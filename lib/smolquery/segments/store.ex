@@ -99,16 +99,32 @@ defmodule Smolquery.Segments.Store do
   Returns the object's location and its size once the write is durable. A failed
   encode leaves nothing behind at `key`, so a reader never sees a partial
   segment.
+
+  The key is validated here, not only in `key/2` — a key recovered from a log,
+  a catalog row, or a wire message gets the same traversal check as one this
+  module built.
   """
   @spec put(t(), key(), encoder()) :: {:ok, put_result()} | {:error, term()}
-  def put(%__MODULE__{} = store, key, encoder),
-    do: store.impl.put(store.config, key, encoder)
+  def put(%__MODULE__{} = store, key, encoder) do
+    with {:ok, key} <- validate_key(key) do
+      store.impl.put(store.config, key, encoder)
+    end
+  end
 
   @doc """
   Where a reader opens the segment at `key`.
+
+  Raises on a key that fails validation: every key reaching this function came
+  from this module or from a manifest this module wrote, so an invalid one is a
+  bug or tampering, never a routine outcome.
   """
   @spec location(t(), key()) :: String.t()
-  def location(%__MODULE__{} = store, key), do: store.impl.location(store.config, key)
+  def location(%__MODULE__{} = store, key) do
+    case validate_key(key) do
+      {:ok, key} -> store.impl.location(store.config, key)
+      {:error, reason} -> raise ArgumentError, "invalid store key: #{inspect(reason)}"
+    end
+  end
 
   @doc """
   Every segment key under `prefix`.
@@ -117,7 +133,11 @@ defmodule Smolquery.Segments.Store do
   then reconciled against.
   """
   @spec list(t(), String.t()) :: {:ok, [key()]} | {:error, term()}
-  def list(%__MODULE__{} = store, prefix), do: store.impl.list(store.config, prefix)
+  def list(%__MODULE__{} = store, prefix) do
+    with {:ok, prefix} <- validate_prefix(prefix) do
+      store.impl.list(store.config, prefix)
+    end
+  end
 
   @doc """
   Removes the segment at `key`.
@@ -126,7 +146,11 @@ defmodule Smolquery.Segments.Store do
   and neither should need to know whether a previous attempt got that far.
   """
   @spec delete(t(), key()) :: :ok | {:error, term()}
-  def delete(%__MODULE__{} = store, key), do: store.impl.delete(store.config, key)
+  def delete(%__MODULE__{} = store, key) do
+    with {:ok, key} <- validate_key(key) do
+      store.impl.delete(store.config, key)
+    end
+  end
 
   @doc """
   Whether a `location/2` is readable from another node.
@@ -168,7 +192,7 @@ defmodule Smolquery.Segments.Store do
   """
   @spec id(key()) :: {:ok, String.t()} | :error
   def id(key) do
-    id = key |> Path.basename(@extension) |> to_string()
+    id = Path.basename(key, @extension)
 
     if Id.valid?(id), do: {:ok, id}, else: :error
   end
@@ -176,9 +200,7 @@ defmodule Smolquery.Segments.Store do
   defp validate_prefix(""), do: {:ok, ""}
 
   defp validate_prefix(prefix) when is_binary(prefix) do
-    segments = String.split(prefix, "/")
-
-    if Enum.all?(segments, &(&1 != "" and &1 != "." and &1 != "..")) do
+    if valid_segments?(String.split(prefix, "/")) do
       {:ok, prefix}
     else
       {:error, {:invalid_prefix, prefix}}
@@ -186,6 +208,21 @@ defmodule Smolquery.Segments.Store do
   end
 
   defp validate_prefix(prefix), do: {:error, {:invalid_prefix, prefix}}
+
+  defp validate_key(key) when is_binary(key) and key != "" do
+    if valid_segments?(String.split(key, "/")) do
+      {:ok, key}
+    else
+      {:error, {:invalid_key, key}}
+    end
+  end
+
+  defp validate_key(key), do: {:error, {:invalid_key, key}}
+
+  defp valid_segments?([first | _rest] = segments) do
+    not String.starts_with?(first, ".") and
+      Enum.all?(segments, &(&1 != "" and &1 != "." and &1 != ".."))
+  end
 
   defp validate_id(id) do
     if Id.valid?(id), do: {:ok, id}, else: {:error, {:invalid_segment_id, id}}

@@ -79,6 +79,46 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert {:ok, put} = Store.put(store, "one.parquet", write("x"))
       assert File.read!(put.location) == "x"
     end
+
+    test "cleans up after an encoder that raises", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      raising = fn _path -> raise ArgumentError, "bad column" end
+
+      assert {:error, {:put_failed, "one.parquet", {:encode_raised, %ArgumentError{}}}} =
+               Store.put(store, "one.parquet", raising)
+
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+      refute File.exists?(Path.join(dir, "one.parquet"))
+    end
+  end
+
+  describe "key validation" do
+    test "every operation refuses a key that could climb out of the store", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      for key <- ["../escape.parquet", "a/../../etc/passwd", "/absolute.parquet", ""] do
+        assert Store.put(store, key, write("x")) == {:error, {:invalid_key, key}}
+        assert Store.delete(store, key) == {:error, {:invalid_key, key}}
+        assert_raise ArgumentError, fn -> Store.location(store, key) end
+      end
+
+      assert File.ls!(dir) == []
+    end
+
+    test "the staging namespace is reserved", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert Store.put(store, ".tmp/one.parquet", write("x")) ==
+               {:error, {:invalid_key, ".tmp/one.parquet"}}
+
+      assert Store.list(store, ".tmp") == {:error, {:invalid_prefix, ".tmp"}}
+    end
+
+    test "list refuses a traversing prefix", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert Store.list(store, "../elsewhere") == {:error, {:invalid_prefix, "../elsewhere"}}
+    end
   end
 
   describe "location/2" do
