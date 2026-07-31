@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [mix.exs]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release on version bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from mix.exs
+        id: version
+        run: |
+          version=$(grep -oE 'version: "[^"]+"' mix.exs | head -1 | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create release if the tag does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG already released; nothing to do"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --generate-notes
+            echo "created $TAG at $GITHUB_SHA"
+          fi

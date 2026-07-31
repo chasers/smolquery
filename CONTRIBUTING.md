@@ -1,0 +1,77 @@
+# Contributing to smolquery
+
+Thanks for your interest. This is an early, opinionated project; see
+[`README.md`](README.md) for what smolquery is.
+
+## Dev setup
+
+Prerequisites match [`.github/workflows/ci.yml`](.github/workflows/ci.yml) —
+currently **OTP 29.0.2 / Elixir 1.20.2**:
+
+```sh
+mix deps.get
+mix test        # fast suite; add --include integration for everything
+```
+
+## Quality gate — run before opening a PR
+
+CI runs these; they must be green:
+
+```sh
+mix ci         # compile -Werror, format, credo --strict (ex_slop), audits, ex_dna, reach arch policy
+mix dialyzer   # type analysis (own CI job)
+```
+
+`mix precommit` is the mutating convenience variant (formats instead of
+checking format) for local use before committing.
+
+## Pull requests
+
+1. Branch off `main`.
+2. Keep changes focused; update `README.md` (and other docs) in the same
+   change when behavior/commands/structure move.
+3. Get `mix ci` + `mix dialyzer` + tests green locally.
+4. Open a PR against `main` with a clear what/why. Reference tracker items by
+   their display key (`T-12`, `PL-1`) — never a bare `#<id>`, which GitHub
+   autolinks to its own issues.
+
+Releases are automatic: a merged bump of `version:` in `mix.exs` creates the
+matching `v<version>` GitHub release (see
+[`.github/workflows/release.yml`](.github/workflows/release.yml)).
+
+## Coordination — the project tracker
+
+Plans and tasks for this repo live in a live smolsqls database (we coordinate
+over the sibling product we dogfood), **not** in local markdown or GitHub
+issues. The architecture plan, milestones, and per-task status are all rows in
+that database.
+
+This repo ships [Claude Code](https://code.claude.com) skills in
+[`skills/`](skills/) for working with it — **`smolquery-pm`** (the tracker:
+projects, plans, tasks) built on **`query-db`** (the SQL-over-HTTP CLI).
+Enable them locally:
+
+```sh
+./skills/install.sh            # link into ./.claude/skills (this repo)
+./skills/install.sh --global   # link into ~/.claude/skills (any directory)
+```
+
+The tracker data is real and single-instance, so there's nothing to
+self-provision — **if you genuinely need to read or update the tracker, get
+the database credentials from the project owner.** Store them in the
+git-ignored `.claude/smolquery-pm.env`; never commit a token.
+
+## Anti-slop measures
+
+CI gates against low-quality (especially AI-generated) code; see
+[`AGENTS.md`](AGENTS.md) for the full tooling guide. In short:
+
+- `credo --strict` with the **ex_slop** plugin (LLM-pattern checks: blanket
+  rescues, narrator comments, anti-idiomatic `Enum`, N+1)
+- `ex_dna` duplication ratchet — new clones fail CI
+- `reach.check --arch` — the service-boundary policy in `.reach.exs` (services
+  communicate only through client modules); `--smells --strict` fails on new
+  structural smells vs the committed baseline
+- No explanatory comments — docs live in `@moduledoc`/`@doc`/`@spec`
+
+Don't disable a gate to get green; fix the code.

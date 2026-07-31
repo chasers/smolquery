@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "tool": "reach",
+  "findings": [],
+  "scopes": {
+    "arch": {
+      "mix_env": "test",
+      "source": "mix",
+      "source_roots": [
+        "lib",
+        "src"
+      ],
+      "file_count": 2
+    },
+    "smells": {
+      "mix_env": "test",
+      "source": "mix",
+      "source_roots": [
+        "lib",
+        "src"
+      ],
+      "file_count": 2
+    }
+  }
+}
