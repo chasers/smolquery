@@ -4,22 +4,20 @@
   "findings": [],
   "scopes": {
     "arch": {
-      "mix_env": "test",
-      "source": "mix",
+      "mix_env": null,
+      "source": "paths",
       "source_roots": [
-        "lib",
-        "src"
+        "lib"
       ],
-      "file_count": 2
+      "file_count": 7
     },
     "smells": {
-      "mix_env": "test",
-      "source": "mix",
+      "mix_env": null,
+      "source": "paths",
       "source_roots": [
-        "lib",
-        "src"
+        "lib"
       ],
-      "file_count": 2
+      "file_count": 7
     }
   }
 }

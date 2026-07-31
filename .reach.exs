@@ -1,4 +1,5 @@
 [
+  checks: [source_paths: ["lib"]],
   layers: [
     ingest_service: "Smolquery.IngestService.*",
     buffer_service: "Smolquery.BufferService.*",

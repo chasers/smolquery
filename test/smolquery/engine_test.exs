@@ -1,0 +1,207 @@
+defmodule Smolquery.EngineTest do
+  use ExUnit.Case, async: false
+
+  alias Smolquery.Engine
+  alias Smolquery.Engine.Result
+
+  @engine __MODULE__.Instance
+
+  setup do
+    start_supervised!({Engine, name: @engine})
+    :ok
+  end
+
+  describe "process naming" do
+    test "derives child names from the engine name" do
+      assert Engine.database_name(MyEngine) == MyEngine.Database
+      assert Engine.connection_name(MyEngine) == MyEngine.Connection
+      assert Engine.supervisor_name(MyEngine) == MyEngine.Supervisor
+    end
+
+    test "registers the whole subtree" do
+      assert is_pid(Process.whereis(Engine.supervisor_name(@engine)))
+      assert is_pid(Process.whereis(Engine.database_name(@engine)))
+      assert is_pid(Process.whereis(Engine.connection_name(@engine)))
+    end
+  end
+
+  describe "version/1" do
+    test "reports the linked DuckDB version" do
+      assert Engine.version(@engine) =~ ~r/^v\d+\.\d+\.\d+/
+    end
+  end
+
+  describe "query/3" do
+    test "returns the neutral result shape" do
+      assert {:ok, %Result{columns: ["n"], rows: [[1]], num_rows: 1}} =
+               Engine.query(@engine, "SELECT 1 AS n")
+    end
+
+    test "binds positional parameters" do
+      assert {:ok, result} =
+               Engine.query(@engine, "SELECT $1::int + 1 AS n, $2 AS who", [41, "smol"])
+
+      assert result.columns == ["n", "who"]
+      assert result.rows == [[42, "smol"]]
+    end
+
+    test "reuses a parameter placeholder" do
+      assert {:ok, result} = Engine.query(@engine, "SELECT $1::int AS a, $1::int AS b", [7])
+
+      assert result.rows == [[7, 7]]
+    end
+
+    test "returns multiple ordered rows" do
+      assert {:ok, result} =
+               Engine.query(@engine, "SELECT i FROM range(3) AS t(i) ORDER BY i")
+
+      assert result.rows == [[0], [1], [2]]
+      assert result.num_rows == 3
+    end
+
+    test "returns an error tuple for invalid SQL rather than crashing" do
+      assert {:error, %Adbc.Error{}} = Engine.query(@engine, "SELECT * FROM no_such_table")
+
+      assert {:ok, _} = Engine.query(@engine, "SELECT 1")
+    end
+  end
+
+  describe "query!/3" do
+    test "unwraps a successful result" do
+      assert %Result{rows: [[2]]} = Engine.query!(@engine, "SELECT 1 + 1")
+    end
+
+    test "raises on error" do
+      assert_raise Adbc.Error, fn -> Engine.query!(@engine, "NOT SQL") end
+    end
+  end
+
+  describe "session settings" do
+    test "applies the configured thread count" do
+      assert Engine.query!(@engine, "SELECT current_setting('threads')") |> Result.one!() == 2
+    end
+
+    test "applies the configured memory limit" do
+      limit = Engine.query!(@engine, "SELECT current_setting('memory_limit')") |> Result.one!()
+
+      assert limit =~ "MiB"
+    end
+
+    test "per-instance options override application config" do
+      start_supervised!({Engine, name: __MODULE__.Override, threads: 1}, id: :override)
+
+      assert Engine.query!(__MODULE__.Override, "SELECT current_setting('threads')")
+             |> Result.one!() == 1
+    end
+  end
+
+  describe "supervision" do
+    test "a connection crash yields a fresh bootstrapped connection" do
+      conn = Process.whereis(Engine.connection_name(@engine))
+      database = Process.whereis(Engine.database_name(@engine))
+
+      kill_and_await(conn)
+
+      assert new_conn = await_registered(Engine.connection_name(@engine), conn)
+      assert new_conn != conn
+      assert Process.whereis(Engine.database_name(@engine)) == database
+      assert {:ok, _} = Engine.query(@engine, "SELECT 1")
+    end
+
+    test "a database crash rebuilds the connections after it" do
+      conn = Process.whereis(Engine.connection_name(@engine))
+      database = Process.whereis(Engine.database_name(@engine))
+
+      kill_and_await(database)
+
+      assert await_registered(Engine.database_name(@engine), database)
+      assert new_conn = await_registered(Engine.connection_name(@engine), conn)
+      assert new_conn != conn
+      assert {:ok, _} = Engine.query(@engine, "SELECT 1")
+    end
+  end
+
+  describe "parquet round-trip" do
+    @tag :tmp_dir
+    test "reads a segment written by Explorer with types intact", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "segment.parquet")
+
+      Explorer.DataFrame.new(
+        id: [1, 2],
+        ts: [~N[2026-07-31 10:00:00.000000], ~N[2026-07-31 10:00:01.000000]],
+        amount: [Decimal.new("1.25"), Decimal.new("2.50")],
+        ratio: [1.5, 2.5],
+        label: ["a", "b"]
+      )
+      |> Explorer.DataFrame.to_parquet!(path)
+
+      result = Engine.query!(@engine, "SELECT * FROM read_parquet($1) ORDER BY id", [path])
+
+      assert result.columns == ["id", "ts", "amount", "ratio", "label"]
+
+      assert result.rows == [
+               [1, ~N[2026-07-31 10:00:00.000000], Decimal.new("1.25"), 1.5, "a"],
+               [2, ~N[2026-07-31 10:00:01.000000], Decimal.new("2.50"), 2.5, "b"]
+             ]
+    end
+
+    @tag :tmp_dir
+    test "Explorer segments carry the min-max stats pruning needs", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "segment.parquet")
+
+      Explorer.DataFrame.new(id: [5, 1, 9], label: ["b", "a", "c"])
+      |> Explorer.DataFrame.to_parquet!(path)
+
+      stats =
+        Engine.query!(
+          @engine,
+          "SELECT path_in_schema, stats_min_value, stats_max_value FROM parquet_metadata($1)",
+          [path]
+        )
+
+      assert stats.rows == [["id", "1", "9"], ["label", "a", "c"]]
+    end
+
+    @tag :tmp_dir
+    test "unions segments across tiers in one plan", %{tmp_dir: tmp_dir} do
+      sealed = Path.join(tmp_dir, "sealed.parquet")
+      hot = Path.join(tmp_dir, "hot.parquet")
+
+      Explorer.DataFrame.new(id: [1, 2]) |> Explorer.DataFrame.to_parquet!(sealed)
+      Explorer.DataFrame.new(id: [3]) |> Explorer.DataFrame.to_parquet!(hot)
+
+      result =
+        Engine.query!(
+          @engine,
+          """
+          SELECT count(*) AS n, max(id) AS newest
+            FROM read_parquet([$1, $2])
+          """,
+          [sealed, hot]
+        )
+
+      assert result.rows == [[3, 3]]
+    end
+  end
+
+  defp kill_and_await(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
+  end
+
+  defp await_registered(name, previous, attempts \\ 100) do
+    case Process.whereis(name) do
+      nil when attempts > 0 ->
+        Process.sleep(10)
+        await_registered(name, previous, attempts - 1)
+
+      ^previous when attempts > 0 ->
+        Process.sleep(10)
+        await_registered(name, previous, attempts - 1)
+
+      pid ->
+        pid
+    end
+  end
+end
