@@ -33,21 +33,26 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
-  id           INTEGER PRIMARY KEY,
-  key          TEXT GENERATED ALWAYS AS ('T-' || id) VIRTUAL,
-  project_id   INTEGER NOT NULL REFERENCES projects(id),
-  plan_id      INTEGER REFERENCES plans(id),
-  title        TEXT NOT NULL,
-  body         TEXT NOT NULL DEFAULT '',
-  status       TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','blocked','done','cancelled')),
-  priority     TEXT NOT NULL DEFAULT 'med' CHECK (priority IN ('low','med','high','urgent')),
-  position     REAL NOT NULL DEFAULT 0,
-  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
-  completed_at TEXT
+  id             INTEGER PRIMARY KEY,
+  key            TEXT GENERATED ALWAYS AS ('T-' || id) VIRTUAL,
+  project_id     INTEGER NOT NULL REFERENCES projects(id),
+  plan_id        INTEGER REFERENCES plans(id),
+  title          TEXT NOT NULL,
+  body           TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','blocked','done','cancelled')),
+  priority       TEXT NOT NULL DEFAULT 'med' CHECK (priority IN ('low','med','high','urgent')),
+  position       REAL NOT NULL DEFAULT 0,
+  created_by     TEXT,
+  updated_by     TEXT,
+  in_progress_by TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS tasks_project_status ON tasks (project_id, status);
+
+CREATE INDEX IF NOT EXISTS tasks_in_progress_by ON tasks (in_progress_by);
 
 CREATE INDEX IF NOT EXISTS tasks_plan ON tasks (plan_id);
 
