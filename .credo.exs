@@ -162,7 +162,7 @@
           {Credo.Check.Warning.UnusedStringOperation, []},
           {Credo.Check.Warning.UnusedTupleOperation, []},
           {Credo.Check.Warning.WrongTestFilename, []}
-        ],
+        ] ++ Enum.map(ExSlop.recommended_checks(), &{&1, []}),
         disabled: [
           #
           # Checks scheduled for next check update (opt-in for now)

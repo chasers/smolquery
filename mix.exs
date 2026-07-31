@@ -9,9 +9,12 @@ defmodule Smolquery.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"],
-      preferred_cli_env: [precommit: :test, ci: :test]
+      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"]
     ]
+  end
+
+  def cli do
+    [preferred_envs: [precommit: :test, ci: :test]]
   end
 
   def application do
