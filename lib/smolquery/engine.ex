@@ -43,6 +43,7 @@ defmodule Smolquery.Engine do
           {:name, atom()}
           | {:path, String.t()}
           | {:extensions, [atom() | String.t()]}
+          | {:statements, [String.t()]}
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}
 
@@ -54,6 +55,9 @@ defmodule Smolquery.Engine do
     * `:name` — base name for the subtree; the database, connection, and
       supervisor are registered beneath it. Defaults to `#{inspect(__MODULE__)}`.
     * `:path` — DuckDB database file. Defaults to in-memory.
+    * `:statements` — SQL run once per connection after extensions and
+      settings, for session state a caller cannot afford to lose on a restart
+      (a catalog `ATTACH`, say).
     * `:extensions`, `:memory_limit`, `:threads` — override the application
       configuration for this instance.
 
@@ -74,7 +78,8 @@ defmodule Smolquery.Engine do
        database: database_name(name),
        name: connection_name(name),
        extensions: Keyword.get(config, :extensions, []),
-       settings: settings(config)}
+       settings: settings(config),
+       statements: Keyword.get(config, :statements, [])}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

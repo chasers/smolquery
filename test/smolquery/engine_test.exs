@@ -95,6 +95,24 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "bootstrap statements" do
+    test "re-run on every connection, so session state survives a restart" do
+      start_supervised!(
+        {Engine,
+         name: __MODULE__.Bootstrapped, statements: ["CREATE TABLE marker AS SELECT 42 AS n"]},
+        id: :bootstrapped
+      )
+
+      assert Engine.query!(__MODULE__.Bootstrapped, "SELECT n FROM marker") |> Result.one!() == 42
+
+      conn = Process.whereis(Engine.connection_name(__MODULE__.Bootstrapped))
+      kill_and_await(conn)
+      assert await_registered(Engine.connection_name(__MODULE__.Bootstrapped), conn) != conn
+
+      assert Engine.query!(__MODULE__.Bootstrapped, "SELECT n FROM marker") |> Result.one!() == 42
+    end
+  end
+
   describe "supervision" do
     test "a connection crash yields a fresh bootstrapped connection" do
       conn = Process.whereis(Engine.connection_name(@engine))
