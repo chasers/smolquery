@@ -27,13 +27,22 @@ checking format) for local use before committing.
 
 ## Pull requests
 
-1. Branch off `main`.
+1. Branch off `main` — it's protected, so you can't push to it directly.
 2. Keep changes focused; update `README.md` (and other docs) in the same
    change when behavior/commands/structure move.
 3. Get `mix ci` + `mix dialyzer` + tests green locally.
 4. Open a PR against `main` with a clear what/why. Reference tracker items by
    their display key (`T-12`, `PL-1`) — never a bare `#<id>`, which GitHub
    autolinks to its own issues.
+
+`Checks (mix ci)`, `Tests`, and `Dialyzer` are required and enforced on every
+PR, with no bypass. No approving review is required, so you can merge your own
+work once those pass. Branches must be up to date with `main` before merging.
+
+For anything non-trivial, split the work into a **stack** of dependent PRs so
+each layer is reviewable on its own — every layer must be independently green.
+See [`AGENTS.md`](AGENTS.md) for the `gh stack` workflow and the constraints
+that come with it.
 
 Releases are automatic: a merged bump of `version:` in `mix.exs` creates the
 matching `v<version>` GitHub release (see
