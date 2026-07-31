@@ -5,10 +5,9 @@ An open source BigQuery alternative, powered by DuckDB and Elixir.
 Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
-> **Status: pre-alpha.** Foundation and role config only — no engine, ingest,
-> storage, or HTTP API yet. Plans and milestones live in the project tracker —
-> see [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to
-> change.
+> **Status: pre-alpha.** The read engine works; no ingest, storage, or HTTP API
+> yet. Plans and milestones live in the project tracker — see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
 ## Architecture (draft)
 
@@ -31,6 +30,30 @@ queries → QueryService ──────────────────�
 - Only BufferService is stateful (seconds-to-minutes of unsealed data);
   everything else scales elastically.
 
+## What works today
+
+`Smolquery.Engine` — the DuckDB read engine, a supervised
+`Adbc.Database` → `Adbc.Connection` subtree with extensions and session settings
+applied before the connection is reachable:
+
+```elixir
+iex> Smolquery.Engine.query!(Smolquery.Engine, "SELECT $1::int + 1 AS n", [41])
+%Smolquery.Engine.Result{columns: ["n"], rows: [[42]], num_rows: 1}
+```
+
+It reads Parquet segments from local disk and over HTTP (`httpfs`), and unions
+both in a single plan — the shape a real query takes across the sealed and hot
+tiers:
+
+```sql
+SELECT * FROM read_parquet('/segments/sealed.parquet')
+UNION ALL
+SELECT * FROM read_parquet('http://buffer-node:4000/hot.parquet')
+```
+
+Results come back as `Smolquery.Engine.Result` — ordered column names plus row
+lists of plain Elixir terms — so callers never see Arrow or ADBC types.
+
 ## Roles
 
 One release, four services; a node starts only the subtrees its roles name.
@@ -43,8 +66,21 @@ SMOLQUERY_ROLES=ingest,buffer
 ```
 
 Unknown role names fail the boot rather than silently starting nothing. Roles
-whose services aren't implemented yet are accepted and contribute no subtree —
-which is all four of them today. See `Smolquery.Roles`.
+whose services aren't implemented yet are accepted and contribute no subtree.
+See `Smolquery.Roles`.
+
+## Configuration
+
+```elixir
+config :smolquery, Smolquery.Engine,
+  memory_limit: "2GB",
+  threads: System.schedulers_online(),
+  extensions: [:httpfs, :json]
+```
+
+`SMOLQUERY_MEMORY_LIMIT` overrides the memory limit at runtime. Engine options
+can also be passed per instance to `Smolquery.Engine.start_link/1`, which
+overrides the application config.
 
 ## Development
 
@@ -55,6 +91,9 @@ mix deps.get
 mix test         # fast suite; add --include integration for everything
 mix precommit    # format + full local quality gate before committing
 ```
+
+Integration-tagged tests are excluded by default: they download DuckDB
+extensions and serve Parquet over a real HTTP server.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for quality gates and the project
 tracker, and [`AGENTS.md`](AGENTS.md) for codebase tooling.
