@@ -12,11 +12,16 @@ defmodule Smolquery.BufferService.Supervisor do
   buffer rebuilds its table's entries from the log when it restarts. A single
   buffer crashing, by contrast, disturbs nothing else.
 
+  `Adopter` comes last, once the pieces it needs are up: it starts a buffer for
+  every owned table that already has a manifest log, so an unsealed tail is not
+  stranded waiting for a write that may never come.
+
   `HotServer` joins this subtree in the layer that adds it.
   """
 
   use Supervisor
 
+  alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
 
@@ -40,7 +45,8 @@ defmodule Smolquery.BufferService.Supervisor do
     children = [
       {HotManifest, name: Runtime.manifest(runtime.name)},
       {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
-      {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)}
+      {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
+      {Adopter, runtime}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

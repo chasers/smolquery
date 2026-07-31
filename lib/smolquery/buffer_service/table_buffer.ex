@@ -54,7 +54,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   use GenServer
 
   alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
@@ -65,6 +67,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :prefix,
     :schema,
     :timer,
+    :signaled_at,
     chunks: [],
     pending: [],
     row_count: 0,
@@ -114,6 +117,20 @@ defmodule Smolquery.BufferService.TableBuffer do
   @spec flush(GenServer.server(), timeout()) :: :ok
   def flush(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :flush, timeout)
 
+  @doc """
+  Stamps `ids` as sealed at a catalog snapshot.
+  """
+  @spec retire(GenServer.server(), [String.t()], non_neg_integer(), timeout()) ::
+          :ok | {:error, term()}
+  def retire(buffer, ids, snapshot, timeout \\ 5_000),
+    do: GenServer.call(buffer, {:retire, ids, snapshot}, timeout)
+
+  @doc """
+  Runs the seal check and the grace-period sweep now, without waiting for the tick.
+  """
+  @spec maintain(GenServer.server(), timeout()) :: :ok
+  def maintain(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :maintain, timeout)
+
   @impl GenServer
   def init({runtime, table_ref}) do
     Process.flag(:trap_exit, true)
@@ -128,7 +145,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   @impl GenServer
   def handle_continue(:recover, state) do
     case HotManifest.recover(state.runtime.manifest, state.table_ref) do
-      {:ok, _report} -> {:noreply, state}
+      {:ok, _report} -> {:noreply, schedule_maintenance(state)}
       {:error, reason} -> {:stop, {:recovery_failed, reason}, state}
     end
   end
@@ -147,13 +164,94 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  def handle_call(:flush, _from, state), do: {:reply, :ok, commit(state)}
+  def handle_call(:flush, _from, state), do: {:reply, :ok, state |> commit() |> run_maintenance()}
+
+  def handle_call({:retire, ids, snapshot}, _from, state) do
+    case HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot) do
+      :ok -> {:reply, :ok, run_maintenance(state)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
 
   @impl GenServer
-  def handle_info(:flush, state), do: {:noreply, commit(%{state | timer: nil})}
+  def handle_info(:flush, state) do
+    {:noreply, %{state | timer: nil} |> commit() |> run_maintenance()}
+  end
+
+  def handle_info(:maintain, state) do
+    {:noreply, state |> run_maintenance() |> schedule_maintenance()}
+  end
 
   @impl GenServer
   def terminate(_reason, state), do: commit(state)
+
+  defp run_maintenance(state) do
+    state
+    |> reap()
+    |> signal_when_ready()
+  end
+
+  defp reap(state) do
+    cutoff = now() - state.runtime.retire_grace_ms
+
+    case HotManifest.retired_before(state.runtime.manifest, state.table_ref, cutoff) do
+      [] -> state
+      expired -> drop(state, Enum.map(expired, & &1.id))
+    end
+  end
+
+  defp drop(state, ids) do
+    HotManifest.drop(state.runtime.manifest, state.table_ref, ids)
+
+    state
+  end
+
+  defp signal_when_ready(state) do
+    unsealed =
+      state.runtime.manifest
+      |> HotManifest.entries(state.table_ref)
+      |> Enum.reject(&Entry.sealed?/1)
+
+    cond do
+      unsealed == [] -> %{state | signaled_at: nil}
+      not sealable?(state, unsealed) -> state
+      due?(state) -> signal(state, unsealed)
+      true -> state
+    end
+  end
+
+  defp sealable?(state, unsealed) do
+    bytes = Enum.sum_by(unsealed, & &1.byte_size)
+    oldest = unsealed |> Enum.min_by(& &1.added_at) |> Map.fetch!(:added_at)
+
+    bytes >= state.runtime.seal_max_bytes or
+      length(unsealed) >= state.runtime.seal_max_files or
+      now() - oldest >= state.runtime.seal_max_age_ms
+  end
+
+  defp due?(%__MODULE__{signaled_at: nil}), do: true
+
+  defp due?(state), do: now() - state.signaled_at >= state.runtime.seal_retry_ms
+
+  defp signal(state, unsealed) do
+    SealConsumer.seal_ready(
+      state.runtime.seal_consumer,
+      state.table_ref,
+      Enum.map(unsealed, & &1.id)
+    )
+
+    %{state | signaled_at: now()}
+  end
+
+  defp schedule_maintenance(state) do
+    Process.send_after(self(), :maintain, state.runtime.maintenance_interval_ms)
+
+    state
+  end
+
+  defp now, do: System.os_time(:millisecond)
 
   defp accept(state, schema, rows, count, bytes, from) do
     state

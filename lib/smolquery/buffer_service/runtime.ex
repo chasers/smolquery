@@ -22,6 +22,13 @@ defmodule Smolquery.BufferService.Runtime do
         max_buffered_rows: 500_000,
         max_buffered_bytes: 64_000_000,
         write_timeout_ms: 15_000,
+        seal_max_bytes: 67_108_864,
+        seal_max_files: 64,
+        seal_max_age_ms: 60_000,
+        seal_retry_ms: 30_000,
+        retire_grace_ms: 600_000,
+        maintenance_interval_ms: 5_000,
+        seal_consumer: {Smolquery.BufferService.SealLog, []},
         ring: [:"buffer1@host"]
 
   `:dir` is the root: segments go to a `Store.Local` beneath `segments/`, manifest
@@ -33,6 +40,9 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
+  `retire_grace_ms` must exceed the longest query a planner can hold open. It is
+  how long a retired micro-segment stays readable after a sealer committed it, and
+  deleting one out from under an in-flight scan is exactly what it prevents.
   """
 
   alias Smolquery.BufferService.HotManifest
@@ -50,7 +60,14 @@ defmodule Smolquery.BufferService.Runtime do
     flush_max_bytes: 8_000_000,
     max_buffered_rows: 500_000,
     max_buffered_bytes: 64_000_000,
-    write_timeout_ms: 15_000
+    write_timeout_ms: 15_000,
+    seal_max_bytes: 67_108_864,
+    seal_max_files: 64,
+    seal_max_age_ms: 60_000,
+    seal_retry_ms: 30_000,
+    retire_grace_ms: 600_000,
+    maintenance_interval_ms: 5_000,
+    seal_consumer: {Smolquery.BufferService.SealLog, []}
   ]
 
   @type t :: %__MODULE__{
@@ -63,7 +80,14 @@ defmodule Smolquery.BufferService.Runtime do
           flush_max_bytes: pos_integer(),
           max_buffered_rows: pos_integer(),
           max_buffered_bytes: pos_integer(),
-          write_timeout_ms: timeout()
+          write_timeout_ms: timeout(),
+          seal_max_bytes: pos_integer(),
+          seal_max_files: pos_integer(),
+          seal_max_age_ms: pos_integer(),
+          seal_retry_ms: pos_integer(),
+          retire_grace_ms: pos_integer(),
+          maintenance_interval_ms: pos_integer(),
+          seal_consumer: {module(), term()}
         }
 
   @limits [
@@ -72,7 +96,14 @@ defmodule Smolquery.BufferService.Runtime do
     :flush_max_bytes,
     :max_buffered_rows,
     :max_buffered_bytes,
-    :write_timeout_ms
+    :write_timeout_ms,
+    :seal_max_bytes,
+    :seal_max_files,
+    :seal_max_age_ms,
+    :seal_retry_ms,
+    :retire_grace_ms,
+    :maintenance_interval_ms,
+    :seal_consumer
   ]
 
   @default_dir "priv/data/buffer"
