@@ -3,7 +3,6 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
 
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Routing
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
   alias Smolquery.Schema
 
   @moduletag :integration
@@ -54,6 +53,8 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
 
     {:ok, _started} = :erpc.call(node, Application, :ensure_all_started, [:smolquery])
 
+    previous_per_node = :application.get_env(:gen_rpc, :client_config_per_node)
+
     :application.set_env(:gen_rpc, :client_config_per_node, {:internal, %{node => @peer_port}},
       persistent: true
     )
@@ -64,6 +65,7 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
     on_exit(fn ->
       Routing.forget(name)
       Application.delete_env(:smolquery, Smolquery.BufferService)
+      restore_per_node(previous_per_node)
     end)
 
     %{name: name, node: node, peer: peer}
@@ -137,4 +139,10 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
   catch
     :exit, _reason -> :ok
   end
+
+  defp restore_per_node({:ok, value}),
+    do: :application.set_env(:gen_rpc, :client_config_per_node, value, persistent: true)
+
+  defp restore_per_node(:undefined),
+    do: :application.unset_env(:gen_rpc, :client_config_per_node, persistent: true)
 end

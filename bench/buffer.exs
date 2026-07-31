@@ -59,7 +59,7 @@ defmodule Bench.Buffer do
 
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
 
@@ -198,7 +198,7 @@ defmodule Bench.Buffer do
       hot_server_port: 0
     ]
 
-    {:ok, pid} = BufferSupervisor.start_link(Keyword.merge(defaults, opts))
+    {:ok, pid} = BufferService.Supervisor.start_link(Keyword.merge(defaults, opts))
 
     {name, pid}
   end

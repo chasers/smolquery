@@ -4,7 +4,7 @@ defmodule Smolquery.BufferService.SealingTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
@@ -37,7 +37,7 @@ defmodule Smolquery.BufferService.SealingTest do
       )
 
     name = Keyword.fetch!(opts, :name)
-    start_supervised!({BufferSupervisor, opts}, id: name)
+    start_supervised!({BufferService.Supervisor, opts}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     %{name: name, runtime: Runtime.new(opts)}
@@ -200,9 +200,9 @@ defmodule Smolquery.BufferService.SealingTest do
     end
 
     test "routes to the owner rather than refusing", context do
-      %{name: name} = start_buffer_service(context, ring: [:buffer1@host])
+      %{name: name} = start_buffer_service(context, ring: [:"buffer1@nonexistent.invalid"])
 
-      assert Client.owner(name, @table) == :buffer1@host
+      assert Client.owner(name, @table) == :"buffer1@nonexistent.invalid"
 
       assert {:error, {kind, _reason}} =
                Client.retire(name, @table, ["01KYWPEEGAM8FQVQS5S2QF26SV"], 1)

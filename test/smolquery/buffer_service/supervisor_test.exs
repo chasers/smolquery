@@ -4,7 +4,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.MemoryStore
@@ -25,7 +25,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
       )
 
     name = Keyword.fetch!(opts, :name)
-    start_supervised!({BufferSupervisor, opts}, id: name)
+    start_supervised!({BufferService.Supervisor, opts}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     name

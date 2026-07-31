@@ -4,7 +4,7 @@ defmodule Smolquery.BufferService.AdopterTest do
   alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Test.SealCollector
 
@@ -37,7 +37,7 @@ defmodule Smolquery.BufferService.AdopterTest do
     opts = options(context, opts)
     name = Keyword.fetch!(opts, :name)
 
-    start_supervised!({BufferSupervisor, opts}, id: name)
+    start_supervised!({BufferService.Supervisor, opts}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     name

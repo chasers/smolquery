@@ -4,7 +4,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
@@ -58,7 +58,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
       )
 
     name = Keyword.fetch!(opts, :name)
-    pid = start_supervised!({BufferSupervisor, opts}, id: name)
+    pid = start_supervised!({BufferService.Supervisor, opts}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     %{name: name, supervisor: pid, runtime: Runtime.new(opts)}
@@ -341,8 +341,8 @@ defmodule Smolquery.BufferService.TableBufferTest do
       [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
       Process.exit(pid, :kill)
 
-      assert_receive {:DOWN, ^ref, :process, ^writer, _reason}
-      refute_received {:acked, _reply}
+      assert_receive {:DOWN, ^ref, :process, ^writer, :normal}
+      assert_received {:acked, {:error, {:badrpc, {:EXIT, {:killed, _call}}}}}
       assert HotManifest.entries(runtime.manifest, @table) == []
       assert {:ok, []} = Store.list(runtime.store, "analytics/events")
     end
