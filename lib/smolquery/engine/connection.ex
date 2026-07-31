@@ -34,6 +34,7 @@ defmodule Smolquery.Engine.Connection do
 
   alias Smolquery.Engine.Params
   alias Smolquery.Engine.Result
+  alias Smolquery.Engine.ResultTooLarge
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
 
@@ -43,6 +44,7 @@ defmodule Smolquery.Engine.Connection do
           | {:extensions, [atom() | String.t()]}
           | {:settings, keyword()}
           | {:statements, [String.t()]}
+          | {:max_rows, pos_integer() | :infinity}
 
   @doc """
   Starts a bootstrapped connection to the ADBC database in `:database`.
@@ -54,6 +56,9 @@ defmodule Smolquery.Engine.Connection do
     * `:extensions` — DuckDB extensions to `INSTALL` and `LOAD`
     * `:settings` — `SET key = value` pairs applied to the session
     * `:statements` — SQL run after extensions and settings, in order
+    * `:max_rows` — most rows `query/4` will convert to Elixir terms before
+      refusing with `Smolquery.Engine.ResultTooLarge`. `:infinity` disables the
+      ceiling.
 
   """
   @spec start_link([option()]) :: GenServer.on_start()
@@ -68,6 +73,9 @@ defmodule Smolquery.Engine.Connection do
   Parameters are bound through `Smolquery.Engine.Params`, which types timestamps
   to match the columns rather than letting ADBC infer them — an inferred
   timestamp silently costs every query its file pruning.
+
+  A result over `:max_rows` is refused with `Smolquery.Engine.ResultTooLarge`
+  instead of converted, because the conversion is what would hurt.
   """
   @spec query(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
@@ -123,12 +131,13 @@ defmodule Smolquery.Engine.Connection do
     extensions = Keyword.get(opts, :extensions, [])
     settings = Keyword.get(opts, :settings, [])
     statements = Keyword.get(opts, :statements, [])
+    max_rows = Keyword.get(opts, :max_rows, :infinity)
 
     with {:ok, adbc} <- Adbc.Connection.start_link(database: database),
          :ok <- load_extensions(adbc, extensions),
          :ok <- apply_settings(adbc, settings),
          :ok <- run_statements(adbc, statements) do
-      {:ok, %{adbc: adbc, database: database}}
+      {:ok, %{adbc: adbc, database: database, max_rows: max_rows}}
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -139,7 +148,7 @@ defmodule Smolquery.Engine.Connection do
     state.adbc
     |> Adbc.Connection.query(sql, params)
     |> case do
-      {:ok, result} -> {:ok, Result.from_adbc(result)}
+      {:ok, result} -> convert(result, state.max_rows)
       {:error, error} -> {:error, error}
     end
     |> reply_or_stop(state)
@@ -165,6 +174,13 @@ defmodule Smolquery.Engine.Connection do
       {:stop, {:database_invalidated, error}, {:error, error}, state}
     else
       {:reply, {:error, error}, state}
+    end
+  end
+
+  defp convert(result, max_rows) do
+    case Result.from_adbc(result, max_rows) do
+      {:ok, converted} -> {:ok, converted}
+      {:error, :too_many_rows} -> {:error, %ResultTooLarge{max: max_rows}}
     end
   end
 

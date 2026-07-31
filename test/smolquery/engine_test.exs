@@ -4,6 +4,7 @@ defmodule Smolquery.EngineTest do
   alias Explorer.DataFrame
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
+  alias Smolquery.Engine.ResultTooLarge
 
   @engine __MODULE__.Instance
 
@@ -115,6 +116,16 @@ defmodule Smolquery.EngineTest do
              }
     end
 
+    test "is not subject to max_result_rows" do
+      start_supervised!({Engine, name: __MODULE__.Framed, max_result_rows: 10}, id: :framed)
+
+      assert {:error, %ResultTooLarge{}} =
+               Engine.query(__MODULE__.Framed, "SELECT i FROM range(500) t(i)")
+
+      assert {:ok, frame} = Engine.frame(__MODULE__.Framed, "SELECT i FROM range(500) t(i)")
+      assert DataFrame.n_rows(frame) == 500
+    end
+
     test "returns an error tuple for invalid SQL rather than crashing" do
       assert {:error, %Adbc.Error{}} = Engine.frame(@engine, "SELECT * FROM no_such_table")
 
@@ -134,6 +145,56 @@ defmodule Smolquery.EngineTest do
 
     test "frame!/3 raises on error" do
       assert_raise Adbc.Error, fn -> Engine.frame!(@engine, "NOT SQL") end
+    end
+  end
+
+  describe "max_result_rows" do
+    test "refuses to convert a result over the ceiling" do
+      start_supervised!({Engine, name: __MODULE__.Capped, max_result_rows: 100}, id: :capped)
+
+      assert {:error, %ResultTooLarge{max: 100}} =
+               Engine.query(__MODULE__.Capped, "SELECT i FROM range(101) t(i)")
+    end
+
+    test "allows a result exactly at the ceiling" do
+      start_supervised!({Engine, name: __MODULE__.AtLimit, max_result_rows: 100}, id: :at_limit)
+
+      assert {:ok, %Result{num_rows: 100}} =
+               Engine.query(__MODULE__.AtLimit, "SELECT i FROM range(100) t(i)")
+    end
+
+    test "says what to do instead" do
+      start_supervised!({Engine, name: __MODULE__.Message, max_result_rows: 1}, id: :message)
+
+      assert {:error, error} = Engine.query(__MODULE__.Message, "SELECT i FROM range(2) t(i)")
+      assert Exception.message(error) =~ "Smolquery.Engine.frame/3"
+    end
+
+    test "query!/3 raises it" do
+      start_supervised!({Engine, name: __MODULE__.Raising, max_result_rows: 1}, id: :raising)
+
+      assert_raise ResultTooLarge, fn ->
+        Engine.query!(__MODULE__.Raising, "SELECT i FROM range(2) t(i)")
+      end
+    end
+
+    test ":infinity lifts the ceiling for a caller that means it" do
+      start_supervised!(
+        {Engine, name: __MODULE__.Unbounded, max_result_rows: :infinity},
+        id: :unbounded
+      )
+
+      assert {:ok, %Result{num_rows: 50_000}} =
+               Engine.query(__MODULE__.Unbounded, "SELECT i FROM range(50000) t(i)")
+    end
+
+    test "leaves the connection usable after refusing" do
+      start_supervised!({Engine, name: __MODULE__.Survives, max_result_rows: 10}, id: :survives)
+
+      assert {:error, %ResultTooLarge{}} =
+               Engine.query(__MODULE__.Survives, "SELECT i FROM range(11) t(i)")
+
+      assert Engine.query!(__MODULE__.Survives, "SELECT 1") |> Result.one!() == 1
     end
   end
 

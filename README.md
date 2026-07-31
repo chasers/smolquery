@@ -56,7 +56,9 @@ There are two result contracts, chosen by how big the answer might be.
 `query/3` returns a `Smolquery.Engine.Result` — ordered column names plus row lists
 of plain Elixir terms, so callers never see Arrow or ADBC types. That conversion
 costs about a kilobyte and 2 µs per row, which is free for the queries the system
-asks itself and ruinous for a user query matching millions of rows.
+asks itself and ruinous for a user query matching millions of rows, so `query/3`
+refuses a result over `:max_result_rows` (default 100 000) instead of spending the
+heap.
 
 `frame/3` is the read path for results nobody sized in advance. DuckDB's Arrow
 stream goes straight to Polars in Rust, so no row becomes an Elixir term, and the
@@ -159,6 +161,7 @@ Runtime environment variables:
 | `SMOLQUERY_MEMORY_LIMIT` | DuckDB memory limit per engine |
 | `SMOLQUERY_DATA_DIR` | data directory; the catalog and DuckLake data path derive from it |
 | `SMOLQUERY_CATALOG` | catalog metadata database, e.g. `postgres:dbname=smolquery host=…` |
+| `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`infinity` to disable) |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.
@@ -197,7 +200,8 @@ results worth knowing before writing a read path:
   converts Arrow row by row, which costs roughly a kilobyte and 2 µs per row — 5M
   rows take 11.5 s and 4.8 GiB, against 307 ms and 8.7 MiB left in Arrow. It is
   the right shape for catalog and control-plane queries, and a trap for user
-  results, which is what `Engine.frame/3` is for.
+  results, which is what `Engine.frame/3` and the `:max_result_rows` ceiling are
+  for.
 - **One connection serializes.** `Engine.Connection` is a per-query mutex, so
   query throughput is flat in client count. Eight connections serve eight
   concurrent clients about 2.9× faster than one does.

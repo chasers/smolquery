@@ -53,6 +53,65 @@ defmodule Smolquery.Engine.ResultTest do
     end
   end
 
+  describe "from_adbc/2" do
+    test "converts a result within the limit" do
+      assert {:ok, result} = Result.from_adbc(%Adbc.Result{data: [batch()], num_rows: 2}, 10)
+
+      assert result.rows == [[1, "a"], [2, "b"]]
+      assert result.num_rows == 2
+    end
+
+    test "allows a result exactly at the limit" do
+      assert {:ok, %Result{num_rows: 2}} =
+               Result.from_adbc(%Adbc.Result{data: [batch()], num_rows: 2}, 2)
+    end
+
+    test "refuses one row past the limit" do
+      adbc = %Adbc.Result{data: [batch()], num_rows: 2}
+
+      assert Result.from_adbc(adbc, 1) == {:error, :too_many_rows}
+    end
+
+    test "refuses once the running total crosses the limit, not per batch" do
+      adbc = %Adbc.Result{data: [batch(), batch()], num_rows: 4}
+
+      assert Result.from_adbc(adbc, 3) == {:error, :too_many_rows}
+      assert {:ok, %Result{num_rows: 4}} = Result.from_adbc(adbc, 4)
+    end
+
+    test "stops converting at the limit rather than walking the whole result" do
+      batches = List.duplicate(batch(), 1_000)
+
+      assert Result.from_adbc(%Adbc.Result{data: batches, num_rows: 2_000}, 4) ==
+               {:error, :too_many_rows}
+    end
+
+    test ":infinity converts whatever came back" do
+      adbc = %Adbc.Result{data: [batch(), batch()], num_rows: 4}
+
+      assert {:ok, %Result{num_rows: 4}} = Result.from_adbc(adbc, :infinity)
+    end
+
+    test "a statement with no data is never too large" do
+      assert {:ok, %Result{num_rows: 7}} =
+               Result.from_adbc(%Adbc.Result{data: nil, num_rows: 7}, 1)
+    end
+
+    test "preserves column order and row order" do
+      assert {:ok, result} =
+               Result.from_adbc(%Adbc.Result{data: [batch(), batch()], num_rows: 4}, 10)
+
+      assert result.columns == ["id", "label"]
+      assert result.rows == [[1, "a"], [2, "b"], [1, "a"], [2, "b"]]
+    end
+
+    test "agrees with from_adbc/1 when it converts" do
+      adbc = %Adbc.Result{data: [batch(), batch()], num_rows: 4}
+
+      assert Result.from_adbc(adbc, 10) == {:ok, Result.from_adbc(adbc)}
+    end
+  end
+
   describe "to_maps/1" do
     test "keys each row by column name" do
       result = Result.from_adbc(%Adbc.Result{data: [batch()], num_rows: 2})

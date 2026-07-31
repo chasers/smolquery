@@ -189,7 +189,7 @@ defmodule Bench.Adbc do
     engines =
       for index <- 1..max_clients do
         name = Module.concat(__MODULE__, "Pooled#{index}")
-        {:ok, _pid} = Engine.start_link(name: name)
+        {:ok, _pid} = Engine.start_link(name: name, max_result_rows: :infinity)
         name
       end
 

@@ -8,6 +8,16 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do
+  ceiling =
+    case max_rows do
+      "infinity" -> :infinity
+      rows -> String.to_integer(rows)
+    end
+
+  config :smolquery, Smolquery.Engine, max_result_rows: ceiling
+end
+
 if data_dir = System.get_env("SMOLQUERY_DATA_DIR") do
   config :smolquery, :data_dir, data_dir
 
