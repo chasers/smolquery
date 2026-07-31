@@ -126,5 +126,12 @@ defmodule Smolquery.BufferService.ClientTest do
 
       assert Client.flush(name, @table) == :ok
     end
+
+    test "does not start a buffer just to flush nothing", context do
+      name = start_buffer_service(context)
+
+      assert Client.flush(name, @table) == :ok
+      assert Registry.lookup(Runtime.registry(name), @table) == []
+    end
   end
 end
