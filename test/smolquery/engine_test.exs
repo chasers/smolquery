@@ -59,6 +59,24 @@ defmodule Smolquery.EngineTest do
       assert result.num_rows == 3
     end
 
+    test "binds a timestamp as TIMESTAMP, the type the columns declare" do
+      assert Engine.query!(@engine, "SELECT typeof($1)", [~N[2026-07-31 12:00:00]])
+             |> Result.one!() == "TIMESTAMP"
+    end
+
+    test "round-trips a timestamp parameter at microsecond precision" do
+      ts = ~N[2026-07-31 12:00:00.123456]
+
+      assert Engine.query!(@engine, "SELECT $1", [ts]) |> Result.one!() == ts
+    end
+
+    test "accepts a DateTime, which ADBC cannot infer a type for" do
+      utc = DateTime.new!(~D[2026-07-31], ~T[12:00:00.123456], "Etc/UTC")
+
+      assert Engine.query!(@engine, "SELECT $1", [utc]) |> Result.one!() ==
+               ~N[2026-07-31 12:00:00.123456]
+    end
+
     test "returns an error tuple for invalid SQL rather than crashing" do
       assert {:error, %Adbc.Error{}} = Engine.query(@engine, "SELECT * FROM no_such_table")
 
