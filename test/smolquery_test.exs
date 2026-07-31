@@ -1,8 +1,9 @@
 defmodule SmolqueryTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
+
   doctest Smolquery
 
-  test "greets the world" do
-    assert Smolquery.hello() == :world
+  test "version/0 reports the application version" do
+    assert Smolquery.version() == to_string(Application.spec(:smolquery, :vsn))
   end
 end

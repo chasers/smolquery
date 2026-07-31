@@ -26,6 +26,11 @@ defmodule Smolquery.MixProject do
 
   defp deps do
     [
+      {:adbc, "~> 0.12"},
+      {:explorer, "~> 0.12"},
+      {:bandit, "~> 1.12"},
+      {:plug, "~> 1.20"},
+      {:req, "~> 0.7"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},

@@ -1,18 +1,25 @@
 defmodule Smolquery do
   @moduledoc """
-  Documentation for `Smolquery`.
+  An open source BigQuery alternative on DuckDB and Elixir.
+
+  One OTP application containing four services — `Smolquery.IngestService`,
+  `Smolquery.BufferService`, `Smolquery.StorageService`, and
+  `Smolquery.QueryService` — around immutable Parquet segments and a DuckLake
+  catalog. Which services a node runs is role configuration; see
+  `Smolquery.Roles`.
   """
 
   @doc """
-  Hello world.
+  The running application version.
 
   ## Examples
 
-      iex> Smolquery.hello()
-      :world
+      iex> Smolquery.version() =~ ~r/^\\d+\\.\\d+\\.\\d+/
+      true
 
   """
-  def hello do
-    :world
+  @spec version() :: String.t()
+  def version do
+    :smolquery |> Application.spec(:vsn) |> to_string()
   end
 end
