@@ -20,7 +20,8 @@ defmodule Smolquery.Engine do
       config :smolquery, Smolquery.Engine,
         memory_limit: "2GB",
         threads: System.schedulers_online(),
-        extensions: [:httpfs, :json]
+        extensions: [:httpfs, :json],
+        max_result_rows: 100_000
 
   Extension names and settings are interpolated into SQL (DuckDB takes no
   parameters in `INSTALL`/`LOAD`/`SET`), so they are configuration-only inputs —
@@ -30,7 +31,8 @@ defmodule Smolquery.Engine do
 
   `query/3` returns a `Smolquery.Engine.Result` — ordered columns and rows of plain
   Elixir terms. It is the right shape for the queries the system asks itself, all
-  of which return tens of rows, and ruinous for one that returns millions.
+  of which return tens of rows, and it refuses a result over `:max_result_rows`
+  rather than spending gigabytes of heap converting one.
 
   `frame/3` returns an `Explorer.DataFrame`, with the Arrow stream going straight
   to Polars in Rust. That is the read path for user queries, whose size nobody
@@ -52,6 +54,8 @@ defmodule Smolquery.Engine do
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
+  @default_max_result_rows 100_000
+
   @type option ::
           {:name, atom()}
           | {:path, String.t()}
@@ -59,6 +63,7 @@ defmodule Smolquery.Engine do
           | {:statements, [String.t()]}
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}
+          | {:max_result_rows, pos_integer() | :infinity}
 
   @doc """
   Starts an engine subtree.
@@ -71,6 +76,10 @@ defmodule Smolquery.Engine do
     * `:statements` — SQL run once per connection after extensions and
       settings, for session state a caller cannot afford to lose on a restart
       (a catalog `ATTACH`, say).
+    * `:max_result_rows` — most rows `query/3` will convert to Elixir terms
+      before returning `Smolquery.Engine.ResultTooLarge`. Defaults to
+      `#{@default_max_result_rows}`; `:infinity` disables the ceiling for a
+      caller that means it.
     * `:extensions`, `:memory_limit`, `:threads` — override the application
       configuration for this instance.
 
@@ -92,7 +101,8 @@ defmodule Smolquery.Engine do
        name: connection_name(name),
        extensions: Keyword.get(config, :extensions, []),
        settings: settings(config),
-       statements: Keyword.get(config, :statements, [])}
+       statements: Keyword.get(config, :statements, []),
+       max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)
@@ -126,7 +136,8 @@ defmodule Smolquery.Engine do
   This is the read path for results too large to be worth Elixir terms. DuckDB's
   Arrow stream is handed to Polars in Rust, so nothing lands on the BEAM heap:
   five million rows take 307 ms and no measurable heap, against 11.5 s and 4.8 GiB
-  through `query/3` (`bench/adbc.exs`).
+  through `query/3` (`bench/adbc.exs`). `:max_result_rows` does not apply, because
+  the cost it guards against is not paid here.
 
   A frame serializes to Parquet, Arrow IPC, CSV, or NDJSON from Rust
   (`Explorer.DataFrame.dump_parquet/2` and friends), which keeps the whole path

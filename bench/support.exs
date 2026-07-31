@@ -53,14 +53,20 @@ defmodule Bench.Support do
 
   @doc """
   Starts a DuckLake-backed engine in `dir` and returns its catalog handle.
+
+  `:max_result_rows` defaults to `:infinity` here, unlike the application default:
+  these scripts exist to measure the cost of converting a large result, which the
+  ceiling is there to prevent a real caller from paying by accident.
   """
-  def start_lake!(name, dir) do
-    {:ok, _pid} =
-      DuckLake.start_link(
-        name: name,
-        metadata: "sqlite:#{Path.join(dir, "catalog.sqlite")}",
-        data_path: Path.join(dir, "data")
-      )
+  def start_lake!(name, dir, opts \\ []) do
+    defaults = [
+      name: name,
+      metadata: "sqlite:#{Path.join(dir, "catalog.sqlite")}",
+      data_path: Path.join(dir, "data"),
+      max_result_rows: :infinity
+    ]
+
+    {:ok, _pid} = DuckLake.start_link(Keyword.merge(defaults, opts))
 
     catalog = DuckLake.new(engine: name)
     :ok = Catalog.create_dataset(catalog, @dataset)

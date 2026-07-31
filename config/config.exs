@@ -5,7 +5,8 @@ config :adbc, :drivers, [:duckdb]
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   threads: System.schedulers_online(),
-  extensions: [:httpfs, :json]
+  extensions: [:httpfs, :json],
+  max_result_rows: 100_000
 
 config :smolquery, :data_dir, "priv/data"
 

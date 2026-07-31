@@ -1,11 +1,23 @@
 defmodule Smolquery.Engine.Result do
   @moduledoc """
-  The neutral result shape every read path returns.
+  The result shape for bounded reads.
 
   `Adbc.Result` is column-oriented, batched, and carries Arrow metadata. This
   struct is the seam between the engine and everything above it: ordered column
   names plus row tuples of plain Elixir terms. Swapping the engine (or adding a
   second one) means writing a new `from_adbc/1`-alike, not touching callers.
+
+  ## This shape is for bounded results only
+
+  Converting Arrow to Elixir terms costs about a kilobyte and two microseconds
+  per row, nearly all of it transposing columns into rows: five million rows take
+  11.5 s and 4.8 GiB, against 307 ms and almost no heap for the same batch left in
+  Arrow (`bench/adbc.exs`). Every query the system asks itself — catalog lookups,
+  snapshot ids, counts — returns tens of rows and belongs here. A user query that
+  might match millions does not; that is `Smolquery.Engine.frame/3`.
+
+  `Smolquery.Engine` enforces the distinction rather than documenting it, refusing
+  a conversion over `:max_result_rows` with `Smolquery.Engine.ResultTooLarge`.
   """
 
   defstruct columns: [], rows: [], num_rows: 0
@@ -25,15 +37,54 @@ defmodule Smolquery.Engine.Result do
   end
 
   def from_adbc(%Adbc.Result{data: batches}) do
-    columns =
-      case batches do
-        [first | _] -> Enum.map(first, & &1.field.name)
-        [] -> []
-      end
-
     rows = Enum.flat_map(batches, &batch_to_rows/1)
 
-    %__MODULE__{columns: columns, rows: rows, num_rows: length(rows)}
+    %__MODULE__{columns: column_names(batches), rows: rows, num_rows: length(rows)}
+  end
+
+  @doc """
+  Builds a result, refusing one longer than `max_rows`.
+
+  A batch is converted, counted, and kept only while the running total is within
+  the limit, so no more than `max_rows` rows are ever built as Elixir terms. There
+  is no cheaper check available: an `Adbc.Result` holds raw Arrow buffers whose row
+  count cannot be read without interpreting each type's memory layout, and the
+  driver leaves `num_rows` nil for a select. Stopping early is the check.
+
+  This bounds the conversion, not the query — ADBC has already fetched the whole
+  Arrow result by the time this runs.
+
+  `:infinity` converts whatever came back.
+  """
+  @spec from_adbc(Adbc.Result.t(), pos_integer() | :infinity) ::
+          {:ok, t()} | {:error, :too_many_rows}
+  def from_adbc(%Adbc.Result{} = result, :infinity), do: {:ok, from_adbc(result)}
+
+  def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}, _max_rows) do
+    {:ok, %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}}
+  end
+
+  def from_adbc(%Adbc.Result{data: batches}, max_rows) do
+    batches
+    |> Enum.reduce_while({0, []}, fn batch, {count, acc} ->
+      rows = batch_to_rows(batch)
+      total = count + length(rows)
+
+      if total > max_rows do
+        {:halt, :too_many_rows}
+      else
+        {:cont, {total, [rows | acc]}}
+      end
+    end)
+    |> case do
+      :too_many_rows ->
+        {:error, :too_many_rows}
+
+      {count, acc} ->
+        rows = acc |> Enum.reverse() |> Enum.concat()
+
+        {:ok, %__MODULE__{columns: column_names(batches), rows: rows, num_rows: count}}
+    end
   end
 
   @doc """
@@ -55,6 +106,9 @@ defmodule Smolquery.Engine.Result do
           "expected exactly one row and one column, got #{length(rows)} row(s) " <>
             "and #{length(columns)} column(s)"
   end
+
+  defp column_names([first | _rest]), do: Enum.map(first, & &1.field.name)
+  defp column_names([]), do: []
 
   defp batch_to_rows([]), do: []
 
