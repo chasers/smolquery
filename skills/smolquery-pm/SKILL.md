@@ -26,7 +26,8 @@ contract).
   Design / Decisions — what a `.plans/*.md` file used to be). A project can
   have several over time. This is the *thinking*.
 - **task** — a discrete, trackable action item with a status, in a project and
-  optionally linked to the plan that spawned it. This is the *doing*.
+  optionally linked to the plan that spawned it. This is the *doing*. `username`
+  (a GitHub username, or NULL if unassigned) records who's working on it.
 
 `project groups → plan describes → tasks execute`. Schema in
 [`schema.sql`](./schema.sql).
@@ -112,6 +113,17 @@ pmq "INSERT INTO tasks (project_id, plan_id, title, priority)
      VALUES ((SELECT id FROM projects WHERE slug = ?),
              (SELECT id FROM plans   WHERE slug = ?), ?, ?) RETURNING id, key" \
     --args '["buffer-service","2026-07-31-hot-tier","Group-commit TableBuffer","high"]'
+
+# Claim a task — assign yourself by GitHub username
+pmq "UPDATE tasks SET username = ?, updated_at = datetime('now') WHERE key = ?" \
+    --args '["chasegranberry","T-1"]'
+
+# What's <username> working on
+pmq "SELECT t.key, p.slug, t.status, t.title
+       FROM tasks t JOIN projects p ON p.id = t.project_id
+      WHERE t.username = ? AND t.status IN ('todo','in_progress')
+      ORDER BY t.position" \
+    --args '["chasegranberry"]'
 
 # Move a task (by key or integer id); marking done stamps completed_at
 pmq "UPDATE tasks

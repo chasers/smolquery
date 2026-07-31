@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   body         TEXT NOT NULL DEFAULT '',
   status       TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in_progress','blocked','done','cancelled')),
   priority     TEXT NOT NULL DEFAULT 'med' CHECK (priority IN ('low','med','high','urgent')),
+  username     TEXT,
   position     REAL NOT NULL DEFAULT 0,
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
@@ -48,6 +49,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS tasks_project_status ON tasks (project_id, status);
+
+CREATE INDEX IF NOT EXISTS tasks_username ON tasks (username);
 
 CREATE INDEX IF NOT EXISTS tasks_plan ON tasks (plan_id);
 
