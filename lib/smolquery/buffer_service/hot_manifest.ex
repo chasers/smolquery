@@ -34,16 +34,26 @@ defmodule Smolquery.BufferService.HotManifest do
   ## One writer per table, many readers
 
   Entries live in one ETS table per node, keyed `{table_ref, segment_id}`. Only
-  the `TableBuffer` owning a table may call `add/3`, `retire/4`, `drop/3`, or
-  `recover/2` for it — that single-writer rule is what makes the log and ETS agree
-  without a lock. Reads (`entries/2`, `entry/3`) are free for anyone, which is what
-  keeps `HotServer` and the query path off the flush path. ETS does not enforce
-  this; the call graph does.
+  the `TableBuffer` owning a table may call `add/3`, `retire/4`, `drop/3`,
+  `recover/2`, or `compact/2` for it — that single-writer rule is what makes the
+  log and ETS agree without a lock, and what keeps a compaction's rename from
+  discarding a concurrent append. Reads (`entries/2`, `entry/3`) are free for
+  anyone, which is what keeps `HotServer` and the query path off the flush path.
+  ETS does not enforce this; the call graph does.
 
   A torn final log line is expected rather than exceptional: a crash mid-append
-  leaves a partial write, and fsync makes everything before it good. Recovery
-  therefore tolerates an unparseable *last* line and refuses an unparseable one
-  anywhere else, which would mean real corruption.
+  leaves a partial write, and fsync makes everything before it good. A record
+  missing its newline was never fully synced, so no caller was acked on it.
+  Recovery therefore truncates the log back to its last complete line — merely
+  tolerating the torn tail would let the next append concatenate onto it and
+  garble a line mid-log — and refuses an unparseable line anywhere *else*, which
+  would mean real corruption.
+
+  The fsync covers the log file's contents, not its directory entry — Erlang
+  cannot fsync a directory without a NIF, the same accepted window
+  `Smolquery.Segments.Store.Local` documents for segments. A table's very first
+  record can in principle vanish with its file on a hard power cut; from the
+  second append on, the directory entry is old metadata.
 
   Recovery also never empties a table's index on the way to rebuilding it. It
   inserts the recovered entries first and only then removes what is no longer
@@ -324,14 +334,17 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp delete_and_forget(manifest, table_ref, ids) do
-    keys =
-      ids
-      |> Enum.flat_map(&lookup(manifest, table_ref, &1))
-      |> Enum.map(& &1.key)
+    case Enum.flat_map(ids, &lookup(manifest, table_ref, &1)) do
+      [] ->
+        :ok
 
-    with :ok <- delete_all(manifest, keys),
-         :ok <- append(manifest, table_ref, %{"op" => "drop", "ids" => ids}) do
-      Enum.each(ids, &:ets.delete(manifest.table, {table_ref, &1}))
+      entries ->
+        record = %{"op" => "drop", "ids" => Enum.map(entries, & &1.id)}
+
+        with :ok <- delete_all(manifest, Enum.map(entries, & &1.key)),
+             :ok <- append(manifest, table_ref, record) do
+          Enum.each(entries, &:ets.delete(manifest.table, {table_ref, &1.id}))
+        end
     end
   end
 
@@ -379,8 +392,16 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp append(%__MODULE__{} = manifest, table_ref, record) do
-    with {:ok, path} <- log_path(manifest, table_ref),
-         :ok <- File.mkdir_p(Path.dirname(path)),
+    with {:ok, path} <- log_path(manifest, table_ref) do
+      case write_line(path, record) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:log_append_failed, reason}}
+      end
+    end
+  end
+
+  defp write_line(path, record) do
+    with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, fd} <- :file.open(path, [:append, :raw, :binary]) do
       result =
         with :ok <- :file.write(fd, [JSON.encode!(record), "\n"]), do: :file.sync(fd)
@@ -406,29 +427,65 @@ defmodule Smolquery.BufferService.HotManifest do
   defp read_log(%__MODULE__{} = manifest, table_ref) do
     with {:ok, path} <- log_path(manifest, table_ref) do
       case File.read(path) do
-        {:ok, contents} -> parse_lines(contents)
-        {:error, :enoent} -> {:ok, []}
-        {:error, reason} -> {:error, {:log_unreadable, reason}}
+        {:ok, contents} ->
+          with {:ok, records, valid_bytes} <- parse_contents(contents),
+               :ok <- truncate_torn_tail(path, contents, valid_bytes) do
+            {:ok, records}
+          end
+
+        {:error, :enoent} ->
+          {:ok, []}
+
+        {:error, reason} ->
+          {:error, {:log_unreadable, reason}}
       end
     end
   end
 
-  defp parse_lines(contents) do
-    lines = contents |> String.split("\n") |> Enum.reject(&(&1 == ""))
-    last = length(lines)
+  defp parse_contents(contents),
+    do: parse_lines(String.split(contents, "\n"), 1, 0, [])
 
-    lines
-    |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, []}, fn {line, index}, {:ok, acc} ->
-      case JSON.decode(line) do
-        {:ok, record} -> {:cont, {:ok, [record | acc]}}
-        {:error, _reason} when index == last -> {:halt, {:ok, acc}}
-        {:error, reason} -> {:halt, {:error, {:corrupt_log, index, reason}}}
-      end
-    end)
-    |> case do
-      {:ok, records} -> {:ok, Enum.reverse(records)}
-      {:error, reason} -> {:error, reason}
+  defp parse_lines([""], _index, offset, acc), do: {:ok, Enum.reverse(acc), offset}
+  defp parse_lines([_torn], _index, offset, acc), do: {:ok, Enum.reverse(acc), offset}
+
+  defp parse_lines(["" | rest], index, offset, acc),
+    do: parse_lines(rest, index + 1, offset + 1, acc)
+
+  defp parse_lines([line | rest], index, offset, acc) do
+    case JSON.decode(line) do
+      {:ok, record} ->
+        parse_lines(rest, index + 1, offset + byte_size(line) + 1, [record | acc])
+
+      {:error, _reason} when rest == [""] ->
+        {:ok, Enum.reverse(acc), offset}
+
+      {:error, reason} ->
+        {:error, {:corrupt_log, index, reason}}
+    end
+  end
+
+  defp truncate_torn_tail(_path, contents, valid_bytes)
+       when byte_size(contents) == valid_bytes,
+       do: :ok
+
+  defp truncate_torn_tail(path, _contents, valid_bytes) do
+    case :file.open(path, [:read, :write, :raw, :binary]) do
+      {:ok, fd} ->
+        result =
+          with {:ok, _position} <- :file.position(fd, valid_bytes),
+               :ok <- :file.truncate(fd) do
+            :file.sync(fd)
+          end
+
+        :file.close(fd)
+
+        case result do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:log_repair_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:log_repair_failed, reason}}
     end
   end
 

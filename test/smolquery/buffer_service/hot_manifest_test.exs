@@ -191,6 +191,18 @@ defmodule Smolquery.BufferService.HotManifestTest do
       assert HotManifest.drop(manifest, @table, []) == :ok
     end
 
+    test "appends no record when there is nothing to drop", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+      compacted = File.read!(path)
+
+      assert HotManifest.drop(manifest, @table, [entry.id]) == :ok
+      assert HotManifest.drop(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SV"]) == :ok
+      assert File.read!(path) == compacted
+    end
+
     test "leaves other entries alone", %{manifest: manifest} do
       dropped = add(manifest, @table, rows(1))
       kept = add(manifest, @table, rows(1))
@@ -300,6 +312,41 @@ defmodule Smolquery.BufferService.HotManifestTest do
       assert {:ok, report} = HotManifest.recover(manifest, @table)
       assert report.entries == 1
       assert Enum.map(HotManifest.entries(manifest, @table), & &1.id) == [kept.id]
+    end
+
+    test "truncates a torn tail, so a later append cannot garble the log", context do
+      manifest = context.manifest
+      kept = add(manifest, @table, rows(1))
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+      intact = File.read!(path)
+
+      File.write!(path, ~s({"op":"add","id":"partial), [:append])
+      {:ok, _report} = HotManifest.recover(manifest, @table)
+
+      assert File.read!(path) == intact
+
+      added = add(manifest, @table, rows(1))
+
+      assert {:ok, report} = HotManifest.recover(manifest, @table)
+      assert report.entries == 2
+
+      assert manifest |> HotManifest.entries(@table) |> Enum.map(& &1.id) |> Enum.sort() ==
+               Enum.sort([kept.id, added.id])
+    end
+
+    test "truncates before its own reconciling append, not after", context do
+      manifest = context.manifest
+      entry = add(manifest, @table, rows(1))
+      File.rm!(Store.location(manifest.store, entry.key))
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+
+      File.write!(path, ~s({"op":"add","id":"partial), [:append])
+
+      assert {:ok, report} = HotManifest.recover(manifest, @table)
+      assert report.missing == [entry.id]
+
+      assert {:ok, second} = HotManifest.recover(manifest, @table)
+      assert second.entries == 0
     end
 
     test "refuses a log corrupt anywhere but the last line", context do
