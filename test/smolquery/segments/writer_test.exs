@@ -1,0 +1,164 @@
+defmodule Smolquery.Segments.WriterTest do
+  use ExUnit.Case, async: true
+
+  alias Explorer.DataFrame
+  alias Smolquery.Schema
+  alias Smolquery.Segments.Id
+  alias Smolquery.Segments.Segment
+  alias Smolquery.Segments.Writer
+
+  @moduletag :tmp_dir
+
+  defp schema do
+    Schema.new!([
+      {"id", :int64, nullable: false},
+      {"ts", :timestamp},
+      {"name", :string},
+      {"amount", {:numeric, 38, 2}},
+      {"ratio", :float64},
+      {"ok", :bool},
+      {"day", :date}
+    ])
+  end
+
+  defp rows(count) do
+    for i <- 1..count do
+      %{
+        "id" => i,
+        "ts" => NaiveDateTime.add(~N[2026-07-31 12:00:00], i, :second),
+        "name" => "row-#{i}",
+        "amount" => Decimal.new("#{i}.25"),
+        "ratio" => i * 0.5,
+        "ok" => rem(i, 2) == 0,
+        "day" => Date.add(~D[2026-07-31], i)
+      }
+    end
+  end
+
+  describe "write/3" do
+    test "writes a ULID-named segment and describes it", %{tmp_dir: dir} do
+      assert {:ok, %Segment{} = segment} = Writer.write(rows(3), schema(), dir: dir)
+
+      assert Id.valid?(segment.id)
+      assert segment.path == Path.join(dir, segment.id <> ".parquet")
+      assert File.exists?(segment.path)
+      assert segment.row_count == 3
+      assert segment.byte_size == File.stat!(segment.path).size
+      assert segment.byte_size > 0
+    end
+
+    test "takes an explicit id", %{tmp_dir: dir} do
+      id = Id.generate()
+
+      assert {:ok, segment} = Writer.write(rows(1), schema(), dir: dir, id: id)
+      assert segment.id == id
+      assert Path.basename(segment.path) == id <> ".parquet"
+    end
+
+    test "rejects an id that is not a ULID", %{tmp_dir: dir} do
+      assert Writer.write(rows(1), schema(), dir: dir, id: "../escape") ==
+               {:error, {:invalid_segment_id, "../escape"}}
+    end
+
+    test "leaves nothing behind in the staging directory", %{tmp_dir: dir} do
+      assert {:ok, _segment} = Writer.write(rows(2), schema(), dir: dir)
+
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+    end
+
+    test "creates the staging directory when the target is fresh", %{tmp_dir: dir} do
+      nested = Path.join(dir, "dataset/table")
+
+      assert {:ok, segment} = Writer.write(rows(1), schema(), dir: nested)
+      assert File.exists?(segment.path)
+    end
+
+    test "refuses to write an empty segment", %{tmp_dir: dir} do
+      assert Writer.write([], schema(), dir: dir) == {:error, :no_rows}
+    end
+
+    test "reports rows that do not fit the schema", %{tmp_dir: dir} do
+      rows = [%{"id" => "not an integer"}]
+
+      assert {:error, {:invalid_rows, message}} = Writer.write(rows, schema(), dir: dir)
+      assert is_binary(message)
+    end
+
+    test "writes a missing column as null", %{tmp_dir: dir} do
+      assert {:ok, segment} = Writer.write([%{"id" => 1}], schema(), dir: dir)
+
+      assert segment.row_count == 1
+      assert segment.stats["name"].null_count == 1
+      assert segment.stats["id"].null_count == 0
+    end
+
+    test "accepts a DataFrame directly", %{tmp_dir: dir} do
+      frame = DataFrame.new(id: [1, 2, 3])
+
+      assert {:ok, segment} = Writer.write(frame, Schema.new!([{"id", :int64}]), dir: dir)
+      assert segment.row_count == 3
+    end
+
+    test "round-trips every logical type through the written file", %{tmp_dir: dir} do
+      {:ok, segment} = Writer.write(rows(2), schema(), dir: dir)
+
+      frame = DataFrame.from_parquet!(segment.path)
+
+      assert DataFrame.names(frame) == ["id", "ts", "name", "amount", "ratio", "ok", "day"]
+
+      assert DataFrame.dtypes(frame) == %{
+               "id" => {:s, 64},
+               "ts" => {:naive_datetime, :microsecond},
+               "name" => :string,
+               "amount" => {:decimal, 38, 2},
+               "ratio" => {:f, 64},
+               "ok" => :boolean,
+               "day" => :date
+             }
+    end
+  end
+
+  describe "stats" do
+    test "carries min-max for the orderable types pruning uses", %{tmp_dir: dir} do
+      {:ok, segment} = Writer.write(rows(4), schema(), dir: dir)
+
+      assert segment.stats["id"] == %{min: 1, max: 4, null_count: 0}
+
+      assert segment.stats["ts"] == %{
+               min: ~N[2026-07-31 12:00:01.000000],
+               max: ~N[2026-07-31 12:00:04.000000],
+               null_count: 0
+             }
+
+      assert segment.stats["day"] == %{
+               min: ~D[2026-08-01],
+               max: ~D[2026-08-04],
+               null_count: 0
+             }
+
+      assert segment.stats["ratio"] == %{min: 0.5, max: 2.0, null_count: 0}
+      assert segment.stats["amount"].min == 1.25
+      assert segment.stats["amount"].max == 4.25
+    end
+
+    test "counts nulls but skips min-max for types with no useful order", %{tmp_dir: dir} do
+      {:ok, segment} = Writer.write(rows(2), schema(), dir: dir)
+
+      assert segment.stats["name"] == %{min: nil, max: nil, null_count: 0}
+      assert segment.stats["ok"] == %{min: nil, max: nil, null_count: 0}
+    end
+
+    test "has an entry for every schema column", %{tmp_dir: dir} do
+      {:ok, segment} = Writer.write(rows(1), schema(), dir: dir)
+
+      assert Map.keys(segment.stats) |> Enum.sort() == Schema.names(schema()) |> Enum.sort()
+    end
+  end
+
+  describe "path/2" do
+    test "names a segment file from its id" do
+      assert Writer.path("/data", "01KYWPEEGAM8FQVQS5S2QF26SV") ==
+               "/data/01KYWPEEGAM8FQVQS5S2QF26SV.parquet"
+    end
+  end
+end
