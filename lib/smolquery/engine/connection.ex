@@ -32,6 +32,7 @@ defmodule Smolquery.Engine.Connection do
 
   require Logger
 
+  alias Smolquery.Engine.Params
   alias Smolquery.Engine.Result
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
@@ -63,11 +64,15 @@ defmodule Smolquery.Engine.Connection do
 
   @doc """
   Runs `sql` with positional `params` (`$1..$n`), returning a `Result`.
+
+  Parameters are bound through `Smolquery.Engine.Params`, which types timestamps
+  to match the columns rather than letting ADBC infer them — an inferred
+  timestamp silently costs every query its file pruning.
   """
   @spec query(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
   def query(conn, sql, params \\ [], timeout \\ 30_000) do
-    GenServer.call(conn, {:query, sql, params}, timeout)
+    GenServer.call(conn, {:query, sql, Params.normalize(params)}, timeout)
   end
 
   @doc """

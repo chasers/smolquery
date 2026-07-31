@@ -92,9 +92,12 @@ Properties worth knowing:
 - **Snapshots are the read contract.** Every mutation reports the snapshot it
   committed at, and `segments/3` lists a table's files as of a snapshot — the
   basis of exactly-once sealing.
-- **Pruning is free.** DuckLake reads each Parquet footer at registration and
-  keeps min-max stats, so a filtered query touches only the segments it must.
-  A segment also carries its own stats for the hot tier.
+- **Pruning is free, but only if the parameter types match.** DuckLake reads each
+  Parquet footer at registration and keeps min-max stats, so a filtered query
+  touches only the segments it must. A segment also carries its own stats for the
+  hot tier. Pruning is lost silently — right rows, every file read — when a
+  predicate compares mismatched types, so `Smolquery.Engine.Params` binds
+  timestamps to the type the columns declare instead of letting ADBC infer one.
 - **Compaction is not free.** `ducklake_merge_adjacent_files` crashes DuckDB on
   externally-registered files, so smolquery never calls it; compaction is built
   from `register_segments/3` + `drop_segments/3` instead.

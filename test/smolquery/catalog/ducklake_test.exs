@@ -15,6 +15,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.Engine.Result
   alias Smolquery.Schema
   alias Smolquery.Segments.Writer
 
@@ -248,6 +249,23 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       analyzed = plan.rows |> List.flatten() |> Enum.join()
 
       assert analyzed =~ "Total Files Read: 1"
+    end
+
+    test "prunes the same way when the bound is a parameter, not a literal", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      segments = Enum.map([1, 10, 20], &write_segment(dir, &1, 100))
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, segments)
+
+      sql = ~s|SELECT count(*) FROM lake."analytics"."events" WHERE ts >= $1|
+      bound = ~N[2026-07-20 00:00:00]
+
+      plan = Engine.query!(@engine, "EXPLAIN ANALYZE " <> sql, [bound])
+      analyzed = plan.rows |> List.flatten() |> Enum.join()
+
+      assert analyzed =~ "Total Files Read: 1"
+      assert Engine.query!(@engine, sql, [bound]) |> Result.one!() == 100
     end
 
     test "sees the rows a segment carries, with types intact", %{
