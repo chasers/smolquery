@@ -26,7 +26,12 @@ contract).
   Design / Decisions — what a `.plans/*.md` file used to be). A project can
   have several over time. This is the *thinking*.
 - **task** — a discrete, trackable action item with a status, in a project and
-  optionally linked to the plan that spawned it. This is the *doing*.
+  optionally linked to the plan that spawned it. This is the *doing*. Three
+  GitHub-username columns track who's touched it: `created_by` (filed it,
+  set once at INSERT), `updated_by` (last person to touch it, set on every
+  UPDATE), and `in_progress_by` (who's actively working it right now — set
+  when status moves to `in_progress`, cleared when it moves away). All three
+  are NULL until someone sets them.
 
 `project groups → plan describes → tasks execute`. Schema in
 [`schema.sql`](./schema.sql).
@@ -108,17 +113,31 @@ pmq "INSERT INTO plans (project_id, slug, title, body_md, status)
      VALUES ((SELECT id FROM projects WHERE slug = ?), ?, ?, ?, ?)" --args-file /tmp/plan_args.json
 
 # Add a task (optionally linked to a plan) — the returned key is what you cite in PRs
-pmq "INSERT INTO tasks (project_id, plan_id, title, priority)
+pmq "INSERT INTO tasks (project_id, plan_id, title, priority, created_by, updated_by)
      VALUES ((SELECT id FROM projects WHERE slug = ?),
-             (SELECT id FROM plans   WHERE slug = ?), ?, ?) RETURNING id, key" \
-    --args '["buffer-service","2026-07-31-hot-tier","Group-commit TableBuffer","high"]'
+             (SELECT id FROM plans   WHERE slug = ?), ?, ?, ?, ?) RETURNING id, key" \
+    --args '["buffer-service","2026-07-31-hot-tier","Group-commit TableBuffer","high","chasegranberry","chasegranberry"]'
 
-# Move a task (by key or integer id); marking done stamps completed_at
+# Start working a task — claims it and stamps who touched it
+pmq "UPDATE tasks
+        SET status = 'in_progress', in_progress_by = ?, updated_by = ?,
+            updated_at = datetime('now')
+      WHERE key = ?" --args '["chasegranberry","chasegranberry","T-1"]'
+
+# What <username> is actively working on right now
+pmq "SELECT t.key, p.slug, t.title
+       FROM tasks t JOIN projects p ON p.id = t.project_id
+      WHERE t.in_progress_by = ?" --args '["chasegranberry"]'
+
+# Move a task (by key or integer id); marking done stamps completed_at and
+# clears in_progress_by (it's no longer "in progress" once it leaves that status)
 pmq "UPDATE tasks
         SET status = ?,
+            in_progress_by = CASE WHEN ? = 'in_progress' THEN in_progress_by ELSE NULL END,
             completed_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE completed_at END,
+            updated_by = ?,
             updated_at = datetime('now')
-      WHERE key = ?" --args '["done","done","T-1"]'
+      WHERE key = ?" --args '["done","done","done","chasegranberry","T-1"]'
 
 # Read a plan's markdown
 pmq "SELECT body_md FROM plans WHERE slug = ?" --args '["2026-07-31-hot-tier"]'
