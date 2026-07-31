@@ -52,9 +52,10 @@ auto-loading the git-ignored file `.claude/smolquery-pm.env` (`.claude/` is
 ignored) if present:
 
 ```
-SMOLSQLS_PM_URL       (default https://alpha.smolsqls.com)
+SMOLSQLS_PM_URL          (default https://alpha.smolsqls.com)
 SMOLSQLS_PM_DB_ID
-SMOLSQLS_PM_DB_TOKEN  (per-database auth_token, Bearer)
+SMOLSQLS_PM_DB_TOKEN     (per-database auth_token, Bearer)
+SMOLSQLS_PM_MGMT_TOKEN   (tenant api_key, Bearer — management calls only, e.g. PATCH /v1/databases/:id)
 ```
 
 If the id/token are missing, stop — get the database credentials from the
@@ -159,6 +160,7 @@ Re-applying is safe (`CREATE TABLE/INDEX IF NOT EXISTS`).
 
 - **This supersedes `.plans/` for the smolquery repo.** When planning work
   here, create/attach a plan row and tasks instead of a local markdown file.
-- Backups: this is real data on alpha — it inherits alpha's backup/replication.
-  For a point-in-time copy, use the management backups endpoint, not tenant SQL
-  (`VACUUM` is denied for tenants).
+- Backups: this is real data on alpha, with litestream replication enabled
+  (`litestream_enabled: true` on the database). For a point-in-time copy, use
+  the management backups endpoint, not tenant SQL (`VACUUM` is denied for
+  tenants).
