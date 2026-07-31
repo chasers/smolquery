@@ -26,11 +26,24 @@ defmodule Smolquery.Engine do
   parameters in `INSTALL`/`LOAD`/`SET`), so they are configuration-only inputs —
   never pass user-supplied values.
 
+  ## Two result contracts, chosen by size
+
+  `query/3` returns a `Smolquery.Engine.Result` — ordered columns and rows of plain
+  Elixir terms. It is the right shape for the queries the system asks itself, all
+  of which return tens of rows, and ruinous for one that returns millions.
+
+  `frame/3` returns an `Explorer.DataFrame`, with the Arrow stream going straight
+  to Polars in Rust. That is the read path for user queries, whose size nobody
+  controls.
+
   ## Usage
 
       {:ok, _pid} = Smolquery.Engine.start_link(name: MyEngine)
       {:ok, result} = Smolquery.Engine.query(MyEngine, "SELECT $1 + 1 AS n", [41])
       #=> %Smolquery.Engine.Result{columns: ["n"], rows: [[42]], num_rows: 1}
+
+      {:ok, frame} = Smolquery.Engine.frame(MyEngine, "SELECT * FROM read_parquet($1)", [path])
+      #=> #Explorer.DataFrame<...>
 
   """
 
@@ -103,6 +116,39 @@ defmodule Smolquery.Engine do
   def query!(name, sql, params \\ []) do
     case query(name, sql, params) do
       {:ok, result} -> result
+      {:error, reason} -> raise reason
+    end
+  end
+
+  @doc """
+  Runs `sql` and returns an `Explorer.DataFrame` instead of a `Result`.
+
+  This is the read path for results too large to be worth Elixir terms. DuckDB's
+  Arrow stream is handed to Polars in Rust, so nothing lands on the BEAM heap:
+  five million rows take 307 ms and no measurable heap, against 11.5 s and 4.8 GiB
+  through `query/3` (`bench/adbc.exs`).
+
+  A frame serializes to Parquet, Arrow IPC, CSV, or NDJSON from Rust
+  (`Explorer.DataFrame.dump_parquet/2` and friends), which keeps the whole path
+  from DuckDB to response bytes clear of Elixir terms.
+
+      {:ok, frame} = Smolquery.Engine.frame(MyEngine, "SELECT * FROM lake.a.events")
+      {:ok, parquet} = Explorer.DataFrame.dump_parquet(frame)
+
+  """
+  @spec frame(atom(), String.t(), [term()]) ::
+          {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
+  def frame(name, sql, params \\ []) do
+    Connection.frame(connection_name(name), sql, params)
+  end
+
+  @doc """
+  Same as `frame/3` but raises on error.
+  """
+  @spec frame!(atom(), String.t(), [term()]) :: Explorer.DataFrame.t()
+  def frame!(name, sql, params \\ []) do
+    case frame(name, sql, params) do
+      {:ok, frame} -> frame
       {:error, reason} -> raise reason
     end
   end

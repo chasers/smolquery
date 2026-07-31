@@ -10,8 +10,9 @@ defmodule Bench.Adbc do
     * **Cold-connection latency** — what a connection pool would amortize. Nearly
       all of it turns out to be extension loading and `ATTACH`, not ADBC.
     * **Large results** — `Engine.query` converts Arrow to Elixir terms, which
-      costs about a kilobyte and a couple of microseconds per row. Leaving the
-      batch in Arrow, or handing it to Explorer, does not.
+      costs about a kilobyte and a couple of microseconds per row. `Engine.frame`,
+      which hands the Arrow stream to Polars, does not — including all the way out
+      to serialized Parquet bytes.
     * **Concurrency** — one `Engine.Connection` is a per-query mutex, so query
       throughput is flat in client count until there are more connections.
 
@@ -104,7 +105,7 @@ defmodule Bench.Adbc do
   end
 
   defp large_results do
-    heading("large-result fetch: three ways to get N rows out of DuckDB")
+    heading("large-result fetch: what it costs to get N rows out of DuckDB")
     max_rows = env("ROWS", 5_000_000)
     adbc = Connection.adbc_connection(Engine.connection_name(@engine))
 
@@ -120,8 +121,12 @@ defmodule Bench.Adbc do
         result.num_rows
       end)
 
-      measure(rows, "Explorer.DataFrame.from_query", fn ->
-        adbc |> DataFrame.from_query!(sql, []) |> DataFrame.n_rows()
+      measure(rows, "Engine.frame → DataFrame", fn ->
+        @engine |> Engine.frame!(sql) |> DataFrame.n_rows()
+      end)
+
+      measure(rows, "Engine.frame → Parquet bytes", fn ->
+        @engine |> Engine.frame!(sql) |> DataFrame.dump_parquet!() |> byte_size()
       end)
 
       measure(rows, "count(*) only (baseline)", fn ->

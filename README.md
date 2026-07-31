@@ -52,8 +52,23 @@ UNION ALL
 SELECT * FROM read_parquet('http://buffer-node:4000/hot.parquet')
 ```
 
-Results come back as `Smolquery.Engine.Result` — ordered column names plus row
-lists of plain Elixir terms — so callers never see Arrow or ADBC types.
+There are two result contracts, chosen by how big the answer might be.
+`query/3` returns a `Smolquery.Engine.Result` — ordered column names plus row lists
+of plain Elixir terms, so callers never see Arrow or ADBC types. That conversion
+costs about a kilobyte and 2 µs per row, which is free for the queries the system
+asks itself and ruinous for a user query matching millions of rows.
+
+`frame/3` is the read path for results nobody sized in advance. DuckDB's Arrow
+stream goes straight to Polars in Rust, so no row becomes an Elixir term, and the
+frame serializes to Parquet or Arrow IPC from Rust as well:
+
+```elixir
+{:ok, frame} = Smolquery.Engine.frame(MyEngine, "SELECT * FROM lake.analytics.events")
+{:ok, parquet} = Explorer.DataFrame.dump_parquet(frame)
+```
+
+Five million rows take 307 ms and no measurable heap that way, against 11.5 s and
+4.8 GiB through `query/3` — see `bench/adbc.exs`.
 
 ### Segments and the catalog
 
@@ -182,7 +197,7 @@ results worth knowing before writing a read path:
   converts Arrow row by row, which costs roughly a kilobyte and 2 µs per row — 5M
   rows take 11.5 s and 4.8 GiB, against 307 ms and 8.7 MiB left in Arrow. It is
   the right shape for catalog and control-plane queries, and a trap for user
-  results.
+  results, which is what `Engine.frame/3` is for.
 - **One connection serializes.** `Engine.Connection` is a per-query mutex, so
   query throughput is flat in client count. Eight connections serve eight
   concurrent clients about 2.9× faster than one does.
