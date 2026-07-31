@@ -135,18 +135,18 @@ defmodule Smolquery.BufferService.TableBuffer do
   def init({runtime, table_ref}) do
     Process.flag(:trap_exit, true)
 
-    with {:ok, prefix} <- Store.prefix(table_ref) do
+    with {:ok, prefix} <- Store.prefix(table_ref),
+         {:ok, _report} <- recover(runtime, table_ref) do
       state = %__MODULE__{runtime: runtime, table_ref: table_ref, prefix: prefix}
 
-      {:ok, state, {:continue, :recover}}
+      {:ok, schedule_maintenance(state)}
     end
   end
 
-  @impl GenServer
-  def handle_continue(:recover, state) do
-    case HotManifest.recover(state.runtime.manifest, state.table_ref) do
-      {:ok, _report} -> {:noreply, schedule_maintenance(state)}
-      {:error, reason} -> {:stop, {:recovery_failed, reason}, state}
+  defp recover(runtime, table_ref) do
+    case HotManifest.recover(runtime.manifest, table_ref) do
+      {:ok, report} -> {:ok, report}
+      {:error, reason} -> {:error, {:recovery_failed, reason}}
     end
   end
 

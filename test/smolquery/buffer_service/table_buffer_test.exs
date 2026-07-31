@@ -193,8 +193,8 @@ defmodule Smolquery.BufferService.TableBufferTest do
       %{name: restarted} =
         start_buffer_service(context, name: name, dir: Path.join(context.tmp_dir, "buffer"))
 
-      assert {:ok, entries} = Client.hot_manifest(restarted, @table)
-      assert entries == []
+      assert {:ok, [entry]} = Client.hot_manifest(restarted, @table)
+      assert entry.id == ack.segment_id
 
       {:ok, _ack} = Client.write_batch(restarted, @table, batch(4..4))
 

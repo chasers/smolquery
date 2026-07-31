@@ -213,6 +213,30 @@ Segment *bytes* deliberately do not travel this way: DuckDB opens them itself vi
 `httpfs`, reading only the column chunks a query needs. Pulling them through RPC
 would put every segment on the BEAM heap and lose that pushdown.
 
+`Smolquery.BufferService.HotServer` is what DuckDB opens them from — a Bandit
+listener, one per instance, serving two unauthenticated routes:
+
+```
+GET /v1/datasets/:dataset/tables/:table/manifest                  # JSON entries
+GET /v1/datasets/:dataset/tables/:table/segments/:id.parquet      # segment bytes
+```
+
+- **A manifest entry's `url` is built from the request that fetched it**, not
+  from static configuration — the same response is correct whether this bound
+  its configured port or an OS-assigned one, and whether it sits behind a proxy
+  or not. An entry backed by a *shared* store (one where
+  `Smolquery.Segments.Store.shared?/1` is `true`, e.g. a future S3 hot tier)
+  reports that store's own location instead, and never round-trips through this
+  route at all.
+- **A segment id is validated and resolved through the manifest**, never by
+  joining request input into a path — `Smolquery.Segments.Id.valid?/1` rejects
+  anything that isn't a well-formed ULID before it gets near the filesystem.
+- **Both routes answer `HEAD` as well as `GET`**, because `httpfs` sends a `HEAD`
+  first to learn a segment's size before issuing the ranged reads Parquet's
+  footer-first format needs.
+- **Auth is Milestone 6's job**, over `CREATE SECRET` headers DuckDB attaches to
+  `httpfs` requests.
+
 The other half of the hot tier is handing data off. A table that crosses
 `seal_max_bytes`, `seal_max_files`, or `seal_max_age_ms` signals a configured
 consumer, and a sealer stamps the segments it committed:
@@ -283,7 +307,9 @@ config :smolquery, Smolquery.BufferService,
   seal_retry_ms: 30_000,
   retire_grace_ms: 600_000,
   maintenance_interval_ms: 5_000,
-  seal_consumer: {Smolquery.BufferService.SealLog, []}
+  seal_consumer: {Smolquery.BufferService.SealLog, []},
+  hot_server_ip: {127, 0, 0, 1},
+  hot_server_port: 4001
 ```
 
 `:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath
@@ -306,6 +332,7 @@ Runtime environment variables:
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`infinity` to disable) |
 | `SMOLQUERY_BUFFER_DIR` | buffer service root for micro-segments and manifest logs |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound |
+| `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.

@@ -43,6 +43,12 @@ defmodule Smolquery.BufferService.Runtime do
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
   deleting one out from under an in-flight scan is exactly what it prevents.
+
+  `hot_server_ip` / `hot_server_port` are where `HotServer` binds to serve
+  micro-segments to DuckDB over `httpfs`. They say nothing about how a segment's
+  URL is built — `HotServer` composes that from each request's own host and port,
+  so the same manifest response is correct whether this bound its configured port
+  or an OS-assigned one (`0`, what tests use to run many instances side by side).
   """
 
   alias Smolquery.BufferService.HotManifest
@@ -67,7 +73,9 @@ defmodule Smolquery.BufferService.Runtime do
     seal_retry_ms: 30_000,
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
-    seal_consumer: {Smolquery.BufferService.SealLog, []}
+    seal_consumer: {Smolquery.BufferService.SealLog, []},
+    hot_server_ip: {127, 0, 0, 1},
+    hot_server_port: 4001
   ]
 
   @type t :: %__MODULE__{
@@ -87,7 +95,9 @@ defmodule Smolquery.BufferService.Runtime do
           seal_retry_ms: pos_integer(),
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
-          seal_consumer: {module(), term()}
+          seal_consumer: {module(), term()},
+          hot_server_ip: :inet.ip_address(),
+          hot_server_port: :inet.port_number()
         }
 
   @limits [
@@ -103,7 +113,9 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_retry_ms,
     :retire_grace_ms,
     :maintenance_interval_ms,
-    :seal_consumer
+    :seal_consumer,
+    :hot_server_ip,
+    :hot_server_port
   ]
 
   @default_dir "priv/data/buffer"
@@ -163,10 +175,26 @@ defmodule Smolquery.BufferService.Runtime do
   def delete(name), do: :persistent_term.erase(key(name))
 
   @doc """
+  The top-level supervisor for an instance, as `Supervisor.start_link/1` names it.
+  """
+  @spec supervisor(atom()) :: atom()
+  def supervisor(name), do: Module.concat(name, "Supervisor")
+
+  @doc """
   The registry mapping a table to its `TableBuffer`.
   """
   @spec registry(atom()) :: atom()
   def registry(name), do: Module.concat(name, "Registry")
+
+  @doc """
+  The child id `HotServer`'s listener is started under.
+
+  Bandit's own id is an opaque ref, so this is what lets a test find the
+  listener's pid — to read the OS-assigned port back when `hot_server_port` is
+  `0` — without depending on that ref.
+  """
+  @spec hot_server(atom()) :: atom()
+  def hot_server(name), do: Module.concat(name, "HotServer")
 
   @doc """
   The partition supervisor `TableBuffer` processes start under.
