@@ -161,5 +161,31 @@ mix precommit    # format + full local quality gate before committing
 Integration-tagged tests are excluded by default: they download DuckDB
 extensions and serve Parquet over a real HTTP server.
 
+### Benchmarks
+
+`bench/` holds the measurements architectural decisions were made on, so they can
+be re-run rather than re-argued — after a DuckDB or DuckLake upgrade, or before
+revisiting the decision they settled.
+
+```sh
+mix run bench/planner.exs                         # scan DuckLake, or plan around it?
+mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
+
+SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
+ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
+```
+
+Each script's `@moduledoc` records what it measures and what it concluded. Two
+results worth knowing before writing a read path:
+
+- **A large result must not come back as Elixir terms.** `Smolquery.Engine.Result`
+  converts Arrow row by row, which costs roughly a kilobyte and 2 µs per row — 5M
+  rows take 11.5 s and 4.8 GiB, against 307 ms and 8.7 MiB left in Arrow. It is
+  the right shape for catalog and control-plane queries, and a trap for user
+  results.
+- **One connection serializes.** `Engine.Connection` is a per-query mutex, so
+  query throughput is flat in client count. Eight connections serve eight
+  concurrent clients about 2.9× faster than one does.
+
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for quality gates and the project
 tracker, and [`AGENTS.md`](AGENTS.md) for codebase tooling.
