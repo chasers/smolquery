@@ -45,6 +45,12 @@ defmodule Smolquery.BufferService.HotManifest do
   therefore tolerates an unparseable *last* line and refuses an unparseable one
   anywhere else, which would mean real corruption.
 
+  Recovery also never empties a table's index on the way to rebuilding it. It
+  inserts the recovered entries first and only then removes what is no longer
+  live, so a reader mid-recovery sees the right set or briefly a superset of it —
+  never nothing. Clearing first would let a query plan against an empty hot tier
+  while a buffer restarted and quietly return incomplete results.
+
   ## Usage
 
       manifest =
@@ -348,9 +354,14 @@ defmodule Smolquery.BufferService.HotManifest do
     do: :ets.insert(table, {{table_ref, entry.id}, entry})
 
   defp replace(%__MODULE__{table: table} = manifest, table_ref, entries) do
-    :ets.match_delete(table, {{table_ref, :_}, :_})
+    keep = MapSet.new(entries, & &1.id)
 
     Enum.each(entries, &insert(manifest, table_ref, &1))
+
+    manifest
+    |> entries(table_ref)
+    |> Enum.reject(&MapSet.member?(keep, &1.id))
+    |> Enum.each(&:ets.delete(table, {table_ref, &1.id}))
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok

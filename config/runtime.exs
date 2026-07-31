@@ -24,6 +24,16 @@ if data_dir = System.get_env("SMOLQUERY_DATA_DIR") do
   config :smolquery, Smolquery.Catalog.DuckLake,
     metadata: "sqlite:#{Path.join(data_dir, "catalog.sqlite")}",
     data_path: Path.join(data_dir, "ducklake")
+
+  config :smolquery, Smolquery.BufferService, dir: Path.join(data_dir, "buffer")
+end
+
+if buffer_dir = System.get_env("SMOLQUERY_BUFFER_DIR") do
+  config :smolquery, Smolquery.BufferService, dir: buffer_dir
+end
+
+if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
+  config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end
 
 if metadata = System.get_env("SMOLQUERY_CATALOG") do
