@@ -1,6 +1,7 @@
 defmodule Smolquery.EngineTest do
   use ExUnit.Case, async: false
 
+  alias Explorer.DataFrame
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
 
@@ -91,6 +92,48 @@ defmodule Smolquery.EngineTest do
 
     test "raises on error" do
       assert_raise Adbc.Error, fn -> Engine.query!(@engine, "NOT SQL") end
+    end
+  end
+
+  describe "frame/3" do
+    test "returns an Explorer.DataFrame" do
+      assert {:ok, frame} = Engine.frame(@engine, "SELECT i FROM range(3) t(i) ORDER BY i")
+
+      assert DataFrame.to_columns(frame, atom_keys: true) == %{i: [0, 1, 2]}
+    end
+
+    test "binds positional parameters, timestamps included" do
+      assert {:ok, frame} =
+               Engine.frame(@engine, "SELECT $1::int AS n, $2 AS ts", [
+                 7,
+                 ~N[2026-07-31 12:00:00]
+               ])
+
+      assert DataFrame.to_columns(frame, atom_keys: true) == %{
+               n: [7],
+               ts: [~N[2026-07-31 12:00:00.000000]]
+             }
+    end
+
+    test "returns an error tuple for invalid SQL rather than crashing" do
+      assert {:error, %Adbc.Error{}} = Engine.frame(@engine, "SELECT * FROM no_such_table")
+
+      assert {:ok, _frame} = Engine.frame(@engine, "SELECT 1")
+    end
+
+    test "serializes to Parquet without building Elixir terms" do
+      assert {:ok, frame} = Engine.frame(@engine, "SELECT i AS id FROM range(100) t(i)")
+      assert {:ok, parquet} = DataFrame.dump_parquet(frame)
+      assert is_binary(parquet)
+
+      assert Engine.query!(@engine, "SELECT count(*) FROM read_parquet($1)", [
+               write_temp(parquet)
+             ])
+             |> Result.one!() == 100
+    end
+
+    test "frame!/3 raises on error" do
+      assert_raise Adbc.Error, fn -> Engine.frame!(@engine, "NOT SQL") end
     end
   end
 
@@ -218,6 +261,14 @@ defmodule Smolquery.EngineTest do
 
       assert result.rows == [[3, 3]]
     end
+  end
+
+  defp write_temp(contents) do
+    path = Path.join(System.tmp_dir!(), "frame-#{System.unique_integer([:positive])}.parquet")
+    File.write!(path, contents)
+    on_exit(fn -> File.rm_rf!(path) end)
+
+    path
   end
 
   defp kill_and_await(pid) do

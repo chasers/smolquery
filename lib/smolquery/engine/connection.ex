@@ -76,6 +76,29 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @doc """
+  Runs `sql` and returns the result as an `Explorer.DataFrame`.
+
+  The Arrow stream goes straight to Polars in Rust, so no row is ever built as an
+  Elixir term. This runs inside the connection process rather than against the ADBC
+  pid directly, so a frame read is subject to the same fatal-error policy as
+  `query/4` and holds its connection for the duration — which is what it is
+  actually doing.
+
+  Explorer 0.12.0 reaches ADBC through a callback shape adbc 0.12.1 deprecated, so
+  every call here prints a deprecation warning from inside Explorer. The warning is
+  cosmetic and the fix belongs upstream. Routing around it through Arrow IPC —
+  `Adbc.StreamResult.to_ipc_stream/1` into `Explorer.DataFrame.load_ipc_stream/2` —
+  works and is quiet, but measured 38% slower on five million rows (388 ms against
+  282 ms) and copies the whole result through a 226 MiB binary on the way, which is
+  a poor trade for silencing a log line.
+  """
+  @spec frame(GenServer.server(), String.t(), [term()], timeout()) ::
+          {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
+  def frame(conn, sql, params \\ [], timeout \\ 30_000) do
+    GenServer.call(conn, {:frame, sql, Params.normalize(params)}, timeout)
+  end
+
+  @doc """
   The underlying `Adbc.Connection` pid, for callers that need ADBC directly.
   """
   @spec adbc_connection(GenServer.server()) :: pid()
@@ -113,23 +136,36 @@ defmodule Smolquery.Engine.Connection do
 
   @impl true
   def handle_call({:query, sql, params}, _from, state) do
-    case Adbc.Connection.query(state.adbc, sql, params) do
-      {:ok, result} ->
-        {:reply, {:ok, Result.from_adbc(result)}, state}
-
-      {:error, error} ->
-        if fatal?(error) do
-          invalidate(state, error)
-          {:stop, {:database_invalidated, error}, {:error, error}, state}
-        else
-          {:reply, {:error, error}, state}
-        end
+    state.adbc
+    |> Adbc.Connection.query(sql, params)
+    |> case do
+      {:ok, result} -> {:ok, Result.from_adbc(result)}
+      {:error, error} -> {:error, error}
     end
+    |> reply_or_stop(state)
+  end
+
+  @impl true
+  def handle_call({:frame, sql, params}, _from, state) do
+    state.adbc
+    |> Explorer.DataFrame.from_query(sql, params)
+    |> reply_or_stop(state)
   end
 
   @impl true
   def handle_call(:adbc_connection, _from, state) do
     {:reply, state.adbc, state}
+  end
+
+  defp reply_or_stop({:ok, value}, state), do: {:reply, {:ok, value}, state}
+
+  defp reply_or_stop({:error, error}, state) do
+    if fatal?(error) do
+      invalidate(state, error)
+      {:stop, {:database_invalidated, error}, {:error, error}, state}
+    else
+      {:reply, {:error, error}, state}
+    end
   end
 
   defp load_extensions(adbc, extensions) do
