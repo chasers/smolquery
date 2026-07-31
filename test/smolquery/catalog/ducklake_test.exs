@@ -17,6 +17,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
   alias Smolquery.Schema
+  alias Smolquery.Segments.Store.Local
   alias Smolquery.Segments.Writer
 
   @moduletag :integration
@@ -63,7 +64,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
         }
       end
 
-    {:ok, segment} = Writer.write(rows, schema(), dir: dir)
+    {:ok, segment} = Writer.write(rows, schema(), store: Local.new(dir: dir))
 
     segment
   end
@@ -173,7 +174,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       segments_dir: dir
     } do
       narrow = Schema.new!([{"id", :int64}])
-      {:ok, segment} = Writer.write([%{"id" => 1}], narrow, dir: dir)
+      {:ok, segment} = Writer.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
 
       assert {:error, error} = Catalog.register_segments(catalog, @table, [segment])
       assert Exception.message(error) =~ "not found in file"

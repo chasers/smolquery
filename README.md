@@ -76,13 +76,14 @@ Five million rows take 307 ms and no measurable heap that way, against 11.5 s an
 
 The storage of record: write-once Parquet segments plus a DuckLake catalog.
 `Smolquery.Segments.Writer` encodes rows through Explorer (Polars), naming each
-segment with a ULID and renaming it into place so a reader never sees a partial
-file. `Smolquery.Catalog` registers those files without copying them:
+segment with a ULID; a `Smolquery.Segments.Store` commits the bytes and owns what
+"durable" means. `Smolquery.Catalog` registers those files without copying them:
 
 ```elixir
 schema = Smolquery.Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
+store = Smolquery.Segments.Store.Local.new(dir: "priv/data/segments")
 
-{:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, dir: "priv/data/segments")
+{:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, store: store)
 
 {:ok, _lake} =
   Smolquery.Catalog.DuckLake.start_link(
@@ -102,6 +103,17 @@ Smolquery.Engine.query!(MyLake, ~s|SELECT count(*) FROM lake."analytics"."events
 
 Properties worth knowing:
 
+- **The store owns durability, and it is swappable.** `Store.put/3` returns only
+  once the segment is durable *by that store's definition*, so everything above it
+  — including the buffer service's "acked means durable" promise — is written
+  against one contract and never names a storage medium. `Store.Local` fsyncs the
+  file and renames it into place, both under one root, so a reader sees either
+  nothing or a complete segment. It fsyncs contents, not the directory entry
+  (Erlang cannot fsync a directory without a NIF): an acked segment survives a
+  process, BEAM, or node crash, and a hard power cut can lose the rename — a
+  strictly smaller window than this store's single-copy exposure to losing the
+  disk. `Store.shared?/1` says whether a segment's location means anything from
+  another node, which is what decides whether it needs serving over HTTP.
 - **Registration is idempotent.** `register_segments/3` diffs against the paths
   the catalog already holds, because DuckLake itself would happily register a
   path twice and double-count its rows. A sealer that crashed mid-handoff can

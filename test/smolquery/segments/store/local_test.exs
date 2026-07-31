@@ -1,0 +1,155 @@
+defmodule Smolquery.Segments.Store.LocalTest do
+  use ExUnit.Case, async: true
+
+  alias Smolquery.Segments.Store
+  alias Smolquery.Segments.Store.Local
+
+  @moduletag :tmp_dir
+
+  defp write(contents), do: fn path -> File.write(path, contents) end
+
+  describe "put/3" do
+    test "commits the encoded bytes at the key and reports them", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert {:ok, put} = Store.put(store, "a/b/one.parquet", write("hello"))
+
+      assert put.location == Path.join(dir, "a/b/one.parquet")
+      assert put.byte_size == 5
+      assert File.read!(put.location) == "hello"
+    end
+
+    test "creates the key's directories", %{tmp_dir: dir} do
+      store = Local.new(dir: Path.join(dir, "fresh"))
+
+      assert {:ok, put} = Store.put(store, "deeply/nested/one.parquet", write("x"))
+      assert File.exists?(put.location)
+    end
+
+    test "leaves nothing staged behind", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      {:ok, _put} = Store.put(store, "one.parquet", write("x"))
+
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+    end
+
+    test "stages nothing at the key until the encode succeeds", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      failing = fn _path -> {:error, :enospc} end
+
+      assert Store.put(store, "one.parquet", failing) ==
+               {:error, {:put_failed, "one.parquet", :enospc}}
+
+      refute File.exists?(Path.join(dir, "one.parquet"))
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+    end
+
+    test "cleans up a partially written staged file", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      half_written = fn path ->
+        File.write!(path, "partial")
+        {:error, :closed}
+      end
+
+      assert {:error, {:put_failed, _key, :closed}} =
+               Store.put(store, "one.parquet", half_written)
+
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+      refute File.exists?(Path.join(dir, "one.parquet"))
+    end
+
+    test "concurrent puts of the same key do not collide in staging", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      results =
+        1..8
+        |> Task.async_stream(fn i -> Store.put(store, "one.parquet", write("body-#{i}")) end)
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _put}, &1))
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+      assert File.read!(Path.join(dir, "one.parquet")) =~ "body-"
+    end
+
+    test "writes without fsync when asked", %{tmp_dir: dir} do
+      store = Local.new(dir: dir, fsync: false)
+
+      assert {:ok, put} = Store.put(store, "one.parquet", write("x"))
+      assert File.read!(put.location) == "x"
+    end
+  end
+
+  describe "location/2" do
+    test "resolves a key beneath the store root", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert Store.location(store, "a/b/one.parquet") == Path.join(dir, "a/b/one.parquet")
+    end
+  end
+
+  describe "list/2" do
+    setup %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      for key <- ["ds/one/a.parquet", "ds/one/b.parquet", "ds/two/c.parquet", "root.parquet"] do
+        {:ok, _put} = Store.put(store, key, write("x"))
+      end
+
+      %{store: store}
+    end
+
+    test "lists the keys under a prefix", %{store: store} do
+      assert Store.list(store, "ds/one") == {:ok, ["ds/one/a.parquet", "ds/one/b.parquet"]}
+      assert Store.list(store, "ds/two") == {:ok, ["ds/two/c.parquet"]}
+    end
+
+    test "lists the whole store from the root prefix", %{store: store} do
+      assert Store.list(store, "") ==
+               {:ok,
+                [
+                  "ds/one/a.parquet",
+                  "ds/one/b.parquet",
+                  "ds/two/c.parquet",
+                  "root.parquet"
+                ]}
+    end
+
+    test "never reports a staged file as a segment", %{store: store, tmp_dir: dir} do
+      File.write!(Path.join(dir, ".tmp/leftover.parquet"), "x")
+
+      assert {:ok, keys} = Store.list(store, "")
+      refute Enum.any?(keys, &String.starts_with?(&1, ".tmp"))
+    end
+
+    test "reports an empty list for a prefix the store does not hold", %{store: store} do
+      assert Store.list(store, "ds/missing") == {:ok, []}
+    end
+  end
+
+  describe "delete/2" do
+    test "removes the segment at a key", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      {:ok, put} = Store.put(store, "one.parquet", write("x"))
+
+      assert Store.delete(store, "one.parquet") == :ok
+      refute File.exists?(put.location)
+    end
+
+    test "is idempotent, so retirement and GC can retry", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      {:ok, _put} = Store.put(store, "one.parquet", write("x"))
+
+      assert Store.delete(store, "one.parquet") == :ok
+      assert Store.delete(store, "one.parquet") == :ok
+      assert Store.delete(store, "never/existed.parquet") == :ok
+    end
+  end
+
+  describe "shared?/1" do
+    test "is not shared — one node's disk needs HotServer to serve it", %{tmp_dir: dir} do
+      refute Store.shared?(Local.new(dir: dir))
+    end
+  end
+end
