@@ -179,6 +179,40 @@ What that ack means:
   BEAM, or node crash, and losing the disk loses that tail. Sealing (Milestone 4)
   is what bounds it.
 
+Calls reach the owning node through a transport seam rather than a hardcoded hop.
+`Client` resolves ownership and dispatches; `Transport.Local` is a direct call for
+a table this node owns, and `Transport.GenRpc` carries the rest over `:gen_rpc`:
+
+```elixir
+config :gen_rpc,
+  tcp_server_port: 5369,
+  tcp_client_port: 5369,
+  rpc_module_control: :whitelist,
+  rpc_module_list: [Smolquery.BufferService.Endpoint]
+```
+
+- **Not Erlang distribution.** Forward-batches are large and constant; on the
+  cluster's single distribution connection they would sit in front of heartbeats
+  and monitors, and a `busy_dist_port` stall looks to OTP like nodes going down.
+  gen_rpc carries this traffic on its own sockets.
+- **Bulk and control are separate channels.** gen_rpc keys one connection per
+  destination, so routing everything at a node through one key just moves the
+  head-of-line blocking onto that socket. Writes travel on `:bulk`, manifest reads
+  and retirements on `:control`.
+- **The allowlist is not optional.** gen_rpc's default `rpc_module_control` is
+  `:disabled`, which lets any peer holding the cookie run arbitrary MFAs on a
+  second port. Naming `Endpoint` — the single module every transport dispatches
+  to — closes that. Per-node TLS is the other half, and belongs to the cluster
+  milestone.
+- **Ownership routes, it does not refuse.** A call for a table this node does not
+  own is forwarded, and `Routing` answers ownership from configuration even on a
+  node running no buffer at all — which is what lets a query node ask a buffer
+  node for a hot manifest.
+
+Segment *bytes* deliberately do not travel this way: DuckDB opens them itself via
+`httpfs`, reading only the column chunks a query needs. Pulling them through RPC
+would put every segment on the BEAM heap and lose that pushdown.
+
 The other half of the hot tier is handing data off. A table that crosses
 `seal_max_bytes`, `seal_max_files`, or `seal_max_age_ms` signals a configured
 consumer, and a sealer stamps the segments it committed:
@@ -278,9 +312,11 @@ Engine options can also be passed per instance to
 
 ## Development
 
-Requires Elixir ~> 1.20 (CI pins OTP 29.0.2 / Elixir 1.20.2).
+Toolchain versions are pinned in `.tool-versions`, matching CI — OTP 29.0.2 /
+Elixir 1.20.2.
 
 ```sh
+mise install     # or asdf install
 mix deps.get
 mix test         # fast suite; add --include integration for everything
 mix precommit    # format + full local quality gate before committing

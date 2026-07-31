@@ -36,6 +36,12 @@ if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
   config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end
 
+if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
+  port = String.to_integer(gen_rpc_port)
+
+  config :gen_rpc, tcp_server_port: port, tcp_client_port: port
+end
+
 if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end

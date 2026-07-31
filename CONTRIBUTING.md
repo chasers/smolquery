@@ -5,13 +5,20 @@ Thanks for your interest. This is an early, opinionated project; see
 
 ## Dev setup
 
-Prerequisites match [`.github/workflows/ci.yml`](.github/workflows/ci.yml) —
-currently **OTP 29.0.2 / Elixir 1.20.2**:
+Toolchain versions are pinned in [`.tool-versions`](.tool-versions) and match
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — **OTP 29.0.2 / Elixir
+1.20.2**. With [mise](https://mise.jdx.dev) (or asdf) installed:
 
 ```sh
+mise install    # installs the pinned Erlang and Elixir
 mix deps.get
 mix test        # fast suite; add --include integration for everything
 ```
+
+Pin the toolchain rather than relying on a system Erlang: a Homebrew `erl` ahead
+of mise's on `PATH` builds against a different OTP than CI, and the failures that
+produces point somewhere else entirely (a rebar3 plugin failing to parse
+Erlang's own `leexinc.hrl`, for one).
 
 ## Quality gate — run before opening a PR
 
