@@ -9,6 +9,27 @@ defmodule Smolquery.BufferService.TableBufferTest do
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
 
+  defmodule FailingStore do
+    @behaviour Smolquery.Segments.Store
+
+    def new, do: %Store{impl: __MODULE__, config: nil}
+
+    @impl Store
+    def put(_config, key, _encoder), do: {:error, {:put_failed, key, :enospc}}
+
+    @impl Store
+    def location(_config, key), do: "failing://" <> key
+
+    @impl Store
+    def list(_config, _prefix), do: {:ok, []}
+
+    @impl Store
+    def delete(_config, _key), do: :ok
+
+    @impl Store
+    def shared?(_config), do: false
+  end
+
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
@@ -158,6 +179,93 @@ defmodule Smolquery.BufferService.TableBufferTest do
         )
 
       assert Client.write_batch(name, @table, batch(1..2)) == {:error, :buffer_full}
+    end
+  end
+
+  describe "a flush that fails" do
+    test "answers the caller with the error and keeps nothing", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          store: FailingStore.new(),
+          dir: Path.join(context.tmp_dir, "failing"),
+          flush_max_rows: 1
+        )
+
+      assert {:error, {:put_failed, _key, :enospc}} =
+               Client.write_batch(name, @table, batch(1..1))
+
+      assert HotManifest.entries(runtime.manifest, @table) == []
+      assert Client.flush(name, @table) == :ok
+    end
+
+    test "surfaces the commit result to the flusher", context do
+      %{name: name} =
+        start_buffer_service(context,
+          store: FailingStore.new(),
+          dir: Path.join(context.tmp_dir, "failing-flush"),
+          flush_interval_ms: 60_000
+        )
+
+      writer = Task.async(fn -> Client.write_batch(name, @table, batch(1..2)) end)
+
+      assert Eventually.until(fn ->
+               match?({:error, {:put_failed, _key, :enospc}}, Client.flush(name, @table))
+             end)
+
+      assert {:error, {:put_failed, _key, :enospc}} = Task.await(writer)
+    end
+
+    test "deletes a stored segment when the manifest append fails", context do
+      logs = Path.join(context.tmp_dir, "ro-logs")
+      File.mkdir_p!(logs)
+      File.chmod!(logs, 0o500)
+      on_exit(fn -> File.chmod!(logs, 0o700) end)
+
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          log_dir: logs,
+          dir: Path.join(context.tmp_dir, "ro-buffer"),
+          flush_max_rows: 1
+        )
+
+      assert {:error, {:log_append_failed, _reason}} =
+               Client.write_batch(name, @table, batch(1..1))
+
+      assert Store.list(runtime.store, "analytics/events") == {:ok, []}
+    end
+  end
+
+  describe "a schema change against a near-full buffer" do
+    test "flushes the accumulator rather than shedding the batch", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "near-full"),
+          max_buffered_rows: 4,
+          flush_interval_ms: 60_000
+        )
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..3)) end)
+      assert Eventually.until(fn -> accumulated_rows(name) == 3 end)
+
+      changed = Schema.new!([{"id", :int64, nullable: false}])
+      rows = for i <- 1..3, do: %{"id" => i}
+
+      second =
+        Task.async(fn -> Client.write_batch(name, @table, %{schema: changed, rows: rows}) end)
+
+      assert {:ok, %{row_count: 3}} = Task.await(first)
+      assert Eventually.until(fn -> accumulated_rows(name) == 3 end)
+      assert Client.flush(name, @table) == :ok
+      assert {:ok, %{row_count: 3}} = Task.await(second)
+
+      assert length(HotManifest.entries(runtime.manifest, @table)) == 2
+    end
+  end
+
+  defp accumulated_rows(name) do
+    case Registry.lookup(Runtime.registry(name), @table) do
+      [{pid, _value}] -> :sys.get_state(pid).row_count
+      [] -> 0
     end
   end
 

@@ -49,9 +49,16 @@ defmodule Smolquery.BufferService.TableBuffer do
   it had acked and deletes any that were never acknowledged. A graceful shutdown
   flushes the accumulator first, so a rolling restart loses nothing. A `:kill`
   loses only rows that had not yet been acked — which no caller was told about.
+
+  A crash never re-runs the commit from `terminate/2`. The pre-crash state may
+  already be half committed — the log record fsynced, the ETS insert not yet done
+  — and committing it again would write the batch twice with no client retry
+  involved. Only a shutdown-class exit flushes the tail.
   """
 
   use GenServer
+
+  require Logger
 
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -113,8 +120,11 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @doc """
   Flushes the accumulator now, without waiting for the interval.
+
+  Returns what the commit returned: a caller draining before shutdown must know
+  whether the tail actually became durable.
   """
-  @spec flush(GenServer.server(), timeout()) :: :ok
+  @spec flush(GenServer.server(), timeout()) :: :ok | {:error, term()}
   def flush(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :flush, timeout)
 
   @doc """
@@ -156,6 +166,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   def handle_call({:write, schema, rows}, from, state) do
     count = length(rows)
     bytes = :erlang.external_size(rows)
+    state = flush_on_schema_change(state, schema)
 
     if full?(state, count, bytes) do
       {:reply, {:error, :buffer_full}, state}
@@ -164,7 +175,11 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  def handle_call(:flush, _from, state), do: {:reply, :ok, state |> commit() |> run_maintenance()}
+  def handle_call(:flush, _from, state) do
+    {result, state} = commit_and_report(state)
+
+    {:reply, result, run_maintenance(state)}
+  end
 
   def handle_call({:retire, ids, snapshot}, _from, state) do
     case HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot) do
@@ -176,16 +191,21 @@ defmodule Smolquery.BufferService.TableBuffer do
   def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
 
   @impl GenServer
-  def handle_info(:flush, state) do
+  def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag}} = state) do
     {:noreply, %{state | timer: nil} |> commit() |> run_maintenance()}
   end
+
+  def handle_info({:flush, _stale}, state), do: {:noreply, state}
 
   def handle_info(:maintain, state) do
     {:noreply, state |> run_maintenance() |> schedule_maintenance()}
   end
 
   @impl GenServer
-  def terminate(_reason, state), do: commit(state)
+  def terminate(:normal, state), do: commit(state)
+  def terminate(:shutdown, state), do: commit(state)
+  def terminate({:shutdown, _reason}, state), do: commit(state)
+  def terminate(_crash, state), do: state
 
   defp run_maintenance(state) do
     state
@@ -203,9 +223,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp drop(state, ids) do
-    HotManifest.drop(state.runtime.manifest, state.table_ref, ids)
+    case HotManifest.drop(state.runtime.manifest, state.table_ref, ids) do
+      :ok ->
+        state
 
-    state
+      {:error, reason} ->
+        Logger.warning(
+          "hot tier sweep for #{inspect(state.table_ref)} failed: #{inspect(reason)}"
+        )
+
+        state
+    end
   end
 
   defp signal_when_ready(state) do
@@ -255,7 +283,6 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp accept(state, schema, rows, count, bytes, from) do
     state
-    |> flush_on_schema_change(schema)
     |> accumulate(schema, rows, count, bytes, from)
     |> commit_when_full()
   end
@@ -285,17 +312,23 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  defp commit(%__MODULE__{chunks: []} = state), do: state
+  defp commit(state), do: state |> commit_and_report() |> elem(1)
 
-  defp commit(state) do
+  defp commit_and_report(%__MODULE__{chunks: []} = state), do: {:ok, state}
+
+  defp commit_and_report(state) do
     rows = state.chunks |> Enum.reverse() |> Enum.concat()
+    result = persist(state, rows)
 
     state.pending
     |> Enum.reverse()
-    |> reply_all(persist(state, rows))
+    |> reply_all(result)
 
-    reset(state)
+    {flush_result(result), reset(state)}
   end
+
+  defp flush_result({:ok, _ack}), do: :ok
+  defp flush_result({:error, reason}), do: {:error, reason}
 
   defp persist(state, rows) do
     with {:ok, segment} <-
@@ -335,14 +368,18 @@ defmodule Smolquery.BufferService.TableBuffer do
       state.byte_size + bytes > state.runtime.max_buffered_bytes
   end
 
-  defp schedule(%__MODULE__{timer: nil} = state),
-    do: %{state | timer: Process.send_after(self(), :flush, state.runtime.flush_interval_ms)}
+  defp schedule(%__MODULE__{timer: nil} = state) do
+    tag = make_ref()
+    timer = Process.send_after(self(), {:flush, tag}, state.runtime.flush_interval_ms)
+
+    %{state | timer: {timer, tag}}
+  end
 
   defp schedule(state), do: state
 
   defp cancel(nil), do: nil
 
-  defp cancel(timer) do
+  defp cancel({timer, _tag}) do
     Process.cancel_timer(timer)
 
     nil
