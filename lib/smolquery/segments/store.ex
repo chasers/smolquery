@@ -71,6 +71,14 @@ defmodule Smolquery.Segments.Store do
   @type key :: String.t()
 
   @typedoc """
+  A table, qualified by its dataset: `{dataset, table}`.
+
+  Defined here rather than borrowed from `Smolquery.Catalog` so the buffer service
+  can name a table without depending on a catalog it is forbidden to touch.
+  """
+  @type table_ref :: {String.t(), String.t()}
+
+  @typedoc """
   Writes the segment's bytes to the staging path it is given.
   """
   @type encoder :: (Path.t() -> :ok | {:error, term()})
@@ -136,7 +144,7 @@ defmodule Smolquery.Segments.Store do
   Both components are validated as identifiers before becoming key components,
   so a key can never carry a path traversal or a quote into a store.
   """
-  @spec prefix({String.t(), String.t()}) :: {:ok, String.t()} | {:error, term()}
+  @spec prefix(table_ref()) :: {:ok, String.t()} | {:error, term()}
   def prefix({dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table) do
