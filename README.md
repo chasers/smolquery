@@ -429,6 +429,7 @@ config :smolquery, Smolquery.StorageService,
   buffer_base_url: "http://127.0.0.1:4001",
   buffer_timeout_ms: 30_000,
   engine_extensions: [:httpfs],
+  compression: :zstd,
   target_segment_bytes: 268_435_456,
   max_concurrent_seals: 2,
   gc_interval_ms: 300_000,
@@ -496,15 +497,24 @@ revisiting the decision they settled.
 mix run bench/planner.exs                         # scan DuckLake, or plan around it?
 mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
 mix run bench/buffer.exs                          # what group commit costs, and where it bends
+mix run bench/sealer.exs                          # what a seal costs, and how far behind it runs
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
 CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurrency
+INPUTS=64 ROWS=20000 mix run bench/sealer.exs     # bigger claims, bigger merges
 ```
 
 `bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
 across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
 fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
+
+`bench/sealer.exs` compares the two merge implementations, measures merge
+throughput against input count and rows, times the whole handoff, and reports the
+sealed-to-hot size ratio. That last number is why it exists: DuckDB's `COPY`
+defaults to snappy while segments are written with zstd, so sealing silently made
+data 2.85× larger until the codec was matched. No correctness test could catch
+that.
 Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
 
 Each script's `@moduledoc` records what it measures and what it concluded. Two

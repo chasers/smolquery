@@ -17,6 +17,7 @@ defmodule Smolquery.StorageService.Runtime do
         buffer_base_url: "http://127.0.0.1:4001",
         buffer_timeout_ms: 30_000,
         engine_extensions: [:httpfs],
+        compression: :zstd,
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -56,6 +57,11 @@ defmodule Smolquery.StorageService.Runtime do
 
       catalog: [metadata: "postgres:dbname=smolquery", data_path: "/mnt/bulk/lake"]
 
+  `compression` is the Parquet codec sealed segments are written with. It defaults
+  to `:zstd` to match `Smolquery.Segments.Writer`, and that match matters: DuckDB's
+  own `COPY` default is snappy, which made sealed segments 2.85 times larger than
+  the micro-segments they replaced (`bench/sealer.exs`).
+
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
   object-store tier would need it too — so it is the default rather than something
@@ -76,6 +82,7 @@ defmodule Smolquery.StorageService.Runtime do
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
+    compression: :zstd,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,
@@ -92,6 +99,7 @@ defmodule Smolquery.StorageService.Runtime do
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
+          compression: atom(),
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
           gc_interval_ms: pos_integer(),
@@ -104,6 +112,7 @@ defmodule Smolquery.StorageService.Runtime do
     :buffer_base_url,
     :buffer_timeout_ms,
     :engine_extensions,
+    :compression,
     :target_segment_bytes,
     :max_concurrent_seals,
     :gc_interval_ms,
