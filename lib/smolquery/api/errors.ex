@@ -67,6 +67,10 @@ defmodule Smolquery.Api.Errors do
     send_error(conn, 400, "INVALID_ARGUMENT", "missing required field: #{name}")
   end
 
+  def from_reason(conn, {:invalid_param, name}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "invalid parameter: #{name}")
+  end
+
   def from_reason(conn, _reason) do
     send_error(conn, 500, "INTERNAL", "internal error")
   end
