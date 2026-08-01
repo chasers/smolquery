@@ -30,9 +30,13 @@ latency SLO.
 ```
 budget      accepted  shed %  krows/s  p50 ms  p95 ms  p99 ms  shed p50 ms
 :infinity       5120     0.0    164.4    6066    6567    6756            -
+5000            1567    69.4    165.1    1695    1980    2255         5004
 1000             595    88.4    170.4     634     891     983         1009
 250              183    96.4    113.0     160     264     305          259
 ```
+
+(The `5000` row — the shipped default, `BUDGETS=5000` — was measured in a
+follow-up run of the same command.)
 
 Reading it:
 
@@ -61,6 +65,9 @@ Reading it:
 - **The default `ack_budget_ms: 5_000`** never fires below saturation
   (predicted wait ~0) and converts the pathological cell from a 15 s
   `write_timeout_ms` cliff into a typed refusal with headroom to spare.
+  Measured at the default: 165 krows/s accepted — the same throughput as
+  unbounded — with p99 at 2.3 s instead of 6.8 s. The budget picks who
+  waits, not how fast the encoder runs.
 - **Budgets at or below the flush interval are a real trade** (−31%
   throughput at 250 ms): the knob expresses it, the default avoids it.
 - **PL-6's partitioning remains worth doing** — it raises the saturation

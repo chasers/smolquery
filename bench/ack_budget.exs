@@ -19,6 +19,7 @@ defmodule Bench.AckBudget do
 
       mix run bench/ack_budget.exs
       WRITERS=512 CALLS=10 ROWS=2000 mix run bench/ack_budget.exs
+      BUDGETS=infinity,5000 mix run bench/ack_budget.exs
   """
 
   import Bench.Support
@@ -51,11 +52,26 @@ defmodule Bench.AckBudget do
         pad("p50 ms", 8) <> pad("p95 ms", 8) <> pad("p99 ms", 8) <> pad("shed p50 ms", 13)
     )
 
-    for budget <- [:infinity, 1_000, 250] do
+    for budget <- budgets() do
       run(budget, writers, calls, batch, batch_rows)
     end
 
     IO.puts("")
+  end
+
+  defp budgets do
+    case System.get_env("BUDGETS") do
+      nil ->
+        [:infinity, 1_000, 250]
+
+      value ->
+        value
+        |> String.split(",", trim: true)
+        |> Enum.map(fn
+          "infinity" -> :infinity
+          budget -> String.to_integer(budget)
+        end)
+    end
   end
 
   defp schema20 do
