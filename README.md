@@ -350,7 +350,8 @@ mix precommit    # format + full local quality gate before committing
 ```
 
 Integration-tagged tests are excluded by default: they download DuckDB
-extensions and serve Parquet over a real HTTP server.
+extensions and serve Parquet over a real HTTP server. CI runs them in a
+dedicated job (`mix test --only integration`).
 
 ### Benchmarks
 

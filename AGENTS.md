@@ -131,4 +131,5 @@ Slop gates enforced by CI (don't disable them to get green — fix the code):
 ```sh
 mix test                            # fast suite (integration excluded)
 mix test --include integration      # everything
+mix test --only integration         # integration suite alone (what CI's Integration tests job runs)
 ```
