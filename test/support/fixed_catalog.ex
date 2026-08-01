@@ -59,5 +59,8 @@ defmodule Smolquery.Test.FixedCatalog do
   def drop_segments(_answers, _table, _paths), do: {:error, :fixed}
 
   @impl Catalog
+  def replace_segments(_answers, _table, _segments, _paths), do: {:error, :fixed}
+
+  @impl Catalog
   def known_segments(_answers), do: {:error, :fixed}
 end

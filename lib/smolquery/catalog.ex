@@ -58,6 +58,8 @@ defmodule Smolquery.Catalog do
               {:ok, [String.t()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
+  @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
+              {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
   @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
 
@@ -123,6 +125,27 @@ defmodule Smolquery.Catalog do
   @spec drop_segments(t(), table_ref(), [String.t()]) :: {:ok, snapshot()} | {:error, term()}
   def drop_segments(%__MODULE__{} = catalog, table, paths),
     do: catalog.impl.drop_segments(catalog.config, table, paths)
+
+  @doc """
+  Registers `segments` and drops `paths` in one commit, returning its snapshot.
+
+  This is the atomic swap compaction is built on: a single snapshot both adds
+  the merged segment and retires the inputs it replaced, so no snapshot ever
+  holds both (its rows counted twice) or neither (a hole where they used to
+  be). A swap that registers nothing is refused with `{:error, :no_segments}`
+  rather than quietly becoming a drop — `drop_segments/3` is how a caller
+  says that on purpose.
+
+  Idempotent the way `register_segments/3` is: a retry whose additions the
+  catalog already holds committed its drops in the same snapshot, so it
+  reports the current snapshot without re-writing. And like `drop_segments/3`,
+  the dropped files are left on disk — older snapshots still read them, and
+  deleting them is GC's job once no snapshot does.
+  """
+  @spec replace_segments(t(), table_ref(), [Segment.t()], [String.t()]) ::
+          {:ok, snapshot()} | {:error, term()}
+  def replace_segments(%__MODULE__{} = catalog, table, segments, paths),
+    do: catalog.impl.replace_segments(catalog.config, table, segments, paths)
 
   @doc """
   The catalog's current snapshot.

@@ -135,7 +135,9 @@ Properties worth knowing:
   timestamps to the type the columns declare instead of letting ADBC infer one.
 - **Compaction is not free.** `ducklake_merge_adjacent_files` crashes DuckDB on
   externally-registered files, so smolquery never calls it; compaction is built
-  from `register_segments/3` + `drop_segments/3` instead.
+  on `replace_segments/4`, which registers the merged segment and drops its
+  inputs inside one transaction (`Smolquery.Engine.transaction/2`) so a single
+  snapshot carries both — no snapshot ever double-counts the rows or loses them.
 
 Types map through one table in `Smolquery.Schema` — logical type ↔ Explorer
 dtype ↔ DuckDB type (`:int64`/`{:s, 64}`/`BIGINT`, `{:numeric, p, s}` ↔

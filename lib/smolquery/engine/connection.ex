@@ -107,6 +107,31 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @doc """
+  Runs `statements` in order inside one transaction: all commit, or the first
+  failure rolls every prior statement back and is returned.
+
+  The whole transaction executes within one call to this process, and that is
+  what makes it a transaction at all. An engine has a single connection, so a
+  statement from another caller landing between `BEGIN` and `COMMIT` would
+  silently join — and be rolled back with — a transaction it knows nothing
+  about; serializing through this process closes that interleaving by
+  construction.
+
+  Statements carry no parameters. A transaction's SQL is built by trusted
+  callers from validated identifiers and escaped literals
+  (`Smolquery.Identifier`), and offering bindings here would suggest
+  user-supplied values belong in one. They do not.
+  """
+  @spec transaction(GenServer.server(), [String.t()], timeout()) ::
+          :ok | {:error, Exception.t()}
+  def transaction(conn, statements, timeout \\ 30_000) do
+    case GenServer.call(conn, {:transaction, statements}, timeout) do
+      {:ok, :committed} -> :ok
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  @doc """
   The underlying `Adbc.Connection` pid, for callers that need ADBC directly.
   """
   @spec adbc_connection(GenServer.server()) :: pid()
@@ -162,6 +187,13 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @impl true
+  def handle_call({:transaction, statements}, _from, state) do
+    state.adbc
+    |> run_transaction(statements)
+    |> reply_or_stop(state)
+  end
+
+  @impl true
   def handle_call(:adbc_connection, _from, state) do
     {:reply, state.adbc, state}
   end
@@ -174,6 +206,33 @@ defmodule Smolquery.Engine.Connection do
       {:stop, {:database_invalidated, error}, {:error, error}, state}
     else
       {:reply, {:error, error}, state}
+    end
+  end
+
+  defp run_transaction(adbc, statements) do
+    with {:ok, _begun} <- Adbc.Connection.query(adbc, "BEGIN TRANSACTION"),
+         :ok <- apply_or_rollback(adbc, statements),
+         {:ok, _committed} <- Adbc.Connection.query(adbc, "COMMIT") do
+      {:ok, :committed}
+    end
+  end
+
+  defp apply_or_rollback(adbc, statements) do
+    Enum.reduce_while(statements, :ok, fn sql, :ok ->
+      case Adbc.Connection.query(adbc, sql) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, error} -> {:halt, rollback(adbc, error)}
+      end
+    end)
+  end
+
+  defp rollback(adbc, error) do
+    case Adbc.Connection.query(adbc, "ROLLBACK") do
+      {:ok, _rolled_back} ->
+        {:error, error}
+
+      {:error, rollback_error} ->
+        {:error, if(fatal?(rollback_error), do: rollback_error, else: error)}
     end
   end
 

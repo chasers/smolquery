@@ -91,6 +91,13 @@ defmodule Smolquery.Test.PathCatalog do
   end
 
   @impl Catalog
+  def replace_segments(agent, table, segments, paths) do
+    {:ok, _registered} = register_segments(agent, table, segments)
+
+    drop_segments(agent, table, paths)
+  end
+
+  @impl Catalog
   def current_snapshot(_agent), do: {:ok, 1}
 
   @impl Catalog

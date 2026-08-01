@@ -62,6 +62,10 @@ defmodule Smolquery.Test.StubCatalog do
     do: record(owner, :drop_segments, [table, paths], {:ok, @snapshot})
 
   @impl Catalog
+  def replace_segments(owner, table, segments, paths),
+    do: record(owner, :replace_segments, [table, segments, paths], {:ok, @snapshot})
+
+  @impl Catalog
   def current_snapshot(owner), do: record(owner, :current_snapshot, [], {:ok, @snapshot})
 
   @impl Catalog
