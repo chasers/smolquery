@@ -215,7 +215,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert {:error, {:put_failed, _key, :enospc}} = Task.await(writer)
     end
 
-    test "deletes a stored segment when the manifest append fails", context do
+    test "refuses to start a buffer whose log cannot be opened", context do
       logs = Path.join(context.tmp_dir, "ro-logs")
       File.mkdir_p!(logs)
       File.chmod!(logs, 0o500)
@@ -228,10 +228,35 @@ defmodule Smolquery.BufferService.TableBufferTest do
           flush_max_rows: 1
         )
 
-      assert {:error, {:log_append_failed, _reason}} =
-               Client.write_batch(name, @table, batch(1..1))
+      assert Client.write_batch(name, @table, batch(1..1)) ==
+               {:error, {:log_open_failed, :eacces}}
 
       assert Store.list(runtime.store, "analytics/events") == {:ok, []}
+    end
+
+    test "deletes a stored segment when the manifest append fails", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "sealed-log"),
+          flush_max_rows: 1
+        )
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
+      held = :sys.get_state(pid).log
+      :sys.replace_state(pid, fn state -> %{state | log: nil} end)
+
+      {:ok, path} = HotManifest.log_path(runtime.manifest, @table)
+      File.chmod!(path, 0o400)
+      on_exit(fn -> File.chmod!(path, 0o600) end)
+
+      assert {:error, {:log_append_failed, :eacces}} =
+               Client.write_batch(name, @table, batch(2..2))
+
+      assert {:ok, [_first]} = Store.list(runtime.store, "analytics/events")
+
+      :sys.replace_state(pid, fn state -> %{state | log: held} end)
     end
   end
 

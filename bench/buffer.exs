@@ -42,11 +42,12 @@ defmodule Bench.Buffer do
     ~51K rows/s at ~16 ms p50 ack; 1000 ms → ~800 rows/s at ~1010 ms p50 —
     linear in between. Pick the interval by the ack-latency budget, not by
     guessing.
-  - **D3: the two fsyncs cost about 2.5-3 ms together, not the bottleneck.**
-    An open+write+fsync+close of a 4 KiB file runs ~0.3-0.7 ms; a full group commit
-    with the segment store's fsync on ran ~2.8 ms p50 versus ~2.4 ms with it
-    off — so the segment fsync's own marginal cost is sub-millisecond, and the
-    manifest log's (not optional, always paid) accounts for most of the rest.
+  - **D3: the two fsyncs cost about 2 ms together, not the bottleneck.**
+    An open+write+fsync+close of a 4 KiB file runs ~0.3-0.7 ms; a full group
+    commit with the segment store's fsync on ran ~2.0 ms p50 versus ~1.7 ms
+    with it off (down from ~2.8 ms before the manifest log held its fd open
+    across appends) — so the segment fsync's own marginal cost is
+    sub-millisecond, and the manifest append pays only its write and fsync.
     Either way, both fsyncs together are an order of magnitude under any
     `flush_interval_ms` worth running. D3's accepted durability window costs
     single-digit milliseconds, not the ack.
@@ -137,7 +138,8 @@ defmodule Bench.Buffer do
       "\n  an open+write+fsync+close of a 4 KiB file: #{ms(raw.min)} ms min, #{ms(raw.median)} ms median"
     )
 
-    IO.puts("  every group commit pays two of these, back to back\n")
+    IO.puts("  the segment put pays one of these per flush; the manifest append")
+    IO.puts("  holds its fd open and pays only the write and the fsync\n")
 
     IO.puts("  store fsync    p50     p95     p99  (ms of one flush = one batch)")
 
