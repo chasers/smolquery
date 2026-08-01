@@ -12,7 +12,11 @@ defmodule Smolquery.MixProject do
       listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
-      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"],
+      dialyzer: [
+        plt_local_path: "priv/plts",
+        plt_core_path: "priv/plts",
+        plt_add_apps: [:ex_unit]
+      ],
       releases: releases()
     ]
   end
