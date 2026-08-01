@@ -179,6 +179,33 @@ What that ack means:
   BEAM, or node crash, and losing the disk loses that tail. Sealing (Milestone 4)
   is what bounds it.
 
+The other half of the hot tier is handing data off. A table that crosses
+`seal_max_bytes`, `seal_max_files`, or `seal_max_age_ms` signals a configured
+consumer, and a sealer stamps the segments it committed:
+
+```elixir
+config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
+
+:ok = Smolquery.BufferService.Client.retire(Smolquery.BufferService, table, ids, snapshot)
+```
+
+- **The signal is level-triggered, not an event.** It repeats every
+  `seal_retry_ms` while a table stays over threshold, so a sealer that dies
+  mid-handoff costs a retry interval rather than leaving that table's tail parked
+  forever. Consumers should expect repeats and read them as current state.
+- **Retirement is a stamp, not a delete.** `retire/4` records the catalog snapshot
+  the sealer committed at and leaves the segments readable, because a query
+  planned at an older snapshot is still entitled to them. Deletion happens
+  `retire_grace_ms` later, which must exceed the longest query a planner can hold
+  open. Retiring an already-sealed id, or one the sweep has already deleted, is
+  `:ok` — every direction a crashed sealer retries from.
+- **Boot adopts what is already on disk.** A buffer is what runs the seal check,
+  so a node restarting with an unsealed tail for a table nobody writes to again
+  would strand it. `Smolquery.BufferService.Adopter` starts a buffer for every
+  owned table with a manifest log, and does it before the subtree reports started
+  — a query arriving mid-adoption would otherwise read an empty manifest and
+  quietly return results missing that table's unsealed rows.
+
 ## Roles
 
 One release, four services; a node starts only the subtrees its roles name.
@@ -215,7 +242,14 @@ config :smolquery, Smolquery.BufferService,
   flush_max_bytes: 8_000_000,
   max_buffered_rows: 500_000,
   max_buffered_bytes: 64_000_000,
-  write_timeout_ms: 15_000
+  write_timeout_ms: 15_000,
+  seal_max_bytes: 67_108_864,
+  seal_max_files: 64,
+  seal_max_age_ms: 60_000,
+  seal_retry_ms: 30_000,
+  retire_grace_ms: 600_000,
+  maintenance_interval_ms: 5_000,
+  seal_consumer: {Smolquery.BufferService.SealLog, []}
 ```
 
 `:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath

@@ -136,6 +136,24 @@ defmodule Smolquery.BufferService.Client do
   end
 
   @doc """
+  Stamps `ids` as sealed at the catalog snapshot a sealer committed them in.
+
+  The other half of the seal handoff. Idempotent in every direction a crashed
+  sealer can retry from: ids already sealed, and ids the grace-period sweep has
+  since deleted, are both `:ok`. The segments stay readable until the grace period
+  expires, because a query planned at an older snapshot is still entitled to them.
+  """
+  @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
+          :ok | {:error, term()}
+  def retire(name, table_ref, ids, snapshot) do
+    with {:ok, runtime} <- runtime(name),
+         :ok <- ensure_owner(runtime, table_ref),
+         {:ok, buffer} <- buffer(runtime, table_ref) do
+      TableBuffer.retire(buffer, ids, snapshot)
+    end
+  end
+
+  @doc """
   The node owning `table_ref`.
   """
   @spec owner(atom(), Store.table_ref()) :: {:ok, node()} | {:error, term()}

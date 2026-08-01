@@ -17,7 +17,13 @@ config :smolquery, Smolquery.BufferService,
   flush_max_bytes: 8_000_000,
   max_buffered_rows: 500_000,
   max_buffered_bytes: 64_000_000,
-  write_timeout_ms: 15_000
+  write_timeout_ms: 15_000,
+  seal_max_bytes: 67_108_864,
+  seal_max_files: 64,
+  seal_max_age_ms: 60_000,
+  seal_retry_ms: 30_000,
+  retire_grace_ms: 600_000,
+  maintenance_interval_ms: 5_000
 
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",
