@@ -1,9 +1,9 @@
 defmodule Smolquery.BufferService.ClientTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.Schema
 
   @moduletag :tmp_dir

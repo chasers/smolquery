@@ -1,10 +1,10 @@
 defmodule Smolquery.BufferService.TableBufferTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
@@ -258,7 +258,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert Client.flush(name, @table) == :ok
       assert {:ok, %{row_count: 3}} = Task.await(second)
 
-      assert length(HotManifest.entries(runtime.manifest, @table)) == 2
+      assert match?([_first, _second], HotManifest.entries(runtime.manifest, @table))
     end
   end
 

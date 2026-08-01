@@ -3,12 +3,14 @@ defmodule Smolquery.BufferService.HotServerTest do
 
   import Plug.Test
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.Engine
   alias Smolquery.Schema
+  alias Smolquery.Segments.Store
   alias Smolquery.Test.MemoryStore
 
   @moduletag :tmp_dir
@@ -119,8 +121,8 @@ defmodule Smolquery.BufferService.HotServerTest do
       {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
 
       {:ok, runtime} = Runtime.fetch(name)
-      [entry] = Smolquery.BufferService.HotManifest.entries(runtime.manifest, @table)
-      File.rm!(Smolquery.Segments.Store.location(runtime.store, entry.key))
+      [entry] = HotManifest.entries(runtime.manifest, @table)
+      File.rm!(Store.location(runtime.store, entry.key))
 
       assert get(name, segment_path(ack.segment_id)).status == 404
     end

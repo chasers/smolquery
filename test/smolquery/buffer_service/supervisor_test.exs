@@ -1,10 +1,10 @@
 defmodule Smolquery.BufferService.SupervisorTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.MemoryStore

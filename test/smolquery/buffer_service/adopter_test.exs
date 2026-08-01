@@ -1,10 +1,10 @@
 defmodule Smolquery.BufferService.AdopterTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Test.SealCollector
 

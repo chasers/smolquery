@@ -427,18 +427,17 @@ defmodule Smolquery.BufferService.HotManifest do
   defp read_log(%__MODULE__{} = manifest, table_ref) do
     with {:ok, path} <- log_path(manifest, table_ref) do
       case File.read(path) do
-        {:ok, contents} ->
-          with {:ok, records, valid_bytes} <- parse_contents(contents),
-               :ok <- truncate_torn_tail(path, contents, valid_bytes) do
-            {:ok, records}
-          end
-
-        {:error, :enoent} ->
-          {:ok, []}
-
-        {:error, reason} ->
-          {:error, {:log_unreadable, reason}}
+        {:ok, contents} -> parse_and_repair(path, contents)
+        {:error, :enoent} -> {:ok, []}
+        {:error, reason} -> {:error, {:log_unreadable, reason}}
       end
+    end
+  end
+
+  defp parse_and_repair(path, contents) do
+    with {:ok, records, valid_bytes} <- parse_contents(contents),
+         :ok <- truncate_torn_tail(path, contents, valid_bytes) do
+      {:ok, records}
     end
   end
 

@@ -1,10 +1,10 @@
 defmodule Smolquery.BufferService.SealingTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
