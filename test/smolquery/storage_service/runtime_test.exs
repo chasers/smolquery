@@ -67,6 +67,12 @@ defmodule Smolquery.StorageService.RuntimeTest do
     test "defaults the buffer instance it retires against" do
       assert Runtime.new(name: __MODULE__.Buffered).buffer_name == Smolquery.BufferService
     end
+
+    test "refuses an unsupported compression codec at boot, not per seal attempt" do
+      assert_raise ArgumentError, ~r/unsupported sealed-segment compression/, fn ->
+        Runtime.new(name: __MODULE__.BadCodec, compression: :lz4)
+      end
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do

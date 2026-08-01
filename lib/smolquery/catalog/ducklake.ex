@@ -49,7 +49,9 @@ defmodule Smolquery.Catalog.DuckLake do
   an internal name, taken deliberately and pinned by a test: if DuckLake renames
   it, the query fails loudly rather than reporting an empty set, which is the
   failure mode that would matter (garbage collection would treat every sealed
-  segment as an orphan).
+  segment as an orphan). A row whose `path_is_relative` is true fails the same
+  way: a relative path returned as-is would match no store location, and GC would
+  again see every committed segment as unreferenced.
 
   `ducklake_merge_adjacent_files/2` must never be called on a smolquery table:
   over externally-registered files it crashes DuckDB fatally (ducklake
@@ -280,7 +282,28 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @impl Catalog
   def known_segments(%__MODULE__{} = config) do
-    column(config, "SELECT path FROM #{metadata_schema(config)}.ducklake_data_file")
+    with {:ok, result} <-
+           query(
+             config,
+             "SELECT path, path_is_relative FROM #{metadata_schema(config)}.ducklake_data_file"
+           ) do
+      absolute_paths(result.rows)
+    end
+  end
+
+  defp absolute_paths(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn
+      [path, relative], {:ok, paths} when relative in [false, 0] ->
+        {:cont, {:ok, [path | paths]}}
+
+      [path, _relative], _acc ->
+        {:halt, {:error, {:relative_segment_path, path}}}
+    end)
+    |> case do
+      {:ok, paths} -> {:ok, Enum.reverse(paths)}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp metadata_schema(%__MODULE__{catalog: catalog}),

@@ -1,6 +1,8 @@
 defmodule Smolquery.Segments.IdTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Smolquery.Segments.Id
 
   describe "generate/0" do
@@ -42,6 +44,10 @@ defmodule Smolquery.Segments.IdTest do
       assert String.slice(a, 0, 10) == String.slice(b, 0, 10)
       assert a != b
     end
+
+    test "refuses a timestamp past the 48-bit prefix rather than truncating it" do
+      assert_raise FunctionClauseError, fn -> Id.generate(1 <<< 48) end
+    end
   end
 
   describe "derive/2" do
@@ -72,6 +78,10 @@ defmodule Smolquery.Segments.IdTest do
 
     test "takes iodata, so a seed needs no intermediate binary" do
       assert Id.derive(1, [["analytics", 0], "events"]) == Id.derive(1, "analytics\0events")
+    end
+
+    test "refuses a timestamp past the 48-bit prefix rather than truncating it" do
+      assert_raise FunctionClauseError, fn -> Id.derive(1 <<< 48, ["seed"]) end
     end
   end
 

@@ -44,12 +44,24 @@ defmodule Smolquery.Test.PathCatalog do
   @spec fail(pid(), term()) :: :ok
   def fail(agent, reason), do: Agent.update(agent, &[{:failure, reason} | &1])
 
+  @doc """
+  Registers `path` as a side effect of the next `known_segments/1` read, which
+  itself still answers without it.
+
+  This is how a test lands a commit *between* a sweep's decision snapshot and its
+  deletes: the sweep's first read triggers the registration, and only a re-read
+  sees it.
+  """
+  @spec register_on_next_read(pid(), String.t()) :: :ok
+  def register_on_next_read(agent, path),
+    do: Agent.update(agent, &[{:register_on_read, path} | &1])
+
   @impl Catalog
   def known_segments(agent) do
-    Agent.get(agent, fn entries ->
+    Agent.get_and_update(agent, fn entries ->
       case failure(entries) do
-        {:ok, reason} -> {:error, reason}
-        :error -> {:ok, for({path, _state} <- paths(entries), do: path)}
+        {:ok, reason} -> {{:error, reason}, entries}
+        :error -> {{:ok, for({path, _state} <- paths(entries), do: path)}, absorb(entries)}
       end
     end)
   end
@@ -97,6 +109,20 @@ defmodule Smolquery.Test.PathCatalog do
   def table_schema(_agent, _table), do: {:ok, Schema.new!([{"id", :int64}])}
 
   defp paths(entries), do: for({path, state} <- entries, is_binary(path), do: {path, state})
+
+  defp absorb(entries) do
+    case for({:register_on_read, path} <- entries, do: path) do
+      [] ->
+        entries
+
+      pending ->
+        entries
+        |> Enum.reject(&match?({:register_on_read, _path}, &1))
+        |> then(
+          &Enum.reduce(pending, &1, fn path, acc -> [{path, :current} | drop(acc, path)] end)
+        )
+    end
+  end
 
   defp failure(entries) do
     case for({:failure, reason} <- entries, do: reason) do

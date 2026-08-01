@@ -38,7 +38,9 @@ defmodule Smolquery.StorageService.Merge do
   *2.85 times larger* than the micro-segments it replaced — measured in
   `bench/sealer.exs`. The sealed tier is where bytes live longest and where object
   storage is billed, so the codec is explicit here and defaults to zstd, matching
-  the tier it merges from.
+  the tier it merges from. The configured value is validated once at boot by
+  `Smolquery.StorageService.Runtime.new/1` — never per attempt, where a bad codec
+  would crash every re-signalled seal forever.
 
   ## Row counts come from the manifest, not a read-back
 
@@ -55,8 +57,6 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Runtime
 
-  @codecs [:zstd, :snappy, :gzip, :uncompressed]
-
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
 
@@ -66,19 +66,30 @@ defmodule Smolquery.StorageService.Merge do
   A claim with none of its inputs left is `{:error, :no_inputs}` — there is nothing
   to seal, and writing an empty segment would register emptiness in the catalog as
   though it were the data.
+
+  A claim whose key is not a well-formed segment key, and a manifest entry missing
+  its `"url"` or carrying a `"row_count"` that is not a count, are both errors
+  before any byte moves: a bad key would fail after the merge already ran, and a
+  defaulted row count would be committed to the catalog as though it were true.
   """
   @spec run(Runtime.t(), Store.table_ref(), SealConsumer.claim()) ::
           {:ok, Segment.t()} | {:error, term()}
   def run(%Runtime{} = runtime, table_ref, claim) do
-    with {:ok, entries} <- HotTier.manifest(runtime, table_ref),
-         {:ok, key} <- output_key(claim),
+    with {:ok, key} <- output_key(claim),
+         {:ok, entries} <- HotTier.manifest(runtime, table_ref),
          {:ok, inputs} <- inputs(entries, claim),
          {:ok, put} <- Store.put(runtime.store, key, &copy(runtime, inputs.urls, &1)) do
       {:ok, segment(key, put, inputs.row_count)}
     end
   end
 
-  defp output_key(%{keys: [key]}), do: {:ok, key}
+  defp output_key(%{keys: [key]}) do
+    case Store.id(key) do
+      {:ok, _id} -> {:ok, key}
+      :error -> {:error, {:invalid_claim_key, key}}
+    end
+  end
+
   defp output_key(%{keys: keys}), do: {:error, {:unsupported_claim_keys, keys}}
   defp output_key(claim), do: {:error, {:invalid_claim, claim}}
 
@@ -87,18 +98,27 @@ defmodule Smolquery.StorageService.Merge do
 
     entries
     |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
-    |> Enum.reduce(%{urls: [], row_count: 0}, fn entry, acc ->
-      %{
-        acc
-        | urls: [entry["url"] | acc.urls],
-          row_count: acc.row_count + (entry["row_count"] || 0)
-      }
+    |> Enum.reduce_while({:ok, %{urls: [], row_count: 0}}, fn entry, {:ok, acc} ->
+      case input(entry) do
+        {:ok, url, row_count} ->
+          {:cont, {:ok, %{acc | urls: [url | acc.urls], row_count: acc.row_count + row_count}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
     end)
     |> case do
-      %{urls: []} -> {:error, :no_inputs}
-      inputs -> {:ok, %{inputs | urls: Enum.reverse(inputs.urls)}}
+      {:ok, %{urls: []}} -> {:error, :no_inputs}
+      {:ok, inputs} -> {:ok, %{inputs | urls: Enum.reverse(inputs.urls)}}
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  defp input(%{"url" => url, "row_count" => row_count})
+       when is_binary(url) and is_integer(row_count) and row_count >= 0,
+       do: {:ok, url, row_count}
+
+  defp input(entry), do: {:error, {:invalid_manifest_entry, entry}}
 
   defp copy(runtime, urls, staged) do
     count = length(urls)
@@ -115,11 +135,10 @@ defmodule Smolquery.StorageService.Merge do
     end
   end
 
-  defp codec(compression) when compression in @codecs,
-    do: compression |> Atom.to_string() |> String.upcase()
-
-  defp codec(compression),
-    do: raise(ArgumentError, "unsupported sealed-segment compression: #{inspect(compression)}")
+  defp codec(:zstd), do: "ZSTD"
+  defp codec(:snappy), do: "SNAPPY"
+  defp codec(:gzip), do: "GZIP"
+  defp codec(:uncompressed), do: "UNCOMPRESSED"
 
   defp segment(key, put, row_count) do
     {:ok, id} = Store.id(key)

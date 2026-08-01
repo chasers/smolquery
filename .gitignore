@@ -29,3 +29,6 @@ smolquery-*.tar
 
 # Dialyzer PLTs (cached in CI, not committed)
 /priv/plts/
+
+# Dev-run data: buffer manifests, segments, and the DuckLake catalog
+/priv/data/

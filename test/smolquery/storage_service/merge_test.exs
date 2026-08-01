@@ -1,3 +1,23 @@
+defmodule Smolquery.StorageService.MergeTest.ManifestStub do
+  @moduledoc """
+  Serves a fixed manifest, for entries a real buffer node would never produce.
+  """
+
+  @behaviour Plug
+
+  import Plug.Conn
+
+  @impl Plug
+  def init(entries), do: entries
+
+  @impl Plug
+  def call(conn, entries) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, JSON.encode!(entries))
+  end
+end
+
 defmodule Smolquery.StorageService.MergeTest do
   @moduledoc """
   The merge, against a real buffer node.
@@ -19,7 +39,9 @@ defmodule Smolquery.StorageService.MergeTest do
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Merge
+  alias Smolquery.StorageService.MergeTest.ManifestStub
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.SegmentServer
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -170,9 +192,16 @@ defmodule Smolquery.StorageService.MergeTest do
   } do
     {:ok, ack} = Client.write_batch(buffer, @table, batch(1..1))
 
-    assert_raise ArgumentError, fn ->
+    assert_raise FunctionClauseError, fn ->
       Merge.run(%{runtime | compression: :"zstd) --"}, @table, claim([ack.segment_id]))
     end
+  end
+
+  test "refuses a claim key that names no segment, before any merge runs", %{runtime: runtime} do
+    key = "analytics/events/not-a-ulid.parquet"
+
+    assert Merge.run(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"], [key])) ==
+             {:error, {:invalid_claim_key, key}}
   end
 
   test "refuses a claim with none of its inputs left", %{runtime: runtime} do
@@ -203,6 +232,38 @@ defmodule Smolquery.StorageService.MergeTest do
 
     assert {:error, {:unsupported_claim_keys, ^keys}} =
              Merge.run(runtime, @table, claim([ack.segment_id], keys))
+  end
+
+  test "refuses a manifest entry without a url", context do
+    entry = %{"id" => "01KYWPEEGAM8FQVQS5S2QF26SW", "row_count" => 3}
+    runtime = stubbed_runtime(context, [entry])
+
+    assert Merge.run(runtime, @table, claim([entry["id"]])) ==
+             {:error, {:invalid_manifest_entry, entry}}
+  end
+
+  test "refuses a manifest entry whose row count is not a count", context do
+    entry = %{
+      "id" => "01KYWPEEGAM8FQVQS5S2QF26SW",
+      "url" => "http://127.0.0.1:1/x.parquet",
+      "row_count" => nil
+    }
+
+    runtime = stubbed_runtime(context, [entry])
+
+    assert Merge.run(runtime, @table, claim([entry["id"]])) ==
+             {:error, {:invalid_manifest_entry, entry}}
+  end
+
+  defp stubbed_runtime(context, entries) do
+    server =
+      start_supervised!({Bandit, plug: {ManifestStub, entries}, port: 0, startup_log: false})
+
+    Runtime.new(
+      name: :"merge_stubbed_#{:erlang.unique_integer([:positive])}",
+      dir: Path.join(context.tmp_dir, "sealed"),
+      buffer_base_url: SegmentServer.base_url(server)
+    )
   end
 
   test "reports an unreachable buffer node", context do
