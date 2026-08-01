@@ -28,19 +28,26 @@ defmodule Smolquery.Api.Inserts do
         "insertErrors" => errors_json(result.errors)
       })
     else
-      {:error, :buffer_full} ->
-        conn
-        |> put_resp_header("retry-after", "1")
-        |> Errors.send_error(429, "RESOURCE_EXHAUSTED", "buffer full, retry later")
-
-      {:error, reason}
-      when reason in [:buffer_service_unavailable, :ingest_service_unavailable] ->
-        Errors.send_error(conn, 503, "UNAVAILABLE", "the write path is not available here")
-
-      {:error, reason} ->
-        Errors.from_reason(conn, reason)
+      {:error, reason} -> insert_error(conn, reason)
     end
   end
+
+  @doc """
+  Maps a whole-request write failure to the envelope; shared with batch loads.
+  """
+  @spec insert_error(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def insert_error(conn, :buffer_full) do
+    conn
+    |> put_resp_header("retry-after", "1")
+    |> Errors.send_error(429, "RESOURCE_EXHAUSTED", "buffer full, retry later")
+  end
+
+  def insert_error(conn, reason)
+      when reason in [:buffer_service_unavailable, :ingest_service_unavailable] do
+    Errors.send_error(conn, 503, "UNAVAILABLE", "the write path is not available here")
+  end
+
+  def insert_error(conn, reason), do: Errors.from_reason(conn, reason)
 
   defp insert_rows(conn, table_ref, rows) do
     {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
@@ -48,12 +55,16 @@ defmodule Smolquery.Api.Inserts do
     IngestService.Client.insert(runtime.ingest_name, table_ref, rows)
   end
 
-  defp rows(%{"rows" => rows}) when is_list(rows), do: {:ok, rows}
-  defp rows(_body), do: {:error, {:missing_field, "rows"}}
-
-  defp errors_json(errors) do
+  @doc """
+  The `insertErrors` JSON shape of validator rejections; shared with loads.
+  """
+  @spec errors_json([Smolquery.IngestService.Validator.row_errors()]) :: [map()]
+  def errors_json(errors) do
     Enum.map(errors, fn %{index: index, errors: messages} ->
       %{"index" => index, "errors" => Enum.map(messages, &%{"message" => &1.message})}
     end)
   end
+
+  defp rows(%{"rows" => rows}) when is_list(rows), do: {:ok, rows}
+  defp rows(_body), do: {:error, {:missing_field, "rows"}}
 end
