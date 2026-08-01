@@ -199,11 +199,15 @@ defmodule Smolquery.BufferService.SealingTest do
              end)
     end
 
-    test "refuses a table this node does not own", context do
+    test "routes to the owner rather than refusing", context do
       %{name: name} = start_buffer_service(context, ring: [:buffer1@host])
 
-      assert {:error, {:not_owner, :buffer1@host}} =
+      assert Client.owner(name, @table) == :buffer1@host
+
+      assert {:error, {kind, _reason}} =
                Client.retire(name, @table, ["01KYWPEEGAM8FQVQS5S2QF26SV"], 1)
+
+      assert kind in [:badrpc, :badtcp]
     end
   end
 

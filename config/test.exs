@@ -2,6 +2,8 @@ import Config
 
 config :logger, level: :warning
 
+config :gen_rpc, tcp_server_port: 15371, tcp_client_port: 15371
+
 config :smolquery, roles: []
 
 config :smolquery, Smolquery.Engine,

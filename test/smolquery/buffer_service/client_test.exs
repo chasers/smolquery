@@ -42,11 +42,12 @@ defmodule Smolquery.BufferService.ClientTest do
       assert is_binary(ack.segment_id)
     end
 
-    test "refuses a table this node does not own", context do
+    test "routes a table this node does not own to its owner", context do
       name = start_buffer_service(context, ring: @elsewhere)
 
-      assert {:error, {:not_owner, owner}} = Client.write_batch(name, @table, batch())
-      assert owner in @elsewhere
+      assert {:error, {kind, _reason}} = Client.write_batch(name, @table, batch())
+      assert kind in [:badrpc, :badtcp]
+      assert Client.owner(name, @table) in @elsewhere
     end
 
     test "reports a node that does not run the buffer role" do
@@ -99,14 +100,13 @@ defmodule Smolquery.BufferService.ClientTest do
     test "is this node in a single-node ring", context do
       name = start_buffer_service(context)
 
-      assert Client.owner(name, @table) == {:ok, node()}
+      assert Client.owner(name, @table) == node()
     end
 
     test "is a remote node when the ring says so", context do
       name = start_buffer_service(context, ring: @elsewhere)
 
-      assert {:ok, owner} = Client.owner(name, @table)
-      assert owner in @elsewhere
+      assert Client.owner(name, @table) in @elsewhere
     end
   end
 

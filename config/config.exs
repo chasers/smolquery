@@ -2,6 +2,12 @@ import Config
 
 config :adbc, :drivers, [:duckdb]
 
+config :gen_rpc,
+  tcp_server_port: 5369,
+  tcp_client_port: 5369,
+  rpc_module_control: :whitelist,
+  rpc_module_list: [Smolquery.BufferService.Endpoint]
+
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   threads: System.schedulers_online(),

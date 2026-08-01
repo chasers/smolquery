@@ -35,6 +35,7 @@ defmodule Smolquery.MixProject do
       {:bandit, "~> 1.12"},
       {:plug, "~> 1.20"},
       {:req, "~> 0.7"},
+      {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
