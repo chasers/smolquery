@@ -6,11 +6,10 @@ Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
 > **Status: pre-alpha.** The read engine, segment writer, catalog, the buffer
-> service's hot tier, the seal handoff to the sealed tier, and query jobs
-> planned across both tiers work. The HTTP API is landing (Milestone 6):
-> today it serves `/healthz` behind Bearer-key auth; inserts, CRUD, and query
-> endpoints arrive layer by layer (queries run through the Elixir client
-> meanwhile).
+> service's hot tier, the seal handoff, query jobs planned across both tiers,
+> the HTTP API (Milestone 6), and storage maintenance — compaction,
+> retention, snapshot expiry, telemetry, and a Docker release (Milestone 7) —
+> work, on a single node. Cluster + object storage is next (Milestone 8).
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -527,6 +526,55 @@ Properties worth knowing:
   sealed segments live outside the data dir names them in
   `allowed_directories`.
 
+## Deploying
+
+The deployable is a `mix release` in a Docker image — one container, one
+volume, env-configured:
+
+```sh
+docker build -t smolquery .
+
+docker run -d --name smolquery \
+  -p 4000:4000 \
+  -v smolquery-data:/data \
+  -e SMOLQUERY_API_KEY=change-me \
+  smolquery
+
+curl -H 'authorization: Bearer change-me' http://127.0.0.1:4000/v1/datasets
+```
+
+Everything durable lives under one directory (`SMOLQUERY_DATA_DIR`, `/data`
+in the container): the hot tier's micro-segments and manifest logs under
+`buffer/`, sealed segments under `sealed/`, the DuckLake catalog SQLite and
+its `ducklake/` data path, and DuckDB's extension cache (`HOME` points there
+too, so first boot downloads extensions once and keeps them on the volume).
+Back that volume up and you have backed smolquery up.
+
+`SIGTERM` drains before it stops: buffers flush their accumulators on
+shutdown (a rolling restart loses nothing), in-flight seals finish or are
+retried by the next boot's re-signal, and everything acked is already on
+disk. `docker stop` is a clean shutdown.
+
+Configuration is environment variables, resolved at boot in
+`config/runtime.exs`:
+
+| Variable | Meaning (default) |
+| --- | --- |
+| `SMOLQUERY_ROLES` | comma-separated subset of `api,ingest,buffer,storage,query` (all) |
+| `SMOLQUERY_API_KEY` | the Bearer key; an `api` node without one refuses to boot |
+| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicit in a cluster |
+| `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in prod images / `4000`) |
+| `SMOLQUERY_DATA_DIR` | the one volume everything durable lives under (`/data` in the image) |
+| `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | split a tier onto its own disk (under the data dir) |
+| `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
+| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
+| `SMOLQUERY_MAX_RESULT_ROWS` | `query/3` conversion ceiling (`100000`, or `infinity`) |
+| `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence (`1000`) |
+| `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
+| `SMOLQUERY_HOT_SERVER_PORT` | hot-tier HTTP port (`4001`) |
+| `SMOLQUERY_BUFFER_BASE_URL` | where readers reach the hot tier (`http://127.0.0.1:4001`) |
+| `GEN_RPC_PORT` | inter-node transport port (`5369`) |
+
 ## HTTP API
 
 `Smolquery.Api` is the front door — one Bandit listener, started by the `:api`
@@ -540,20 +588,21 @@ route.
 curl http://127.0.0.1:4000/healthz
 
 auth='authorization: Bearer '$SMOLQUERY_API_KEY
-curl -H "$auth" -d '{"id": "analytics"}' http://127.0.0.1:4000/v1/datasets
-curl -H "$auth" -d '{"id": "events", "schema": [
+json='content-type: application/json'
+curl -H "$auth" -H "$json" -d '{"id": "analytics"}' http://127.0.0.1:4000/v1/datasets
+curl -H "$auth" -H "$json" -d '{"id": "events", "schema": [
       {"name": "id", "type": "INT64", "nullable": false},
       {"name": "ts", "type": "TIMESTAMP"},
       {"name": "amount", "type": "NUMERIC(38,2)"}
     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables
 curl -H "$auth" http://127.0.0.1:4000/v1/datasets/analytics/tables/events
-curl -H "$auth" -d '{"rows": [
+curl -H "$auth" -H "$json" -d '{"rows": [
       {"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"},
       {"id": 2}
     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
 curl -H "$auth" -H 'content-type: application/x-ndjson' --data-binary @events.ndjson \
      http://127.0.0.1:4000/v1/datasets/analytics/tables/events/load
-curl -H "$auth" -d '{"query": "SELECT count(*) AS n FROM analytics.events"}' \
+curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.events"}' \
      http://127.0.0.1:4000/v1/queries
 ```
 

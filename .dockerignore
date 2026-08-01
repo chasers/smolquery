@@ -1,0 +1,14 @@
+_build/
+deps/
+priv/data/
+priv/plts/
+tmp/
+.git/
+.github/
+.claude/
+.plans/
+.rfcs/
+bench/results/
+doc/
+Dockerfile
+README.md
