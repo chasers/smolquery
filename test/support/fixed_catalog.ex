@@ -62,5 +62,14 @@ defmodule Smolquery.Test.FixedCatalog do
   def replace_segments(_answers, _table, _segments, _paths), do: {:error, :fixed}
 
   @impl Catalog
+  def put_retention(_answers, _table, _policy), do: {:error, :fixed}
+
+  @impl Catalog
+  def retention(_answers, _table), do: {:error, :fixed}
+
+  @impl Catalog
+  def expire_snapshots(_answers, _older_than_ms), do: {:error, :fixed}
+
+  @impl Catalog
   def known_segments(_answers), do: {:error, :fixed}
 end

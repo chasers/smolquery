@@ -26,6 +26,8 @@ defmodule Smolquery.StorageService.Runtime do
         compact_below_bytes: 33_554_432,
         compact_min_inputs: 2,
         compact_max_bytes: 134_217_728,
+        retention_interval_ms: 3_600_000,
+        snapshot_keep_ms: 86_400_000,
         handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
   `:dir` is where sealed segments land, through a `Store.Local` beneath it. Pass
@@ -45,6 +47,13 @@ defmodule Smolquery.StorageService.Runtime do
   `max_concurrent_seals` bounds seals in flight on this node. Signalling is
   level-triggered, so a signal shed at the bound costs a `seal_retry_ms` delay
   rather than a lost seal.
+
+  `retention_interval_ms` paces `Smolquery.StorageService.Retention`'s sweep;
+  which tables expire and how fast is per-table policy in the catalog, not
+  node configuration. `snapshot_keep_ms` is the time-travel promise: each
+  sweep expires catalog snapshots older than this, which is what lets GC
+  physically reclaim dropped and compacted-away files — so it must exceed the
+  longest query a reader may still have pinned.
 
   The `compact_*` knobs shape `Smolquery.StorageService.Compactor`'s sweep:
   every `compact_interval_ms` it groups sealed segments under
@@ -105,6 +114,8 @@ defmodule Smolquery.StorageService.Runtime do
     compact_below_bytes: 33_554_432,
     compact_min_inputs: 2,
     compact_max_bytes: 134_217_728,
+    retention_interval_ms: 3_600_000,
+    snapshot_keep_ms: 86_400_000,
     handoff: {Smolquery.StorageService.Handoff.Seal, []}
   ]
 
@@ -126,6 +137,8 @@ defmodule Smolquery.StorageService.Runtime do
           compact_below_bytes: pos_integer(),
           compact_min_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
+          retention_interval_ms: pos_integer(),
+          snapshot_keep_ms: pos_integer(),
           handoff: {module(), term()}
         }
 
@@ -143,6 +156,8 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_below_bytes,
     :compact_min_inputs,
     :compact_max_bytes,
+    :retention_interval_ms,
+    :snapshot_keep_ms,
     :handoff
   ]
 
@@ -225,6 +240,12 @@ defmodule Smolquery.StorageService.Runtime do
   """
   @spec compactor(atom()) :: atom()
   def compactor(name), do: Module.concat(name, "Compactor")
+
+  @doc """
+  The process dropping segments past their table's TTL.
+  """
+  @spec retention(atom()) :: atom()
+  def retention(name), do: Module.concat(name, "Retention")
 
   defp validate_compression(%__MODULE__{compression: compression} = runtime)
        when compression in @codecs,

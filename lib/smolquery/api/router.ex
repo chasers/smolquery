@@ -19,7 +19,8 @@ defmodule Smolquery.Api.Router do
       POST /v1/datasets                            create a dataset
       GET  /v1/datasets/:ds/tables                 list a dataset's tables
       POST /v1/datasets/:ds/tables                 create a table
-      GET  /v1/datasets/:ds/tables/:table          a table's schema
+      GET  /v1/datasets/:ds/tables/:table          a table's schema + retention
+      PATCH /v1/datasets/:ds/tables/:table         set/clear retention policy
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
       POST /v1/datasets/:ds/tables/:table/load     batch load (NDJSON/CSV/Parquet body)
       POST /v1/queries                             sync query, first page inline
@@ -92,6 +93,10 @@ defmodule Smolquery.Api.Router do
 
   get "/v1/datasets/:dataset/tables/:table" do
     Tables.get(conn, dataset, table)
+  end
+
+  patch "/v1/datasets/:dataset/tables/:table" do
+    Tables.update(conn, dataset, table)
   end
 
   post "/v1/datasets/:dataset/tables/:table/insert" do

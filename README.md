@@ -434,6 +434,25 @@ per table per sweep replaces one oldest-first run of segments under
   compaction that crashed before its swap re-plans the same group into the
   same key next sweep.
 
+`Smolquery.StorageService.Retention` ages data out, for tables that opt in
+with a policy (`PATCH` the table with `{"retention": {"column": ..., "ttlMs":
+...}}`). Nothing ever deletes rows: the unit of expiry is the whole segment,
+dropped only once the *maximum* of the policy column across its rows has
+passed the horizon (read from Parquet footer stats), so a segment straddling
+the boundary keeps all its rows until it ages out entirely. Missing or
+unreadable stats mean the segment is kept — retention that guesses is
+deletion.
+
+Each retention sweep ends by expiring catalog snapshots older than
+`snapshot_keep_ms`. That is what turns any logical drop — retention's or
+compaction's — into a physically reclaimable file: GC spares every path some
+snapshot still references, and only expiry makes that test say no. The T-14
+verification is pinned in the DuckLake tests: `ducklake_expire_snapshots` is
+sound over externally-registered files (a pinned read of an expired snapshot
+fails cleanly, `known_segments/1` shrinks, the current snapshot survives).
+`snapshot_keep_ms` is the deployment's time-travel promise and must exceed
+the longest pinned query.
+
 ### Queries
 
 `Smolquery.QueryService` is the read path: async query jobs planned against the
@@ -535,7 +554,8 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `POST /v1/datasets` | create a dataset (idempotent) |
 | `GET /v1/datasets/:ds/tables` | list a dataset's tables |
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
-| `GET /v1/datasets/:ds/tables/:t` | a table's schema |
+| `GET /v1/datasets/:ds/tables/:t` | a table's schema and retention policy |
+| `PATCH /v1/datasets/:ds/tables/:t` | set or clear retention: `{"retention": {"column": "ts", "ttlMs": 2592000000}}` ages rows out of `ts` after 30 days, segment-grained and conservative (a segment is dropped only once *every* row in it has aged out); `{"retention": null}` keeps rows forever again |
 | `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is |
 | `POST /v1/datasets/:ds/tables/:t/load` | batch load — the body is the file (`application/x-ndjson`, `text/csv`, or `application/vnd.apache.parquet`), pushed through the same insert path in chunks; capped by `load_max_bytes` (413 past it), synchronous, and not atomic — a mid-load failure reports what was already durable |
 | `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504 |
@@ -641,6 +661,8 @@ config :smolquery, Smolquery.StorageService,
   compact_below_bytes: 33_554_432,
   compact_min_inputs: 2,
   compact_max_bytes: 134_217_728,
+  retention_interval_ms: 3_600_000,
+  snapshot_keep_ms: 86_400_000,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
 config :smolquery, Smolquery.QueryService,

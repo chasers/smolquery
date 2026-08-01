@@ -40,6 +40,14 @@ defmodule Smolquery.Api.TablesTest do
 
   defp get_json(name, path), do: request(name, conn(:get, path))
 
+  defp patch_json(name, path, body) do
+    request(
+      name,
+      conn(:patch, path, JSON.encode!(body))
+      |> put_req_header("content-type", "application/json")
+    )
+  end
+
   defp create_dataset(name, id), do: post_json(name, "/v1/datasets", %{"id" => id})
 
   describe "datasets" do
@@ -112,7 +120,12 @@ defmodule Smolquery.Api.TablesTest do
       assert JSON.decode!(listed.resp_body) == %{"tables" => ["events"]}
 
       fetched = get_json(name, "/v1/datasets/analytics/tables/events")
-      assert JSON.decode!(fetched.resp_body) == %{"id" => "events", "schema" => @schema_json}
+
+      assert JSON.decode!(fetched.resp_body) == %{
+               "id" => "events",
+               "schema" => @schema_json,
+               "retention" => nil
+             }
     end
 
     test "re-creating with the same schema is idempotent", %{name: name} do
@@ -204,6 +217,86 @@ defmodule Smolquery.Api.TablesTest do
         })
 
       assert response.status == 400
+    end
+  end
+
+  describe "retention" do
+    defp create_events(name) do
+      create_dataset(name, "analytics")
+
+      post_json(name, "/v1/datasets/analytics/tables", %{
+        "id" => "events",
+        "schema" => @schema_json
+      })
+    end
+
+    test "sets, reads back, and clears a policy", %{name: name} do
+      create_events(name)
+      policy = %{"column" => "ts", "ttlMs" => 86_400_000}
+
+      updated =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"retention" => policy})
+
+      assert updated.status == 200
+      assert JSON.decode!(updated.resp_body)["retention"] == policy
+
+      fetched = get_json(name, "/v1/datasets/analytics/tables/events")
+      assert JSON.decode!(fetched.resp_body)["retention"] == policy
+
+      cleared =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"retention" => nil})
+
+      assert cleared.status == 200
+      assert JSON.decode!(cleared.resp_body)["retention"] == nil
+    end
+
+    test "refuses a column the schema does not have", %{name: name} do
+      create_events(name)
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => %{"column" => "created", "ttlMs" => 1_000}
+        })
+
+      assert response.status == 400
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "does not exist"
+    end
+
+    test "refuses a column that is not a timestamp or date", %{name: name} do
+      create_events(name)
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => %{"column" => "amount", "ttlMs" => 1_000}
+        })
+
+      assert response.status == 400
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "timestamp or date"
+    end
+
+    test "refuses a malformed policy and a missing field", %{name: name} do
+      create_events(name)
+
+      zero_ttl =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => %{"column" => "ts", "ttlMs" => 0}
+        })
+
+      assert zero_ttl.status == 400
+
+      missing = patch_json(name, "/v1/datasets/analytics/tables/events", %{})
+      assert missing.status == 400
+    end
+
+    test "a table the catalog does not hold is a 404", %{name: name} do
+      create_dataset(name, "analytics")
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/missing", %{
+          "retention" => %{"column" => "ts", "ttlMs" => 1_000}
+        })
+
+      assert response.status == 404
     end
   end
 end

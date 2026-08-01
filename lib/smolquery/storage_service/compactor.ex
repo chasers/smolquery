@@ -54,10 +54,6 @@ defmodule Smolquery.StorageService.Compactor do
   slow mystery.
   """
 
-  use GenServer
-
-  require Logger
-
   alias Smolquery.Catalog
   alias Smolquery.Engine
   alias Smolquery.Segments.Id
@@ -67,6 +63,10 @@ defmodule Smolquery.StorageService.Compactor do
 
   @enforce_keys [:runtime]
   defstruct [:runtime]
+
+  use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
+
+  require Logger
 
   @doc """
   Starts the compactor for a runtime.
@@ -85,37 +85,8 @@ defmodule Smolquery.StorageService.Compactor do
   @spec sweep(atom(), timeout()) :: {:ok, map()} | {:error, term()}
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
 
-  @impl GenServer
-  def init(%Runtime{} = runtime) do
-    {:ok, schedule(%__MODULE__{runtime: runtime})}
-  end
-
-  @impl GenServer
-  def handle_call(:sweep, _from, state) do
-    {:reply, run(state), state}
-  end
-
-  @impl GenServer
-  def handle_info(:sweep, state) do
-    case run(state) do
-      {:ok, _report} -> :ok
-      {:error, reason} -> Logger.warning("compaction sweep failed: #{inspect(reason)}")
-    end
-
-    {:noreply, schedule(state)}
-  end
-
-  @impl GenServer
-  def handle_info(_message, state), do: {:noreply, state}
-
-  defp schedule(state) do
-    Process.send_after(self(), :sweep, state.runtime.compact_interval_ms)
-
-    state
-  end
-
   defp run(state) do
-    with {:ok, tables} <- tables(state.runtime.catalog) do
+    with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
       outcomes = Enum.map(tables, &compact_table(state.runtime, &1))
 
       {:ok,
@@ -123,19 +94,6 @@ defmodule Smolquery.StorageService.Compactor do
          compacted: for({:ok, swap} <- outcomes, do: swap),
          failed: for({:failed, failure} <- outcomes, do: failure)
        }}
-    end
-  end
-
-  defp tables(catalog) do
-    with {:ok, datasets} <- Catalog.list_datasets(catalog) do
-      Enum.reduce_while(datasets, {:ok, []}, &collect_tables(catalog, &1, &2))
-    end
-  end
-
-  defp collect_tables(catalog, dataset, {:ok, acc}) do
-    case Catalog.list_tables(catalog, dataset) do
-      {:ok, tables} -> {:cont, {:ok, acc ++ Enum.map(tables, &{dataset, &1})}}
-      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 

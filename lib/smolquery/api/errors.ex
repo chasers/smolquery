@@ -71,6 +71,28 @@ defmodule Smolquery.Api.Errors do
     send_error(conn, 400, "INVALID_ARGUMENT", "invalid parameter: #{name}")
   end
 
+  def from_reason(conn, {:invalid_retention, _retention}) do
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      ~s|retention must be null or {"column": <name>, "ttlMs": <positive integer>}|
+    )
+  end
+
+  def from_reason(conn, {:unknown_retention_column, column}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "retention column does not exist: #{column}")
+  end
+
+  def from_reason(conn, {:retention_column_not_temporal, column, _type}) do
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      "retention column must be a timestamp or date: #{column}"
+    )
+  end
+
   def from_reason(conn, _reason) do
     send_error(conn, 500, "INTERNAL", "internal error")
   end
