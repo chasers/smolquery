@@ -524,10 +524,42 @@ CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurren
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs     # bigger claims, bigger merges
 ```
 
+`bench/results/` holds the last recorded run of each script — the tables verbatim,
+the machine they came from, and the decisions they settled. Re-run a script after a
+DuckDB, DuckLake, Explorer, or OTP upgrade and overwrite its file there, so the
+next comparison has something to diff against.
+
 `bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
 across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
-fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
-Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
+fsyncs behind an ack (D3), and locates the one-table inline-flush ceiling (D6) in
+five parts — a writer sweep to 1024 against a light and a heavy schema, the Polars
+encode timed in isolation, the fsync toggle re-run at the top of the sweep, a
+`flush_max_bytes` sweep, and a partition proxy running P independent buffers over
+one workload. Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`,
+`WRITERS_PER_BUFFER`. Sealing is disabled throughout — this script measures group
+commit, `bench/sealer.exs` measures sealing.
+
+Every D6 section runs three schemas, because the encode is what it investigates and
+cost-per-row is the variable that moves everything else: `light` (2 columns,
+165 B/row), `heavy` (4 columns with a `Decimal`, 254 B/row), and `huge` (20 columns
+spanning all seven logical types, 867 B/row — the shape of a real event table).
+`huge` is 5.3× `light`'s bytes but 12× its encode time, since per-column overhead
+dominates payload size.
+
+One table saturates at **2.19M rows/s light, 1.08M heavy, 280K huge**, set by the
+encode plus the write path around it. None of the configured bounds sets it:
+`flush_max_bytes` from 8 MB to 512 MB moves rows-per-flush 8–27× and throughput
+5–12%, non-monotonically — it decides how rows are *packed* into flushes, not how
+many get through.
+
+The number to design against is ack latency, and it has two regimes. Below
+saturation, `p50 = flush_interval_ms + ~5 ms` regardless of load — group commit's
+whole promise. At saturation, `p50 = outstanding rows ÷ throughput` (Little's Law)
+and **`flush_interval_ms` drops out entirely**. So at the default config a
+20-column table returns a **2.01 second p50 ack**. Eight independent buffers reach
+6.68M rows/s — 3.11× light, 4.09× huge, ordered by how encode-bound each schema is
+— which is the case for partitioned writes (PL-6). Partitioning divides the overload
+factor but does not define the cliff; bounding ack latency needs backpressure (T-56).
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the
@@ -536,18 +568,19 @@ defaults to snappy while segments are written with zstd, so sealing silently mad
 data 2.85× larger until the codec was matched. No correctness test could catch
 that.
 
-Each script's `@moduledoc` records what it measures and what it concluded. Two
-results worth knowing before writing a read path:
+Each script's `@moduledoc` records what it measures and what it concluded; the
+numbers behind those conclusions are in `bench/results/`. Two results worth knowing
+before writing a read path:
 
 - **A large result must not come back as Elixir terms.** `Smolquery.Engine.Result`
   converts Arrow row by row, which costs roughly a kilobyte and 2 µs per row — 5M
-  rows take 11.5 s and 4.8 GiB, against 307 ms and 8.7 MiB left in Arrow. It is
+  rows take 11.2 s and 3.4 GiB, against 390 ms and 11.5 MiB left in Arrow. It is
   the right shape for catalog and control-plane queries, and a trap for user
   results, which is what `Engine.frame/3` and the `:max_result_rows` ceiling are
   for.
 - **One connection serializes.** `Engine.Connection` is a per-query mutex, so
   query throughput is flat in client count. Eight connections serve eight
-  concurrent clients about 2.9× faster than one does.
+  concurrent clients about 3.5× faster than one does.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for quality gates and the project
 tracker, and [`AGENTS.md`](AGENTS.md) for codebase tooling.
