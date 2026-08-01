@@ -13,6 +13,22 @@ defmodule Smolquery.StorageService.SealerTest do
 
   defp claim(ids), do: %{ids: ids, keys: ["analytics/events/sealed.parquet"]}
 
+  defp run_attempt(name, table_ref) do
+    Sealer.seal_ready(name, table_ref, claim(["a"]))
+    assert_receive {:sealing, ^table_ref, _claim, attempt}
+    HandoffProbe.release(attempt)
+
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  defp run_attempt(name, table_ref, result) do
+    Sealer.seal_ready(name, table_ref, claim(["a"]))
+    assert_receive {:sealing, ^table_ref, _claim, attempt}
+    HandoffProbe.release(attempt, result)
+
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
   setup context do
     name = :"sealer_#{:erlang.unique_integer([:positive])}"
 
@@ -140,6 +156,50 @@ defmodule Smolquery.StorageService.SealerTest do
     assert_receive {:sealing, @events, %{ids: ["a"]}, retry}
 
     HandoffProbe.release(retry)
+  end
+
+  @tag :tmp_dir
+  @tag result: {:error, :handoff_refused}
+  test "counts consecutive failures per table", %{name: name} do
+    capture_log(fn ->
+      run_attempt(name, @events)
+      run_attempt(name, @events)
+      run_attempt(name, @clicks)
+    end)
+
+    assert Sealer.failures(name) == %{@events => 2, @clicks => 1}
+  end
+
+  @tag :tmp_dir
+  @tag result: {:error, :handoff_refused}
+  test "clears a table's failures once an attempt succeeds", %{name: name} do
+    capture_log(fn -> run_attempt(name, @events) end)
+    assert Sealer.failures(name) == %{@events => 1}
+
+    run_attempt(name, @events, :ok)
+    assert Sealer.failures(name) == %{}
+  end
+
+  @tag :tmp_dir
+  @tag result: :crash
+  test "counts a crashed attempt as a failure", %{name: name} do
+    capture_log(fn -> run_attempt(name, @events) end)
+
+    assert Sealer.failures(name) == %{@events => 1}
+  end
+
+  @tag :tmp_dir
+  @tag result: {:error, :handoff_refused}
+  test "escalates to an error once a table stops looking transient", %{name: name} do
+    log = capture_log(fn -> Enum.each(1..4, fn _ -> run_attempt(name, @events) end) end)
+
+    refute log =~ "may never seal"
+
+    log = capture_log(fn -> run_attempt(name, @events) end)
+
+    assert log =~ "[error]"
+    assert log =~ "5 consecutive failures"
+    assert log =~ "may never seal"
   end
 
   @tag :tmp_dir

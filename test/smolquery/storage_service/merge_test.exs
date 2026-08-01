@@ -34,6 +34,8 @@ defmodule Smolquery.StorageService.MergeTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
+  alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
@@ -64,11 +66,24 @@ defmodule Smolquery.StorageService.MergeTest do
 
     on_exit(fn -> BufferService.Runtime.delete(buffer) end)
 
+    start_supervised!(
+      {DuckLake,
+       name: Runtime.catalog_engine(storage),
+       metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
+       data_path: Path.join(context.tmp_dir, "ducklake")},
+      id: Runtime.catalog_engine(storage)
+    )
+
+    catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
+    :ok = Catalog.create_dataset(catalog, "analytics")
+    :ok = Catalog.create_table(catalog, @table, Map.get(context, :declares, schema()))
+
     runtime =
       Runtime.new(
         name: storage,
         dir: Path.join(context.tmp_dir, "sealed"),
-        buffer_base_url: HotServer.base_url(buffer)
+        buffer_base_url: HotServer.base_url(buffer),
+        catalog: catalog
       )
 
     start_supervised!({Engine, name: Runtime.engine(storage), extensions: [:httpfs]})
@@ -77,6 +92,14 @@ defmodule Smolquery.StorageService.MergeTest do
   end
 
   defp claim(ids, keys \\ @keys), do: %{ids: ids, keys: keys}
+
+  defp columns_in(runtime, segment, projection) do
+    Runtime.engine(runtime.name)
+    |> Engine.query!("SELECT #{projection} FROM read_parquet($1) ORDER BY id", [
+      Store.location(runtime.store, segment.key)
+    ])
+    |> Map.fetch!(:rows)
+  end
 
   defp rows_in(runtime, segment) do
     Runtime.engine(runtime.name)
@@ -130,6 +153,7 @@ defmodule Smolquery.StorageService.MergeTest do
     assert rows_in(runtime, segment) == [1, 2]
   end
 
+  @tag declares: Schema.new!([{"id", :int64}, {"name", :string}])
   test "unions differing-but-compatible schemas", %{buffer: buffer, runtime: runtime} do
     narrow = %{schema: Schema.new!([{"id", :int64}]), rows: [%{"id" => 1}]}
 
@@ -144,14 +168,67 @@ defmodule Smolquery.StorageService.MergeTest do
     assert {:ok, segment} =
              Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
 
-    result =
-      Engine.query!(
-        Runtime.engine(runtime.name),
-        "SELECT id, name FROM read_parquet($1) ORDER BY id",
-        [Store.location(runtime.store, segment.key)]
-      )
+    assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, "two"]]
+  end
 
-    assert result.rows == [[1, nil], [2, "two"]]
+  @tag declares: Schema.new!([{"id", :int64}, {"name", :string}])
+  test "seals the catalog's columns even when no input carries one", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    {:ok, first} = Client.write_batch(buffer, @table, batch(1..1))
+    {:ok, second} = Client.write_batch(buffer, @table, batch(2..2))
+
+    assert {:ok, segment} =
+             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+
+    assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, nil]]
+  end
+
+  @tag declares: Schema.new!([{"name", :string}, {"id", :int64}])
+  test "seals in the catalog's column order, not the inputs'", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    batch = %{
+      schema: Schema.new!([{"id", :int64}, {"name", :string}]),
+      rows: [%{"id" => 1, "name" => "one"}]
+    }
+
+    {:ok, ack} = Client.write_batch(buffer, @table, batch)
+
+    assert {:ok, segment} = Merge.run(runtime, @table, claim([ack.segment_id]))
+    assert columns_in(runtime, segment, "*") == [["one", 1]]
+  end
+
+  test "refuses an input column the catalog does not declare", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    undeclared = %{
+      schema: Schema.new!([{"id", :int64}, {"name", :string}]),
+      rows: [%{"id" => 1, "name" => "one"}]
+    }
+
+    {:ok, ack} = Client.write_batch(buffer, @table, undeclared)
+
+    assert Merge.run(runtime, @table, claim([ack.segment_id])) ==
+             {:error, {:undeclared_columns, ["name"]}}
+
+    assert {:ok, []} = Store.list(runtime.store, "analytics/events")
+  end
+
+  test "reports a table the catalog does not hold", %{buffer: buffer, runtime: runtime} do
+    {:ok, ack} = Client.write_batch(buffer, {"analytics", "absent"}, batch(1..1))
+
+    assert {:error, _reason} =
+             Merge.run(
+               runtime,
+               {"analytics", "absent"},
+               claim([ack.segment_id], [
+                 "analytics/absent/01KYWPEEGAM8FQVQS5S2QF26SV.parquet"
+               ])
+             )
   end
 
   test "skips an input the manifest no longer lists", %{buffer: buffer, runtime: runtime} do
@@ -209,14 +286,17 @@ defmodule Smolquery.StorageService.MergeTest do
              {:error, :no_inputs}
   end
 
-  test "leaves nothing behind when the merge fails", %{buffer: buffer, runtime: runtime} do
+  test "leaves nothing behind when an input cannot be read", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
     {:ok, ack} = Client.write_batch(buffer, @table, batch(1..1))
     {:ok, [entry]} = Client.hot_manifest(buffer, @table)
 
     {:ok, buffer_runtime} = BufferService.Runtime.fetch(buffer)
     :ok = File.rm!(Store.location(buffer_runtime.store, entry.key))
 
-    assert {:error, {:put_failed, _key, {:merge_failed, message}}} =
+    assert {:error, {:merge_failed, message}} =
              Merge.run(runtime, @table, claim([ack.segment_id]))
 
     assert message =~ "404"

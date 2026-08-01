@@ -210,6 +210,37 @@ defmodule Smolquery.Schema do
     end
   end
 
+  @doc """
+  The `SELECT` list that projects a relation carrying `columns` onto this schema.
+
+  Every declared column appears, in the schema's own order and cast to the type
+  the schema declares; a declared column `columns` does not carry becomes a typed
+  `NULL`. A column not declared here is dropped, so callers that must not lose one
+  check `names/1` first.
+
+  This is what lets a writer produce a file matching a schema it does not control
+  — the merge projects a claim's inputs onto the catalog's declared columns, so a
+  claim whose micro-segments all predate an added column still seals to a file
+  the catalog accepts.
+  """
+  @spec projection(t(), [String.t()]) :: {:ok, String.t()} | {:error, term()}
+  def projection(%__MODULE__{fields: fields}, columns) do
+    available = MapSet.new(columns)
+
+    with {:ok, expressions} <- map_fields(fields, &projected_column(&1, available)) do
+      {:ok, Enum.join(expressions, ", ")}
+    end
+  end
+
+  defp projected_column(%Field{} = field, available) do
+    with {:ok, type} <- duckdb_type(field.type) do
+      name = Identifier.quote_name!(field.name)
+      source = if MapSet.member?(available, field.name), do: name, else: "NULL"
+
+      {:ok, "CAST(#{source} AS #{type}) AS #{name}"}
+    end
+  end
+
   defp build_fields(specs) do
     map_fields(specs, fn
       %Field{} = field -> {:ok, field}

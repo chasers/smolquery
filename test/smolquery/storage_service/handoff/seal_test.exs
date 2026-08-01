@@ -107,6 +107,14 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
   defp seal(context, claim),
     do: Handoff.seal(context.runtime.handoff, context.runtime, @table, claim)
 
+  defp add_column(context, definition) do
+    context.runtime.name
+    |> Runtime.catalog_engine()
+    |> Engine.query!(~s|ALTER TABLE lake."analytics"."events" ADD COLUMN #{definition}|)
+
+    :ok
+  end
+
   defp visible_ids(context, snapshot \\ :current) do
     {:ok, sealed} = Catalog.segments(context.catalog, @table, snapshot)
     {:ok, entries} = Client.hot_manifest(context.buffer, @table)
@@ -175,6 +183,38 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
 
       assert {:ok, entry} = HotManifest.entry(context.buffer_runtime.manifest, @table, later)
       assert entry.sealed_at == nil
+    end
+  end
+
+  describe "a column added after the claim's inputs were written" do
+    test "seals to the catalog's schema instead of retrying a file it will reject", context do
+      ids = [write(context.buffer, 1..2), write(context.buffer, 3..3)]
+      claim = freeze_claim(context, ids)
+
+      add_column(context, ~s|"name" VARCHAR|)
+
+      assert seal(context, claim) == :ok
+      assert sealed_count(context) == 1
+      assert visible_ids(context) == [1, 2, 3]
+
+      assert {:ok, entries} = Client.hot_manifest(context.buffer, @table)
+      assert Enum.all?(entries, &(&1.sealed_at != nil))
+    end
+
+    test "the added column reads back as NULL for the rows that predate it", context do
+      claim = freeze_claim(context, [write(context.buffer, 1..2)])
+
+      add_column(context, ~s|"name" VARCHAR|)
+
+      assert seal(context, claim) == :ok
+      assert {:ok, [sealed]} = Catalog.segments(context.catalog, @table, :current)
+
+      result =
+        context.runtime.name
+        |> Runtime.engine()
+        |> Engine.query!("SELECT id, name FROM read_parquet($1) ORDER BY id", [sealed])
+
+      assert result.rows == [[1, nil], [2, nil]]
     end
   end
 
