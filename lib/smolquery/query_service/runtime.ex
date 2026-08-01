@@ -62,6 +62,15 @@ defmodule Smolquery.QueryService.Runtime do
   configuration names, resolved the same way `job_bootstrap` is: a deployment
   passing a `%Smolquery.Catalog{}` handle gets no history unless it passes
   `history_metadata` too, and `history_metadata: nil` switches history off.
+
+  `lockdown` (PL-8 D7) is whether each job engine, after planning, disables
+  DuckDB's external access for the user's SQL — leaving exactly
+  `allowed_directories` plus the plan's own micro-segment URLs readable. On
+  by default: SQL arriving over the HTTP API must not read arbitrary files.
+  `allowed_directories` defaults to the node's `:data_dir` (expanded) plus
+  whatever the catalog configuration names; a deployment whose sealed
+  segments live elsewhere must say so here, or its queries will honestly
+  fail to read them.
   """
 
   alias Smolquery.Catalog
@@ -72,6 +81,8 @@ defmodule Smolquery.QueryService.Runtime do
     :catalog,
     :catalog_opts,
     :history_metadata,
+    :allowed_directories,
+    lockdown: true,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
@@ -88,6 +99,8 @@ defmodule Smolquery.QueryService.Runtime do
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           history_metadata: String.t() | nil,
+          allowed_directories: [String.t()],
+          lockdown: boolean(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
@@ -100,6 +113,7 @@ defmodule Smolquery.QueryService.Runtime do
         }
 
   @limits [
+    :lockdown,
     :buffer_name,
     :buffer_base_url,
     :buffer_timeout_ms,
@@ -130,7 +144,9 @@ defmodule Smolquery.QueryService.Runtime do
       catalog_opts: catalog_opts,
       job_bootstrap: Keyword.get_lazy(config, :job_bootstrap, fn -> bootstrap(catalog_opts) end),
       history_metadata:
-        Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end)
+        Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
+      allowed_directories:
+        Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end)
     }
     |> struct!(Keyword.take(config, @limits))
   end
@@ -197,5 +213,23 @@ defmodule Smolquery.QueryService.Runtime do
       "sqlite:" <> _path = metadata -> metadata
       _absent_or_not_sqlite -> nil
     end
+  end
+
+  defp allowed_directories(catalog_opts) do
+    merged =
+      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts || [])
+
+    [
+      Application.get_env(:smolquery, :data_dir),
+      Keyword.get(merged, :data_path),
+      case Keyword.get(merged, :metadata) do
+        "sqlite:" <> path -> Path.dirname(path)
+        _not_a_file -> nil
+      end,
+      ".tmp"
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
   end
 end

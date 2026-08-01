@@ -86,7 +86,12 @@ defmodule Smolquery.StorageService.MergeTest do
         catalog: catalog
       )
 
-    start_supervised!({Engine, name: Runtime.engine(storage), extensions: [:httpfs]})
+    start_supervised!(
+      {Engine,
+       name: Runtime.engine(storage),
+       extensions: [:httpfs],
+       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]}
+    )
 
     %{buffer: buffer, runtime: runtime}
   end

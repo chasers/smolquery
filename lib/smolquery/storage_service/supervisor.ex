@@ -57,12 +57,23 @@ defmodule Smolquery.StorageService.Supervisor do
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
         [
-          {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
+          {Engine,
+           name: Runtime.engine(runtime.name),
+           extensions: runtime.engine_extensions,
+           statements: hot_tier_secret(runtime)},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
           {GC, runtime}
         ]
 
     Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  defp hot_tier_secret(%Runtime{} = runtime) do
+    if :httpfs in runtime.engine_extensions do
+      [Smolquery.InternalSecret.create_secret_statement(runtime.buffer_base_url)]
+    else
+      []
+    end
   end
 end

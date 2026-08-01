@@ -54,6 +54,7 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
        name: @job,
        extensions: [:ducklake, :httpfs],
        statements: [
+         Smolquery.InternalSecret.create_secret_statement("http://"),
          DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
        ]}
     )

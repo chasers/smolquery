@@ -17,6 +17,8 @@ defmodule Smolquery.Application do
 
   @impl true
   def start(_type, _args) do
+    Smolquery.InternalSecret.ensure()
+
     children = Enum.flat_map(Roles.enabled(), &subtree/1)
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)

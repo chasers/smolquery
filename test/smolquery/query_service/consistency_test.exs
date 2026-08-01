@@ -85,7 +85,12 @@ defmodule Smolquery.QueryService.ConsistencyTest do
         catalog: catalog
       )
 
-    start_supervised!({Engine, name: StorageRuntime.engine(storage), extensions: [:httpfs]})
+    start_supervised!(
+      {Engine,
+       name: StorageRuntime.engine(storage),
+       extensions: [:httpfs],
+       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]}
+    )
 
     start_supervised!(
       {QueryService.Supervisor,
@@ -94,6 +99,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
        buffer_name: buffer,
        buffer_base_url: HotServer.base_url(buffer),
        engine_extensions: [:httpfs],
+       allowed_directories: [context.tmp_dir],
        job_bootstrap: [
          DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
        ]},
@@ -189,6 +195,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
        name: reader,
        extensions: [:ducklake, :httpfs],
        statements: [
+         Smolquery.InternalSecret.create_secret_statement("http://"),
          DuckLake.attach_statement(
            DuckLake.default_catalog(),
            context.metadata,

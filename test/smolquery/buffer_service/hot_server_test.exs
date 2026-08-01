@@ -40,7 +40,15 @@ defmodule Smolquery.BufferService.HotServerTest do
     name
   end
 
-  defp get(name, path), do: HotServer.call(conn(:get, path), name)
+  defp authed(conn) do
+    Plug.Conn.put_req_header(
+      conn,
+      Smolquery.InternalSecret.header(),
+      Smolquery.InternalSecret.value()
+    )
+  end
+
+  defp get(name, path), do: HotServer.call(authed(conn(:get, path)), name)
 
   defp segment_path(id), do: "/v1/datasets/analytics/tables/events/segments/#{id}.parquet"
 
@@ -49,7 +57,8 @@ defmodule Smolquery.BufferService.HotServerTest do
       name = start_buffer_service(context)
       {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
 
-      response = HotServer.call(conn(:get, "http://buffer.internal:9999" <> @manifest_path), name)
+      response =
+        HotServer.call(authed(conn(:get, "http://buffer.internal:9999" <> @manifest_path)), name)
 
       assert response.status == 200
       assert [entry] = JSON.decode!(response.resp_body)
@@ -165,7 +174,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       name = start_buffer_service(context)
       {:ok, ack} = Client.write_batch(name, @table, batch(1..2))
 
-      response = HotServer.call(conn(:head, segment_path(ack.segment_id)), name)
+      response = HotServer.call(authed(conn(:head, segment_path(ack.segment_id))), name)
 
       assert response.status == 200
       assert {"accept-ranges", "bytes"} in response.resp_headers
@@ -175,7 +184,10 @@ defmodule Smolquery.BufferService.HotServerTest do
 
   describe "ranged reads" do
     defp get_range(name, path, range) do
-      HotServer.call(conn(:get, path) |> Plug.Conn.put_req_header("range", range), name)
+      HotServer.call(
+        conn(:get, path) |> Plug.Conn.put_req_header("range", range) |> authed(),
+        name
+      )
     end
 
     setup context do
@@ -262,11 +274,24 @@ defmodule Smolquery.BufferService.HotServerTest do
         |> Plug.Conn.put_req_header("x-forwarded-proto", "https")
         |> Plug.Conn.put_req_header("x-forwarded-host", "hot.example.com")
         |> Plug.Conn.put_req_header("x-forwarded-port", "443")
+        |> authed()
         |> HotServer.call(name)
 
       assert [entry] = JSON.decode!(response.resp_body)
       assert entry["url"] == "https://hot.example.com:443" <> segment_path(ack.segment_id)
     end
+  end
+
+  test "401s a request without the internal secret, before routing", context do
+    name = start_buffer_service(context)
+
+    assert HotServer.call(conn(:get, @manifest_path), name).status == 401
+
+    wrong =
+      conn(:get, @manifest_path)
+      |> Plug.Conn.put_req_header(Smolquery.InternalSecret.header(), "wrong")
+
+    assert HotServer.call(wrong, name).status == 401
   end
 
   test "404s an unmatched route", context do
@@ -280,13 +305,23 @@ defmodule Smolquery.BufferService.HotServerTest do
 
     test "a written, acked batch is queryable through httpfs immediately", context do
       engine_name = :"#{__MODULE__}.Engine#{:erlang.unique_integer([:positive])}"
-      start_supervised!({Engine, name: engine_name, extensions: [:httpfs]})
+
+      start_supervised!(
+        {Engine,
+         name: engine_name,
+         extensions: [:httpfs],
+         statements: [Smolquery.InternalSecret.create_secret_statement("http://")]}
+      )
 
       name = start_buffer_service(context)
       {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
 
       manifest_url = HotServer.base_url(name) <> @manifest_path
-      %{status: 200, body: [entry]} = Req.get!(manifest_url)
+
+      %{status: 200, body: [entry]} =
+        Req.get!(manifest_url,
+          headers: [{Smolquery.InternalSecret.header(), Smolquery.InternalSecret.value()}]
+        )
 
       assert entry["id"] == ack.segment_id
 

@@ -50,7 +50,9 @@ defmodule Smolquery.BufferService.HotClient do
   defp url(base, path), do: String.trim_trailing(base, "/") <> path
 
   defp get(url, timeout_ms) do
-    case Req.get(url, receive_timeout: timeout_ms, retry: false) do
+    headers = [{Smolquery.InternalSecret.header(), Smolquery.InternalSecret.value()}]
+
+    case Req.get(url, headers: headers, receive_timeout: timeout_ms, retry: false) do
       {:ok, %Req.Response{status: 200, body: entries}} when is_list(entries) -> {:ok, entries}
       {:ok, %Req.Response{status: 200, body: body}} -> {:error, {:manifest_malformed, body}}
       {:ok, %Req.Response{status: status}} -> {:error, {:manifest_status, status}}

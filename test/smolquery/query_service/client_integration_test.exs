@@ -54,6 +54,7 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
        catalog: catalog,
        buffer_base_url: HotServer.base_url(buffer),
        engine_extensions: [:httpfs],
+       allowed_directories: [context.tmp_dir],
        job_bootstrap: [
          DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
        ]},
