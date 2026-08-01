@@ -7,7 +7,7 @@ defmodule Smolquery.RolesTest do
 
   describe "all/0" do
     test "lists every subtree in pipeline order, front door first" do
-      assert Roles.all() == [:api, :ingest, :buffer, :storage, :query]
+      assert Roles.all() == [:api, :ingest, :buffer, :storage, :query, :web]
     end
   end
 

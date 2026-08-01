@@ -12,3 +12,5 @@ bench/results/
 doc/
 Dockerfile
 README.md
+priv/static/assets/
+assets/node_modules/

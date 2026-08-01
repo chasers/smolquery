@@ -17,6 +17,9 @@ RUN mix deps.compile
 COPY lib lib
 COPY config/runtime.exs config/
 RUN mix compile
+COPY assets assets
+COPY priv/static priv/static
+RUN mix assets.deploy
 RUN mix run --no-start -e 'Adbc.download_driver!(:duckdb)'
 RUN mix release
 
@@ -33,7 +36,7 @@ ENV HOME=/data \
     SMOLQUERY_DATA_DIR=/data
 
 VOLUME /data
-EXPOSE 4000
+EXPOSE 4000 4002
 
 ENTRYPOINT ["/app/bin/smolquery"]
 CMD ["start"]

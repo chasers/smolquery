@@ -20,6 +20,42 @@ config :smolquery, Smolquery.Api,
   ip: {127, 0, 0, 1},
   port: 4000
 
+config :smolquery, SmolqueryWeb.Endpoint,
+  url: [host: "localhost"],
+  adapter: Bandit.PhoenixAdapter,
+  http: [ip: {127, 0, 0, 1}, port: 4002],
+  render_errors: [
+    formats: [html: SmolqueryWeb.ErrorHTML, json: SmolqueryWeb.ErrorJSON],
+    layout: false
+  ],
+  pubsub_server: Smolquery.PubSub,
+  live_view: [signing_salt: "M6MLueJD"],
+  server: true
+
+config :phoenix, :json_library, JSON
+
+config :phoenix_live_view, root_tag_attribute: "phx-r"
+
+config :esbuild,
+  version: "0.25.4",
+  smolquery: [
+    args:
+      ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
+    cd: Path.expand("../assets", __DIR__),
+    env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+  ]
+
+config :tailwind,
+  version: "4.3.0",
+  smolquery: [
+    args: ~w(
+      --input=assets/css/app.css
+      --output=priv/static/assets/css/app.css
+    ),
+    cd: Path.expand("..", __DIR__),
+    env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+  ]
+
 config :smolquery, Smolquery.IngestService, schema_cache_ttl_ms: 60_000
 
 config :smolquery, Smolquery.BufferService,
