@@ -20,6 +20,8 @@ config :smolquery, Smolquery.Api,
   ip: {127, 0, 0, 1},
   port: 4000
 
+config :smolquery, Smolquery.IngestService, schema_cache_ttl_ms: 60_000
+
 config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,

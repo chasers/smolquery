@@ -144,6 +144,60 @@ defmodule Smolquery.SchemaTest do
     end
   end
 
+  describe "value_from_json/2" do
+    test "coerces what the insert path accepts" do
+      assert Schema.value_from_json(:int64, 42) == {:ok, 42}
+      assert Schema.value_from_json(:int64, "9007199254740993") == {:ok, 9_007_199_254_740_993}
+      assert Schema.value_from_json(:float64, 1.5) == {:ok, 1.5}
+      assert Schema.value_from_json(:float64, 2) == {:ok, 2.0}
+      assert Schema.value_from_json(:float64, "1.25") == {:ok, 1.25}
+      assert Schema.value_from_json(:string, "hi") == {:ok, "hi"}
+      assert Schema.value_from_json(:bool, true) == {:ok, true}
+      assert Schema.value_from_json(:date, "2026-08-01") == {:ok, ~D[2026-08-01]}
+
+      assert Schema.value_from_json(:timestamp, "2026-08-01T10:00:00") ==
+               {:ok, ~N[2026-08-01 10:00:00]}
+
+      assert Schema.value_from_json({:numeric, 38, 2}, "12.50") == {:ok, Decimal.new("12.50")}
+      assert Schema.value_from_json({:numeric, 38, 2}, 12) == {:ok, Decimal.new(12)}
+      assert Schema.value_from_json({:numeric, 38, 2}, 12.5) == {:ok, Decimal.from_float(12.5)}
+    end
+
+    test "converts an offset timestamp to naive UTC" do
+      assert Schema.value_from_json(:timestamp, "2026-08-01T10:00:00+02:00") ==
+               {:ok, ~N[2026-08-01 08:00:00]}
+
+      assert Schema.value_from_json(:timestamp, "2026-08-01T10:00:00Z") ==
+               {:ok, ~N[2026-08-01 10:00:00]}
+    end
+
+    test "nil passes through for every type" do
+      for type <- @logical_types do
+        assert Schema.value_from_json(type, nil) == {:ok, nil}
+      end
+    end
+
+    test "rejects what it cannot coerce" do
+      assert Schema.value_from_json(:int64, 1.5) == {:error, {:invalid_value, :int64, 1.5}}
+
+      assert Schema.value_from_json(:int64, "12abc") ==
+               {:error, {:invalid_value, :int64, "12abc"}}
+
+      assert Schema.value_from_json(:int64, true) == {:error, {:invalid_value, :int64, true}}
+      assert Schema.value_from_json(:string, 1) == {:error, {:invalid_value, :string, 1}}
+      assert Schema.value_from_json(:bool, "true") == {:error, {:invalid_value, :bool, "true"}}
+
+      assert Schema.value_from_json(:date, "01/02/2026") ==
+               {:error, {:invalid_value, :date, "01/02/2026"}}
+
+      assert Schema.value_from_json(:timestamp, "yesterday") ==
+               {:error, {:invalid_value, :timestamp, "yesterday"}}
+
+      assert Schema.value_from_json({:numeric, 38, 2}, "12.5x") ==
+               {:error, {:invalid_value, {:numeric, 38, 2}, "12.5x"}}
+    end
+  end
+
   describe "explorer_dtypes/1" do
     test "pairs column names with dtypes in schema order" do
       schema = Schema.new!([{"id", :int64}, {"amount", {:numeric, 12, 3}}])

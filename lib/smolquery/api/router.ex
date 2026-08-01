@@ -14,12 +14,13 @@ defmodule Smolquery.Api.Router do
 
   v1 surface so far:
 
-      GET  /healthz                         liveness, no auth
-      GET  /v1/datasets                     list datasets
-      POST /v1/datasets                     create a dataset
-      GET  /v1/datasets/:ds/tables          list a dataset's tables
-      POST /v1/datasets/:ds/tables          create a table
-      GET  /v1/datasets/:ds/tables/:table   a table's schema
+      GET  /healthz                                liveness, no auth
+      GET  /v1/datasets                            list datasets
+      POST /v1/datasets                            create a dataset
+      GET  /v1/datasets/:ds/tables                 list a dataset's tables
+      POST /v1/datasets/:ds/tables                 create a table
+      GET  /v1/datasets/:ds/tables/:table          a table's schema
+      POST /v1/datasets/:ds/tables/:table/insert   streaming insert
 
   Failures speak `Smolquery.Api.Errors`' envelope, and nothing else — including
   what `Plug.Parsers` raises for a body that is not JSON, via
@@ -32,6 +33,7 @@ defmodule Smolquery.Api.Router do
 
   alias Smolquery.Api.Datasets
   alias Smolquery.Api.Errors
+  alias Smolquery.Api.Inserts
   alias Smolquery.Api.Runtime
   alias Smolquery.Api.Tables
 
@@ -75,6 +77,10 @@ defmodule Smolquery.Api.Router do
 
   get "/v1/datasets/:dataset/tables/:table" do
     Tables.get(conn, dataset, table)
+  end
+
+  post "/v1/datasets/:dataset/tables/:table/insert" do
+    Inserts.insert(conn, dataset, table)
   end
 
   match _ do

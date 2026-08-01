@@ -31,13 +31,22 @@ defmodule Smolquery.Api.Runtime do
   alias Smolquery.Catalog
 
   @enforce_keys [:name, :api_key, :catalog]
-  defstruct [:name, :api_key, :catalog, :catalog_opts, ip: {127, 0, 0, 1}, port: 4000]
+  defstruct [
+    :name,
+    :api_key,
+    :catalog,
+    :catalog_opts,
+    ingest_name: Smolquery.IngestService,
+    ip: {127, 0, 0, 1},
+    port: 4000
+  ]
 
   @type t :: %__MODULE__{
           name: atom(),
           api_key: String.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
+          ingest_name: atom(),
           ip: :inet.socket_address(),
           port: :inet.port_number()
         }
@@ -62,7 +71,7 @@ defmodule Smolquery.Api.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ip, :port]))
+    |> struct!(Keyword.take(config, [:ingest_name, :ip, :port]))
   end
 
   use Smolquery.Runtime
