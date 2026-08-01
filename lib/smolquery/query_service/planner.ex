@@ -34,6 +34,12 @@ defmodule Smolquery.QueryService.Planner do
   Hot rows have no snapshot: an unclaimed micro-segment is always included.
   That is read-your-writes, not an inconsistency.
 
+  Entries that survive the membership rule then pass through
+  `Smolquery.QueryService.Pruner`: a micro-segment whose min-max stats prove
+  the query's WHERE conjuncts unsatisfiable is dropped before its URL is
+  built, saving DuckDB an HTTP footer read per file. The sealed tier prunes
+  itself — DuckLake collects stats at registration (verified in PL-2).
+
   ## Both tiers project onto the catalog's schema
 
   Micro-segments written before a column was added lack it; `UNION ALL BY
@@ -58,6 +64,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Plan
+  alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
 
   @doc """
@@ -70,11 +77,13 @@ defmodule Smolquery.QueryService.Planner do
   """
   @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
   def plan(%Runtime{} = runtime, connection, sql) do
-    with {:ok, refs} <- table_refs(connection, sql),
+    with {:ok, ast} <- serialize(connection, sql),
+         {:ok, statement} <- gate(ast),
+         {:ok, refs} <- refs(statement),
          {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
          {:ok, tables} <- resolve(runtime, refs, snapshot),
          {:ok, manifests} <- manifests(runtime, refs) do
-      {:ok, build(sql, snapshot, refs, tables, manifests)}
+      {:ok, build(sql, snapshot, refs, tables, manifests, Pruner.conjuncts(statement, refs))}
     end
   end
 
@@ -215,10 +224,16 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, snapshot, refs, tables, manifests) do
+  defp build(sql, snapshot, refs, tables, manifests, conjuncts) do
     hot =
       Map.new(refs, fn ref ->
-        {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
+        surviving =
+          Enum.filter(
+            manifests[ref],
+            &(include?(&1, tables[ref].sealed) and Pruner.keep?(&1, conjuncts[ref] || []))
+          )
+
+        {ref, surviving}
       end)
 
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)

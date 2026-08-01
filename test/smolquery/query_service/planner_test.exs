@@ -224,6 +224,29 @@ defmodule Smolquery.QueryService.PlannerTest do
                {:error, {:unknown_table, {"analytics", "missing"}}}
     end
 
+    test "an entry whose stats cannot match the WHERE is pruned from the union" do
+      stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
+      runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events WHERE id > 100")
+
+      assert [%{"id" => "01B"}] = plan.hot[@table]
+      [_schema, view] = plan.statements
+      assert view =~ "01B.parquet"
+      refute view =~ "01A.parquet"
+    end
+
+    test "stats that leave a chance keep their entry" do
+      stats = %{"id" => %{"min" => 1, "max" => 200, "null_count" => 0}}
+      runtime = runtime([entry("01A", %{"stats" => stats})])
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events WHERE id > 100")
+
+      assert [%{"id" => "01A"}] = plan.hot[@table]
+    end
+
     test "an unreachable hot tier fails the plan, not the sealed half of an answer" do
       runtime =
         Runtime.new(
