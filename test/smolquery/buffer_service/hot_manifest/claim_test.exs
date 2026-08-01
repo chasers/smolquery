@@ -60,29 +60,46 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
              |> Enum.all?(&(&1.claim_keys == @keys))
     end
 
-    test "takes only unclaimed ids, so a live claim cannot be grown", %{manifest: manifest} do
+    test "refuses a second claim while one is live, so a claim cannot be grown", %{
+      manifest: manifest
+    } do
       first = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [first.id], @keys)
 
       second = add(manifest, @table)
       grown = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SW.parquet"]
 
-      assert {:ok, claim} = HotManifest.claim(manifest, @table, [first.id, second.id], grown)
-      assert claim.ids == [second.id]
+      assert HotManifest.claim(manifest, @table, [first.id, second.id], grown) ==
+               {:error, :claim_outstanding}
 
-      assert {:ok, entry} = HotManifest.entry(manifest, @table, first.id)
-      assert entry.claim_keys == @keys
+      assert {:ok, first_entry} = HotManifest.entry(manifest, @table, first.id)
+      assert first_entry.claim_keys == @keys
+
+      assert {:ok, second_entry} = HotManifest.entry(manifest, @table, second.id)
+      assert second_entry.claim_keys == []
     end
 
-    test "refuses a claim with nothing left to freeze", %{manifest: manifest} do
+    test "refuses to re-freeze a live claim", %{manifest: manifest} do
       entry = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
 
       assert HotManifest.claim(manifest, @table, [entry.id], @keys) ==
-               {:error, :nothing_to_claim}
+               {:error, :claim_outstanding}
     end
 
-    test "skips a sealed id", %{manifest: manifest} do
+    test "refuses a set it can only partially freeze", %{manifest: manifest} do
+      sealed = add(manifest, @table)
+      :ok = HotManifest.retire(manifest, @table, [sealed.id], 7)
+      live = add(manifest, @table)
+
+      assert HotManifest.claim(manifest, @table, [sealed.id, live.id], @keys) ==
+               {:error, :partial_claim}
+
+      assert {:ok, entry} = HotManifest.entry(manifest, @table, live.id)
+      assert entry.claim_keys == []
+    end
+
+    test "refuses a sealed id", %{manifest: manifest} do
       entry = add(manifest, @table)
       :ok = HotManifest.retire(manifest, @table, [entry.id], 7)
 
@@ -90,7 +107,7 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
                {:error, :nothing_to_claim}
     end
 
-    test "skips an id the node never held", %{manifest: manifest} do
+    test "refuses an id the node never held", %{manifest: manifest} do
       assert HotManifest.claim(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SV"], @keys) ==
                {:error, :nothing_to_claim}
     end

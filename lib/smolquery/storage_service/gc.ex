@@ -33,6 +33,13 @@ defmodule Smolquery.StorageService.GC do
   it commits — after which the next attempt simply merges again, so the cost is
   wasted work rather than lost rows.
 
+  Sightings are clocked with monotonic time: this is elapsed time within one live
+  process, and a wall clock stepped by NTP would expire a candidate early or hold
+  it forever. And the sweep re-reads `known_segments/1` immediately before it
+  deletes, so a commit that lands mid-sweep — a delayed retry of the same
+  deterministic key finally succeeding — keeps its file rather than losing it to
+  the sweep-start snapshot.
+
   ## Restarting forgets what it had seen
 
   Candidates live in memory, so a restart resets every clock and an orphan waits
@@ -109,9 +116,19 @@ defmodule Smolquery.StorageService.GC do
          {:ok, keys} <- Store.list(state.runtime.store, "") do
       {expired, watching} = partition(state, unreferenced(state.runtime, keys, known))
 
-      with :ok <- delete_all(state.runtime, expired) do
-        {:ok, %{swept: expired, watching: map_size(watching)}, %{state | candidates: watching}}
+      with {:ok, swept} <- sweep_expired(state.runtime, expired) do
+        {:ok, %{swept: swept, watching: map_size(watching)}, %{state | candidates: watching}}
       end
+    end
+  end
+
+  defp sweep_expired(_runtime, []), do: {:ok, []}
+
+  defp sweep_expired(runtime, keys) do
+    with {:ok, known} <- Catalog.known_segments(runtime.catalog) do
+      expired = unreferenced(runtime, keys, known)
+
+      with :ok <- delete_all(runtime, expired), do: {:ok, expired}
     end
   end
 
@@ -122,7 +139,7 @@ defmodule Smolquery.StorageService.GC do
   end
 
   defp partition(state, keys) do
-    now = System.os_time(:millisecond)
+    now = System.monotonic_time(:millisecond)
     cutoff = now - state.runtime.gc_grace_ms
 
     seen = Map.new(keys, &{&1, Map.get(state.candidates, &1, now)})

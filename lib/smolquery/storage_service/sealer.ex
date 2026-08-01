@@ -82,10 +82,18 @@ defmodule Smolquery.StorageService.Sealer do
   def handle_call(:sealing, _from, state), do: {:reply, Map.values(state.attempts), state}
 
   @impl GenServer
-  def handle_info({ref, _result}, state) when is_reference(ref) do
+  def handle_info({ref, result}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
 
-    {:noreply, finish(state, ref)}
+    case Map.fetch(state.attempts, ref) do
+      {:ok, table_ref} ->
+        log_failed(table_ref, result)
+
+        {:noreply, finish(state, ref)}
+
+      :error ->
+        {:noreply, state}
+    end
   end
 
   @impl GenServer
@@ -103,6 +111,11 @@ defmodule Smolquery.StorageService.Sealer do
 
   @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp log_failed(table_ref, {:error, reason}),
+    do: Logger.warning("seal of #{inspect(table_ref)} failed: #{inspect(reason)}")
+
+  defp log_failed(_table_ref, _result), do: :ok
 
   defp sealing?(state, table_ref), do: table_ref in Map.values(state.attempts)
 

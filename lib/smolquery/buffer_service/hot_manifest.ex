@@ -261,17 +261,22 @@ defmodule Smolquery.BufferService.HotManifest do
   sealed segment it produces is always the same segment. Rows that arrive after
   the claim wait for the next one.
 
-  Only unsealed, unclaimed ids are taken, so a repeated claim of a live one is not
-  a way to grow it. `keys` are recorded rather than recomputed at seal time,
-  which is what keeps the output name stable even if one of the inputs later goes
-  missing from the store.
+  One live claim per table, enforced here: a claim while one is outstanding is
+  `{:error, :claim_outstanding}`, whatever ids it names, because two live claims
+  would leave `live_claim/2` with no honest answer. And the set is frozen whole
+  or not at all — an id that cannot be frozen (already sealed, or never held)
+  makes the claim `{:error, :partial_claim}`, because `keys` were derived from
+  the full requested set and stamping a subset with them would break the
+  output's input-derived identity. `keys` are recorded rather than recomputed at
+  seal time, which is what keeps the output name stable even if one of the
+  inputs later goes missing from the store.
   """
   @spec claim(t(), Store.table_ref(), [String.t()], [String.t()], log() | nil) ::
           {:ok, claim()} | {:error, term()}
   def claim(%__MODULE__{} = manifest, table_ref, ids, keys, log \\ nil) do
-    case claimable(manifest, table_ref, ids) do
-      [] -> {:error, :nothing_to_claim}
-      entries -> freeze(manifest, table_ref, entries, keys, log)
+    with :ok <- refuse_live_claim(manifest, table_ref),
+         {:ok, entries} <- freezable(manifest, table_ref, ids) do
+      freeze(manifest, table_ref, entries, keys, log)
     end
   end
 
@@ -437,10 +442,21 @@ defmodule Smolquery.BufferService.HotManifest do
     not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
   end
 
-  defp claimable(manifest, table_ref, ids) do
-    manifest
-    |> unsealed(table_ref, ids)
-    |> Enum.reject(&Entry.claimed?/1)
+  defp refuse_live_claim(manifest, table_ref) do
+    case live_claim(manifest, table_ref) do
+      {:ok, _live} -> {:error, :claim_outstanding}
+      :error -> :ok
+    end
+  end
+
+  defp freezable(manifest, table_ref, ids) do
+    requested = Enum.uniq(ids)
+
+    case unsealed(manifest, table_ref, requested) do
+      [] -> {:error, :nothing_to_claim}
+      entries when length(entries) == length(requested) -> {:ok, entries}
+      _partial -> {:error, :partial_claim}
+    end
   end
 
   defp freeze(manifest, table_ref, entries, keys, log) do

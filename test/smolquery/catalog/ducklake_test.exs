@@ -225,6 +225,21 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert {:ok, known} = Catalog.known_segments(catalog)
       assert Enum.sort(known) == Enum.sort([a.path, b.path])
     end
+
+    test "fails loudly on a relative path rather than returning one that matches nothing", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      segment = write_segment(dir, 1, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
+      Engine.query!(
+        @engine,
+        ~s|UPDATE "__ducklake_metadata_lake".ducklake_data_file SET path_is_relative = true|
+      )
+
+      assert {:error, {:relative_segment_path, _path}} = Catalog.known_segments(catalog)
+    end
   end
 
   describe "drop_segments/3" do

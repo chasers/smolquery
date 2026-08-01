@@ -57,10 +57,12 @@ defmodule Smolquery.StorageService.Runtime do
 
       catalog: [metadata: "postgres:dbname=smolquery", data_path: "/mnt/bulk/lake"]
 
-  `compression` is the Parquet codec sealed segments are written with. It defaults
-  to `:zstd` to match `Smolquery.Segments.Writer`, and that match matters: DuckDB's
-  own `COPY` default is snappy, which made sealed segments 2.85 times larger than
-  the micro-segments they replaced (`bench/sealer.exs`).
+  `compression` is the Parquet codec sealed segments are written with — one of
+  `:zstd`, `:snappy`, `:gzip`, or `:uncompressed`, validated here at boot because
+  a bad value discovered per seal attempt would crash every re-signalled seal
+  forever. It defaults to `:zstd` to match `Smolquery.Segments.Writer`, and that
+  match matters: DuckDB's own `COPY` default is snappy, which made sealed segments
+  2.85 times larger than the micro-segments they replaced (`bench/sealer.exs`).
 
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
@@ -120,6 +122,8 @@ defmodule Smolquery.StorageService.Runtime do
     :handoff
   ]
 
+  @codecs [:zstd, :snappy, :gzip, :uncompressed]
+
   @default_dir "priv/data/sealed"
 
   @doc """
@@ -127,21 +131,24 @@ defmodule Smolquery.StorageService.Runtime do
 
   Application config for `Smolquery.StorageService` supplies the defaults; `opts`
   overrides them, so a test passes what it needs and inherits the rest.
+
+  Raises on a `compression` outside #{inspect(@codecs)}: seals are level-triggered
+  retries, so a codec discovered bad per attempt would crash forever rather than
+  once, here, at boot.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.StorageService, []), opts)
     name = Keyword.get(config, :name, Smolquery.StorageService)
 
-    struct!(
-      %__MODULE__{
-        name: name,
-        store: build_store(config),
-        catalog: build_catalog(config, name),
-        catalog_opts: catalog_opts(config)
-      },
-      Keyword.take(config, @limits)
-    )
+    %__MODULE__{
+      name: name,
+      store: build_store(config),
+      catalog: build_catalog(config, name),
+      catalog_opts: catalog_opts(config)
+    }
+    |> struct!(Keyword.take(config, @limits))
+    |> validate_compression()
   end
 
   use Smolquery.Runtime
@@ -185,6 +192,16 @@ defmodule Smolquery.StorageService.Runtime do
   """
   @spec gc(atom()) :: atom()
   def gc(name), do: Module.concat(name, "GC")
+
+  defp validate_compression(%__MODULE__{compression: compression} = runtime)
+       when compression in @codecs,
+       do: runtime
+
+  defp validate_compression(%__MODULE__{compression: compression}) do
+    raise ArgumentError,
+          "unsupported sealed-segment compression: #{inspect(compression)} " <>
+            "(expected one of #{inspect(@codecs)})"
+  end
 
   defp build_store(config) do
     case Keyword.get(config, :store) do

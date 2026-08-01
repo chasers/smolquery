@@ -310,13 +310,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp sealed_id({dataset, table}, ids) do
     sorted = Enum.sort(ids)
-    newest = List.last(sorted)
-
-    timestamp =
-      case Id.timestamp(newest) do
-        {:ok, timestamp} -> timestamp
-        :error -> now()
-      end
+    {:ok, timestamp} = sorted |> List.last() |> Id.timestamp()
 
     Id.derive(timestamp, [dataset, 0, table, 0, Enum.intersperse(sorted, 0)])
   end

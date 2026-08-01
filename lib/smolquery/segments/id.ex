@@ -20,6 +20,7 @@ defmodule Smolquery.Segments.Id do
   @values @alphabet |> Enum.with_index() |> Map.new()
   @encoded_length 26
   @random_bits 80
+  @max_timestamp (1 <<< 48) - 1
 
   @doc """
   A new ULID, stamped with the current time.
@@ -29,9 +30,13 @@ defmodule Smolquery.Segments.Id do
 
   @doc """
   A new ULID stamped with `timestamp` in milliseconds since the Unix epoch.
+
+  A timestamp must fit the 48-bit ULID prefix; one that does not is refused
+  rather than silently truncated into a different id.
   """
   @spec generate(non_neg_integer()) :: String.t()
-  def generate(timestamp) when is_integer(timestamp) and timestamp >= 0 do
+  def generate(timestamp)
+      when is_integer(timestamp) and timestamp >= 0 and timestamp <= @max_timestamp do
     <<value::128>> = <<timestamp::48, :crypto.strong_rand_bytes(10)::binary>>
 
     encode(value)
@@ -48,9 +53,14 @@ defmodule Smolquery.Segments.Id do
 
   Not a substitute for `generate/0`: an id that a caller can predict is exactly
   wrong for a micro-segment, where two writers must never collide.
+
+  A timestamp past the 48-bit prefix is refused rather than truncated — a
+  truncating input would let two distinct inputs share an id, which is exactly
+  the collision this function's contract rules out.
   """
   @spec derive(non_neg_integer(), iodata()) :: String.t()
-  def derive(timestamp, seed) when is_integer(timestamp) and timestamp >= 0 do
+  def derive(timestamp, seed)
+      when is_integer(timestamp) and timestamp >= 0 and timestamp <= @max_timestamp do
     <<random::size(@random_bits), _rest::bits>> = :crypto.hash(:sha256, seed)
     <<value::128>> = <<timestamp::48, random::size(@random_bits)>>
 

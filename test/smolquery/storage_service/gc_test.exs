@@ -88,6 +88,18 @@ defmodule Smolquery.StorageService.GCTest do
       assert {:ok, [^key]} = Store.list(runtime.store, "")
     end
 
+    test "rechecks the catalog before deleting, so a mid-sweep commit keeps its file",
+         context do
+      %{name: name, runtime: runtime} = start_gc(context, gc_grace_ms: 0)
+      key = put(runtime, "01KYWPEEGAM8FQVQS5S2QF26SV")
+
+      PathCatalog.register_on_next_read(context.catalog, Store.location(runtime.store, key))
+
+      assert {:ok, report} = GC.sweep(name)
+      assert report.swept == []
+      assert {:ok, [^key]} = Store.list(runtime.store, "")
+    end
+
     test "stops watching a candidate that got registered after all", context do
       %{name: name, runtime: runtime} = start_gc(context, gc_grace_ms: 60_000)
       key = put(runtime, "01KYWPEEGAM8FQVQS5S2QF26SV")

@@ -508,6 +508,7 @@ INPUTS=64 ROWS=20000 mix run bench/sealer.exs     # bigger claims, bigger merges
 `bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
 across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
 fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
+Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the
@@ -515,7 +516,6 @@ sealed-to-hot size ratio. That last number is why it exists: DuckDB's `COPY`
 defaults to snappy while segments are written with zstd, so sealing silently made
 data 2.85× larger until the codec was matched. No correctness test could catch
 that.
-Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
 
 Each script's `@moduledoc` records what it measures and what it concluded. Two
 results worth knowing before writing a read path:

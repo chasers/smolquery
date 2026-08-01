@@ -101,6 +101,26 @@ defmodule Smolquery.StorageService.SealerTest do
   end
 
   @tag :tmp_dir
+  @tag result: {:error, :handoff_refused}
+  test "logs a failed attempt and frees the table", %{name: name} do
+    log =
+      capture_log(fn ->
+        Sealer.seal_ready(name, @events, claim(["a"]))
+        assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
+        HandoffProbe.release(attempt)
+        assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+      end)
+
+    assert log =~ "failed"
+    assert log =~ "handoff_refused"
+
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, %{ids: ["a"]}, retry}
+
+    HandoffProbe.release(retry)
+  end
+
+  @tag :tmp_dir
   @tag result: :crash
   test "survives a crashed attempt and frees the table", %{name: name} do
     sealer = Process.whereis(Runtime.sealer(name))
