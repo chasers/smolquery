@@ -33,7 +33,8 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
     :sealed_at,
     :retired_at,
     stats: %{},
-    claim_keys: []
+    claim_keys: [],
+    batch_ids: []
   ]
 
   @type column_stats :: Segment.column_stats()
@@ -47,21 +48,28 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
           sealed_at: non_neg_integer() | nil,
           retired_at: integer() | nil,
           stats: %{optional(String.t()) => column_stats()},
-          claim_keys: [String.t()]
+          claim_keys: [String.t()],
+          batch_ids: [String.t()]
         }
 
   @doc """
   The entry describing a freshly written segment, added at `added_at`.
+
+  `batch_ids` are the idempotency keys of the client batches this segment's
+  group commit covered — what lets a retry of any of them be answered with
+  this entry instead of a second write. Empty for callers that sent none,
+  which costs them nothing but the dedup.
   """
-  @spec from_segment(Segment.t(), integer()) :: t()
-  def from_segment(%Segment{} = segment, added_at) do
+  @spec from_segment(Segment.t(), integer(), [String.t()]) :: t()
+  def from_segment(%Segment{} = segment, added_at, batch_ids \\ []) do
     %__MODULE__{
       id: segment.id,
       key: segment.key,
       row_count: segment.row_count,
       byte_size: segment.byte_size,
       added_at: added_at,
-      stats: segment.stats
+      stats: segment.stats,
+      batch_ids: batch_ids
     }
   end
 
@@ -111,6 +119,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
       "sealed_at" => entry.sealed_at,
       "retired_at" => entry.retired_at,
       "claim_keys" => entry.claim_keys,
+      "batch_ids" => entry.batch_ids,
       "stats" => encode_stats(entry.stats)
     }
   end
@@ -131,6 +140,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
        sealed_at: Map.get(record, "sealed_at"),
        retired_at: Map.get(record, "retired_at"),
        claim_keys: Map.get(record, "claim_keys") || [],
+       batch_ids: Map.get(record, "batch_ids") || [],
        stats: record |> Map.get("stats", %{}) |> decode_stats()
      }}
   end

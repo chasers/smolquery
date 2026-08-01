@@ -30,9 +30,20 @@ defmodule Smolquery.IngestService.Client do
   full (`{:error, :buffer_full}`) or too far behind
   (`{:error, {:overloaded, predicted_ms}}`, PL-9) — both the API's 429 — or
   a service is not running.
+
+  ## Options
+
+    * `:batch_id` — the batch's idempotency key, end to end. It must come
+      from the caller whose retries it protects: an id generated here would
+      change on every retry and dedup nothing. With one, a retry of a batch
+      the buffer already committed — after a lost response, a transport
+      timeout, or a buffer crash-before-reply — is answered with the
+      original commit instead of writing the rows twice (T-41). Without
+      one, writes are at-least-once, as before.
   """
-  @spec insert(atom(), Store.table_ref(), [term()]) :: {:ok, result()} | {:error, term()}
-  def insert(name, table_ref, rows) when is_list(rows) do
+  @spec insert(atom(), Store.table_ref(), [term()], keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def insert(name, table_ref, rows, opts \\ []) when is_list(rows) do
     with {:ok, runtime} <- runtime(name),
          {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
       case Validator.validate(schema, rows) do
@@ -40,7 +51,7 @@ defmodule Smolquery.IngestService.Client do
           {:ok, %{inserted: 0, errors: errors}}
 
         {valid, errors} ->
-          write(runtime, table_ref, schema, valid, errors)
+          write(runtime, table_ref, schema, valid, errors, Keyword.get(opts, :batch_id))
       end
     end
   end
@@ -60,13 +71,16 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
-  defp write(runtime, table_ref, schema, valid, errors) do
-    batch = %{schema: schema, rows: valid}
+  defp write(runtime, table_ref, schema, valid, errors, batch_id) do
+    batch = batch(schema, valid, batch_id)
 
     with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
       {:ok, %{inserted: length(valid), errors: errors}}
     end
   end
+
+  defp batch(schema, rows, nil), do: %{schema: schema, rows: rows}
+  defp batch(schema, rows, batch_id), do: %{schema: schema, rows: rows, batch_id: batch_id}
 
   defp runtime(name) do
     case Runtime.fetch(name) do

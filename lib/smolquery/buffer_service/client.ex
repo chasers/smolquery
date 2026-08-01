@@ -66,10 +66,11 @@ defmodule Smolquery.BufferService.Client do
       `:buffer` role
     * `{:error, {:badrpc | :badtcp, reason}}` — the owner could not be reached
 
-  `{:badrpc, :timeout}` is not safely retryable: the call may have reached the
-  owner and committed after the deadline, so a blind retry writes the rows
-  twice. Until batches carry an idempotency key, that ambiguity belongs to the
-  caller — the ingest edge knows its own dedup story; this module does not.
+  `{:badrpc, :timeout}` is ambiguous: the call may have reached the owner and
+  committed after the deadline. A batch carrying a `:batch_id` idempotency
+  key makes the retry safe — the owner answers a committed id with the
+  original ack instead of writing again (T-41). A batch without one is
+  at-least-once, and the ambiguity belongs to the caller.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}

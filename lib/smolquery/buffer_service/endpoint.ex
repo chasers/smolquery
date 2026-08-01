@@ -26,7 +26,11 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
-  @type batch :: %{required(:schema) => Schema.t(), required(:rows) => [Writer.row()]}
+  @type batch :: %{
+          required(:schema) => Schema.t(),
+          required(:rows) => [Writer.row()],
+          optional(:batch_id) => String.t()
+        }
 
   @retries 5
   @retry_interval_ms 10
@@ -39,15 +43,30 @@ defmodule Smolquery.BufferService.Endpoint do
   with `{:error, {:overloaded, predicted_ms}}` instead of queueing toward a
   timeout. The prediction rides along so a caller knows how far behind the
   buffer is — the API turns it into a `retry-after`.
+
+  A batch carrying a `:batch_id` is idempotent: one whose id already
+  committed is answered with the original ack before admission even runs, so
+  a client retrying into an overloaded buffer is not refused for work that is
+  already done.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
-  def write_batch(name, table_ref, %{schema: %Schema{} = schema, rows: rows})
+  def write_batch(name, table_ref, %{schema: %Schema{} = schema, rows: rows} = batch)
       when is_list(rows) do
     with {:ok, runtime} <- runtime(name) do
-      deliver(runtime, table_ref, schema, rows, @retries)
+      batch_id = Map.get(batch, :batch_id)
+
+      case committed_ack(runtime, table_ref, batch_id) do
+        {:ok, ack} -> {:ok, ack}
+        :error -> deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+      end
     end
   end
+
+  defp committed_ack(_runtime, _table_ref, nil), do: :error
+
+  defp committed_ack(runtime, table_ref, batch_id),
+    do: HotManifest.batch_ack(runtime.manifest, table_ref, batch_id)
 
   @doc """
   Every micro-segment this node holds for a table.
@@ -97,25 +116,30 @@ defmodule Smolquery.BufferService.Endpoint do
     :exit, {:noproc, _call} -> :ok
   end
 
-  defp deliver(runtime, table_ref, schema, rows, retries) do
+  defp deliver(runtime, table_ref, schema, rows, batch_id, retries) do
     case buffer(runtime, table_ref) do
-      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, schema, rows)
-      {:error, :noproc} -> retry(runtime, table_ref, schema, rows, retries)
+      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id)
+      {:error, :noproc} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
       {:error, reason} -> {:error, reason}
     end
   catch
-    :exit, {:noproc, _call} -> retry(runtime, table_ref, schema, rows, retries)
+    :exit, {:noproc, _call} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
   end
 
-  defp admit_and_write(runtime, table_ref, buffer, schema, rows) do
+  defp admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id) do
     load = load(runtime, table_ref)
     count = length(rows)
 
     with :ok <- Load.admit(load, count, runtime.ack_budget_ms) do
       Load.enter(load, count)
 
-      case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms) do
+      case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id) do
         {:ok, ack} ->
+          {:ok, ack}
+
+        {:duplicate, ack} ->
+          Load.leave(load, count)
+
           {:ok, ack}
 
         {:error, reason} ->
@@ -133,12 +157,13 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp retry(_runtime, _table_ref, _schema, _rows, 0), do: {:error, :buffer_unavailable}
+  defp retry(_runtime, _table_ref, _schema, _rows, _batch_id, 0),
+    do: {:error, :buffer_unavailable}
 
-  defp retry(runtime, table_ref, schema, rows, retries) do
+  defp retry(runtime, table_ref, schema, rows, batch_id, retries) do
     Process.sleep(@retry_interval_ms)
 
-    deliver(runtime, table_ref, schema, rows, retries - 1)
+    deliver(runtime, table_ref, schema, rows, batch_id, retries - 1)
   end
 
   defp runtime(name) do

@@ -94,4 +94,32 @@ defmodule Smolquery.BufferService.HotManifest.EntryTest do
       assert {:error, {:invalid_record, _}} = Entry.from_record(%{"id" => 1, "key" => "k"})
     end
   end
+
+  describe "batch ids" do
+    test "round-trip through the record" do
+      entry = %Entry{
+        id: "01KYWPEEGAM8FQVQS5S2QF26SV",
+        key: "analytics/events/01KYWPEEGAM8FQVQS5S2QF26SV.parquet",
+        row_count: 3,
+        byte_size: 100,
+        added_at: 1,
+        batch_ids: ["batch-a", "batch-b"]
+      }
+
+      assert {:ok, restored} = entry |> Entry.to_record() |> Entry.from_record()
+      assert restored.batch_ids == ["batch-a", "batch-b"]
+    end
+
+    test "a record from before batch ids existed restores empty" do
+      record = %{
+        "op" => "add",
+        "id" => "01KYWPEEGAM8FQVQS5S2QF26SV",
+        "key" => "analytics/events/01KYWPEEGAM8FQVQS5S2QF26SV.parquet",
+        "row_count" => 3
+      }
+
+      assert {:ok, restored} = Entry.from_record(record)
+      assert restored.batch_ids == []
+    end
+  end
 end

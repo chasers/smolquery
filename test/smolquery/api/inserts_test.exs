@@ -149,4 +149,48 @@ defmodule Smolquery.Api.InsertsTest do
     assert response.status == 503
     assert %{"error" => %{"status" => "UNAVAILABLE"}} = JSON.decode!(response.resp_body)
   end
+
+  describe "insertId (T-41)" do
+    defp post_body(name, body) do
+      conn(:post, @path, JSON.encode!(body))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{@key}")
+      |> Router.call(Router.init(name))
+    end
+
+    defp hot_rows(buffer) do
+      {:ok, entries} =
+        Smolquery.BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+
+      Enum.sum_by(entries, & &1.row_count)
+    end
+
+    test "a retried request with the same insertId cannot double-count", %{
+      name: name,
+      buffer: buffer
+    } do
+      body = %{"rows" => [%{"id" => 1}, %{"id" => 2}], "insertId" => "req-1"}
+
+      assert post_body(name, body).status == 200
+      retried = post_body(name, body)
+
+      assert retried.status == 200
+      assert JSON.decode!(retried.resp_body)["insertedRows"] == 2
+      assert hot_rows(buffer) == 2
+    end
+
+    test "requests with different insertIds write separately", %{name: name, buffer: buffer} do
+      assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => "req-a"}).status == 200
+      assert post_body(name, %{"rows" => [%{"id" => 2}], "insertId" => "req-b"}).status == 200
+      assert hot_rows(buffer) == 2
+    end
+
+    test "a malformed insertId is a 400", %{name: name} do
+      assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => 42}).status == 400
+      assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => ""}).status == 400
+
+      oversized = String.duplicate("x", 129)
+      assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => oversized}).status == 400
+    end
+  end
 end

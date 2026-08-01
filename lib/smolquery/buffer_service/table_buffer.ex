@@ -99,6 +99,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :load,
     chunks: [],
     pending: [],
+    batch_ids: [],
     row_count: 0,
     byte_size: 0
   ]
@@ -133,11 +134,19 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   The reply arrives after the group commit this batch lands in, so its latency is
   the remaining flush interval plus the encode — not the cost of these rows alone.
+
+  `batch_id` is the batch's idempotency key, or `nil` for at-least-once. A
+  batch whose id already committed is answered `{:duplicate, ack}` with the
+  original commit's ack and writes nothing; one whose id is still sitting in
+  the accumulator joins that commit's pending list instead of accumulating
+  its rows twice. The `{:duplicate, ack}` shape exists for the endpoint's
+  load accounting — rows that were never accepted must not wait to be
+  drained — and callers who do not care treat it as `{:ok, ack}`.
   """
-  @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout()) ::
-          {:ok, ack()} | {:error, term()}
-  def write(buffer, %Schema{} = schema, rows, timeout) do
-    GenServer.call(buffer, {:write, schema, rows}, timeout)
+  @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
+          {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
+  def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) do
+    GenServer.call(buffer, {:write, schema, rows, batch_id}, timeout)
   end
 
   @doc """
@@ -197,17 +206,13 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @impl GenServer
-  def handle_call({:write, _schema, []}, _from, state), do: {:reply, {:error, :no_rows}, state}
+  def handle_call({:write, _schema, [], _batch_id}, _from, state),
+    do: {:reply, {:error, :no_rows}, state}
 
-  def handle_call({:write, schema, rows}, from, state) do
-    count = length(rows)
-    bytes = :erlang.external_size(rows)
-    state = flush_on_schema_change(state, schema)
-
-    if full?(state, count, bytes) do
-      {:reply, {:error, :buffer_full}, state}
-    else
-      {:noreply, accept(state, schema, rows, count, bytes, from)}
+  def handle_call({:write, schema, rows, batch_id}, from, state) do
+    case committed_ack(state, batch_id) do
+      {:ok, ack} -> {:reply, {:duplicate, ack}, state}
+      :error -> write_or_join(state, schema, rows, batch_id, from)
     end
   end
 
@@ -357,9 +362,34 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp now, do: System.os_time(:millisecond)
 
-  defp accept(state, schema, rows, count, bytes, from) do
+  defp committed_ack(_state, nil), do: :error
+
+  defp committed_ack(state, batch_id),
+    do: HotManifest.batch_ack(state.runtime.manifest, state.table_ref, batch_id)
+
+  defp write_or_join(state, schema, rows, batch_id, from) do
+    if not is_nil(batch_id) and batch_id in state.batch_ids do
+      {:noreply, %{state | pending: [{from, :duplicate} | state.pending]}}
+    else
+      write_new(state, schema, rows, batch_id, from)
+    end
+  end
+
+  defp write_new(state, schema, rows, batch_id, from) do
+    count = length(rows)
+    bytes = :erlang.external_size(rows)
+    state = flush_on_schema_change(state, schema)
+
+    if full?(state, count, bytes) do
+      {:reply, {:error, :buffer_full}, state}
+    else
+      {:noreply, accept(state, schema, rows, count, bytes, batch_id, from)}
+    end
+  end
+
+  defp accept(state, schema, rows, count, bytes, batch_id, from) do
     state
-    |> accumulate(schema, rows, count, bytes, from)
+    |> accumulate(schema, rows, count, bytes, batch_id, from)
     |> commit_when_full()
   end
 
@@ -367,17 +397,21 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
   defp flush_on_schema_change(state, _schema), do: commit(state)
 
-  defp accumulate(state, schema, rows, count, bytes, from) do
+  defp accumulate(state, schema, rows, count, bytes, batch_id, from) do
     %{
       state
       | schema: schema,
         chunks: [rows | state.chunks],
-        pending: [from | state.pending],
+        pending: [{from, :new} | state.pending],
+        batch_ids: track_batch(state.batch_ids, batch_id),
         row_count: state.row_count + count,
         byte_size: state.byte_size + bytes
     }
     |> schedule()
   end
+
+  defp track_batch(batch_ids, nil), do: batch_ids
+  defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
 
   defp commit_when_full(state) do
     if state.row_count >= state.runtime.flush_max_rows or
@@ -422,7 +456,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp add(state, segment) do
-    case HotManifest.add(state.runtime.manifest, state.table_ref, segment, state.log) do
+    batch_ids = Enum.reverse(state.batch_ids)
+
+    case HotManifest.add(state.runtime.manifest, state.table_ref, segment, state.log, batch_ids) do
       {:ok, entry} ->
         {:ok, entry}
 
@@ -433,13 +469,20 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  defp reply_all(pending, reply), do: Enum.each(pending, &GenServer.reply(&1, reply))
+  defp reply_all(pending, result) do
+    Enum.each(pending, fn {from, kind} -> GenServer.reply(from, reply_for(kind, result)) end)
+  end
+
+  defp reply_for(:new, result), do: result
+  defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
+  defp reply_for(:duplicate, error), do: error
 
   defp reset(state) do
     %{
       state
       | chunks: [],
         pending: [],
+        batch_ids: [],
         row_count: 0,
         byte_size: 0,
         timer: cancel(state.timer)

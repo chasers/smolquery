@@ -508,4 +508,64 @@ defmodule Smolquery.BufferService.HotManifestTest do
       refute File.exists?(Store.location(manifest.store, entry.key))
     end
   end
+
+  describe "batch dedup (T-41)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "add with batch ids makes batch_ack answer with the commit's ack", %{
+      manifest: manifest
+    } do
+      segment = write(manifest, @table, rows(3))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, nil, ["batch-a", "batch-b"])
+
+      ack = %{segment_id: entry.id, row_count: 3}
+      assert HotManifest.batch_ack(manifest, @table, "batch-a") == {:ok, ack}
+      assert HotManifest.batch_ack(manifest, @table, "batch-b") == {:ok, ack}
+      assert HotManifest.batch_ack(manifest, @table, "batch-c") == :error
+      assert HotManifest.batch_ack(manifest, @other, "batch-a") == :error
+    end
+
+    test "an id lives exactly as long as its entry", %{manifest: manifest} do
+      segment = write(manifest, @table, rows(2))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, nil, ["batch-a"])
+
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+
+      assert HotManifest.batch_ack(manifest, @table, "batch-a") == :error
+    end
+
+    test "retirement keeps the id answering until the reaper drops the entry", %{
+      manifest: manifest
+    } do
+      segment = write(manifest, @table, rows(2))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, nil, ["batch-a"])
+
+      {:ok, _claim} =
+        HotManifest.claim(manifest, @table, [entry.id], ["analytics/events/#{entry.id}.parquet"])
+
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 7)
+
+      assert {:ok, _ack} = HotManifest.batch_ack(manifest, @table, "batch-a")
+    end
+
+    test "recovery rebuilds the index from the log", context do
+      manifest = start_manifest(context, context.local)
+      segment = write(manifest, @table, rows(2))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, nil, ["batch-a"])
+
+      rebuilt = start_manifest(context, context.local)
+      {:ok, _report} = HotManifest.recover(rebuilt, @table)
+
+      assert HotManifest.batch_ack(rebuilt, @table, "batch-a") ==
+               {:ok, %{segment_id: entry.id, row_count: 2}}
+    end
+
+    test "batch index rows never pollute the entry listing", %{manifest: manifest} do
+      segment = write(manifest, @table, rows(1))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, nil, ["batch-a"])
+
+      assert [%Entry{id: id}] = HotManifest.entries(manifest, @table)
+      assert id == entry.id
+    end
+  end
 end
