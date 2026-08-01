@@ -146,6 +146,35 @@ defmodule Smolquery.StorageService.MergeTest do
     assert rows_in(runtime, segment) == [1, 2]
   end
 
+  test "seals smaller than it read, because the codec matches the writer's", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    ids =
+      for i <- 1..8 do
+        {:ok, ack} = Client.write_batch(buffer, @table, batch((i * 500)..(i * 500 + 499)))
+
+        ack.segment_id
+      end
+
+    {:ok, entries} = Client.hot_manifest(buffer, @table)
+    input_bytes = Enum.sum_by(entries, & &1.byte_size)
+
+    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert segment.byte_size < input_bytes
+  end
+
+  test "refuses an unsupported codec rather than interpolating it", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    {:ok, ack} = Client.write_batch(buffer, @table, batch(1..1))
+
+    assert_raise ArgumentError, fn ->
+      Merge.run(%{runtime | compression: :"zstd) --"}, @table, claim([ack.segment_id]))
+    end
+  end
+
   test "refuses a claim with none of its inputs left", %{runtime: runtime} do
     assert Merge.run(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"])) ==
              {:error, :no_inputs}

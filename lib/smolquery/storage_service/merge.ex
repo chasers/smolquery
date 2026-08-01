@@ -31,6 +31,15 @@ defmodule Smolquery.StorageService.Merge do
   `Smolquery.StorageService.Handoff`'s job, which is where the ordering that makes
   the handoff exactly-once lives.
 
+  ## Compression has to match the writer's, or sealing inflates the data
+
+  `COPY`'s default codec is snappy while `Smolquery.Segments.Writer` writes
+  micro-segments with zstd, so taking DuckDB's default made a sealed segment
+  *2.85 times larger* than the micro-segments it replaced — measured in
+  `bench/sealer.exs`. The sealed tier is where bytes live longest and where object
+  storage is billed, so the codec is explicit here and defaults to zstd, matching
+  the tier it merges from.
+
   ## Row counts come from the manifest, not a read-back
 
   The merged segment's `row_count` is the sum of its inputs', which the buffer
@@ -45,6 +54,8 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Runtime
+
+  @codecs [:zstd, :snappy, :gzip, :uncompressed]
 
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
@@ -95,7 +106,7 @@ defmodule Smolquery.StorageService.Merge do
 
     sql = """
     COPY (SELECT * FROM read_parquet([#{placeholders}], union_by_name := true))
-    TO $#{count + 1} (FORMAT PARQUET)
+    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)})
     """
 
     case Engine.query(Runtime.engine(runtime.name), sql, urls ++ [staged]) do
@@ -103,6 +114,12 @@ defmodule Smolquery.StorageService.Merge do
       {:error, error} -> {:error, {:merge_failed, Exception.message(error)}}
     end
   end
+
+  defp codec(compression) when compression in @codecs,
+    do: compression |> Atom.to_string() |> String.upcase()
+
+  defp codec(compression),
+    do: raise(ArgumentError, "unsupported sealed-segment compression: #{inspect(compression)}")
 
   defp segment(key, put, row_count) do
     {:ok, id} = Store.id(key)
