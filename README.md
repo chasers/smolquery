@@ -478,6 +478,10 @@ curl -H "$auth" -d '{"id": "events", "schema": [
       {"name": "amount", "type": "NUMERIC(38,2)"}
     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables
 curl -H "$auth" http://127.0.0.1:4000/v1/datasets/analytics/tables/events
+curl -H "$auth" -d '{"rows": [
+      {"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"},
+      {"id": 2}
+    ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
 ```
 
 The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
@@ -490,6 +494,16 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `GET /v1/datasets/:ds/tables` | list a dataset's tables |
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
 | `GET /v1/datasets/:ds/tables/:t` | a table's schema |
+| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full buffer is a 429 with `retry-after` |
+
+Insert rows are JSON objects keyed by column name. Values coerce by the
+table's schema — `INT64` accepts integers or digit strings (JS clients lose
+precision past 2^53), `TIMESTAMP`/`DATE` take ISO 8601 strings (offsets
+convert to UTC), `NUMERIC` prefers strings (floats round). The ingest edge
+validates against a cached schema (`schema_cache_ttl_ms`, invalidated by CRUD
+on the same node), forwards one request as one forward-batch, and never acks
+from memory — the response returns when the rows are on the buffer node's
+disk and in its hot manifest.
 
 Failures answer one JSON envelope everywhere:
 
@@ -512,10 +526,8 @@ SMOLQUERY_ROLES=query              # a query-only node
 SMOLQUERY_ROLES=api,ingest,buffer
 ```
 
-Unknown role names fail the boot rather than silently starting nothing. `:api`,
-`:query`, `:buffer`, and `:storage` start their subtrees today; `:ingest` is
-accepted and contributes nothing until its milestone lands. See
-`Smolquery.Roles`.
+Unknown role names fail the boot rather than silently starting nothing. Every
+role starts its subtree today. See `Smolquery.Roles`.
 
 ## Configuration
 

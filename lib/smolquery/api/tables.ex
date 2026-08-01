@@ -11,8 +11,10 @@ defmodule Smolquery.Api.Tables do
   alias Smolquery.Api.Datasets
   alias Smolquery.Api.Errors
   alias Smolquery.Api.Json
+  alias Smolquery.Api.Runtime
   alias Smolquery.Api.TableSchema
   alias Smolquery.Catalog
+  alias Smolquery.IngestService
 
   @doc """
   Every table in a dataset.
@@ -38,6 +40,7 @@ defmodule Smolquery.Api.Tables do
          {:ok, schema} <- TableSchema.from_json(conn.body_params["schema"]),
          :ok <- Datasets.exists(conn, dataset),
          :ok <- Catalog.create_table(catalog, {dataset, id}, schema),
+         :ok <- invalidate_schema_cache(conn, {dataset, id}),
          {:ok, existing} <- Catalog.table_schema(catalog, {dataset, id}) do
       if existing == schema do
         Json.send_json(conn, 200, %{"id" => id, "schema" => TableSchema.to_json(schema)})
@@ -70,4 +73,10 @@ defmodule Smolquery.Api.Tables do
 
   defp id(%{"id" => id}) when is_binary(id), do: {:ok, id}
   defp id(_body), do: {:error, {:missing_field, "id"}}
+
+  defp invalidate_schema_cache(conn, table_ref) do
+    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
+
+    IngestService.Client.invalidate(runtime.ingest_name, table_ref)
+  end
 end

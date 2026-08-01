@@ -219,6 +219,92 @@ defmodule Smolquery.Schema do
   def type_from_api(name), do: {:error, {:unsupported_type, name}}
 
   @doc """
+  The Elixir term a JSON-decoded value becomes for a logical type — what a
+  streaming insert's rows pass through on the way to the segment writer.
+
+  One table, like the type names:
+
+  | logical | accepted JSON | becomes |
+  |---|---|---|
+  | `:int64` | integer, or a string of digits (JS clients lose precision past 2^53) | integer |
+  | `:float64` | number, or a string that parses as one | float |
+  | `:string` | string | binary |
+  | `:bool` | boolean | boolean |
+  | `:timestamp` | ISO 8601 string; an offset is converted to UTC | `NaiveDateTime` |
+  | `:date` | ISO 8601 string | `Date` |
+  | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
+
+  `nil` passes through for every type; whether a column may be null is the
+  validator's question, not a value question.
+  """
+  @spec value_from_json(logical_type(), term()) ::
+          {:ok, term()} | {:error, {:invalid_value, logical_type(), term()}}
+  def value_from_json(_type, nil), do: {:ok, nil}
+
+  def value_from_json(:int64, value) when is_integer(value), do: {:ok, value}
+
+  def value_from_json(:int64, value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> {:ok, integer}
+      _partial_or_error -> invalid(:int64, value)
+    end
+  end
+
+  def value_from_json(:float64, value) when is_float(value), do: {:ok, value}
+  def value_from_json(:float64, value) when is_integer(value), do: {:ok, value * 1.0}
+
+  def value_from_json(:float64, value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} -> {:ok, float}
+      _partial_or_error -> invalid(:float64, value)
+    end
+  end
+
+  def value_from_json(:string, value) when is_binary(value), do: {:ok, value}
+
+  def value_from_json(:bool, value) when is_boolean(value), do: {:ok, value}
+
+  def value_from_json(:timestamp, value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        {:ok, DateTime.to_naive(DateTime.shift_zone!(datetime, "Etc/UTC"))}
+
+      {:error, :missing_offset} ->
+        case NaiveDateTime.from_iso8601(value) do
+          {:ok, naive} -> {:ok, naive}
+          {:error, _reason} -> invalid(:timestamp, value)
+        end
+
+      {:error, _reason} ->
+        invalid(:timestamp, value)
+    end
+  end
+
+  def value_from_json(:date, value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> {:ok, date}
+      {:error, _reason} -> invalid(:date, value)
+    end
+  end
+
+  def value_from_json({:numeric, _p, _s} = type, value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {decimal, ""} -> {:ok, decimal}
+      _partial_or_error -> invalid(type, value)
+    end
+  end
+
+  def value_from_json({:numeric, _p, _s}, value) when is_integer(value),
+    do: {:ok, Decimal.new(value)}
+
+  def value_from_json({:numeric, _p, _s}, value) when is_float(value),
+    do: {:ok, Decimal.from_float(value)}
+
+  def value_from_json(type, value), do: invalid(type, value)
+
+  defp invalid(type, value), do: {:error, {:invalid_value, type, value}}
+
+  @doc """
   The `column_name dtype` pairs Explorer needs to build a DataFrame.
   """
   @spec explorer_dtypes(t()) :: {:ok, [{String.t(), term()}]} | {:error, term()}
