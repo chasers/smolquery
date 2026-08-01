@@ -16,7 +16,7 @@ defmodule Smolquery.StorageService.Handoff.Log do
   alias Smolquery.StorageService.Handoff
 
   @impl Handoff
-  def seal(_config, _runtime, {dataset, table}, ids) do
+  def seal(_config, _runtime, {dataset, table}, %{ids: ids}) do
     Logger.info(fn ->
       "seal #{dataset}.#{table}: #{length(ids)} micro-segments claimed, merge not implemented"
     end)

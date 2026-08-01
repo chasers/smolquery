@@ -38,13 +38,13 @@ defmodule Smolquery.StorageService.Client do
   alias Smolquery.StorageService.Sealer
 
   @impl SealConsumer
-  @spec seal_ready(keyword(), Store.table_ref(), [String.t()]) :: :ok
-  def seal_ready(config, table_ref, ids) do
+  @spec seal_ready(keyword(), Store.table_ref(), SealConsumer.claim()) :: :ok
+  def seal_ready(config, table_ref, claim) do
     name = Keyword.get(config, :name, Smolquery.StorageService)
 
     case Runtime.fetch(name) do
-      {:ok, _runtime} -> Sealer.seal_ready(name, table_ref, ids)
-      :error -> report_missing(name, table_ref, ids)
+      {:ok, _runtime} -> Sealer.seal_ready(name, table_ref, claim)
+      :error -> report_missing(name, table_ref, claim.ids)
     end
   end
 

@@ -14,7 +14,7 @@ defmodule Smolquery.BufferService.SealLog do
   alias Smolquery.BufferService.SealConsumer
 
   @impl SealConsumer
-  def seal_ready(_config, {dataset, table}, ids) do
+  def seal_ready(_config, {dataset, table}, %{ids: ids}) do
     Logger.info(fn ->
       "seal_ready #{dataset}.#{table}: #{length(ids)} unsealed micro-segments, no sealer configured"
     end)

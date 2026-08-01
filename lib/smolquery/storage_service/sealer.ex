@@ -10,27 +10,27 @@ defmodule Smolquery.StorageService.Sealer do
   ## Dropping a signal is always safe
 
   Two rules discard signals: a table already being sealed coalesces (its running
-  attempt covers the same tail), and a signal arriving at
-  `max_concurrent_seals` is shed. Both are safe because signalling is
-  level-triggered — `Smolquery.BufferService.SealConsumer` re-signals every
-  `seal_retry_ms` while a table stays over its thresholds, so a dropped signal
-  costs a retry interval and nothing else. That is the whole reason this process
-  needs no queue: the buffer already holds the only durable record of what wants
-  sealing, and it repeats itself.
+  attempt covers the same claim), and a signal arriving at `max_concurrent_seals`
+  is shed. Both are safe because signalling is level-triggered —
+  `Smolquery.BufferService.SealConsumer` re-signals every `seal_retry_ms` until
+  the claim is retired, so a dropped signal costs a retry interval and nothing
+  else. That is the whole reason this process needs no queue: the buffer holds the
+  only durable record of what wants sealing, and it repeats itself.
 
   ## Attempts fail rather than block
 
   A seal attempt runs under a `Task.Supervisor` and is monitored, never linked, so
   a merge that crashes takes down neither this process nor the table it was
-  sealing. The table simply becomes eligible again, and the next re-signal
-  retries it. Retrying is safe because a claim fixes the input set, which is
-  Milestone 4 L2's work.
+  sealing. The table simply becomes eligible again, and the next re-signal retries
+  it — with the same claim, so the retry produces the same sealed segment rather
+  than a second one.
   """
 
   use GenServer
 
   require Logger
 
+  alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Handoff
   alias Smolquery.StorageService.Runtime
@@ -53,9 +53,9 @@ defmodule Smolquery.StorageService.Sealer do
   its write path must not wait on storage. Returns `:ok` whether the signal
   becomes work or is dropped; see the coalescing rules above.
   """
-  @spec seal_ready(atom(), Store.table_ref(), [String.t()]) :: :ok
-  def seal_ready(name, table_ref, ids) do
-    GenServer.cast(Runtime.sealer(name), {:seal_ready, table_ref, ids})
+  @spec seal_ready(atom(), Store.table_ref(), SealConsumer.claim()) :: :ok
+  def seal_ready(name, table_ref, claim) do
+    GenServer.cast(Runtime.sealer(name), {:seal_ready, table_ref, claim})
   end
 
   @doc """
@@ -70,11 +70,11 @@ defmodule Smolquery.StorageService.Sealer do
   def init(%Runtime{} = runtime), do: {:ok, %__MODULE__{runtime: runtime}}
 
   @impl GenServer
-  def handle_cast({:seal_ready, table_ref, ids}, state) do
+  def handle_cast({:seal_ready, table_ref, claim}, state) do
     cond do
       sealing?(state, table_ref) -> {:noreply, state}
       at_capacity?(state) -> {:noreply, shed(state, table_ref)}
-      true -> {:noreply, start_attempt(state, table_ref, ids)}
+      true -> {:noreply, start_attempt(state, table_ref, claim)}
     end
   end
 
@@ -117,12 +117,12 @@ defmodule Smolquery.StorageService.Sealer do
     state
   end
 
-  defp start_attempt(state, table_ref, ids) do
+  defp start_attempt(state, table_ref, claim) do
     runtime = state.runtime
 
     task =
       Task.Supervisor.async_nolink(Runtime.seals(runtime.name), fn ->
-        Handoff.seal(runtime.handoff, runtime, table_ref, ids)
+        Handoff.seal(runtime.handoff, runtime, table_ref, claim)
       end)
 
     %{state | attempts: Map.put(state.attempts, task.ref, table_ref)}

@@ -247,10 +247,27 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
 :ok = Smolquery.BufferService.Client.retire(Smolquery.BufferService, table, ids, snapshot)
 ```
 
+- **What gets signalled is a frozen claim, not the tail as it stands.** Crossing a
+  threshold first writes a `claim` record to the manifest log — the micro-segment
+  ids, plus the key of the sealed segment they will become, derived from those ids
+  — and only then signals. Rows written afterwards wait for the next claim. A
+  sealer therefore merges the same inputs into the same output no matter how many
+  times it is told or which side crashed, which is what makes retrying safe
+  instead of duplicating rows.
+- **The claim is how a query planner dedups, exactly.** Each manifest entry
+  carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
+  include a micro-segment unless its claim's keys are all in the catalog's segment
+  list at `S`. Since the commit that adds those keys is atomic, a micro-segment
+  stops counting at the instant its rows start counting — there is no window where
+  both tiers hold them, which snapshot-stamp comparison could not achieve.
+- **Retiring one member of a claim retires all of them**, because the sealed
+  segment holds every input's rows. Stamping only some would leave the rest
+  claimed but unsealed, and the next re-signal would rebuild that claim's segment
+  from a subset — overwriting a committed segment with fewer rows.
 - **The signal is level-triggered, not an event.** It repeats every
-  `seal_retry_ms` while a table stays over threshold, so a sealer that dies
-  mid-handoff costs a retry interval rather than leaving that table's tail parked
-  forever. Consumers should expect repeats and read them as current state.
+  `seal_retry_ms` until the claim is retired, so a sealer that dies mid-handoff
+  costs a retry interval rather than leaving that table's tail parked forever.
+  Consumers should expect repeats, and can rely on them being identical.
 - **Retirement is a stamp, not a delete.** `retire/4` records the catalog snapshot
   the sealer committed at and leaves the segments readable, because a query
   planned at an older snapshot is still entitled to them. Deletion happens
@@ -296,8 +313,9 @@ that wiring is configuration. So far the scheduling half is built:
 
 What a seal attempt *does* is `Smolquery.StorageService.Handoff`, and it is not
 implemented yet: the default reports `{:error, :not_implemented}` and logs, so a
-storage node accepts and schedules signals but seals nothing, visibly. The merge,
-catalog commit, and retirement land next.
+storage node accepts and schedules signals but seals nothing, visibly. It already
+receives the frozen claim, though — the ids to merge and the key to write them to —
+so the merge, catalog commit, and retirement are what remain.
 
 ## Roles
 

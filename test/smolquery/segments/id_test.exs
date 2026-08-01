@@ -44,6 +44,37 @@ defmodule Smolquery.Segments.IdTest do
     end
   end
 
+  describe "derive/2" do
+    test "same inputs, same id — what a seal retry depends on" do
+      assert Id.derive(1_785_000_000_000, ["analytics", "events", "a", "b"]) ==
+               Id.derive(1_785_000_000_000, ["analytics", "events", "a", "b"])
+    end
+
+    test "different seeds give different ids" do
+      refute Id.derive(1_785_000_000_000, ["a"]) == Id.derive(1_785_000_000_000, ["b"])
+    end
+
+    test "different timestamps give different ids for one seed" do
+      refute Id.derive(1_785_000_000_000, ["a"]) == Id.derive(1_785_000_000_001, ["a"])
+    end
+
+    test "is a well-formed ULID that still sorts chronologically" do
+      early = Id.derive(1_000_000_000_000, ["late-seed"])
+      late = Id.derive(1_000_000_000_001, ["early-seed"])
+
+      assert Id.valid?(early)
+      assert early < late
+    end
+
+    test "recovers the timestamp it was derived with" do
+      assert Id.timestamp(Id.derive(1_785_000_000_000, ["seed"])) == {:ok, 1_785_000_000_000}
+    end
+
+    test "takes iodata, so a seed needs no intermediate binary" do
+      assert Id.derive(1, [["analytics", 0], "events"]) == Id.derive(1, "analytics\0events")
+    end
+  end
+
   describe "timestamp/1" do
     test "recovers the millisecond it was stamped with" do
       assert Id.timestamp(Id.generate(1_785_000_000_000)) == {:ok, 1_785_000_000_000}

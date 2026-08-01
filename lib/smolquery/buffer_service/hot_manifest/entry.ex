@@ -24,7 +24,17 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   alias Smolquery.Segments.Segment
 
   @enforce_keys [:id, :key, :row_count, :byte_size, :added_at]
-  defstruct [:id, :key, :row_count, :byte_size, :added_at, :sealed_at, :retired_at, stats: %{}]
+  defstruct [
+    :id,
+    :key,
+    :row_count,
+    :byte_size,
+    :added_at,
+    :sealed_at,
+    :retired_at,
+    stats: %{},
+    claim_keys: []
+  ]
 
   @type column_stats :: Segment.column_stats()
 
@@ -36,7 +46,8 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
           added_at: integer(),
           sealed_at: non_neg_integer() | nil,
           retired_at: integer() | nil,
-          stats: %{optional(String.t()) => column_stats()}
+          stats: %{optional(String.t()) => column_stats()},
+          claim_keys: [String.t()]
         }
 
   @doc """
@@ -68,6 +79,24 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
     do: %{entry | sealed_at: snapshot, retired_at: retired_at}
 
   @doc """
+  Whether a sealer has been asked to seal this segment, and into what.
+
+  `claim_keys` names the sealed segment(s) the claim covering this entry will
+  produce. It is what makes the handoff exactly-once, and it is deliberately
+  *not* `sealed_at`: a planner cannot tell from a snapshot stamp whether the
+  commit it describes is visible to *its* snapshot, but it can ask whether these
+  keys are in the catalog's segment list at the snapshot it is reading.
+  """
+  @spec claimed?(t()) :: boolean()
+  def claimed?(%__MODULE__{claim_keys: keys}), do: keys != []
+
+  @doc """
+  Stamps an entry as claimed for the sealed segment(s) `keys` name.
+  """
+  @spec claim(t(), [String.t()]) :: t()
+  def claim(%__MODULE__{} = entry, keys), do: %{entry | claim_keys: keys}
+
+  @doc """
   The log record for an entry, in full — replaying it restores the entry exactly.
   """
   @spec to_record(t()) :: map()
@@ -81,6 +110,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
       "added_at" => entry.added_at,
       "sealed_at" => entry.sealed_at,
       "retired_at" => entry.retired_at,
+      "claim_keys" => entry.claim_keys,
       "stats" => encode_stats(entry.stats)
     }
   end
@@ -100,6 +130,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
        added_at: Map.get(record, "added_at", 0),
        sealed_at: Map.get(record, "sealed_at"),
        retired_at: Map.get(record, "retired_at"),
+       claim_keys: Map.get(record, "claim_keys") || [],
        stats: record |> Map.get("stats", %{}) |> decode_stats()
      }}
   end

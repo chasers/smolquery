@@ -66,7 +66,7 @@ defmodule Smolquery.BufferService.AdopterTest do
 
     _restarted = start_buffer_service(context, name: name, seal_max_age_ms: 1)
 
-    assert_receive {:seal_ready, @table, [id]}, 1_000
+    assert_receive {:seal_ready, @table, %{ids: [id]}}, 1_000
     assert id == ack.segment_id
   end
 

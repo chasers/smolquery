@@ -11,6 +11,8 @@ defmodule Smolquery.StorageService.SealerTest do
   @events {"analytics", "events"}
   @clicks {"analytics", "clicks"}
 
+  defp claim(ids), do: %{ids: ids, keys: ["analytics/events/sealed.parquet"]}
+
   setup context do
     name = :"sealer_#{:erlang.unique_integer([:positive])}"
 
@@ -30,9 +32,9 @@ defmodule Smolquery.StorageService.SealerTest do
 
   @tag :tmp_dir
   test "hands a signal to the configured handoff", %{name: name} do
-    assert Sealer.seal_ready(name, @events, ["a", "b"]) == :ok
+    assert Sealer.seal_ready(name, @events, claim(["a", "b"])) == :ok
 
-    assert_receive {:sealing, @events, ["a", "b"], attempt}
+    assert_receive {:sealing, @events, %{ids: ["a", "b"]}, attempt}
     assert Sealer.sealing(name) == [@events]
 
     HandoffProbe.release(attempt)
@@ -41,12 +43,12 @@ defmodule Smolquery.StorageService.SealerTest do
 
   @tag :tmp_dir
   test "coalesces a second signal for a table already sealing", %{name: name} do
-    Sealer.seal_ready(name, @events, ["a"])
-    assert_receive {:sealing, @events, ["a"], attempt}
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
 
-    Sealer.seal_ready(name, @events, ["a", "b"])
+    Sealer.seal_ready(name, @events, claim(["a", "b"]))
 
-    refute_receive {:sealing, @events, ["a", "b"], _attempt}, 50
+    refute_receive {:sealing, @events, %{ids: ["a", "b"]}, _attempt}, 50
     assert Sealer.sealing(name) == [@events]
 
     HandoffProbe.release(attempt)
@@ -54,11 +56,11 @@ defmodule Smolquery.StorageService.SealerTest do
 
   @tag :tmp_dir
   test "seals distinct tables concurrently", %{name: name} do
-    Sealer.seal_ready(name, @events, ["a"])
-    Sealer.seal_ready(name, @clicks, ["b"])
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    Sealer.seal_ready(name, @clicks, claim(["b"]))
 
-    assert_receive {:sealing, @events, ["a"], events_attempt}
-    assert_receive {:sealing, @clicks, ["b"], clicks_attempt}
+    assert_receive {:sealing, @events, %{ids: ["a"]}, events_attempt}
+    assert_receive {:sealing, @clicks, %{ids: ["b"]}, clicks_attempt}
     assert Enum.sort(Sealer.sealing(name)) == Enum.sort([@events, @clicks])
 
     HandoffProbe.release(events_attempt)
@@ -68,32 +70,32 @@ defmodule Smolquery.StorageService.SealerTest do
   @tag :tmp_dir
   @tag max_concurrent_seals: 1
   test "sheds a signal that arrives at the concurrency bound", %{name: name} do
-    Sealer.seal_ready(name, @events, ["a"])
-    assert_receive {:sealing, @events, ["a"], attempt}
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
 
-    Sealer.seal_ready(name, @clicks, ["b"])
+    Sealer.seal_ready(name, @clicks, claim(["b"]))
 
-    refute_receive {:sealing, @clicks, _ids, _attempt}, 50
+    refute_receive {:sealing, @clicks, _claim, _attempt}, 50
     assert Sealer.sealing(name) == [@events]
 
     HandoffProbe.release(attempt)
     assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
 
-    Sealer.seal_ready(name, @clicks, ["b"])
-    assert_receive {:sealing, @clicks, ["b"], shed_attempt}
+    Sealer.seal_ready(name, @clicks, claim(["b"]))
+    assert_receive {:sealing, @clicks, %{ids: ["b"]}, shed_attempt}
 
     HandoffProbe.release(shed_attempt)
   end
 
   @tag :tmp_dir
   test "a table becomes eligible again after a failed attempt", %{name: name} do
-    Sealer.seal_ready(name, @events, ["a"])
-    assert_receive {:sealing, @events, ["a"], attempt}
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
     HandoffProbe.release(attempt)
     assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
 
-    Sealer.seal_ready(name, @events, ["a", "b"])
-    assert_receive {:sealing, @events, ["a", "b"], retry}
+    Sealer.seal_ready(name, @events, claim(["a", "b"]))
+    assert_receive {:sealing, @events, %{ids: ["a", "b"]}, retry}
 
     HandoffProbe.release(retry)
   end
@@ -105,8 +107,8 @@ defmodule Smolquery.StorageService.SealerTest do
 
     log =
       capture_log(fn ->
-        Sealer.seal_ready(name, @events, ["a"])
-        assert_receive {:sealing, @events, ["a"], attempt}
+        Sealer.seal_ready(name, @events, claim(["a"]))
+        assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
         HandoffProbe.release(attempt)
         assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
       end)
@@ -114,8 +116,8 @@ defmodule Smolquery.StorageService.SealerTest do
     assert log =~ "crashed"
     assert Process.alive?(sealer)
 
-    Sealer.seal_ready(name, @events, ["a"])
-    assert_receive {:sealing, @events, ["a"], retry}
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, %{ids: ["a"]}, retry}
 
     HandoffProbe.release(retry)
   end
