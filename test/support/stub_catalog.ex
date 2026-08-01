@@ -66,6 +66,17 @@ defmodule Smolquery.Test.StubCatalog do
     do: record(owner, :replace_segments, [table, segments, paths], {:ok, @snapshot})
 
   @impl Catalog
+  def put_retention(owner, table, policy),
+    do: record(owner, :put_retention, [table, policy], :ok)
+
+  @impl Catalog
+  def retention(owner, table), do: record(owner, :retention, [table], {:ok, nil})
+
+  @impl Catalog
+  def expire_snapshots(owner, older_than_ms),
+    do: record(owner, :expire_snapshots, [older_than_ms], {:ok, 0})
+
+  @impl Catalog
   def current_snapshot(owner), do: record(owner, :current_snapshot, [], {:ok, @snapshot})
 
   @impl Catalog

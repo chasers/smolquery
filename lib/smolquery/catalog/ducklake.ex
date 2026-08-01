@@ -365,6 +365,82 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
+  @impl Catalog
+  def put_retention(%__MODULE__{} = config, {dataset, table}, nil) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- ensure_retention_table(config),
+         {:ok, _result} <- query(config, delete_retention_sql(config, dataset, table)) do
+      :ok
+    end
+  end
+
+  def put_retention(%__MODULE__{} = config, {dataset, table}, %{column: column, ttl_ms: ttl_ms})
+      when is_binary(column) and is_integer(ttl_ms) and ttl_ms > 0 do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- ensure_retention_table(config) do
+      Engine.transaction(config.engine, [
+        delete_retention_sql(config, dataset, table),
+        "INSERT INTO #{retention_table(config)} VALUES (" <>
+          "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
+          "#{Identifier.sql_string(column)}, #{ttl_ms})"
+      ])
+    end
+  end
+
+  def put_retention(%__MODULE__{} = _config, _table, policy),
+    do: {:error, {:invalid_retention, policy}}
+
+  @impl Catalog
+  def retention(%__MODULE__{} = config, {dataset, table}) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- ensure_retention_table(config),
+         {:ok, result} <-
+           query(
+             config,
+             "SELECT column_name, ttl_ms FROM #{retention_table(config)} " <>
+               "WHERE dataset = $1 AND table_name = $2",
+             [dataset, table]
+           ) do
+      case result.rows do
+        [] -> {:ok, nil}
+        [[column, ttl_ms]] -> {:ok, %{column: column, ttl_ms: ttl_ms}}
+        rows -> {:error, {:ambiguous_retention, rows}}
+      end
+    end
+  end
+
+  @impl Catalog
+  def expire_snapshots(%__MODULE__{} = config, older_than_ms)
+      when is_integer(older_than_ms) and older_than_ms > 0 do
+    sql =
+      "CALL ducklake_expire_snapshots(#{Identifier.sql_string(config.catalog)}, " <>
+        "older_than => now() - INTERVAL #{Identifier.sql_string("#{older_than_ms} milliseconds")})"
+
+    case query(config, sql) do
+      {:ok, result} -> {:ok, result.num_rows}
+      {:error, error} -> {:error, classify(error)}
+    end
+  end
+
+  defp retention_table(config), do: "#{metadata_schema(config)}.smolquery_retention"
+
+  defp ensure_retention_table(config) do
+    sql =
+      "CREATE TABLE IF NOT EXISTS #{retention_table(config)} (" <>
+        "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
+        "column_name VARCHAR NOT NULL, ttl_ms BIGINT NOT NULL)"
+
+    with {:ok, _result} <- query(config, sql), do: :ok
+  end
+
+  defp delete_retention_sql(config, dataset, table) do
+    "DELETE FROM #{retention_table(config)} WHERE dataset = " <>
+      "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)}"
+  end
+
   defp absolute_paths(rows) do
     rows
     |> Enum.reduce_while({:ok, []}, fn

@@ -98,6 +98,15 @@ defmodule Smolquery.Test.PathCatalog do
   end
 
   @impl Catalog
+  def put_retention(_agent, _table, _policy), do: :ok
+
+  @impl Catalog
+  def retention(_agent, _table), do: {:ok, nil}
+
+  @impl Catalog
+  def expire_snapshots(_agent, _older_than_ms), do: {:ok, 0}
+
+  @impl Catalog
   def current_snapshot(_agent), do: {:ok, 1}
 
   @impl Catalog

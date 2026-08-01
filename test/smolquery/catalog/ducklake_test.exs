@@ -410,6 +410,116 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "retention policy" do
+    test "round-trips a policy through the metadata database", %{catalog: catalog} do
+      assert Catalog.retention(catalog, @table) == {:ok, nil}
+
+      policy = %{column: "ts", ttl_ms: 86_400_000}
+      assert Catalog.put_retention(catalog, @table, policy) == :ok
+      assert Catalog.retention(catalog, @table) == {:ok, policy}
+
+      replaced = %{column: "ts", ttl_ms: 3_600_000}
+      assert Catalog.put_retention(catalog, @table, replaced) == :ok
+      assert Catalog.retention(catalog, @table) == {:ok, replaced}
+
+      assert Catalog.put_retention(catalog, @table, nil) == :ok
+      assert Catalog.retention(catalog, @table) == {:ok, nil}
+    end
+
+    test "policies are per table", %{catalog: catalog} do
+      :ok = Catalog.create_table(catalog, {"analytics", "clicks"}, schema())
+
+      policy = %{column: "ts", ttl_ms: 1_000}
+      assert Catalog.put_retention(catalog, @table, policy) == :ok
+      assert Catalog.retention(catalog, {"analytics", "clicks"}) == {:ok, nil}
+    end
+
+    test "refuses a malformed policy", %{catalog: catalog} do
+      assert {:error, {:invalid_retention, _policy}} =
+               Catalog.put_retention(catalog, @table, %{column: "ts", ttl_ms: 0})
+
+      assert {:error, {:invalid_retention, _policy}} =
+               Catalog.put_retention(catalog, @table, %{ttl_ms: 5})
+    end
+
+    test "policy rows survive a connection restart", %{catalog: catalog} do
+      policy = %{column: "ts", ttl_ms: 86_400_000}
+      :ok = Catalog.put_retention(catalog, @table, policy)
+
+      connection = Process.whereis(Engine.connection_name(@engine))
+      ref = Process.monitor(connection)
+      Process.exit(connection, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^connection, :killed}, 1_000
+
+      assert eventually(fn ->
+               case Process.whereis(Engine.connection_name(@engine)) do
+                 nil -> false
+                 ^connection -> false
+                 _restarted -> true
+               end
+             end)
+
+      assert Catalog.retention(catalog, @table) == {:ok, policy}
+    end
+  end
+
+  describe "expire_snapshots/2 (the T-14 spike for this maintenance function)" do
+    test "expires old snapshots over externally-registered files without crashing", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, first} = Catalog.register_segments(catalog, @table, [a])
+      {:ok, _second} = Catalog.register_segments(catalog, @table, [b])
+      {:ok, _dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      Process.sleep(1_100)
+
+      assert {:ok, expired} = Catalog.expire_snapshots(catalog, 1_000)
+      assert expired > 0
+
+      assert {:error, _pinned_read_fails_cleanly} = Catalog.segments(catalog, @table, first)
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [b.path]}
+      assert row_count() == 10
+    end
+
+    test "expiry is what makes a dropped file invisible to known_segments", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+      {:ok, _dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      assert {:ok, known} = Catalog.known_segments(catalog)
+      assert a.path in known
+
+      Process.sleep(1_100)
+      assert {:ok, _expired} = Catalog.expire_snapshots(catalog, 1_000)
+
+      assert {:ok, known} = Catalog.known_segments(catalog)
+      refute a.path in known
+      assert b.path in known
+      assert File.exists?(a.path)
+    end
+
+    test "never expires the snapshot a current reader would plan against", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      segment = write_segment(dir, 1, 10)
+      {:ok, registered} = Catalog.register_segments(catalog, @table, [segment])
+
+      Process.sleep(1_100)
+      assert {:ok, _expired} = Catalog.expire_snapshots(catalog, 1_000)
+
+      assert Catalog.segments(catalog, @table, registered) == {:ok, [segment.path]}
+      assert row_count() == 10
+    end
+  end
+
   describe "query path" do
     test "prunes segments by the stats DuckLake derived from the footers", %{
       catalog: catalog,

@@ -67,7 +67,12 @@ defmodule Smolquery.Api.CrudIntegrationTest do
 
     fetched = Req.get!(req, url: "/v1/datasets/analytics/tables/events")
     assert fetched.status == 200
-    assert fetched.body == %{"id" => "events", "schema" => @schema_json}
+
+    assert fetched.body == %{
+             "id" => "events",
+             "schema" => @schema_json,
+             "retention" => nil
+           }
   end
 
   test "the schema read back through DuckLake survives a re-create check", %{base: base} do

@@ -16,7 +16,8 @@ defmodule Smolquery.Test.MapCatalog do
 
   @spec new() :: Catalog.t()
   def new do
-    {:ok, agent} = Agent.start_link(fn -> %{datasets: MapSet.new(), tables: %{}} end)
+    {:ok, agent} =
+      Agent.start_link(fn -> %{datasets: MapSet.new(), tables: %{}, retention: %{}} end)
 
     %Catalog{impl: __MODULE__, config: agent}
   end
@@ -68,6 +69,23 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def replace_segments(_agent, _table_ref, _segments, _paths), do: {:error, :not_supported}
+
+  @impl Catalog
+  def put_retention(agent, table_ref, nil) do
+    Agent.update(agent, &%{&1 | retention: Map.delete(&1.retention, table_ref)})
+  end
+
+  def put_retention(agent, table_ref, %{column: _column, ttl_ms: _ttl_ms} = policy) do
+    Agent.update(agent, &%{&1 | retention: Map.put(&1.retention, table_ref, policy)})
+  end
+
+  @impl Catalog
+  def retention(agent, table_ref) do
+    {:ok, agent |> Agent.get(& &1.retention) |> Map.get(table_ref)}
+  end
+
+  @impl Catalog
+  def expire_snapshots(_agent, _older_than_ms), do: {:ok, 0}
 
   @impl Catalog
   def current_snapshot(_agent), do: {:error, :not_supported}

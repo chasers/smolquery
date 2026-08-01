@@ -5,8 +5,9 @@ defmodule Smolquery.StorageService.Supervisor do
   Started only on nodes whose roles include `:storage` (see `Smolquery.Roles`).
   Holds the sealed tier's workers: a catalog to commit through, an engine to merge
   through, a task supervisor the merges run under, the sealer that answers seal
-  signals, the compactor that re-merges undersized sealed segments, and the
-  sweeper that deletes uploads whose commit never followed.
+  signals, the compactor that re-merges undersized sealed segments, the retention
+  sweeper that drops segments past their table's TTL and expires old snapshots,
+  and the GC that deletes uploads whose commit never followed.
 
   The catalog and the merge run on separate engines deliberately. An
   `Adbc.Connection` serializes the queries it is given, so sharing one would put
@@ -36,6 +37,7 @@ defmodule Smolquery.StorageService.Supervisor do
   alias Smolquery.Engine
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
+  alias Smolquery.StorageService.Retention
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
 
@@ -66,6 +68,7 @@ defmodule Smolquery.StorageService.Supervisor do
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
           {Compactor, runtime},
+          {Retention, runtime},
           {GC, runtime}
         ]
 

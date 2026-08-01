@@ -46,6 +46,16 @@ defmodule Smolquery.Catalog do
 
   @type snapshot :: non_neg_integer()
 
+  @typedoc """
+  A table's TTL policy: rows age out of `column` after `ttl_ms`.
+
+  Retention is segment-grained — a segment is dropped once the *maximum* of
+  `column` across its rows has passed the horizon — so `column` names which
+  timestamp the age is measured against, and a policy is only as good as that
+  column's Parquet stats.
+  """
+  @type retention :: %{column: String.t(), ttl_ms: pos_integer()}
+
   @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
@@ -62,6 +72,12 @@ defmodule Smolquery.Catalog do
               {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
   @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
+  @callback put_retention(config :: term(), table_ref(), retention() | nil) ::
+              :ok | {:error, term()}
+  @callback retention(config :: term(), table_ref()) ::
+              {:ok, retention() | nil} | {:error, term()}
+  @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
 
   @doc """
   Creates a dataset, if it does not already exist.
@@ -89,6 +105,28 @@ defmodule Smolquery.Catalog do
   @spec list_tables(t(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def list_tables(%__MODULE__{} = catalog, dataset),
     do: catalog.impl.list_tables(catalog.config, dataset)
+
+  @doc """
+  Every table in the catalog, qualified — the flattened form of
+  `list_datasets/1` × `list_tables/2`.
+
+  A convenience over the callbacks rather than one itself: maintenance
+  sweeps (compaction, retention) want "all tables" and no implementation
+  could answer it better than the composition does.
+  """
+  @spec tables(t()) :: {:ok, [table_ref()]} | {:error, term()}
+  def tables(%__MODULE__{} = catalog) do
+    with {:ok, datasets} <- list_datasets(catalog) do
+      Enum.reduce_while(datasets, {:ok, []}, &collect_tables(catalog, &1, &2))
+    end
+  end
+
+  defp collect_tables(catalog, dataset, {:ok, acc}) do
+    case list_tables(catalog, dataset) do
+      {:ok, tables} -> {:cont, {:ok, acc ++ Enum.map(tables, &{dataset, &1})}}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
 
   @doc """
   A table's schema as the catalog holds it.
@@ -167,4 +205,41 @@ defmodule Smolquery.Catalog do
   @spec known_segments(t()) :: {:ok, [String.t()]} | {:error, term()}
   def known_segments(%__MODULE__{} = catalog),
     do: catalog.impl.known_segments(catalog.config)
+
+  @doc """
+  Sets (or with `nil` clears) a table's retention policy.
+
+  Policy is metadata about a table's segments, so it lives behind this seam
+  with the rest of the table's metadata — not in service configuration, where
+  it could disagree between nodes, and not in job-history-style side storage,
+  because unlike a job row it is exactly what the catalog is *for*.
+
+  Whether `column` exists and carries a time type is the caller's check
+  (`Smolquery.Schema`), made where a validation error can still reach the
+  user who typed it.
+  """
+  @spec put_retention(t(), table_ref(), retention() | nil) :: :ok | {:error, term()}
+  def put_retention(%__MODULE__{} = catalog, table, policy),
+    do: catalog.impl.put_retention(catalog.config, table, policy)
+
+  @doc """
+  A table's retention policy, or `nil` when it keeps rows forever.
+  """
+  @spec retention(t(), table_ref()) :: {:ok, retention() | nil} | {:error, term()}
+  def retention(%__MODULE__{} = catalog, table),
+    do: catalog.impl.retention(catalog.config, table)
+
+  @doc """
+  Expires snapshots older than `older_than_ms`, returning how many expired.
+
+  Expiry is what turns a logical drop into a reclaimable file: GC spares any
+  path some snapshot still references, and dropped or compacted-away segments
+  stay referenced by the snapshots that predate the drop. Expiring those
+  snapshots is therefore the step that lets GC's membership test finally say
+  no — and it is also what bounds time travel, so the window must exceed the
+  longest query any reader may still have pinned.
+  """
+  @spec expire_snapshots(t(), pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def expire_snapshots(%__MODULE__{} = catalog, older_than_ms),
+    do: catalog.impl.expire_snapshots(catalog.config, older_than_ms)
 end
