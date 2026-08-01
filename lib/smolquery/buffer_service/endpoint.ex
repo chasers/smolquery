@@ -19,6 +19,7 @@ defmodule Smolquery.BufferService.Endpoint do
 
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
+  alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
@@ -32,6 +33,12 @@ defmodule Smolquery.BufferService.Endpoint do
 
   @doc """
   Accumulates a forward-batch, returning once its rows are durable and queryable.
+
+  Admission runs here, before the buffer's mailbox (PL-9): a batch whose
+  Little's-law wait estimate exceeds the runtime's `ack_budget_ms` is refused
+  with `{:error, {:overloaded, predicted_ms}}` instead of queueing toward a
+  timeout. The prediction rides along so a caller knows how far behind the
+  buffer is — the API turns it into a `retry-after`.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
@@ -92,12 +99,38 @@ defmodule Smolquery.BufferService.Endpoint do
 
   defp deliver(runtime, table_ref, schema, rows, retries) do
     case buffer(runtime, table_ref) do
-      {:ok, buffer} -> TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms)
+      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, schema, rows)
       {:error, :noproc} -> retry(runtime, table_ref, schema, rows, retries)
       {:error, reason} -> {:error, reason}
     end
   catch
     :exit, {:noproc, _call} -> retry(runtime, table_ref, schema, rows, retries)
+  end
+
+  defp admit_and_write(runtime, table_ref, buffer, schema, rows) do
+    load = load(runtime, table_ref)
+    count = length(rows)
+
+    with :ok <- Load.admit(load, count, runtime.ack_budget_ms) do
+      Load.enter(load, count)
+
+      case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms) do
+        {:ok, ack} ->
+          {:ok, ack}
+
+        {:error, reason} ->
+          Load.leave(load, count)
+
+          {:error, reason}
+      end
+    end
+  end
+
+  defp load(runtime, table_ref) do
+    case Registry.lookup(Runtime.registry(runtime.name), table_ref) do
+      [{_pid, load}] when is_reference(load) -> load
+      _absent_or_unpublished -> nil
+    end
   end
 
   defp retry(_runtime, _table_ref, _schema, _rows, 0), do: {:error, :buffer_unavailable}

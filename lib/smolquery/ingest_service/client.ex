@@ -27,8 +27,9 @@ defmodule Smolquery.IngestService.Client do
   `{:ok, result}` carries how many rows the buffer acked and every rejected
   row's index and reasons — partial failure is a result, not an error. An
   error is a whole-request failure: the table does not exist, the buffer is
-  full (`{:error, :buffer_full}` — the API's 429), or a service is not
-  running.
+  full (`{:error, :buffer_full}`) or too far behind
+  (`{:error, {:overloaded, predicted_ms}}`, PL-9) — both the API's 429 — or
+  a service is not running.
   """
   @spec insert(atom(), Store.table_ref(), [term()]) :: {:ok, result()} | {:error, term()}
   def insert(name, table_ref, rows) when is_list(rows) do

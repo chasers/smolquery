@@ -7,6 +7,7 @@ defmodule Smolquery.Api.InsertsTest do
   alias Smolquery.Api.Router
   alias Smolquery.Api.Runtime
   alias Smolquery.BufferService
+  alias Smolquery.BufferService.Load
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
@@ -111,6 +112,31 @@ defmodule Smolquery.Api.InsertsTest do
 
     assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
     assert message =~ "rows"
+  end
+
+  test "an overloaded buffer is a 429 whose retry-after is the prediction", %{
+    name: name,
+    buffer: buffer
+  } do
+    rows = for i <- 1..1_000, do: %{"id" => i}
+    assert post_rows(name, rows).status == 200
+
+    [{_pid, load}] =
+      Registry.lookup(BufferService.Runtime.registry(buffer), {"analytics", "events"})
+
+    for _crush <- 1..80,
+        do: Load.sample_rate(load, 1_000, 1_000_000_000)
+
+    response = post_rows(name, for(i <- 1..10, do: %{"id" => i}))
+
+    assert response.status == 429
+
+    assert %{"error" => %{"status" => "RESOURCE_EXHAUSTED", "message" => message}} =
+             JSON.decode!(response.resp_body)
+
+    assert message =~ "overloaded"
+    assert [retry_after] = Plug.Conn.get_resp_header(response, "retry-after")
+    assert String.to_integer(retry_after) >= 1
   end
 
   test "a buffer that is not running is a 503", %{name: name} do
