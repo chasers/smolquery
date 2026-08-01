@@ -15,6 +15,8 @@ defmodule Smolquery.StorageService.Runtime do
       config :smolquery, Smolquery.StorageService,
         dir: "priv/data/sealed",
         buffer_base_url: "http://127.0.0.1:4001",
+        buffer_timeout_ms: 30_000,
+        engine_extensions: [:httpfs],
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -42,9 +44,11 @@ defmodule Smolquery.StorageService.Runtime do
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
 
-  The merge path reads micro-segments over HTTP, so the `Smolquery.Engine`
-  configuration this service's engine inherits must include the `httpfs`
-  extension.
+  `engine_extensions` are loaded into this service's own engine. `httpfs` is not
+  optional in a real deployment — the merge reads micro-segments over HTTP, and an
+  object-store tier would need it too — so it is the default rather than something
+  a deployment has to remember. Tests that never merge set it to `[]` and skip the
+  extension download.
   """
 
   alias Smolquery.Segments.Store
@@ -54,6 +58,8 @@ defmodule Smolquery.StorageService.Runtime do
     :name,
     :store,
     buffer_base_url: "http://127.0.0.1:4001",
+    buffer_timeout_ms: 30_000,
+    engine_extensions: [:httpfs],
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,
@@ -65,6 +71,8 @@ defmodule Smolquery.StorageService.Runtime do
           name: atom(),
           store: Store.t(),
           buffer_base_url: String.t(),
+          buffer_timeout_ms: timeout(),
+          engine_extensions: [atom() | String.t()],
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
           gc_interval_ms: pos_integer(),
@@ -74,6 +82,8 @@ defmodule Smolquery.StorageService.Runtime do
 
   @limits [
     :buffer_base_url,
+    :buffer_timeout_ms,
+    :engine_extensions,
     :target_segment_bytes,
     :max_concurrent_seals,
     :gc_interval_ms,

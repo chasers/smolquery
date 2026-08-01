@@ -10,6 +10,8 @@ config :smolquery, Smolquery.BufferService,
   hot_server_port: 0,
   seal_consumer: {Smolquery.BufferService.SealLog, []}
 
+config :smolquery, Smolquery.StorageService, engine_extensions: []
+
 config :smolquery, Smolquery.Engine,
   memory_limit: "512MB",
   threads: 2,

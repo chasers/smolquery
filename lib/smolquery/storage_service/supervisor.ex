@@ -44,7 +44,7 @@ defmodule Smolquery.StorageService.Supervisor do
     Runtime.put(runtime)
 
     children = [
-      {Engine, name: Runtime.engine(runtime.name)},
+      {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
       {Task.Supervisor, name: Runtime.seals(runtime.name)},
       {Sealer, runtime}
     ]

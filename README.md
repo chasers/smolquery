@@ -311,11 +311,31 @@ that wiring is configuration. So far the scheduling half is built:
   per flush against one per seal — and that difference is what makes an object
   store plausible here long before it is for the hot tier.
 
-What a seal attempt *does* is `Smolquery.StorageService.Handoff`, and it is not
-implemented yet: the default reports `{:error, :not_implemented}` and logs, so a
-storage node accepts and schedules signals but seals nothing, visibly. It already
-receives the frozen claim, though — the ids to merge and the key to write them to —
-so the merge, catalog commit, and retirement are what remain.
+The merge itself is built. `Smolquery.StorageService.Merge` turns a claim into one
+sealed segment inside DuckDB, writing straight to the store's staging path:
+
+```sql
+COPY (SELECT * FROM read_parquet([urls], union_by_name := true)) TO staged
+```
+
+- **No segment's bytes become an Elixir term**, which matters most for the largest
+  objects the system writes. Same reason the segment writer hands Polars a path.
+- **The inputs come over HTTP**, from `HotServer`. The bytes have to travel that
+  way regardless — `httpfs` speaks HTTP and nothing else — so the manifest comes
+  the same way, and a remote buffer node needs nothing new in a cluster.
+- **`union_by_name` is what makes additive schema evolution work**: micro-segments
+  written before and after a column was added merge into one segment carrying the
+  union.
+- **The output key comes from the claim, not from the merge**, so a retry is an
+  idempotent overwrite of identical rows rather than a second segment.
+- **An input the manifest no longer lists is skipped, not fatal** — its rows are
+  gone either way, and refusing would strand the table's whole tail on one lost
+  file. A claim with nothing left is an error rather than an empty segment.
+
+What remains is composing that into the full handoff:
+`Smolquery.StorageService.Handoff` is still the logging stub, so a storage node
+accepts and schedules signals, and merges nothing until the catalog commit and
+retirement land beside it.
 
 ## Roles
 
@@ -367,6 +387,8 @@ config :smolquery, Smolquery.BufferService,
 config :smolquery, Smolquery.StorageService,
   dir: "priv/data/sealed",
   buffer_base_url: "http://127.0.0.1:4001",
+  buffer_timeout_ms: 30_000,
+  engine_extensions: [:httpfs],
   target_segment_bytes: 268_435_456,
   max_concurrent_seals: 2,
   gc_interval_ms: 300_000,
@@ -387,6 +409,8 @@ The storage service's `:dir` is where sealed segments land, and `:store`
 overrides it the same way. `buffer_base_url` is where the sealer reaches
 `HotServer` to pull manifests and segment bytes — honest for a single node, and
 replaced by ownership-ring lookup when the cluster arrives.
+`engine_extensions` loads `httpfs` into the sealer's own engine, which the merge
+cannot work without.
 
 Runtime environment variables:
 
