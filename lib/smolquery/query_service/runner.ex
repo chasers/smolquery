@@ -254,6 +254,13 @@ defmodule Smolquery.QueryService.Runner do
   defp settle(state, job) do
     stop_engine(state.engine)
     record_history(state.runtime, job)
+
+    :telemetry.execute(
+      [:smolquery, :query, :job],
+      %{duration_ms: job.duration_ms || 0},
+      %{state: job.state}
+    )
+
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, job, state.result}))
 
     Registry.update_value(

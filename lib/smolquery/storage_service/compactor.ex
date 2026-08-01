@@ -161,6 +161,12 @@ defmodule Smolquery.StorageService.Compactor do
           "into #{key} at snapshot #{snapshot}"
       end)
 
+      :telemetry.execute(
+        [:smolquery, :compact, :swap],
+        %{replaced: length(paths)},
+        %{result: :ok}
+      )
+
       {:ok, %{table: table_ref, key: key, replaced: length(paths), snapshot: snapshot}}
     else
       {:error, reason} -> failed(table_ref, reason)
@@ -202,6 +208,8 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp failed(table_ref, reason) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
+
+    :telemetry.execute([:smolquery, :compact, :swap], %{replaced: 0}, %{result: :error})
 
     {:failed, %{table: table_ref, reason: reason}}
   end

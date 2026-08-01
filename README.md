@@ -562,6 +562,7 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 
 | route | |
 |---|---|
+| `GET /metrics` | Prometheus text, gated by the *internal* secret (`x-smolquery-internal`), not the API key — metrics are for operators, not tenants |
 | `GET /v1/datasets` | list datasets |
 | `POST /v1/datasets` | create a dataset (idempotent) |
 | `GET /v1/datasets/:ds/tables` | list a dataset's tables |
@@ -575,6 +576,19 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `GET /v1/jobs/:id` | status and stats; once the result TTL expires, answered from durable job history |
 | `GET /v1/jobs/:id/results` | page a finished job's rows with `max_results` + `page_token`; expired results are 410, unknown jobs 404 |
 | `DELETE /v1/jobs/:id` | cancel — cancelling a finished job is still a 200 |
+
+### Observability
+
+Every service emits plain `:telemetry` events at its seams — ingest
+accept/reject, buffer group commits (count, rows, time), admission refusals,
+batch-dedup hits, seal attempts, compaction swaps, retention drops, snapshot
+expiry, GC sweeps, terminal query jobs, API requests. `Smolquery.Telemetry`
+aggregates them into counters and `GET /metrics` renders Prometheus text;
+an exporter wanting a different backend attaches to the same events without
+touching a call site. Counters only, with paired totals for means
+(`smolquery_buffer_commit_microseconds_total / smolquery_buffer_commits_total`),
+and labels drawn from closed sets so cardinality is bounded by code, not
+traffic.
 
 Query results page from the frame the runner holds until `result_ttl_ms`;
 temporal and decimal values arrive as ISO 8601 / decimal strings, mirroring

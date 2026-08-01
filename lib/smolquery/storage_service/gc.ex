@@ -128,6 +128,12 @@ defmodule Smolquery.StorageService.GC do
       with {:ok, swept} <- sweep_expired(state.runtime, expired),
            {:ok, staged} <-
              Store.sweep_staging(state.runtime.store, state.runtime.gc_grace_ms) do
+        :telemetry.execute(
+          [:smolquery, :gc, :sweep],
+          %{swept: length(swept), staged: length(staged)},
+          %{}
+        )
+
         {:ok, %{swept: swept, staged: staged, watching: map_size(watching)},
          %{state | candidates: watching}}
       end

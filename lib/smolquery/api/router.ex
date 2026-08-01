@@ -15,6 +15,7 @@ defmodule Smolquery.Api.Router do
   v1 surface so far:
 
       GET  /healthz                                liveness, no auth
+      GET  /metrics                                Prometheus text (internal secret)
       GET  /v1/datasets                            list datasets
       POST /v1/datasets                            create a dataset
       GET  /v1/datasets/:ds/tables                 list a dataset's tables
@@ -73,6 +74,12 @@ defmodule Smolquery.Api.Router do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, JSON.encode!(%{"status" => "ok"}))
+  end
+
+  get "/metrics" do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(200, Smolquery.Telemetry.render())
   end
 
   get "/v1/datasets" do
