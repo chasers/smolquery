@@ -39,7 +39,13 @@ defmodule Smolquery.CatalogTest do
     end
 
     test "register_segments/3 reaches the implementation", %{catalog: catalog} do
-      segment = %Segment{id: "id", path: "/p.parquet", row_count: 1, byte_size: 1}
+      segment = %Segment{
+        id: "id",
+        key: "p.parquet",
+        path: "/p.parquet",
+        row_count: 1,
+        byte_size: 1
+      }
 
       assert Catalog.register_segments(catalog, {"ds", "t"}, [segment]) ==
                {:ok, StubCatalog.snapshot()}

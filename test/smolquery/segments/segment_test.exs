@@ -6,6 +6,7 @@ defmodule Smolquery.Segments.SegmentTest do
   defp segment do
     %Segment{
       id: "01KYWPEEGAM8FQVQS5S2QF26SV",
+      key: "analytics/events/01KYWPEEGAM8FQVQS5S2QF26SV.parquet",
       path: "/data/segments/01KYWPEEGAM8FQVQS5S2QF26SV.parquet",
       row_count: 2,
       byte_size: 1_024,

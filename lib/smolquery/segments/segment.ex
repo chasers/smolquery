@@ -6,10 +6,16 @@ defmodule Smolquery.Segments.Segment do
   registers it in the catalog, a hot manifest entry describes it, and the
   planner prunes on its stats. A segment is write-once — a `Segment` struct
   always refers to a file that is complete and will never change.
+
+  A segment has two names, and the difference matters. `key` names it *within its
+  store* — stable, store-agnostic, what `Smolquery.Segments.Store` takes to
+  delete or list it. `path` is where a reader opens it, which the store derives
+  from the key: an absolute filesystem path on local disk, an `s3://` URL in an
+  object store. The catalog registers `path`; the hot manifest holds both.
   """
 
-  @enforce_keys [:id, :path, :row_count, :byte_size]
-  defstruct [:id, :path, :row_count, :byte_size, stats: %{}]
+  @enforce_keys [:id, :key, :path, :row_count, :byte_size]
+  defstruct [:id, :key, :path, :row_count, :byte_size, stats: %{}]
 
   @type column_stats :: %{
           min: term(),
@@ -19,6 +25,7 @@ defmodule Smolquery.Segments.Segment do
 
   @type t :: %__MODULE__{
           id: String.t(),
+          key: String.t(),
           path: String.t(),
           row_count: non_neg_integer(),
           byte_size: non_neg_integer(),
