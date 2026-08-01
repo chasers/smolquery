@@ -10,6 +10,7 @@ defmodule Bench.Support do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.Schema
+  alias Smolquery.Segments.Store.Local
   alias Smolquery.Segments.Writer
 
   @dataset "analytics"
@@ -97,7 +98,9 @@ defmodule Bench.Support do
           }
         end
 
-      {:ok, segment} = Writer.write(values, schema, dir: Path.join(dir, "segments"))
+      {:ok, segment} =
+        Writer.write(values, schema, store: Local.new(dir: Path.join(dir, "segments")))
+
       segment
     end
   end

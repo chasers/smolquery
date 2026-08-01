@@ -5,10 +5,10 @@ An open source BigQuery alternative, powered by DuckDB and Elixir.
 Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
-> **Status: pre-alpha.** The read engine, segment writer, and catalog work;
-> no ingest, sealing, or HTTP API yet. Plans and milestones live in the project
-> tracker — see [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is
-> subject to change.
+> **Status: pre-alpha.** The read engine, segment writer, catalog, and the
+> buffer service's hot tier work; no sealing, ingest HTTP, or query API yet.
+> Plans and milestones live in the project tracker — see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
 ## Architecture (draft)
 
@@ -76,13 +76,14 @@ Five million rows take 307 ms and no measurable heap that way, against 11.5 s an
 
 The storage of record: write-once Parquet segments plus a DuckLake catalog.
 `Smolquery.Segments.Writer` encodes rows through Explorer (Polars), naming each
-segment with a ULID and renaming it into place so a reader never sees a partial
-file. `Smolquery.Catalog` registers those files without copying them:
+segment with a ULID; a `Smolquery.Segments.Store` commits the bytes and owns what
+"durable" means. `Smolquery.Catalog` registers those files without copying them:
 
 ```elixir
 schema = Smolquery.Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
+store = Smolquery.Segments.Store.Local.new(dir: "priv/data/segments")
 
-{:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, dir: "priv/data/segments")
+{:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, store: store)
 
 {:ok, _lake} =
   Smolquery.Catalog.DuckLake.start_link(
@@ -102,6 +103,17 @@ Smolquery.Engine.query!(MyLake, ~s|SELECT count(*) FROM lake."analytics"."events
 
 Properties worth knowing:
 
+- **The store owns durability, and it is swappable.** `Store.put/3` returns only
+  once the segment is durable *by that store's definition*, so everything above it
+  — including the buffer service's "acked means durable" promise — is written
+  against one contract and never names a storage medium. `Store.Local` fsyncs the
+  file and renames it into place, both under one root, so a reader sees either
+  nothing or a complete segment. It fsyncs contents, not the directory entry
+  (Erlang cannot fsync a directory without a NIF): an acked segment survives a
+  process, BEAM, or node crash, and a hard power cut can lose the rename — a
+  strictly smaller window than this store's single-copy exposure to losing the
+  disk. `Store.shared?/1` says whether a segment's location means anything from
+  another node, which is what decides whether it needs serving over HTTP.
 - **Registration is idempotent.** `register_segments/3` diffs against the paths
   the catalog already holds, because DuckLake itself would happily register a
   path twice and double-count its rows. A sealer that crashed mid-handoff can
@@ -123,6 +135,135 @@ Types map through one table in `Smolquery.Schema` — logical type ↔ Explorer
 dtype ↔ DuckDB type (`:int64`/`{:s, 64}`/`BIGINT`, `{:numeric, p, s}` ↔
 `DECIMAL(p,s)`, and so on).
 
+### The hot tier
+
+`Smolquery.BufferService` owns the promise the rest of the system leans on: rows
+are durable when, and only when, the owning buffer node has persisted them.
+Writes go through one client module and come back acked:
+
+```elixir
+batch = %{schema: schema, rows: [%{"id" => 1, "ts" => ~N[2026-07-31 12:00:00]}]}
+
+{:ok, ack} =
+  Smolquery.BufferService.Client.write_batch(
+    Smolquery.BufferService,
+    {"analytics", "events"},
+    batch
+  )
+#=> {:ok, %{segment_id: "01K...", row_count: 1}}
+
+{:ok, entries} =
+  Smolquery.BufferService.Client.hot_manifest(Smolquery.BufferService, {"analytics", "events"})
+```
+
+What that ack means:
+
+- **One event makes rows durable *and* queryable.** Batches group-commit into a
+  micro-segment; the ack is withheld until the segment is in the store and its
+  entry is fsynced into the table's manifest log. There is no second mechanism
+  for read-your-writes — the manifest a query plans against is the thing that
+  made the rows durable.
+- **The manifest log is the authority, not the directory.** On restart a table's
+  buffer replays its log and reconciles against the store: a segment with no log
+  record was never acked and is deleted (adopting it would double-count a
+  client's retry), and a record whose segment is gone is dropped.
+- **Backpressure is immediate.** A batch that would exceed `max_buffered_rows` or
+  `max_buffered_bytes` gets `{:error, :buffer_full}` rather than being queued, for
+  the ingest edge to turn into a 429.
+- **One table, one node.** `Smolquery.BufferService.Ring` maps a table to its
+  owning buffer node by consistent hashing; a table this node does not own is
+  refused with `{:error, {:not_owner, node}}`. Milestone 3 runs a single-node
+  ring.
+- **The loss window is honest.** With the default local store, a buffer node's
+  disk holds a single copy of its unsealed tail: acked rows survive a process,
+  BEAM, or node crash, and losing the disk loses that tail. Sealing (Milestone 4)
+  is what bounds it.
+
+Calls reach the owning node through a transport seam rather than a hardcoded hop.
+`Client` resolves ownership and dispatches; `Transport.Local` is a direct call for
+a table this node owns, and `Transport.GenRpc` carries the rest over `:gen_rpc`:
+
+```elixir
+config :gen_rpc,
+  tcp_server_port: 5369,
+  tcp_client_port: 5369,
+  rpc_module_control: :whitelist,
+  rpc_module_list: [Smolquery.BufferService.Endpoint]
+```
+
+- **Not Erlang distribution.** Forward-batches are large and constant; on the
+  cluster's single distribution connection they would sit in front of heartbeats
+  and monitors, and a `busy_dist_port` stall looks to OTP like nodes going down.
+  gen_rpc carries this traffic on its own sockets.
+- **Bulk and control are separate channels.** gen_rpc keys one connection per
+  destination, so routing everything at a node through one key just moves the
+  head-of-line blocking onto that socket. Writes travel on `:bulk`, manifest reads
+  and retirements on `:control`.
+- **The allowlist is not optional.** gen_rpc's default `rpc_module_control` is
+  `:disabled`, which lets any peer holding the cookie run arbitrary MFAs on a
+  second port. Naming `Endpoint` — the single module every transport dispatches
+  to — closes that. Per-node TLS is the other half, and belongs to the cluster
+  milestone.
+- **Ownership routes, it does not refuse.** A call for a table this node does not
+  own is forwarded, and `Routing` answers ownership from configuration even on a
+  node running no buffer at all — which is what lets a query node ask a buffer
+  node for a hot manifest.
+
+Segment *bytes* deliberately do not travel this way: DuckDB opens them itself via
+`httpfs`, reading only the column chunks a query needs. Pulling them through RPC
+would put every segment on the BEAM heap and lose that pushdown.
+
+`Smolquery.BufferService.HotServer` is what DuckDB opens them from — a Bandit
+listener, one per instance, serving two unauthenticated routes:
+
+```
+GET /v1/datasets/:dataset/tables/:table/manifest                  # JSON entries
+GET /v1/datasets/:dataset/tables/:table/segments/:id.parquet      # segment bytes
+```
+
+- **A manifest entry's `url` is built from the request that fetched it**, not
+  from static configuration — the same response is correct whether this bound
+  its configured port or an OS-assigned one, and whether it sits behind a proxy
+  or not. An entry backed by a *shared* store (one where
+  `Smolquery.Segments.Store.shared?/1` is `true`, e.g. a future S3 hot tier)
+  reports that store's own location instead, and never round-trips through this
+  route at all.
+- **A segment id is validated and resolved through the manifest**, never by
+  joining request input into a path — `Smolquery.Segments.Id.valid?/1` rejects
+  anything that isn't a well-formed ULID before it gets near the filesystem.
+- **Both routes answer `HEAD` as well as `GET`**, because `httpfs` sends a `HEAD`
+  first to learn a segment's size before issuing the ranged reads Parquet's
+  footer-first format needs.
+- **Auth is Milestone 6's job**, over `CREATE SECRET` headers DuckDB attaches to
+  `httpfs` requests.
+
+The other half of the hot tier is handing data off. A table that crosses
+`seal_max_bytes`, `seal_max_files`, or `seal_max_age_ms` signals a configured
+consumer, and a sealer stamps the segments it committed:
+
+```elixir
+config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
+
+:ok = Smolquery.BufferService.Client.retire(Smolquery.BufferService, table, ids, snapshot)
+```
+
+- **The signal is level-triggered, not an event.** It repeats every
+  `seal_retry_ms` while a table stays over threshold, so a sealer that dies
+  mid-handoff costs a retry interval rather than leaving that table's tail parked
+  forever. Consumers should expect repeats and read them as current state.
+- **Retirement is a stamp, not a delete.** `retire/4` records the catalog snapshot
+  the sealer committed at and leaves the segments readable, because a query
+  planned at an older snapshot is still entitled to them. Deletion happens
+  `retire_grace_ms` later, which must exceed the longest query a planner can hold
+  open. Retiring an already-sealed id, or one the sweep has already deleted, is
+  `:ok` — every direction a crashed sealer retries from.
+- **Boot adopts what is already on disk.** A buffer is what runs the seal check,
+  so a node restarting with an unsealed tail for a table nobody writes to again
+  would strand it. `Smolquery.BufferService.Adopter` starts a buffer for every
+  owned table with a manifest log, and does it before the subtree reports started
+  — a query arriving mid-adoption would otherwise read an empty manifest and
+  quietly return results missing that table's unsealed rows.
+
 ## Roles
 
 One release, four services; a node starts only the subtrees its roles name.
@@ -134,9 +275,9 @@ SMOLQUERY_ROLES=query              # a query-only node
 SMOLQUERY_ROLES=ingest,buffer
 ```
 
-Unknown role names fail the boot rather than silently starting nothing. Roles
-whose services aren't implemented yet are accepted and contribute no subtree.
-See `Smolquery.Roles`.
+Unknown role names fail the boot rather than silently starting nothing. `:query`
+and `:buffer` start their subtrees today; `:ingest` and `:storage` are accepted
+and contribute nothing until their milestones land. See `Smolquery.Roles`.
 
 ## Configuration
 
@@ -151,7 +292,34 @@ config :smolquery, :data_dir, "priv/data"
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",
   data_path: "priv/data/ducklake"
+
+config :smolquery, Smolquery.BufferService,
+  dir: "priv/data/buffer",
+  flush_interval_ms: 1_000,
+  flush_max_rows: 100_000,
+  flush_max_bytes: 8_000_000,
+  max_buffered_rows: 500_000,
+  max_buffered_bytes: 64_000_000,
+  write_timeout_ms: 15_000,
+  seal_max_bytes: 67_108_864,
+  seal_max_files: 64,
+  seal_max_age_ms: 60_000,
+  seal_retry_ms: 30_000,
+  retire_grace_ms: 600_000,
+  maintenance_interval_ms: 5_000,
+  seal_consumer: {Smolquery.BufferService.SealLog, []},
+  hot_server_ip: {127, 0, 0, 1},
+  hot_server_port: 4001
 ```
+
+`:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath
+`segments/`, manifest logs to `manifests/`. They are separate because they answer
+to different rules — segments can move to another store, while the log stays on
+the node that gave the ack. Point the segments elsewhere with
+`store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}`.
+
+`flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
+the current group commit, so lowering it trades throughput for latency.
 
 Runtime environment variables:
 
@@ -162,15 +330,20 @@ Runtime environment variables:
 | `SMOLQUERY_DATA_DIR` | data directory; the catalog and DuckLake data path derive from it |
 | `SMOLQUERY_CATALOG` | catalog metadata database, e.g. `postgres:dbname=smolquery host=…` |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`infinity` to disable) |
+| `SMOLQUERY_BUFFER_DIR` | buffer service root for micro-segments and manifest logs |
+| `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound |
+| `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.
 
 ## Development
 
-Requires Elixir ~> 1.20 (CI pins OTP 29.0.2 / Elixir 1.20.2).
+Toolchain versions are pinned in `.tool-versions`, matching CI — OTP 29.0.2 /
+Elixir 1.20.2.
 
 ```sh
+mise install     # or asdf install
 mix deps.get
 mix test         # fast suite; add --include integration for everything
 mix precommit    # format + full local quality gate before committing
@@ -188,10 +361,17 @@ revisiting the decision they settled.
 ```sh
 mix run bench/planner.exs                         # scan DuckLake, or plan around it?
 mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
+mix run bench/buffer.exs                          # what group commit costs, and where it bends
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
+CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurrency
 ```
+
+`bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
+across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
+fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
+Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
 
 Each script's `@moduledoc` records what it measures and what it concluded. Two
 results worth knowing before writing a read path:
