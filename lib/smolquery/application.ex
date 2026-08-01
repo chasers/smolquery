@@ -22,7 +22,7 @@ defmodule Smolquery.Application do
   end
 
   defp subtree(:query), do: [Smolquery.QueryService.Supervisor]
+  defp subtree(:buffer), do: [Smolquery.BufferService.Supervisor]
   defp subtree(:ingest), do: []
-  defp subtree(:buffer), do: []
   defp subtree(:storage), do: []
 end
