@@ -182,6 +182,25 @@ defmodule Smolquery.Segments.Store do
   def shared?(%__MODULE__{} = store), do: store.impl.shared?(store.config)
 
   @doc """
+  A staged file's write time, in POSIX seconds — `:infinity` if it is
+  already gone (a race with another sweep, or the write it staged for
+  finished first).
+
+  Shared by every implementation whose `put/3` stages through a local
+  directory before committing elsewhere — `Store.Local` before its rename,
+  `Store.S3` before its upload — since `sweep_staging/2`'s "is this old
+  enough to be an abandoned write" question is the same filesystem check
+  either way.
+  """
+  @spec staged_at(Path.t()) :: integer() | :infinity
+  def staged_at(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} -> mtime
+      {:error, _reason} -> :infinity
+    end
+  end
+
+  @doc """
   The key prefix a table's segments live under.
 
   Both components are validated as identifiers before becoming key components,

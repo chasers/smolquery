@@ -35,6 +35,7 @@ defmodule Smolquery.StorageService.Supervisor do
 
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.EngineSecrets
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Retention
@@ -64,7 +65,7 @@ defmodule Smolquery.StorageService.Supervisor do
           {Engine,
            name: Runtime.engine(runtime.name),
            extensions: runtime.engine_extensions,
-           statements: hot_tier_secret(runtime)},
+           statements: engine_secrets(runtime)},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
           {Compactor, runtime},
@@ -75,11 +76,8 @@ defmodule Smolquery.StorageService.Supervisor do
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  defp hot_tier_secret(%Runtime{} = runtime) do
-    if :httpfs in runtime.engine_extensions do
-      [Smolquery.InternalSecret.create_secret_statement(runtime.buffer_base_url)]
-    else
-      []
-    end
+  defp engine_secrets(%Runtime{} = runtime) do
+    EngineSecrets.hot_tier(runtime.engine_extensions, runtime.buffer_base_url) ++
+      EngineSecrets.sealed_tier(runtime.store)
   end
 end

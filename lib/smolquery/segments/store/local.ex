@@ -119,16 +119,9 @@ defmodule Smolquery.Segments.Store.Local do
       [dir, @staging, "*"]
       |> Path.join()
       |> Path.wildcard()
-      |> Enum.filter(&(staged_at(&1) <= cutoff and File.rm(&1) == :ok))
+      |> Enum.filter(&(Store.staged_at(&1) <= cutoff and File.rm(&1) == :ok))
 
     {:ok, Enum.map(swept, &Path.basename/1)}
-  end
-
-  defp staged_at(path) do
-    case File.stat(path, time: :posix) do
-      {:ok, %File.Stat{mtime: mtime}} -> mtime
-      {:error, _reason} -> :infinity
-    end
   end
 
   defp encode(staged, encoder) do
