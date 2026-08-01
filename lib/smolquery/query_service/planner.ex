@@ -23,13 +23,19 @@ defmodule Smolquery.QueryService.Planner do
 
   The plan pins the catalog's current snapshot `S` once. Each view's sealed
   side reads `AT (VERSION => S)`; each hot manifest entry is included iff it
-  carries no claim, or its claim's sealed keys are not all present in
-  `Catalog.segments(table, S)`. That is Milestone 4's D1 rule (T-27), exact at
-  every instant of the seal handoff: the catalog commit that makes rows appear
-  in the sealed tier at `S′` is the same event that excludes their
-  micro-segments for every reader at `S >= S′`. Keys compare by path basename —
-  claims carry store keys, the catalog absolute paths, and both end in
-  `<segment id>.parquet`.
+  carries no claim, or its claim's sealed keys were not all registered by `S`
+  (`Catalog.registered_through(table, S)`). That is Milestone 4's D1 rule
+  (T-27), exact at every instant of the seal handoff: the catalog commit that
+  makes rows appear in the sealed tier at `S′` is the same event that excludes
+  their micro-segments for every reader at `S >= S′`. Keys compare by path
+  basename — claims carry store keys, the catalog absolute paths, and both
+  end in `<segment id>.parquet`.
+
+  Membership asks "registered by `S`", never "listed at `S`": compaction and
+  retention *drop* sealed segments a live hot entry may still name, and a
+  drop never un-commits a seal — its rows live on in whatever replaced it. The
+  M7 maintenance matrix caught exactly that double-count when this read
+  `segments/3`.
 
   Hot rows have no snapshot: an unclaimed micro-segment is always included.
   That is read-your-writes, not an inconsistency.
@@ -182,7 +188,7 @@ defmodule Smolquery.QueryService.Planner do
   defp resolve(runtime, refs, snapshot) do
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
       with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-           {:ok, paths} <- Catalog.segments(runtime.catalog, ref, snapshot) do
+           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot) do
         sealed = MapSet.new(paths, &Path.basename/1)
 
         {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed})}}

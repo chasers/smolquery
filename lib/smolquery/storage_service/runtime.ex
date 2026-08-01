@@ -53,7 +53,11 @@ defmodule Smolquery.StorageService.Runtime do
   node configuration. `snapshot_keep_ms` is the time-travel promise: each
   sweep expires catalog snapshots older than this, which is what lets GC
   physically reclaim dropped and compacted-away files — so it must exceed the
-  longest query a reader may still have pinned.
+  longest query a reader may still have pinned, *and* the buffer's
+  `retire_grace_ms`: expiry erases the registration history the planner's
+  seal-membership rule reads, so hot entries must be reaped before the
+  snapshots that sealed them expire. The defaults (24 h against 10 min) hold
+  that order with room to spare.
 
   The `compact_*` knobs shape `Smolquery.StorageService.Compactor`'s sweep:
   every `compact_interval_ms` it groups sealed segments under

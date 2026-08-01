@@ -459,7 +459,9 @@ verification is pinned in the DuckLake tests: `ducklake_expire_snapshots` is
 sound over externally-registered files (a pinned read of an expired snapshot
 fails cleanly, `known_segments/1` shrinks, the current snapshot survives).
 `snapshot_keep_ms` is the deployment's time-travel promise and must exceed
-the longest pinned query.
+the longest pinned query — and the buffer's `retire_grace_ms`, because expiry
+erases the registration history the planner's seal-membership rule reads
+(defaults: 24 h against 10 min).
 
 ### Queries
 
@@ -496,13 +498,15 @@ CREATE VIEW "analytics"."events" AS SELECT "id", "ts" FROM (
 
 Properties worth knowing:
 
-- **One snapshot per job, and rows count exactly once while sealing runs
-  underneath.** The sealed side is pinned `AT (VERSION => S)`; a hot
-  micro-segment is included iff it carries no claim or its claim's sealed keys
-  are not all in the catalog at `S`. The commit that makes rows appear in the
-  sealed tier is the same event that excludes their micro-segments — no gap, at
-  any crash point, which the reader-side crash matrix walks through the public
-  surface.
+- **One snapshot per job, and rows count exactly once while sealing — and
+  compaction — run underneath.** The sealed side is pinned `AT (VERSION => S)`;
+  a hot micro-segment is included iff it carries no claim or its claim's sealed
+  keys were not all *registered by* `S` (`Catalog.registered_through/3`, not
+  the at-`S` file listing: compaction may have dropped a sealed file a live hot
+  entry still names, and a drop never un-commits a seal). The commit that makes
+  rows appear in the sealed tier is the same event that excludes their
+  micro-segments — no gap, at any crash point, which the reader-side and
+  maintenance crash matrices walk through the public surface.
 - **Hot rows have no snapshot.** An acked write is visible to the next query —
   read-your-writes, not an inconsistency.
 - **Both tiers project onto the catalog's schema.** A micro-segment written
