@@ -46,9 +46,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   ## Recovery, and what a crash costs
 
   On start the buffer recovers its table's manifest, which re-adopts the segments
-  it had acked and deletes any that were never acknowledged. A graceful shutdown
-  flushes the accumulator first, so a rolling restart loses nothing. A `:kill`
-  loses only rows that had not yet been acked — which no caller was told about.
+  it had acked and deletes any that were never acknowledged, then opens the
+  table's manifest log and holds it for its lifetime — reopening the file around
+  every append costs more than the append itself. A graceful shutdown flushes
+  the accumulator first, so a rolling restart loses nothing. A `:kill` loses
+  only rows that had not yet been acked — which no caller was told about.
 
   A crash never re-runs the commit from `terminate/2`. The pre-crash state may
   already be half committed — the log record fsynced, the ETS insert not yet done
@@ -72,6 +74,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :runtime,
     :table_ref,
     :prefix,
+    :log,
     :schema,
     :timer,
     :signaled_at,
@@ -146,8 +149,9 @@ defmodule Smolquery.BufferService.TableBuffer do
     Process.flag(:trap_exit, true)
 
     with {:ok, prefix} <- Store.prefix(table_ref),
-         {:ok, _report} <- recover(runtime, table_ref) do
-      state = %__MODULE__{runtime: runtime, table_ref: table_ref, prefix: prefix}
+         {:ok, _report} <- recover(runtime, table_ref),
+         {:ok, log} <- HotManifest.open_log(runtime.manifest, table_ref) do
+      state = %__MODULE__{runtime: runtime, table_ref: table_ref, prefix: prefix, log: log}
 
       {:ok, schedule_maintenance(state)}
     end
@@ -182,7 +186,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_call({:retire, ids, snapshot}, _from, state) do
-    case HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot) do
+    case HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log) do
       :ok -> {:reply, :ok, run_maintenance(state)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -202,10 +206,16 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @impl GenServer
-  def terminate(:normal, state), do: commit(state)
-  def terminate(:shutdown, state), do: commit(state)
-  def terminate({:shutdown, _reason}, state), do: commit(state)
-  def terminate(_crash, state), do: state
+  def terminate(:normal, state), do: state |> commit() |> close_log()
+  def terminate(:shutdown, state), do: state |> commit() |> close_log()
+  def terminate({:shutdown, _reason}, state), do: state |> commit() |> close_log()
+  def terminate(_crash, state), do: close_log(state)
+
+  defp close_log(state) do
+    HotManifest.close_log(state.log)
+
+    state
+  end
 
   defp run_maintenance(state) do
     state
@@ -223,7 +233,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp drop(state, ids) do
-    case HotManifest.drop(state.runtime.manifest, state.table_ref, ids) do
+    case HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log) do
       :ok ->
         state
 
@@ -339,7 +349,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp add(state, segment) do
-    case HotManifest.add(state.runtime.manifest, state.table_ref, segment) do
+    case HotManifest.add(state.runtime.manifest, state.table_ref, segment, state.log) do
       {:ok, entry} ->
         {:ok, entry}
 

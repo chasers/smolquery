@@ -212,6 +212,56 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "a held log" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "carries add, retire, and drop through one fd", %{manifest: manifest} do
+      {:ok, log} = HotManifest.open_log(manifest, @table)
+
+      segment = write(manifest, @table, rows(2))
+      {:ok, entry} = HotManifest.add(manifest, @table, segment, log)
+
+      assert HotManifest.retire(manifest, @table, [entry.id], 7, log) == :ok
+      assert HotManifest.drop(manifest, @table, [entry.id], log) == :ok
+      assert HotManifest.close_log(log) == :ok
+
+      assert HotManifest.recover(manifest, @table) ==
+               {:ok, %{entries: 0, orphans: [], missing: []}}
+    end
+
+    test "records appended through a held log recover identically", context do
+      manifest = context.manifest
+      {:ok, log} = HotManifest.open_log(manifest, @table)
+
+      entries =
+        for _ <- 1..2 do
+          {:ok, entry} = HotManifest.add(manifest, @table, write(manifest, @table, rows(1)), log)
+
+          entry
+        end
+
+      :ok = HotManifest.close_log(log)
+
+      restarted = %{start_manifest(context, context.local) | log_dir: manifest.log_dir}
+      {:ok, report} = HotManifest.recover(restarted, @table)
+
+      assert report.entries == 2
+
+      assert Enum.map(HotManifest.entries(restarted, @table), & &1.id) ==
+               entries |> Enum.map(& &1.id) |> Enum.sort()
+    end
+
+    test "open_log creates the table's log directories", %{manifest: manifest} do
+      fresh = {"analytics", "fresh"}
+
+      assert {:ok, log} = HotManifest.open_log(manifest, fresh)
+      {:ok, path} = HotManifest.log_path(manifest, fresh)
+
+      assert File.exists?(path)
+      assert HotManifest.close_log(log) == :ok
+    end
+  end
+
   describe "retired_before/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

@@ -137,7 +137,8 @@ defmodule Bench.Buffer do
       "\n  an open+write+fsync+close of a 4 KiB file: #{ms(raw.min)} ms min, #{ms(raw.median)} ms median"
     )
 
-    IO.puts("  every group commit pays two of these, back to back\n")
+    IO.puts("  the segment put pays one of these per flush; the manifest append")
+    IO.puts("  holds its fd open and pays only the write and the fsync\n")
 
     IO.puts("  store fsync    p50     p95     p99  (ms of one flush = one batch)")
 
