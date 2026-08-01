@@ -42,6 +42,16 @@ defmodule Smolquery.Api.Inserts do
     |> Errors.send_error(429, "RESOURCE_EXHAUSTED", "buffer full, retry later")
   end
 
+  def insert_error(conn, {:overloaded, predicted_ms}) do
+    conn
+    |> put_resp_header("retry-after", Integer.to_string(max(ceil(predicted_ms / 1000), 1)))
+    |> Errors.send_error(
+      429,
+      "RESOURCE_EXHAUSTED",
+      "write path overloaded, ~#{predicted_ms} ms behind; retry later"
+    )
+  end
+
   def insert_error(conn, reason)
       when reason in [:buffer_service_unavailable, :ingest_service_unavailable] do
     Errors.send_error(conn, 503, "UNAVAILABLE", "the write path is not available here")

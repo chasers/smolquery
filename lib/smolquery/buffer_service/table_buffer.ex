@@ -80,6 +80,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
+  alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Schema
@@ -95,6 +96,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :schema,
     :timer,
     :signaled_at,
+    :load,
     chunks: [],
     pending: [],
     row_count: 0,
@@ -168,10 +170,23 @@ defmodule Smolquery.BufferService.TableBuffer do
     with {:ok, prefix} <- Store.prefix(table_ref),
          {:ok, _report} <- recover(runtime, table_ref),
          {:ok, log} <- HotManifest.open_log(runtime.manifest, table_ref) do
-      state = %__MODULE__{runtime: runtime, table_ref: table_ref, prefix: prefix, log: log}
+      state = %__MODULE__{
+        runtime: runtime,
+        table_ref: table_ref,
+        prefix: prefix,
+        log: log,
+        load: publish_load(runtime, table_ref)
+      }
 
       {:ok, schedule_maintenance(state)}
     end
+  end
+
+  defp publish_load(runtime, table_ref) do
+    load = Load.new()
+    Registry.update_value(Runtime.registry(runtime.name), table_ref, fn _value -> load end)
+
+    load
   end
 
   defp recover(runtime, table_ref) do
@@ -379,7 +394,14 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp commit_and_report(state) do
     rows = state.chunks |> Enum.reverse() |> Enum.concat()
+    started = System.monotonic_time(:microsecond)
     result = persist(state, rows)
+
+    Load.drained(state.load, state.row_count)
+
+    if match?({:ok, _ack}, result) do
+      Load.sample_rate(state.load, state.row_count, System.monotonic_time(:microsecond) - started)
+    end
 
     state.pending
     |> Enum.reverse()

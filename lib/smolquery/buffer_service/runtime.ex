@@ -21,6 +21,7 @@ defmodule Smolquery.BufferService.Runtime do
         flush_max_bytes: 8_000_000,
         max_buffered_rows: 500_000,
         max_buffered_bytes: 64_000_000,
+        ack_budget_ms: 5_000,
         write_timeout_ms: 15_000,
         control_timeout_ms: 15_000,
         seal_max_bytes: 67_108_864,
@@ -40,6 +41,14 @@ defmodule Smolquery.BufferService.Runtime do
   Pass `:store` to override the segment store outright:
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
+
+  `ack_budget_ms` is the write path's latency promise (PL-9): a batch whose
+  Little's-law wait estimate exceeds it is refused at the `Endpoint` with
+  `{:error, {:overloaded, predicted_ms}}` rather than queued in the buffer's
+  mailbox toward a timeout. `:infinity` disables admission and restores
+  silent queueing. It bounds *waiting*, where `max_buffered_rows`/`bytes`
+  bound *memory* — the bench proved the queue that hurts is the mailbox,
+  which the memory bounds never see.
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
@@ -67,6 +76,7 @@ defmodule Smolquery.BufferService.Runtime do
     flush_max_bytes: 8_000_000,
     max_buffered_rows: 500_000,
     max_buffered_bytes: 64_000_000,
+    ack_budget_ms: 5_000,
     write_timeout_ms: 15_000,
     control_timeout_ms: 15_000,
     seal_max_bytes: 67_108_864,
@@ -90,6 +100,7 @@ defmodule Smolquery.BufferService.Runtime do
           flush_max_bytes: pos_integer(),
           max_buffered_rows: pos_integer(),
           max_buffered_bytes: pos_integer(),
+          ack_budget_ms: timeout(),
           write_timeout_ms: timeout(),
           control_timeout_ms: timeout(),
           seal_max_bytes: pos_integer(),
@@ -109,6 +120,7 @@ defmodule Smolquery.BufferService.Runtime do
     :flush_max_bytes,
     :max_buffered_rows,
     :max_buffered_bytes,
+    :ack_budget_ms,
     :write_timeout_ms,
     :control_timeout_ms,
     :seal_max_bytes,

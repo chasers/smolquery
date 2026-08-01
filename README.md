@@ -173,9 +173,13 @@ What that ack means:
   buffer replays its log and reconciles against the store: a segment with no log
   record was never acked and is deleted (adopting it would double-count a
   client's retry), and a record whose segment is gone is dropped.
-- **Backpressure is immediate.** A batch that would exceed `max_buffered_rows` or
-  `max_buffered_bytes` gets `{:error, :buffer_full}` rather than being queued, for
-  the ingest edge to turn into a 429.
+- **Backpressure is immediate, and it bounds latency, not just memory.** A batch
+  that would exceed `max_buffered_rows` or `max_buffered_bytes` gets
+  `{:error, :buffer_full}`; a batch whose Little's-law wait estimate exceeds
+  `ack_budget_ms` gets `{:error, {:overloaded, predicted_ms}}` before it ever
+  reaches the buffer's mailbox (`bench/results/ack_budget.md`: an unbounded 6 s
+  p50 under overload becomes p99 ≤ the budget). The ingest edge turns both into
+  a 429, with the prediction as `retry-after`.
 - **One table, one node.** `Smolquery.BufferService.Ring` maps a table to its
   owning buffer node by consistent hashing; a table this node does not own is
   refused with `{:error, {:not_owner, node}}`. Milestone 3 runs a single-node
@@ -504,7 +508,7 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `GET /v1/datasets/:ds/tables` | list a dataset's tables |
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
 | `GET /v1/datasets/:ds/tables/:t` | a table's schema |
-| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full buffer is a 429 with `retry-after` |
+| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is |
 | `POST /v1/datasets/:ds/tables/:t/load` | batch load — the body is the file (`application/x-ndjson`, `text/csv`, or `application/vnd.apache.parquet`), pushed through the same insert path in chunks; capped by `load_max_bytes` (413 past it), synchronous, and not atomic — a mid-load failure reports what was already durable |
 | `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504 |
 | `POST /v1/jobs` | the same query as an async job — returns it pending |
@@ -695,6 +699,7 @@ mix run bench/buffer.exs                          # what group commit costs, and
 mix run bench/sealer.exs                          # what a seal costs, and how far behind it runs
 mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
 mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
+mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
@@ -737,7 +742,8 @@ and **`flush_interval_ms` drops out entirely**. So at the default config a
 20-column table returns a **2.01 second p50 ack**. Eight independent buffers reach
 6.68M rows/s — 3.11× light, 4.09× huge, ordered by how encode-bound each schema is
 — which is the case for partitioned writes (PL-6). Partitioning divides the overload
-factor but does not define the cliff; bounding ack latency needs backpressure (T-56).
+factor but does not define the cliff; `ack_budget_ms` now defines it (T-56,
+`bench/results/ack_budget.md`).
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the

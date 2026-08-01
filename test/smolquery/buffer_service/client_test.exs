@@ -3,6 +3,7 @@ defmodule Smolquery.BufferService.ClientTest do
 
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Schema
   alias Smolquery.Test.Eventually
@@ -11,6 +12,12 @@ defmodule Smolquery.BufferService.ClientTest do
 
   @table {"analytics", "events"}
   @elsewhere [:"buffer1@nonexistent.invalid", :"buffer2@nonexistent.invalid"]
+
+  defp published_load(name) do
+    [{_pid, load}] = Registry.lookup(Runtime.registry(name), @table)
+
+    load
+  end
 
   defp batch(rows \\ [%{"id" => 1}]) do
     %{schema: Schema.new!([{"id", :int64}]), rows: rows}
@@ -41,6 +48,41 @@ defmodule Smolquery.BufferService.ClientTest do
       assert {:ok, ack} = Client.write_batch(name, @table, batch([%{"id" => 1}, %{"id" => 2}]))
       assert ack.row_count == 2
       assert is_binary(ack.segment_id)
+    end
+
+    test "sheds a write whose predicted wait exceeds the ack budget, then recovers", context do
+      name = start_buffer_service(context, flush_max_rows: 1, ack_budget_ms: 100)
+
+      rows = for i <- 1..1_000, do: %{"id" => i}
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch(rows))
+
+      load = published_load(name)
+
+      for _crush <- 1..80,
+          do: Load.sample_rate(load, 1_000, 1_000_000_000)
+
+      assert {:error, {:overloaded, predicted}} =
+               Client.write_batch(name, @table, batch([%{"id" => 1}]))
+
+      assert predicted > 100
+
+      for _recover <- 1..80, do: Load.sample_rate(load, 1_000, 1_000)
+
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch([%{"id" => 2}]))
+    end
+
+    test "ack_budget_ms: :infinity never sheds", context do
+      name = start_buffer_service(context, flush_max_rows: 1, ack_budget_ms: :infinity)
+
+      rows = for i <- 1..1_000, do: %{"id" => i}
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch(rows))
+
+      load = published_load(name)
+
+      for _crush <- 1..80,
+          do: Load.sample_rate(load, 1_000, 1_000_000_000)
+
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch([%{"id" => 1}]))
     end
 
     test "routes a table this node does not own to its owner", context do
