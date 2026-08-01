@@ -5,8 +5,9 @@ An open source BigQuery alternative, powered by DuckDB and Elixir.
 Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
-> **Status: pre-alpha.** The read engine, segment writer, catalog, and the
-> buffer service's hot tier work; no sealing, ingest HTTP, or query API yet.
+> **Status: pre-alpha.** The read engine, segment writer, catalog, the buffer
+> service's hot tier, and the seal handoff to the sealed tier work; no GC,
+> ingest HTTP, or query API yet.
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -332,10 +333,34 @@ COPY (SELECT * FROM read_parquet([urls], union_by_name := true)) TO staged
   gone either way, and refusing would strand the table's whole tail on one lost
   file. A claim with nothing left is an error rather than an empty segment.
 
-What remains is composing that into the full handoff:
-`Smolquery.StorageService.Handoff` is still the logging stub, so a storage node
-accepts and schedules signals, and merges nothing until the catalog commit and
-retirement land beside it.
+`Smolquery.StorageService.Handoff.Seal` composes that into the whole handoff, and
+this is the one cross-service dance in smolquery:
+
+```
+merge → put → register → retire
+```
+
+An attempt starts by asking the catalog whether the claim's sealed segment is
+already registered. If it is, some earlier attempt got that far before dying, and
+this one skips to retirement. So a crash costs a `seal_retry_ms` delay and nothing
+more, at every point:
+
+- **before the commit** — nothing is registered, so the next attempt merges again,
+  overwriting its own half-written output at the same key.
+- **after the commit, before retirement** — the rows are in the sealed tier and the
+  micro-segments are still unretired. This is exactly the window the
+  catalog-membership rule is built for: a query at any snapshot counts them once.
+  The next attempt finds the keys registered and retires.
+- **after retirement** — nothing left to do; a repeated retire is `:ok`.
+
+Retirement goes through `BufferService.Client`, not HTTP: it is a control-plane
+call with no bulk data, `HotServer` is read-only, and the client already owns
+ownership routing and idempotence. Same bulk/control split the buffer draws
+internally.
+
+A table the catalog does not hold is an error rather than something the sealer
+creates — the ingest edge validated against the catalog before forwarding, so a
+table with micro-segments is a table the catalog already knows.
 
 ## Roles
 
@@ -393,7 +418,7 @@ config :smolquery, Smolquery.StorageService,
   max_concurrent_seals: 2,
   gc_interval_ms: 300_000,
   gc_grace_ms: 3_600_000,
-  handoff: {Smolquery.StorageService.Handoff.Log, []}
+  handoff: {Smolquery.StorageService.Handoff.Seal, []}
 ```
 
 `:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath

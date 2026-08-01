@@ -1,8 +1,10 @@
 defmodule Smolquery.StorageService.RuntimeTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Catalog
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.StubCatalog
 
   describe "new/1" do
     test "derives a local store from :dir" do
@@ -38,6 +40,33 @@ defmodule Smolquery.StorageService.RuntimeTest do
     test "defaults the instance name" do
       assert Runtime.new().name == Smolquery.StorageService
     end
+
+    test "wires a DuckLake catalog to this instance's own engine" do
+      runtime = Runtime.new(name: __MODULE__.Lake)
+
+      assert %Catalog{impl: Catalog.DuckLake, config: %{engine: engine}} = runtime.catalog
+      assert engine == Runtime.catalog_engine(__MODULE__.Lake)
+      assert runtime.catalog_opts == []
+    end
+
+    test "passes catalog options through for the supervisor to start" do
+      opts = [metadata: "sqlite:/tmp/c.sqlite", data_path: "/tmp/lake"]
+      runtime = Runtime.new(name: __MODULE__.LakeOpts, catalog: opts)
+
+      assert runtime.catalog_opts == opts
+    end
+
+    test "takes a catalog handle outright, and then starts none" do
+      catalog = StubCatalog.new(self())
+      runtime = Runtime.new(name: __MODULE__.Given, catalog: catalog)
+
+      assert runtime.catalog == catalog
+      assert runtime.catalog_opts == nil
+    end
+
+    test "defaults the buffer instance it retires against" do
+      assert Runtime.new(name: __MODULE__.Buffered).buffer_name == Smolquery.BufferService
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do
@@ -61,6 +90,7 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.sealer(Storage) == Storage.Sealer
       assert Runtime.engine(Storage) == Storage.Engine
       assert Runtime.seals(Storage) == Storage.Seals
+      assert Runtime.catalog_engine(Storage) == Storage.Catalog
     end
   end
 end

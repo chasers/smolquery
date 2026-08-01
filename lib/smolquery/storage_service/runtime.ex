@@ -21,7 +21,7 @@ defmodule Smolquery.StorageService.Runtime do
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
         gc_grace_ms: 3_600_000,
-        handoff: {Smolquery.StorageService.Handoff.Log, []}
+        handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
   `:dir` is where sealed segments land, through a `Store.Local` beneath it. Pass
   `:store` to override the store outright — it is a wholly separate handle from
@@ -44,6 +44,18 @@ defmodule Smolquery.StorageService.Runtime do
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
 
+  `buffer_name` is the buffer service instance `retire/4` is called on. Retirement
+  goes through `Smolquery.BufferService.Client` rather than HTTP, unlike the
+  manifest pull — it is a control-plane call, and `HotServer` is read-only. That
+  split mirrors the buffer's own: bulk on one channel, control on another.
+
+  `catalog` is where sealed segments are committed. Given options (or nothing), the
+  service starts its own `Smolquery.Catalog.DuckLake` engine and commits through
+  it; given a `%Smolquery.Catalog{}` outright, it commits through that and starts
+  nothing:
+
+      catalog: [metadata: "postgres:dbname=smolquery", data_path: "/mnt/bulk/lake"]
+
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
   object-store tier would need it too — so it is the default rather than something
@@ -51,12 +63,16 @@ defmodule Smolquery.StorageService.Runtime do
   extension download.
   """
 
+  alias Smolquery.Catalog
   alias Smolquery.Segments.Store
 
-  @enforce_keys [:name, :store]
+  @enforce_keys [:name, :store, :catalog]
   defstruct [
     :name,
     :store,
+    :catalog,
+    :catalog_opts,
+    buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
@@ -64,12 +80,15 @@ defmodule Smolquery.StorageService.Runtime do
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,
     gc_grace_ms: 3_600_000,
-    handoff: {Smolquery.StorageService.Handoff.Log, []}
+    handoff: {Smolquery.StorageService.Handoff.Seal, []}
   ]
 
   @type t :: %__MODULE__{
           name: atom(),
           store: Store.t(),
+          catalog: Catalog.t(),
+          catalog_opts: keyword() | nil,
+          buffer_name: atom(),
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
@@ -81,6 +100,7 @@ defmodule Smolquery.StorageService.Runtime do
         }
 
   @limits [
+    :buffer_name,
     :buffer_base_url,
     :buffer_timeout_ms,
     :engine_extensions,
@@ -102,11 +122,14 @@ defmodule Smolquery.StorageService.Runtime do
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.StorageService, []), opts)
+    name = Keyword.get(config, :name, Smolquery.StorageService)
 
     struct!(
       %__MODULE__{
-        name: Keyword.get(config, :name, Smolquery.StorageService),
-        store: build_store(config)
+        name: name,
+        store: build_store(config),
+        catalog: build_catalog(config, name),
+        catalog_opts: catalog_opts(config)
       },
       Keyword.take(config, @limits)
     )
@@ -133,6 +156,16 @@ defmodule Smolquery.StorageService.Runtime do
   def engine(name), do: Module.concat(name, "Engine")
 
   @doc """
+  The engine instance catalog commits go through.
+
+  Separate from the merge engine because an `Adbc.Connection` serializes its
+  queries: a commit waiting behind a multi-gigabyte `COPY` would make the catalog
+  as slow as the largest merge in flight.
+  """
+  @spec catalog_engine(atom()) :: atom()
+  def catalog_engine(name), do: Module.concat(name, "Catalog")
+
+  @doc """
   The task supervisor seal attempts run under.
   """
   @spec seals(atom()) :: atom()
@@ -143,6 +176,25 @@ defmodule Smolquery.StorageService.Runtime do
       nil -> Store.Local.new(dir: Keyword.get(config, :dir, @default_dir))
       {impl, opts} -> impl.new(opts)
       %Store{} = store -> store
+    end
+  end
+
+  defp build_catalog(config, name) do
+    case Keyword.get(config, :catalog) do
+      %Catalog{} = catalog ->
+        catalog
+
+      opts ->
+        opts = List.wrap(opts)
+
+        Catalog.DuckLake.new([engine: catalog_engine(name)] ++ Keyword.take(opts, [:catalog]))
+    end
+  end
+
+  defp catalog_opts(config) do
+    case Keyword.get(config, :catalog) do
+      %Catalog{} -> nil
+      opts -> List.wrap(opts)
     end
   end
 end
