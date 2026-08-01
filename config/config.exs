@@ -29,7 +29,9 @@ config :smolquery, Smolquery.BufferService,
   seal_max_age_ms: 60_000,
   seal_retry_ms: 30_000,
   retire_grace_ms: 600_000,
-  maintenance_interval_ms: 5_000
+  maintenance_interval_ms: 5_000,
+  hot_server_ip: {127, 0, 0, 1},
+  hot_server_port: 4001
 
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",

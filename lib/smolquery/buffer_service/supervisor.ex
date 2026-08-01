@@ -12,17 +12,19 @@ defmodule Smolquery.BufferService.Supervisor do
   buffer rebuilds its table's entries from the log when it restarts. A single
   buffer crashing, by contrast, disturbs nothing else.
 
-  `Adopter` comes last, once the pieces it needs are up: it starts a buffer for
+  `Adopter` comes next, once the pieces it needs are up: it starts a buffer for
   every owned table that already has a manifest log, so an unsealed tail is not
   stranded waiting for a write that may never come.
 
-  `HotServer` joins this subtree in the layer that adds it.
+  `HotServer` is last — it only reads the manifest and the store, so nothing
+  beneath it depends on it being up.
   """
 
   use Supervisor
 
   alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Runtime
 
   @doc """
@@ -35,7 +37,7 @@ defmodule Smolquery.BufferService.Supervisor do
   def start_link(opts \\ []) do
     runtime = Runtime.new(opts)
 
-    Supervisor.start_link(__MODULE__, runtime, name: Module.concat(runtime.name, "Supervisor"))
+    Supervisor.start_link(__MODULE__, runtime, name: Runtime.supervisor(runtime.name))
   end
 
   @impl Supervisor
@@ -46,7 +48,15 @@ defmodule Smolquery.BufferService.Supervisor do
       {HotManifest, name: Runtime.manifest(runtime.name)},
       {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
       {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
-      {Adopter, runtime}
+      {Adopter, runtime},
+      Supervisor.child_spec(
+        {Bandit,
+         plug: {HotServer, runtime.name},
+         ip: runtime.hot_server_ip,
+         port: runtime.hot_server_port,
+         startup_log: false},
+        id: Runtime.hot_server(runtime.name)
+      )
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)
