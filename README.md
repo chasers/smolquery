@@ -482,6 +482,8 @@ curl -H "$auth" -d '{"rows": [
       {"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"},
       {"id": 2}
     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
+curl -H "$auth" -d '{"query": "SELECT count(*) AS n FROM analytics.events"}' \
+     http://127.0.0.1:4000/v1/queries
 ```
 
 The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
@@ -495,6 +497,18 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
 | `GET /v1/datasets/:ds/tables/:t` | a table's schema |
 | `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full buffer is a 429 with `retry-after` |
+| `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504 |
+| `POST /v1/jobs` | the same query as an async job — returns it pending |
+| `GET /v1/jobs/:id` | status and stats; once the result TTL expires, answered from durable job history |
+| `GET /v1/jobs/:id/results` | page a finished job's rows with `max_results` + `page_token`; expired results are 410, unknown jobs 404 |
+| `DELETE /v1/jobs/:id` | cancel — cancelling a finished job is still a 200 |
+
+Query results page from the frame the runner holds until `result_ttl_ms`;
+temporal and decimal values arrive as ISO 8601 / decimal strings, mirroring
+what inserts accept. Terminal jobs are recorded in a `smolquery_jobs` table
+inside the same SQLite database that backs the DuckLake catalog (via DuckDB's
+`sqlite` extension), so job status outlives the result TTL even though the
+rows do not.
 
 Insert rows are JSON objects keyed by column name. Values coerce by the
 table's schema — `INT64` accepts integers or digit strings (JS clients lose

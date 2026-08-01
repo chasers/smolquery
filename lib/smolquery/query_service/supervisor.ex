@@ -26,6 +26,7 @@ defmodule Smolquery.QueryService.Supervisor do
   use Supervisor
 
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Runtime
 
   @doc """
@@ -51,8 +52,11 @@ defmodule Smolquery.QueryService.Supervisor do
           {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
           {PartitionSupervisor,
            child_spec: DynamicSupervisor, name: Runtime.runners(runtime.name)}
-        ]
+        ] ++ history(runtime)
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
+
+  defp history(%Runtime{history_metadata: nil}), do: []
+  defp history(%Runtime{} = runtime), do: [{History, runtime}]
 end

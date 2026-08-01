@@ -26,6 +26,7 @@ defmodule Smolquery.QueryService.Runner do
 
   alias Explorer.DataFrame
   alias Smolquery.Engine.Connection
+  alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
@@ -227,6 +228,7 @@ defmodule Smolquery.QueryService.Runner do
 
   defp settle(state, job) do
     stop_engine(state.engine)
+    record_history(state.runtime, job)
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, job, state.result}))
 
     Registry.update_value(
@@ -248,6 +250,9 @@ defmodule Smolquery.QueryService.Runner do
 
     :ok
   end
+
+  defp record_history(%Runtime{history_metadata: nil}, _job), do: :ok
+  defp record_history(%Runtime{name: name}, job), do: History.record(name, job)
 
   defp engine_pid?(nil, _pid), do: false
 

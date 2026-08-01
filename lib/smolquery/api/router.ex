@@ -21,6 +21,11 @@ defmodule Smolquery.Api.Router do
       POST /v1/datasets/:ds/tables                 create a table
       GET  /v1/datasets/:ds/tables/:table          a table's schema
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
+      POST /v1/queries                             sync query, first page inline
+      POST /v1/jobs                                async query job
+      GET  /v1/jobs/:id                            job status + stats (history fallback)
+      GET  /v1/jobs/:id/results                    page a finished job's rows
+      DELETE /v1/jobs/:id                          cancel
 
   Failures speak `Smolquery.Api.Errors`' envelope, and nothing else — including
   what `Plug.Parsers` raises for a body that is not JSON, via
@@ -34,6 +39,8 @@ defmodule Smolquery.Api.Router do
   alias Smolquery.Api.Datasets
   alias Smolquery.Api.Errors
   alias Smolquery.Api.Inserts
+  alias Smolquery.Api.Jobs
+  alias Smolquery.Api.Queries
   alias Smolquery.Api.Runtime
   alias Smolquery.Api.Tables
 
@@ -81,6 +88,26 @@ defmodule Smolquery.Api.Router do
 
   post "/v1/datasets/:dataset/tables/:table/insert" do
     Inserts.insert(conn, dataset, table)
+  end
+
+  post "/v1/queries" do
+    Queries.create(conn)
+  end
+
+  post "/v1/jobs" do
+    Jobs.create(conn)
+  end
+
+  get "/v1/jobs/:id/results" do
+    Jobs.results(conn, id)
+  end
+
+  get "/v1/jobs/:id" do
+    Jobs.get(conn, id)
+  end
+
+  delete "/v1/jobs/:id" do
+    Jobs.cancel(conn, id)
   end
 
   match _ do

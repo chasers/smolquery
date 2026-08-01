@@ -37,6 +37,7 @@ defmodule Smolquery.Api.Runtime do
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
+    query_name: Smolquery.QueryService,
     ip: {127, 0, 0, 1},
     port: 4000
   ]
@@ -47,6 +48,7 @@ defmodule Smolquery.Api.Runtime do
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
+          query_name: atom(),
           ip: :inet.socket_address(),
           port: :inet.port_number()
         }
@@ -71,7 +73,7 @@ defmodule Smolquery.Api.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :ip, :port]))
+    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :ip, :port]))
   end
 
   use Smolquery.Runtime

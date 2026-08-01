@@ -56,6 +56,12 @@ defmodule Smolquery.QueryService.Runtime do
   `Smolquery.Catalog.DuckLake` settings). A deployment passing a
   `%Smolquery.Catalog{}` handle must pass the bootstrap too, or job engines
   see no sealed tier.
+
+  `history_metadata` is where `QueryService.History` durably records terminal
+  jobs (PL-8 D8) — by default the same `sqlite:` database the catalog
+  configuration names, resolved the same way `job_bootstrap` is: a deployment
+  passing a `%Smolquery.Catalog{}` handle gets no history unless it passes
+  `history_metadata` too, and `history_metadata: nil` switches history off.
   """
 
   alias Smolquery.Catalog
@@ -65,6 +71,7 @@ defmodule Smolquery.QueryService.Runtime do
     :name,
     :catalog,
     :catalog_opts,
+    :history_metadata,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
@@ -80,6 +87,7 @@ defmodule Smolquery.QueryService.Runtime do
           name: atom(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
+          history_metadata: String.t() | nil,
           buffer_name: atom(),
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
@@ -120,7 +128,9 @@ defmodule Smolquery.QueryService.Runtime do
       name: name,
       catalog: catalog,
       catalog_opts: catalog_opts,
-      job_bootstrap: Keyword.get_lazy(config, :job_bootstrap, fn -> bootstrap(catalog_opts) end)
+      job_bootstrap: Keyword.get_lazy(config, :job_bootstrap, fn -> bootstrap(catalog_opts) end),
+      history_metadata:
+        Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end)
     }
     |> struct!(Keyword.take(config, @limits))
   end
@@ -155,6 +165,12 @@ defmodule Smolquery.QueryService.Runtime do
   @spec runners(atom()) :: atom()
   def runners(name), do: Module.concat(name, "Runners")
 
+  @doc """
+  The history store terminal jobs are recorded in.
+  """
+  @spec history(atom()) :: atom()
+  def history(name), do: Module.concat(name, "History")
+
   defp bootstrap(nil), do: []
 
   defp bootstrap(catalog_opts) do
@@ -168,6 +184,18 @@ defmodule Smolquery.QueryService.Runtime do
       [Catalog.DuckLake.attach_statement(lake, metadata, data_path)]
     else
       :error -> []
+    end
+  end
+
+  defp history_metadata(nil), do: nil
+
+  defp history_metadata(catalog_opts) do
+    merged =
+      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
+
+    case Keyword.get(merged, :metadata) do
+      "sqlite:" <> _path = metadata -> metadata
+      _absent_or_not_sqlite -> nil
     end
   end
 end

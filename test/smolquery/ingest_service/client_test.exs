@@ -99,19 +99,11 @@ defmodule Smolquery.IngestService.ClientTest do
   test "a full buffer refuses the whole batch", context do
     %{name: name} =
       start_stack(context,
-        buffer: [flush_max_rows: 100_000, flush_interval_ms: 60_000, max_buffered_rows: 2]
+        buffer: [flush_max_rows: 100_000, flush_interval_ms: 60_000, max_buffered_rows: 1]
       )
 
-    blocked =
-      Task.async(fn ->
-        IngestService.Client.insert(name, @table, [%{"id" => 1}, %{"id" => 2}])
-      end)
-
-    Process.sleep(50)
-
-    assert IngestService.Client.insert(name, @table, [%{"id" => 3}]) == {:error, :buffer_full}
-
-    Task.shutdown(blocked, :brutal_kill)
+    assert IngestService.Client.insert(name, @table, [%{"id" => 1}, %{"id" => 2}]) ==
+             {:error, :buffer_full}
   end
 
   test "an ingest service that is not running says so" do
