@@ -39,8 +39,10 @@ queries → QueryService ──────────────────�
 applied before the connection is reachable:
 
 ```elixir
-iex> Smolquery.Engine.query!(Smolquery.Engine, "SELECT $1::int + 1 AS n", [41])
-%Smolquery.Engine.Result{columns: ["n"], rows: [[42]], num_rows: 1}
+{:ok, _pid} = Smolquery.Engine.start_link(name: MyEngine)
+
+Smolquery.Engine.query!(MyEngine, "SELECT $1::int + 1 AS n", [41])
+#=> %Smolquery.Engine.Result{columns: ["n"], rows: [[42]], num_rows: 1}
 ```
 
 It reads Parquet segments from local disk and over HTTP (`httpfs`), and unions
@@ -454,6 +456,15 @@ config :smolquery, Smolquery.StorageService,
   gc_interval_ms: 300_000,
   gc_grace_ms: 3_600_000,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}
+
+config :smolquery, Smolquery.QueryService,
+  buffer_base_url: "http://127.0.0.1:4001",
+  buffer_timeout_ms: 30_000,
+  engine_extensions: [:httpfs],
+  max_concurrent_jobs: 8,
+  default_timeout_ms: 60_000,
+  job_memory_limit: "1GB",
+  result_ttl_ms: 300_000
 ```
 
 `:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath
@@ -472,6 +483,15 @@ replaced by ownership-ring lookup when the cluster arrives.
 `engine_extensions` loads `httpfs` into the sealer's own engine, which the merge
 cannot work without.
 
+The query service holds today what every query job will need and no job owns: a
+catalog engine to plan through (given `catalog:` options it starts its own
+DuckLake engine; given a `%Smolquery.Catalog{}` it starts none), a registry, and
+the supervisor jobs will run under. Its `buffer_base_url` is where the planner
+reaches `HotServer` for hot manifests — the same single-node honesty as the
+storage service's. The job dials (`max_concurrent_jobs`, `default_timeout_ms`,
+`job_memory_limit`, `result_ttl_ms`) take effect as Milestone 5's later layers
+land.
+
 Runtime environment variables:
 
 | variable | effect |
@@ -485,7 +505,7 @@ Runtime environment variables:
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound |
 | `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` |
 | `SMOLQUERY_SEALED_DIR` | storage service root for sealed segments |
-| `SMOLQUERY_BUFFER_BASE_URL` | `HotServer` base URL the sealer pulls micro-segments from |
+| `SMOLQUERY_BUFFER_BASE_URL` | `HotServer` base URL the sealer and the query planner pull the hot tier from |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.

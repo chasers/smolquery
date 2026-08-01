@@ -55,7 +55,7 @@ defmodule Smolquery.StorageService.Supervisor do
     Runtime.put(runtime)
 
     children =
-      catalog(runtime) ++
+      DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
         [
           {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
@@ -65,9 +65,4 @@ defmodule Smolquery.StorageService.Supervisor do
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
-
-  defp catalog(%Runtime{catalog_opts: nil}), do: []
-
-  defp catalog(%Runtime{} = runtime),
-    do: [{DuckLake, [name: Runtime.catalog_engine(runtime.name)] ++ runtime.catalog_opts}]
 end

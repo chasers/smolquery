@@ -16,6 +16,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
+  alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Segments.Writer
@@ -197,6 +198,54 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
     test "is empty for a table with no segments", %{catalog: catalog} do
       assert Catalog.segments(catalog, @table, :current) == {:ok, []}
+    end
+  end
+
+  describe "reading as of a snapshot (the Milestone 5 planner's sealed side)" do
+    test "AT (VERSION => snapshot) pins a table read to a registration's snapshot", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 100)
+      b = write_segment(dir, 2, 50)
+
+      {:ok, first} = Catalog.register_segments(catalog, @table, [a])
+      {:ok, _second} = Catalog.register_segments(catalog, @table, [b])
+
+      result =
+        Engine.query!(
+          @engine,
+          ~s|SELECT count(*) FROM lake."analytics"."events" AT (VERSION => #{first})|
+        )
+
+      assert result.rows == [[100]]
+      assert row_count() == 150
+    end
+
+    test "a second engine attaches the same lake read-only", %{
+      catalog: catalog,
+      segments_dir: dir,
+      tmp_dir: tmp
+    } do
+      segment = write_segment(dir, 1, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
+      reader = __MODULE__.ReadOnly
+
+      metadata = Identifier.sql_string("ducklake:sqlite:" <> Path.join(tmp, "catalog.sqlite"))
+      data_path = Identifier.sql_string(Path.join(tmp, "data"))
+
+      attach =
+        "ATTACH #{metadata} AS lake " <>
+          "(DATA_PATH #{data_path}, DATA_INLINING_ROW_LIMIT 0, READ_ONLY)"
+
+      start_supervised!({Engine, name: reader, extensions: [:ducklake], statements: [attach]})
+
+      result = Engine.query!(reader, ~s|SELECT count(*) FROM lake."analytics"."events"|)
+      assert result.rows == [[10]]
+
+      assert {:error, error} = Engine.query(reader, ~s|DELETE FROM lake."analytics"."events"|)
+      assert Exception.message(error) =~ ~r/read.only/i
     end
   end
 

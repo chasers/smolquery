@@ -40,6 +40,7 @@ end
 
 if base_url = System.get_env("SMOLQUERY_BUFFER_BASE_URL") do
   config :smolquery, Smolquery.StorageService, buffer_base_url: base_url
+  config :smolquery, Smolquery.QueryService, buffer_base_url: base_url
 end
 
 if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do

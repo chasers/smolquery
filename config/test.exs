@@ -12,6 +12,8 @@ config :smolquery, Smolquery.BufferService,
 
 config :smolquery, Smolquery.StorageService, engine_extensions: []
 
+config :smolquery, Smolquery.QueryService, engine_extensions: []
+
 config :smolquery, Smolquery.Engine,
   memory_limit: "512MB",
   threads: 2,

@@ -149,6 +149,34 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @doc """
+  Resolves a service's `:catalog` configuration into a handle and the options
+  its supervisor must start an engine with.
+
+  Every service that reads or commits through a catalog accepts the same two
+  shapes of configuration. A `%Smolquery.Catalog{}` given outright is used
+  as-is and the options come back `nil` — the catalog is managed elsewhere and
+  the service starts nothing. Options (or nothing) mean the service runs its
+  own lake: the handle reads through `engine`, and the options are what
+  `children/2` starts that engine with.
+  """
+  @spec resolve(Catalog.t() | keyword() | nil, atom()) :: {Catalog.t(), keyword() | nil}
+  def resolve(%Catalog{} = catalog, _engine), do: {catalog, nil}
+
+  def resolve(opts, engine) do
+    opts = List.wrap(opts)
+
+    {new([engine: engine] ++ Keyword.take(opts, [:catalog])), opts}
+  end
+
+  @doc """
+  The children a supervisor starts for a catalog `resolve/2` returned —
+  none when the handle was given outright.
+  """
+  @spec children(keyword() | nil, atom()) :: [{module(), keyword()}]
+  def children(nil, _engine), do: []
+  def children(opts, engine), do: [{__MODULE__, [name: engine] ++ opts}]
+
+  @doc """
   The `ATTACH` statement that binds a metadata database and data path to a
   catalog name.
 
