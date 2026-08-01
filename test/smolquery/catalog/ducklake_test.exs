@@ -200,6 +200,33 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "known_segments/1" do
+    test "is empty for a catalog that has registered nothing", %{catalog: catalog} do
+      assert Catalog.known_segments(catalog) == {:ok, []}
+    end
+
+    test "reports a registered segment", %{catalog: catalog, segments_dir: dir} do
+      segment = write_segment(dir, 1, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
+      assert Catalog.known_segments(catalog) == {:ok, [segment.path]}
+    end
+
+    test "still reports a segment dropped from the current snapshot", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+      {:ok, _dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [b.path]}
+      assert {:ok, known} = Catalog.known_segments(catalog)
+      assert Enum.sort(known) == Enum.sort([a.path, b.path])
+    end
+  end
+
   describe "drop_segments/3" do
     test "removes a segment from the current snapshot but leaves the file", %{
       catalog: catalog,

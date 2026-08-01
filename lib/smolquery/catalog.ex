@@ -59,6 +59,7 @@ defmodule Smolquery.Catalog do
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
+  @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
 
   @doc """
   Creates a dataset, if it does not already exist.
@@ -129,4 +130,18 @@ defmodule Smolquery.Catalog do
   @spec current_snapshot(t()) :: {:ok, snapshot()} | {:error, term()}
   def current_snapshot(%__MODULE__{} = catalog),
     do: catalog.impl.current_snapshot(catalog.config)
+
+  @doc """
+  Every segment path the catalog has ever referenced, at any snapshot.
+
+  Not the same question as `segments/3`, and the difference is what makes garbage
+  collection safe. A path missing from the *current* snapshot may still be the only
+  copy of rows an older snapshot can read, so deleting on that basis would break
+  time travel. A path missing from *every* snapshot was never successfully
+  committed — an upload whose commit did not follow — and is the only garbage a
+  sealer can produce.
+  """
+  @spec known_segments(t()) :: {:ok, [String.t()]} | {:error, term()}
+  def known_segments(%__MODULE__{} = catalog),
+    do: catalog.impl.known_segments(catalog.config)
 end

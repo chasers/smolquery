@@ -4,8 +4,8 @@ defmodule Smolquery.StorageService.Supervisor do
 
   Started only on nodes whose roles include `:storage` (see `Smolquery.Roles`).
   Holds the sealed tier's workers: a catalog to commit through, an engine to merge
-  through, a task supervisor the merges run under, and the sealer that answers seal
-  signals.
+  through, a task supervisor the merges run under, the sealer that answers seal
+  signals, and the sweeper that deletes uploads whose commit never followed.
 
   The catalog and the merge run on separate engines deliberately. An
   `Adbc.Connection` serializes the queries it is given, so sharing one would put
@@ -27,13 +27,13 @@ defmodule Smolquery.StorageService.Supervisor do
   what makes a storage node disposable: it can die mid-seal and another node (or
   this one, restarted) reconciles from what the catalog says.
 
-  `GC` joins this subtree in Milestone 4 L5.
   """
 
   use Supervisor
 
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
 
@@ -59,7 +59,8 @@ defmodule Smolquery.StorageService.Supervisor do
         [
           {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
-          {Sealer, runtime}
+          {Sealer, runtime},
+          {GC, runtime}
         ]
 
     Supervisor.init(children, strategy: :rest_for_one)
