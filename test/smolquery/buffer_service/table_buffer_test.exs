@@ -161,8 +161,8 @@ defmodule Smolquery.BufferService.TableBufferTest do
         )
 
       task = Task.async(fn -> Client.write_batch(name, @table, batch(1..4)) end)
-      Process.sleep(50)
 
+      assert Eventually.until(fn -> accumulated_rows(name) == 4 end)
       assert Client.write_batch(name, @table, batch(5..8)) == {:error, :buffer_full}
 
       :ok = Client.flush(name, @table)
@@ -294,6 +294,13 @@ defmodule Smolquery.BufferService.TableBufferTest do
     end
   end
 
+  defp accumulating?(name) do
+    case Registry.lookup(Runtime.registry(name), @table) do
+      [{pid, _value}] -> :sys.get_state(pid).pending != []
+      [] -> false
+    end
+  end
+
   describe "crash safety" do
     test "acked rows survive the buffer being killed", %{name: name, runtime: runtime} do
       {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
@@ -341,7 +348,8 @@ defmodule Smolquery.BufferService.TableBufferTest do
       %{name: name, runtime: runtime} = start_buffer_service(context, flush_interval_ms: 60_000)
 
       task = Task.async(fn -> Client.write_batch(name, @table, batch(1..3)) end)
-      Process.sleep(50)
+
+      assert Eventually.until(fn -> accumulated_rows(name) == 3 end)
 
       [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
       GenServer.stop(pid, :normal)
@@ -361,7 +369,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
           send(test_pid, {:acked, Client.write_batch(name, @table, batch(1..3))})
         end)
 
-      Process.sleep(50)
+      assert Eventually.until(fn -> accumulating?(name) end)
 
       [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
       Process.exit(pid, :kill)
