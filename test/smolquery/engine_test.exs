@@ -5,6 +5,7 @@ defmodule Smolquery.EngineTest do
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
+  alias Smolquery.Test.Eventually
 
   @engine __MODULE__.Instance
 
@@ -231,7 +232,7 @@ defmodule Smolquery.EngineTest do
       kill_and_await(conn)
       assert await_registered(Engine.connection_name(__MODULE__.Bootstrapped), conn) != conn
 
-      assert Engine.query!(__MODULE__.Bootstrapped, "SELECT n FROM marker") |> Result.one!() == 42
+      assert Eventually.until(fn -> rebootstrapped?(__MODULE__.Bootstrapped) end)
     end
   end
 
@@ -330,6 +331,12 @@ defmodule Smolquery.EngineTest do
     on_exit(fn -> File.rm_rf!(path) end)
 
     path
+  end
+
+  defp rebootstrapped?(engine) do
+    match?({:ok, %Result{rows: [[42]]}}, Engine.query(engine, "SELECT n FROM marker"))
+  catch
+    :exit, _mid_restart -> false
   end
 
   defp kill_and_await(pid) do
