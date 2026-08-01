@@ -148,7 +148,17 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
     end)
   end
 
-  defp decode_stats(stats) do
+  @doc """
+  Typed stats from their JSON form, exactly as `from_record/1` restores them.
+
+  Public because the manifest travels as JSON beyond this module: a query
+  planner pruning on a manifest it fetched over HTTP holds the same
+  string-keyed stats a log record does, and must get the same
+  `NaiveDateTime`/`Date` bounds back — a bound left as its ISO string would
+  silently stop comparing, which is pruning lost without an error.
+  """
+  @spec decode_stats(map()) :: %{optional(String.t()) => column_stats()}
+  def decode_stats(stats) do
     Map.new(stats, fn {column, column_stats} ->
       {column,
        %{
