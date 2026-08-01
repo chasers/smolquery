@@ -17,7 +17,13 @@ defmodule Smolquery.QueryService.History do
   Recording is a cast and failures only log: a job's history row is worth
   having and never worth failing the job over. A history whose engine could
   not start (no `sqlite` extension offline, unwritable metadata database)
-  disables itself rather than crash-looping the query service.
+  disables itself rather than crash-looping the query service — and it traps
+  exits so a connection dying *later* disables it the same way, because the
+  connection is linked and an untrapped exit would be exactly that crash
+  loop. Boot contends with the DuckLake engine for the same SQLite file, so
+  the attach carries a busy timeout and the connect retries before giving
+  up; the container exit-criterion run caught the bare version dying on
+  "database is locked" during first boot.
   """
 
   use GenServer
@@ -30,6 +36,8 @@ defmodule Smolquery.QueryService.History do
   alias Smolquery.QueryService.Runtime
 
   @table "smolquery_history.smolquery_jobs"
+  @connect_attempts 5
+  @connect_retry_ms 500
 
   @doc """
   Starts the history store for a runtime.
@@ -60,12 +68,14 @@ defmodule Smolquery.QueryService.History do
 
   @impl GenServer
   def init(%Runtime{} = runtime) do
+    Process.flag(:trap_exit, true)
+
     {:ok, %{runtime: runtime, connection: nil}, {:continue, :connect}}
   end
 
   @impl GenServer
   def handle_continue(:connect, state) do
-    case connect(state.runtime) do
+    case connect_with_retries(state.runtime, @connect_attempts) do
       {:ok, connection} ->
         {:noreply, %{state | connection: connection}}
 
@@ -76,6 +86,29 @@ defmodule Smolquery.QueryService.History do
         )
 
         {:noreply, state}
+    end
+  end
+
+  @impl GenServer
+  def handle_info({:EXIT, _pid, reason}, state) do
+    Logger.warning("job history disabled: its connection died: #{inspect(reason)}")
+
+    {:noreply, %{state | connection: nil}}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  defp connect_with_retries(runtime, attempts) do
+    case connect(runtime) do
+      {:ok, connection} ->
+        {:ok, connection}
+
+      {:error, _reason} when attempts > 1 ->
+        Process.sleep(@connect_retry_ms)
+        connect_with_retries(runtime, attempts - 1)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -130,7 +163,7 @@ defmodule Smolquery.QueryService.History do
         extensions: [:sqlite],
         statements: [
           "ATTACH IF NOT EXISTS #{Identifier.sql_string(path)} " <>
-            "AS smolquery_history (TYPE sqlite)",
+            "AS smolquery_history (TYPE sqlite, BUSY_TIMEOUT 5000)",
           "CREATE TABLE IF NOT EXISTS #{@table} (" <>
             "id TEXT, sql TEXT, state TEXT, error TEXT, snapshot BIGINT, " <>
             "row_count BIGINT, duration_ms BIGINT, submitted_at BIGINT, " <>

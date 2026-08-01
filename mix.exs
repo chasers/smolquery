@@ -10,7 +10,17 @@ defmodule Smolquery.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"]
+      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"],
+      releases: releases()
+    ]
+  end
+
+  defp releases do
+    [
+      smolquery: [
+        include_executables_for: [:unix],
+        applications: [runtime_tools: :permanent]
+      ]
     ]
   end
 

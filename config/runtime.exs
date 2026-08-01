@@ -78,3 +78,7 @@ end
 if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end
+
+if keep = System.get_env("SMOLQUERY_SNAPSHOT_KEEP_MS") do
+  config :smolquery, Smolquery.StorageService, snapshot_keep_ms: String.to_integer(keep)
+end
