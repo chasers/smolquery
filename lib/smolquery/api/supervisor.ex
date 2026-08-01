@@ -6,12 +6,17 @@ defmodule Smolquery.Api.Supervisor do
   Resolving the runtime happens in `start_link/1`, so a node missing its API
   key fails the boot right here — fail closed — rather than starting a
   listener that would wave requests through.
+
+  The strategy is `rest_for_one`, catalog engine first, because the listener
+  answers CRUD through it; a catalog engine that dies takes the listener down
+  with it rather than leaving routes serving through a dead handle.
   """
 
   use Supervisor
 
   alias Smolquery.Api.Router
   alias Smolquery.Api.Runtime
+  alias Smolquery.Catalog.DuckLake
 
   @doc """
   Starts the API.
@@ -30,14 +35,16 @@ defmodule Smolquery.Api.Supervisor do
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
 
-    children = [
-      Supervisor.child_spec(
-        {Bandit,
-         plug: {Router, runtime.name}, ip: runtime.ip, port: runtime.port, startup_log: false},
-        id: Runtime.listener(runtime.name)
-      )
-    ]
+    children =
+      DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
+        [
+          Supervisor.child_spec(
+            {Bandit,
+             plug: {Router, runtime.name}, ip: runtime.ip, port: runtime.port, startup_log: false},
+            id: Runtime.listener(runtime.name)
+          )
+        ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 end

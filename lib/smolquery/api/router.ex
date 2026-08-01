@@ -14,19 +14,31 @@ defmodule Smolquery.Api.Router do
 
   v1 surface so far:
 
-      GET /healthz    liveness, no auth
+      GET  /healthz                         liveness, no auth
+      GET  /v1/datasets                     list datasets
+      POST /v1/datasets                     create a dataset
+      GET  /v1/datasets/:ds/tables          list a dataset's tables
+      POST /v1/datasets/:ds/tables          create a table
+      GET  /v1/datasets/:ds/tables/:table   a table's schema
 
-  Failures speak `Smolquery.Api.Errors`' envelope, and nothing else.
+  Failures speak `Smolquery.Api.Errors`' envelope, and nothing else — including
+  what `Plug.Parsers` raises for a body that is not JSON, via
+  `Plug.ErrorHandler`. Bodies parse after auth, so unauthenticated payloads are
+  never read.
   """
 
   use Plug.Router
+  use Plug.ErrorHandler
 
+  alias Smolquery.Api.Datasets
   alias Smolquery.Api.Errors
   alias Smolquery.Api.Runtime
+  alias Smolquery.Api.Tables
 
   plug(Plug.Telemetry, event_prefix: [:smolquery, :api])
   plug(:match)
   plug(Smolquery.Api.Auth)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, pass: [])
   plug(:dispatch)
 
   @impl Plug
@@ -45,8 +57,46 @@ defmodule Smolquery.Api.Router do
     |> send_resp(200, JSON.encode!(%{"status" => "ok"}))
   end
 
+  get "/v1/datasets" do
+    Datasets.list(conn)
+  end
+
+  post "/v1/datasets" do
+    Datasets.create(conn)
+  end
+
+  get "/v1/datasets/:dataset/tables" do
+    Tables.list(conn, dataset)
+  end
+
+  post "/v1/datasets/:dataset/tables" do
+    Tables.create(conn, dataset)
+  end
+
+  get "/v1/datasets/:dataset/tables/:table" do
+    Tables.get(conn, dataset, table)
+  end
+
   match _ do
     Errors.send_error(conn, 404, "NOT_FOUND", "no such route")
+  end
+
+  @impl Plug.ErrorHandler
+  def handle_errors(conn, %{reason: %Plug.Parsers.ParseError{}}) do
+    Errors.send_error(conn, 400, "INVALID_ARGUMENT", "request body is not valid JSON")
+  end
+
+  def handle_errors(conn, %{reason: %Plug.Parsers.UnsupportedMediaTypeError{}}) do
+    Errors.send_error(
+      conn,
+      415,
+      "UNSUPPORTED_MEDIA_TYPE",
+      "request body must be application/json"
+    )
+  end
+
+  def handle_errors(conn, _error) do
+    Errors.send_error(conn, 500, "INTERNAL", "internal error")
   end
 
   @doc """

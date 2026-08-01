@@ -21,14 +21,23 @@ defmodule Smolquery.Api.Runtime do
 
   `ip` defaults to loopback for the same reason — exposing the listener beyond
   the node is a deliberate act (`SMOLQUERY_API_IP`), not a default.
+
+  `catalog` is where the CRUD routes resolve datasets, tables, and schemas —
+  the same seam `Smolquery.QueryService` uses. Given options (or nothing), the
+  API starts its own `Smolquery.Catalog.DuckLake` engine; given a
+  `%Smolquery.Catalog{}` outright, it reads through that and starts nothing.
   """
 
-  @enforce_keys [:name, :api_key]
-  defstruct [:name, :api_key, ip: {127, 0, 0, 1}, port: 4000]
+  alias Smolquery.Catalog
+
+  @enforce_keys [:name, :api_key, :catalog]
+  defstruct [:name, :api_key, :catalog, :catalog_opts, ip: {127, 0, 0, 1}, port: 4000]
 
   @type t :: %__MODULE__{
           name: atom(),
           api_key: String.t(),
+          catalog: Catalog.t(),
+          catalog_opts: keyword() | nil,
           ip: :inet.socket_address(),
           port: :inet.port_number()
         }
@@ -42,10 +51,16 @@ defmodule Smolquery.Api.Runtime do
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.Api, []), opts)
+    name = Keyword.get(config, :name, Smolquery.Api)
+
+    {catalog, catalog_opts} =
+      Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
     %__MODULE__{
-      name: Keyword.get(config, :name, Smolquery.Api),
-      api_key: fetch_api_key!(config)
+      name: name,
+      api_key: fetch_api_key!(config),
+      catalog: catalog,
+      catalog_opts: catalog_opts
     }
     |> struct!(Keyword.take(config, [:ip, :port]))
   end
@@ -63,6 +78,12 @@ defmodule Smolquery.Api.Runtime do
   """
   @spec listener(atom()) :: atom()
   def listener(name), do: Module.concat(name, "Listener")
+
+  @doc """
+  The engine instance CRUD routes resolve the catalog through.
+  """
+  @spec catalog_engine(atom()) :: atom()
+  def catalog_engine(name), do: Module.concat(name, "Catalog")
 
   defp fetch_api_key!(config) do
     case Keyword.get(config, :api_key) do

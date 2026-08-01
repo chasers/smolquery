@@ -22,4 +22,52 @@ defmodule Smolquery.Api.Errors do
     |> put_resp_content_type("application/json")
     |> send_resp(code, body)
   end
+
+  @doc """
+  Sends the envelope a failure reason maps to.
+
+  The clauses cover what the catalog and schema layers actually return; any
+  reason they do not is a 500 that names nothing — internals never leak
+  through the envelope.
+  """
+  @spec from_reason(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def from_reason(conn, {:invalid_identifier, name}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "invalid identifier: #{inspect(name)}")
+  end
+
+  def from_reason(conn, {:unknown_table, {dataset, table}}) do
+    send_error(conn, 404, "NOT_FOUND", "table #{dataset}.#{table} does not exist")
+  end
+
+  def from_reason(conn, {:unknown_dataset, dataset}) do
+    send_error(conn, 404, "NOT_FOUND", "dataset #{dataset} does not exist")
+  end
+
+  def from_reason(conn, {:unsupported_type, type}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "unsupported type: #{inspect(type)}")
+  end
+
+  def from_reason(conn, :empty_schema) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "a schema needs at least one field")
+  end
+
+  def from_reason(conn, {:duplicate_columns, names}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "duplicate columns: #{Enum.join(names, ", ")}")
+  end
+
+  def from_reason(conn, {:invalid_field, field}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "invalid schema field: #{inspect(field)}")
+  end
+
+  def from_reason(conn, {:invalid_schema, _other}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "schema must be a list of fields")
+  end
+
+  def from_reason(conn, {:missing_field, name}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "missing required field: #{name}")
+  end
+
+  def from_reason(conn, _reason) do
+    send_error(conn, 500, "INTERNAL", "internal error")
+  end
 end
