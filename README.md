@@ -469,8 +469,27 @@ route.
 
 ```sh
 curl http://127.0.0.1:4000/healthz
-curl -H "authorization: Bearer $SMOLQUERY_API_KEY" http://127.0.0.1:4000/v1/...
+
+auth='authorization: Bearer '$SMOLQUERY_API_KEY
+curl -H "$auth" -d '{"id": "analytics"}' http://127.0.0.1:4000/v1/datasets
+curl -H "$auth" -d '{"id": "events", "schema": [
+      {"name": "id", "type": "INT64", "nullable": false},
+      {"name": "ts", "type": "TIMESTAMP"},
+      {"name": "amount", "type": "NUMERIC(38,2)"}
+    ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables
+curl -H "$auth" http://127.0.0.1:4000/v1/datasets/analytics/tables/events
 ```
+
+The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
+`TIMESTAMP`, `DATE`, and `NUMERIC(p,s)`:
+
+| route | |
+|---|---|
+| `GET /v1/datasets` | list datasets |
+| `POST /v1/datasets` | create a dataset (idempotent) |
+| `GET /v1/datasets/:ds/tables` | list a dataset's tables |
+| `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
+| `GET /v1/datasets/:ds/tables/:t` | a table's schema |
 
 Failures answer one JSON envelope everywhere:
 
@@ -478,9 +497,9 @@ Failures answer one JSON envelope everywhere:
 {"error": {"code": 401, "status": "UNAUTHENTICATED", "message": "missing or invalid API key"}}
 ```
 
-The v1 surface (datasets/tables CRUD, streaming inserts, query jobs, batch
-loads) lands across Milestone 6's layers; the routes exist in
-`Smolquery.Api.Router` as they arrive.
+The rest of the v1 surface (streaming inserts, query jobs, batch loads) lands
+across Milestone 6's layers; the routes exist in `Smolquery.Api.Router` as
+they arrive.
 
 ## Roles
 

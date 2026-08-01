@@ -8,15 +8,18 @@ defmodule Smolquery.Schema do
   The mapping lives here once, so a new type is one row in one table rather
   than a change in three modules.
 
-  | logical | Explorer dtype | DuckDB |
-  |---|---|---|
-  | `:int64` | `{:s, 64}` | `BIGINT` |
-  | `:float64` | `{:f, 64}` | `DOUBLE` |
-  | `:string` | `:string` | `VARCHAR` |
-  | `:bool` | `:boolean` | `BOOLEAN` |
-  | `:timestamp` | `{:naive_datetime, :microsecond}` | `TIMESTAMP` |
-  | `:date` | `:date` | `DATE` |
-  | `{:numeric, p, s}` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
+  | logical | API name | Explorer dtype | DuckDB |
+  |---|---|---|---|
+  | `:int64` | `INT64` | `{:s, 64}` | `BIGINT` |
+  | `:float64` | `FLOAT64` | `{:f, 64}` | `DOUBLE` |
+  | `:string` | `STRING` | `:string` | `VARCHAR` |
+  | `:bool` | `BOOL` | `:boolean` | `BOOLEAN` |
+  | `:timestamp` | `TIMESTAMP` | `{:naive_datetime, :microsecond}` | `TIMESTAMP` |
+  | `:date` | `DATE` | `:date` | `DATE` |
+  | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
+
+  The API names are the BigQuery-flavored strings `Smolquery.Api` speaks in
+  table-schema JSON.
 
   Milestone 1 verified that every one of these round-trips byte-identically
   through Explorer's Parquet writer, so a segment written here reads back
@@ -56,19 +59,25 @@ defmodule Smolquery.Schema do
           | {String.t(), logical_type(), keyword()}
 
   @mapping [
-    {:int64, {:s, 64}, "BIGINT"},
-    {:float64, {:f, 64}, "DOUBLE"},
-    {:string, :string, "VARCHAR"},
-    {:bool, :boolean, "BOOLEAN"},
-    {:timestamp, {:naive_datetime, :microsecond}, "TIMESTAMP"},
-    {:date, :date, "DATE"}
+    {:int64, {:s, 64}, "BIGINT", "INT64"},
+    {:float64, {:f, 64}, "DOUBLE", "FLOAT64"},
+    {:string, :string, "VARCHAR", "STRING"},
+    {:bool, :boolean, "BOOLEAN", "BOOL"},
+    {:timestamp, {:naive_datetime, :microsecond}, "TIMESTAMP", "TIMESTAMP"},
+    {:date, :date, "DATE", "DATE"}
   ]
 
   @scalar_types Enum.map(@mapping, &elem(&1, 0))
-  @logical_to_explorer Map.new(@mapping, fn {logical, dtype, _duckdb} -> {logical, dtype} end)
-  @explorer_to_logical Map.new(@mapping, fn {logical, dtype, _duckdb} -> {dtype, logical} end)
-  @logical_to_duckdb Map.new(@mapping, fn {logical, _dtype, duckdb} -> {logical, duckdb} end)
-  @duckdb_to_logical Map.new(@mapping, fn {logical, _dtype, duckdb} -> {duckdb, logical} end)
+  @logical_to_explorer Map.new(@mapping, fn {logical, dtype, _duckdb, _api} ->
+                         {logical, dtype}
+                       end)
+  @explorer_to_logical Map.new(@mapping, fn {logical, dtype, _duckdb, _api} ->
+                         {dtype, logical}
+                       end)
+  @logical_to_duckdb Map.new(@mapping, fn {logical, _dtype, duckdb, _api} -> {logical, duckdb} end)
+  @duckdb_to_logical Map.new(@mapping, fn {logical, _dtype, duckdb, _api} -> {duckdb, logical} end)
+  @logical_to_api Map.new(@mapping, fn {logical, _dtype, _duckdb, api} -> {logical, api} end)
+  @api_to_logical Map.new(@mapping, fn {logical, _dtype, _duckdb, api} -> {api, logical} end)
 
   @doc """
   Builds a schema from field specs — `Field` structs or `{name, type}` /
@@ -184,6 +193,32 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
+  The API name for a logical type — what table-schema JSON says.
+  """
+  @spec api_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
+  def api_type({:numeric, precision, scale}), do: {:ok, "NUMERIC(#{precision},#{scale})"}
+
+  def api_type(type) do
+    case Map.fetch(@logical_to_api, type) do
+      {:ok, name} -> {:ok, name}
+      :error -> {:error, {:unsupported_type, type}}
+    end
+  end
+
+  @doc """
+  The logical type for an API name, case-insensitively.
+  """
+  @spec type_from_api(term()) :: {:ok, logical_type()} | {:error, {:unsupported_type, term()}}
+  def type_from_api(name) when is_binary(name) do
+    case Map.fetch(@api_to_logical, String.upcase(name)) do
+      {:ok, type} -> {:ok, type}
+      :error -> numeric_from_api(name)
+    end
+  end
+
+  def type_from_api(name), do: {:error, {:unsupported_type, name}}
+
+  @doc """
   The `column_name dtype` pairs Explorer needs to build a DataFrame.
   """
   @spec explorer_dtypes(t()) :: {:ok, [{String.t(), term()}]} | {:error, term()}
@@ -268,6 +303,16 @@ defmodule Smolquery.Schema do
     |> Enum.frequencies_by(& &1.name)
     |> Enum.filter(fn {_name, count} -> count > 1 end)
     |> Enum.map(fn {name, _count} -> name end)
+  end
+
+  defp numeric_from_api(name) do
+    case Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, String.trim(name)) do
+      [_match, precision, scale] ->
+        validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
+
+      nil ->
+        {:error, {:unsupported_type, name}}
+    end
   end
 
   defp decimal_from_duckdb(name) do

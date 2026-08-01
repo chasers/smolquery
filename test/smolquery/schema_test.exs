@@ -110,6 +110,30 @@ defmodule Smolquery.SchemaTest do
       assert Schema.logical_from_duckdb("decimal(18, 4)") == {:ok, {:numeric, 18, 4}}
     end
 
+    test "round-trips every logical type through API names" do
+      for type <- @logical_types do
+        assert {:ok, name} = Schema.api_type(type)
+        assert Schema.type_from_api(name) == {:ok, type}
+      end
+    end
+
+    test "speaks the BigQuery-flavored API vocabulary" do
+      assert Schema.api_type(:int64) == {:ok, "INT64"}
+      assert Schema.api_type(:bool) == {:ok, "BOOL"}
+      assert Schema.api_type({:numeric, 38, 2}) == {:ok, "NUMERIC(38,2)"}
+      assert Schema.type_from_api("string") == {:ok, :string}
+      assert Schema.type_from_api("numeric(18, 4)") == {:ok, {:numeric, 18, 4}}
+    end
+
+    test "rejects API names it does not carry" do
+      assert Schema.type_from_api("GEOGRAPHY") == {:error, {:unsupported_type, "GEOGRAPHY"}}
+
+      assert Schema.type_from_api("NUMERIC(99,0)") ==
+               {:error, {:unsupported_type, {:numeric, 99, 0}}}
+
+      assert Schema.type_from_api(42) == {:error, {:unsupported_type, 42}}
+    end
+
     test "reports types it does not carry" do
       assert Schema.duckdb_type(:blob) == {:error, {:unsupported_type, :blob}}
       assert Schema.explorer_dtype(:blob) == {:error, {:unsupported_type, :blob}}
