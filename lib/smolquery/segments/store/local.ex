@@ -71,7 +71,7 @@ defmodule Smolquery.Segments.Store.Local do
 
     with :ok <- File.mkdir_p(Path.dirname(target)),
          :ok <- File.mkdir_p(Path.dirname(staged)),
-         :ok <- encoder.(staged),
+         :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          :ok <- sync(staged, config.fsync),
          :ok <- File.rename(staged, target) do
@@ -94,7 +94,6 @@ defmodule Smolquery.Segments.Store.Local do
       |> Path.join("**/*.parquet")
       |> Path.wildcard()
       |> Enum.map(&Path.relative_to(&1, dir))
-      |> Enum.reject(&String.starts_with?(&1, @staging <> "/"))
       |> Enum.sort()
 
     {:ok, keys}
@@ -111,6 +110,14 @@ defmodule Smolquery.Segments.Store.Local do
 
   @impl Store
   def shared?(%__MODULE__{}), do: false
+
+  defp encode(staged, encoder) do
+    encoder.(staged)
+  catch
+    kind, reason ->
+      File.rm(staged)
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
 
   defp staging_path(%__MODULE__{dir: dir}, key) do
     name = Path.basename(key) <> "." <> Integer.to_string(:erlang.unique_integer([:positive]))

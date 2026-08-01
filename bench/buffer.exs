@@ -19,6 +19,10 @@ defmodule Bench.Buffer do
 
   Rows are two columns (`id`, `ts`) rather than `Bench.Support.schema/0`'s four,
   so the numbers measure group commit and the store, not `Decimal` construction.
+  MB/s is measured on the in-memory batch (`:erlang.external_size/1`), the same
+  measure the buffer's byte bound uses — not the encoded Parquet. Every cell
+  warms up with one untimed write per table, so lazy buffer start, manifest
+  recovery, and NIF warmup stay out of the tail percentiles.
 
       mix run bench/buffer.exs
       CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs
@@ -39,7 +43,7 @@ defmodule Bench.Buffer do
     linear in between. Pick the interval by the ack-latency budget, not by
     guessing.
   - **D3: the two fsyncs cost about 2.5-3 ms together, not the bottleneck.**
-    An isolated fsync of a 4 KiB file runs ~0.3-0.7 ms; a full group commit
+    An open+write+fsync+close of a 4 KiB file runs ~0.3-0.7 ms; a full group commit
     with the segment store's fsync on ran ~2.8 ms p50 versus ~2.4 ms with it
     off — so the segment fsync's own marginal cost is sub-millisecond, and the
     manifest log's (not optional, always paid) accounts for most of the rest.
@@ -59,7 +63,7 @@ defmodule Bench.Buffer do
 
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
+  alias Smolquery.BufferService
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
 
@@ -82,7 +86,9 @@ defmodule Bench.Buffer do
     table_counts = Enum.filter([1, 4], &(&1 <= env("MAX_TABLES", 4)))
     calls = env("CALLS", 20)
 
-    IO.puts("\n  batch  writers  tables    batches/s      rows/s      p50     p95     p99  (ms)")
+    IO.puts(
+      "\n  batch  writers  tables    batches/s      rows/s      MB/s      p50     p95     p99  (ms)"
+    )
 
     for tables <- table_counts, writers <- writer_counts, size <- batch_sizes do
       {name, pid} = start_buffer(dir, flush_interval_ms: 25, flush_max_rows: 1_000_000)
@@ -97,7 +103,7 @@ defmodule Bench.Buffer do
         latencies,
         wall_us,
         writers * calls,
-        writers * calls * size
+        size
       )
     end
   end
@@ -109,7 +115,7 @@ defmodule Bench.Buffer do
     calls = env("CALLS", 20)
     size = env("BATCH", 50)
 
-    IO.puts("\n  flush_ms    batches/s      rows/s      p50     p95     p99  (ms)")
+    IO.puts("\n  flush_ms    batches/s      rows/s      MB/s      p50     p95     p99  (ms)")
 
     for interval <- [10, 25, 100, 250, 1_000] do
       {name, pid} = start_buffer(dir, flush_interval_ms: interval, flush_max_rows: 1_000_000)
@@ -118,7 +124,7 @@ defmodule Bench.Buffer do
 
       stop_buffer(name, pid)
 
-      report([pad(interval, 8)], latencies, wall_us, writers * calls, writers * calls * size)
+      report([pad(interval, 8)], latencies, wall_us, writers * calls, size)
     end
   end
 
@@ -128,7 +134,7 @@ defmodule Bench.Buffer do
     raw = raw_fsync()
 
     IO.puts(
-      "\n  a single isolated fsync of a 4 KiB file  : #{ms(raw.min)} ms min, #{ms(raw.median)} ms median"
+      "\n  an open+write+fsync+close of a 4 KiB file: #{ms(raw.min)} ms min, #{ms(raw.median)} ms median"
     )
 
     IO.puts("  every group commit pays two of these, back to back\n")
@@ -166,7 +172,7 @@ defmodule Bench.Buffer do
     calls = env("CALLS", 20)
     size = env("BATCH", 20)
 
-    IO.puts("\n  writers      rows/s     p50 ack     p99 ack  (ms)")
+    IO.puts("\n  writers      rows/s      MB/s     p50 ack     p99 ack  (ms)")
 
     for writers <- writer_counts do
       {name, pid} = start_buffer(dir, flush_interval_ms: 25, flush_max_rows: 1_000_000)
@@ -178,10 +184,11 @@ defmodule Bench.Buffer do
       sorted = Enum.sort(latencies)
       seconds = wall_us / 1_000_000
       rows_per_sec = Float.round(writers * calls * size / seconds, 1)
+      mb_per_sec = megabytes_per_second(writers * calls, size, seconds)
 
       IO.puts(
-        "  #{pad(writers, 7)}  #{pad(rows_per_sec, 10)}  #{pad(ms(percentile(sorted, 0.50)), 10)}  " <>
-          "#{pad(ms(percentile(sorted, 0.99)), 10)}"
+        "  #{pad(writers, 7)}  #{pad(rows_per_sec, 10)}  #{pad(mb_per_sec, 8)}  " <>
+          "#{pad(ms(percentile(sorted, 0.50)), 10)}  #{pad(ms(percentile(sorted, 0.99)), 10)}"
       )
     end
 
@@ -198,7 +205,7 @@ defmodule Bench.Buffer do
       hot_server_port: 0
     ]
 
-    {:ok, pid} = BufferSupervisor.start_link(Keyword.merge(defaults, opts))
+    {:ok, pid} = BufferService.Supervisor.start_link(Keyword.merge(defaults, opts))
 
     {name, pid}
   end
@@ -209,15 +216,15 @@ defmodule Bench.Buffer do
   end
 
   defp hammer(name, table_refs, writers, calls, size) do
+    warmup(name, table_refs, size)
     tables = length(table_refs)
 
     :timer.tc(fn ->
       1..writers
       |> Task.async_stream(
         fn writer ->
-          table_ref = Enum.at(table_refs, rem(writer, tables))
-
           for call <- 1..calls do
+            table_ref = Enum.at(table_refs, rem(writer + call, tables))
             offset = writer * 10_000_000 + call * size
 
             {us, {:ok, _ack}} =
@@ -232,6 +239,17 @@ defmodule Bench.Buffer do
       |> Enum.flat_map(fn {:ok, times} -> times end)
     end)
   end
+
+  defp warmup(name, table_refs, size) do
+    Enum.each(table_refs, fn table_ref ->
+      {:ok, _ack} = Client.write_batch(name, table_ref, batch(size, 0))
+    end)
+  end
+
+  defp batch_bytes(size), do: :erlang.external_size(batch(size, 0).rows)
+
+  defp megabytes_per_second(batches, size, seconds),
+    do: Float.round(batches * batch_bytes(size) / 1_000_000 / seconds, 2)
 
   defp row_schema, do: Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
 
@@ -254,9 +272,9 @@ defmodule Bench.Buffer do
       timed(
         fn ->
           {:ok, fd} = :file.open(path, [:write, :raw, :binary])
-          :file.write(fd, bytes)
-          :file.sync(fd)
-          :file.close(fd)
+          :ok = :file.write(fd, bytes)
+          :ok = :file.sync(fd)
+          :ok = :file.close(fd)
         end,
         50
       )
@@ -270,13 +288,15 @@ defmodule Bench.Buffer do
     Enum.at(sorted, index)
   end
 
-  defp report(columns, latencies, wall_us, batches, rows) do
+  defp report(columns, latencies, wall_us, batches, size) do
     sorted = Enum.sort(latencies)
     seconds = wall_us / 1_000_000
 
     IO.puts(
       "  #{Enum.join(columns, "  ")}  #{pad(Float.round(batches / seconds, 1), 9)}  " <>
-        "#{pad(Float.round(rows / seconds, 1), 10)}  #{pad(ms(percentile(sorted, 0.50)), 6)}  " <>
+        "#{pad(Float.round(batches * size / seconds, 1), 10)}  " <>
+        "#{pad(megabytes_per_second(batches, size, seconds), 8)}  " <>
+        "#{pad(ms(percentile(sorted, 0.50)), 6)}  " <>
         "#{pad(ms(percentile(sorted, 0.95)), 6)}  #{pad(ms(percentile(sorted, 0.99)), 6)}"
     )
   end

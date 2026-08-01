@@ -26,6 +26,15 @@ defmodule Smolquery.BufferService.Transport.GenRpc do
   Both become `{:error, {:badrpc | :badtcp, reason}}`, so a caller sees the same
   shape it would from any other failure and never has to know a transport exists.
 
+  ## The rpc deadline outlives the operation's
+
+  The remote endpoint runs the operation under the caller-supplied timeout; the
+  rpc waits that long *plus a margin* for connect, serialization, and the reply's
+  trip back. With the two deadlines equal, a write finishing just under its
+  budget commits durably on the owner while the caller is already holding
+  `{:badrpc, :timeout}` — and gen_rpc does not cancel the remote worker, so a
+  retry would write the rows twice.
+
   ## Configuration
 
       config :gen_rpc,
@@ -45,12 +54,17 @@ defmodule Smolquery.BufferService.Transport.GenRpc do
 
   alias Smolquery.BufferService.Transport
 
+  @rpc_margin_ms 5_000
+
   @impl Transport
   def invoke(node, channel, function, args, timeout) do
-    case :gen_rpc.call({node, channel}, Transport.endpoint(), function, args, timeout) do
+    case :gen_rpc.call({node, channel}, Transport.endpoint(), function, args, deadline(timeout)) do
       {:badrpc, reason} -> {:error, {:badrpc, reason}}
       {:badtcp, reason} -> {:error, {:badtcp, reason}}
       result -> result
     end
   end
+
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout), do: timeout + @rpc_margin_ms
 end

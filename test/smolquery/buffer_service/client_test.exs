@@ -1,15 +1,15 @@
 defmodule Smolquery.BufferService.ClientTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.BufferService.Supervisor, as: BufferSupervisor
   alias Smolquery.Schema
 
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
-  @elsewhere [:buffer1@host, :buffer2@host]
+  @elsewhere [:"buffer1@nonexistent.invalid", :"buffer2@nonexistent.invalid"]
 
   defp batch(rows \\ [%{"id" => 1}]) do
     %{schema: Schema.new!([{"id", :int64}]), rows: rows}
@@ -27,7 +27,7 @@ defmodule Smolquery.BufferService.ClientTest do
       )
 
     name = Keyword.fetch!(opts, :name)
-    start_supervised!({BufferSupervisor, opts}, id: name)
+    start_supervised!({BufferService.Supervisor, opts}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     name
@@ -125,6 +125,13 @@ defmodule Smolquery.BufferService.ClientTest do
       name = start_buffer_service(context)
 
       assert Client.flush(name, @table) == :ok
+    end
+
+    test "does not start a buffer just to flush nothing", context do
+      name = start_buffer_service(context)
+
+      assert Client.flush(name, @table) == :ok
+      assert Registry.lookup(Runtime.registry(name), @table) == []
     end
   end
 end

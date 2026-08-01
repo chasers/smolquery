@@ -54,6 +54,10 @@ defmodule Smolquery.BufferService.Endpoint do
 
   @doc """
   Stamps segments as sealed at the catalog snapshot a sealer committed them in.
+
+  A buffer dying between the lookup and the call comes back as
+  `{:error, :buffer_unavailable}` rather than an exit — retire is idempotent, so
+  the sealer just retries.
   """
   @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
           :ok | {:error, term()}
@@ -62,20 +66,28 @@ defmodule Smolquery.BufferService.Endpoint do
          {:ok, buffer} <- buffer(runtime, table_ref) do
       TableBuffer.retire(buffer, ids, snapshot)
     end
+  catch
+    :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
   end
 
   @doc """
   Flushes a table's accumulator without waiting out the interval.
+
+  A table with no buffer running has nothing accumulated, so this never starts
+  one — starting a buffer means a full manifest recovery, all to flush an empty
+  accumulator.
   """
   @spec flush(atom(), Store.table_ref()) :: :ok | {:error, term()}
   def flush(name, table_ref) do
     with {:ok, runtime} <- runtime(name),
-         {:ok, buffer} <- buffer(runtime, table_ref) do
+         {:ok, buffer} <- running_buffer(runtime, table_ref) do
       TableBuffer.flush(buffer)
     else
       {:error, :noproc} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  catch
+    :exit, {:noproc, _call} -> :ok
   end
 
   defp deliver(runtime, table_ref, schema, rows, retries) do
@@ -106,9 +118,16 @@ defmodule Smolquery.BufferService.Endpoint do
   end
 
   defp buffer(runtime, table_ref) do
+    case running_buffer(runtime, table_ref) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, :noproc} -> start_buffer(runtime, table_ref)
+    end
+  end
+
+  defp running_buffer(runtime, table_ref) do
     case Registry.lookup(Runtime.registry(runtime.name), table_ref) do
       [{pid, _value}] -> if Process.alive?(pid), do: {:ok, pid}, else: {:error, :noproc}
-      [] -> start_buffer(runtime, table_ref)
+      [] -> {:error, :noproc}
     end
   end
 

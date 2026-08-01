@@ -361,10 +361,17 @@ revisiting the decision they settled.
 ```sh
 mix run bench/planner.exs                         # scan DuckLake, or plan around it?
 mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
+mix run bench/buffer.exs                          # what group commit costs, and where it bends
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
+CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurrency
 ```
+
+`bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
+across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
+fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
+Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
 
 Each script's `@moduledoc` records what it measures and what it concluded. Two
 results worth knowing before writing a read path:

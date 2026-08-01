@@ -76,7 +76,7 @@ defmodule Smolquery.BufferService.Routing do
       ring: runtime.ring,
       remote_transport: remote_transport(),
       write_timeout_ms: runtime.write_timeout_ms,
-      control_timeout_ms: @default_control_timeout_ms
+      control_timeout_ms: runtime.control_timeout_ms
     }
   end
 
