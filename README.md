@@ -483,14 +483,16 @@ replaced by ownership-ring lookup when the cluster arrives.
 `engine_extensions` loads `httpfs` into the sealer's own engine, which the merge
 cannot work without.
 
-The query service holds today what every query job will need and no job owns: a
-catalog engine to plan through (given `catalog:` options it starts its own
-DuckLake engine; given a `%Smolquery.Catalog{}` it starts none), a registry, and
-the supervisor jobs will run under. Its `buffer_base_url` is where the planner
-reaches `HotServer` for hot manifests — the same single-node honesty as the
-storage service's. The job dials (`max_concurrent_jobs`, `default_timeout_ms`,
-`job_memory_limit`, `result_ttl_ms`) take effect as Milestone 5's later layers
-land.
+The query service runs each query as a job with a private DuckDB engine
+(`Smolquery.QueryService.Client.query/3` sync, `submit/3` + `fetch/2` async).
+Given `catalog:` options it starts its own DuckLake engine to plan through;
+given a `%Smolquery.Catalog{}` it starts none — but then `job_bootstrap:` must
+carry the `ATTACH` job engines need, since they attach the lake themselves.
+`buffer_base_url` is where the planner reaches `HotServer` for hot manifests —
+the same single-node honesty as the storage service's. `max_concurrent_jobs`
+refuses rather than queues; `default_timeout_ms` bounds every job's runtime;
+`job_memory_limit` is each job engine's DuckDB `memory_limit`; `result_ttl_ms`
+is how long a finished job holds its result frame for an async caller.
 
 Runtime environment variables:
 

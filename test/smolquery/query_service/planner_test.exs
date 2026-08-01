@@ -10,6 +10,7 @@ defmodule Smolquery.QueryService.PlannerTest do
   alias Smolquery.Test.ManifestServer
 
   @engine __MODULE__.Parser
+  @conn Engine.connection_name(@engine)
   @table {"analytics", "events"}
   @snapshot 7
 
@@ -67,35 +68,35 @@ defmodule Smolquery.QueryService.PlannerTest do
        WHERE u.id IN (SELECT id FROM analytics.blocked)
       """
 
-      assert Planner.table_refs(@engine, sql) ==
+      assert Planner.table_refs(@conn, sql) ==
                {:ok, [{"analytics", "events"}, {"analytics", "users"}, {"analytics", "blocked"}]}
     end
 
     test "a CTE name is not a table reference" do
       sql = "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
 
-      assert Planner.table_refs(@engine, sql) == {:ok, []}
+      assert Planner.table_refs(@conn, sql) == {:ok, []}
     end
 
     test "a repeated reference appears once" do
       sql = "SELECT * FROM analytics.events UNION ALL SELECT * FROM analytics.events"
 
-      assert Planner.table_refs(@engine, sql) == {:ok, [{"analytics", "events"}]}
+      assert Planner.table_refs(@conn, sql) == {:ok, [{"analytics", "events"}]}
     end
 
     test "a bare name that is no CTE is unknown, not guessed at" do
-      assert Planner.table_refs(@engine, "SELECT * FROM events") ==
+      assert Planner.table_refs(@conn, "SELECT * FROM events") ==
                {:error, {:unknown_table, "events"}}
     end
 
     test "a catalog-qualified reference is refused" do
-      assert Planner.table_refs(@engine, "SELECT * FROM lake.analytics.events") ==
+      assert Planner.table_refs(@conn, "SELECT * FROM lake.analytics.events") ==
                {:error, {:catalog_qualified_reference, "lake.events"}}
     end
 
     test "a reference carrying its own AT clause is refused" do
       assert Planner.table_refs(
-               @engine,
+               @conn,
                "SELECT * FROM analytics.events AT (VERSION => 3)"
              ) ==
                {:error, {:unsupported_at_clause, "events"}}
@@ -103,30 +104,30 @@ defmodule Smolquery.QueryService.PlannerTest do
 
     test "DML and DDL fail the read-only gate" do
       assert {:error, {:invalid_query, message}} =
-               Planner.table_refs(@engine, "INSERT INTO analytics.events VALUES (1)")
+               Planner.table_refs(@conn, "INSERT INTO analytics.events VALUES (1)")
 
       assert message =~ "Only SELECT"
 
       assert {:error, {:invalid_query, _message}} =
-               Planner.table_refs(@engine, "DROP TABLE analytics.events")
+               Planner.table_refs(@conn, "DROP TABLE analytics.events")
     end
 
     test "unparseable SQL is an invalid query, not a crash" do
       assert {:error, {:invalid_query, _message}} =
-               Planner.table_refs(@engine, "SELECT FROM WHERE")
+               Planner.table_refs(@conn, "SELECT FROM WHERE")
     end
 
     test "two statements are refused" do
-      assert Planner.table_refs(@engine, "SELECT 1; SELECT 2") ==
+      assert Planner.table_refs(@conn, "SELECT 1; SELECT 2") ==
                {:error, :multiple_statements}
     end
 
     test "a table function is not a table reference" do
-      assert Planner.table_refs(@engine, "SELECT * FROM range(10)") == {:ok, []}
+      assert Planner.table_refs(@conn, "SELECT * FROM range(10)") == {:ok, []}
     end
 
     test "a dataset name that is not an identifier is refused" do
-      assert Planner.table_refs(@engine, ~s|SELECT * FROM "bad ds"."t"|) ==
+      assert Planner.table_refs(@conn, ~s|SELECT * FROM "bad ds"."t"|) ==
                {:error, {:invalid_identifier, "bad ds"}}
     end
   end
@@ -136,7 +137,7 @@ defmodule Smolquery.QueryService.PlannerTest do
       runtime = runtime([entry("01A")])
 
       assert {:ok, %Plan{} = plan} =
-               Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
 
       assert plan.snapshot == @snapshot
       assert plan.tables == [@table]
@@ -150,7 +151,7 @@ defmodule Smolquery.QueryService.PlannerTest do
     test "unclaimed micro-segments join the union" do
       runtime = runtime([entry("01A"), entry("01B")])
 
-      assert {:ok, plan} = Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
 
       [_schema, view] = plan.statements
       assert view =~ "UNION ALL BY NAME"
@@ -170,7 +171,7 @@ defmodule Smolquery.QueryService.PlannerTest do
           answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
         )
 
-      assert {:ok, plan} = Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
 
       assert plan.hot[@table] == []
       [_schema, view] = plan.statements
@@ -181,7 +182,7 @@ defmodule Smolquery.QueryService.PlannerTest do
       runtime =
         runtime([entry("01A", %{"claim_keys" => ["analytics/events/01PENDING.parquet"]})])
 
-      assert {:ok, plan} = Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
 
       assert [%{"id" => "01A"}] = plan.hot[@table]
     end
@@ -202,7 +203,7 @@ defmodule Smolquery.QueryService.PlannerTest do
           answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
         )
 
-      assert {:ok, plan} = Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
 
       assert [%{"id" => "01A"}] = plan.hot[@table]
     end
@@ -210,7 +211,7 @@ defmodule Smolquery.QueryService.PlannerTest do
     test "a query touching no tables plans no views" do
       runtime = runtime([])
 
-      assert {:ok, plan} = Planner.plan(runtime, @engine, "SELECT 1 + 1")
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT 1 + 1")
 
       assert plan.tables == []
       assert plan.statements == []
@@ -219,7 +220,7 @@ defmodule Smolquery.QueryService.PlannerTest do
     test "an unknown table fails at plan time" do
       runtime = runtime([])
 
-      assert Planner.plan(runtime, @engine, "SELECT * FROM analytics.missing") ==
+      assert Planner.plan(runtime, @conn, "SELECT * FROM analytics.missing") ==
                {:error, {:unknown_table, {"analytics", "missing"}}}
     end
 
@@ -238,7 +239,7 @@ defmodule Smolquery.QueryService.PlannerTest do
         )
 
       assert {:error, {:hot_tier_unavailable, @table, _reason}} =
-               Planner.plan(runtime, @engine, "SELECT * FROM analytics.events")
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
     end
   end
 end
