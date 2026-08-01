@@ -92,6 +92,8 @@ defmodule Smolquery.Segments.Store do
   @callback list(config :: term(), prefix :: String.t()) :: {:ok, [key()]} | {:error, term()}
   @callback delete(config :: term(), key()) :: :ok | {:error, term()}
   @callback shared?(config :: term()) :: boolean()
+  @callback sweep_staging(config :: term(), age_ms :: non_neg_integer()) ::
+              {:ok, [String.t()]} | {:error, term()}
 
   @doc """
   Stores a segment at `key`, calling `encoder` with the staging path to write.
@@ -109,6 +111,23 @@ defmodule Smolquery.Segments.Store do
     with {:ok, key} <- validate_key(key) do
       store.impl.put(store.config, key, encoder)
     end
+  end
+
+  @doc """
+  Deletes staged writes older than `age_ms`, returning what was deleted.
+
+  `put/3` cleans up after a failure it can see, but a killed encoder leaves its
+  staging bytes behind with nothing else naming them — they are never a
+  segment, so no manifest, catalog, or garbage collector will ever delete
+  them. This is that deleter.
+
+  The age is the guard against sweeping a write that is merely in flight: pass
+  a duration comfortably longer than the slowest write this store serves, or
+  `0` only from a boot path where nothing can be writing yet.
+  """
+  @spec sweep_staging(t(), non_neg_integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def sweep_staging(%__MODULE__{} = store, age_ms) when is_integer(age_ms) and age_ms >= 0 do
+    store.impl.sweep_staging(store.config, age_ms)
   end
 
   @doc """

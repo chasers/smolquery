@@ -113,8 +113,39 @@ defmodule Smolquery.StorageService.Merge do
   def run(%Runtime{} = runtime, table_ref, claim) do
     with {:ok, key} <- output_key(claim),
          {:ok, entries} <- HotTier.manifest(runtime, table_ref),
-         {:ok, inputs} <- inputs(entries, claim),
-         {:ok, schema} <- Catalog.table_schema(runtime.catalog, table_ref),
+         {:ok, inputs} <- inputs(entries, claim) do
+      merge(runtime, table_ref, key, inputs)
+    end
+  end
+
+  @doc """
+  Merges already-sealed segments at `urls` into the segment `key` names.
+
+  The compactor's entry point: same projection onto the catalog's declared
+  schema, same codec, same idempotent overwrite of a deterministic key —
+  only the inputs differ. They come from the catalog rather than a hot
+  manifest, so their row counts are read from the Parquet footers instead of
+  vouched for by a buffer. That is a metadata read, not the read-back the
+  moduledoc rules out: a footer's `num_rows` is the file's row count by
+  definition, and no data page moves to answer it.
+
+  An empty `urls` is `{:error, :no_inputs}` for the same reason an emptied
+  claim is: registering emptiness as though it were data is the one thing a
+  merge must never do.
+  """
+  @spec compact(Runtime.t(), Store.table_ref(), Store.key(), [String.t()]) ::
+          {:ok, Segment.t()} | {:error, term()}
+  def compact(%Runtime{} = _runtime, _table_ref, _key, []), do: {:error, :no_inputs}
+
+  def compact(%Runtime{} = runtime, table_ref, key, urls) when is_list(urls) do
+    with {:ok, key} <- valid_key(key),
+         {:ok, row_count} <- footer_row_count(runtime, urls) do
+      merge(runtime, table_ref, key, %{urls: urls, row_count: row_count})
+    end
+  end
+
+  defp merge(runtime, table_ref, key, inputs) do
+    with {:ok, schema} <- Catalog.table_schema(runtime.catalog, table_ref),
          {:ok, projection} <- projection(runtime, schema, inputs.urls),
          {:ok, put} <-
            Store.put(runtime.store, key, &copy(runtime, projection, inputs.urls, &1)) do
@@ -123,14 +154,32 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp output_key(%{keys: [key]}) do
-    case Store.id(key) do
-      {:ok, _id} -> {:ok, key}
-      :error -> {:error, {:invalid_claim_key, key}}
+    case valid_key(key) do
+      {:ok, key} -> {:ok, key}
+      {:error, {:invalid_segment_key, key}} -> {:error, {:invalid_claim_key, key}}
     end
   end
 
   defp output_key(%{keys: keys}), do: {:error, {:unsupported_claim_keys, keys}}
   defp output_key(claim), do: {:error, {:invalid_claim, claim}}
+
+  defp valid_key(key) do
+    case Store.id(key) do
+      {:ok, _id} -> {:ok, key}
+      :error -> {:error, {:invalid_segment_key, key}}
+    end
+  end
+
+  defp footer_row_count(runtime, urls) do
+    sql = "SELECT sum(num_rows)::BIGINT FROM parquet_file_metadata([#{placeholders(urls)}])"
+
+    with {:ok, result} <- query(runtime, sql, urls) do
+      case result.rows do
+        [[count]] when is_integer(count) -> {:ok, count}
+        rows -> {:error, {:unexpected_row_count_result, rows}}
+      end
+    end
+  end
 
   defp inputs(entries, %{ids: ids}) do
     claimed = MapSet.new(ids)
@@ -185,11 +234,9 @@ defmodule Smolquery.StorageService.Merge do
     with {:ok, _result} <- query(runtime, sql, urls ++ [staged]), do: :ok
   end
 
-  defp scan(urls) do
-    placeholders = Enum.map_join(1..length(urls), ", ", &"$#{&1}")
+  defp scan(urls), do: "read_parquet([#{placeholders(urls)}], union_by_name := true)"
 
-    "read_parquet([#{placeholders}], union_by_name := true)"
-  end
+  defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
 
   defp query(runtime, sql, params) do
     case Engine.query(Runtime.engine(runtime.name), sql, params) do

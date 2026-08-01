@@ -407,6 +407,32 @@ ever name it — the next attempt writes the same key and registers that one.
   "old" key the moment it lands — reading the key's age would sweep live work. So
   `gc_grace_ms` must exceed the longest merge, the way `retire_grace_ms` must exceed
   the longest query.
+- **Staging is swept too.** A killed encoder leaves half-written bytes in the
+  store's `.tmp` directory that no manifest or catalog will ever account for.
+  Each GC sweep clears staged files older than the same grace period, and buffer
+  nodes clear theirs at boot, before any writer starts.
+
+`Smolquery.StorageService.Compactor` re-merges undersized sealed segments —
+the residue of eager and age-cap seals — so a quiet table stops accreting
+files. It sweeps every `compact_interval_ms`, needs no signals (the catalog
+itself says which segments are small; sizes come from Parquet footers), and
+per table per sweep replaces one oldest-first run of segments under
+`compact_below_bytes` with a single merged segment, capped at
+`compact_max_bytes`:
+
+- **The swap is atomic.** `Catalog.replace_segments/4` registers the merged
+  segment and drops its inputs in one DuckLake transaction, so a single
+  snapshot carries both — no snapshot double-counts the rows or loses them.
+  Readers pinned at earlier snapshots keep reading the old files; GC reclaims
+  them once no snapshot references them.
+- **The swap is verified.** File-level drops only work because the lake is
+  attached with `DATA_INLINING_ROW_LIMIT 0`; broken, the symptom is silently
+  slower queries. After every swap the compactor re-reads `segments/3` and
+  fails loudly if a dropped path survived.
+- **A retry overwrites, never duplicates.** The merged segment's id derives
+  from the sorted input ids, the same identity rule sealing uses, so a
+  compaction that crashed before its swap re-plans the same group into the
+  same key next sweep.
 
 ### Queries
 
@@ -611,6 +637,10 @@ config :smolquery, Smolquery.StorageService,
   max_concurrent_seals: 2,
   gc_interval_ms: 300_000,
   gc_grace_ms: 3_600_000,
+  compact_interval_ms: 300_000,
+  compact_below_bytes: 33_554_432,
+  compact_min_inputs: 2,
+  compact_max_bytes: 134_217_728,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
 config :smolquery, Smolquery.QueryService,
