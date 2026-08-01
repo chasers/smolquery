@@ -73,6 +73,23 @@ defmodule Smolquery.StorageService.GCTest do
       assert {:ok, [^key]} = Store.list(runtime.store, "")
     end
 
+    test "clears staged files a killed merge left behind, after the same grace", context do
+      %{name: name} = start_gc(context, gc_grace_ms: 0)
+      staging = Path.join([context.tmp_dir, "sealed", ".tmp"])
+      File.mkdir_p!(staging)
+      File.write!(Path.join(staging, "leaked.parquet.99"), "half-encoded")
+
+      assert {:ok, report} = GC.sweep(name)
+      assert report.staged == ["leaked.parquet.99"]
+      refute File.exists?(Path.join(staging, "leaked.parquet.99"))
+
+      %{name: patient} = start_gc(context, gc_grace_ms: 60_000)
+      File.write!(Path.join(staging, "in-flight.parquet.7"), "still writing")
+
+      assert {:ok, %{staged: []}} = GC.sweep(patient)
+      assert File.exists?(Path.join(staging, "in-flight.parquet.7"))
+    end
+
     test "waits out the grace period before deleting", context do
       %{name: name, runtime: runtime} = start_gc(context, gc_grace_ms: 60_000)
       key = put(runtime, "01KYWPEEGAM8FQVQS5S2QF26SV")
@@ -147,8 +164,19 @@ defmodule Smolquery.StorageService.GCTest do
 
   describe "the periodic sweep" do
     test "runs on its own interval", context do
-      %{runtime: runtime} = start_gc(context, gc_grace_ms: 0, gc_interval_ms: 20)
+      name = :"gc_#{:erlang.unique_integer([:positive])}"
+
+      runtime =
+        Runtime.new(
+          name: name,
+          dir: Path.join(context.tmp_dir, "sealed"),
+          catalog: PathCatalog.new(context.catalog),
+          gc_grace_ms: 0,
+          gc_interval_ms: 20
+        )
+
       _key = put(runtime, "01KYWPEEGAM8FQVQS5S2QF26SV")
+      start_supervised!({GC, runtime}, id: name)
 
       assert Eventually.until(fn -> Store.list(runtime.store, "") == {:ok, []} end)
     end

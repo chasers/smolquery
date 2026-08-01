@@ -1,0 +1,196 @@
+defmodule Smolquery.StorageService.CompactorTest do
+  @moduledoc """
+  The compactor against a real DuckLake catalog and a real merge.
+
+  Tagged `:integration` because the swap is the part that can actually be wrong:
+  `replace_segments/4` composing registration and retirement in one DuckLake
+  transaction, and the post-swap verification that the inlining-off invariant
+  held. Faking the catalog would test this module's plumbing and skip both.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Engine
+  alias Smolquery.Engine.Result
+  alias Smolquery.Schema
+  alias Smolquery.Segments.Id
+  alias Smolquery.Segments.Store
+  alias Smolquery.Segments.Writer
+  alias Smolquery.StorageService.Compactor
+  alias Smolquery.StorageService.Runtime
+
+  @moduletag :integration
+  @moduletag :tmp_dir
+
+  @table {"analytics", "events"}
+
+  defp schema, do: Schema.new!([{"id", :int64}])
+
+  setup context do
+    storage = :"compactor_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {DuckLake,
+       name: Runtime.catalog_engine(storage),
+       metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
+       data_path: Path.join(context.tmp_dir, "ducklake")},
+      id: Runtime.catalog_engine(storage)
+    )
+
+    start_supervised!({Engine, name: Runtime.engine(storage)}, id: Runtime.engine(storage))
+
+    catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
+    :ok = Catalog.create_dataset(catalog, "analytics")
+    :ok = Catalog.create_table(catalog, @table, schema())
+
+    %{storage: storage, catalog: catalog}
+  end
+
+  defp start_compactor(context, opts) do
+    runtime =
+      Runtime.new(
+        [
+          name: context.storage,
+          dir: Path.join(context.tmp_dir, "sealed"),
+          catalog: context.catalog,
+          engine_extensions: [],
+          compact_min_inputs: 2,
+          compact_below_bytes: 1_048_576,
+          compact_max_bytes: 16_777_216,
+          compact_interval_ms: 3_600_000
+        ] ++ opts
+      )
+
+    start_supervised!({Compactor, runtime}, id: {:compactor, context.storage})
+
+    runtime
+  end
+
+  defp seal(runtime, catalog, index, range) do
+    {:ok, prefix} = Store.prefix(@table)
+    rows = for i <- range, do: %{"id" => i}
+
+    {:ok, segment} =
+      Writer.write(rows, schema(),
+        store: runtime.store,
+        prefix: prefix,
+        id: Id.generate(index * 1_000)
+      )
+
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
+    segment
+  end
+
+  defp lake_rows(storage) do
+    Runtime.catalog_engine(storage)
+    |> Engine.query!(~s|SELECT count(*) FROM lake."analytics"."events"|)
+    |> Result.one!()
+  end
+
+  test "replaces an undersized run with one merged segment in one snapshot", context do
+    runtime = start_compactor(context, [])
+    a = seal(runtime, context.catalog, 1, 1..10)
+    b = seal(runtime, context.catalog, 2, 11..20)
+    c = seal(runtime, context.catalog, 3, 21..30)
+    {:ok, before_swap} = Catalog.current_snapshot(context.catalog)
+
+    assert {:ok, report} = Compactor.sweep(context.storage)
+
+    assert [%{table: @table, replaced: 3, key: key, snapshot: snapshot}] = report.compacted
+    assert report.failed == []
+    assert snapshot == before_swap + 1
+
+    merged = Store.location(runtime.store, key)
+    assert Catalog.segments(context.catalog, @table, :current) == {:ok, [merged]}
+    assert lake_rows(context.storage) == 30
+    assert Enum.all?([a, b, c], &File.exists?(&1.path))
+  end
+
+  test "readers pinned before the swap still see the inputs", context do
+    runtime = start_compactor(context, [])
+    a = seal(runtime, context.catalog, 1, 1..10)
+    b = seal(runtime, context.catalog, 2, 11..20)
+    {:ok, pinned} = Catalog.current_snapshot(context.catalog)
+
+    assert {:ok, %{compacted: [_swap]}} = Compactor.sweep(context.storage)
+
+    assert {:ok, paths} = Catalog.segments(context.catalog, @table, pinned)
+    assert Enum.sort(paths) == Enum.sort([a.path, b.path])
+  end
+
+  test "a second sweep finds nothing left to do", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert {:ok, %{compacted: [_swap]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+    assert lake_rows(context.storage) == 20
+  end
+
+  test "skips a table with fewer segments than the minimum", context do
+    runtime = start_compactor(context, compact_min_inputs: 3)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+  end
+
+  test "leaves segments at or above the size floor alone", context do
+    runtime = start_compactor(context, compact_below_bytes: 1)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
+  end
+
+  test "a ceiling too small for two inputs compacts nothing", context do
+    runtime = start_compactor(context, compact_max_bytes: 1)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+  end
+
+  test "groups oldest first and leaves what would pass the ceiling", context do
+    engine = Runtime.engine(context.storage)
+    runtime = start_compactor(context, [])
+    a = seal(runtime, context.catalog, 1, 1..10)
+    b = seal(runtime, context.catalog, 2, 11..20)
+    c = seal(runtime, context.catalog, 3, 21..30)
+
+    sizes =
+      engine
+      |> Engine.query!(
+        "SELECT file_name, sum(total_compressed_size)::BIGINT " <>
+          "FROM parquet_metadata([$1, $2, $3]) GROUP BY file_name",
+        [a.path, b.path, c.path]
+      )
+      |> Map.fetch!(:rows)
+      |> Map.new(fn [path, bytes] -> {path, bytes} end)
+
+    stop_supervised!({:compactor, context.storage})
+
+    capped =
+      start_compactor(context,
+        compact_max_bytes: Map.fetch!(sizes, a.path) + Map.fetch!(sizes, b.path)
+      )
+
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Compactor.sweep(context.storage)
+
+    merged = Store.location(capped.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([merged, c.path])
+    assert lake_rows(context.storage) == 30
+  end
+
+  test "an empty catalog sweeps nothing", context do
+    start_compactor(context, [])
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+  end
+end

@@ -13,6 +13,11 @@ defmodule Smolquery.BufferService.Adopter do
   back. Starting a buffer recovers that table's manifest, which is also what
   re-adopts its segments and clears any that were never acked.
 
+  Boot is also the one moment the store's staging directory can be swept with no
+  age guard at all: this runs before any buffer starts, so nothing can be
+  mid-write, and whatever a killed encoder left staged is deleted rather than
+  leaked forever (`Smolquery.Segments.Store.sweep_staging/2`).
+
   Tables this node no longer owns are left alone. Handing an unsealed tail to a
   new owner is a ring-change problem, and ring changes are Milestone 8.
 
@@ -34,6 +39,7 @@ defmodule Smolquery.BufferService.Adopter do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.Segments.Store
 
   @behaviour GenServer
 
@@ -51,6 +57,7 @@ defmodule Smolquery.BufferService.Adopter do
 
   @impl GenServer
   def init(%Runtime{} = runtime) do
+    sweep_staging(runtime)
     adopt(runtime)
 
     :ignore
@@ -88,6 +95,19 @@ defmodule Smolquery.BufferService.Adopter do
         end)
 
         false
+    end
+  end
+
+  defp sweep_staging(runtime) do
+    case Store.sweep_staging(runtime.store, 0) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, swept} ->
+        Logger.info(fn -> "swept #{length(swept)} staged file(s) a previous run left behind" end)
+
+      {:error, reason} ->
+        Logger.warning("boot staging sweep failed: #{inspect(reason)}")
     end
   end
 

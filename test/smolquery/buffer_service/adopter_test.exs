@@ -97,4 +97,14 @@ defmodule Smolquery.BufferService.AdopterTest do
 
     assert Adopter.adopt(runtime) == [@table]
   end
+
+  test "boot sweeps staged files a killed encoder left behind", context do
+    staging = Path.join([context.tmp_dir, "buffer", "segments", ".tmp"])
+    File.mkdir_p!(staging)
+    File.write!(Path.join(staging, "leaked.parquet.42"), "half-encoded")
+
+    start_buffer_service(context)
+
+    refute File.exists?(Path.join(staging, "leaked.parquet.42"))
+  end
 end

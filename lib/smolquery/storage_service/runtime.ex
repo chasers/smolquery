@@ -22,6 +22,10 @@ defmodule Smolquery.StorageService.Runtime do
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
         gc_grace_ms: 3_600_000,
+        compact_interval_ms: 300_000,
+        compact_below_bytes: 33_554_432,
+        compact_min_inputs: 2,
+        compact_max_bytes: 134_217_728,
         handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
   `:dir` is where sealed segments land, through a `Store.Local` beneath it. Pass
@@ -41,6 +45,14 @@ defmodule Smolquery.StorageService.Runtime do
   `max_concurrent_seals` bounds seals in flight on this node. Signalling is
   level-triggered, so a signal shed at the bound costs a `seal_retry_ms` delay
   rather than a lost seal.
+
+  The `compact_*` knobs shape `Smolquery.StorageService.Compactor`'s sweep:
+  every `compact_interval_ms` it groups sealed segments under
+  `compact_below_bytes` into merges of at least `compact_min_inputs` inputs
+  and at most `compact_max_bytes` output, one group per table per sweep. The
+  defaults (32 MiB floor, 128 MiB ceiling) sit under `target_segment_bytes`
+  on purpose — compaction exists to clean up eager and age-cap seals, not to
+  re-merge segments the sealer already sized well.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -89,6 +101,10 @@ defmodule Smolquery.StorageService.Runtime do
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,
     gc_grace_ms: 3_600_000,
+    compact_interval_ms: 300_000,
+    compact_below_bytes: 33_554_432,
+    compact_min_inputs: 2,
+    compact_max_bytes: 134_217_728,
     handoff: {Smolquery.StorageService.Handoff.Seal, []}
   ]
 
@@ -106,6 +122,10 @@ defmodule Smolquery.StorageService.Runtime do
           max_concurrent_seals: pos_integer(),
           gc_interval_ms: pos_integer(),
           gc_grace_ms: pos_integer(),
+          compact_interval_ms: pos_integer(),
+          compact_below_bytes: pos_integer(),
+          compact_min_inputs: pos_integer(),
+          compact_max_bytes: pos_integer(),
           handoff: {module(), term()}
         }
 
@@ -119,6 +139,10 @@ defmodule Smolquery.StorageService.Runtime do
     :max_concurrent_seals,
     :gc_interval_ms,
     :gc_grace_ms,
+    :compact_interval_ms,
+    :compact_below_bytes,
+    :compact_min_inputs,
+    :compact_max_bytes,
     :handoff
   ]
 
@@ -195,6 +219,12 @@ defmodule Smolquery.StorageService.Runtime do
   """
   @spec gc(atom()) :: atom()
   def gc(name), do: Module.concat(name, "GC")
+
+  @doc """
+  The process re-merging undersized sealed segments.
+  """
+  @spec compactor(atom()) :: atom()
+  def compactor(name), do: Module.concat(name, "Compactor")
 
   defp validate_compression(%__MODULE__{compression: compression} = runtime)
        when compression in @codecs,

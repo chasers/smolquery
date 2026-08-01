@@ -195,4 +195,43 @@ defmodule Smolquery.Segments.Store.LocalTest do
       refute Store.shared?(Local.new(dir: dir))
     end
   end
+
+  describe "sweep_staging/2" do
+    defp stage(dir, name) do
+      staging = Path.join(dir, ".tmp")
+      File.mkdir_p!(staging)
+      path = Path.join(staging, name)
+      File.write!(path, "half-encoded")
+
+      path
+    end
+
+    test "deletes a staged file a killed encoder left behind", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      path = stage(dir, "leaked.parquet.123")
+
+      assert Store.sweep_staging(store, 0) == {:ok, ["leaked.parquet.123"]}
+      refute File.exists?(path)
+    end
+
+    test "spares a staged file younger than the age guard", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      path = stage(dir, "in-flight.parquet.456")
+
+      assert Store.sweep_staging(store, 60_000) == {:ok, []}
+      assert File.exists?(path)
+    end
+
+    test "never touches committed segments", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      {:ok, put} = Store.put(store, "a/b/one.parquet", write("kept"))
+
+      assert Store.sweep_staging(store, 0) == {:ok, []}
+      assert File.exists?(put.location)
+    end
+
+    test "an empty or absent staging directory sweeps nothing", %{tmp_dir: dir} do
+      assert Store.sweep_staging(Local.new(dir: dir), 0) == {:ok, []}
+    end
+  end
 end

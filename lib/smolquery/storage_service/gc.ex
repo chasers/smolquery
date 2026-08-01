@@ -8,6 +8,15 @@ defmodule Smolquery.StorageService.GC do
   will ever name it, because the next attempt writes the same key and registers
   that. Those are orphans, and they are the *only* orphans: every other unreferenced
   path in the sealed store is either about to be registered or was never ours.
+  (Compaction produces the same orphan the same way — its merged segment is put
+  before the swap commits, at a key derived the same deterministic way — so the
+  same sweep covers it with nothing added.)
+
+  Each sweep also clears the store's staging directory of writes older than the
+  grace period (`Smolquery.Segments.Store.sweep_staging/2`): a killed encoder
+  leaves its staged bytes behind, and they are not segments, so no manifest or
+  catalog will ever account for them. The same grace period applies for the same
+  reason — a staged file younger than the longest merge may still be mid-write.
 
   ## What is deliberately not garbage
 
@@ -116,8 +125,11 @@ defmodule Smolquery.StorageService.GC do
          {:ok, keys} <- Store.list(state.runtime.store, "") do
       {expired, watching} = partition(state, unreferenced(state.runtime, keys, known))
 
-      with {:ok, swept} <- sweep_expired(state.runtime, expired) do
-        {:ok, %{swept: swept, watching: map_size(watching)}, %{state | candidates: watching}}
+      with {:ok, swept} <- sweep_expired(state.runtime, expired),
+           {:ok, staged} <-
+             Store.sweep_staging(state.runtime.store, state.runtime.gc_grace_ms) do
+        {:ok, %{swept: swept, staged: staged, watching: map_size(watching)},
+         %{state | candidates: watching}}
       end
     end
   end

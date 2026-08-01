@@ -28,6 +28,9 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
     @impl Store
     def shared?(_config), do: false
+
+    @impl Store
+    def sweep_staging(_config, _age_ms), do: {:ok, []}
   end
 
   @moduletag :tmp_dir

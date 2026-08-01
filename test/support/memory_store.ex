@@ -66,6 +66,9 @@ defmodule Smolquery.Test.MemoryStore do
   @impl Store
   def shared?(_agent), do: true
 
+  @impl Store
+  def sweep_staging(_agent, _age_ms), do: {:ok, []}
+
   @doc """
   The bytes stored at `key`, for a test that wants to check what was written.
   """
