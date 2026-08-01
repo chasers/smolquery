@@ -64,6 +64,9 @@ defmodule Smolquery.Test.StubCatalog do
   @impl Catalog
   def current_snapshot(owner), do: record(owner, :current_snapshot, [], {:ok, @snapshot})
 
+  @impl Catalog
+  def known_segments(owner), do: record(owner, :known_segments, [], {:ok, ["/stub.parquet"]})
+
   defp record(owner, function, args, reply) do
     send(owner, {:called, function, args})
 

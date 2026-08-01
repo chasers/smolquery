@@ -41,6 +41,16 @@ defmodule Smolquery.Catalog.DuckLake do
   registration, which is why nothing here passes stats: the sealed tier prunes
   on numbers DuckLake derives, and a segment's own stats serve the hot tier.
 
+  `known_segments/1` reads DuckLake's own metadata schema
+  (`__ducklake_metadata_<catalog>.ducklake_data_file`) rather than a documented
+  function, because no documented function answers "every path any snapshot ever
+  referenced" — `ducklake_list_files/2` answers per snapshot, and iterating every
+  snapshot to union them costs more the longer a lake lives. That is a coupling to
+  an internal name, taken deliberately and pinned by a test: if DuckLake renames
+  it, the query fails loudly rather than reporting an empty set, which is the
+  failure mode that would matter (garbage collection would treat every sealed
+  segment as an orphan).
+
   `ducklake_merge_adjacent_files/2` must never be called on a smolquery table:
   over externally-registered files it crashes DuckDB fatally (ducklake
   `67480b1d`, format 0.4), and a fatal error invalidates the whole database.
@@ -267,6 +277,14 @@ defmodule Smolquery.Catalog.DuckLake do
       end
     end
   end
+
+  @impl Catalog
+  def known_segments(%__MODULE__{} = config) do
+    column(config, "SELECT path FROM #{metadata_schema(config)}.ducklake_data_file")
+  end
+
+  defp metadata_schema(%__MODULE__{catalog: catalog}),
+    do: Identifier.quote_name!("__ducklake_metadata_" <> catalog)
 
   defp add_data_files(config, {dataset, table}, paths) do
     literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)

@@ -171,6 +171,12 @@ defmodule Smolquery.StorageService.Runtime do
   @spec seals(atom()) :: atom()
   def seals(name), do: Module.concat(name, "Seals")
 
+  @doc """
+  The process sweeping uncommitted sealed segments.
+  """
+  @spec gc(atom()) :: atom()
+  def gc(name), do: Module.concat(name, "GC")
+
   defp build_store(config) do
     case Keyword.get(config, :store) do
       nil -> Store.Local.new(dir: Keyword.get(config, :dir, @default_dir))

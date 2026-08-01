@@ -6,8 +6,8 @@ Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
 > **Status: pre-alpha.** The read engine, segment writer, catalog, the buffer
-> service's hot tier, and the seal handoff to the sealed tier work; no GC,
-> ingest HTTP, or query API yet.
+> service's hot tier, and the seal handoff to the sealed tier work; no ingest
+> HTTP or query API yet.
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -361,6 +361,21 @@ internally.
 A table the catalog does not hold is an error rather than something the sealer
 creates — the ingest edge validated against the catalog before forwarding, so a
 table with micro-segments is a table the catalog already knows.
+
+`Smolquery.StorageService.GC` collects the one kind of garbage this can leave: a
+segment put but never registered, because an attempt died in between. Nothing will
+ever name it — the next attempt writes the same key and registers that one.
+
+- **The test is membership in every snapshot, not the current one.** A path dropped
+  from the current snapshot is still the only copy of rows an older snapshot can
+  read, so `Catalog.known_segments/1` spans all of history. Reclaiming expired
+  snapshots' files is retention's job, not GC's.
+- **Two sightings, not a timestamp.** An object is deleted only after being seen
+  unreferenced for `gc_grace_ms` continuously. A sealed segment's key encodes when
+  its *inputs* were written, so a claim that waited an hour for a sealer produces an
+  "old" key the moment it lands — reading the key's age would sweep live work. So
+  `gc_grace_ms` must exceed the longest merge, the way `retire_grace_ms` must exceed
+  the longest query.
 
 ## Roles
 

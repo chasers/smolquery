@@ -30,6 +30,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService
+  alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Handoff
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime
@@ -223,6 +224,27 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
     end
   end
 
+  describe "the orphan a crash leaves" do
+    test "an uncommitted merge output is swept, and a committed one is not", context do
+      ids = [write(context.buffer, 1..2)]
+      claim = freeze_claim(context, ids)
+
+      assert {:ok, orphan} = Merge.run(context.runtime, @table, claim)
+      assert sealed_count(context) == 0
+
+      start_supervised!({GC, %{context.runtime | gc_grace_ms: 0}}, id: :gc_orphan)
+
+      assert {:ok, report} = GC.sweep(context.runtime.name)
+      assert report.swept == [orphan.key]
+      assert visible_ids(context) == [1, 2]
+
+      assert seal(context, claim) == :ok
+      assert {:ok, second} = GC.sweep(context.runtime.name)
+      assert second.swept == []
+      assert visible_ids(context) == [1, 2]
+    end
+  end
+
   describe "crashed after retirement" do
     test "a repeated attempt changes nothing", context do
       ids = [write(context.buffer, 1..3)]
@@ -305,6 +327,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
         {BufferService.Supervisor,
          name: buffer,
          dir: Path.join(context.tmp_dir, "e2e_buffer"),
+         hot_server_port: 0,
          flush_interval_ms: 25,
          maintenance_interval_ms: 20,
          seal_max_files: 1,
