@@ -47,10 +47,29 @@ defmodule Bench.Buffer do
       `split` should be *neutral* by construction — P encodes of 1/P the rows
       finish in the same cycle — so gains there mean P=1 was already past it.
 
-  Rows are two columns (`id`, `ts`) rather than `Bench.Support.schema/0`'s four,
-  so the numbers measure group commit and the store, not `Decimal` construction.
-  The D6 sweep runs both: `light` is those two columns, `heavy` is the four-column
-  schema with a `Decimal`, which is what makes the encode do real work.
+  The first two sections use two columns (`id`, `ts`) so their numbers measure group
+  commit and the store rather than `Decimal` construction. Every D6 section runs
+  three schemas instead, because the encode is the thing under investigation and
+  its cost per row is the variable that moves everything else:
+
+    * `light` — 2 columns (`int64`, `timestamp`). ~165 B/row.
+    * `heavy` — `Bench.Support.schema/0`'s 4 columns, adding a `string` and a
+      `Decimal`. ~254 B/row.
+    * `huge` — 20 columns spanning all seven logical types, the shape of a real
+      event table: ids, a session string, low-cardinality enums (`event`, `region`,
+      `country`), floats, a `bool`, a `date`, two `Decimal`s, and a `tags` blob.
+      ~890 B/row.
+
+  `huge` is 5.4× `light`'s bytes but 12× its encode time — 20 Arrow arrays to
+  build, so per-column overhead dominates payload size. That makes it the only one
+  of the three whose encode is already past `flush_interval_ms` at the default
+  `flush_max_bytes`, and therefore the case partitioning helps most.
+
+  Unlike `heavy`, `huge`'s column values derive from the *global* row index, so
+  cardinality is realistic per column rather than repeating identically in every
+  batch. (`heavy` keys its `Decimal` off the within-batch index; that quirk is left
+  alone so its numbers stay comparable with earlier runs.)
+
   MB/s is measured on the in-memory batch (`:erlang.external_size/1`), the same
   measure the buffer's byte bound uses — not the encoded Parquet. Every cell
   warms up with one untimed write per table, so lazy buffer start, manifest
@@ -71,17 +90,17 @@ defmodule Bench.Buffer do
   The last full run — its numbers, machine, and tables — is in
   `bench/results/buffer.md`. The short version:
 
-  - **Ack latency is `flush_interval_ms` plus a couple of milliseconds — and
-    nothing else moves it.** With the interval held at 25 ms, p50 sat at
-    30-35 ms across every batch size (1-500 rows), writer count (1-32), and
-    table count (1-4) tried. Throughput scaled with all three instead
-    (32 writers × 500-row batches reached ~450K rows/s); latency did not, which
-    is the whole point of group commit — a client pays the flush cadence, not
-    the load on it.
-  - **Flush cadence is exactly the dial it's documented as.** 10 ms →
-    ~51K rows/s at ~16 ms p50 ack; 1000 ms → ~800 rows/s at ~1010 ms p50 —
-    linear in between. Pick the interval by the ack-latency budget, not by
-    guessing.
+  - **Ack latency has two regimes, and which one you are in decides everything.**
+    *Below saturation:* `p50 = flush_interval_ms + ~5 ms`, invariant across a
+    14,000× throughput spread — a client pays the flush cadence, not the load on
+    it, which is the whole point of group commit. *At saturation:*
+    `p50 = outstanding rows ÷ throughput` (Little's Law, since synchronous writers
+    pin outstanding rows at `writers × batch`) and **`flush_interval_ms` drops out
+    of the equation entirely**. Verified within 13%, usually 3%, across all 21
+    saturated cells.
+  - **Flush cadence is exactly the dial it's documented as — below saturation.**
+    10 ms → ~51K rows/s at ~15 ms p50 ack; 1000 ms → ~790 rows/s at ~1010 ms p50 —
+    linear in between. Above saturation this knob does nothing; see T-56.
   - **D3: the two fsyncs cost about 2 ms together, not the bottleneck.**
     An open+write+fsync+close of a 4 KiB file runs ~0.3-0.7 ms; a full group
     commit with the segment store's fsync on ran ~2.0 ms p50 versus ~1.7 ms
@@ -91,40 +110,47 @@ defmodule Bench.Buffer do
     Either way, both fsyncs together are an order of magnitude under any
     `flush_interval_ms` worth running. D3's accepted durability window costs
     single-digit milliseconds, not the ack.
-  - **D6: the writer sweep finds no plateau at 1024 writers, because writer count
-    was never the variable.** 593 → 2,251 → 8,944 → 36,108 → 150,589 → 539,471
-    rows/s at 1, 4, 16, 64, 256, 1024 writers, heavy within 12%. The `flushes`
-    column is 20 in every cell: group commit turns added writers into a *wider*
-    flush, not more flushes, so rows/s climbs with rows-per-flush (20 → 20,480)
-    while cadence holds. At 20-row batches even 1024 writers only make a 20,480-row
-    flush, which is nowhere near saturating anything.
-  - **Saturate it with 500-row batches and one table tops out at ~2.2M rows/s
-    light, ~1.1M heavy.** That is the real single-table number, and none of the
-    three configured bounds sets it: sweeping `flush_max_bytes` 8 MB → 512 MB moves
-    rows-per-flush 7.5× (47,189 → 353,103) and throughput ~5%. The byte bound
-    decides how rows are *packed* into flushes, not how many get through.
-  - **What sets it is the encode plus the write path around it.** The encode alone
-    sustains ~4.4M rows/s light (100K rows in 22.5 ms) and ~2.3M heavy (43.6 ms),
-    so accumulate, reply fan-out, manifest append, and fsync cost roughly the other
-    half. Read `encode_in_isolation/1`'s last column as an upper bound.
+  - **D6: the writer sweep finds no plateau for `light` or `heavy`, because 20-row
+    batches cannot saturate them.** 601 → 2,293 → 9,378 → 37,048 → 150,911 →
+    547,345 rows/s at 1, 4, 16, 64, 256, 1024 writers. `flushes` is 20 in every one
+    of those cells: group commit turns added writers into a *wider* flush, not more
+    flushes, so rows/s climbs with rows-per-flush (20 → 20,480) while cadence holds.
+    Their linear scaling measures headroom, not a limit — and the "~148K rows/s, no
+    plateau found" PL-6 was drafted against was this artifact.
+  - **`huge` is the exception, and it is why the sweep now works.** At 1024 writers
+    it flushes 46 times, not 20, because 20,480 rows × 867 B crosses the 8 MB byte
+    bound — and it is the one row that plateaus (34,808 → 109,395 → 227,556, i.e.
+    3.1× then 2.1×).
+  - **Saturate with 500-row batches and one table tops out at 2.19M rows/s light,
+    1.08M heavy, 280K huge.** None of the three configured bounds sets it: sweeping
+    `flush_max_bytes` 8 MB → 512 MB moves rows-per-flush 8-27× and throughput
+    5-12%, not even monotonically. The byte bound decides how rows are *packed*
+    into flushes, not how many get through — though at its 8 MB default it is what
+    caps rows-per-flush (47,189 / 29,681 / 9,499 rows).
+  - **What sets it is the encode plus the write path around it.** Encode alone
+    sustains ~4.17M rows/s light, ~2.28M heavy, ~356K huge. Measured saturation is
+    53% / 47% / **79%** of that: the write path costs proportionally *less* the more
+    expensive the encode, because per-flush fixed costs amortize over longer work.
+    Read `encode_in_isolation/1`'s last column as an upper bound.
   - **Not the fsync, and not the mailbox.** Toggling the segment fsync at 1024
-    writers moves throughput ±4%, and the wrong way for both schemas — noise.
-    Mailbox depth stays at or below the writer count because each writer has one
-    outstanding call.
-  - **Group commit's latency promise breaks at saturation, and that is the real
-    argument for PL-6.** Below saturation p50 ack is `flush_interval_ms` plus a few
-    ms regardless of load. At saturation it degrades to 210 ms light and 458 ms
-    heavy — 8-19× the interval — because offered rows per cycle far exceed flushed
-    rows per cycle and acks queue cycles deep.
-  - **P independent buffers multiply both.** The partition proxy reaches
-    **6.8M rows/s light and 3.3M heavy at P=8** on 10 cores: 3.23× a single buffer
-    for a fixed workload, 5.17× for P fully-loaded buffers, with p50 ack recovering
-    211 ms → 67 ms. `split` and `scale` agree to 0.2% at P=8, where they describe
-    the same configuration. Partitioning divides exactly the quantity that binds,
-    so PL-6's design multiplies the right thing.
+    writers moves throughput ±2-6% on all three schemas — noise. Mailbox depth
+    stays at or below the writer count because each writer has one outstanding call.
+  - **The argument for PL-6 is the ack contract, not headroom.** At the default
+    config a 20-column event table returns a **2.01 second p50 ack** — a
+    user-visible defect at ordinary load, not a ceiling someone might reach later.
+  - **P independent buffers multiply it, and most for the schemas that need it
+    most.** The proxy reaches **6.68M rows/s light, 3.58M heavy, 1.11M huge at
+    P=8** on 10 cores. The multiplier tracks how encode-bound the schema is —
+    3.11× light (53% in encode), 3.22× heavy (47%), **4.09× huge (79%)** — which is
+    the mechanism claim, since the encode is what partitioning parallelizes.
+  - **But partitioning alone cannot fix overload.** Latency at saturation is
+    `outstanding ÷ throughput`, so P divides the overload factor by P and no more:
+    at the 73× overload this bench drives, P=8 still yields 438 ms. Bounding ack
+    latency requires bounding outstanding rows, which nothing does today — see
+    T-56, a companion to PL-6 rather than a follow-up.
   - **Inline flush stays; double-buffering still has no case.** It hides one encode
     behind the next accumulation — worth part of one cycle — where partitioning
-    multiplies the encode itself and fixes the ack degradation too.
+    multiplies the encode itself and helps the ack degradation too.
 
   """
 
@@ -138,6 +164,7 @@ defmodule Bench.Buffer do
   alias Smolquery.Segments.Writer
 
   @dataset "bench"
+  @weights [:light, :heavy, :huge]
 
   def run do
     with_tmp_dir("buffer", fn dir ->
@@ -252,7 +279,7 @@ defmodule Bench.Buffer do
         "     p50 ack     p99 ack  (ms)"
     )
 
-    for weight <- [:light, :heavy], writers <- writer_counts do
+    for weight <- @weights, writers <- writer_counts do
       {name, pid} = start_buffer(dir, flush_interval_ms: 25, flush_max_rows: 1_000_000)
       table_ref = {@dataset, "events"}
 
@@ -305,7 +332,7 @@ defmodule Bench.Buffer do
       "  schema     rows   encode min   encode med   fits #{interval}ms      ceiling rows/s"
     )
 
-    for weight <- [:light, :heavy], rows <- sizes do
+    for weight <- @weights, rows <- sizes do
       %{rows: batch_rows, schema: schema} = batch(rows, 0, weight)
 
       encode =
@@ -332,7 +359,7 @@ defmodule Bench.Buffer do
       "\n  schema  store fsync      rows/s   flushes   mailbox     p50 ack     p99 ack  (ms)"
     )
 
-    for weight <- [:light, :heavy], fsync? <- [true, false] do
+    for weight <- @weights, fsync? <- [true, false] do
       root = Path.join(dir, "ceiling-#{weight}-#{fsync?}")
 
       {name, pid} =
@@ -385,7 +412,7 @@ defmodule Bench.Buffer do
       "  schema  flush_max_bytes      rows/s   flushes   rows/flush   MiB/flush     p50 ack"
     )
 
-    for weight <- [:light, :heavy], limit <- [8_000_000, 32_000_000, 512_000_000] do
+    for weight <- @weights, limit <- [8_000_000, 32_000_000, 512_000_000] do
       root = Path.join(dir, "bytebound-#{weight}-#{limit}")
 
       {name, pid} =
@@ -440,7 +467,7 @@ defmodule Bench.Buffer do
       "  mode    schema    P   writers      rows/s      vs P=1   flushes   rows/flush   mailbox     p50 ack"
     )
 
-    for mode <- [:split, :scale], weight <- [:light, :heavy] do
+    for mode <- [:split, :scale], weight <- @weights do
       Enum.reduce([1, 2, 4, 8], nil, fn partitions, baseline ->
         writers = if mode == :split, do: total, else: per_buffer * partitions
         refs = for p <- 1..partitions, do: {@dataset, "events_p#{p}"}
@@ -602,6 +629,31 @@ defmodule Bench.Buffer do
 
   defp row_schema(:heavy), do: schema()
 
+  defp row_schema(:huge) do
+    Schema.new!([
+      {"id", :int64, nullable: false},
+      {"ts", :timestamp},
+      {"name", :string},
+      {"amount", {:numeric, 38, 2}},
+      {"user_id", :int64},
+      {"session_id", :string},
+      {"event", :string},
+      {"region", :string},
+      {"latency_ms", :float64},
+      {"ok", :bool},
+      {"day", :date},
+      {"price", {:numeric, 18, 4}},
+      {"quantity", :int64},
+      {"discount", :float64},
+      {"sku", :string},
+      {"country", :string},
+      {"retries", :int64},
+      {"updated_at", :timestamp},
+      {"score", :float64},
+      {"tags", :string}
+    ])
+  end
+
   defp batch(size, offset, :light) do
     rows =
       for i <- 1..size do
@@ -623,6 +675,42 @@ defmodule Bench.Buffer do
       end
 
     %{schema: row_schema(:heavy), rows: rows}
+  end
+
+  @events ~w(page_view click purchase signup logout search add_to_cart error)
+  @regions ~w(us-east-1 us-west-2 eu-west-1 eu-central-1 ap-south-1 sa-east-1)
+  @countries ~w(US CA GB DE FR ES IT NL SE NO PL BR MX JP KR IN AU NZ ZA SG)
+
+  defp batch(size, offset, :huge) do
+    rows =
+      for i <- 1..size do
+        n = offset + i
+
+        %{
+          "id" => n,
+          "ts" => NaiveDateTime.add(~N[2026-01-01 00:00:00], n),
+          "name" => "row-#{n}",
+          "amount" => Decimal.new(1, rem(n, 100_000_000), -2),
+          "user_id" => rem(n, 250_000),
+          "session_id" => "sess-" <> String.pad_leading(Integer.to_string(n, 16), 12, "0"),
+          "event" => Enum.at(@events, rem(n, length(@events))),
+          "region" => Enum.at(@regions, rem(n, length(@regions))),
+          "latency_ms" => rem(n, 4_000) / 7,
+          "ok" => rem(n, 97) != 0,
+          "day" => Date.add(~D[2026-01-01], rem(n, 365)),
+          "price" => Decimal.new(1, rem(n, 1_000_000), -4),
+          "quantity" => rem(n, 40) + 1,
+          "discount" => rem(n, 30) / 100,
+          "sku" => "sku-#{rem(n, 50_000)}",
+          "country" => Enum.at(@countries, rem(n, length(@countries))),
+          "retries" => rem(n, 4),
+          "updated_at" => NaiveDateTime.add(~N[2026-01-01 00:00:00], n + rem(n, 900)),
+          "score" => rem(n, 10_000) / 100,
+          "tags" => Enum.map_join(1..3, ",", &"tag-#{rem(n + &1, 50)}")
+        }
+      end
+
+    %{schema: row_schema(:huge), rows: rows}
   end
 
   defp raw_fsync do

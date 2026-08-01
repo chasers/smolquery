@@ -539,19 +539,27 @@ one workload. Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`,
 `WRITERS_PER_BUFFER`. Sealing is disabled throughout — this script measures group
 commit, `bench/sealer.exs` measures sealing.
 
-One table saturates at **~2.2M rows/s** on two columns and **~1.1M** on four with a
-`Decimal`, set by the encode plus the write path around it. None of the three
-configured bounds sets it: `flush_max_bytes` from 8 MB to 512 MB moves rows-per-flush
-7.5× and throughput ~5%. Writer count alone never finds the ceiling, because group
-commit turns extra writers into a wider flush rather than more flushes — which is why
-the sweep is still linear at 1024 writers and 20-row batches.
+Every D6 section runs three schemas, because the encode is what it investigates and
+cost-per-row is the variable that moves everything else: `light` (2 columns,
+165 B/row), `heavy` (4 columns with a `Decimal`, 254 B/row), and `huge` (20 columns
+spanning all seven logical types, 867 B/row — the shape of a real event table).
+`huge` is 5.3× `light`'s bytes but 12× its encode time, since per-column overhead
+dominates payload size.
 
-The number to design against is the ack latency, not the throughput. Below
-saturation p50 ack is `flush_interval_ms` plus a few milliseconds regardless of
-load; at saturation it degrades to 210–458 ms against a 25 ms interval, because
-offered rows per cycle far exceed flushed rows per cycle. Eight independent buffers
-reach 6.8M rows/s and pull p50 ack back to 67 ms — the case for partitioned writes
-(PL-6).
+One table saturates at **2.19M rows/s light, 1.08M heavy, 280K huge**, set by the
+encode plus the write path around it. None of the configured bounds sets it:
+`flush_max_bytes` from 8 MB to 512 MB moves rows-per-flush 8–27× and throughput
+5–12%, non-monotonically — it decides how rows are *packed* into flushes, not how
+many get through.
+
+The number to design against is ack latency, and it has two regimes. Below
+saturation, `p50 = flush_interval_ms + ~5 ms` regardless of load — group commit's
+whole promise. At saturation, `p50 = outstanding rows ÷ throughput` (Little's Law)
+and **`flush_interval_ms` drops out entirely**. So at the default config a
+20-column table returns a **2.01 second p50 ack**. Eight independent buffers reach
+6.68M rows/s — 3.11× light, 4.09× huge, ordered by how encode-bound each schema is
+— which is the case for partitioned writes (PL-6). Partitioning divides the overload
+factor but does not define the cliff; bounding ack latency needs backpressure (T-56).
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the
