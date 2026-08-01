@@ -26,10 +26,20 @@ if data_dir = System.get_env("SMOLQUERY_DATA_DIR") do
     data_path: Path.join(data_dir, "ducklake")
 
   config :smolquery, Smolquery.BufferService, dir: Path.join(data_dir, "buffer")
+
+  config :smolquery, Smolquery.StorageService, dir: Path.join(data_dir, "sealed")
 end
 
 if buffer_dir = System.get_env("SMOLQUERY_BUFFER_DIR") do
   config :smolquery, Smolquery.BufferService, dir: buffer_dir
+end
+
+if sealed_dir = System.get_env("SMOLQUERY_SEALED_DIR") do
+  config :smolquery, Smolquery.StorageService, dir: sealed_dir
+end
+
+if base_url = System.get_env("SMOLQUERY_BUFFER_BASE_URL") do
+  config :smolquery, Smolquery.StorageService, buffer_base_url: base_url
 end
 
 if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do

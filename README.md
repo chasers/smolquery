@@ -264,6 +264,41 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   — a query arriving mid-adoption would otherwise read an empty manifest and
   quietly return results missing that table's unsealed rows.
 
+### The sealed tier
+
+`Smolquery.StorageService` owns what happens after the hot tier: merge a table's
+micro-segments into large sealed segments, commit them to the catalog, retire the
+inputs. Started by the `:storage` role, it is where seal signals now go —
+
+```elixir
+config :smolquery, Smolquery.BufferService,
+  seal_consumer: {Smolquery.StorageService.Client, []}
+```
+
+— and the buffer service still names no storage module of its own, which is why
+that wiring is configuration. So far the scheduling half is built:
+
+- **One seal in flight per table, a bounded pool per node.**
+  `Smolquery.StorageService.Sealer` coalesces a signal for a table it is already
+  sealing and sheds one arriving at `max_concurrent_seals`. Both are safe because
+  signalling is level-triggered — a dropped signal costs a `seal_retry_ms` delay,
+  never a lost seal, so the sealer needs no queue of its own.
+- **An attempt runs as a monitored task, not a linked one.** A merge that crashes
+  frees its table and leaves the sealer and its siblings alone; the next re-signal
+  retries it.
+- **Signalling a node that runs no storage service is reported, not raised.**
+  Raising would take down the `TableBuffer` that signalled, and it signals from
+  the write path.
+- **Sealed segments get their own store handle** (`dir: "priv/data/sealed"`),
+  separate from the buffer's. The two tiers have opposite write profiles — one put
+  per flush against one per seal — and that difference is what makes an object
+  store plausible here long before it is for the hot tier.
+
+What a seal attempt *does* is `Smolquery.StorageService.Handoff`, and it is not
+implemented yet: the default reports `{:error, :not_implemented}` and logs, so a
+storage node accepts and schedules signals but seals nothing, visibly. The merge,
+catalog commit, and retirement land next.
+
 ## Roles
 
 One release, four services; a node starts only the subtrees its roles name.
@@ -275,9 +310,9 @@ SMOLQUERY_ROLES=query              # a query-only node
 SMOLQUERY_ROLES=ingest,buffer
 ```
 
-Unknown role names fail the boot rather than silently starting nothing. `:query`
-and `:buffer` start their subtrees today; `:ingest` and `:storage` are accepted
-and contribute nothing until their milestones land. See `Smolquery.Roles`.
+Unknown role names fail the boot rather than silently starting nothing. `:query`,
+`:buffer`, and `:storage` start their subtrees today; `:ingest` is accepted and
+contributes nothing until its milestone lands. See `Smolquery.Roles`.
 
 ## Configuration
 
@@ -307,9 +342,18 @@ config :smolquery, Smolquery.BufferService,
   seal_retry_ms: 30_000,
   retire_grace_ms: 600_000,
   maintenance_interval_ms: 5_000,
-  seal_consumer: {Smolquery.BufferService.SealLog, []},
+  seal_consumer: {Smolquery.StorageService.Client, []},
   hot_server_ip: {127, 0, 0, 1},
   hot_server_port: 4001
+
+config :smolquery, Smolquery.StorageService,
+  dir: "priv/data/sealed",
+  buffer_base_url: "http://127.0.0.1:4001",
+  target_segment_bytes: 268_435_456,
+  max_concurrent_seals: 2,
+  gc_interval_ms: 300_000,
+  gc_grace_ms: 3_600_000,
+  handoff: {Smolquery.StorageService.Handoff.Log, []}
 ```
 
 `:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath
@@ -320,6 +364,11 @@ the node that gave the ack. Point the segments elsewhere with
 
 `flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
 the current group commit, so lowering it trades throughput for latency.
+
+The storage service's `:dir` is where sealed segments land, and `:store`
+overrides it the same way. `buffer_base_url` is where the sealer reaches
+`HotServer` to pull manifests and segment bytes — honest for a single node, and
+replaced by ownership-ring lookup when the cluster arrives.
 
 Runtime environment variables:
 
@@ -333,6 +382,8 @@ Runtime environment variables:
 | `SMOLQUERY_BUFFER_DIR` | buffer service root for micro-segments and manifest logs |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound |
 | `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` |
+| `SMOLQUERY_SEALED_DIR` | storage service root for sealed segments |
+| `SMOLQUERY_BUFFER_BASE_URL` | `HotServer` base URL the sealer pulls micro-segments from |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.

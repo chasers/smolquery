@@ -5,6 +5,7 @@ defmodule Smolquery.BufferService.ClientTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Schema
+  alias Smolquery.Test.Eventually
 
   @moduletag :tmp_dir
 
@@ -115,10 +116,12 @@ defmodule Smolquery.BufferService.ClientTest do
       name = start_buffer_service(context, flush_interval_ms: 60_000)
 
       writer = Task.async(fn -> Client.write_batch(name, @table, batch()) end)
-      Process.sleep(50)
 
-      assert Client.flush(name, @table) == :ok
-      assert {:ok, _ack} = Task.await(writer)
+      assert Eventually.until(fn ->
+               assert Client.flush(name, @table) == :ok
+
+               match?({:ok, {:ok, _ack}}, Task.yield(writer, 10))
+             end)
     end
 
     test "is harmless on a table with nothing buffered", context do

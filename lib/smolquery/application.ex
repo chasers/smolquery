@@ -8,6 +8,10 @@ defmodule Smolquery.Application do
 
   Roles whose services are not implemented yet contribute nothing — the role is
   accepted, and its subtree appears when its milestone lands.
+
+  Order within a node does not encode a dependency: services reach each other
+  through client modules that tolerate a peer being absent, so a node starting
+  `:storage` before `:buffer` is not a problem for either.
   """
 
   use Application
@@ -23,6 +27,6 @@ defmodule Smolquery.Application do
 
   defp subtree(:query), do: [Smolquery.QueryService.Supervisor]
   defp subtree(:buffer), do: [Smolquery.BufferService.Supervisor]
+  defp subtree(:storage), do: [Smolquery.StorageService.Supervisor]
   defp subtree(:ingest), do: []
-  defp subtree(:storage), do: []
 end

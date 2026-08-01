@@ -153,30 +153,7 @@ defmodule Smolquery.BufferService.Runtime do
     )
   end
 
-  @doc """
-  Publishes a runtime for `Client` to read.
-  """
-  @spec put(t()) :: :ok
-  def put(%__MODULE__{} = runtime), do: :persistent_term.put(key(runtime.name), runtime)
-
-  @doc """
-  The published runtime for an instance.
-
-  `:error` means the buffer service is not running on this node — a caller is
-  asking a node that does not hold the `:buffer` role.
-  """
-  @spec fetch(atom()) :: {:ok, t()} | :error
-  def fetch(name) do
-    {:ok, :persistent_term.get(key(name))}
-  rescue
-    ArgumentError -> :error
-  end
-
-  @doc """
-  Withdraws a published runtime.
-  """
-  @spec delete(atom()) :: boolean()
-  def delete(name), do: :persistent_term.erase(key(name))
+  use Smolquery.Runtime
 
   @doc """
   The top-level supervisor for an instance, as `Supervisor.start_link/1` names it.
@@ -226,6 +203,4 @@ defmodule Smolquery.BufferService.Runtime do
       %Store{} = store -> store
     end
   end
-
-  defp key(name), do: {__MODULE__, name}
 end

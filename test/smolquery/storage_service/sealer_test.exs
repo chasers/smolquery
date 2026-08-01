@@ -1,0 +1,131 @@
+defmodule Smolquery.StorageService.SealerTest do
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
+
+  alias Smolquery.StorageService.Runtime
+  alias Smolquery.StorageService.Sealer
+  alias Smolquery.Test.Eventually
+  alias Smolquery.Test.HandoffProbe
+
+  @events {"analytics", "events"}
+  @clicks {"analytics", "clicks"}
+
+  setup context do
+    name = :"sealer_#{:erlang.unique_integer([:positive])}"
+
+    runtime =
+      Runtime.new(
+        name: name,
+        dir: Path.join(context.tmp_dir, "sealed"),
+        max_concurrent_seals: Map.get(context, :max_concurrent_seals, 2),
+        handoff: {HandoffProbe, {self(), Map.get(context, :result, :ok)}}
+      )
+
+    start_supervised!({Task.Supervisor, name: Runtime.seals(name)})
+    start_supervised!({Sealer, runtime})
+
+    %{name: name}
+  end
+
+  @tag :tmp_dir
+  test "hands a signal to the configured handoff", %{name: name} do
+    assert Sealer.seal_ready(name, @events, ["a", "b"]) == :ok
+
+    assert_receive {:sealing, @events, ["a", "b"], attempt}
+    assert Sealer.sealing(name) == [@events]
+
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
+  test "coalesces a second signal for a table already sealing", %{name: name} do
+    Sealer.seal_ready(name, @events, ["a"])
+    assert_receive {:sealing, @events, ["a"], attempt}
+
+    Sealer.seal_ready(name, @events, ["a", "b"])
+
+    refute_receive {:sealing, @events, ["a", "b"], _attempt}, 50
+    assert Sealer.sealing(name) == [@events]
+
+    HandoffProbe.release(attempt)
+  end
+
+  @tag :tmp_dir
+  test "seals distinct tables concurrently", %{name: name} do
+    Sealer.seal_ready(name, @events, ["a"])
+    Sealer.seal_ready(name, @clicks, ["b"])
+
+    assert_receive {:sealing, @events, ["a"], events_attempt}
+    assert_receive {:sealing, @clicks, ["b"], clicks_attempt}
+    assert Enum.sort(Sealer.sealing(name)) == Enum.sort([@events, @clicks])
+
+    HandoffProbe.release(events_attempt)
+    HandoffProbe.release(clicks_attempt)
+  end
+
+  @tag :tmp_dir
+  @tag max_concurrent_seals: 1
+  test "sheds a signal that arrives at the concurrency bound", %{name: name} do
+    Sealer.seal_ready(name, @events, ["a"])
+    assert_receive {:sealing, @events, ["a"], attempt}
+
+    Sealer.seal_ready(name, @clicks, ["b"])
+
+    refute_receive {:sealing, @clicks, _ids, _attempt}, 50
+    assert Sealer.sealing(name) == [@events]
+
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+
+    Sealer.seal_ready(name, @clicks, ["b"])
+    assert_receive {:sealing, @clicks, ["b"], shed_attempt}
+
+    HandoffProbe.release(shed_attempt)
+  end
+
+  @tag :tmp_dir
+  test "a table becomes eligible again after a failed attempt", %{name: name} do
+    Sealer.seal_ready(name, @events, ["a"])
+    assert_receive {:sealing, @events, ["a"], attempt}
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+
+    Sealer.seal_ready(name, @events, ["a", "b"])
+    assert_receive {:sealing, @events, ["a", "b"], retry}
+
+    HandoffProbe.release(retry)
+  end
+
+  @tag :tmp_dir
+  @tag result: :crash
+  test "survives a crashed attempt and frees the table", %{name: name} do
+    sealer = Process.whereis(Runtime.sealer(name))
+
+    log =
+      capture_log(fn ->
+        Sealer.seal_ready(name, @events, ["a"])
+        assert_receive {:sealing, @events, ["a"], attempt}
+        HandoffProbe.release(attempt)
+        assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+      end)
+
+    assert log =~ "crashed"
+    assert Process.alive?(sealer)
+
+    Sealer.seal_ready(name, @events, ["a"])
+    assert_receive {:sealing, @events, ["a"], retry}
+
+    HandoffProbe.release(retry)
+  end
+
+  @tag :tmp_dir
+  test "ignores an unrelated message", %{name: name} do
+    sealer = Process.whereis(Runtime.sealer(name))
+    send(sealer, :unrelated)
+
+    assert Sealer.sealing(name) == []
+    assert Process.alive?(sealer)
+  end
+end

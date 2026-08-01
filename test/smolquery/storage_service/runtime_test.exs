@@ -1,0 +1,66 @@
+defmodule Smolquery.StorageService.RuntimeTest do
+  use ExUnit.Case, async: true
+
+  alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.Runtime
+
+  describe "new/1" do
+    test "derives a local store from :dir" do
+      runtime = Runtime.new(name: __MODULE__.Derived, dir: "/tmp/sealed")
+
+      assert %Store{impl: Store.Local, config: %{dir: "/tmp/sealed"}} = runtime.store
+    end
+
+    test "takes a store outright when given one" do
+      runtime =
+        Runtime.new(
+          name: __MODULE__.Given,
+          store: {Store.Local, [dir: "/mnt/bulk", fsync: false]}
+        )
+
+      assert %Store{impl: Store.Local, config: %{dir: "/mnt/bulk", fsync: false}} = runtime.store
+    end
+
+    test "opts override application config" do
+      runtime = Runtime.new(name: __MODULE__.Overridden, max_concurrent_seals: 9)
+
+      assert runtime.max_concurrent_seals == 9
+    end
+
+    test "inherits application config for what opts leave out" do
+      configured = Application.get_env(:smolquery, Smolquery.StorageService, [])
+      runtime = Runtime.new(name: __MODULE__.Inherited)
+
+      assert runtime.buffer_base_url == Keyword.fetch!(configured, :buffer_base_url)
+      assert runtime.gc_grace_ms == Keyword.fetch!(configured, :gc_grace_ms)
+    end
+
+    test "defaults the instance name" do
+      assert Runtime.new().name == Smolquery.StorageService
+    end
+  end
+
+  describe "put/1, fetch/1 and delete/1" do
+    test "round-trips a runtime through persistent_term" do
+      runtime = Runtime.new(name: __MODULE__.Published, dir: "/tmp/published")
+
+      assert Runtime.put(runtime) == :ok
+      assert Runtime.fetch(__MODULE__.Published) == {:ok, runtime}
+      assert Runtime.delete(__MODULE__.Published)
+      assert Runtime.fetch(__MODULE__.Published) == :error
+    end
+
+    test "fetching an unpublished instance is an error, not a raise" do
+      assert Runtime.fetch(__MODULE__.NeverPublished) == :error
+    end
+  end
+
+  describe "naming" do
+    test "derives every process name from the instance name" do
+      assert Runtime.supervisor(Storage) == Storage.Supervisor
+      assert Runtime.sealer(Storage) == Storage.Sealer
+      assert Runtime.engine(Storage) == Storage.Engine
+      assert Runtime.seals(Storage) == Storage.Seals
+    end
+  end
+end

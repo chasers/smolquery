@@ -31,7 +31,16 @@ config :smolquery, Smolquery.BufferService,
   retire_grace_ms: 600_000,
   maintenance_interval_ms: 5_000,
   hot_server_ip: {127, 0, 0, 1},
-  hot_server_port: 4001
+  hot_server_port: 4001,
+  seal_consumer: {Smolquery.StorageService.Client, []}
+
+config :smolquery, Smolquery.StorageService,
+  dir: "priv/data/sealed",
+  buffer_base_url: "http://127.0.0.1:4001",
+  target_segment_bytes: 268_435_456,
+  max_concurrent_seals: 2,
+  gc_interval_ms: 300_000,
+  gc_grace_ms: 3_600_000
 
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",
