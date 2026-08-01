@@ -2,9 +2,10 @@ defmodule Smolquery.Roles do
   @moduledoc """
   Which service subtrees this node runs.
 
-  A role maps one-to-one onto a top-level service supervision subtree. A node
-  starts only the services in its role set, so the same release deploys as a
-  single-node dev instance (all four roles) or as a fleet of specialized nodes.
+  A role maps one-to-one onto a top-level supervision subtree — the four
+  services, plus `:api` for the HTTP front door. A node starts only the
+  subtrees in its role set, so the same release deploys as a single-node dev
+  instance (every role) or as a fleet of specialized nodes.
 
   Roles come from `config :smolquery, :roles`, which `config/runtime.exs`
   populates from the `SMOLQUERY_ROLES` environment variable — a comma-separated
@@ -17,9 +18,9 @@ defmodule Smolquery.Roles do
   With the variable unset, a node runs every role.
   """
 
-  @type t :: :ingest | :buffer | :storage | :query
+  @type t :: :api | :ingest | :buffer | :storage | :query
 
-  @all [:ingest, :buffer, :storage, :query]
+  @all [:api, :ingest, :buffer, :storage, :query]
   @names Map.new(@all, &{Atom.to_string(&1), &1})
 
   @doc """
