@@ -2,9 +2,9 @@ defmodule Smolquery.BufferService.HotServer do
   @moduledoc """
   Serves a buffer node's hot tier to DuckDB over HTTP.
 
-  Two routes, both read-only and unauthenticated in v1 (see
-  `Smolquery.BufferService.Runtime` for why, and Milestone 6 for when that
-  changes). Both answer `HEAD` as well as `GET` — `httpfs` sends a `HEAD`
+  Two routes, both read-only, both requiring the internal secret
+  (`Smolquery.InternalSecret` — PL-8 D6 closed PL-3 D12's unauthenticated
+  window). Both answer `HEAD` as well as `GET` — `httpfs` sends a `HEAD`
   first, to learn a segment's size before it starts issuing ranged reads
   against it:
 
@@ -61,8 +61,21 @@ defmodule Smolquery.BufferService.HotServer do
 
   @impl Plug
   def call(conn, name) do
-    conn = Plug.RewriteOn.call(conn, @rewrite_on)
+    if authenticated?(conn) do
+      conn |> Plug.RewriteOn.call(@rewrite_on) |> route(name)
+    else
+      send_resp(conn, 401, "missing or invalid internal secret")
+    end
+  end
 
+  defp authenticated?(conn) do
+    case get_req_header(conn, Smolquery.InternalSecret.header()) do
+      [secret] -> Plug.Crypto.secure_compare(secret, Smolquery.InternalSecret.value())
+      _absent_or_repeated -> false
+    end
+  end
+
+  defp route(conn, name) do
     case {conn.method, conn.path_info} do
       {method, ["v1", "datasets", dataset, "tables", table, "manifest"]}
       when method in ["GET", "HEAD"] ->

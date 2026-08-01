@@ -22,14 +22,14 @@ defmodule Smolquery.QueryService.Client do
   with `{:error, :too_many_jobs}` — the caller knows immediately, instead of
   queueing invisibly behind an unbounded backlog.
 
-  ## v1 trust boundary
+  ## Trust boundary
 
-  SQL given to this module is trusted. A SELECT can read any file or URL the
-  node can reach (`read_csv('/etc/passwd')` is a SELECT), and DuckDB's
-  external access cannot be disabled without also breaking the hot-tier reads
-  the plan itself needs. Single-tenant self-hosted is the v1 posture, the
-  same one `HotServer`'s unauthenticated routes take; scoping
-  `allowed_directories` lands with auth in Milestone 6.
+  SQL given to this module is untrusted by default (PL-8 D7): after planning,
+  each job engine disables DuckDB's external access for the user's SQL,
+  leaving readable exactly the runtime's `allowed_directories` and the plan's
+  own micro-segment URLs — `read_csv('/etc/passwd')` is a permission error,
+  not a data source. `lockdown: false` restores the old trusted posture for
+  deployments that want it.
   """
 
   alias Explorer.DataFrame

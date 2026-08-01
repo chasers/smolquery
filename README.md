@@ -220,7 +220,8 @@ Segment *bytes* deliberately do not travel this way: DuckDB opens them itself vi
 would put every segment on the BEAM heap and lose that pushdown.
 
 `Smolquery.BufferService.HotServer` is what DuckDB opens them from — a Bandit
-listener, one per instance, serving two unauthenticated routes:
+listener, one per instance, serving two routes behind the internal secret
+(`Smolquery.InternalSecret`, sent as `x-smolquery-internal`):
 
 ```
 GET /v1/datasets/:dataset/tables/:table/manifest                  # JSON entries
@@ -454,9 +455,14 @@ Properties worth knowing:
   itself — DuckLake keeps stats at registration.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.
-- **v1 trusts its SQL.** A SELECT can `read_csv('/etc/passwd')`; scoping
-  DuckDB's `allowed_directories` lands with auth in Milestone 6, the same
-  posture as `HotServer`'s unauthenticated routes.
+- **User SQL is locked down.** After planning, each job engine disables
+  DuckDB's external access for the user's SQL, leaving readable exactly the
+  runtime's `allowed_directories` (the data dir and catalog paths by default)
+  plus the plan's own micro-segment URLs — `read_csv('/etc/passwd')` is a
+  permission error, and the configuration is locked so SQL cannot turn it
+  back on. `lockdown: false` restores the trusted posture; a deployment whose
+  sealed segments live outside the data dir names them in
+  `allowed_directories`.
 
 ## HTTP API
 
@@ -528,9 +534,20 @@ Failures answer one JSON envelope everywhere:
 {"error": {"code": 401, "status": "UNAUTHENTICATED", "message": "missing or invalid API key"}}
 ```
 
-The rest of the v1 surface (streaming inserts, query jobs, batch loads) lands
-across Milestone 6's layers; the routes exist in `Smolquery.Api.Router` as
-they arrive.
+### Security posture (v1)
+
+Three layers, each fail-closed:
+
+- **The front door** requires the static Bearer key on every `/v1` route; a
+  node holding the `:api` role with no key refuses to boot.
+- **Internal HTTP** (`HotServer`'s manifest and segment routes) requires the
+  internal secret; readers attach it — `HotClient` as a header, the DuckDB
+  engines via an http `CREATE SECRET`. A single node generates one at boot; a
+  cluster sets `SMOLQUERY_INTERNAL_SECRET` everywhere or reads fail with 401s.
+- **User SQL** runs with DuckDB's external access disabled and locked after
+  planning: readable is exactly `allowed_directories` plus the micro-segment
+  URLs the plan itself produced. Single-tenant remains the model — auth says
+  *whether* you may query, not *which tables*.
 
 ## Roles
 
@@ -635,6 +652,7 @@ Runtime environment variables:
 | `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires; a node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_PORT` | port the HTTP API binds (default 4000) |
 | `SMOLQUERY_API_IP` | address the HTTP API binds (default `127.0.0.1` — exposing it is deliberate) |
+| `SMOLQUERY_INTERNAL_SECRET` | the shared secret internal HTTP (`HotServer`) requires; a single node generates one at boot when unset, a cluster must set it |
 | `SMOLQUERY_MEMORY_LIMIT` | DuckDB memory limit per engine |
 | `SMOLQUERY_DATA_DIR` | data directory; the catalog and DuckLake data path derive from it |
 | `SMOLQUERY_CATALOG` | catalog metadata database, e.g. `postgres:dbname=smolquery host=…` |

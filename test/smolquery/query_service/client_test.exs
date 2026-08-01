@@ -40,6 +40,28 @@ defmodule Smolquery.QueryService.ClientTest do
       assert DataFrame.to_columns(frame)["n"] == [2]
     end
 
+    test "lockdown denies user SQL the filesystem (PL-8 D7)" do
+      name = start_service()
+
+      {:ok, job, nil} = Client.query(name, "SELECT * FROM read_csv('/etc/passwd')")
+
+      assert job.state == :error
+      assert inspect(job.error) =~ "Permission Error"
+    end
+
+    test "lockdown: false restores the trusted posture" do
+      name = start_service(lockdown: false, allowed_directories: [])
+
+      tmp = Path.join(System.tmp_dir!(), "smolquery-trusted-#{System.unique_integer()}.csv")
+      File.write!(tmp, "a\n1\n")
+      on_exit(fn -> File.rm(tmp) end)
+
+      {:ok, job, frame} = Client.query(name, "SELECT * FROM read_csv('#{tmp}')")
+
+      assert job.state == :done
+      assert DataFrame.to_columns(frame)["a"] == [1]
+    end
+
     test "a query that cannot plan finishes as an error, which is still an answer" do
       name = start_service()
 

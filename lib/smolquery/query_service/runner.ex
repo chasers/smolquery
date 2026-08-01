@@ -175,7 +175,7 @@ defmodule Smolquery.QueryService.Runner do
           database: database,
           extensions: extensions(runtime),
           settings: [memory_limit: runtime.job_memory_limit],
-          statements: runtime.job_bootstrap,
+          statements: hot_tier_secret(runtime) ++ runtime.job_bootstrap,
           max_rows: :infinity
         )
 
@@ -201,12 +201,37 @@ defmodule Smolquery.QueryService.Runner do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
-         :ok <- run_statements(connection, plan.statements),
+         :ok <- run_statements(connection, plan.statements ++ lockdown(runtime, plan)),
          {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
       duration = System.monotonic_time(:millisecond) - started
 
       {:ok, %{snapshot: plan.snapshot, frame: frame, duration_ms: duration}}
     end
+  end
+
+  defp hot_tier_secret(%Runtime{} = runtime) do
+    if :httpfs in runtime.engine_extensions do
+      [Smolquery.InternalSecret.create_secret_statement(runtime.buffer_base_url)]
+    else
+      []
+    end
+  end
+
+  defp lockdown(%Runtime{lockdown: false}, _plan), do: []
+
+  defp lockdown(%Runtime{} = runtime, plan) do
+    urls = plan.hot |> Map.values() |> List.flatten() |> Enum.map(& &1["url"])
+
+    [
+      "SET allowed_directories = #{sql_list(runtime.allowed_directories)}",
+      "SET allowed_paths = #{sql_list(urls)}",
+      "SET enable_external_access = false",
+      "SET lock_configuration = true"
+    ]
+  end
+
+  defp sql_list(values) do
+    "[" <> Enum.map_join(values, ", ", &Smolquery.Identifier.sql_string/1) <> "]"
   end
 
   defp run_statements(connection, statements) do

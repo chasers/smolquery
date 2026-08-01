@@ -84,7 +84,13 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
         catalog: catalog
       )
 
-    start_supervised!({Engine, name: Runtime.engine(storage), extensions: [:httpfs]})
+    start_supervised!(
+      {Engine,
+       name: Runtime.engine(storage),
+       extensions: [:httpfs],
+       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]}
+    )
+
     {:ok, buffer_runtime} = BufferService.Runtime.fetch(buffer)
 
     %{buffer: buffer, buffer_runtime: buffer_runtime, runtime: runtime, catalog: catalog}
