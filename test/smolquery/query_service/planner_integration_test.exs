@@ -97,7 +97,8 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     rows = for i <- 3..5, do: %{"id" => i, "name" => "hot-#{i}"}
     {:ok, _ack} = Client.write_batch(buffer, @table, %{schema: schema(), rows: rows})
 
-    {:ok, plan} = Planner.plan(runtime, @job, "SELECT count(*) FROM analytics.events")
+    {:ok, plan} =
+      Planner.plan(runtime, Engine.connection_name(@job), "SELECT count(*) FROM analytics.events")
 
     assert run(plan).rows == [[5]]
   end
@@ -112,7 +113,7 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     {:ok, plan} =
       Planner.plan(
         runtime,
-        @job,
+        Engine.connection_name(@job),
         "SELECT name FROM analytics.events ORDER BY id"
       )
 
@@ -126,7 +127,8 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
   } do
     seal_rows(catalog, Path.join(tmp, "segments"), 1..2)
 
-    {:ok, plan} = Planner.plan(runtime, @job, "SELECT count(*) FROM analytics.events")
+    {:ok, plan} =
+      Planner.plan(runtime, Engine.connection_name(@job), "SELECT count(*) FROM analytics.events")
 
     seal_rows(catalog, Path.join(tmp, "segments"), 100..109)
 

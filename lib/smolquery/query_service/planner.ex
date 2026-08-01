@@ -54,7 +54,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
-  alias Smolquery.Engine
+  alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Plan
@@ -63,13 +63,14 @@ defmodule Smolquery.QueryService.Planner do
   @doc """
   Plans `sql` against the catalog and the hot tier, as one consistent read.
 
-  `engine` is only used to parse — `json_serialize_sql` runs there and nothing
-  else does. The runner passes its own job engine, so parsing never queues
-  behind another job's scan.
+  `connection` (an `Smolquery.Engine.Connection` server) is only used to
+  parse — `json_serialize_sql` runs there and nothing else does. The runner
+  passes its own job engine's connection, so parsing never queues behind
+  another job's scan.
   """
-  @spec plan(Runtime.t(), atom(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
-  def plan(%Runtime{} = runtime, engine, sql) do
-    with {:ok, refs} <- table_refs(engine, sql),
+  @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
+  def plan(%Runtime{} = runtime, connection, sql) do
+    with {:ok, refs} <- table_refs(connection, sql),
          {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
          {:ok, tables} <- resolve(runtime, refs, snapshot),
          {:ok, manifests} <- manifests(runtime, refs) do
@@ -86,17 +87,21 @@ defmodule Smolquery.QueryService.Planner do
   name that is no CTE, a catalog-qualified name, and a reference carrying its
   own `AT` clause are each refused with a reason naming the offender.
   """
-  @spec table_refs(atom(), String.t()) :: {:ok, [Catalog.table_ref()]} | {:error, term()}
-  def table_refs(engine, sql) do
-    with {:ok, ast} <- serialize(engine, sql),
+  @spec table_refs(GenServer.server(), String.t()) ::
+          {:ok, [Catalog.table_ref()]} | {:error, term()}
+  def table_refs(connection, sql) do
+    with {:ok, ast} <- serialize(connection, sql),
          {:ok, statement} <- gate(ast) do
       refs(statement)
     end
   end
 
-  defp serialize(engine, sql) do
+  defp serialize(connection, sql) do
     with {:ok, result} <-
-           Engine.query(engine, "SELECT json_serialize_sql(#{Identifier.sql_string(sql)})") do
+           Connection.query(
+             connection,
+             "SELECT json_serialize_sql(#{Identifier.sql_string(sql)})"
+           ) do
       result |> Result.one!() |> JSON.decode()
     end
   end

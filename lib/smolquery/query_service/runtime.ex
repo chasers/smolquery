@@ -49,6 +49,13 @@ defmodule Smolquery.QueryService.Runtime do
   otherwise. `job_memory_limit` is handed to each job engine's DuckDB
   `memory_limit`. `result_ttl_ms` is how long a finished job holds its result
   frame for an async caller to fetch.
+
+  `job_bootstrap` is the SQL each job engine runs before its first query —
+  by default, the `ATTACH` that binds the same lake the `catalog`
+  configuration names (falling back to the application's
+  `Smolquery.Catalog.DuckLake` settings). A deployment passing a
+  `%Smolquery.Catalog{}` handle must pass the bootstrap too, or job engines
+  see no sealed tier.
   """
 
   alias Smolquery.Catalog
@@ -62,6 +69,7 @@ defmodule Smolquery.QueryService.Runtime do
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
+    job_bootstrap: [],
     max_concurrent_jobs: 8,
     default_timeout_ms: 60_000,
     job_memory_limit: "1GB",
@@ -76,6 +84,7 @@ defmodule Smolquery.QueryService.Runtime do
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
+          job_bootstrap: [String.t()],
           max_concurrent_jobs: pos_integer(),
           default_timeout_ms: pos_integer(),
           job_memory_limit: String.t(),
@@ -107,7 +116,12 @@ defmodule Smolquery.QueryService.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
-    %__MODULE__{name: name, catalog: catalog, catalog_opts: catalog_opts}
+    %__MODULE__{
+      name: name,
+      catalog: catalog,
+      catalog_opts: catalog_opts,
+      job_bootstrap: Keyword.get_lazy(config, :job_bootstrap, fn -> bootstrap(catalog_opts) end)
+    }
     |> struct!(Keyword.take(config, @limits))
   end
 
@@ -140,4 +154,20 @@ defmodule Smolquery.QueryService.Runtime do
   """
   @spec runners(atom()) :: atom()
   def runners(name), do: Module.concat(name, "Runners")
+
+  defp bootstrap(nil), do: []
+
+  defp bootstrap(catalog_opts) do
+    merged =
+      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
+
+    with {:ok, metadata} <- Keyword.fetch(merged, :metadata),
+         {:ok, data_path} <- Keyword.fetch(merged, :data_path) do
+      lake = Keyword.get(merged, :catalog, Catalog.DuckLake.default_catalog())
+
+      [Catalog.DuckLake.attach_statement(lake, metadata, data_path)]
+    else
+      :error -> []
+    end
+  end
 end
