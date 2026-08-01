@@ -21,6 +21,7 @@ defmodule Smolquery.Api.Router do
       POST /v1/datasets/:ds/tables                 create a table
       GET  /v1/datasets/:ds/tables/:table          a table's schema
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
+      POST /v1/datasets/:ds/tables/:table/load     batch load (NDJSON/CSV/Parquet body)
       POST /v1/queries                             sync query, first page inline
       POST /v1/jobs                                async query job
       GET  /v1/jobs/:id                            job status + stats (history fallback)
@@ -40,6 +41,7 @@ defmodule Smolquery.Api.Router do
   alias Smolquery.Api.Errors
   alias Smolquery.Api.Inserts
   alias Smolquery.Api.Jobs
+  alias Smolquery.Api.Loads
   alias Smolquery.Api.Queries
   alias Smolquery.Api.Runtime
   alias Smolquery.Api.Tables
@@ -47,7 +49,13 @@ defmodule Smolquery.Api.Router do
   plug(Plug.Telemetry, event_prefix: [:smolquery, :api])
   plug(:match)
   plug(Smolquery.Api.Auth)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, pass: [])
+
+  plug(Plug.Parsers,
+    parsers: [:json],
+    json_decoder: JSON,
+    pass: ["application/x-ndjson", "text/csv", "application/vnd.apache.parquet"]
+  )
+
   plug(:dispatch)
 
   @impl Plug
@@ -88,6 +96,10 @@ defmodule Smolquery.Api.Router do
 
   post "/v1/datasets/:dataset/tables/:table/insert" do
     Inserts.insert(conn, dataset, table)
+  end
+
+  post "/v1/datasets/:dataset/tables/:table/load" do
+    Loads.create(conn, dataset, table)
   end
 
   post "/v1/queries" do

@@ -82,8 +82,8 @@ defmodule Smolquery.Api.TablesTest do
 
     test "a non-json content type is a 415", %{name: name} do
       conn =
-        conn(:post, "/v1/datasets", "id,analytics")
-        |> put_req_header("content-type", "text/csv")
+        conn(:post, "/v1/datasets", "<dataset/>")
+        |> put_req_header("content-type", "application/xml")
         |> put_req_header("authorization", "Bearer #{@key}")
 
       assert_raise Plug.Parsers.UnsupportedMediaTypeError, fn ->

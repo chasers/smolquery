@@ -235,7 +235,10 @@ defmodule Smolquery.Schema do
   | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
 
   `nil` passes through for every type; whether a column may be null is the
-  validator's question, not a value question.
+  validator's question, not a value question. A value already in its native
+  Elixir representation (`NaiveDateTime`, `Date`, `Decimal`) also passes
+  through — batch loads parse files into natives before taking the same
+  validation path streaming inserts do.
   """
   @spec value_from_json(logical_type(), term()) ::
           {:ok, term()} | {:error, {:invalid_value, logical_type(), term()}}
@@ -264,6 +267,8 @@ defmodule Smolquery.Schema do
 
   def value_from_json(:bool, value) when is_boolean(value), do: {:ok, value}
 
+  def value_from_json(:timestamp, %NaiveDateTime{} = value), do: {:ok, value}
+
   def value_from_json(:timestamp, value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
       {:ok, datetime, _offset} ->
@@ -280,12 +285,16 @@ defmodule Smolquery.Schema do
     end
   end
 
+  def value_from_json(:date, %Date{} = value), do: {:ok, value}
+
   def value_from_json(:date, value) when is_binary(value) do
     case Date.from_iso8601(value) do
       {:ok, date} -> {:ok, date}
       {:error, _reason} -> invalid(:date, value)
     end
   end
+
+  def value_from_json({:numeric, _p, _s}, %Decimal{} = value), do: {:ok, value}
 
   def value_from_json({:numeric, _p, _s} = type, value) when is_binary(value) do
     case Decimal.parse(value) do
