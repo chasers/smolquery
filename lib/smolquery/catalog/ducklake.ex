@@ -118,6 +118,8 @@ defmodule Smolquery.Catalog.DuckLake do
     {metadata, config} = Keyword.pop!(config, :metadata)
     {data_path, config} = Keyword.pop!(config, :data_path)
 
+    :ok = ensure_metadata_dir(metadata)
+
     extensions = Keyword.get(config, :extensions, engine_extensions())
     statements = Keyword.get(config, :statements, [])
 
@@ -165,6 +167,9 @@ defmodule Smolquery.Catalog.DuckLake do
       "AS #{Identifier.quote_name!(catalog)} " <>
       "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0)"
   end
+
+  defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))
+  defp ensure_metadata_dir(_metadata), do: :ok
 
   @impl Catalog
   def create_dataset(%__MODULE__{} = config, dataset) do
