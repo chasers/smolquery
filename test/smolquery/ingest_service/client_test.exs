@@ -110,4 +110,20 @@ defmodule Smolquery.IngestService.ClientTest do
     assert IngestService.Client.insert(:never_started, @table, [%{"id" => 1}]) ==
              {:error, :ingest_service_unavailable}
   end
+
+  describe "batch_id (T-41)" do
+    test "an insert retried with the same batch id counts its rows once", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+      rows = [%{"id" => 1}, %{"id" => 2}]
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert(name, @table, rows, batch_id: "insert-1")
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert(name, @table, rows, batch_id: "insert-1")
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum_by(entries, & &1.row_count) == 2
+    end
+  end
 end

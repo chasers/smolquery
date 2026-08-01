@@ -190,6 +190,14 @@ What that ack means:
   disk holds a single copy of its unsealed tail: acked rows survive a process,
   BEAM, or node crash, and losing the disk loses that tail. Sealing (Milestone 4)
   is what bounds it.
+- **A batch with an id is exactly-once; one without is at-least-once.** A batch
+  carrying a `:batch_id` idempotency key can be retried through any failure — a
+  lost ack, a transport timeout, a buffer crash-before-reply — and its rows land
+  once: the ids are fsynced in the manifest log record with the commit they
+  belong to, so the dedup index survives a restart, and a retry of a committed
+  batch is answered with the original ack before it is even admitted. An id
+  lives as long as its entry (through seal and grace), which comfortably covers
+  any retry loop. The API's `insertId` is where one comes from.
 
 Calls reach the owning node through a transport seam rather than a hardcoded hop.
 `Client` resolves ownership and dispatches; `Transport.Local` is a direct call for
@@ -556,7 +564,7 @@ The surface so far — schema types are `INT64`, `FLOAT64`, `STRING`, `BOOL`,
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
 | `GET /v1/datasets/:ds/tables/:t` | a table's schema and retention policy |
 | `PATCH /v1/datasets/:ds/tables/:t` | set or clear retention: `{"retention": {"column": "ts", "ttlMs": 2592000000}}` ages rows out of `ts` after 30 days, segment-grained and conservative (a segment is dropped only once *every* row in it has aged out); `{"retention": null}` keeps rows forever again |
-| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is |
+| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is. An optional `insertId` makes the request idempotent: retrying after a timeout or dropped response with the same id (and the same rows) cannot double-count — without one, retries are at-least-once |
 | `POST /v1/datasets/:ds/tables/:t/load` | batch load — the body is the file (`application/x-ndjson`, `text/csv`, or `application/vnd.apache.parquet`), pushed through the same insert path in chunks; capped by `load_max_bytes` (413 past it), synchronous, and not atomic — a mid-load failure reports what was already durable |
 | `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504 |
 | `POST /v1/jobs` | the same query as an async job — returns it pending |

@@ -179,4 +179,74 @@ defmodule Smolquery.BufferService.ClientTest do
       assert Registry.lookup(Runtime.registry(name), @table) == []
     end
   end
+
+  describe "write_batch/3 with a batch id (T-41)" do
+    defp batch_with_id(rows, id) do
+      %{schema: Schema.new!([{"id", :int64}]), rows: rows, batch_id: id}
+    end
+
+    defp hot_rows(name) do
+      {:ok, entries} = Client.hot_manifest(name, @table)
+
+      Enum.sum_by(entries, & &1.row_count)
+    end
+
+    test "a retry after the commit re-acks instead of writing twice", context do
+      name = start_buffer_service(context)
+      batch = batch_with_id([%{"id" => 1}, %{"id" => 2}], "retry-1")
+
+      {:ok, ack} = Client.write_batch(name, @table, batch)
+
+      assert {:ok, ^ack} = Client.write_batch(name, @table, batch)
+      assert hot_rows(name) == 2
+    end
+
+    test "a duplicate racing the same group commit lands once", context do
+      name = start_buffer_service(context, flush_interval_ms: 150)
+      batch = batch_with_id([%{"id" => 1}], "race-1")
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch) end)
+      second = Task.async(fn -> Client.write_batch(name, @table, batch) end)
+
+      assert {:ok, ack} = Task.await(first)
+      assert {:ok, ^ack} = Task.await(second)
+      assert hot_rows(name) == 1
+    end
+
+    test "re-acked retries do not skew the outstanding-load estimate", context do
+      name = start_buffer_service(context)
+      batch = batch_with_id([%{"id" => 1}], "load-1")
+
+      {:ok, _first} = Client.write_batch(name, @table, batch)
+      {:ok, _second} = Client.write_batch(name, @table, batch)
+      {:ok, _third} = Client.write_batch(name, @table, batch)
+
+      load = published_load(name)
+
+      assert Eventually.until(fn ->
+               Load.predicted_wait_ms(load, 0) in [0, :unknown]
+             end)
+    end
+
+    test "distinct ids still write separately", context do
+      name = start_buffer_service(context)
+
+      {:ok, _a} = Client.write_batch(name, @table, batch_with_id([%{"id" => 1}], "a"))
+      {:ok, _b} = Client.write_batch(name, @table, batch_with_id([%{"id" => 2}], "b"))
+
+      assert hot_rows(name) == 2
+    end
+
+    test "the dedup window survives a buffer restart", context do
+      name = start_buffer_service(context)
+      batch = batch_with_id([%{"id" => 1}], "reborn-1")
+      {:ok, ack} = Client.write_batch(name, @table, batch)
+
+      stop_supervised!(name)
+      restarted = start_buffer_service(context, name: name)
+
+      assert {:ok, ^ack} = Client.write_batch(restarted, @table, batch)
+      assert hot_rows(restarted) == 1
+    end
+  end
 end

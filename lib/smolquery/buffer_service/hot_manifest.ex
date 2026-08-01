@@ -154,6 +154,7 @@ defmodule Smolquery.BufferService.HotManifest do
   @impl GenServer
   def init(name) do
     :ets.new(name, [:ordered_set, :public, :named_table, read_concurrency: true])
+    :ets.new(batches(name), [:set, :public, :named_table, read_concurrency: true])
 
     {:ok, name}
   end
@@ -211,16 +212,40 @@ defmodule Smolquery.BufferService.HotManifest do
 
   Returns once the entry is durable. Until this returns, no caller may be told
   their rows were accepted.
+
+  `batch_ids` are the idempotency keys of the client batches this commit
+  covers; they are fsynced in the entry's record, which is what keeps the
+  dedup window closed across a restart (`batch_ack/3`).
   """
-  @spec add(t(), Store.table_ref(), Segment.t(), log() | nil) ::
+  @spec add(t(), Store.table_ref(), Segment.t(), log() | nil, [String.t()]) ::
           {:ok, Entry.t()} | {:error, term()}
-  def add(%__MODULE__{} = manifest, table_ref, %Segment{} = segment, log \\ nil) do
-    entry = Entry.from_segment(segment, now())
+  def add(%__MODULE__{} = manifest, table_ref, %Segment{} = segment, log \\ nil, batch_ids \\ []) do
+    entry = Entry.from_segment(segment, now(), batch_ids)
 
     with :ok <- append(manifest, table_ref, Entry.to_record(entry), log) do
       insert(manifest, table_ref, entry)
+      index_batches(manifest, table_ref, entry)
 
       {:ok, entry}
+    end
+  end
+
+  @doc """
+  The ack a committed batch was (or would have been) answered with.
+
+  The T-41 dedup read: a caller retrying a batch — after a lost ack, a
+  transport timeout, or a buffer crash-before-reply — asks with the batch's
+  idempotency key and gets the original commit's ack instead of a second
+  write. The index is rebuilt from the manifest log on recovery and an id
+  lives exactly as long as its entry, so the window stays closed across a
+  restart and the index is bounded by the grace-period reaper.
+  """
+  @spec batch_ack(t(), Store.table_ref(), String.t()) ::
+          {:ok, %{segment_id: String.t(), row_count: non_neg_integer()}} | :error
+  def batch_ack(%__MODULE__{table: table}, table_ref, batch_id) do
+    case :ets.lookup(batches(table), {table_ref, batch_id}) do
+      [{_key, ack}] -> {:ok, ack}
+      [] -> :error
     end
   end
 
@@ -509,7 +534,7 @@ defmodule Smolquery.BufferService.HotManifest do
 
         with :ok <- delete_all(manifest, Enum.map(entries, & &1.key)),
              :ok <- append(manifest, table_ref, record, log) do
-          Enum.each(entries, &:ets.delete(manifest.table, {table_ref, &1.id}))
+          Enum.each(entries, &forget(manifest, table_ref, &1))
         end
     end
   end
@@ -532,6 +557,22 @@ defmodule Smolquery.BufferService.HotManifest do
   defp insert(%__MODULE__{table: table}, table_ref, %Entry{} = entry),
     do: :ets.insert(table, {{table_ref, entry.id}, entry})
 
+  defp batches(table), do: Module.concat(table, Batches)
+
+  defp index_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry) do
+    ack = %{segment_id: entry.id, row_count: entry.row_count}
+
+    Enum.each(entry.batch_ids, &:ets.insert(batches(table), {{table_ref, &1}, ack}))
+  end
+
+  defp forget(%__MODULE__{} = manifest, table_ref, %Entry{} = entry) do
+    :ets.delete(manifest.table, {table_ref, entry.id})
+    forget_batches(manifest, table_ref, entry)
+  end
+
+  defp forget_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry),
+    do: Enum.each(entry.batch_ids, &:ets.delete(batches(table), {table_ref, &1}))
+
   defp replace(%__MODULE__{table: table} = manifest, table_ref, entries) do
     keep = MapSet.new(entries, & &1.id)
 
@@ -541,6 +582,9 @@ defmodule Smolquery.BufferService.HotManifest do
     |> entries(table_ref)
     |> Enum.reject(&MapSet.member?(keep, &1.id))
     |> Enum.each(&:ets.delete(table, {table_ref, &1.id}))
+
+    :ets.match_delete(batches(table), {{table_ref, :_}, :_})
+    Enum.each(entries, &index_batches(manifest, table_ref, &1))
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok
