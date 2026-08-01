@@ -149,6 +149,16 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @doc """
+  The catalog name a lake is attached under when configuration names none.
+
+  Public because the name appears in SQL other modules build — the query
+  planner's views read `#{@default_catalog}.<dataset>.<table>`, and the engine
+  executing them must have attached the lake under the same name.
+  """
+  @spec default_catalog() :: String.t()
+  def default_catalog, do: @default_catalog
+
+  @doc """
   Resolves a service's `:catalog` configuration into a handle and the options
   its supervisor must start an engine with.
 

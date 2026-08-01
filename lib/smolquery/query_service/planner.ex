@@ -1,0 +1,260 @@
+defmodule Smolquery.QueryService.Planner do
+  @moduledoc """
+  SQL in, an executable `Smolquery.QueryService.Plan` out.
+
+  The planner composes one consistent table view out of two tiers that move
+  underneath it: sealed segments in the catalog, micro-segments in buffer
+  nodes' hot manifests. It never rewrites the user's SQL. Instead it builds a
+  view per referenced table in the job engine's own default catalog —
+  shadowing the attached lake in name resolution — and the user's query runs
+  unmodified against those.
+
+  ## DuckDB's parser is the only parser
+
+  Table references come from `json_serialize_sql`, which doubles as the
+  read-only gate: only a single SELECT statement serializes; DDL, DML, and
+  multi-statement input fail here, before any manifest is fetched or view
+  created. References must be `dataset.table` — a bare name that is not a CTE
+  is unknown, and a catalog-qualified or `AT`-clause reference is refused
+  rather than silently given different consistency semantics than the view
+  would have.
+
+  ## One snapshot, and the membership rule
+
+  The plan pins the catalog's current snapshot `S` once. Each view's sealed
+  side reads `AT (VERSION => S)`; each hot manifest entry is included iff it
+  carries no claim, or its claim's sealed keys are not all present in
+  `Catalog.segments(table, S)`. That is Milestone 4's D1 rule (T-27), exact at
+  every instant of the seal handoff: the catalog commit that makes rows appear
+  in the sealed tier at `S′` is the same event that excludes their
+  micro-segments for every reader at `S >= S′`. Keys compare by path basename —
+  claims carry store keys, the catalog absolute paths, and both end in
+  `<segment id>.parquet`.
+
+  Hot rows have no snapshot: an unclaimed micro-segment is always included.
+  That is read-your-writes, not an inconsistency.
+
+  ## Both tiers project onto the catalog's schema
+
+  Micro-segments written before a column was added lack it; `UNION ALL BY
+  NAME` pads what one side is missing with NULL, and the view's outer
+  projection selects exactly the catalog's columns, in catalog order, so a
+  column neither tier carries cannot leak in and one the hot tier predates
+  cannot error.
+
+  ## Failure honesty
+
+  An unreachable buffer owner fails the plan — answering from the sealed tier
+  alone would be a wrong answer with a green status. The v1 owner-to-URL map
+  is the runtime's single `buffer_base_url` (the ring is `[self]`); Milestone
+  8 replaces that one function with ring lookup.
+  """
+
+  alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.HotClient
+  alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Engine
+  alias Smolquery.Engine.Result
+  alias Smolquery.Identifier
+  alias Smolquery.QueryService.Plan
+  alias Smolquery.QueryService.Runtime
+
+  @doc """
+  Plans `sql` against the catalog and the hot tier, as one consistent read.
+
+  `engine` is only used to parse — `json_serialize_sql` runs there and nothing
+  else does. The runner passes its own job engine, so parsing never queues
+  behind another job's scan.
+  """
+  @spec plan(Runtime.t(), atom(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
+  def plan(%Runtime{} = runtime, engine, sql) do
+    with {:ok, refs} <- table_refs(engine, sql),
+         {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
+         {:ok, tables} <- resolve(runtime, refs, snapshot),
+         {:ok, manifests} <- manifests(runtime, refs) do
+      {:ok, build(sql, snapshot, refs, tables, manifests)}
+    end
+  end
+
+  @doc """
+  The `{dataset, table}` references in `sql`, via DuckDB's own parser.
+
+  Serialization failing is the read-only gate doing its job: anything but a
+  single SELECT statement is `{:error, {:invalid_query, message}}` or
+  `{:error, :multiple_statements}`. CTE names are not references; a bare table
+  name that is no CTE, a catalog-qualified name, and a reference carrying its
+  own `AT` clause are each refused with a reason naming the offender.
+  """
+  @spec table_refs(atom(), String.t()) :: {:ok, [Catalog.table_ref()]} | {:error, term()}
+  def table_refs(engine, sql) do
+    with {:ok, ast} <- serialize(engine, sql),
+         {:ok, statement} <- gate(ast) do
+      refs(statement)
+    end
+  end
+
+  defp serialize(engine, sql) do
+    with {:ok, result} <-
+           Engine.query(engine, "SELECT json_serialize_sql(#{Identifier.sql_string(sql)})") do
+      result |> Result.one!() |> JSON.decode()
+    end
+  end
+
+  defp gate(%{"error" => true} = ast),
+    do: {:error, {:invalid_query, Map.get(ast, "error_message", "unparseable")}}
+
+  defp gate(%{"statements" => [statement]}), do: {:ok, statement}
+  defp gate(%{"statements" => _many}), do: {:error, :multiple_statements}
+  defp gate(ast), do: {:error, {:invalid_query, ast}}
+
+  defp refs(statement) do
+    ctes = collect(statement, &cte_names/1)
+
+    statement
+    |> collect(&base_table/1)
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, []}, fn node, {:ok, acc} ->
+      case classify(node, ctes) do
+        {:ok, ref} -> {:cont, {:ok, [ref | acc]}}
+        :cte -> {:cont, {:ok, acc}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, refs} -> {:ok, refs |> Enum.reverse() |> Enum.uniq()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp collect(node, fun), do: node |> collect(fun, []) |> Enum.reverse()
+
+  defp collect(node, fun, acc) when is_map(node) do
+    acc = node |> fun.() |> Enum.reduce(acc, &[&1 | &2])
+
+    Enum.reduce(node, acc, fn {_key, value}, inner -> collect(value, fun, inner) end)
+  end
+
+  defp collect(node, fun, acc) when is_list(node),
+    do: Enum.reduce(node, acc, &collect(&1, fun, &2))
+
+  defp collect(_leaf, _fun, acc), do: acc
+
+  defp cte_names(%{"cte_map" => %{"map" => entries}}) when is_list(entries),
+    do: for(%{"key" => name} <- entries, do: name)
+
+  defp cte_names(_node), do: []
+
+  defp base_table(%{"type" => "BASE_TABLE"} = node), do: [node]
+  defp base_table(_node), do: []
+
+  defp classify(%{"at_clause" => at} = node, _ctes) when not is_nil(at),
+    do: {:error, {:unsupported_at_clause, node["table_name"]}}
+
+  defp classify(%{"catalog_name" => catalog} = node, _ctes) when catalog != "",
+    do: {:error, {:catalog_qualified_reference, "#{catalog}.#{node["table_name"]}"}}
+
+  defp classify(%{"schema_name" => "", "table_name" => name}, ctes) do
+    if name in ctes, do: :cte, else: {:error, {:unknown_table, name}}
+  end
+
+  defp classify(%{"schema_name" => dataset, "table_name" => table}, _ctes) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table) do
+      {:ok, {dataset, table}}
+    end
+  end
+
+  defp resolve(runtime, refs, snapshot) do
+    Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
+      with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
+           {:ok, paths} <- Catalog.segments(runtime.catalog, ref, snapshot) do
+        sealed = MapSet.new(paths, &Path.basename/1)
+
+        {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed})}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp manifests(_runtime, []), do: {:ok, %{}}
+
+  defp manifests(runtime, refs) do
+    refs
+    |> Task.async_stream(&{&1, manifest(runtime, &1)},
+      ordered: false,
+      on_timeout: :kill_task,
+      timeout: fetch_deadline(runtime)
+    )
+    |> Enum.reduce_while({:ok, %{}}, fn
+      {:ok, {ref, {:ok, entries}}}, {:ok, acc} ->
+        {:cont, {:ok, Map.put(acc, ref, entries)}}
+
+      {:ok, {ref, {:error, reason}}}, _acc ->
+        {:halt, {:error, {:hot_tier_unavailable, ref, reason}}}
+
+      {:exit, reason}, _acc ->
+        {:halt, {:error, {:hot_tier_unavailable, reason}}}
+    end)
+  end
+
+  defp manifest(runtime, ref) do
+    owner = Client.owner(runtime.buffer_name, ref)
+
+    HotClient.manifest(base_url(runtime, owner), ref, timeout_ms: runtime.buffer_timeout_ms)
+  end
+
+  defp base_url(%Runtime{buffer_base_url: url}, _owner), do: url
+
+  defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
+  defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
+
+  defp build(sql, snapshot, refs, tables, manifests) do
+    hot =
+      Map.new(refs, fn ref ->
+        {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
+      end)
+
+    statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
+
+    %Plan{sql: sql, snapshot: snapshot, tables: refs, statements: statements, hot: hot}
+  end
+
+  defp include?(entry, sealed) do
+    case entry["claim_keys"] do
+      keys when is_list(keys) and keys != [] ->
+        not Enum.all?(keys, &MapSet.member?(sealed, Path.basename(&1)))
+
+      _unclaimed ->
+        true
+    end
+  end
+
+  defp view({dataset, table}, snapshot, %{schema: schema}, entries) do
+    ds = Identifier.quote_name!(dataset)
+    t = Identifier.quote_name!(table)
+    lake = Identifier.quote_name!(DuckLake.default_catalog())
+    columns = Enum.map_join(schema.fields, ", ", &Identifier.quote_name!(&1.name))
+
+    sealed = "SELECT * FROM #{lake}.#{ds}.#{t} AT (VERSION => #{snapshot})"
+
+    union =
+      case Enum.map(entries, & &1["url"]) do
+        [] ->
+          sealed
+
+        urls ->
+          parquet = Enum.map_join(urls, ", ", &Identifier.sql_string/1)
+
+          sealed <>
+            " UNION ALL BY NAME " <>
+            "SELECT * FROM read_parquet([#{parquet}], union_by_name := true)"
+      end
+
+    [
+      "CREATE SCHEMA IF NOT EXISTS #{ds}",
+      "CREATE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{union})"
+    ]
+  end
+end
