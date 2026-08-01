@@ -41,7 +41,8 @@ config :smolquery, Smolquery.StorageService,
   target_segment_bytes: 268_435_456,
   max_concurrent_seals: 2,
   gc_interval_ms: 300_000,
-  gc_grace_ms: 3_600_000
+  gc_grace_ms: 3_600_000,
+  handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",

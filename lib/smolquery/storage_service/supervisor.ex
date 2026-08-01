@@ -3,15 +3,25 @@ defmodule Smolquery.StorageService.Supervisor do
   Top-level subtree for the `:storage` role.
 
   Started only on nodes whose roles include `:storage` (see `Smolquery.Roles`).
-  Holds the sealed tier's workers: an engine to merge through, a task supervisor
-  the merges run under, and the sealer that answers seal signals.
+  Holds the sealed tier's workers: a catalog to commit through, an engine to merge
+  through, a task supervisor the merges run under, and the sealer that answers seal
+  signals.
+
+  The catalog and the merge run on separate engines deliberately. An
+  `Adbc.Connection` serializes the queries it is given, so sharing one would put
+  every catalog commit behind whatever multi-gigabyte `COPY` happened to be in
+  flight.
 
   The strategy is `rest_for_one`, in that order, because the dependency runs one
-  way. A seal attempt merges through the engine and runs as a task, so both must
-  be up before the sealer accepts a signal; the sealer crashing disturbs neither.
-  Losing the engine restarts the sealer too, which is what abandons in-flight
-  attempts — safe, because a level-triggered re-signal brings every unsealed table
-  back and a claim fixes the input set.
+  way. A seal attempt commits through the catalog and merges through the engine and
+  runs as a task, so all three must be up before the sealer accepts a signal; the
+  sealer crashing disturbs none of them. Losing the catalog restarts everything
+  above it, which is what abandons in-flight attempts — safe, because a
+  level-triggered re-signal brings every unsealed table back and a claim fixes the
+  input set.
+
+  A deployment that commits through a catalog it manages elsewhere passes a
+  `%Smolquery.Catalog{}` in configuration, and then this subtree starts none.
 
   Nothing here holds durable state. The catalog and the sealed store do, which is
   what makes a storage node disposable: it can die mid-seal and another node (or
@@ -22,6 +32,7 @@ defmodule Smolquery.StorageService.Supervisor do
 
   use Supervisor
 
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
@@ -43,12 +54,19 @@ defmodule Smolquery.StorageService.Supervisor do
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
 
-    children = [
-      {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
-      {Task.Supervisor, name: Runtime.seals(runtime.name)},
-      {Sealer, runtime}
-    ]
+    children =
+      catalog(runtime) ++
+        [
+          {Engine, name: Runtime.engine(runtime.name), extensions: runtime.engine_extensions},
+          {Task.Supervisor, name: Runtime.seals(runtime.name)},
+          {Sealer, runtime}
+        ]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
+
+  defp catalog(%Runtime{catalog_opts: nil}), do: []
+
+  defp catalog(%Runtime{} = runtime),
+    do: [{DuckLake, [name: Runtime.catalog_engine(runtime.name)] ++ runtime.catalog_opts}]
 end

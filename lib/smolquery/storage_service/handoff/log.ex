@@ -1,12 +1,14 @@
 defmodule Smolquery.StorageService.Handoff.Log do
   @moduledoc """
-  The default `Smolquery.StorageService.Handoff` — writes the attempt to the log.
+  A `Smolquery.StorageService.Handoff` that writes the attempt to the log and
+  refuses it.
 
-  Stands in until the merge lands. A node running the storage role can accept seal
-  signals, schedule them, and bound them, but it cannot yet seal anything, and
-  that shows up here rather than as silent success: the attempt reports
-  `{:error, :not_implemented}`, so the table stays unsealed and the buffer's
-  level-triggered signal keeps asking.
+  `Handoff.Seal` is what a deployment wants. This is for one narrow case: a storage
+  node that should accept, schedule, and bound seal signals without acting on them
+  — while a catalog is unavailable, or to watch what sealing *would* be asked to do
+  before letting it. The attempt reports `{:error, :not_implemented}` rather than
+  success, so nothing is retired and the buffer's level-triggered signal keeps
+  asking.
   """
 
   @behaviour Smolquery.StorageService.Handoff
