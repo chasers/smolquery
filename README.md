@@ -524,10 +524,23 @@ CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurren
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs     # bigger claims, bigger merges
 ```
 
+`bench/results/` holds the last recorded run of each script — the tables verbatim,
+the machine they came from, and the decisions they settled. Re-run a script after a
+DuckDB, DuckLake, Explorer, or OTP upgrade and overwrite its file there, so the
+next comparison has something to diff against.
+
 `bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
 across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
-fsyncs behind an ack (D3), and probes the one-table inline-flush ceiling (D6).
-Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
+fsyncs behind an ack (D3), and locates the one-table inline-flush ceiling (D6) —
+sweeping writers to 1024 against a light and a heavy schema, timing the Polars
+encode in isolation, and re-running the fsync toggle at the top of the sweep. Its
+other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
+
+That ceiling is the encode, and it is structural: throughput is
+`rows_per_flush / max(encode, flush_interval_ms)`, so one table holds ~1.7M rows/s
+on a four-column schema with a `Decimal` and ~2-3.4M on two columns. Writer count
+does not find it — group commit turns extra writers into a wider flush rather than
+more flushes, which is why the sweep is still linear at 1024.
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the
@@ -536,18 +549,19 @@ defaults to snappy while segments are written with zstd, so sealing silently mad
 data 2.85× larger until the codec was matched. No correctness test could catch
 that.
 
-Each script's `@moduledoc` records what it measures and what it concluded. Two
-results worth knowing before writing a read path:
+Each script's `@moduledoc` records what it measures and what it concluded; the
+numbers behind those conclusions are in `bench/results/`. Two results worth knowing
+before writing a read path:
 
 - **A large result must not come back as Elixir terms.** `Smolquery.Engine.Result`
   converts Arrow row by row, which costs roughly a kilobyte and 2 µs per row — 5M
-  rows take 11.5 s and 4.8 GiB, against 307 ms and 8.7 MiB left in Arrow. It is
+  rows take 11.2 s and 3.4 GiB, against 390 ms and 11.5 MiB left in Arrow. It is
   the right shape for catalog and control-plane queries, and a trap for user
   results, which is what `Engine.frame/3` and the `:max_result_rows` ceiling are
   for.
 - **One connection serializes.** `Engine.Connection` is a per-query mutex, so
   query throughput is flat in client count. Eight connections serve eight
-  concurrent clients about 2.9× faster than one does.
+  concurrent clients about 3.5× faster than one does.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for quality gates and the project
 tracker, and [`AGENTS.md`](AGENTS.md) for codebase tooling.
