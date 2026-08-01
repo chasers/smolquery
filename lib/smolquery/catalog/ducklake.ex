@@ -302,6 +302,25 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def registered_through(%__MODULE__{} = config, {dataset, table}, snapshot)
+      when is_integer(snapshot) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, result} <-
+           query(
+             config,
+             "SELECT DISTINCT df.path, df.path_is_relative " <>
+               "FROM #{metadata_schema(config)}.ducklake_data_file df " <>
+               "JOIN #{metadata_schema(config)}.ducklake_table t ON t.table_id = df.table_id " <>
+               "JOIN #{metadata_schema(config)}.ducklake_schema s ON s.schema_id = t.schema_id " <>
+               "WHERE s.schema_name = $1 AND t.table_name = $2 AND df.begin_snapshot <= $3",
+             [dataset, table, snapshot]
+           ) do
+      absolute_paths(result.rows)
+    end
+  end
+
+  @impl Catalog
   def drop_segments(%__MODULE__{} = config, _table, []), do: current_snapshot(config)
 
   def drop_segments(%__MODULE__{} = config, table, paths) do

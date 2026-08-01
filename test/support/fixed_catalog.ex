@@ -41,6 +41,14 @@ defmodule Smolquery.Test.FixedCatalog do
     do: {:ok, Map.get(segments, {table, snapshot}, [])}
 
   @impl Catalog
+  def registered_through(answers, table, snapshot) do
+    case Map.fetch(answers, :registered) do
+      {:ok, registered} -> {:ok, Map.get(registered, {table, snapshot}, [])}
+      :error -> segments(answers, table, snapshot)
+    end
+  end
+
+  @impl Catalog
   def create_dataset(_answers, _dataset), do: {:error, :fixed}
 
   @impl Catalog

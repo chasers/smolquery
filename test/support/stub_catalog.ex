@@ -58,6 +58,10 @@ defmodule Smolquery.Test.StubCatalog do
     do: record(owner, :segments, [table, snapshot], {:ok, ["/stub.parquet"]})
 
   @impl Catalog
+  def registered_through(owner, table, snapshot),
+    do: record(owner, :registered_through, [table, snapshot], {:ok, ["/stub.parquet"]})
+
+  @impl Catalog
   def drop_segments(owner, table, paths),
     do: record(owner, :drop_segments, [table, paths], {:ok, @snapshot})
 

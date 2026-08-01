@@ -291,6 +291,39 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "registered_through/3 (the seal-membership read)" do
+    test "still lists a path the current snapshot dropped", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a, b])
+      {:ok, dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      assert {:ok, through} = Catalog.registered_through(catalog, @table, dropped)
+      assert Enum.sort(through) == Enum.sort([a.path, b.path])
+    end
+
+    test "excludes a path registered after the asked snapshot", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, first} = Catalog.register_segments(catalog, @table, [a])
+      {:ok, _second} = Catalog.register_segments(catalog, @table, [b])
+
+      assert Catalog.registered_through(catalog, @table, first) == {:ok, [a.path]}
+    end
+
+    test "is empty for a table that never registered anything", %{catalog: catalog} do
+      {:ok, snapshot} = Catalog.current_snapshot(catalog)
+
+      assert Catalog.registered_through(catalog, @table, snapshot) == {:ok, []}
+    end
+  end
+
   describe "drop_segments/3" do
     test "removes a segment from the current snapshot but leaves the file", %{
       catalog: catalog,

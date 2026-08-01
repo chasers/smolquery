@@ -66,6 +66,8 @@ defmodule Smolquery.Catalog do
               {:ok, snapshot()} | {:error, term()}
   @callback segments(config :: term(), table_ref(), snapshot() | :current) ::
               {:ok, [String.t()]} | {:error, term()}
+  @callback registered_through(config :: term(), table_ref(), snapshot()) ::
+              {:ok, [String.t()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
@@ -153,6 +155,23 @@ defmodule Smolquery.Catalog do
           {:ok, [String.t()]} | {:error, term()}
   def segments(%__MODULE__{} = catalog, table, snapshot \\ :current),
     do: catalog.impl.segments(catalog.config, table, snapshot)
+
+  @doc """
+  Every path ever registered against the table at a snapshot at or before
+  `snapshot` — including paths a later snapshot dropped.
+
+  This is the seal-membership question, and it is deliberately not
+  `segments/3`: a planner deciding whether a hot micro-segment's seal has
+  committed must not change its answer because compaction or retention later
+  *replaced* the sealed file. A drop never un-commits a seal — the rows live
+  on in whatever replaced it — so membership tests "was it ever registered by
+  `snapshot`", while `segments/3` answers the different question "what would
+  I read at `snapshot`".
+  """
+  @spec registered_through(t(), table_ref(), snapshot()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def registered_through(%__MODULE__{} = catalog, table, snapshot),
+    do: catalog.impl.registered_through(catalog.config, table, snapshot)
 
   @doc """
   Removes segments from a table's current snapshot, returning the new snapshot.

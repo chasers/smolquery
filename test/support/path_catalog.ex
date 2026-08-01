@@ -77,6 +77,16 @@ defmodule Smolquery.Test.PathCatalog do
   end
 
   @impl Catalog
+  def registered_through(agent, _table, _snapshot) do
+    Agent.get(agent, fn entries ->
+      case failure(entries) do
+        {:ok, reason} -> {:error, reason}
+        :error -> {:ok, for({path, _state} <- paths(entries), do: path)}
+      end
+    end)
+  end
+
+  @impl Catalog
   def register_segments(agent, _table, segments) do
     Enum.each(segments, &register(agent, &1.path))
 
