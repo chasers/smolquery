@@ -96,17 +96,27 @@ end
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
   uri = URI.parse(catalog_database_url)
   [db_username | db_password] = String.split(uri.userinfo || "postgres", ":", parts: 2)
+  db_password = List.first(db_password) || ""
   database = String.trim_leading(uri.path || "/smolquery", "/")
+  port = uri.port || 5432
 
   config :smolquery, Smolquery.Cluster,
     enabled: true,
     postgres: [
       hostname: uri.host,
-      port: uri.port || 5432,
+      port: port,
       username: db_username,
-      password: List.first(db_password) || "",
+      password: db_password,
       database: database
     ]
+
+  # The catalog's own metadata connection, split from the same URL (PL-11
+  # D1) — SMOLQUERY_CATALOG below still wins if an operator sets it
+  # explicitly, since that block runs after this one.
+  config :smolquery, Smolquery.Catalog.DuckLake,
+    metadata:
+      "postgres:dbname=#{database} host=#{uri.host} port=#{port} " <>
+        "user=#{db_username} password=#{db_password}"
 end
 
 # Inter-node query traffic over TLS. Certificates are per node (gen_rpc
