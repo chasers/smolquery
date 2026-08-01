@@ -18,7 +18,7 @@ defmodule Bench.Buffer do
       double-buffering is worth building, and the number partitioned writes
       (PL-6) have to beat.
 
-  D6 comes in three parts, because "one table plateaus at N rows/s" is only
+  D6 comes in five parts, because "one table plateaus at N rows/s" is only
   actionable once you know *what* plateaued:
 
     * **the sweep** — writers against rows/s, for a light schema and a heavy one,
@@ -26,12 +26,26 @@ defmodule Bench.Buffer do
       happened (each flush is one segment in the manifest, so the manifest counts
       them) and how deep the buffer's mailbox got.
     * **the encode in isolation** — `Writer.write` timed off to the side, across
-      the rows-per-flush the sweep produced. One table's structural ceiling is
+      the rows-per-flush the sweep produced. Throughput is
       `rows_per_flush / max(encode, flush_interval_ms)`: while an encode finishes
       inside the interval, cadence sets the ack; the moment it does not, the
       encode does.
     * **the fsyncs at the ceiling** — D3's store-fsync toggle re-run at the top of
       the writer sweep, to show whether the plateau is the fsync or the encode.
+    * **the byte bound** — the correction to the two parts above. They price the
+      encode against `flush_interval_ms` as if `rows_per_flush` could grow without
+      limit, but `flush_max_bytes` caps it first (8 MB by default, so ~48K light
+      rows or ~31K heavy). This sweeps that bound to find which of the three
+      actually binds, because the answer decides whether partitioning is even
+      addressing the right quantity.
+    * **the partition proxy** — P independent TableBuffers over one workload,
+      addressed as P tables. Partitions differ from tables in routing and identity,
+      not in throughput mechanics, so this reads the multiplier PL-6 would buy
+      without building PL-6. Two modes, and they answer different questions:
+      `split` divides a fixed writer pool P ways (partitioning a real workload),
+      `scale` holds writers-per-buffer constant (headroom). Below the crossover
+      `split` should be *neutral* by construction — P encodes of 1/P the rows
+      finish in the same cycle — so gains there mean P=1 was already past it.
 
   Rows are two columns (`id`, `ts`) rather than `Bench.Support.schema/0`'s four,
   so the numbers measure group commit and the store, not `Decimal` construction.
@@ -41,6 +55,13 @@ defmodule Bench.Buffer do
   measure the buffer's byte bound uses — not the encoded Parquet. Every cell
   warms up with one untimed write per table, so lazy buffer start, manifest
   recovery, and NIF warmup stay out of the tail percentiles.
+
+  **Sealing is disabled here** — every cell raises the seal thresholds out of
+  reach. This script measures group commit; `bench/sealer.exs` measures sealing.
+  Without that, the high-volume sections cross `seal_max_bytes` mid-cell and
+  signal seals into a DuckLake catalog this script never creates, and the failed
+  seals retry with backoff *inside the timed window*. Also why `flush_count/2` can
+  trust the manifest: nothing retires entries out from under it.
 
       mix run bench/buffer.exs
       CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs
@@ -70,28 +91,40 @@ defmodule Bench.Buffer do
     Either way, both fsyncs together are an order of magnitude under any
     `flush_interval_ms` worth running. D3's accepted durability window costs
     single-digit milliseconds, not the ack.
-  - **D6: still no plateau at 1024 writers — and writer count was never going to
-    find one.** 582 → 2,179 → 8,968 → 32,983 → 145,944 → 492,904 rows/s at 1, 4,
-    16, 64, 256, 1024 writers, and the heavy schema tracks it within 13%. The
-    reason is in the `flushes` column: it is 20 in every cell. Group commit turns
-    added writers into a *wider* flush, not more flushes, so rows/s climbs with
-    rows-per-flush (20 → 20,480) while the cadence holds.
-  - **What bends is the encode, structurally rather than at a writer count.**
-    Throughput is `rows_per_flush / max(encode, flush_interval_ms)`; the ceiling
-    is where one encode outgrows the interval. Timed off to the side, that is
-    ~100K rows/flush light (29.4 ms) and ~50K heavy (30.4 ms) — a ceiling of
-    **~2.0-3.4M rows/s light, ~1.7M heavy** on one table, needing thousands of
-    concurrent 20-row writers or hundreds of 500-row ones to reach.
+  - **D6: the writer sweep finds no plateau at 1024 writers, because writer count
+    was never the variable.** 593 → 2,251 → 8,944 → 36,108 → 150,589 → 539,471
+    rows/s at 1, 4, 16, 64, 256, 1024 writers, heavy within 12%. The `flushes`
+    column is 20 in every cell: group commit turns added writers into a *wider*
+    flush, not more flushes, so rows/s climbs with rows-per-flush (20 → 20,480)
+    while cadence holds. At 20-row batches even 1024 writers only make a 20,480-row
+    flush, which is nowhere near saturating anything.
+  - **Saturate it with 500-row batches and one table tops out at ~2.2M rows/s
+    light, ~1.1M heavy.** That is the real single-table number, and none of the
+    three configured bounds sets it: sweeping `flush_max_bytes` 8 MB → 512 MB moves
+    rows-per-flush 7.5× (47,189 → 353,103) and throughput ~5%. The byte bound
+    decides how rows are *packed* into flushes, not how many get through.
+  - **What sets it is the encode plus the write path around it.** The encode alone
+    sustains ~4.4M rows/s light (100K rows in 22.5 ms) and ~2.3M heavy (43.6 ms),
+    so accumulate, reply fan-out, manifest append, and fsync cost roughly the other
+    half. Read `encode_in_isolation/1`'s last column as an upper bound.
   - **Not the fsync, and not the mailbox.** Toggling the segment fsync at 1024
-    writers moves throughput ±6%, and the wrong way for the heavy schema — noise.
-    Mailbox depth peaks below the writer count (809 of 1024) because each writer
-    has one outstanding call, so the buffer never falls behind its own inbox.
-  - **So partitioning (PL-6) is the right multiplier, and less urgent than it was
-    written to be.** P TableBuffers give P parallel encodes, which is the quantity
-    that binds. But PL-6 was drafted against "148K rows/s, no plateau found"; the
-    real wall is an order of magnitude past that. Double-buffering is worth ~7 ms
-    of a 41.5 ms cycle today, and past the crossover partitioning is the better
-    lever — so inline flush stays.
+    writers moves throughput ±4%, and the wrong way for both schemas — noise.
+    Mailbox depth stays at or below the writer count because each writer has one
+    outstanding call.
+  - **Group commit's latency promise breaks at saturation, and that is the real
+    argument for PL-6.** Below saturation p50 ack is `flush_interval_ms` plus a few
+    ms regardless of load. At saturation it degrades to 210 ms light and 458 ms
+    heavy — 8-19× the interval — because offered rows per cycle far exceed flushed
+    rows per cycle and acks queue cycles deep.
+  - **P independent buffers multiply both.** The partition proxy reaches
+    **6.8M rows/s light and 3.3M heavy at P=8** on 10 cores: 3.23× a single buffer
+    for a fixed workload, 5.17× for P fully-loaded buffers, with p50 ack recovering
+    211 ms → 67 ms. `split` and `scale` agree to 0.2% at P=8, where they describe
+    the same configuration. Partitioning divides exactly the quantity that binds,
+    so PL-6's design multiplies the right thing.
+  - **Inline flush stays; double-buffering still has no case.** It hides one encode
+    behind the next accumulation — worth part of one cycle — where partitioning
+    multiplies the encode itself and fixes the ack degradation too.
 
   """
 
@@ -114,6 +147,8 @@ defmodule Bench.Buffer do
       inline_flush_ceiling(dir)
       encode_in_isolation(dir)
       fsyncs_at_the_ceiling(dir)
+      byte_bound(dir)
+      partition_proxy(dir)
     end)
   end
 
@@ -261,7 +296,10 @@ defmodule Bench.Buffer do
     sizes = [100, 1_000, 10_000, 50_000, 100_000]
 
     IO.puts("\n  the flush cadence holds while one encode fits inside flush_interval_ms")
-    IO.puts("  (#{interval} ms here). Past that, rows/s = rows_per_flush / encode.\n")
+    IO.puts("  (#{interval} ms here). Past that, rows/s = rows_per_flush / encode.")
+    IO.puts("  Read the last column as an upper bound, not a prediction: it prices the")
+    IO.puts("  encode alone, and the byte-bound section measures the write path around")
+    IO.puts("  it costing roughly another half on top.\n")
 
     IO.puts(
       "  schema     rows   encode min   encode med   fits #{interval}ms      ceiling rows/s"
@@ -330,6 +368,126 @@ defmodule Bench.Buffer do
     IO.puts("  fsync only. Little movement here means the ceiling is upstream of both.")
   end
 
+  defp byte_bound(dir) do
+    heading("what actually caps rows per flush: flush_max_bytes, not the interval")
+
+    writers = env("MAX_WRITERS", 1024)
+    calls = env("CALLS", 20)
+    size = 500
+
+    IO.puts(
+      "\n  #{writers} writers x #{size}-row batches offers #{writers * size} rows per cycle."
+    )
+
+    IO.puts("  Whichever bound binds first decides what one encode actually swallows.\n")
+
+    IO.puts(
+      "  schema  flush_max_bytes      rows/s   flushes   rows/flush   MiB/flush     p50 ack"
+    )
+
+    for weight <- [:light, :heavy], limit <- [8_000_000, 32_000_000, 512_000_000] do
+      root = Path.join(dir, "bytebound-#{weight}-#{limit}")
+
+      {name, pid} =
+        start_buffer(dir,
+          store: Store.Local.new(dir: Path.join(root, "segments")),
+          log_dir: Path.join(root, "manifests"),
+          flush_interval_ms: 25,
+          flush_max_rows: 100_000_000,
+          flush_max_bytes: limit,
+          max_buffered_rows: 100_000_000,
+          max_buffered_bytes: 2_048_000_000
+        )
+
+      table_ref = {@dataset, "events"}
+      {wall_us, latencies} = hammer(name, [table_ref], writers, calls, size, weight)
+      flushes = flush_count(name, table_ref)
+
+      stop_buffer(name, pid)
+
+      rows = writers * calls * size
+      per = per_flush(rows, flushes)
+
+      IO.puts(
+        "  #{label(weight, 6)}  #{pad(div(limit, 1_000_000), 13)} MB  " <>
+          "#{pad(round(rows / (wall_us / 1_000_000)), 10)}  #{pad(flushes, 7)}  " <>
+          "#{pad(per, 11)}  " <>
+          "#{pad(mib(per * bytes_per_row(weight)), 9)}  " <>
+          "#{pad(ms(percentile(Enum.sort(latencies), 0.50)), 10)}"
+      )
+    end
+
+    IO.puts("\n  the default is 8 MB. If rows/flush stops growing there while rows/s")
+    IO.puts("  stops with it, the byte bound — not flush_interval_ms and not the")
+    IO.puts("  encode — is what one table's ceiling is actually made of.")
+  end
+
+  defp partition_proxy(dir) do
+    heading("the partition proxy (PL-6 step 4): P independent buffers over one workload")
+
+    total = env("MAX_WRITERS", 1024)
+    per_buffer = env("WRITERS_PER_BUFFER", 128)
+    calls = env("CALLS", 20)
+    size = 500
+
+    IO.puts("\n  P independent TableBuffers, addressed as P tables. Partitions differ from")
+    IO.puts("  tables in routing and identity, not in throughput mechanics, so this reads")
+    IO.puts("  the multiplier PL-6 would buy without building PL-6.\n")
+    IO.puts("  split — #{total} writers divided P ways: models partitioning a fixed workload.")
+    IO.puts("  scale — #{per_buffer} writers per buffer: models P buffers each fully loaded.\n")
+
+    IO.puts(
+      "  mode    schema    P   writers      rows/s      vs P=1   flushes   rows/flush   mailbox     p50 ack"
+    )
+
+    for mode <- [:split, :scale], weight <- [:light, :heavy] do
+      Enum.reduce([1, 2, 4, 8], nil, fn partitions, baseline ->
+        writers = if mode == :split, do: total, else: per_buffer * partitions
+        refs = for p <- 1..partitions, do: {@dataset, "events_p#{p}"}
+        root = Path.join(dir, "proxy-#{mode}-#{weight}-#{partitions}")
+
+        {name, pid} =
+          start_buffer(dir,
+            store: Store.Local.new(dir: Path.join(root, "segments")),
+            log_dir: Path.join(root, "manifests"),
+            flush_interval_ms: 25,
+            flush_max_rows: 100_000_000,
+            flush_max_bytes: 512_000_000,
+            max_buffered_rows: 100_000_000,
+            max_buffered_bytes: 2_048_000_000
+          )
+
+        {{wall_us, latencies}, mailbox} =
+          with_mailbox_sampler(name, refs, fn ->
+            hammer(name, refs, writers, calls, size, weight)
+          end)
+
+        flushes = refs |> Enum.map(&flush_count(name, &1)) |> Enum.sum()
+
+        stop_buffer(name, pid)
+
+        rows = writers * calls * size
+        rate = rows / (wall_us / 1_000_000)
+        speedup = if baseline, do: "#{Float.round(rate / baseline, 2)}x", else: "-"
+
+        IO.puts(
+          "  #{label(mode, 6)}  #{label(weight, 6)}  #{pad(partitions, 3)}  #{pad(writers, 7)}  " <>
+            "#{pad(round(rate), 10)}  #{pad(speedup, 10)}  #{pad(flushes, 7)}  " <>
+            "#{pad(per_flush(rows, flushes), 11)}  #{pad(mailbox, 7)}  " <>
+            "#{pad(ms(percentile(Enum.sort(latencies), 0.50)), 10)}"
+        )
+
+        baseline || rate
+      end)
+    end
+
+    IO.puts("\n  split is the prediction under test: while one buffer's encode still fits")
+    IO.puts("  inside flush_interval_ms, dividing a fixed workload P ways should be")
+    IO.puts("  throughput-neutral — P encodes of 1/P the rows finish in the same cycle.")
+    IO.puts("  Gains there mean P=1 was already past its crossover. scale is the headroom")
+    IO.puts("  question: do P loaded buffers multiply, or contend?")
+  end
+
   defp flush_count(name, table_ref) do
     {:ok, entries} = Client.hot_manifest(name, table_ref)
 
@@ -337,12 +495,12 @@ defmodule Bench.Buffer do
   end
 
   defp per_flush(_rows, 0), do: 0
-  defp per_flush(rows, flushes), do: Float.round(rows / flushes, 1)
+  defp per_flush(rows, flushes), do: round(rows / flushes)
 
-  defp with_mailbox_sampler(name, table_ref, fun) do
+  defp with_mailbox_sampler(name, table_refs, fun) do
     parent = self()
     registry = Runtime.registry(name)
-    sampler = spawn_link(fn -> sample_mailbox(registry, table_ref, 0) end)
+    sampler = spawn_link(fn -> sample_mailbox(registry, List.wrap(table_refs), 0) end)
 
     result = fun.()
     send(sampler, {:peak, parent})
@@ -357,13 +515,16 @@ defmodule Bench.Buffer do
     {result, peak}
   end
 
-  defp sample_mailbox(registry, table_ref, peak) do
+  defp sample_mailbox(registry, table_refs, peak) do
     receive do
       {:peak, from} -> send(from, {:peak, peak})
     after
-      1 -> sample_mailbox(registry, table_ref, max(peak, mailbox_depth(registry, table_ref)))
+      1 -> sample_mailbox(registry, table_refs, max(peak, deepest_mailbox(registry, table_refs)))
     end
   end
+
+  defp deepest_mailbox(registry, table_refs),
+    do: table_refs |> Enum.map(&mailbox_depth(registry, &1)) |> Enum.max()
 
   defp mailbox_depth(registry, table_ref) do
     with [{pid, _value}] <- Registry.lookup(registry, table_ref),
@@ -380,7 +541,10 @@ defmodule Bench.Buffer do
     defaults = [
       name: name,
       dir: Path.join(dir, "instance-#{System.unique_integer([:positive])}"),
-      hot_server_port: 0
+      hot_server_port: 0,
+      seal_max_bytes: 1_000_000_000_000,
+      seal_max_files: 1_000_000_000,
+      seal_max_age_ms: 86_400_000
     ]
 
     {:ok, pid} = BufferService.Supervisor.start_link(Keyword.merge(defaults, opts))
@@ -427,6 +591,8 @@ defmodule Bench.Buffer do
   end
 
   defp batch_bytes(size, weight), do: :erlang.external_size(batch(size, 0, weight).rows)
+
+  defp bytes_per_row(weight), do: batch_bytes(1_000, weight) / 1_000
 
   defp megabytes_per_second(batches, size, seconds, weight \\ :light),
     do: Float.round(batches * batch_bytes(size, weight) / 1_000_000 / seconds, 2)

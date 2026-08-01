@@ -531,16 +531,27 @@ next comparison has something to diff against.
 
 `bench/buffer.exs` reports batches/s, rows/s, MB/s, and p50/p95/p99 ack latency
 across batch size × writers × tables, sweeps `flush_interval_ms`, prices the two
-fsyncs behind an ack (D3), and locates the one-table inline-flush ceiling (D6) —
-sweeping writers to 1024 against a light and a heavy schema, timing the Polars
-encode in isolation, and re-running the fsync toggle at the top of the sweep. Its
-other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`.
+fsyncs behind an ack (D3), and locates the one-table inline-flush ceiling (D6) in
+five parts — a writer sweep to 1024 against a light and a heavy schema, the Polars
+encode timed in isolation, the fsync toggle re-run at the top of the sweep, a
+`flush_max_bytes` sweep, and a partition proxy running P independent buffers over
+one workload. Its other knobs: `MAX_BATCH`, `MAX_TABLES`, `WRITERS`, `BATCH`,
+`WRITERS_PER_BUFFER`. Sealing is disabled throughout — this script measures group
+commit, `bench/sealer.exs` measures sealing.
 
-That ceiling is the encode, and it is structural: throughput is
-`rows_per_flush / max(encode, flush_interval_ms)`, so one table holds ~1.7M rows/s
-on a four-column schema with a `Decimal` and ~2-3.4M on two columns. Writer count
-does not find it — group commit turns extra writers into a wider flush rather than
-more flushes, which is why the sweep is still linear at 1024.
+One table saturates at **~2.2M rows/s** on two columns and **~1.1M** on four with a
+`Decimal`, set by the encode plus the write path around it. None of the three
+configured bounds sets it: `flush_max_bytes` from 8 MB to 512 MB moves rows-per-flush
+7.5× and throughput ~5%. Writer count alone never finds the ceiling, because group
+commit turns extra writers into a wider flush rather than more flushes — which is why
+the sweep is still linear at 1024 writers and 20-row batches.
+
+The number to design against is the ack latency, not the throughput. Below
+saturation p50 ack is `flush_interval_ms` plus a few milliseconds regardless of
+load; at saturation it degrades to 210–458 ms against a 25 ms interval, because
+offered rows per cycle far exceed flushed rows per cycle. Eight independent buffers
+reach 6.8M rows/s and pull p50 ack back to 67 ms — the case for partitioned writes
+(PL-6).
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the
