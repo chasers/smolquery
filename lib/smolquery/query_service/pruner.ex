@@ -80,8 +80,10 @@ defmodule Smolquery.QueryService.Pruner do
 
     named =
       sources
-      |> Enum.filter(&match?({_name, ref} when is_tuple(ref), &1))
-      |> Enum.filter(fn {_name, ref} -> MapSet.member?(known, ref) end)
+      |> Enum.filter(fn
+        {_name, ref} -> MapSet.member?(known, ref)
+        :opaque -> false
+      end)
       |> Enum.group_by(fn {name, _ref} -> name end, fn {_name, ref} -> ref end)
       |> Enum.flat_map(fn
         {name, [ref]} -> [{name, ref}]
@@ -98,22 +100,24 @@ defmodule Smolquery.QueryService.Pruner do
     %{named: named, single: single}
   end
 
-  defp sources(%{"type" => "BASE_TABLE"} = node) do
+  defp sources(from), do: from |> sources([]) |> Enum.reverse()
+
+  defp sources(%{"type" => "BASE_TABLE"} = node, acc) do
     name =
       case node["alias"] do
         "" -> node["table_name"]
         given -> given
       end
 
-    [{name, {node["schema_name"], node["table_name"]}}]
+    [{name, {node["schema_name"], node["table_name"]}} | acc]
   end
 
-  defp sources(%{"type" => "JOIN"} = node),
-    do: sources(node["left"]) ++ sources(node["right"])
+  defp sources(%{"type" => "JOIN"} = node, acc),
+    do: sources(node["right"], sources(node["left"], acc))
 
-  defp sources(%{"type" => "EMPTY"}), do: []
-  defp sources(nil), do: []
-  defp sources(_opaque), do: [:opaque]
+  defp sources(%{"type" => "EMPTY"}, acc), do: acc
+  defp sources(nil, acc), do: acc
+  defp sources(_opaque, acc), do: [:opaque | acc]
 
   defp split(%{"type" => "CONJUNCTION_AND", "children" => children}),
     do: Enum.flat_map(children, &split/1)
@@ -122,18 +126,8 @@ defmodule Smolquery.QueryService.Pruner do
   defp split(node), do: [node]
 
   defp parse(%{"class" => "COMPARISON", "type" => type} = node, aliases) do
-    with {:ok, op} <- Map.fetch(@operators, type) do
-      case {column(node["left"], aliases), literal(node["right"])} do
-        {{:ok, ref, name}, {:ok, value}} ->
-          [{ref, {name, op, value}}]
-
-        _not_column_op_literal ->
-          case {literal(node["left"]), column(node["right"], aliases)} do
-            {{:ok, value}, {:ok, ref, name}} -> [{ref, {name, @mirrored[op], value}}]
-            _unparseable -> []
-          end
-      end
-    else
+    case Map.fetch(@operators, type) do
+      {:ok, op} -> comparison(node, op, aliases)
       :error -> []
     end
   end
@@ -149,6 +143,20 @@ defmodule Smolquery.QueryService.Pruner do
   end
 
   defp parse(_node, _aliases), do: []
+
+  defp comparison(node, op, aliases) do
+    case {column(node["left"], aliases), literal(node["right"])} do
+      {{:ok, ref, name}, {:ok, value}} -> [{ref, {name, op, value}}]
+      _not_column_op_literal -> mirrored_comparison(node, op, aliases)
+    end
+  end
+
+  defp mirrored_comparison(node, op, aliases) do
+    case {literal(node["left"]), column(node["right"], aliases)} do
+      {{:ok, value}, {:ok, ref, name}} -> [{ref, {name, @mirrored[op], value}}]
+      _unparseable -> []
+    end
+  end
 
   defp column(%{"class" => "COLUMN_REF", "column_names" => [name]}, %{single: ref})
        when not is_nil(ref),
@@ -174,7 +182,7 @@ defmodule Smolquery.QueryService.Pruner do
        when cast in ["TIMESTAMP", "DATE"] and is_binary(text) do
     case cast do
       "TIMESTAMP" -> text |> String.replace(" ", "T") |> naive()
-      "DATE" -> with({:ok, date} <- Date.from_iso8601(text), do: {:ok, date})
+      "DATE" -> date(text)
     end
   end
 
@@ -193,6 +201,13 @@ defmodule Smolquery.QueryService.Pruner do
   defp naive(text) do
     case NaiveDateTime.from_iso8601(text) do
       {:ok, naive} -> {:ok, naive}
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp date(text) do
+    case Date.from_iso8601(text) do
+      {:ok, date} -> {:ok, date}
       {:error, _reason} -> :error
     end
   end
