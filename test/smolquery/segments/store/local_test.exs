@@ -80,12 +80,15 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert File.read!(put.location) == "x"
     end
 
-    test "cleans up after an encoder that raises", %{tmp_dir: dir} do
+    test "cleans up after an encoder that raises, and lets the raise through", %{tmp_dir: dir} do
       store = Local.new(dir: dir)
-      raising = fn _path -> raise ArgumentError, "bad column" end
 
-      assert {:error, {:put_failed, "one.parquet", {:encode_raised, %ArgumentError{}}}} =
-               Store.put(store, "one.parquet", raising)
+      raising = fn path ->
+        File.write!(path, "partial")
+        raise ArgumentError, "bad column"
+      end
+
+      assert_raise ArgumentError, fn -> Store.put(store, "one.parquet", raising) end
 
       assert File.ls!(Path.join(dir, ".tmp")) == []
       refute File.exists?(Path.join(dir, "one.parquet"))

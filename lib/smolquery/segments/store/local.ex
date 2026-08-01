@@ -113,8 +113,10 @@ defmodule Smolquery.Segments.Store.Local do
 
   defp encode(staged, encoder) do
     encoder.(staged)
-  rescue
-    error -> {:error, {:encode_raised, error}}
+  catch
+    kind, reason ->
+      File.rm(staged)
+      :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
   defp staging_path(%__MODULE__{dir: dir}, key) do
