@@ -15,7 +15,10 @@ defmodule Smolquery.BufferService.SealLogTest do
     test "acknowledges the signal and says what nobody is sealing" do
       log =
         capture_log(fn ->
-          assert SealLog.seal_ready([], {"analytics", "events"}, ["a", "b", "c"]) == :ok
+          assert SealLog.seal_ready([], {"analytics", "events"}, %{
+                   ids: ["a", "b", "c"],
+                   keys: ["k"]
+                 }) == :ok
         end)
 
       assert log =~ "seal_ready analytics.events: 3 unsealed micro-segments"

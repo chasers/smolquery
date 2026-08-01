@@ -10,6 +10,8 @@ defmodule Smolquery.StorageService.ClientTest do
 
   @events {"analytics", "events"}
 
+  defp claim(ids), do: %{ids: ids, keys: ["analytics/events/sealed.parquet"]}
+
   describe "seal_ready/3 with a storage service running" do
     setup context do
       name = :"storage_client_#{:erlang.unique_integer([:positive])}"
@@ -31,9 +33,9 @@ defmodule Smolquery.StorageService.ClientTest do
 
     @tag :tmp_dir
     test "reaches the sealer", %{name: name} do
-      assert Client.seal_ready([name: name], @events, ["a"]) == :ok
+      assert Client.seal_ready([name: name], @events, claim(["a"])) == :ok
 
-      assert_receive {:sealing, @events, ["a"], attempt}
+      assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
       HandoffProbe.release(attempt)
     end
   end
@@ -42,7 +44,7 @@ defmodule Smolquery.StorageService.ClientTest do
     test "reports rather than raising, so the signalling buffer survives" do
       log =
         capture_log(fn ->
-          assert Client.seal_ready([name: __MODULE__.Absent], @events, ["a", "b"]) == :ok
+          assert Client.seal_ready([name: __MODULE__.Absent], @events, claim(["a", "b"])) == :ok
         end)
 
       assert log =~ "seal_ready analytics.events: 2 unsealed micro-segments"
@@ -50,7 +52,7 @@ defmodule Smolquery.StorageService.ClientTest do
     end
 
     test "defaults to the application's instance name" do
-      log = capture_log(fn -> assert Client.seal_ready([], @events, []) == :ok end)
+      log = capture_log(fn -> assert Client.seal_ready([], @events, claim([])) == :ok end)
 
       assert log =~ inspect(Smolquery.StorageService)
     end

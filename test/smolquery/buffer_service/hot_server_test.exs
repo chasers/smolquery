@@ -11,6 +11,7 @@ defmodule Smolquery.BufferService.HotServerTest do
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
+  alias Smolquery.Test.Eventually
   alias Smolquery.Test.MemoryStore
 
   @moduletag :tmp_dir
@@ -66,6 +67,33 @@ defmodule Smolquery.BufferService.HotServerTest do
       [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
 
       assert entry["url"] == "memory://analytics/events/#{ack.segment_id}.parquet"
+    end
+
+    test "exposes claim_keys, which is what a planner dedups on", context do
+      name = start_buffer_service(context, seal_max_files: 1, seal_retry_ms: 60_000)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert Eventually.until(fn ->
+               [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
+
+               entry["claim_keys"] != []
+             end)
+
+      [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
+
+      assert entry["id"] == ack.segment_id
+      assert [key] = entry["claim_keys"]
+      assert String.starts_with?(key, "analytics/events/")
+      assert String.ends_with?(key, ".parquet")
+    end
+
+    test "reports an unclaimed entry with no claim keys", context do
+      name = start_buffer_service(context)
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
+
+      assert entry["claim_keys"] == []
     end
 
     test "an unknown table's manifest is an empty list", context do

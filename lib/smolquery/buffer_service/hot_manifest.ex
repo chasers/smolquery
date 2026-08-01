@@ -31,6 +31,26 @@ defmodule Smolquery.BufferService.HotManifest do
   append heals itself. Neither rule mentions a filesystem, which is why they
   survive the hot tier moving to an object store.
 
+  ## Claims: the log is also what makes sealing exactly-once
+
+  Before a sealer is told a table is ready, the set it is being told about is
+  frozen into the log as a `claim` — the micro-segment ids, and the key(s) of the
+  sealed segment they will become. Two properties follow, and the seal handoff
+  needs both:
+
+    * **the input set never moves.** A sealer answering a repeated signal, or
+      retrying after either side crashed, merges exactly the ids the claim names.
+      Rows that landed since wait for the next claim.
+    * **the output is named before it is written**, deterministically from the
+      inputs (`Smolquery.Segments.Id.derive/2`). So "did this merge already
+      commit" is a question about catalog membership of a known key, not about
+      timing — which is what lets a query planner exclude a micro-segment at the
+      instant its rows appear in the sealed tier, with no window in between.
+
+  A claim is live until every entry in it is sealed, which is what limits a table
+  to one outstanding claim and makes recovery free: replaying the log restores it,
+  so a restarted buffer re-signals the same set rather than inventing a new one.
+
   ## One writer per table, many readers
 
   Entries live in one ETS table per node, keyed `{table_ref, segment_id}`. Only
@@ -95,6 +115,11 @@ defmodule Smolquery.BufferService.HotManifest do
   @type t :: %__MODULE__{table: atom(), log_dir: String.t(), store: Store.t()}
 
   @type option :: {:name, atom()} | {:log_dir, String.t()} | {:store, Store.t()}
+
+  @typedoc """
+  A frozen set of micro-segment ids, and the sealed segment key(s) they become.
+  """
+  @type claim :: %{ids: [String.t()], keys: [String.t()]}
 
   @opaque log :: {:hot_log, :file.fd()}
 
@@ -228,18 +253,68 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
+  Freezes `ids` as a claim, to be sealed into the segment(s) `keys` name.
+
+  A claim is what makes the seal handoff exactly-once. The set is frozen *before*
+  anyone is told to seal it, and durably: the sealer that answers a signal — or
+  retries one after either side crashed — always sees the same input set, so the
+  sealed segment it produces is always the same segment. Rows that arrive after
+  the claim wait for the next one.
+
+  Only unsealed, unclaimed ids are taken, so a repeated claim of a live one is not
+  a way to grow it. `keys` are recorded rather than recomputed at seal time,
+  which is what keeps the output name stable even if one of the inputs later goes
+  missing from the store.
+  """
+  @spec claim(t(), Store.table_ref(), [String.t()], [String.t()], log() | nil) ::
+          {:ok, claim()} | {:error, term()}
+  def claim(%__MODULE__{} = manifest, table_ref, ids, keys, log \\ nil) do
+    case claimable(manifest, table_ref, ids) do
+      [] -> {:error, :nothing_to_claim}
+      entries -> freeze(manifest, table_ref, entries, keys, log)
+    end
+  end
+
+  @doc """
+  The table's outstanding claim, if a sealer still owes one.
+
+  A claim is live until every entry in it is sealed — which is what limits a table
+  to one at a time, and what makes the signal to re-send after a crash a lookup
+  rather than remembered state.
+  """
+  @spec live_claim(t(), Store.table_ref()) :: {:ok, claim()} | :error
+  def live_claim(%__MODULE__{} = manifest, table_ref) do
+    manifest
+    |> entries(table_ref)
+    |> Enum.reject(&(Entry.sealed?(&1) or not Entry.claimed?(&1)))
+    |> case do
+      [] -> :error
+      claimed -> {:ok, %{ids: Enum.map(claimed, & &1.id), keys: hd(claimed).claim_keys}}
+    end
+  end
+
+  @doc """
   Stamps `ids` as sealed at a catalog snapshot.
 
   Idempotent in every direction a crashed sealer can retry from: ids already
   sealed, and ids the reaper has since deleted, are both `:ok`. The segments stay
   readable — retirement is a stamp, not a delete.
+
+  Retiring any member of a claim retires all of them. The claim's sealed segment
+  holds every input's rows, so once it is in the catalog every input is sealed —
+  and stamping only some would leave the rest claimed but unsealed, so the next
+  re-signal would ask a sealer to rebuild that claim's segment from a subset and
+  overwrite the committed one with fewer rows.
   """
   @spec retire(t(), Store.table_ref(), [String.t()], non_neg_integer(), log() | nil) ::
           :ok | {:error, term()}
   def retire(%__MODULE__{} = manifest, table_ref, ids, snapshot, log \\ nil) do
     case unsealed(manifest, table_ref, ids) do
-      [] -> :ok
-      pending -> seal_all(manifest, table_ref, pending, snapshot, log)
+      [] ->
+        :ok
+
+      pending ->
+        seal_all(manifest, table_ref, with_claim(manifest, table_ref, pending), snapshot, log)
     end
   end
 
@@ -340,6 +415,42 @@ defmodule Smolquery.BufferService.HotManifest do
   def log_path(%__MODULE__{log_dir: log_dir}, table_ref) do
     with {:ok, prefix} <- Store.prefix(table_ref) do
       {:ok, Path.join([log_dir, prefix, @log])}
+    end
+  end
+
+  defp with_claim(manifest, table_ref, pending) do
+    claimed = pending |> Enum.flat_map(& &1.claim_keys) |> MapSet.new()
+
+    if MapSet.size(claimed) == 0 do
+      pending
+    else
+      siblings =
+        manifest
+        |> entries(table_ref)
+        |> Enum.filter(&sibling?(&1, claimed))
+
+      Enum.uniq_by(pending ++ siblings, & &1.id)
+    end
+  end
+
+  defp sibling?(%Entry{} = entry, claimed) do
+    not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
+  end
+
+  defp claimable(manifest, table_ref, ids) do
+    manifest
+    |> unsealed(table_ref, ids)
+    |> Enum.reject(&Entry.claimed?/1)
+  end
+
+  defp freeze(manifest, table_ref, entries, keys, log) do
+    ids = Enum.map(entries, & &1.id)
+    record = %{"op" => "claim", "ids" => ids, "keys" => keys}
+
+    with :ok <- append(manifest, table_ref, record, log) do
+      Enum.each(entries, &insert(manifest, table_ref, Entry.claim(&1, keys)))
+
+      {:ok, %{ids: ids, keys: keys}}
     end
   end
 
@@ -566,6 +677,16 @@ defmodule Smolquery.BufferService.HotManifest do
      Enum.reduce(ids, acc, fn id, acc ->
        case Map.fetch(acc, id) do
          {:ok, entry} -> Map.put(acc, id, Entry.seal(entry, snapshot, retired_at))
+         :error -> acc
+       end
+     end)}
+  end
+
+  defp apply_record(%{"op" => "claim", "ids" => ids, "keys" => keys}, acc) do
+    {:ok,
+     Enum.reduce(ids, acc, fn id, acc ->
+       case Map.fetch(acc, id) do
+         {:ok, entry} -> Map.put(acc, id, Entry.claim(entry, keys))
          :error -> acc
        end
      end)}

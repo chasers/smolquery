@@ -10,14 +10,20 @@ defmodule Smolquery.BufferService.SealConsumer do
       config :smolquery, Smolquery.BufferService,
         seal_consumer: {Smolquery.BufferService.SealLog, []}
 
-  ## The signal is level-triggered
+  ## The signal is level-triggered, and carries a frozen claim
 
   `seal_ready/3` is called when a table crosses `seal_max_bytes`,
   `seal_max_files`, or `seal_max_age_ms`, and called *again* every
-  `seal_retry_ms` while it stays crossed. A sealer that dies mid-handoff must not
-  leave a table's tail parked forever, so a lost signal costs a retry interval
-  rather than everything. Consumers should therefore expect repeats for the same
-  segments and treat them as a statement of the current state, not an event.
+  `seal_retry_ms` until the claim it names is retired. A sealer that dies
+  mid-handoff must not leave a table's tail parked forever, so a lost signal costs
+  a retry interval rather than everything.
+
+  Consumers should therefore expect repeats — and can rely on them being
+  *identical*. The claim's id set is frozen in the manifest log before the first
+  signal goes out, so every repeat names the same micro-segments and the same
+  sealed segment key, however much has been written since and whichever side
+  crashed in between. That is what a consumer's idempotence can be built on; see
+  `Smolquery.BufferService.HotManifest` for the claim itself.
 
   ## It must not block
 
@@ -32,16 +38,22 @@ defmodule Smolquery.BufferService.SealConsumer do
   and the buffer recovers its manifest on restart.
   """
 
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.Segments.Store
 
-  @doc """
-  Reports that `ids` are ready to be sealed for `table_ref`.
+  @typedoc """
+  The frozen set to seal, and the sealed segment key(s) it becomes.
   """
-  @callback seal_ready(config :: term(), Store.table_ref(), [String.t()]) :: :ok
+  @type claim :: HotManifest.claim()
+
+  @doc """
+  Reports that `claim` is ready to be sealed for `table_ref`.
+  """
+  @callback seal_ready(config :: term(), Store.table_ref(), claim()) :: :ok
 
   @doc """
   Dispatches a signal to a configured consumer.
   """
-  @spec seal_ready({module(), term()}, Store.table_ref(), [String.t()]) :: :ok
-  def seal_ready({impl, config}, table_ref, ids), do: impl.seal_ready(config, table_ref, ids)
+  @spec seal_ready({module(), term()}, Store.table_ref(), claim()) :: :ok
+  def seal_ready({impl, config}, table_ref, claim), do: impl.seal_ready(config, table_ref, claim)
 end

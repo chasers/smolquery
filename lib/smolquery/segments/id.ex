@@ -38,6 +38,26 @@ defmodule Smolquery.Segments.Id do
   end
 
   @doc """
+  A ULID derived from `timestamp` and `seed` rather than from randomness.
+
+  Same inputs, same id — which is what lets a sealed segment be named before it
+  is written and named identically by a retry. The 80 random bits become 80 bits
+  of SHA-256 over `seed`, so the result is still a well-formed ULID and still
+  sorts by `timestamp`; only its uniqueness argument changes, from randomness to
+  the caller's promise that distinct outputs get distinct seeds.
+
+  Not a substitute for `generate/0`: an id that a caller can predict is exactly
+  wrong for a micro-segment, where two writers must never collide.
+  """
+  @spec derive(non_neg_integer(), iodata()) :: String.t()
+  def derive(timestamp, seed) when is_integer(timestamp) and timestamp >= 0 do
+    <<random::size(@random_bits), _rest::bits>> = :crypto.hash(:sha256, seed)
+    <<value::128>> = <<timestamp::48, random::size(@random_bits)>>
+
+    encode(value)
+  end
+
+  @doc """
   The millisecond timestamp a ULID was stamped with.
   """
   @spec timestamp(term()) :: {:ok, non_neg_integer()} | :error

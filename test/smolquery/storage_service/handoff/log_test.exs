@@ -18,7 +18,10 @@ defmodule Smolquery.StorageService.Handoff.LogTest do
     test "reports the claim and refuses to claim success", %{runtime: runtime} do
       log =
         capture_log(fn ->
-          assert Handoff.Log.seal([], runtime, {"analytics", "events"}, ["a", "b", "c"]) ==
+          assert Handoff.Log.seal([], runtime, {"analytics", "events"}, %{
+                   ids: ["a", "b", "c"],
+                   keys: ["k"]
+                 }) ==
                    {:error, :not_implemented}
         end)
 
@@ -28,7 +31,10 @@ defmodule Smolquery.StorageService.Handoff.LogTest do
 
     test "dispatches through the behaviour", %{runtime: runtime} do
       capture_log(fn ->
-        assert Handoff.seal({Handoff.Log, []}, runtime, {"analytics", "events"}, ["a"]) ==
+        assert Handoff.seal({Handoff.Log, []}, runtime, {"analytics", "events"}, %{
+                 ids: ["a"],
+                 keys: ["k"]
+               }) ==
                  {:error, :not_implemented}
       end)
     end

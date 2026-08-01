@@ -4,7 +4,8 @@ defmodule Smolquery.Test.SealCollector do
 
   Seal signalling is level-triggered, so a test needs to see repeats as well as the
   first signal. Sending each one as a message makes both observable, and makes the
-  absence of a signal assertable with `refute_receive`.
+  absence of a signal assertable with `refute_receive`. The message carries the
+  whole claim, so a test can assert that repeats are identical.
   """
 
   @behaviour Smolquery.BufferService.SealConsumer
@@ -12,8 +13,8 @@ defmodule Smolquery.Test.SealCollector do
   alias Smolquery.BufferService.SealConsumer
 
   @impl SealConsumer
-  def seal_ready(test, table_ref, ids) do
-    send(test, {:seal_ready, table_ref, ids})
+  def seal_ready(test, table_ref, claim) do
+    send(test, {:seal_ready, table_ref, claim})
 
     :ok
   end

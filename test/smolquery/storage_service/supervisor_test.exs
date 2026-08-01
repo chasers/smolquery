@@ -45,9 +45,9 @@ defmodule Smolquery.StorageService.SupervisorTest do
 
   @tag :tmp_dir
   test "a seal signal reaches the handoff through the whole subtree", %{name: name} do
-    Sealer.seal_ready(name, @events, ["a"])
+    Sealer.seal_ready(name, @events, %{ids: ["a"], keys: ["k"]})
 
-    assert_receive {:sealing, @events, ["a"], attempt}
+    assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}
     HandoffProbe.release(attempt)
     assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
   end

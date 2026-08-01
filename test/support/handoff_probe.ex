@@ -7,7 +7,7 @@ defmodule Smolquery.Test.HandoffProbe do
   and the concurrency bound only mean anything while an attempt is still running.
 
       handoff = {HandoffProbe, {self(), :ok}}
-      assert_receive {:sealing, table_ref, ids, attempt}
+      assert_receive {:sealing, table_ref, claim, attempt}
       HandoffProbe.release(attempt)
 
   The configured term is `{test_pid, result}` — the result every released attempt
@@ -19,8 +19,8 @@ defmodule Smolquery.Test.HandoffProbe do
   alias Smolquery.StorageService.Handoff
 
   @impl Handoff
-  def seal({test, result}, _runtime, table_ref, ids) do
-    send(test, {:sealing, table_ref, ids, self()})
+  def seal({test, result}, _runtime, table_ref, claim) do
+    send(test, {:sealing, table_ref, claim, self()})
 
     receive do
       :release -> finish(result)

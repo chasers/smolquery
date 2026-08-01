@@ -55,19 +55,19 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, _ack} = Client.write_batch(name, @table, batch(1..2))
 
-      refute_receive {:seal_ready, _table, _ids}, 100
+      refute_receive {:seal_ready, _table, _claim}, 100
     end
 
     test "signals when the file count crosses", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 2)
 
       {:ok, first} = Client.write_batch(name, @table, batch(1..1))
-      refute_receive {:seal_ready, _table, _ids}, 60
+      refute_receive {:seal_ready, _table, _claim}, 60
 
       {:ok, second} = Client.write_batch(name, @table, batch(2..2))
 
-      assert_receive {:seal_ready, @table, ids}, 500
-      assert Enum.sort(ids) == Enum.sort([first.segment_id, second.segment_id])
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert Enum.sort(claim.ids) == Enum.sort([first.segment_id, second.segment_id])
     end
 
     test "signals when the byte total crosses", context do
@@ -75,7 +75,7 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
 
-      assert_receive {:seal_ready, @table, [id]}, 500
+      assert_receive {:seal_ready, @table, %{ids: [id]}}, 500
       assert id == ack.segment_id
     end
 
@@ -84,7 +84,7 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
 
-      assert_receive {:seal_ready, @table, [id]}, 500
+      assert_receive {:seal_ready, @table, %{ids: [id]}}, 500
       assert id == ack.segment_id
     end
 
@@ -93,8 +93,9 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
 
-      assert_receive {:seal_ready, @table, _first}, 500
-      assert_receive {:seal_ready, @table, _second}, 500
+      assert_receive {:seal_ready, @table, first}, 500
+      assert_receive {:seal_ready, @table, second}, 500
+      assert first == second
     end
 
     test "does not re-signal before the retry interval", context do
@@ -102,8 +103,8 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
 
-      assert_receive {:seal_ready, @table, _ids}, 500
-      refute_receive {:seal_ready, _table, _ids}, 100
+      assert_receive {:seal_ready, @table, _claim}, 500
+      refute_receive {:seal_ready, _table, _claim}, 100
     end
 
     test "goes quiet once everything is retired", context do
@@ -111,32 +112,84 @@ defmodule Smolquery.BufferService.SealingTest do
 
       {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
 
-      assert_receive {:seal_ready, @table, _ids}, 500
+      assert_receive {:seal_ready, @table, _claim}, 500
 
       :ok = Client.retire(name, @table, [ack.segment_id], 7)
 
       Process.sleep(60)
       flush_messages()
 
-      refute_receive {:seal_ready, _table, _ids}, 100
+      refute_receive {:seal_ready, _table, _claim}, 100
     end
 
-    test "signals only the unsealed remainder", context do
+    test "freezes the claim, so writes after it wait for the next one", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 2, seal_retry_ms: 1)
 
-      {:ok, sealed} = Client.write_batch(name, @table, batch(1..1))
-      {:ok, unsealed} = Client.write_batch(name, @table, batch(2..2))
+      {:ok, first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, second} = Client.write_batch(name, @table, batch(2..2))
 
-      assert_receive {:seal_ready, @table, _both}, 500
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert Enum.sort(claim.ids) == Enum.sort([first.segment_id, second.segment_id])
 
-      :ok = Client.retire(name, @table, [sealed.segment_id], 3)
+      {:ok, third} = Client.write_batch(name, @table, batch(3..3))
+
+      assert_receive {:seal_ready, @table, repeat}, 500
+      assert repeat == claim
+      refute third.segment_id in repeat.ids
+    end
+
+    test "the next claim covers only what arrived after the last one retired", context do
+      %{name: name} = start_buffer_service(context, seal_max_files: 2, seal_retry_ms: 1)
+
+      {:ok, first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, second} = Client.write_batch(name, @table, batch(2..2))
+
+      assert_receive {:seal_ready, @table, claim}, 500
+
+      :ok = Client.retire(name, @table, claim.ids, 3)
       flush_messages()
 
-      {:ok, _third} = Client.write_batch(name, @table, batch(3..3))
+      {:ok, third} = Client.write_batch(name, @table, batch(3..3))
+      {:ok, fourth} = Client.write_batch(name, @table, batch(4..4))
 
-      assert_receive {:seal_ready, @table, ids}, 500
-      refute sealed.segment_id in ids
-      assert unsealed.segment_id in ids
+      assert_receive {:seal_ready, @table, next}, 500
+      assert Enum.sort(next.ids) == Enum.sort([third.segment_id, fourth.segment_id])
+      refute first.segment_id in next.ids
+      refute second.segment_id in next.ids
+      refute next.keys == claim.keys
+    end
+
+    test "the claim's key survives a buffer restart, so a retry seals into the same segment",
+         context do
+      %{name: name} = start_buffer_service(context, seal_max_bytes: 1, seal_retry_ms: 1)
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert_receive {:seal_ready, @table, before}, 500
+
+      Process.exit(buffer(name), :kill)
+      flush_messages()
+
+      assert_receive {:seal_ready, @table, replayed}, 1_000
+      assert replayed == before
+    end
+
+    test "retiring one member of a claim retires the whole claim", context do
+      %{name: name} = start_buffer_service(context, seal_max_files: 2, seal_retry_ms: 60_000)
+
+      {:ok, first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, second} = Client.write_batch(name, @table, batch(2..2))
+
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert match?([_first, _second], claim.ids)
+
+      :ok = Client.retire(name, @table, [first.segment_id], 3)
+
+      assert {:ok, entries} = Client.hot_manifest(name, @table)
+      assert Enum.all?(entries, &(&1.sealed_at == 3))
+
+      assert entries |> Enum.map(& &1.id) |> Enum.sort() ==
+               Enum.sort([first.segment_id, second.segment_id])
     end
   end
 
@@ -250,7 +303,7 @@ defmodule Smolquery.BufferService.SealingTest do
 
   defp flush_messages do
     receive do
-      {:seal_ready, _table, _ids} -> flush_messages()
+      {:seal_ready, _table, _claim} -> flush_messages()
     after
       0 -> :ok
     end

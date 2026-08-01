@@ -43,6 +43,22 @@ defmodule Smolquery.BufferService.TableBuffer do
   therefore works at the file level for free — `read_parquet(union_by_name = true)`
   handles the read side.
 
+  ## Sealing is signalled against a frozen set
+
+  Crossing a seal threshold does not signal the tail as it stands; it first freezes
+  that tail into a claim in the manifest log, and signals the claim. Everything
+  written afterwards accumulates for the *next* claim, and while a claim is
+  outstanding the re-signal repeats it verbatim. A sealer therefore merges the same
+  ids no matter how many times it is told, or which side of the handoff crashed —
+  see `Smolquery.BufferService.HotManifest` for why that is what makes sealing
+  exactly-once.
+
+  The claim also names its output, derived from its inputs, so a table's sealed
+  segment has a stable identity before any bytes exist. One key per claim: how
+  large a sealed segment gets is `seal_max_bytes`'s business, since it bounds what
+  a claim can hold, and splitting a merge across files is the compactor's problem
+  rather than the buffer's.
+
   ## Recovery, and what a crash costs
 
   On start the buffer recovers its table's manifest, which re-adopts the segments
@@ -67,6 +83,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Schema
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
@@ -247,6 +264,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp signal_when_ready(state) do
+    case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
+      {:ok, claim} -> resignal(state, claim)
+      :error -> claim_when_sealable(state)
+    end
+  end
+
+  defp resignal(state, claim) do
+    if due?(state), do: signal(state, claim), else: state
+  end
+
+  defp claim_when_sealable(state) do
     unsealed =
       state.runtime.manifest
       |> HotManifest.entries(state.table_ref)
@@ -255,9 +283,42 @@ defmodule Smolquery.BufferService.TableBuffer do
     cond do
       unsealed == [] -> %{state | signaled_at: nil}
       not sealable?(state, unsealed) -> state
-      due?(state) -> signal(state, unsealed)
-      true -> state
+      true -> claim_and_signal(state, unsealed)
     end
+  end
+
+  defp claim_and_signal(state, unsealed) do
+    ids = Enum.map(unsealed, & &1.id)
+
+    with {:ok, keys} <- sealed_keys(state, ids),
+         {:ok, claim} <-
+           HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, state.log) do
+      signal(state, claim)
+    else
+      {:error, reason} ->
+        Logger.warning("claiming #{inspect(state.table_ref)} failed: #{inspect(reason)}")
+
+        state
+    end
+  end
+
+  defp sealed_keys(state, ids) do
+    with {:ok, key} <- Store.key(state.prefix, sealed_id(state.table_ref, ids)) do
+      {:ok, [key]}
+    end
+  end
+
+  defp sealed_id({dataset, table}, ids) do
+    sorted = Enum.sort(ids)
+    newest = List.last(sorted)
+
+    timestamp =
+      case Id.timestamp(newest) do
+        {:ok, timestamp} -> timestamp
+        :error -> now()
+      end
+
+    Id.derive(timestamp, [dataset, 0, table, 0, Enum.intersperse(sorted, 0)])
   end
 
   defp sealable?(state, unsealed) do
@@ -273,12 +334,8 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp due?(state), do: now() - state.signaled_at >= state.runtime.seal_retry_ms
 
-  defp signal(state, unsealed) do
-    SealConsumer.seal_ready(
-      state.runtime.seal_consumer,
-      state.table_ref,
-      Enum.map(unsealed, & &1.id)
-    )
+  defp signal(state, claim) do
+    SealConsumer.seal_ready(state.runtime.seal_consumer, state.table_ref, claim)
 
     %{state | signaled_at: now()}
   end
