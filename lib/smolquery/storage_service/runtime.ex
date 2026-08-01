@@ -141,11 +141,14 @@ defmodule Smolquery.StorageService.Runtime do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.StorageService, []), opts)
     name = Keyword.get(config, :name, Smolquery.StorageService)
 
+    {catalog, catalog_opts} =
+      Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
+
     %__MODULE__{
       name: name,
       store: build_store(config),
-      catalog: build_catalog(config, name),
-      catalog_opts: catalog_opts(config)
+      catalog: catalog,
+      catalog_opts: catalog_opts
     }
     |> struct!(Keyword.take(config, @limits))
     |> validate_compression()
@@ -208,25 +211,6 @@ defmodule Smolquery.StorageService.Runtime do
       nil -> Store.Local.new(dir: Keyword.get(config, :dir, @default_dir))
       {impl, opts} -> impl.new(opts)
       %Store{} = store -> store
-    end
-  end
-
-  defp build_catalog(config, name) do
-    case Keyword.get(config, :catalog) do
-      %Catalog{} = catalog ->
-        catalog
-
-      opts ->
-        opts = List.wrap(opts)
-
-        Catalog.DuckLake.new([engine: catalog_engine(name)] ++ Keyword.take(opts, [:catalog]))
-    end
-  end
-
-  defp catalog_opts(config) do
-    case Keyword.get(config, :catalog) do
-      %Catalog{} -> nil
-      opts -> List.wrap(opts)
     end
   end
 end

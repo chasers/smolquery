@@ -45,6 +45,14 @@ config :smolquery, Smolquery.StorageService,
   gc_grace_ms: 3_600_000,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}
 
+config :smolquery, Smolquery.QueryService,
+  buffer_base_url: "http://127.0.0.1:4001",
+  buffer_timeout_ms: 30_000,
+  max_concurrent_jobs: 8,
+  default_timeout_ms: 60_000,
+  job_memory_limit: "1GB",
+  result_ttl_ms: 300_000
+
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",
   data_path: "priv/data/ducklake"
