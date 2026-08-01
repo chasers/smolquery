@@ -323,6 +323,93 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "replace_segments/4" do
+    test "one snapshot both adds the replacement and retires the inputs", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      merged = write_segment(dir, 3, 20)
+      {:ok, registered} = Catalog.register_segments(catalog, @table, [a, b])
+
+      assert {:ok, swapped} =
+               Catalog.replace_segments(catalog, @table, [merged], [a.path, b.path])
+
+      assert swapped == registered + 1
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [merged.path]}
+      assert row_count() == 20
+    end
+
+    test "readers pinned before the swap still see the inputs", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      merged = write_segment(dir, 3, 10)
+      {:ok, registered} = Catalog.register_segments(catalog, @table, [a])
+
+      {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
+
+      assert Catalog.segments(catalog, @table, registered) == {:ok, [a.path]}
+      assert File.exists?(a.path)
+
+      result =
+        Engine.query!(
+          @engine,
+          ~s|SELECT count(*) FROM lake."analytics"."events" AT (VERSION => #{registered})|
+        )
+
+      assert result.rows == [[10]]
+    end
+
+    test "a failing addition rolls back the drops that preceded it", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+
+      narrow = Schema.new!([{"id", :int64}])
+      {:ok, bad} = Writer.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
+
+      assert {:error, error} = Catalog.replace_segments(catalog, @table, [bad], [a.path])
+      assert Exception.message(error) =~ "not found in file"
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [a.path]}
+      assert row_count() == 10
+    end
+
+    test "retrying a committed swap is a no-op that reports the current snapshot", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      merged = write_segment(dir, 3, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+      {:ok, swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
+
+      assert Catalog.replace_segments(catalog, @table, [merged], [a.path]) == {:ok, swapped}
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [merged.path]}
+      assert row_count() == 10
+    end
+
+    test "refuses to become a drop when there is nothing to add", %{catalog: catalog} do
+      assert Catalog.replace_segments(catalog, @table, [], ["/anywhere.parquet"]) ==
+               {:error, :no_segments}
+    end
+
+    test "with nothing to drop it registers like register_segments/3", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      segment = write_segment(dir, 1, 10)
+
+      assert {:ok, _snapshot} = Catalog.replace_segments(catalog, @table, [segment], [])
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [segment.path]}
+      assert row_count() == 10
+    end
+  end
+
   describe "query path" do
     test "prunes segments by the stats DuckLake derived from the footers", %{
       catalog: catalog,

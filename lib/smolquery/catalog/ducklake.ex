@@ -56,8 +56,13 @@ defmodule Smolquery.Catalog.DuckLake do
   `ducklake_merge_adjacent_files/2` must never be called on a smolquery table:
   over externally-registered files it crashes DuckDB fatally (ducklake
   `67480b1d`, format 0.4), and a fatal error invalidates the whole database.
-  Compaction stays `Smolquery.StorageService.Compactor`'s job, built from
-  `register_segments/3` and `drop_segments/3`.
+  Compaction stays `Smolquery.StorageService.Compactor`'s job, built on
+  `replace_segments/4` — registration and retirement composed inside one
+  `Smolquery.Engine.transaction/2`, so a single snapshot carries both. The
+  swap runs its `DELETE` before its `ducklake_add_data_files`: the order is
+  invisible inside the transaction, and it puts the statement most likely to
+  fail (registering a merged file the table could reject) after one that has
+  already applied, so the rollback path is the one a real failure exercises.
   """
 
   @behaviour Smolquery.Catalog
@@ -300,12 +305,38 @@ defmodule Smolquery.Catalog.DuckLake do
   def drop_segments(%__MODULE__{} = config, _table, []), do: current_snapshot(config)
 
   def drop_segments(%__MODULE__{} = config, table, paths) do
-    with {:ok, name} <- table_name(config, table) do
-      literals = paths |> Enum.uniq() |> Enum.map_join(", ", &Identifier.sql_string/1)
+    with {:ok, name} <- table_name(config, table),
+         :ok <- commit(config, delete_statement(name, paths)) do
+      current_snapshot(config)
+    end
+  end
 
-      with :ok <- commit(config, "DELETE FROM #{name} WHERE filename IN (#{literals})") do
-        current_snapshot(config)
+  @impl Catalog
+  def replace_segments(%__MODULE__{} = _config, _table, [], _paths), do: {:error, :no_segments}
+
+  def replace_segments(%__MODULE__{} = config, {dataset, table} = ref, segments, paths) do
+    add = segments |> Enum.map(& &1.path) |> Enum.uniq()
+
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, registered} <- segments(config, ref, :current) do
+      case add -- registered do
+        [] -> current_snapshot(config)
+        pending -> swap(config, {dataset, table}, pending, Enum.uniq(paths))
       end
+    end
+  end
+
+  defp swap(config, ref, add, []), do: add_data_files(config, ref, add)
+
+  defp swap(config, ref, add, drop) do
+    with {:ok, name} <- table_name(config, ref),
+         :ok <-
+           commit_transaction(config, [
+             delete_statement(name, drop),
+             add_statement(config, ref, add)
+           ]) do
+      current_snapshot(config)
     end
   end
 
@@ -352,33 +383,44 @@ defmodule Smolquery.Catalog.DuckLake do
   defp metadata_schema(%__MODULE__{catalog: catalog}),
     do: Identifier.quote_name!("__ducklake_metadata_" <> catalog)
 
-  defp add_data_files(config, {dataset, table}, paths) do
-    literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)
-
-    sql =
-      "CALL ducklake_add_data_files(" <>
-        "#{Identifier.sql_string(config.catalog)}, #{Identifier.sql_string(table)}, " <>
-        "[#{literals}], schema => #{Identifier.sql_string(dataset)})"
-
-    with :ok <- commit(config, sql), do: current_snapshot(config)
+  defp add_data_files(config, ref, paths) do
+    with :ok <- commit(config, add_statement(config, ref, paths)), do: current_snapshot(config)
   end
 
-  defp commit(config, sql, attempt \\ 1) do
-    case query(config, sql) do
+  defp add_statement(config, {dataset, table}, paths) do
+    literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)
+
+    "CALL ducklake_add_data_files(" <>
+      "#{Identifier.sql_string(config.catalog)}, #{Identifier.sql_string(table)}, " <>
+      "[#{literals}], schema => #{Identifier.sql_string(dataset)})"
+  end
+
+  defp delete_statement(name, paths) do
+    literals = paths |> Enum.uniq() |> Enum.map_join(", ", &Identifier.sql_string/1)
+
+    "DELETE FROM #{name} WHERE filename IN (#{literals})"
+  end
+
+  defp commit(config, sql), do: with_commit_retries(fn -> query(config, sql) end)
+
+  defp commit_transaction(config, statements) do
+    with_commit_retries(fn ->
+      with :ok <- Engine.transaction(config.engine, statements), do: {:ok, :committed}
+    end)
+  end
+
+  defp with_commit_retries(run, attempt \\ 1) do
+    case run.() do
       {:ok, _result} ->
         :ok
 
       {:error, error} ->
-        retry_or_fail(config, sql, attempt, error)
-    end
-  end
-
-  defp retry_or_fail(config, sql, attempt, error) do
-    if conflict?(error) and attempt < @commit_attempts do
-      Process.sleep(backoff(attempt))
-      commit(config, sql, attempt + 1)
-    else
-      {:error, classify(error)}
+        if conflict?(error) and attempt < @commit_attempts do
+          Process.sleep(backoff(attempt))
+          with_commit_retries(run, attempt + 1)
+        else
+          {:error, classify(error)}
+        end
     end
   end
 

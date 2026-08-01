@@ -131,6 +131,18 @@ defmodule Smolquery.Engine do
   end
 
   @doc """
+  Runs `statements` in order inside one transaction: all commit, or the first
+  failure rolls every prior statement back and is returned.
+
+  See `Smolquery.Engine.Connection.transaction/3` for why the transaction runs
+  inside the connection process and why statements carry no parameters.
+  """
+  @spec transaction(atom(), [String.t()]) :: :ok | {:error, Exception.t()}
+  def transaction(name, statements) do
+    Connection.transaction(connection_name(name), statements)
+  end
+
+  @doc """
   Runs `sql` and returns an `Explorer.DataFrame` instead of a `Result`.
 
   This is the read path for results too large to be worth Elixir terms. DuckDB's

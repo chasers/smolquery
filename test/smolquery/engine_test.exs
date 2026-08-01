@@ -97,6 +97,45 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "transaction/2" do
+    test "commits every statement together" do
+      assert Engine.transaction(@engine, [
+               "CREATE TABLE txn_commit (n INTEGER)",
+               "INSERT INTO txn_commit VALUES (1), (2)"
+             ]) == :ok
+
+      assert Engine.query!(@engine, "SELECT count(*) FROM txn_commit") |> Result.one!() == 2
+    end
+
+    test "a failing statement rolls back the ones already applied" do
+      assert {:error, %Adbc.Error{}} =
+               Engine.transaction(@engine, [
+                 "CREATE TABLE txn_rollback (n INTEGER)",
+                 "INSERT INTO txn_rollback VALUES (1)",
+                 "SELECT * FROM no_such_table"
+               ])
+
+      assert {:error, error} = Engine.query(@engine, "SELECT count(*) FROM txn_rollback")
+      assert Exception.message(error) =~ "txn_rollback"
+    end
+
+    test "returns the failing statement's error, not the rollback's" do
+      assert {:error, error} = Engine.transaction(@engine, ["SELECT * FROM no_such_table"])
+      assert Exception.message(error) =~ "no_such_table"
+    end
+
+    test "the connection is usable after a rollback" do
+      {:error, _error} = Engine.transaction(@engine, ["NOT SQL"])
+
+      assert Engine.query!(@engine, "SELECT 1") |> Result.one!() == 1
+      assert Engine.transaction(@engine, ["CREATE TABLE txn_after (n INTEGER)"]) == :ok
+    end
+
+    test "an empty statement list commits nothing and succeeds" do
+      assert Engine.transaction(@engine, []) == :ok
+    end
+  end
+
   describe "frame/3" do
     test "returns an Explorer.DataFrame" do
       assert {:ok, frame} = Engine.frame(@engine, "SELECT i FROM range(3) t(i) ORDER BY i")
