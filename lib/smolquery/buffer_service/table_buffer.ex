@@ -430,12 +430,19 @@ defmodule Smolquery.BufferService.TableBuffer do
     rows = state.chunks |> Enum.reverse() |> Enum.concat()
     started = System.monotonic_time(:microsecond)
     result = persist(state, rows)
+    duration_us = System.monotonic_time(:microsecond) - started
 
     Load.drained(state.load, state.row_count)
 
     if match?({:ok, _ack}, result) do
-      Load.sample_rate(state.load, state.row_count, System.monotonic_time(:microsecond) - started)
+      Load.sample_rate(state.load, state.row_count, duration_us)
     end
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: state.row_count, bytes: state.byte_size, duration_us: duration_us},
+      %{result: if(match?({:ok, _ack}, result), do: :ok, else: :error)}
+    )
 
     state.pending
     |> Enum.reverse()

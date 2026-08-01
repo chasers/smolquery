@@ -125,6 +125,8 @@ defmodule Smolquery.StorageService.Sealer do
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.fetch(state.attempts, ref) do
       {:ok, table_ref} ->
+        attempt(:crashed)
+
         {:noreply, state |> failed(table_ref, "crashed: #{inspect(reason)}") |> finish(ref)}
 
       :error ->
@@ -135,11 +137,20 @@ defmodule Smolquery.StorageService.Sealer do
   @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp record(state, table_ref, {:error, reason}),
-    do: failed(state, table_ref, "failed: #{inspect(reason)}")
+  defp record(state, table_ref, {:error, reason}) do
+    attempt(:error)
 
-  defp record(state, table_ref, _result),
-    do: %{state | failures: Map.delete(state.failures, table_ref)}
+    failed(state, table_ref, "failed: #{inspect(reason)}")
+  end
+
+  defp record(state, table_ref, _result) do
+    attempt(:ok)
+
+    %{state | failures: Map.delete(state.failures, table_ref)}
+  end
+
+  defp attempt(result),
+    do: :telemetry.execute([:smolquery, :seal, :attempt], %{}, %{result: result})
 
   defp failed(state, table_ref, description) do
     consecutive = Map.get(state.failures, table_ref, 0) + 1

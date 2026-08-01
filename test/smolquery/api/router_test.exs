@@ -33,6 +33,40 @@ defmodule Smolquery.Api.RouterTest do
     end
   end
 
+  describe "metrics" do
+    test "answers Prometheus text to the internal secret" do
+      name = start_api()
+
+      response =
+        request(
+          name,
+          conn(:get, "/metrics")
+          |> put_req_header(
+            Smolquery.InternalSecret.header(),
+            Smolquery.InternalSecret.value()
+          )
+        )
+
+      assert response.status == 200
+
+      assert {"content-type", "text/plain" <> _charset} =
+               List.keyfind(response.resp_headers, "content-type", 0)
+    end
+
+    test "refuses a scrape without the secret, and one holding only the API key" do
+      name = start_api()
+
+      assert request(name, conn(:get, "/metrics")).status == 401
+      assert request(name, authorized(conn(:get, "/metrics"))).status == 401
+
+      wrong =
+        conn(:get, "/metrics")
+        |> put_req_header(Smolquery.InternalSecret.header(), "not-the-secret")
+
+      assert request(name, wrong).status == 401
+    end
+  end
+
   describe "auth" do
     test "no authorization header is a 401 in the error envelope" do
       name = start_api()

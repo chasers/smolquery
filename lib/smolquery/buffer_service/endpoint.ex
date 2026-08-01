@@ -57,8 +57,13 @@ defmodule Smolquery.BufferService.Endpoint do
       batch_id = Map.get(batch, :batch_id)
 
       case committed_ack(runtime, table_ref, batch_id) do
-        {:ok, ack} -> {:ok, ack}
-        :error -> deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+        {:ok, ack} ->
+          deduped(rows)
+
+          {:ok, ack}
+
+        :error ->
+          deliver(runtime, table_ref, schema, rows, batch_id, @retries)
       end
     end
   end
@@ -130,24 +135,39 @@ defmodule Smolquery.BufferService.Endpoint do
     load = load(runtime, table_ref)
     count = length(rows)
 
-    with :ok <- Load.admit(load, count, runtime.ack_budget_ms) do
-      Load.enter(load, count)
+    case Load.admit(load, count, runtime.ack_budget_ms) do
+      :ok ->
+        Load.enter(load, count)
 
-      case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id) do
-        {:ok, ack} ->
-          {:ok, ack}
+        case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id) do
+          {:ok, ack} ->
+            {:ok, ack}
 
-        {:duplicate, ack} ->
-          Load.leave(load, count)
+          {:duplicate, ack} ->
+            Load.leave(load, count)
+            deduped(rows)
 
-          {:ok, ack}
+            {:ok, ack}
 
-        {:error, reason} ->
-          Load.leave(load, count)
+          {:error, reason} ->
+            Load.leave(load, count)
 
-          {:error, reason}
-      end
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        :telemetry.execute(
+          [:smolquery, :buffer, :admission],
+          %{rows: count},
+          %{outcome: :refused}
+        )
+
+        {:error, reason}
     end
+  end
+
+  defp deduped(rows) do
+    :telemetry.execute([:smolquery, :buffer, :dedup], %{rows: length(rows)}, %{})
   end
 
   defp load(runtime, table_ref) do

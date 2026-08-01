@@ -71,12 +71,22 @@ defmodule Smolquery.StorageService.Retention do
     with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
       outcomes = Enum.map(tables, &sweep_table(state.runtime, &1))
 
-      {:ok,
-       %{
-         dropped: for({:ok, drop} <- outcomes, do: drop),
-         failed: for({:failed, failure} <- outcomes, do: failure),
-         expired_snapshots: expire(state.runtime)
-       }}
+      report = %{
+        dropped: for({:ok, drop} <- outcomes, do: drop),
+        failed: for({:failed, failure} <- outcomes, do: failure),
+        expired_snapshots: expire(state.runtime)
+      }
+
+      :telemetry.execute(
+        [:smolquery, :retention, :sweep],
+        %{
+          dropped: Enum.sum_by(report.dropped, &length(&1.dropped)),
+          expired_snapshots: report.expired_snapshots
+        },
+        %{}
+      )
+
+      {:ok, report}
     end
   end
 

@@ -48,6 +48,8 @@ defmodule Smolquery.IngestService.Client do
          {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
       case Validator.validate(schema, rows) do
         {[], errors} ->
+          measure(0, errors)
+
           {:ok, %{inserted: 0, errors: errors}}
 
         {valid, errors} ->
@@ -75,8 +77,18 @@ defmodule Smolquery.IngestService.Client do
     batch = batch(schema, valid, batch_id)
 
     with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
+      measure(length(valid), errors)
+
       {:ok, %{inserted: length(valid), errors: errors}}
     end
+  end
+
+  defp measure(accepted, errors) do
+    :telemetry.execute(
+      [:smolquery, :ingest, :insert],
+      %{accepted: accepted, rejected: length(errors)},
+      %{}
+    )
   end
 
   defp batch(schema, rows, nil), do: %{schema: schema, rows: rows}
