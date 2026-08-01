@@ -54,6 +54,36 @@ jobs:
       - run: mix deps.get
       - run: mix test
 
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.2"
+          elixir-version: "1.20.2"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+
+      - name: Cache DuckDB extensions
+        uses: actions/cache@v4
+        with:
+          path: ~/.duckdb
+          key: duckdb-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get
+      - name: Start epmd for the two-node gen_rpc tests
+        run: epmd -daemon
+      - run: mix test --only integration
+
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-latest

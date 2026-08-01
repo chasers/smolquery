@@ -25,8 +25,9 @@ Erlang's own `leexinc.hrl`, for one).
 CI runs these; they must be green:
 
 ```sh
-mix ci         # compile -Werror, format, credo --strict (ex_slop), audits, ex_dna, reach arch policy
-mix dialyzer   # type analysis (own CI job)
+mix ci                        # compile -Werror, format, credo --strict (ex_slop), audits, ex_dna, reach arch policy
+mix dialyzer                  # type analysis (own CI job)
+mix test --only integration   # slow/external suite (own CI job; the two-node tests need epmd running)
 ```
 
 `mix precommit` is the mutating convenience variant (formats instead of
