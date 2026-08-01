@@ -659,6 +659,7 @@ mix run bench/adbc.exs                            # what ADBC costs to connect, 
 mix run bench/buffer.exs                          # what group commit costs, and where it bends
 mix run bench/sealer.exs                          # what a seal costs, and how far behind it runs
 mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
+mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
