@@ -25,6 +25,7 @@ defmodule Smolquery.Application do
     Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)
   end
 
+  defp subtree(:api), do: [Smolquery.Api.Supervisor]
   defp subtree(:query), do: [Smolquery.QueryService.Supervisor]
   defp subtree(:buffer), do: [Smolquery.BufferService.Supervisor]
   defp subtree(:storage), do: [Smolquery.StorageService.Supervisor]

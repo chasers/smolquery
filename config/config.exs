@@ -16,6 +16,10 @@ config :smolquery, Smolquery.Engine,
 
 config :smolquery, :data_dir, "priv/data"
 
+config :smolquery, Smolquery.Api,
+  ip: {127, 0, 0, 1},
+  port: 4000
+
 config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,

@@ -7,8 +7,10 @@ in one self-hostable BEAM release.
 
 > **Status: pre-alpha.** The read engine, segment writer, catalog, the buffer
 > service's hot tier, the seal handoff to the sealed tier, and query jobs
-> planned across both tiers work; no HTTP API yet (queries run through the
-> Elixir client).
+> planned across both tiers work. The HTTP API is landing (Milestone 6):
+> today it serves `/healthz` behind Bearer-key auth; inserts, CRUD, and query
+> endpoints arrive layer by layer (queries run through the Elixir client
+> meanwhile).
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -456,20 +458,45 @@ Properties worth knowing:
   DuckDB's `allowed_directories` lands with auth in Milestone 6, the same
   posture as `HotServer`'s unauthenticated routes.
 
+## HTTP API
+
+`Smolquery.Api` is the front door — one Bandit listener, started by the `:api`
+role, routing only to service client modules and the catalog (the same
+boundary rule the services hold each other to). Every `/v1` route requires the
+static Bearer key; a node with the `:api` role and no key configured fails the
+boot rather than serve an open API. `/healthz` is the one unauthenticated
+route.
+
+```sh
+curl http://127.0.0.1:4000/healthz
+curl -H "authorization: Bearer $SMOLQUERY_API_KEY" http://127.0.0.1:4000/v1/...
+```
+
+Failures answer one JSON envelope everywhere:
+
+```json
+{"error": {"code": 401, "status": "UNAUTHENTICATED", "message": "missing or invalid API key"}}
+```
+
+The v1 surface (datasets/tables CRUD, streaming inserts, query jobs, batch
+loads) lands across Milestone 6's layers; the routes exist in
+`Smolquery.Api.Router` as they arrive.
+
 ## Roles
 
-One release, four services; a node starts only the subtrees its roles name.
-`SMOLQUERY_ROLES` is a comma-separated list, or `all`:
+One release, four services plus the HTTP front door; a node starts only the
+subtrees its roles name. `SMOLQUERY_ROLES` is a comma-separated list, or `all`:
 
 ```sh
 SMOLQUERY_ROLES=all                # default when unset — single-node dev
 SMOLQUERY_ROLES=query              # a query-only node
-SMOLQUERY_ROLES=ingest,buffer
+SMOLQUERY_ROLES=api,ingest,buffer
 ```
 
-Unknown role names fail the boot rather than silently starting nothing. `:query`,
-`:buffer`, and `:storage` start their subtrees today; `:ingest` is accepted and
-contributes nothing until its milestone lands. See `Smolquery.Roles`.
+Unknown role names fail the boot rather than silently starting nothing. `:api`,
+`:query`, `:buffer`, and `:storage` start their subtrees today; `:ingest` is
+accepted and contributes nothing until its milestone lands. See
+`Smolquery.Roles`.
 
 ## Configuration
 
@@ -557,6 +584,9 @@ Runtime environment variables:
 | variable | effect |
 |---|---|
 | `SMOLQUERY_ROLES` | which service subtrees start (`all` or a comma-separated list) |
+| `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires; a node with the `:api` role and no key refuses to boot |
+| `SMOLQUERY_API_PORT` | port the HTTP API binds (default 4000) |
+| `SMOLQUERY_API_IP` | address the HTTP API binds (default `127.0.0.1` — exposing it is deliberate) |
 | `SMOLQUERY_MEMORY_LIMIT` | DuckDB memory limit per engine |
 | `SMOLQUERY_DATA_DIR` | data directory; the catalog and DuckLake data path derive from it |
 | `SMOLQUERY_CATALOG` | catalog metadata database, e.g. `postgres:dbname=smolquery host=…` |

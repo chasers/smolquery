@@ -4,6 +4,20 @@ if roles = System.get_env("SMOLQUERY_ROLES") do
   config :smolquery, roles: Smolquery.Roles.parse!(roles)
 end
 
+if api_key = System.get_env("SMOLQUERY_API_KEY") do
+  config :smolquery, Smolquery.Api, api_key: api_key
+end
+
+if api_port = System.get_env("SMOLQUERY_API_PORT") do
+  config :smolquery, Smolquery.Api, port: String.to_integer(api_port)
+end
+
+if api_ip = System.get_env("SMOLQUERY_API_IP") do
+  {:ok, ip} = api_ip |> String.to_charlist() |> :inet.parse_address()
+
+  config :smolquery, Smolquery.Api, ip: ip
+end
+
 if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
