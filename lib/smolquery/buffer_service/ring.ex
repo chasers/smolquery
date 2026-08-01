@@ -56,17 +56,11 @@ defmodule Smolquery.BufferService.Ring do
   produces the same ring, on every node in the cluster.
   """
   @spec new([node()]) :: {:ok, t()} | {:error, :empty_ring}
-  def new([]), do: {:error, :empty_ring}
-
   def new(nodes) when is_list(nodes) do
-    nodes = nodes |> Enum.uniq() |> Enum.sort()
-
-    points =
-      for node <- nodes, index <- 0..(@points_per_node - 1) do
-        {:erlang.phash2({node, index}, @space), node}
-      end
-
-    {:ok, %__MODULE__{nodes: nodes, points: points |> Enum.sort() |> List.to_tuple()}}
+    case nodes |> Enum.uniq() |> Enum.sort() do
+      [] -> {:error, :empty_ring}
+      nodes -> {:ok, %__MODULE__{nodes: nodes, points: points(nodes)}}
+    end
   end
 
   @doc """
@@ -107,6 +101,14 @@ defmodule Smolquery.BufferService.Ring do
   """
   @spec own?(t(), routing_key()) :: boolean()
   def own?(%__MODULE__{} = ring, key), do: owner(ring, key) == node()
+
+  defp points(nodes) do
+    for node <- nodes, index <- 0..(@points_per_node - 1) do
+      {:erlang.phash2({node, index}, @space), node}
+    end
+    |> Enum.sort()
+    |> List.to_tuple()
+  end
 
   defp search(points, hash, low, high) when low < high do
     middle = div(low + high, 2)
