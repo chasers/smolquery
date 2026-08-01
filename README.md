@@ -6,8 +6,9 @@ Datasets, tables, async query jobs, and streaming inserts over an HTTP API —
 in one self-hostable BEAM release.
 
 > **Status: pre-alpha.** The read engine, segment writer, catalog, the buffer
-> service's hot tier, and the seal handoff to the sealed tier work; no ingest
-> HTTP or query API yet.
+> service's hot tier, the seal handoff to the sealed tier, and query jobs
+> planned across both tiers work; no HTTP API yet (queries run through the
+> Elixir client).
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -398,6 +399,63 @@ ever name it — the next attempt writes the same key and registers that one.
   `gc_grace_ms` must exceed the longest merge, the way `retire_grace_ms` must exceed
   the longest query.
 
+### Queries
+
+`Smolquery.QueryService` is the read path: async query jobs planned against the
+catalog ∪ the hot tier, started by the `:query` role. The surface is
+`Smolquery.QueryService.Client`:
+
+```elixir
+{:ok, job, frame} = Smolquery.QueryService.Client.query(Smolquery.QueryService,
+  "SELECT count(*) FROM analytics.events")
+
+{:ok, job} = Smolquery.QueryService.Client.submit(name, sql)   # async
+{:ok, job, frame} = Smolquery.QueryService.Client.fetch(name, job.id)
+:ok = Smolquery.QueryService.Client.cancel(name, job.id)
+```
+
+Each job runs in its own process with its own private DuckDB engine — two jobs'
+views never collide, cancellation kills the engine and the query dies with it,
+and `job_memory_limit` binds one job, not the node. The engine costs ~50 ms to
+start (`bench/results/query.md`), which an async job never notices.
+
+The planner never rewrites SQL. For each table the query references (found with
+DuckDB's own parser, which doubles as the read-only gate — only a single SELECT
+serializes), it creates `<dataset>.<table>` as a view in the job engine's own
+catalog, shadowing the attached lake:
+
+```sql
+CREATE VIEW "analytics"."events" AS SELECT "id", "ts" FROM (
+  SELECT * FROM "lake"."analytics"."events" AT (VERSION => 42)   -- sealed, pinned
+  UNION ALL BY NAME
+  SELECT * FROM read_parquet(['http://…/01A.parquet'], union_by_name := true)
+)
+```
+
+Properties worth knowing:
+
+- **One snapshot per job, and rows count exactly once while sealing runs
+  underneath.** The sealed side is pinned `AT (VERSION => S)`; a hot
+  micro-segment is included iff it carries no claim or its claim's sealed keys
+  are not all in the catalog at `S`. The commit that makes rows appear in the
+  sealed tier is the same event that excludes their micro-segments — no gap, at
+  any crash point, which the reader-side crash matrix walks through the public
+  surface.
+- **Hot rows have no snapshot.** An acked write is visible to the next query —
+  read-your-writes, not an inconsistency.
+- **Both tiers project onto the catalog's schema.** A micro-segment written
+  before a column was added reads back with NULLs there, the way a sealed
+  segment does.
+- **Manifest-level pruning drops hot files before DuckDB pays an HTTP footer
+  read for each** (~0.7 ms/file): top-level WHERE conjuncts against flush-time
+  min-max stats, conservative in every uncertain case. The sealed tier prunes
+  itself — DuckLake keeps stats at registration.
+- **An unreachable buffer owner fails the query.** Sealed-only rows behind a
+  green status would be a wrong answer.
+- **v1 trusts its SQL.** A SELECT can `read_csv('/etc/passwd')`; scoping
+  DuckDB's `allowed_directories` lands with auth in Milestone 6, the same
+  posture as `HotServer`'s unauthenticated routes.
+
 ## Roles
 
 One release, four services; a node starts only the subtrees its roles name.
@@ -539,6 +597,7 @@ mix run bench/planner.exs                         # scan DuckLake, or plan aroun
 mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
 mix run bench/buffer.exs                          # what group commit costs, and where it bends
 mix run bench/sealer.exs                          # what a seal costs, and how far behind it runs
+mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
