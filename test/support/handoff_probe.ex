@@ -11,7 +11,8 @@ defmodule Smolquery.Test.HandoffProbe do
       HandoffProbe.release(attempt)
 
   The configured term is `{test_pid, result}` — the result every released attempt
-  returns, or `:crash` to make it raise.
+  returns, or `:crash` to make it raise. `release/2` overrides it for one attempt,
+  for a test that needs a table to fail and then succeed.
   """
 
   @behaviour Smolquery.StorageService.Handoff
@@ -24,15 +25,26 @@ defmodule Smolquery.Test.HandoffProbe do
 
     receive do
       :release -> finish(result)
+      {:release, override} -> finish(override)
     end
   end
 
   @doc """
-  Lets a reported attempt finish.
+  Lets a reported attempt finish, returning the configured result.
   """
   @spec release(pid()) :: :ok
   def release(attempt) do
     send(attempt, :release)
+
+    :ok
+  end
+
+  @doc """
+  Lets a reported attempt finish with `result`, ignoring the configured one.
+  """
+  @spec release(pid(), term()) :: :ok
+  def release(attempt, result) do
+    send(attempt, {:release, result})
 
     :ok
   end

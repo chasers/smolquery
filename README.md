@@ -304,6 +304,13 @@ that wiring is configuration. So far the scheduling half is built:
 - **An attempt runs as a monitored task, not a linked one.** A merge that crashes
   frees its table and leaves the sealer and its siblings alone; the next re-signal
   retries it.
+- **A claim that can never seal retries forever, and is counted while it does.**
+  Bounding the retries would be worse — the buffer holds the only durable record of
+  what wants sealing, so giving up strands a table's tail with nothing left to
+  notice. `Sealer.failures/1` reports consecutive failed attempts per table, cleared
+  by the first success, and the log escalates from a warning to an error once a
+  table stops looking transient. Distinguishing "retrying" from "stuck" is the part
+  that was missing; stopping is not.
 - **Signalling a node that runs no storage service is reported, not raised.**
   Raising would take down the `TableBuffer` that signalled, and it signals from
   the write path.
@@ -316,7 +323,8 @@ The merge itself is built. `Smolquery.StorageService.Merge` turns a claim into o
 sealed segment inside DuckDB, writing straight to the store's staging path:
 
 ```sql
-COPY (SELECT * FROM read_parquet([urls], union_by_name := true)) TO staged
+COPY (SELECT <the catalog's columns> FROM read_parquet([urls], union_by_name := true))
+TO staged
 ```
 
 - **No segment's bytes become an Elixir term**, which matters most for the largest
@@ -327,6 +335,17 @@ COPY (SELECT * FROM read_parquet([urls], union_by_name := true)) TO staged
 - **`union_by_name` is what makes additive schema evolution work**: micro-segments
   written before and after a column was added merge into one segment carrying the
   union.
+- **But the union of the inputs is not the schema the catalog declares**, and
+  registration compares against the catalog. A claim whose inputs *all* predate an
+  added column unions to the older, narrower schema, and `add_data_files` rejects
+  the file — a rejection no retry can clear, because the claim's input set is
+  frozen. So the merge projects onto the catalog's columns instead: each declared
+  column in the catalog's order, cast to the catalog's type, and one the inputs do
+  not carry as a typed `NULL`. The sealed file matches the table by construction.
+- **A column the inputs carry and the catalog does not is an error**
+  (`{:error, {:undeclared_columns, names}}`), refused before any byte moves.
+  Projecting it away would silently drop a column of acked rows, which is worse
+  than a stuck claim; widening the table is the catalog's call, not the sealer's.
 - **The output key comes from the claim, not from the merge**, so a retry is an
   idempotent overwrite of identical rows rather than a second segment.
 - **An input the manifest no longer lists is skipped, not fatal** — its rows are

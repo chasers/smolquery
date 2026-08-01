@@ -129,6 +129,35 @@ defmodule Smolquery.SchemaTest do
     end
   end
 
+  describe "projection/2" do
+    test "selects every declared column in the schema's order, cast to its type" do
+      schema = Schema.new!([{"id", :int64}, {"amount", {:numeric, 12, 3}}])
+
+      assert Schema.projection(schema, ["amount", "id"]) ==
+               {:ok,
+                ~s|CAST("id" AS BIGINT) AS "id", CAST("amount" AS DECIMAL(12,3)) AS "amount"|}
+    end
+
+    test "substitutes a typed NULL for a column the relation does not carry" do
+      schema = Schema.new!([{"id", :int64}, {"name", :string}])
+
+      assert Schema.projection(schema, ["id"]) ==
+               {:ok, ~s|CAST("id" AS BIGINT) AS "id", CAST(NULL AS VARCHAR) AS "name"|}
+    end
+
+    test "drops a column the schema does not declare" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert Schema.projection(schema, ["id", "name"]) == {:ok, ~s|CAST("id" AS BIGINT) AS "id"|}
+    end
+
+    test "reports a type it cannot render" do
+      schema = %Schema{fields: [%Field{name: "b", type: :blob}]}
+
+      assert Schema.projection(schema, ["b"]) == {:error, {:unsupported_type, :blob}}
+    end
+  end
+
   describe "column_definitions/1" do
     test "renders quoted DDL preserving order and nullability" do
       schema =

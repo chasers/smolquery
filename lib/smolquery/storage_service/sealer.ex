@@ -24,6 +24,17 @@ defmodule Smolquery.StorageService.Sealer do
   sealing. The table simply becomes eligible again, and the next re-signal retries
   it — with the same claim, so the retry produces the same sealed segment rather
   than a second one.
+
+  ## A claim that can never seal retries forever, and is counted while it does
+
+  The retry loop has no bound, and giving it one would be worse than leaving it:
+  the buffer holds the only durable record of what wants sealing, so a sealer that
+  gave up would strand a table's tail in the hot tier with nothing left to notice.
+  What it does instead is count. `failures/1` reports consecutive failed attempts
+  per table, cleared the moment one succeeds, and the log escalates from a warning
+  to an error once a table has failed enough times in a row to stop being plausibly
+  transient. Distinguishing "retrying" from "stuck" is the part that was missing;
+  stopping is not.
   """
 
   use GenServer
@@ -36,7 +47,9 @@ defmodule Smolquery.StorageService.Sealer do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, attempts: %{}]
+  defstruct [:runtime, attempts: %{}, failures: %{}]
+
+  @stuck_after 5
 
   @doc """
   Starts the sealer for a runtime.
@@ -66,6 +79,17 @@ defmodule Smolquery.StorageService.Sealer do
   @spec sealing(atom()) :: [Store.table_ref()]
   def sealing(name), do: GenServer.call(Runtime.sealer(name), :sealing)
 
+  @doc """
+  Consecutive failed seal attempts, per table.
+
+  A table appears here once an attempt has failed and drops out the moment one
+  succeeds, so a table sealing cleanly is absent rather than zero. This is what an
+  operator reads to tell a claim that is merely retrying from one that can never
+  seal; see the moduledoc.
+  """
+  @spec failures(atom()) :: %{Store.table_ref() => pos_integer()}
+  def failures(name), do: GenServer.call(Runtime.sealer(name), :failures)
+
   @impl GenServer
   def init(%Runtime{} = runtime), do: {:ok, %__MODULE__{runtime: runtime}}
 
@@ -82,14 +106,15 @@ defmodule Smolquery.StorageService.Sealer do
   def handle_call(:sealing, _from, state), do: {:reply, Map.values(state.attempts), state}
 
   @impl GenServer
+  def handle_call(:failures, _from, state), do: {:reply, state.failures, state}
+
+  @impl GenServer
   def handle_info({ref, result}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
 
     case Map.fetch(state.attempts, ref) do
       {:ok, table_ref} ->
-        log_failed(table_ref, result)
-
-        {:noreply, finish(state, ref)}
+        {:noreply, state |> record(table_ref, result) |> finish(ref)}
 
       :error ->
         {:noreply, state}
@@ -100,9 +125,7 @@ defmodule Smolquery.StorageService.Sealer do
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.fetch(state.attempts, ref) do
       {:ok, table_ref} ->
-        Logger.warning("seal of #{inspect(table_ref)} crashed: #{inspect(reason)}")
-
-        {:noreply, finish(state, ref)}
+        {:noreply, state |> failed(table_ref, "crashed: #{inspect(reason)}") |> finish(ref)}
 
       :error ->
         {:noreply, state}
@@ -112,10 +135,30 @@ defmodule Smolquery.StorageService.Sealer do
   @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp log_failed(table_ref, {:error, reason}),
-    do: Logger.warning("seal of #{inspect(table_ref)} failed: #{inspect(reason)}")
+  defp record(state, table_ref, {:error, reason}),
+    do: failed(state, table_ref, "failed: #{inspect(reason)}")
 
-  defp log_failed(_table_ref, _result), do: :ok
+  defp record(state, table_ref, _result),
+    do: %{state | failures: Map.delete(state.failures, table_ref)}
+
+  defp failed(state, table_ref, description) do
+    consecutive = Map.get(state.failures, table_ref, 0) + 1
+
+    log_failure(table_ref, description, consecutive)
+
+    %{state | failures: Map.put(state.failures, table_ref, consecutive)}
+  end
+
+  defp log_failure(table_ref, description, consecutive) when consecutive >= @stuck_after do
+    Logger.error(
+      "seal of #{inspect(table_ref)} #{description} — #{consecutive} consecutive failures, " <>
+        "this claim may never seal"
+    )
+  end
+
+  defp log_failure(table_ref, description, consecutive),
+    do:
+      Logger.warning("seal of #{inspect(table_ref)} #{description} (#{consecutive} consecutive)")
 
   defp sealing?(state, table_ref), do: table_ref in Map.values(state.attempts)
 
