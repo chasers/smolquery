@@ -28,6 +28,19 @@ defmodule Smolquery.BufferService.Supervisor do
   re-asserts membership after a `:pg` scope restart. It is omitted entirely
   when the drain flag is already up: a subtree restarted after a completed
   drain must not silently rejoin a ring whose writes it refuses.
+
+  `RingEpoch` follows it when epoch fencing is configured (T-92) —
+  `:epoch_fencing` is set by `config/runtime.exs` wherever
+  `CATALOG_DATABASE_URL` enables clustering, and `:epoch_store` opts a test
+  in explicitly; a test that merely flips `Smolquery.Cluster` on gets no
+  keeper and no gate, because the keeper without a reachable store fails
+  every write closed, which is right in production and wrong in a test that
+  never promised a Postgres. Membership asserts
+  what `:pg` sees, the epoch keeper fences what this node may act on. It
+  sits above the manifest and the buffers because they consume its gate; if
+  it cannot keep its lease verified the writes it would have permitted must
+  fail closed, which its published-but-stale state already guarantees even
+  across its own restarts.
   """
 
   use Supervisor
@@ -36,6 +49,8 @@ defmodule Smolquery.BufferService.Supervisor do
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
+  alias Smolquery.BufferService.Ring
+  alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Cluster.PgGroup
 
@@ -58,6 +73,7 @@ defmodule Smolquery.BufferService.Supervisor do
 
     children = [
       membership(runtime),
+      ring_epoch(runtime),
       {HotManifest, name: Runtime.manifest(runtime.name)},
       {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
       {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
@@ -79,5 +95,18 @@ defmodule Smolquery.BufferService.Supervisor do
     unless Drain.draining?(runtime.name) do
       {PgGroup.Member, {Smolquery.BufferService, runtime.name}}
     end
+  end
+
+  defp ring_epoch(runtime) do
+    if epoch_fencing?() do
+      {RingEpoch, name: runtime.name, static: Ring.nodes(runtime.ring)}
+    end
+  end
+
+  defp epoch_fencing? do
+    config = Application.get_env(:smolquery, Smolquery.BufferService, [])
+
+    Keyword.has_key?(config, :epoch_store) or
+      (Smolquery.Cluster.enabled?() and Keyword.get(config, :epoch_fencing, false))
   end
 end

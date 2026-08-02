@@ -21,6 +21,7 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Load
+  alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
@@ -49,6 +50,13 @@ defmodule Smolquery.BufferService.Endpoint do
   committed is answered with the original ack before admission even runs, so
   a client retrying into an overloaded buffer is not refused for work that is
   already done.
+
+  Ownership is fenced before admission (`Smolquery.BufferService.RingEpoch`,
+  T-92): a clustered node refuses a write for a table the epoch-stamped
+  configuration does not give it, so two nodes with divergent `:pg` views
+  cannot both accept the same table's writes. The dedup answer above is
+  deliberately not fenced — repeating an ack for a batch this node already
+  committed is safe from any node.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
@@ -70,10 +78,12 @@ defmodule Smolquery.BufferService.Endpoint do
   end
 
   defp admit(runtime, table_ref, schema, rows, batch_id) do
-    if Drain.draining?(runtime.name) do
-      {:error, :draining}
-    else
-      deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+    with :ok <- RingEpoch.check_write(runtime.name, table_ref) do
+      if Drain.draining?(runtime.name) do
+        {:error, :draining}
+      else
+        deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+      end
     end
   end
 

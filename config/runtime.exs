@@ -122,7 +122,7 @@ if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
   config :smolquery, Smolquery.Catalog.DuckLake,
     metadata: Smolquery.DatabaseUrl.libpq_metadata(db)
 
-  config :smolquery, Smolquery.BufferService, hot_server_ip: {0, 0, 0, 0}
+  config :smolquery, Smolquery.BufferService, hot_server_ip: {0, 0, 0, 0}, epoch_fencing: true
 end
 
 if hot_server_ip = System.get_env("SMOLQUERY_HOT_SERVER_IP") do
