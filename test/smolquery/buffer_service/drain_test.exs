@@ -139,6 +139,17 @@ defmodule Smolquery.BufferService.DrainTest do
     assert PgGroup.nodes(BufferService, name, []) == []
   end
 
+  test "handoff refuses new writes, flushes the tail, and seals nothing", context do
+    name = start_buffer_service(context)
+
+    assert {:ok, _ack} = Client.write_batch(name, @table_a, batch(1..10))
+    assert :ok = Drain.handoff(name)
+
+    assert Drain.draining?(name)
+    assert {:error, :draining} = Client.write_batch(name, @table_a, batch(11..20))
+    refute_receive {:seal_ready, @table_a, _claim}, 100
+  end
+
   defp ensure_pg_scope! do
     case :pg.start_link(Cluster.pg_scope()) do
       {:ok, _pid} -> :ok

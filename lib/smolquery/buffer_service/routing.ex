@@ -27,6 +27,7 @@ defmodule Smolquery.BufferService.Routing do
   actual ring change rather than once per write.
   """
 
+  alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.Transport
@@ -127,6 +128,28 @@ defmodule Smolquery.BufferService.Routing do
     :smolquery
     |> Application.get_env(Smolquery.BufferService, [])
     |> Keyword.get(:expected_nodes, [])
+  end
+
+  @doc """
+  How many of `manifest_nodes/1` a reader may fail to reach and still answer
+  completely (T-97).
+
+  Zero without replication — every node's unsealed tail is a sole copy, so an
+  absent expected node must fail the read (T-94). Under
+  `Smolquery.BufferService.Replicator.SegmentShipping` it is
+  `replication_factor - 1`: every acked row an absent node held exists on
+  that many other disks, and the planner's dedupe-by-id makes counting the
+  surviving copy exact. The value comes from configuration rather than the
+  buffer runtime because the reader asking is usually a query node running
+  no buffer at all.
+  """
+  @spec absence_tolerance(atom()) :: non_neg_integer()
+  def absence_tolerance(_name) do
+    :smolquery
+    |> Application.get_env(Smolquery.BufferService, [])
+    |> Keyword.get(:replicator, {Replicator.None, []})
+    |> Replicator.new()
+    |> Replicator.redundancy()
   end
 
   @doc """

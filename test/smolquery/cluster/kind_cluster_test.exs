@@ -120,7 +120,7 @@ defmodule Smolquery.Cluster.KindClusterTest do
       assert Kind.total_rows(dataset, tables) == {:ok, 500}
     end
 
-    test "fails queries cleanly when killed, and never answers short", context do
+    test "answers completely from the replica when killed, and never short", context do
       %{dataset: dataset, tables: tables, first: first} = context
 
       victim = Kind.owner_pod({dataset, first})
@@ -128,15 +128,23 @@ defmodule Smolquery.Cluster.KindClusterTest do
 
       Kind.kill!(victim)
 
-      for _attempt <- 1..10 do
-        outcome = Kind.count("SELECT count(*) AS n FROM #{dataset}.#{first}")
+      outcomes =
+        for _attempt <- 1..10 do
+          outcome = Kind.count("SELECT count(*) AS n FROM #{dataset}.#{first}")
 
-        assert outcome in [{:ok, 200}, {:error, 503}],
-               "while #{victim} was down a query answered #{inspect(outcome)} — " <>
-                 "acked rows go missing silently rather than failing (T-94)"
+          assert outcome in [{:ok, 200}, {:error, 503}],
+                 "while #{victim} was down a query answered #{inspect(outcome)} — " <>
+                   "acked rows go missing silently rather than failing (T-94)"
 
-        Process.sleep(2_000)
-      end
+          Process.sleep(2_000)
+
+          outcome
+        end
+
+      assert {:ok, 200} in outcomes,
+             "no query answered completely while #{victim} was down — " <>
+               "its follower holds every acked row and the planner tolerates " <>
+               "one absent member under replication (T-96, T-97)"
 
       Kind.await_fleet!()
 
