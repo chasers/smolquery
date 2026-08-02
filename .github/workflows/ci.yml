@@ -72,7 +72,10 @@ jobs:
       minio:
         # bitnami's image (unlike minio/minio) runs `server` off env vars alone —
         # GitHub Actions service containers cannot override a command/args.
-        image: bitnami/minio:latest
+        # bitnamilegacy, not bitnami: Broadcom moved bitnami/minio's free
+        # tags off Docker Hub in 2025 ("manifest unknown" on :latest);
+        # bitnamilegacy is the frozen free mirror.
+        image: bitnamilegacy/minio:latest
         env:
           MINIO_ROOT_USER: smolquery
           MINIO_ROOT_PASSWORD: smolquery-secret
