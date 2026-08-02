@@ -6,6 +6,7 @@ defmodule Smolquery.MixProject do
       app: :smolquery,
       version: "0.1.0",
       elixir: "~> 1.20",
+      package: [licenses: ["Apache-2.0"]],
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
