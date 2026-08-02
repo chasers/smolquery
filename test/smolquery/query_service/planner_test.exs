@@ -162,6 +162,34 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert [%{"id" => "01A"}, %{"id" => "01B"}] = plan.hot[@table]
     end
 
+    test "the same segment id arriving twice is read once, not counted per copy" do
+      runtime = runtime([entry("01A"), entry("01B"), entry("01A")])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      assert [%{"id" => "01A"}, %{"id" => "01B"}] = plan.hot[@table]
+
+      [_schema, view] = plan.statements
+
+      assert view =~
+               ~s|read_parquet(['http://hot.test/01A.parquet', 'http://hot.test/01B.parquet'], union_by_name := true)|
+    end
+
+    test "of two copies of a segment, the one further along the seal handoff wins" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+      claim = %{"claim_keys" => ["analytics/events/01SEALED.parquet"]}
+
+      runtime =
+        runtime(
+          [entry("01A"), entry("01A", claim)],
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
+        )
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      assert plan.hot[@table] == []
+    end
+
     test "a claimed entry whose sealed keys are all present at the snapshot is excluded" do
       sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
 
