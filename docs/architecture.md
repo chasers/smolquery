@@ -219,6 +219,18 @@ What that ack means:
   `Replicator.None`, the single-copy policy above) is where segment shipping
   (T-96) or a shared-store manifest policy (T-26) plugs in without the group
   commit knowing which.
+- **Segment shipping closes the window (T-96).** With
+  `Replicator.SegmentShipping` (`SMOLQUERY_BUFFER_REPLICATION=2`), a group
+  commit ships the encoded segment and its manifest entry to the next
+  `replication_factor - 1` ring successors and waits for their fsync before
+  any ack — one round-trip per flush, amortized like the fsync. The ack rule
+  is all-replicas: a follower down fails the write honestly, a ring smaller
+  than the factor refuses writes as `underreplicated`, and a failed shipment
+  compensates the owner's local commit away so no side keeps rows the caller
+  was told failed. Claims, retires, and drops replicate too (followers first
+  — they are idempotent), a follower's disk stays `Adopter`-replayable
+  (promotion is the existing boot recovery), and seal signalling gates on
+  epoch ownership so only one manifest ever freezes a claim.
 - **A batch with an id is exactly-once; one without is at-least-once.** A batch
   carrying a `:batch_id` idempotency key can be retried through any failure — a
   lost ack, a transport timeout, a buffer crash-before-reply — and its rows land

@@ -125,6 +125,42 @@ defmodule Smolquery.BufferService.RingEpoch do
   end
 
   @doc """
+  Whether this node is `table_ref`'s owner at the current epoch — the seal
+  gate (T-96). A node with no published configuration owns whatever the
+  static ring says (single-node behavior, unchanged); a node whose lease
+  lapsed owns nothing, the same fail-closed arm as `check_write/2`. Unlike
+  `check_write/2` this ignores settling: an owner-elect freezing a claim is
+  safe (claims are deterministic and idempotent), and waiting a lease to
+  seal would only stretch the unsealed window.
+  """
+  @spec owner?(atom(), term()) :: boolean()
+  def owner?(name, table_ref) do
+    case :persistent_term.get(key(name), nil) do
+      nil ->
+        true
+
+      config ->
+        now = System.monotonic_time(:millisecond)
+
+        now - :atomics.get(config.verified, 1) <= config.lease_ms and
+          Ring.owner(config.ring, table_ref) == node()
+    end
+  end
+
+  @doc """
+  The epoch this node currently holds, `nil` before the first verified
+  refresh or where no keeper runs. Stamped onto replica traffic so a
+  follower can refuse a shipment from a configuration older than its own.
+  """
+  @spec current_epoch(atom()) :: non_neg_integer() | nil
+  def current_epoch(name) do
+    case :persistent_term.get(key(name), nil) do
+      nil -> nil
+      config -> config.epoch
+    end
+  end
+
+  @doc """
   Forces a refresh now, returning once it completed. For tests, which
   otherwise race the refresh interval.
   """

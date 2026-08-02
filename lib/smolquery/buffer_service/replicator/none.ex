@@ -14,4 +14,7 @@ defmodule Smolquery.BufferService.Replicator.None do
 
   @impl Smolquery.BufferService.Replicator
   def commit(_config, _commit), do: :ok
+
+  @impl Smolquery.BufferService.Replicator
+  def append(_config, _mutation), do: :ok
 end

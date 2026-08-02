@@ -93,6 +93,53 @@ defmodule Smolquery.BufferService.Endpoint do
     do: HotManifest.batch_ack(runtime.manifest, table_ref, batch_id)
 
   @doc """
+  Accepts a replicated group commit from a table's owner (T-96).
+
+  The follower half of segment shipping: `bytes` land in this node's store
+  and `entry` is appended verbatim to this node's manifest log, inside the
+  table's own buffer process. A shipment stamped with an epoch older than
+  this node's own configuration is refused — fencing applies to every write
+  path, replica traffic included (PL-13).
+  """
+  @spec accept_replica(atom(), Store.table_ref(), Entry.t(), binary() | nil, term()) ::
+          :ok | {:error, term()}
+  def accept_replica(name, table_ref, %Entry{} = entry, bytes, epoch) do
+    with {:ok, runtime} <- runtime(name),
+         :ok <- replica_epoch_check(name, epoch),
+         {:ok, buffer} <- buffer(runtime, table_ref) do
+      TableBuffer.accept_replica(buffer, entry, bytes, runtime.write_timeout_ms)
+    end
+  catch
+    :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
+  end
+
+  @doc """
+  Applies a claim, retire, or drop a table's owner replicated here (T-96).
+  """
+  @spec apply_replica_mutation(atom(), Store.table_ref(), :claim | :retire | :drop, map(), term()) ::
+          :ok | {:error, term()}
+  def apply_replica_mutation(name, table_ref, op, args, epoch)
+      when op in [:claim, :retire, :drop] do
+    with {:ok, runtime} <- runtime(name),
+         :ok <- replica_epoch_check(name, epoch),
+         {:ok, buffer} <- buffer(runtime, table_ref) do
+      TableBuffer.apply_replica_mutation(buffer, op, args, runtime.control_timeout_ms)
+    end
+  catch
+    :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
+  end
+
+  defp replica_epoch_check(name, epoch) do
+    local = RingEpoch.current_epoch(name)
+
+    if is_integer(local) and is_integer(epoch) and epoch < local do
+      {:error, {:stale_epoch, local}}
+    else
+      :ok
+    end
+  end
+
+  @doc """
   Every micro-segment this node holds for a table.
   """
   @spec hot_manifest(atom(), Store.table_ref()) :: {:ok, [Entry.t()]} | {:error, term()}
