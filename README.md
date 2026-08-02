@@ -825,12 +825,19 @@ The query service runs each query as a job with a private DuckDB engine
 Given `catalog:` options it starts its own DuckLake engine to plan through;
 given a `%Smolquery.Catalog{}` it starts none — but then `job_bootstrap:` must
 carry the `ATTACH` job engines need, since they attach the lake themselves.
-`buffer_base_url` is where the planner reaches `HotServer` for hot manifests —
-the same single-node honesty as the storage service's. `store` takes the same
-`Store.S3` config as the storage service's when the sealed tier lives there —
-every job's engine needs the matching `CREATE SECRET` to read it, even though
-the query path never writes through the store itself. `max_concurrent_jobs`
-refuses rather than queues; `default_timeout_ms` bounds every job's runtime;
+`buffer_base_url` is where the planner reaches `HotServer` for hot
+manifests on a single node. Clustered (`CATALOG_DATABASE_URL` set,
+Milestone 8 L5), the planner ignores it per table and instead derives each
+owning node's URL from the node name itself
+(`http://<host-part-of-node-name>:<buffer_hot_port>`) — `buffer_hot_port`
+is the port every buffer node's `HotServer` binds
+(`Smolquery.BufferService`'s own `hot_server_port`); a table whose owner
+is unreachable still fails the whole plan, the same honesty as
+single-node. `store` takes the same `Store.S3` config as the storage
+service's when the sealed tier lives there — every job's engine needs the
+matching `CREATE SECRET` to read it, even though the query path never
+writes through the store itself. `max_concurrent_jobs` refuses rather
+than queues; `default_timeout_ms` bounds every job's runtime;
 `job_memory_limit` is each job engine's DuckDB `memory_limit`; `result_ttl_ms`
 is how long a finished job holds its result frame for an async caller.
 
