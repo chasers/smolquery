@@ -170,7 +170,7 @@ defmodule SmolqueryWeb.TableLive.Show do
         <h1 class="text-xl font-semibold font-mono">{@dataset}.{@table}</h1>
       </div>
 
-      <div class="card bg-base-200">
+      <div class="card bg-base-200 border border-base-300">
         <div class="card-body py-4">
           <h2 class="card-title text-base">Schema</h2>
           <table class="table table-sm">
@@ -192,7 +192,7 @@ defmodule SmolqueryWeb.TableLive.Show do
         </div>
       </div>
 
-      <div class="card bg-base-200">
+      <div class="card bg-base-200 border border-base-300">
         <div class="card-body py-4">
           <h2 class="card-title text-base">Retention</h2>
           <div :if={@retention} class="text-sm font-mono">
@@ -233,7 +233,7 @@ defmodule SmolqueryWeb.TableLive.Show do
         </div>
       </div>
 
-      <div class="card bg-base-200">
+      <div class="card bg-base-200 border border-base-300">
         <div class="card-body py-4">
           <h2 class="card-title text-base">Preview</h2>
           <%= case @preview do %>

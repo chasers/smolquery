@@ -184,7 +184,7 @@ defmodule SmolqueryWeb.TableLive.Index do
         No datasets yet — create one below.
       </div>
 
-      <div :for={{dataset, tables} <- @listing} class="card bg-base-200">
+      <div :for={{dataset, tables} <- @listing} class="card bg-base-200 border border-base-300">
         <div class="card-body py-4">
           <h2 class="card-title text-base font-mono">{dataset}</h2>
           <div :if={tables == []} class="text-sm opacity-70">No tables in this dataset.</div>
@@ -199,7 +199,7 @@ defmodule SmolqueryWeb.TableLive.Index do
       </div>
 
       <div class="grid gap-6 md:grid-cols-2">
-        <div class="card bg-base-200">
+        <div class="card bg-base-200 border border-base-300">
           <div class="card-body py-4">
             <h2 class="card-title text-base">New dataset</h2>
             <form id="create-dataset" phx-submit="create_dataset" class="flex gap-2">
@@ -214,7 +214,7 @@ defmodule SmolqueryWeb.TableLive.Index do
           </div>
         </div>
 
-        <div class="card bg-base-200">
+        <div class="card bg-base-200 border border-base-300">
           <div class="card-body py-4">
             <h2 class="card-title text-base">New table</h2>
             <form

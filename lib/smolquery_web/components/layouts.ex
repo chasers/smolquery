@@ -35,10 +35,11 @@ defmodule SmolqueryWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
+    <header class="navbar px-4 sm:px-6 lg:px-8 border-b border-base-300 bg-base-100">
       <div class="flex-1">
         <a href={~p"/tables"} class="flex-1 flex w-fit items-center gap-2">
-          <span class="text-lg font-semibold">smolquery</span>
+          <.icon name="hero-bolt-solid" class="size-5 text-primary" />
+          <span class="text-lg font-semibold tracking-tight">smolquery</span>
         </a>
       </div>
       <div class="flex-none">
