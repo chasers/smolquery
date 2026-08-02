@@ -79,11 +79,20 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       assert second_entry.claim_keys == []
     end
 
-    test "refuses to re-freeze a live claim", %{manifest: manifest} do
+    test "absorbs an identical re-claim of the live claim", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+
+      assert HotManifest.claim(manifest, @table, [entry.id], @keys) == {:ok, claim}
+    end
+
+    test "refuses to re-freeze a live claim under different keys", %{manifest: manifest} do
       entry = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
 
-      assert HotManifest.claim(manifest, @table, [entry.id], @keys) ==
+      other = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
+
+      assert HotManifest.claim(manifest, @table, [entry.id], other) ==
                {:error, :claim_outstanding}
     end
 

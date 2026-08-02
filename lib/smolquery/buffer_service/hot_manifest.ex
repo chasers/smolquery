@@ -307,9 +307,12 @@ defmodule Smolquery.BufferService.HotManifest do
   sealed segment it produces is always the same segment. Rows that arrive after
   the claim wait for the next one.
 
-  One live claim per table, enforced here: a claim while one is outstanding is
-  `{:error, :claim_outstanding}`, whatever ids it names, because two live claims
-  would leave `live_claim/2` with no honest answer. And the set is frozen whole
+  One live claim per table, enforced here: a claim while a *different* one is
+  outstanding is `{:error, :claim_outstanding}`, because two live claims would
+  leave `live_claim/2` with no honest answer. Re-claiming exactly the live claim
+  (same ids, same keys) is absorbed as `{:ok, claim}` without touching the log —
+  a replicated claim whose ack was lost is re-shipped verbatim, and refusing the
+  retry would wedge the owner's seal pipeline forever. And the set is frozen whole
   or not at all — an id that cannot be frozen (already sealed, or never held)
   makes the claim `{:error, :partial_claim}`, because `keys` were derived from
   the full requested set and stamping a subset with them would break the
@@ -320,9 +323,22 @@ defmodule Smolquery.BufferService.HotManifest do
   @spec claim(t(), Store.table_ref(), [String.t()], [String.t()], log() | nil) ::
           {:ok, claim()} | {:error, term()}
   def claim(%__MODULE__{} = manifest, table_ref, ids, keys, log \\ nil) do
-    with :ok <- refuse_live_claim(manifest, table_ref),
-         {:ok, entries} <- freezable(manifest, table_ref, ids) do
-      freeze(manifest, table_ref, entries, keys, log)
+    case live_claim(manifest, table_ref) do
+      {:ok, live} ->
+        absorb_identical_claim(live, ids, keys)
+
+      :error ->
+        with {:ok, entries} <- freezable(manifest, table_ref, ids) do
+          freeze(manifest, table_ref, entries, keys, log)
+        end
+    end
+  end
+
+  defp absorb_identical_claim(live, ids, keys) do
+    if live.keys == keys and Enum.sort(live.ids) == ids |> Enum.uniq() |> Enum.sort() do
+      {:ok, live}
+    else
+      {:error, :claim_outstanding}
     end
   end
 
@@ -486,13 +502,6 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp sibling?(%Entry{} = entry, claimed) do
     not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
-  end
-
-  defp refuse_live_claim(manifest, table_ref) do
-    case live_claim(manifest, table_ref) do
-      {:ok, _live} -> {:error, :claim_outstanding}
-      :error -> :ok
-    end
   end
 
   defp freezable(manifest, table_ref, ids) do

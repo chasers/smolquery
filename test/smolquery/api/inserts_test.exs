@@ -139,6 +139,16 @@ defmodule Smolquery.Api.InsertsTest do
     assert String.to_integer(retry_after) >= 1
   end
 
+  test "a draining buffer is a 503 with retry-after, not a 500", %{name: name, buffer: buffer} do
+    assert :ok = BufferService.Drain.handoff(buffer)
+
+    response = post_rows(name, [%{"id" => 1}])
+
+    assert response.status == 503
+    assert %{"error" => %{"status" => "UNAVAILABLE"}} = JSON.decode!(response.resp_body)
+    assert Plug.Conn.get_resp_header(response, "retry-after") == ["1"]
+  end
+
   test "a buffer that is not running is a 503", %{name: name} do
     {:ok, runtime} = Runtime.fetch(name)
     {:ok, ingest_runtime} = IngestService.Runtime.fetch(runtime.ingest_name)

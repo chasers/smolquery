@@ -38,6 +38,9 @@ defmodule Smolquery.BufferService.ReplicatorTest do
 
       reply
     end
+
+    @impl Smolquery.BufferService.Replicator
+    def redundancy(_config), do: 0
   end
 
   defp start_buffer_service(context, opts) do
@@ -85,7 +88,7 @@ defmodule Smolquery.BufferService.ReplicatorTest do
     assert commit.table_ref == @table
     assert commit.entry.id == ack.segment_id
     assert commit.entry.row_count == 2
-    assert commit.batch_ids == ["batch-1"]
+    assert commit.entry.batch_ids == ["batch-1"]
     assert commit.segment.key =~ commit.entry.id
   end
 

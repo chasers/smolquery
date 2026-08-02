@@ -180,6 +180,12 @@ defmodule Bench.Buffer do
     ]
 
     only = System.get_env("BENCH_SECTION")
+    known = Enum.map(sections, fn {name, _section} -> Atom.to_string(name) end)
+
+    if only != nil and only not in known do
+      raise ArgumentError,
+            "BENCH_SECTION=#{only} matches no section; known: #{Enum.join(known, ", ")}"
+    end
 
     with_tmp_dir("buffer", fn dir ->
       for {name, section} <- sections, only in [nil, Atom.to_string(name)] do

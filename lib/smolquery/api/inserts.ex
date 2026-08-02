@@ -66,7 +66,7 @@ defmodule Smolquery.Api.Inserts do
   end
 
   def insert_error(conn, reason)
-      when reason in [:not_owner, :ownership_settling, :ring_config_stale] do
+      when reason in [:not_owner, :ownership_settling, :ring_config_stale, :draining] do
     conn
     |> put_resp_header("retry-after", "1")
     |> Errors.send_error(503, "UNAVAILABLE", "table ownership is moving; retry")

@@ -82,15 +82,19 @@ defmodule Smolquery.BufferService.Client do
   key makes the retry safe — the owner answers a committed id with the
   original ack instead of writing again (T-41), and the dedup record is
   fsynced in the manifest entry, so it survives a restart. What it survives
-  *across an owner move* depends on the replicator (T-96): under
-  `Smolquery.BufferService.Replicator.SegmentShipping` the entry — batch ids
-  included — is on every follower before the ack, and the ring promotes a
-  follower, so a retry against the new owner is answered with the original
-  ack; this also covers a flush the caller saw *fail* after a follower had
-  already applied it (the compensating drop can be lost with the owner), where
-  the retry is answered from the surviving copy and the rows exist once.
-  Single-copy (`Replicator.None`), the record lives only on the owner, and
-  across an owner move a `:batch_id` batch is at-least-once like any other.
+  *across an owner move* depends on the replicator (T-96) and on the kind of
+  move: under `Smolquery.BufferService.Replicator.SegmentShipping` the entry
+  — batch ids included — is on every follower before the ack, and an owner
+  *loss* promotes a follower, so a retry against the promoted owner is
+  answered with the original ack; this also covers a flush the caller saw
+  *fail* after a follower had already applied it (the compensating drop can
+  be lost with the owner), where the retry is answered from the surviving
+  copy and the rows exist once. A node *joining* the ring is the move dedup
+  does not survive: the joiner takes over its key range holding neither
+  entries nor batch ids (nothing backfills), so a retry that routes to it
+  commits again. Single-copy (`Replicator.None`), the record lives only on
+  the owner, and across any owner move a `:batch_id` batch is at-least-once
+  like any other.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}

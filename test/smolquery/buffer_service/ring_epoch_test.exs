@@ -12,6 +12,7 @@ defmodule Smolquery.BufferService.RingEpochTest do
   alias Smolquery.Test.Eventually
 
   @other :"buffer2@nonexistent.invalid"
+  @third :"buffer3@nonexistent.invalid"
 
   defp unique_name(prefix), do: :"#{prefix}_#{:erlang.unique_integer([:positive])}"
 
@@ -105,6 +106,25 @@ defmodule Smolquery.BufferService.RingEpochTest do
     assert RingEpoch.check_write(name, acquired) == {:error, :ownership_settling}
   end
 
+  test "a second advance within the lease keeps the first advance's settle" do
+    name = unique_name(:epoch)
+    store = start_store()
+    {:ok, _config} = Memory.ensure(store, scope(name), [@other])
+    holder = start_supervised!({Agent, fn -> [node()] end}, id: {:members, name})
+
+    start_epoch(name, store, fn -> Agent.get(holder, & &1) end, lease_ms: 500)
+
+    ref = ref_owned_by([node(), @third], node())
+    assert RingEpoch.check_write(name, ref) == {:error, :ownership_settling}
+
+    Agent.update(holder, fn _members -> [node(), @third] end)
+    RingEpoch.refresh(name)
+
+    assert {:ok, %{epoch: 2}} = Memory.fetch(store, scope(name))
+    assert RingEpoch.check_write(name, ref) == {:error, :ownership_settling}
+    assert Eventually.until(fn -> RingEpoch.check_write(name, ref) == :ok end)
+  end
+
   test "a membership change advances the epoch and fences the old view" do
     name = unique_name(:epoch)
     store = start_store()
@@ -144,6 +164,13 @@ defmodule Smolquery.BufferService.RingEpochTest do
 
     assert Memory.advance(store, "buffer:cas", 0, [node()]) == {:error, :conflict}
     assert {:ok, %{epoch: 1}} = Memory.fetch(store, "buffer:cas")
+  end
+
+  test "advance on a missing scope conflicts, and the refetch answers not_found" do
+    store = start_store()
+
+    assert Memory.advance(store, "buffer:absent", 0, [node()]) == {:error, :conflict}
+    assert Memory.fetch(store, "buffer:absent") == :not_found
   end
 
   describe "wired into a running buffer instance" do

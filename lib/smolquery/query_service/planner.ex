@@ -111,6 +111,8 @@ defmodule Smolquery.QueryService.Planner do
   while a mutation propagates.
   """
 
+  require Logger
+
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
@@ -277,12 +279,24 @@ defmodule Smolquery.QueryService.Planner do
       end)
 
     if map_size(failures) <= Client.absence_tolerance(runtime.buffer_name) do
+      log_tolerated(failures)
+
       {:ok, Map.new(gathered, fn {ref, pages} -> {ref, pages |> List.flatten() |> dedupe()} end)}
     else
       {_url, {ref, reason}} = Enum.min_by(failures, fn {url, _failure} -> url end)
 
       {:error, {:hot_tier_unavailable, ref, reason}}
     end
+  end
+
+  defp log_tolerated(failures) when map_size(failures) == 0, do: :ok
+
+  defp log_tolerated(failures) do
+    Logger.warning(fn ->
+      absent = failures |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+
+      "hot tier read degraded: answering without #{absent} (within replica tolerance)"
+    end)
   end
 
   defp dedupe(entries) do
