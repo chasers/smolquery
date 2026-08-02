@@ -32,7 +32,7 @@ elixir skills/query-db/smolsqls_query.exs [opts] --file path/to/schema.sql
 | `--env FILE` | dotenv file to load first (default: per `--db`) |
 | `--args JSON` | positional args bound to `?`, e.g. `--args '["x",1]'` |
 | `--args-file FILE` | read the JSON args array from a file (large values, e.g. a markdown body) |
-| `--file FILE` | apply each `;`-separated statement in FILE (schema/migration) |
+| `--file FILE` | apply each statement in FILE (schema/migration), split on `;` but BEGIN/CASE/END-aware so a `CREATE TRIGGER ... BEGIN ... END;` body isn't split mid-way |
 | `--json` | print the raw JSON response instead of an aligned table |
 
 ## Credentials — from the environment, never on argv

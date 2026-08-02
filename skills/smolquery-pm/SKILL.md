@@ -32,6 +32,11 @@ contract).
   UPDATE), and `in_progress_by` (who's actively working it right now — set
   when status moves to `in_progress`, cleared when it moves away). All three
   are NULL until someone sets them.
+- **changes** — an append-only activity log: one row per create/update across
+  projects/plans/tasks (`entity_type`, `entity_key`, `action`, `actor`,
+  `summary`, `created_at`). Populated automatically by triggers, not written
+  to directly. This is how you notice parallel work — see "Coordinating with
+  parallel work" below.
 
 `project groups → plan describes → tasks execute`. Schema in
 [`schema.sql`](./schema.sql).
@@ -149,7 +154,33 @@ pmq "SELECT t.status, COUNT(*) AS n FROM tasks t JOIN projects p ON p.id = t.pro
 ```
 
 `RETURNING` rows come back in the output. Always bump `updated_at` on an UPDATE
-(there are no triggers).
+— that column has no trigger; only `changes` logging is trigger-driven (see
+below).
+
+## Coordinating with parallel work
+
+Other agents or humans may be working the tracker at the same time. `changes`
+is populated automatically (triggers on `projects`/`plans`/`tasks`, both
+INSERT and UPDATE) — check it before starting non-trivial work, and again
+partway through anything long-running, to catch work that landed in parallel:
+
+```sh
+# Recent activity across the whole tracker
+pmq "SELECT id, entity_type, entity_key, action, actor, summary, created_at
+       FROM changes ORDER BY id DESC LIMIT 20"
+
+# Poll loop: only what's new since the last change id you saw
+pmq "SELECT id, entity_type, entity_key, action, actor, summary, created_at
+       FROM changes WHERE id > ? ORDER BY id" --args '[123]'
+
+# Activity on one task/plan/project specifically
+pmq "SELECT action, actor, summary, created_at FROM changes
+      WHERE entity_type = ? AND entity_key = ? ORDER BY id" --args '["task","T-9"]'
+```
+
+`changes` only gets a summary of *which field* changed first (status, then
+priority, then a few others — see the trigger `CASE` in `schema.sql`), not a
+full diff; for the actual current values, query the entity's own row.
 
 ## Setup / provisioning
 
@@ -166,14 +197,15 @@ curl -sS -X POST "${SMOLSQLS_PM_URL:-https://alpha.smolsqls.com}/v1/databases" \
 # 2. store creds in the git-ignored env file (auto-loaded by the tool; never commit)
 #    printf 'export SMOLSQLS_PM_DB_ID=%s\nexport SMOLSQLS_PM_DB_TOKEN=%s\n' "$ID" "$TOKEN" > .claude/smolquery-pm.env
 
-# 3. apply the schema (splits on ';' and posts each statement)
+# 3. apply the schema (splits on ';' and posts each statement — the loader is
+#    BEGIN/CASE/END-aware, so the changes-log triggers apply as one statement each)
 elixir skills/query-db/smolsqls_query.exs --db pm --file skills/smolquery-pm/schema.sql
 
 # 4. verify
-pmq "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+pmq "SELECT type, name FROM sqlite_master WHERE type IN ('table','trigger') ORDER BY type, name"
 ```
 
-Re-applying is safe (`CREATE TABLE/INDEX IF NOT EXISTS`).
+Re-applying is safe (`CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS`).
 
 ## Notes
 
