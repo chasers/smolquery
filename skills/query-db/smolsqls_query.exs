@@ -109,9 +109,7 @@ defmodule SmolsqlsQuery do
     |> String.split("\n")
     |> Enum.reject(&(&1 =~ ~r/^\s*--/))
     |> Enum.join("\n")
-    |> String.split(";")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
+    |> split_statements()
     |> Enum.reduce(0, fn stmt, n ->
       case query(req, stmt, []) do
         {:ok, _} -> n + 1
@@ -119,6 +117,25 @@ defmodule SmolsqlsQuery do
       end
     end)
     |> then(&IO.puts("applied #{&1} statement(s)"))
+  end
+
+  # Splits on ';' but stays inside CREATE TRIGGER bodies (opened by BEGIN, and
+  # by CASE...END within them), so a trigger's internal ';'s don't split early.
+  defp split_statements(text) do
+    ~r/;|\bBEGIN\b|\bCASE\b|\bEND\b/i
+    |> Regex.split(text, include_captures: true)
+    |> Enum.reduce({[], "", 0}, fn tok, {stmts, cur, depth} ->
+      cond do
+        String.upcase(tok) in ["BEGIN", "CASE"] -> {stmts, cur <> tok, depth + 1}
+        String.upcase(tok) == "END" -> {stmts, cur <> tok, max(depth - 1, 0)}
+        tok == ";" and depth == 0 -> {[cur <> ";" | stmts], "", depth}
+        true -> {stmts, cur <> tok, depth}
+      end
+    end)
+    |> then(fn {stmts, cur, _depth} -> if String.trim(cur) == "", do: stmts, else: [cur | stmts] end)
+    |> Enum.reverse()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
   end
 
   defp print_table(%{"columns" => [], "num_changes" => n}), do: IO.puts("ok (num_changes: #{n})")
