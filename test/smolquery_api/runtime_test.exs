@@ -1,20 +1,19 @@
-defmodule Smolquery.Api.RuntimeTest do
+defmodule SmolqueryApi.RuntimeTest do
   use ExUnit.Case, async: true
 
-  alias Smolquery.Api.Runtime
+  alias SmolqueryApi.Runtime
 
   describe "new/1" do
     test "resolves options over application config" do
-      runtime = Runtime.new(name: :api_runtime_test, api_key: "k", port: 8080)
+      runtime = Runtime.new(name: :api_runtime_test, api_key: "k", load_max_bytes: 1024)
 
       assert runtime.name == :api_runtime_test
       assert runtime.api_key == "k"
-      assert runtime.ip == {127, 0, 0, 1}
-      assert runtime.port == 8080
+      assert runtime.load_max_bytes == 1024
     end
 
     test "defaults the instance name" do
-      assert Runtime.new(api_key: "k").name == Smolquery.Api
+      assert Runtime.new(api_key: "k").name == SmolqueryApi
     end
 
     test "refuses to resolve without an api_key" do

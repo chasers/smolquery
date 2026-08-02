@@ -5,7 +5,7 @@ defmodule SmolqueryWeb.TableLive.Index do
   Lists every dataset with its tables, creates datasets, and creates tables
   from a schema built field by field over `Smolquery.Schema`'s logical types.
   Reads and writes go straight through `Smolquery.Catalog` — the same layering
-  rule as `Smolquery.Api` (PL-12 D4).
+  rule as `SmolqueryApi` (PL-12 D4).
   """
 
   use SmolqueryWeb, :live_view

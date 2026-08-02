@@ -6,7 +6,7 @@ config :gen_rpc, tcp_server_port: 15371, tcp_client_port: 15371
 
 config :smolquery, roles: []
 
-config :smolquery, Smolquery.Api, port: 0
+config :smolquery, SmolqueryApi.Endpoint, http: [ip: {127, 0, 0, 1}, port: 0], server: false
 
 config :smolquery, SmolqueryWeb.ClusterLive.Index, pod_actions: false
 

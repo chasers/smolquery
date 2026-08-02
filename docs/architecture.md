@@ -655,7 +655,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 
 | role | subtree |
 |---|---|
-| `api` | `Smolquery.Api` — the Bandit HTTP front door |
+| `api` | `SmolqueryApi` — the HTTP front door, a Phoenix endpoint on Bandit |
 | `ingest` | `Smolquery.IngestService` — schema validation and batching |
 | `buffer` | `Smolquery.BufferService` — the hot tier and `HotServer` |
 | `storage` | `Smolquery.StorageService` — seal, compact, retention, GC |

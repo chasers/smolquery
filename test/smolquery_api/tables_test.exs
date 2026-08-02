@@ -1,12 +1,12 @@
-defmodule Smolquery.Api.TablesTest do
+defmodule SmolqueryApi.TableControllerTest do
   use ExUnit.Case, async: true
 
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
+  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.MapCatalog
+  alias SmolqueryApi.Runtime
 
   @key "tables-test-key"
   @schema_json [
@@ -27,7 +27,7 @@ defmodule Smolquery.Api.TablesTest do
   defp request(name, conn) do
     conn
     |> put_req_header("authorization", "Bearer #{@key}")
-    |> Router.call(Router.init(name))
+    |> then(&ApiEndpoint.request(name, &1))
   end
 
   defp post_json(name, path, body) do
@@ -82,10 +82,11 @@ defmodule Smolquery.Api.TablesTest do
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer #{@key}")
 
-      assert_raise Plug.Parsers.ParseError, fn -> Router.call(conn, Router.init(name)) end
+      response = ApiEndpoint.request(name, conn)
 
-      assert {400, _headers, body} = sent_resp(conn)
-      assert %{"error" => %{"status" => "INVALID_ARGUMENT"}} = JSON.decode!(body)
+      assert response.status == 400
+      assert response.halted
+      assert %{"error" => %{"status" => "INVALID_ARGUMENT"}} = JSON.decode!(response.resp_body)
     end
 
     test "a non-json content type is a 415", %{name: name} do
@@ -94,12 +95,13 @@ defmodule Smolquery.Api.TablesTest do
         |> put_req_header("content-type", "application/xml")
         |> put_req_header("authorization", "Bearer #{@key}")
 
-      assert_raise Plug.Parsers.UnsupportedMediaTypeError, fn ->
-        Router.call(conn, Router.init(name))
-      end
+      response = ApiEndpoint.request(name, conn)
 
-      assert {415, _headers, body} = sent_resp(conn)
-      assert %{"error" => %{"status" => "UNSUPPORTED_MEDIA_TYPE"}} = JSON.decode!(body)
+      assert response.status == 415
+      assert response.halted
+
+      assert %{"error" => %{"status" => "UNSUPPORTED_MEDIA_TYPE"}} =
+               JSON.decode!(response.resp_body)
     end
   end
 

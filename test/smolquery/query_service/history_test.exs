@@ -10,12 +10,11 @@ defmodule Smolquery.QueryService.HistoryTest do
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
-  alias Smolquery.Api
-  alias Smolquery.Api.Router
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
+  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
 
@@ -80,17 +79,18 @@ defmodule Smolquery.QueryService.HistoryTest do
 
     api = :"history_api_#{:erlang.unique_integer([:positive])}"
 
-    start_supervised!(
-      {Api.Supervisor,
-       name: api,
-       api_key: @key,
-       port: 0,
-       catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
-       query_name: query},
-      id: api
+    api
+    |> then(
+      &SmolqueryApi.Runtime.new(
+        name: &1,
+        api_key: @key,
+        catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
+        query_name: query
+      )
     )
+    |> SmolqueryApi.Runtime.put()
 
-    on_exit(fn -> Api.Runtime.delete(api) end)
+    on_exit(fn -> SmolqueryApi.Runtime.delete(api) end)
 
     {:ok, job, _frame} = Client.query(query, "SELECT 1 AS n")
 
@@ -101,7 +101,7 @@ defmodule Smolquery.QueryService.HistoryTest do
     status =
       conn(:get, "/v1/jobs/#{job.id}")
       |> put_req_header("authorization", "Bearer #{@key}")
-      |> Router.call(Router.init(api))
+      |> then(&ApiEndpoint.request(api, &1))
 
     assert status.status == 200
 
@@ -111,7 +111,7 @@ defmodule Smolquery.QueryService.HistoryTest do
     results =
       conn(:get, "/v1/jobs/#{job.id}/results")
       |> put_req_header("authorization", "Bearer #{@key}")
-      |> Router.call(Router.init(api))
+      |> then(&ApiEndpoint.request(api, &1))
 
     assert results.status == 410
     assert %{"error" => %{"status" => "GONE"}} = JSON.decode!(results.resp_body)

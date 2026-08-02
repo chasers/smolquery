@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Auth do
+defmodule SmolqueryApi.Auth do
   @moduledoc """
   Bearer-key authentication for every `/v1` route (PL-8 D5).
 
@@ -11,7 +11,7 @@ defmodule Smolquery.Api.Auth do
   401 whether the path matches or not.
 
   The instance name arrives in `conn.private.smolquery_api`, placed there by
-  `Smolquery.Api.Router` before the pipeline runs. No published runtime for
+  `SmolqueryApi.Router` before the pipeline runs. No published runtime for
   that name means the API is not actually up here, and the answer is the same
   401 — never an open door.
   """
@@ -20,9 +20,9 @@ defmodule Smolquery.Api.Auth do
 
   import Plug.Conn
 
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Runtime
   alias Smolquery.InternalSecret
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.Runtime
 
   @impl Plug
   def init(opts), do: opts

@@ -1,17 +1,17 @@
-defmodule Smolquery.Api.InsertsTest do
+defmodule SmolqueryApi.InsertControllerTest do
   use ExUnit.Case, async: true
 
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Load
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.MapCatalog
+  alias SmolqueryApi.Runtime
 
   @moduletag :tmp_dir
 
@@ -60,7 +60,7 @@ defmodule Smolquery.Api.InsertsTest do
     conn(:post, @path, JSON.encode!(%{"rows" => rows}))
     |> put_req_header("content-type", "application/json")
     |> put_req_header("authorization", "Bearer #{@key}")
-    |> Router.call(Router.init(name))
+    |> then(&ApiEndpoint.request(name, &1))
   end
 
   test "acked rows answer 200 with no insertErrors", %{name: name, buffer: buffer} do
@@ -95,7 +95,7 @@ defmodule Smolquery.Api.InsertsTest do
       conn(:post, "/v1/datasets/analytics/tables/nope/insert", JSON.encode!(%{"rows" => [%{}]}))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{@key}")
-      |> Router.call(Router.init(name))
+      |> then(&ApiEndpoint.request(name, &1))
 
     assert response.status == 404
   end
@@ -106,7 +106,7 @@ defmodule Smolquery.Api.InsertsTest do
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{@key}")
 
-    response = Router.call(conn, Router.init(name))
+    response = ApiEndpoint.request(name, conn)
 
     assert response.status == 400
 
@@ -165,7 +165,7 @@ defmodule Smolquery.Api.InsertsTest do
       conn(:post, @path, JSON.encode!(body))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{@key}")
-      |> Router.call(Router.init(name))
+      |> then(&ApiEndpoint.request(name, &1))
     end
 
     defp hot_rows(buffer) do

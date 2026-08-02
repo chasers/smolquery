@@ -18,7 +18,7 @@ defmodule Smolquery.Schema do
   | `:date` | `DATE` | `:date` | `DATE` |
   | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
 
-  The API names are the BigQuery-flavored strings `Smolquery.Api` speaks in
+  The API names are the BigQuery-flavored strings `SmolqueryApi` speaks in
   table-schema JSON.
 
   Milestone 1 verified that every one of these round-trips byte-identically

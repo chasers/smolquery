@@ -1,8 +1,9 @@
 # HTTP API v1
 
-`Smolquery.Api` is the front door — one Bandit listener, started by the `:api`
-role, routing only to service client modules and the catalog (the same boundary
-rule the services hold each other to). Every `/v1` route requires the static
+`SmolqueryApi` is the front door — a Phoenix endpoint served by Bandit (the
+same stack as the web UI's `SmolqueryWeb`), started by the `:api` role, routing
+only to service client modules and the catalog (the same boundary rule the
+services hold each other to). Every `/v1` route requires the static
 Bearer key (`SMOLQUERY_API_KEY`); a node with the `:api` role and no key
 configured fails the boot rather than serve an open API. `/healthz` is the one
 unauthenticated route.

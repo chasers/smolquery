@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Inserts do
+defmodule SmolqueryApi.InsertController do
   @moduledoc """
   The streaming-insert route's logic, over `Smolquery.IngestService.Client`.
 
@@ -9,12 +9,12 @@ defmodule Smolquery.Api.Inserts do
   429 with `retry-after`, a service that is not running here is a 503.
   """
 
-  import Plug.Conn, only: [put_resp_header: 3]
+  use SmolqueryApi, :controller
 
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Json
-  alias Smolquery.Api.Runtime
   alias Smolquery.IngestService
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
 
   @doc """
   Inserts the body's rows into a table.
@@ -26,8 +26,8 @@ defmodule Smolquery.Api.Inserts do
   scope: the window closes for as long as the batch's segment stays in the
   hot tier, which comfortably covers any retry loop.
   """
-  @spec insert(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
-  def insert(conn, dataset, table) do
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, %{"dataset" => dataset, "table" => table}) do
     with {:ok, rows} <- rows(conn.body_params),
          {:ok, batch_id} <- insert_id(conn.body_params),
          {:ok, result} <- insert_rows(conn, {dataset, table}, rows, batch_id) do

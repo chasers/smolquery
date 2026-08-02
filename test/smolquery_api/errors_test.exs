@@ -1,9 +1,9 @@
-defmodule Smolquery.Api.ErrorsTest do
+defmodule SmolqueryApi.ErrorsTest do
   use ExUnit.Case, async: true
 
   import Plug.Test
 
-  alias Smolquery.Api.Errors
+  alias SmolqueryApi.Errors
 
   test "sends the envelope as json with the code as the http status" do
     response = Errors.send_error(conn(:get, "/"), 429, "BUFFER_FULL", "try again")

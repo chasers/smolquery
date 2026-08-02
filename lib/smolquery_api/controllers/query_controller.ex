@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Queries do
+defmodule SmolqueryApi.QueryController do
   @moduledoc """
   The synchronous query route: submit, wait, answer with the first page.
 
@@ -17,21 +17,27 @@ defmodule Smolquery.Api.Queries do
   error string.
   """
 
+  use SmolqueryApi, :controller
+
   alias Explorer.DataFrame
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Jobs
-  alias Smolquery.Api.Json
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.JobController
+  alias SmolqueryApi.Json
 
   @doc """
   Runs the body's query and answers with the finished job and its first page.
   """
-  @spec create(Plug.Conn.t()) :: Plug.Conn.t()
-  def create(conn) do
-    with {:ok, sql} <- Jobs.sql(conn.body_params),
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, _params) do
+    with {:ok, sql} <- JobController.sql(conn.body_params),
          {:ok, job, frame} <-
-           Client.query(Jobs.query_name(conn), sql, Jobs.submit_opts(conn.body_params)) do
+           Client.query(
+             JobController.query_name(conn),
+             sql,
+             JobController.submit_opts(conn.body_params)
+           ) do
       answer(conn, job, frame)
     else
       {:error, :timeout} ->
@@ -43,15 +49,15 @@ defmodule Smolquery.Api.Queries do
         )
 
       {:error, reason} ->
-        Jobs.query_error(conn, reason)
+        JobController.query_error(conn, reason)
     end
   end
 
   defp answer(conn, %Job{state: :done} = job, %DataFrame{} = frame) do
     body =
       job
-      |> Jobs.page_body(frame, 0, max_results(conn.body_params))
-      |> Map.put("job", Jobs.job_json(job, true))
+      |> JobController.page_body(frame, 0, max_results(conn.body_params))
+      |> Map.put("job", JobController.job_json(job, true))
 
     Json.send_json(conn, 200, body)
   end

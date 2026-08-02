@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Datasets do
+defmodule SmolqueryApi.DatasetController do
   @moduledoc """
   The dataset routes' logic: list and create, over `Smolquery.Catalog`.
 
@@ -7,16 +7,18 @@ defmodule Smolquery.Api.Datasets do
   attached to a dataset that could silently differ.
   """
 
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Json
-  alias Smolquery.Api.Runtime
+  use SmolqueryApi, :controller
+
   alias Smolquery.Catalog
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
 
   @doc """
   Every dataset in the catalog.
   """
-  @spec list(Plug.Conn.t()) :: Plug.Conn.t()
-  def list(conn) do
+  @spec index(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def index(conn, _params) do
     case Catalog.list_datasets(catalog(conn)) do
       {:ok, datasets} -> Json.send_json(conn, 200, %{"datasets" => datasets})
       {:error, reason} -> Errors.from_reason(conn, reason)
@@ -26,8 +28,8 @@ defmodule Smolquery.Api.Datasets do
   @doc """
   Creates the dataset the body names.
   """
-  @spec create(Plug.Conn.t()) :: Plug.Conn.t()
-  def create(conn) do
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, _params) do
     with {:ok, id} <- id(conn.body_params),
          :ok <- Catalog.create_dataset(catalog(conn), id) do
       Json.send_json(conn, 200, %{"id" => id})

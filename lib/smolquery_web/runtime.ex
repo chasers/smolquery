@@ -2,7 +2,7 @@ defmodule SmolqueryWeb.Runtime do
   @moduledoc """
   A running web UI's resolved configuration.
 
-  The same shape as `Smolquery.Api.Runtime`: configuration becomes a struct
+  The same shape as `SmolqueryApi.Runtime`: configuration becomes a struct
   once at boot and lands in `:persistent_term`, so every LiveView mount reads
   its handles for free.
 
@@ -12,7 +12,7 @@ defmodule SmolqueryWeb.Runtime do
         catalog: [metadata: "sqlite:...", data_path: "..."]
 
   `catalog` is where the UI resolves datasets, tables, and schemas — the same
-  seam `Smolquery.Api` uses. Given options (or nothing), the UI starts its own
+  seam `SmolqueryApi` uses. Given options (or nothing), the UI starts its own
   `Smolquery.Catalog.DuckLake` engine; given a `%Smolquery.Catalog{}` outright,
   it reads through that and starts nothing.
 

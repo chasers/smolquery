@@ -1,8 +1,8 @@
-defmodule Smolquery.Api.TableSchemaTest do
+defmodule SmolqueryApi.TableSchemaTest do
   use ExUnit.Case, async: true
 
-  alias Smolquery.Api.TableSchema
   alias Smolquery.Schema
+  alias SmolqueryApi.TableSchema
 
   @schema Schema.new!([
             {"id", :int64, nullable: false},
