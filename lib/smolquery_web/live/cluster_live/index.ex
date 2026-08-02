@@ -34,6 +34,16 @@ defmodule SmolqueryWeb.ClusterLive.Index do
   needs only that the node is alive and a buffer member, since it goes
   straight over the cluster's own distribution rather than kubectl/the k8s
   API.
+
+  Every action's target is validated against the current fleet snapshot
+  before anything runs: a crafted event can't name an arbitrary pod in the
+  namespace (the ServiceAccount token can delete more than smolquery pods)
+  or mint an atom from a bogus node string. A kill/restart that fails —
+  kubectl non-zero, an API-server 403 — flashes the error instead of
+  crashing the LiveView. Setting `pod_actions: false` under this module's
+  app env (as `config/test.exs` does) disables kill/restart wholesale, so
+  `mix test` on a machine with a live `kind-smolquery` context can never
+  reach a real cluster.
   """
 
   use SmolqueryWeb, :live_view
@@ -58,7 +68,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
     socket =
       socket
       |> assign(:page_title, "Cluster")
-      |> assign(:kill_available, Pods.available?())
+      |> assign(:kill_available, pod_actions_enabled?() and Pods.available?())
       |> assign(:draining, MapSet.new())
       |> load_fleet()
 
@@ -94,30 +104,51 @@ defmodule SmolqueryWeb.ClusterLive.Index do
 
   @impl Phoenix.LiveView
   def handle_event("kill", %{"pod" => pod}, socket) do
-    with_kill_available(socket, "kill", fn -> Pods.kill!(pod) end, "Killed #{pod}")
+    pod_action(socket, "kill", pod, fn -> Pods.kill!(pod) end, "Killed #{pod}")
   end
 
   def handle_event("restart", %{"pod" => pod}, socket) do
-    with_kill_available(socket, "restart", fn -> Pods.restart!(pod) end, "Restarting #{pod}")
+    pod_action(socket, "restart", pod, fn -> Pods.restart!(pod) end, "Restarting #{pod}")
   end
 
   def handle_event("drain", %{"node" => node_str}, socket) do
-    node = String.to_existing_atom(node_str)
+    case Enum.find(socket.assigns.fleet, &(to_string(&1.node) == node_str)) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "#{node_str} is not part of the fleet")}
 
-    {:noreply,
-     socket
-     |> assign(:draining, MapSet.put(socket.assigns.draining, node))
-     |> start_async({:drain, node}, fn -> rpc_drain(node) end)}
+      row ->
+        {:noreply,
+         socket
+         |> assign(:draining, MapSet.put(socket.assigns.draining, row.node))
+         |> start_async({:drain, row.node}, fn -> rpc_drain(row.node) end)}
+    end
   end
 
-  defp with_kill_available(socket, verb, action, success_message) do
-    if socket.assigns.kill_available do
-      action.()
+  defp pod_action(socket, verb, pod, action, success_message) do
+    cond do
+      Enum.all?(socket.assigns.fleet, &(&1.pod != pod)) ->
+        {:noreply, put_flash(socket, :error, "#{pod} is not part of the fleet")}
 
-      {:noreply, put_flash(socket, :info, "#{success_message} — watching the ring recover…")}
-    else
-      {:noreply, put_flash(socket, :error, "No kind cluster detected — nothing to #{verb}")}
+      !socket.assigns.kill_available ->
+        {:noreply, put_flash(socket, :error, "No kind cluster detected — nothing to #{verb}")}
+
+      true ->
+        try do
+          action.()
+
+          {:noreply, put_flash(socket, :info, "#{success_message} — watching the ring recover…")}
+        rescue
+          error in [RuntimeError, Req.TransportError] ->
+            {:noreply,
+             put_flash(socket, :error, "#{verb} of #{pod} failed: #{Exception.message(error)}")}
+        end
     end
+  end
+
+  defp pod_actions_enabled? do
+    :smolquery
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:pod_actions, true)
   end
 
   defp rpc_drain(node) do

@@ -1,6 +1,8 @@
 defmodule SmolqueryWeb.ClusterLiveTest do
   use SmolqueryWeb.ConnCase, async: false
 
+  alias Smolquery.Cluster.Pods
+
   describe "index" do
     test "renders this node as the only, alive row", %{conn: conn} do
       start_web!()
@@ -27,7 +29,7 @@ defmodule SmolqueryWeb.ClusterLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/cluster")
 
-      html = render_click(lv, "kill", %{"pod" => "smolquery-buffer-0"})
+      html = render_click(lv, "kill", %{"pod" => Pods.pod_of_node(node())})
 
       assert html =~ "No kind cluster detected"
     end
@@ -37,9 +39,29 @@ defmodule SmolqueryWeb.ClusterLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/cluster")
 
-      html = render_click(lv, "restart", %{"pod" => "smolquery-buffer-0"})
+      html = render_click(lv, "restart", %{"pod" => Pods.pod_of_node(node())})
 
       assert html =~ "No kind cluster detected"
+    end
+
+    test "kill of a pod outside the fleet flashes instead of deleting it", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/cluster")
+
+      html = render_click(lv, "kill", %{"pod" => "smolquery-postgres-0"})
+
+      assert html =~ "smolquery-postgres-0 is not part of the fleet"
+    end
+
+    test "drain of an unknown node flashes instead of crashing", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/cluster")
+
+      html = render_click(lv, "drain", %{"node" => "ghost@nowhere"})
+
+      assert html =~ "ghost@nowhere is not part of the fleet"
     end
 
     test "no drain button for a node that isn't a buffer member", %{conn: conn} do
