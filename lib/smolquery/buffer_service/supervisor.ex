@@ -45,7 +45,7 @@ defmodule Smolquery.BufferService.Supervisor do
   `ExpectedNodes` starts under the same condition (T-109) but *last*: the
   durable expected-fleet row lives in the same config store the epoch keeper
   CASes against, but unlike the epoch keeper nothing in this subtree
-  consumes it — readers go through `:persistent_term` — so under
+  consumes it — readers go through its ETS table — so under
   `rest_for_one` it must sit where its crash restarts nothing else. Query
   nodes start their own from `Smolquery.QueryService.Supervisor`; on a node
   running both roles the first one wins and the other start is `:ignore`d.

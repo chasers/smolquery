@@ -27,7 +27,7 @@ defmodule Smolquery.QueryService.Supervisor do
   planner's read fan-out asks `Routing.manifest_nodes/1`, and a query node
   runs no buffer subtree to keep that answer current for it. Last under
   `rest_for_one` because nothing here consumes it directly — readers go
-  through `:persistent_term` — and on a node that also runs the `:buffer`
+  through its ETS table — and on a node that also runs the `:buffer`
   role the buffer subtree's keeper wins and this start is `:ignore`d.
   """
 

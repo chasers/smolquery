@@ -15,9 +15,11 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   already proved for ring membership (T-92): one row in the same
   `Smolquery.Cluster.ConfigStore` Postgres, scope `"expected:<name>"` beside
   the epoch's `"buffer:<name>"`, advanced by compare-and-swap and polled
-  every `refresh_ms` into `:persistent_term` so the read path costs one
-  term lookup. Not a new failure domain: sealing and epoch fencing already
-  require this Postgres.
+  every `refresh_ms` into a keeper-owned named ETS table so the read path
+  costs one lookup. ETS rather than `:persistent_term`, deliberately: a
+  term is written at boot and never again — re-putting one triggers a
+  global heap scan, and this state changes at runtime by design. Not a new
+  failure domain: sealing and epoch fencing already require this Postgres.
 
   ## Propagation is eventual, and both stale directions fail safe
 
@@ -86,15 +88,15 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   @doc """
   The nodes the deployment currently expects for `name`.
 
-  One `:persistent_term` read where a keeper has published; the static
-  `:expected_nodes` configuration where none ever ran, which is exactly the
-  pre-T-109 answer.
+  One ETS lookup where a keeper has published; the static `:expected_nodes`
+  configuration where none ever ran (or a keeper is mid-restart), which is
+  exactly the pre-T-109 answer.
   """
   @spec list(atom()) :: [node()]
   def list(name) do
-    case :persistent_term.get(key(name), nil) do
-      nil -> static()
-      config -> config.members
+    case current(name) do
+      {:ok, config} -> config.members
+      :error -> static()
     end
   end
 
@@ -105,10 +107,14 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   """
   @spec current(atom()) :: {:ok, %{epoch: non_neg_integer(), members: [node()]}} | :error
   def current(name) do
-    case :persistent_term.get(key(name), nil) do
-      nil -> :error
-      config -> {:ok, config}
+    with table when table != :undefined <- :ets.whereis(process_name(name)),
+         [{:config, config}] <- :ets.lookup(table, :config) do
+      {:ok, config}
+    else
+      _absent -> :error
     end
+  rescue
+    ArgumentError -> :error
   end
 
   @doc """
@@ -143,6 +149,7 @@ defmodule Smolquery.BufferService.ExpectedNodes do
         state = %{
           name: name,
           scope: "expected:#{name}",
+          table: new_table(name),
           store_impl: store_impl,
           store: store,
           setup_done: false,
@@ -209,10 +216,14 @@ defmodule Smolquery.BufferService.ExpectedNodes do
     if config.epoch == state.epoch do
       state
     else
-      :persistent_term.put(key(state.name), published(config))
+      :ets.insert(state.table, {:config, published(config)})
 
       %{state | epoch: config.epoch}
     end
+  end
+
+  defp new_table(name) do
+    :ets.new(process_name(name), [:named_table, :protected, read_concurrency: true])
   end
 
   defp published(config), do: %{epoch: config.epoch, members: config.members}
@@ -228,8 +239,6 @@ defmodule Smolquery.BufferService.ExpectedNodes do
 
     state
   end
-
-  defp key(name), do: {__MODULE__, name}
 
   @doc """
   Whether the deployment configures a config store to keep this state in —
