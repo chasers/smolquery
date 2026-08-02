@@ -27,6 +27,7 @@ defmodule Smolquery.BufferService.Routing do
   actual ring change rather than once per write.
   """
 
+  alias Smolquery.BufferService.ExpectedNodes
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
@@ -96,11 +97,14 @@ defmodule Smolquery.BufferService.Routing do
   crashed owner's tables with a silently short result and a green status (T-94,
   found by `scripts/kind-smoke.sh`), which is worse than failing.
 
-  `:expected_nodes` is what tells the two apart. A configured node absent from
-  the ring must still answer or fail the read; a node the configuration no
-  longer names was removed deliberately, and is nobody's missing tail. Scaling
-  the fleet down is therefore drain, then stop, then drop from
-  `:expected_nodes` — in that order.
+  The expected set is what tells the two apart. An expected node absent from
+  the ring must still answer or fail the read; a node the set no longer
+  names was removed deliberately, and is nobody's missing tail. Scaling the
+  fleet down is therefore drain, then stop, then drop from the expected set
+  — in that order. The set itself comes from
+  `Smolquery.BufferService.ExpectedNodes` (T-109): a CAS-backed config-store
+  row where a keeper runs, the static `:expected_nodes` configuration it was
+  seeded from where none does.
 
   Unset (single-node, dev, and every pre-Milestone-8 deployment) this is exactly
   `nodes/1`, so nothing changes for a fleet that never had a ring to lose a
@@ -119,15 +123,9 @@ defmodule Smolquery.BufferService.Routing do
     name
     |> resolve()
     |> nodes()
-    |> Enum.concat(expected_nodes())
+    |> Enum.concat(ExpectedNodes.list(name))
     |> Enum.uniq()
     |> Enum.sort()
-  end
-
-  defp expected_nodes do
-    :smolquery
-    |> Application.get_env(Smolquery.BufferService, [])
-    |> Keyword.get(:expected_nodes, [])
   end
 
   @doc """

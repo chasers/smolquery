@@ -77,6 +77,7 @@ defmodule Smolquery.BufferService.RingEpoch do
 
   require Logger
 
+  alias Smolquery.BufferService.ConfigStoreKeeper
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Routing
   alias Smolquery.Cluster.PgGroup
@@ -175,7 +176,7 @@ defmodule Smolquery.BufferService.RingEpoch do
   def init(opts) do
     name = Keyword.fetch!(opts, :name)
     static = Keyword.fetch!(opts, :static)
-    {store_impl, store_opts} = store_spec(opts)
+    {store_impl, store_opts} = ConfigStoreKeeper.store_spec(opts)
 
     case store_impl.start_link(store_opts) do
       {:ok, store} ->
@@ -248,7 +249,7 @@ defmodule Smolquery.BufferService.RingEpoch do
   defp attempt_refresh(state) do
     verified_at = System.monotonic_time(:millisecond)
 
-    with {:ok, state} <- setup(state),
+    with {:ok, state} <- ConfigStoreKeeper.setup(state),
          members = Enum.sort(state.members.()),
          {:ok, config} <- current(state, members),
          {:ok, config} <- reconcile(state, config, members) do
@@ -260,15 +261,6 @@ defmodule Smolquery.BufferService.RingEpoch do
         end)
 
         state
-    end
-  end
-
-  defp setup(%{setup_done: true} = state), do: {:ok, state}
-
-  defp setup(state) do
-    case state.store_impl.setup(state.store) do
-      :ok -> {:ok, %{state | setup_done: true}}
-      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -343,24 +335,6 @@ defmodule Smolquery.BufferService.RingEpoch do
   defp prev_ring(members), do: Ring.new!(members)
 
   defp members(name, static), do: PgGroup.nodes(Smolquery.BufferService, name, static)
-
-  defp store_spec(opts) do
-    configured =
-      Application.get_env(:smolquery, Smolquery.BufferService, [])
-      |> Keyword.get(:epoch_store)
-
-    Keyword.get(opts, :store) || configured || postgres_store()
-  end
-
-  defp postgres_store do
-    postgres =
-      Application.get_env(:smolquery, Smolquery.Cluster, [])
-      |> Keyword.get(:postgres) ||
-        raise ArgumentError,
-              "RingEpoch needs an :epoch_store or Smolquery.Cluster :postgres config"
-
-    {Smolquery.Cluster.ConfigStore.Postgres, postgres}
-  end
 
   defp option(opts, config, opt_key, config_key, default) do
     Keyword.get(opts, opt_key) || Keyword.get(config, config_key, default)
