@@ -1,0 +1,55 @@
+name: Cluster
+
+# The :cluster suite, against a real kind cluster — the paths that need distinct
+# hosts and so have no :peer equivalent (see test/smolquery/cluster/).
+#
+# Deliberately not on pull_request: this builds a release image and boots a
+# six-pod fleet, which is minutes on a 2-core runner rather than the seconds the
+# other jobs take. Manual for now; flip on a schedule or a push to main once it
+# has proven green here.
+on:
+  workflow_dispatch:
+
+env:
+  MIX_ENV: test
+
+jobs:
+  cluster:
+    name: Cluster tests (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.2"
+          elixir-version: "1.20.2"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+
+      - run: mix deps.get
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Bring up the cluster
+        run: ./scripts/kind-up.sh
+
+      - name: Cluster tests
+        run: mix test --only cluster
+
+      - name: Fleet state on failure
+        if: failure()
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kube/config
+        run: |
+          kubectl --context kind-smolquery -n smolquery get pods -o wide
+          kubectl --context kind-smolquery -n smolquery describe pods
+          kubectl --context kind-smolquery -n smolquery logs -l app=smolquery-buffer \
+            --tail=200 --prefix --all-containers

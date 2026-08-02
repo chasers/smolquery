@@ -617,7 +617,7 @@ object storage through a Postgres catalog:
 
 ```sh
 ./scripts/kind-up.sh    # kind cluster + certs + image build/load + apply + wait
-./scripts/kind-smoke.sh # the whole exit criterion: ingest, fan-out, seal, drain, kill
+mix test --only cluster # the whole exit criterion: ingest, fan-out, seal, drain, kill
 ```
 
 The topology (all StatefulSets — every cluster member needs a stable pod name,
@@ -632,15 +632,16 @@ each other's URLs from node names):
 | `postgres` / `minio` | 1 each | — | kind-overlay only |
 
 The API lands on `http://localhost:8080` (Bearer `kind-only-api-key`), the web
-UI on `http://localhost:8082`. The smoke script asserts every Milestone 8 path
-that needs real distinct hosts:
+UI on `http://localhost:8082`. `test/smolquery/cluster/kind_cluster_test.exs`
+(tagged `:cluster`, driven through `Smolquery.Test.Kind`) asserts every
+Milestone 8 path that needs real distinct hosts:
 
 | clause | how it is asserted |
 | --- | --- |
 | the fleet ingests and seals | rows land through the API edge, a segment appears in MinIO through the Postgres catalog, and the same count reads back over `s3://` under the query lockdown |
 | a query fans out across owners | the two tables are *chosen* by walking the ring until they land on two different buffer nodes, so the fan-out cannot pass vacuously |
-| draining loses nothing | `Drain.drain/2` on `smolquery-buffer-0`, after which inserts route to the remaining owners and the count is exact |
-| a killed owner does not hang queries | the owner is force-deleted and queries are issued under a 20 s deadline; a timeout fails the run |
+| draining loses nothing | `Drain.drain/2` on the table's actual owner, after which the ring drops to two, inserts route to the remaining owners, and the count is exact |
+| a killed owner never answers short | the owner is force-deleted, then every query must come back either complete or `503` — any other count means acked rows went missing silently (T-94) |
 | two storage replicas never double-merge | both replicas must be Running, and every row stays unique (`count(*) = count(DISTINCT id)`) across the seals |
 
 The drain step is worth knowing on its own, since it is the one operation with
@@ -1024,6 +1025,24 @@ docker run -d --rm -p 9000:9000 \
 
 CI runs them in a dedicated job (`mix test --only integration`) with both
 services provided.
+
+`:cluster`-tagged tests are excluded the same way, and go further: they need the
+whole fleet on real distinct hosts, so they run against the kind cluster rather
+than starting anything themselves.
+
+```sh
+./scripts/kind-up.sh      # once — cluster, certs, image, manifests
+mix test --only cluster   # or ./scripts/kind-smoke.sh, which does exactly this
+```
+
+They exist because that is where Milestone 8's real bugs were: L7's four on
+first boot, and T-94's silently short answer, which survived a fully green
+suite. `:peer` cannot reproduce them — it cannot give two nodes distinct hosts
+sharing one port, which is the assumption node-name-derived URLs rest on. The
+tests drain a node and kill a pod, so each one restores the fleet in `on_exit`
+and takes its own dataset; the buffer PVCs, the catalog, and MinIO all outlive a
+redeploy. A full run is one to two minutes, most of it waiting out
+`seal_max_age_ms` and pod restarts.
 
 ### Benchmarks
 
