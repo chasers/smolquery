@@ -71,9 +71,19 @@ defmodule Smolquery.QueryService.Runtime do
   whatever the catalog configuration names; a deployment whose sealed
   segments live elsewhere must say so here, or its queries will honestly
   fail to read them.
+
+  `store` names nothing this service writes through — the query path never
+  writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
+  8 L3), every job engine still needs the same credentials to
+  `read_parquet('s3://...')` the locations the catalog hands back. Passing
+  the identical `Segments.Store.S3` config `StorageService` was given (same
+  bucket, same keys) gets each job's engine the matching `CREATE SECRET`;
+  `nil` (the default) means no sealed data lives in an object store this
+  service must authenticate to.
   """
 
   alias Smolquery.Catalog
+  alias Smolquery.Segments.Store
 
   @enforce_keys [:name, :catalog]
   defstruct [
@@ -82,6 +92,7 @@ defmodule Smolquery.QueryService.Runtime do
     :catalog_opts,
     :history_metadata,
     :allowed_directories,
+    :store,
     lockdown: true,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
@@ -109,7 +120,8 @@ defmodule Smolquery.QueryService.Runtime do
           max_concurrent_jobs: pos_integer(),
           default_timeout_ms: pos_integer(),
           job_memory_limit: String.t(),
-          result_ttl_ms: pos_integer()
+          result_ttl_ms: pos_integer(),
+          store: Store.t() | nil
         }
 
   @limits [
@@ -121,7 +133,8 @@ defmodule Smolquery.QueryService.Runtime do
     :max_concurrent_jobs,
     :default_timeout_ms,
     :job_memory_limit,
-    :result_ttl_ms
+    :result_ttl_ms,
+    :store
   ]
 
   @doc """

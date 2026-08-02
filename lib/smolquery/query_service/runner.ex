@@ -26,6 +26,7 @@ defmodule Smolquery.QueryService.Runner do
 
   alias Explorer.DataFrame
   alias Smolquery.Engine.Connection
+  alias Smolquery.EngineSecrets
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
@@ -175,7 +176,7 @@ defmodule Smolquery.QueryService.Runner do
           database: database,
           extensions: extensions(runtime),
           settings: [memory_limit: runtime.job_memory_limit],
-          statements: hot_tier_secret(runtime) ++ runtime.job_bootstrap,
+          statements: engine_secrets(runtime) ++ runtime.job_bootstrap,
           max_rows: :infinity
         )
 
@@ -209,12 +210,9 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp hot_tier_secret(%Runtime{} = runtime) do
-    if :httpfs in runtime.engine_extensions do
-      [Smolquery.InternalSecret.create_secret_statement(runtime.buffer_base_url)]
-    else
-      []
-    end
+  defp engine_secrets(%Runtime{} = runtime) do
+    EngineSecrets.hot_tier(runtime.engine_extensions, runtime.buffer_base_url) ++
+      EngineSecrets.sealed_tier(runtime.store)
   end
 
   defp lockdown(%Runtime{lockdown: false}, _plan), do: []

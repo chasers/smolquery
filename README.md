@@ -794,11 +794,22 @@ the node that gave the ack. Point the segments elsewhere with
 the current group commit, so lowering it trades throughput for latency.
 
 The storage service's `:dir` is where sealed segments land, and `:store`
-overrides it the same way. `buffer_base_url` is where the sealer reaches
-`HotServer` to pull manifests and segment bytes — honest for a single node, and
-replaced by ownership-ring lookup when the cluster arrives.
-`engine_extensions` loads `httpfs` into the sealer's own engine, which the merge
-cannot work without.
+overrides it the same way — including onto an object store (Milestone 8 L3):
+
+    store: {Smolquery.Segments.Store.S3,
+            bucket: "smolquery-sealed",
+            access_key_id: System.get_env("S3_ACCESS_KEY_ID"),
+            secret_access_key: System.get_env("S3_SECRET_ACCESS_KEY"),
+            endpoint: "http://minio:9000",
+            staging_dir: "/mnt/scratch/sealed-staging"}
+
+`buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and
+segment bytes — honest for a single node, and replaced by ownership-ring
+lookup when the cluster arrives. `engine_extensions` loads `httpfs` into the
+sealer's own engine, which the merge cannot work without — the same engine
+also authenticates to the sealed tier's `Store.S3` credentials, when
+configured, via `CREATE SECRET` (`Smolquery.EngineSecrets`), so a compaction
+re-merging existing sealed segments can read them back over `s3://`.
 
 The query service runs each query as a job with a private DuckDB engine
 (`Smolquery.QueryService.Client.query/3` sync, `submit/3` + `fetch/2` async).
@@ -806,7 +817,10 @@ Given `catalog:` options it starts its own DuckLake engine to plan through;
 given a `%Smolquery.Catalog{}` it starts none — but then `job_bootstrap:` must
 carry the `ATTACH` job engines need, since they attach the lake themselves.
 `buffer_base_url` is where the planner reaches `HotServer` for hot manifests —
-the same single-node honesty as the storage service's. `max_concurrent_jobs`
+the same single-node honesty as the storage service's. `store` takes the same
+`Store.S3` config as the storage service's when the sealed tier lives there —
+every job's engine needs the matching `CREATE SECRET` to read it, even though
+the query path never writes through the store itself. `max_concurrent_jobs`
 refuses rather than queues; `default_timeout_ms` bounds every job's runtime;
 `job_memory_limit` is each job engine's DuckDB `memory_limit`; `result_ttl_ms`
 is how long a finished job holds its result frame for an async caller.
