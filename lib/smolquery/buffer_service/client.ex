@@ -64,6 +64,10 @@ defmodule Smolquery.BufferService.Client do
     * `{:error, :buffer_full}` — shed load; the ingest edge turns this into a 429
     * `{:error, :buffer_service_unavailable}` — the owner does not run the
       `:buffer` role
+    * `{:error, :draining}` — the owner is mid-drain (Milestone 8 L4); the
+      ring has not moved yet, but this node has already stopped taking new
+      writes for tables it owns, so a retry should expect the owner to
+      change
     * `{:error, {:badrpc | :badtcp, reason}}` — the owner could not be reached
 
   `{:badrpc, :timeout}` is ambiguous: the call may have reached the owner and

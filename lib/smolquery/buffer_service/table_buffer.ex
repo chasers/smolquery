@@ -172,6 +172,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   @spec maintain(GenServer.server(), timeout()) :: :ok
   def maintain(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :maintain, timeout)
 
+  @doc """
+  Flushes, then signals a seal for every unsealed micro-segment this table
+  holds — regardless of `seal_max_bytes`/`seal_max_files`/`seal_max_age_ms`
+  or how recently a claim last signalled (Milestone 8 L4's drain).
+
+  A no-op, returning `:ok`, when there is nothing unsealed: draining a table
+  that already has none is not an error.
+  """
+  @spec force_seal(GenServer.server(), timeout()) :: :ok
+  def force_seal(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :force_seal, timeout)
+
   @impl GenServer
   def init({runtime, table_ref}) do
     Process.flag(:trap_exit, true)
@@ -230,6 +241,12 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
+
+  def handle_call(:force_seal, _from, state) do
+    {_result, state} = commit_and_report(state)
+
+    {:reply, :ok, state |> reap() |> force_signal()}
+  end
 
   @impl GenServer
   def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag}} = state) do
@@ -305,6 +322,22 @@ defmodule Smolquery.BufferService.TableBuffer do
       not sealable?(state, unsealed) -> state
       true -> claim_and_signal(state, unsealed)
     end
+  end
+
+  defp force_signal(state) do
+    case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
+      {:ok, claim} -> signal(state, claim)
+      :error -> force_claim(state)
+    end
+  end
+
+  defp force_claim(state) do
+    unsealed =
+      state.runtime.manifest
+      |> HotManifest.entries(state.table_ref)
+      |> Enum.reject(&Entry.sealed?/1)
+
+    if unsealed == [], do: state, else: claim_and_signal(state, unsealed)
   end
 
   defp claim_and_signal(state, unsealed) do

@@ -27,14 +27,18 @@ defmodule Smolquery.ClusterTest do
 
     assert Cluster.enabled?()
 
-    assert [{Elixir.Cluster.Supervisor, [topologies, opts]}, Smolquery.Cluster.Membership] =
-             Cluster.children()
+    assert [
+             {Elixir.Cluster.Supervisor, [topologies, opts]},
+             Smolquery.Cluster.Membership,
+             %{id: :pg, start: {:pg, :start_link, [pg_scope]}}
+           ] = Cluster.children()
 
     assert opts[:name] == Smolquery.Cluster.Supervisor
     assert [postgres: config] = topologies
     assert config[:strategy] == LibclusterPostgres.Strategy
     assert config[:config][:channel_name] == "smolquery_cluster"
     assert config[:config][:hostname] == "localhost"
+    assert pg_scope == Cluster.pg_scope()
   end
 
   defp restore(:error), do: Application.delete_env(:smolquery, Cluster)

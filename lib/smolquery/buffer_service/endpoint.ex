@@ -17,6 +17,7 @@ defmodule Smolquery.BufferService.Endpoint do
   a caller try the next owner rather than crash.
   """
 
+  alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Load
@@ -63,8 +64,16 @@ defmodule Smolquery.BufferService.Endpoint do
           {:ok, ack}
 
         :error ->
-          deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+          admit(runtime, table_ref, schema, rows, batch_id)
       end
+    end
+  end
+
+  defp admit(runtime, table_ref, schema, rows, batch_id) do
+    if Drain.draining?(runtime.name) do
+      {:error, :draining}
+    else
+      deliver(runtime, table_ref, schema, rows, batch_id, @retries)
     end
   end
 

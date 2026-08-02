@@ -18,6 +18,12 @@ defmodule Smolquery.BufferService.Supervisor do
 
   `HotServer` is last — it only reads the manifest and the store, so nothing
   beneath it depends on it being up.
+
+  This process's own pid joins `Smolquery.BufferService.Membership`'s `:pg`
+  group on init (Milestone 8 L4) — a no-op when clustering is off, and
+  otherwise what puts this node in the ring at all. The pid dies with this
+  subtree, so an ungraceful crash removes the node from the ring the same
+  way `Smolquery.BufferService.Drain.drain/2`'s explicit `leave` does.
   """
 
   use Supervisor
@@ -25,6 +31,7 @@ defmodule Smolquery.BufferService.Supervisor do
   alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
+  alias Smolquery.BufferService.Membership
   alias Smolquery.BufferService.Runtime
 
   @doc """
@@ -43,6 +50,7 @@ defmodule Smolquery.BufferService.Supervisor do
   @impl Supervisor
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
+    Membership.join(runtime.name, self())
 
     children = [
       {HotManifest, name: Runtime.manifest(runtime.name)},
