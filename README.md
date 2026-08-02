@@ -793,6 +793,15 @@ the node that gave the ack. Point the segments elsewhere with
 `flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
 the current group commit, so lowering it trades throughput for latency.
 
+`ring:` is the static fallback only — with `CATALOG_DATABASE_URL` set
+(clustering on, Milestone 8 L4), ownership instead tracks which nodes are
+actually alive and hosting this instance, via `:pg`
+(`Smolquery.BufferService.Membership`); the config value only matters again
+if clustering is off. `Smolquery.BufferService.Drain.drain/2` takes a node
+out of the ring on purpose — force-sealing everything it owns and waiting
+for the seal to land before it stops being an owner, so a planned fleet
+shrink loses nothing an unplanned node death wouldn't already risk.
+
 The storage service's `:dir` is where sealed segments land, and `:store`
 overrides it the same way — including onto an object store (Milestone 8 L3):
 
