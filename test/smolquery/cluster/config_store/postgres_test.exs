@@ -61,6 +61,14 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
     assert Postgres.fetch(ctx.conn, "test:never-written") == :not_found
   end
 
+  test "an empty member list round-trips as empty, not as one blank node", ctx do
+    {:ok, _config} = Postgres.ensure(ctx.conn, ctx.scope, [@node_a])
+    {:ok, _config} = Postgres.advance(ctx.conn, ctx.scope, 0, [])
+
+    assert {:ok, config} = Postgres.fetch(ctx.conn, ctx.scope)
+    assert config.members == []
+  end
+
   defp connection_opts do
     [
       hostname: System.get_env("TEST_POSTGRES_HOST", "localhost"),
