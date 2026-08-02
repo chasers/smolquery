@@ -3,14 +3,14 @@ name: Cluster
 # The :cluster suite, against a real kind cluster — the paths that need distinct
 # hosts and so have no :peer equivalent (see test/smolquery/cluster/).
 #
-# Deliberately not on pull_request: this builds a release image and boots a
-# six-pod fleet, which is minutes on a 2-core runner rather than the seconds the
-# other jobs take. Manual for now; flip on a schedule or a push to main once it
-# has proven green here.
+# Runs on merges to main, not on pull_request: a run is ~5 minutes (image build
+# and cluster boot ~2:40, the tests themselves ~2:00) against ~1 minute for the
+# other jobs, so gating every PR on it would make it the long pole. Add
+# `pull_request:` below if that trade ever looks worth it.
 on:
   workflow_dispatch:
   push:
-    branches: [cluster-tests]
+    branches: [main]
 
 env:
   MIX_ENV: test
