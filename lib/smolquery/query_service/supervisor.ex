@@ -21,10 +21,19 @@ defmodule Smolquery.QueryService.Supervisor do
 
   A deployment that manages the catalog elsewhere passes a
   `%Smolquery.Catalog{}` in configuration, and then this subtree starts none.
+
+  Where a config store is configured (T-109), the subtree ends with a
+  `Smolquery.BufferService.ExpectedNodes` keeper for `buffer_name`: the
+  planner's read fan-out asks `Routing.manifest_nodes/1`, and a query node
+  runs no buffer subtree to keep that answer current for it. Last under
+  `rest_for_one` because nothing here consumes it directly — readers go
+  through `:persistent_term` — and on a node that also runs the `:buffer`
+  role the buffer subtree's keeper wins and this start is `:ignore`d.
   """
 
   use Supervisor
 
+  alias Smolquery.BufferService.ExpectedNodes
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Runtime
@@ -52,11 +61,19 @@ defmodule Smolquery.QueryService.Supervisor do
           {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
           {PartitionSupervisor,
            child_spec: DynamicSupervisor, name: Runtime.runners(runtime.name)}
-        ] ++ history(runtime)
+        ] ++ history(runtime) ++ expected_nodes(runtime)
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
   defp history(%Runtime{history_metadata: nil}), do: []
   defp history(%Runtime{} = runtime), do: [{History, runtime}]
+
+  defp expected_nodes(%Runtime{} = runtime) do
+    if ExpectedNodes.configured?() do
+      [{ExpectedNodes, name: runtime.buffer_name}]
+    else
+      []
+    end
+  end
 end

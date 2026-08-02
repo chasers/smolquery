@@ -41,12 +41,21 @@ defmodule Smolquery.BufferService.Supervisor do
   it cannot keep its lease verified the writes it would have permitted must
   fail closed, which its published-but-stale state already guarantees even
   across its own restarts.
+
+  `ExpectedNodes` starts under the same condition (T-109) but *last*: the
+  durable expected-fleet row lives in the same config store the epoch keeper
+  CASes against, but unlike the epoch keeper nothing in this subtree
+  consumes it — readers go through `:persistent_term` — so under
+  `rest_for_one` it must sit where its crash restarts nothing else. Query
+  nodes start their own from `Smolquery.QueryService.Supervisor`; on a node
+  running both roles the first one wins and the other start is `:ignore`d.
   """
 
   use Supervisor
 
   alias Smolquery.BufferService.Adopter
   alias Smolquery.BufferService.Drain
+  alias Smolquery.BufferService.ExpectedNodes
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Ring
@@ -85,7 +94,8 @@ defmodule Smolquery.BufferService.Supervisor do
          port: runtime.hot_server_port,
          startup_log: false},
         id: Runtime.hot_server(runtime.name)
-      )
+      ),
+      expected_nodes(runtime)
     ]
 
     Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
@@ -98,15 +108,14 @@ defmodule Smolquery.BufferService.Supervisor do
   end
 
   defp ring_epoch(runtime) do
-    if epoch_fencing?() do
+    if ExpectedNodes.configured?() do
       {RingEpoch, name: runtime.name, static: Ring.nodes(runtime.ring)}
     end
   end
 
-  defp epoch_fencing? do
-    config = Application.get_env(:smolquery, Smolquery.BufferService, [])
-
-    Keyword.has_key?(config, :epoch_store) or
-      (Smolquery.Cluster.enabled?() and Keyword.get(config, :epoch_fencing, false))
+  defp expected_nodes(runtime) do
+    if ExpectedNodes.configured?() do
+      {ExpectedNodes, name: runtime.name}
+    end
   end
 end
