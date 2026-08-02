@@ -2,6 +2,8 @@ import Config
 
 config :adbc, :drivers, [:duckdb]
 
+config :smolquery, Smolquery.Cluster, enabled: false
+
 config :gen_rpc,
   tcp_server_port: 5369,
   tcp_client_port: 5369,

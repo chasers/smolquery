@@ -93,6 +93,50 @@ if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
   config :gen_rpc, tcp_server_port: port, tcp_client_port: port
 end
 
+if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
+  uri = URI.parse(catalog_database_url)
+  [db_username | db_password] = String.split(uri.userinfo || "postgres", ":", parts: 2)
+  database = String.trim_leading(uri.path || "/smolquery", "/")
+
+  config :smolquery, Smolquery.Cluster,
+    enabled: true,
+    postgres: [
+      hostname: uri.host,
+      port: uri.port || 5432,
+      username: db_username,
+      password: List.first(db_password) || "",
+      database: database
+    ]
+end
+
+# Inter-node query traffic over TLS. Certificates are per node (gen_rpc
+# verifies the peer certificate CN against the dialed node name), mounted
+# from a k8s secret; scripts/gen-dev-certs.sh generates a dev CA + node
+# certs for the kind overlay.
+if System.get_env("GEN_RPC_TLS") in ~w(true 1) do
+  tls_dir = System.get_env("GEN_RPC_TLS_DIR") || "/etc/smolquery/gen-rpc-tls"
+
+  pod_name =
+    System.get_env("POD_NAME") || System.get_env("HOSTNAME") ||
+      raise "GEN_RPC_TLS requires POD_NAME"
+
+  ssl_options = [
+    certfile: Path.join(tls_dir, pod_name <> ".pem"),
+    keyfile: Path.join(tls_dir, pod_name <> ".key"),
+    cacertfile: Path.join(tls_dir, "ca.pem")
+  ]
+
+  ssl_port = String.to_integer(System.get_env("GEN_RPC_SSL_PORT") || "5870")
+
+  config :gen_rpc,
+    default_client_driver: :ssl,
+    tcp_server_port: false,
+    ssl_server_port: ssl_port,
+    ssl_client_port: ssl_port,
+    ssl_client_options: ssl_options,
+    ssl_server_options: ssl_options
+end
+
 if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end
