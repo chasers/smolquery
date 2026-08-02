@@ -22,6 +22,24 @@ if api_ip = System.get_env("SMOLQUERY_API_IP") do
   config :smolquery, Smolquery.Api, ip: ip
 end
 
+if web_port = System.get_env("SMOLQUERY_WEB_PORT") do
+  config :smolquery, SmolqueryWeb.Endpoint, http: [port: String.to_integer(web_port)]
+end
+
+if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
+  {:ok, ip} = web_ip |> String.to_charlist() |> :inet.parse_address()
+
+  config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
+end
+
+if config_env() == :prod do
+  secret_key_base =
+    System.get_env("SMOLQUERY_SECRET_KEY_BASE") ||
+      Base.encode64(:crypto.strong_rand_bytes(48))
+
+  config :smolquery, SmolqueryWeb.Endpoint, secret_key_base: secret_key_base
+end
+
 if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end

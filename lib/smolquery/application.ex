@@ -25,6 +25,7 @@ defmodule Smolquery.Application do
   end
 
   defp subtree(:api), do: [Smolquery.Api.Supervisor]
+  defp subtree(:web), do: [SmolqueryWeb.Supervisor]
   defp subtree(:query), do: [Smolquery.QueryService.Supervisor]
   defp subtree(:buffer), do: [Smolquery.BufferService.Supervisor]
   defp subtree(:storage), do: [Smolquery.StorageService.Supervisor]

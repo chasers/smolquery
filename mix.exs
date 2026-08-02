@@ -8,9 +8,15 @@ defmodule Smolquery.MixProject do
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
-      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"],
+      dialyzer: [
+        plt_local_path: "priv/plts",
+        plt_core_path: "priv/plts",
+        plt_add_apps: [:ex_unit]
+      ],
       releases: releases()
     ]
   end
@@ -46,6 +52,20 @@ defmodule Smolquery.MixProject do
       {:plug, "~> 1.20"},
       {:req, "~> 0.7"},
       {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_html, "~> 4.1"},
+      {:phoenix_live_view, "~> 1.2"},
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
+      {:lazy_html, ">= 0.1.0", only: :test},
+      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
+      {:tailwind, "~> 0.3", runtime: Mix.env() == :dev},
+      {:heroicons,
+       github: "tailwindlabs/heroicons",
+       tag: "v2.2.0",
+       sparse: "optimized",
+       app: false,
+       compile: false,
+       depth: 1},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
@@ -57,6 +77,13 @@ defmodule Smolquery.MixProject do
 
   defp aliases do
     [
+      "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
+      "assets.build": ["compile", "tailwind smolquery", "esbuild smolquery"],
+      "assets.deploy": [
+        "tailwind smolquery --minify",
+        "esbuild smolquery --minify",
+        "phx.digest"
+      ],
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",

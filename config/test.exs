@@ -8,6 +8,11 @@ config :smolquery, roles: []
 
 config :smolquery, Smolquery.Api, port: 0
 
+config :smolquery, SmolqueryWeb.Endpoint,
+  http: [ip: {127, 0, 0, 1}, port: 0],
+  secret_key_base: "vN2tBnLkDhX4wG9pQmZrY7cJfA1sE6uHb3TgVjR8xWqK5yMdC0aPoUiSlF2hNzEe",
+  server: false
+
 config :smolquery, Smolquery.BufferService,
   hot_server_port: 0,
   seal_consumer: {Smolquery.BufferService.SealLog, []}

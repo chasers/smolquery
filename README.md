@@ -535,9 +535,10 @@ volume, env-configured:
 docker build -t smolquery .
 
 docker run -d --name smolquery \
-  -p 4000:4000 \
+  -p 4000:4000 -p 4002:4002 \
   -v smolquery-data:/data \
   -e SMOLQUERY_API_KEY=change-me \
+  -e SMOLQUERY_WEB_IP=0.0.0.0 \
   smolquery
 
 curl -H 'authorization: Bearer change-me' http://127.0.0.1:4000/v1/datasets
@@ -560,10 +561,12 @@ Configuration is environment variables, resolved at boot in
 
 | Variable | Meaning (default) |
 | --- | --- |
-| `SMOLQUERY_ROLES` | comma-separated subset of `api,ingest,buffer,storage,query` (all) |
+| `SMOLQUERY_ROLES` | comma-separated subset of `api,ingest,buffer,storage,query,web` (all) |
 | `SMOLQUERY_API_KEY` | the Bearer key; an `api` node without one refuses to boot |
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicit in a cluster |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in prod images / `4000`) |
+| `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind (`127.0.0.1` — exposing the unauthenticated UI is a deliberate act / `4002`) |
+| `SMOLQUERY_SECRET_KEY_BASE` | signs web UI sessions; generated per boot when unset (sessions reset on restart) |
 | `SMOLQUERY_DATA_DIR` | the one volume everything durable lives under (`/data` in the image) |
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | split a tier onto its own disk (under the data dir) |
 | `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
@@ -676,15 +679,38 @@ Three layers, each fail-closed:
   URLs the plan itself produced. Single-tenant remains the model — auth says
   *whether* you may query, not *which tables*.
 
+## Web UI
+
+`SmolqueryWeb` is a Phoenix LiveView UI, started by the `:web` role on port
+4002 (`SMOLQUERY_WEB_PORT`): browse datasets and tables, create both, edit a
+table's retention policy, preview rows, and run SQL through the query
+service's job lifecycle — submit, live state, paged results, cancel.
+
+The UI calls service client modules and `Smolquery.Catalog` directly — the
+same layering rule as the HTTP API, never loopback HTTP. It binds
+`127.0.0.1` by default because it has no auth story yet (that and
+drop/alter-table are tracked as follow-ups on PL-12); exposing it
+(`SMOLQUERY_WEB_IP=0.0.0.0`) is a deliberate act.
+
+Assets are esbuild + Tailwind, vendored the way `phx.new` lays them out:
+
+```sh
+mix assets.setup    # once — downloads the tailwind/esbuild binaries
+mix assets.build    # or let the dev watchers rebuild on change
+iex -S mix          # then open http://localhost:4002
+```
+
 ## Roles
 
-One release, four services plus the HTTP front door; a node starts only the
-subtrees its roles name. `SMOLQUERY_ROLES` is a comma-separated list, or `all`:
+One release, four services plus two edges — the HTTP front door and the web
+UI; a node starts only the subtrees its roles name. `SMOLQUERY_ROLES` is a
+comma-separated list, or `all`:
 
 ```sh
 SMOLQUERY_ROLES=all                # default when unset — single-node dev
 SMOLQUERY_ROLES=query              # a query-only node
 SMOLQUERY_ROLES=api,ingest,buffer
+SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 ```
 
 Unknown role names fail the boot rather than silently starting nothing. Every
@@ -807,6 +833,7 @@ Elixir 1.20.2.
 ```sh
 mise install     # or asdf install
 mix deps.get
+mix assets.setup # once — web UI asset toolchain (tailwind + esbuild)
 mix test         # fast suite; add --include integration for everything
 mix precommit    # format + full local quality gate before committing
 ```

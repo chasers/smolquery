@@ -32,3 +32,7 @@ smolquery-*.tar
 
 # Dev-run data: buffer manifests, segments, and the DuckLake catalog
 /priv/data/
+
+# Built web assets and fetched JS deps (rebuilt by mix assets.build)
+/priv/static/assets/
+/assets/node_modules/
