@@ -8,8 +8,13 @@ defmodule Smolquery.Api.Queries do
   that outlives `timeoutMs` has been cancelled by the client layer; the 504
   says so and points long queries at `POST /v1/jobs`.
 
-  A query that *finished* badly is the caller's error, not the server's: the
-  planner's message comes back in a 400.
+  A query that *finished* badly is usually the caller's error, not the server's:
+  the planner's message comes back in a 400. Unreachable hot tier is the
+  exception, and answers 503 — the SQL was fine, a buffer node holding rows the
+  answer needs could not be asked (`Smolquery.QueryService.Planner`'s failure
+  honesty, T-94). The distinction is the difference between "fix your query" and
+  "retry this", which is not something a client should have to infer from an
+  error string.
   """
 
   alias Explorer.DataFrame
@@ -51,8 +56,17 @@ defmodule Smolquery.Api.Queries do
     Json.send_json(conn, 200, body)
   end
 
-  defp answer(conn, %Job{state: :error} = job, _frame) do
-    Errors.send_error(conn, 400, "INVALID_QUERY", error_message(job))
+  defp answer(conn, %Job{state: :error, error: error} = job, _frame) do
+    if hot_tier_unavailable?(error) do
+      Errors.send_error(
+        conn,
+        503,
+        "UNAVAILABLE",
+        "a buffer node holding unsealed rows for this query could not be reached"
+      )
+    else
+      Errors.send_error(conn, 400, "INVALID_QUERY", error_message(job))
+    end
   end
 
   defp answer(conn, %Job{} = job, _frame) do
@@ -61,6 +75,10 @@ defmodule Smolquery.Api.Queries do
 
   defp error_message(%Job{error: {:invalid_query, message}}) when is_binary(message), do: message
   defp error_message(%Job{error: error}), do: inspect(error)
+
+  defp hot_tier_unavailable?({:hot_tier_unavailable, _reason}), do: true
+  defp hot_tier_unavailable?({:hot_tier_unavailable, _ref, _reason}), do: true
+  defp hot_tier_unavailable?(_other), do: false
 
   defp max_results(body) do
     case body do

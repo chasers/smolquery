@@ -82,6 +82,54 @@ defmodule Smolquery.BufferService.Routing do
   def nodes(%__MODULE__{ring: ring}), do: Ring.nodes(ring)
 
   @doc """
+  Every node that might hold unsealed rows for a table: the ring, plus the nodes
+  the deployment expects to be in it.
+
+  Read fan-out asks this set; writes keep routing off `nodes/1`, since a batch
+  must never be sent to a node that is not in the ring. The difference exists
+  because `:pg` membership disappears the moment a node dies, and it disappears
+  the same way whether the node drained first — `Smolquery.BufferService.Drain.drain/2`
+  force-seals everything it owns before leaving, so it holds nothing — or
+  crashed, leaving an acked-but-unsealed tail on its own disk that no other node
+  can see or count. A reader trusting live membership alone therefore answers a
+  crashed owner's tables with a silently short result and a green status (T-94,
+  found by `scripts/kind-smoke.sh`), which is worse than failing.
+
+  `:expected_nodes` is what tells the two apart. A configured node absent from
+  the ring must still answer or fail the read; a node the configuration no
+  longer names was removed deliberately, and is nobody's missing tail. Scaling
+  the fleet down is therefore drain, then stop, then drop from
+  `:expected_nodes` — in that order.
+
+  Unset (single-node, dev, and every pre-Milestone-8 deployment) this is exactly
+  `nodes/1`, so nothing changes for a fleet that never had a ring to lose a
+  member from.
+
+  This is deliberately coarser than the question a reader actually has, which is
+  *which* nodes hold unsealed rows for *this* table. Nothing durable records
+  that: the manifest log that knows sits on the node's own disk, unreachable
+  precisely when the answer matters, and ownership math cannot substitute for it
+  — a node can hold unsealed rows for a table it no longer owns, which is why
+  the fan-out asks every member rather than the owner. So an absent expected
+  node fails every query, not only the queries touching tables it held.
+  """
+  @spec manifest_nodes(atom()) :: [node()]
+  def manifest_nodes(name) do
+    name
+    |> resolve()
+    |> nodes()
+    |> Enum.concat(expected_nodes())
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp expected_nodes do
+    :smolquery
+    |> Application.get_env(Smolquery.BufferService, [])
+    |> Keyword.get(:expected_nodes, [])
+  end
+
+  @doc """
   Drops a cached routing, so the next resolve rebuilds it from configuration.
   """
   @spec forget(atom()) :: boolean()

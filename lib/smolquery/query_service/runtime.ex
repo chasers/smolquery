@@ -74,12 +74,13 @@ defmodule Smolquery.QueryService.Runtime do
 
   `lockdown` (PL-8 D7) is whether each job engine, after planning, disables
   DuckDB's external access for the user's SQL — leaving exactly
-  `allowed_directories` plus the plan's own micro-segment URLs readable. On
+  `allowed_directories`, the plan's own micro-segment URLs, and the sealed
+  tier's object-store prefix (when `store` is `Store.S3`) readable. On
   by default: SQL arriving over the HTTP API must not read arbitrary files.
   `allowed_directories` defaults to the node's `:data_dir` (expanded) plus
   whatever the catalog configuration names; a deployment whose sealed
-  segments live elsewhere must say so here, or its queries will honestly
-  fail to read them.
+  segments live elsewhere on disk must say so here, or its queries will
+  honestly fail to read them.
 
   `store` names nothing this service writes through — the query path never
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone

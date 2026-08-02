@@ -588,6 +588,8 @@ Configuration is environment variables, resolved at boot in
 | `SMOLQUERY_HOT_SERVER_PORT` | hot-tier HTTP port (`4001`), on every node — peers derive each other's hot-tier URLs from node name + this port |
 | `SMOLQUERY_HOT_SERVER_IP` | hot-tier HTTP bind (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
 | `SMOLQUERY_BUFFER_BASE_URL` | where readers reach the hot tier (`http://127.0.0.1:4001`) |
+| `SMOLQUERY_BUFFER_NODES` | the buffer fleet this deployment expects, as comma-separated node names. A reader fails a query when one of these cannot answer, instead of counting its unsealed rows as zero (T-94) — `:pg` membership drops a crashed node exactly the way it drops a drained one, and only configuration can tell them apart. Scaling down is drain, stop, *then* remove from this list. Unset (single-node, dev) the live ring is the whole set and nothing changes |
+| `SMOLQUERY_BUFFER_REPLICAS` | on k8s, the buffer StatefulSet's replica count: `rel/env.sh.eex` expands it into `SMOLQUERY_BUFFER_NODES` using the pod-DNS naming (`SMOLQUERY_BUFFER_STATEFULSET`, default `smolquery-buffer`), so the expected fleet carries no hardcoded namespace and scaling is one number. Ignored if `SMOLQUERY_BUFFER_NODES` is set explicitly |
 | `SMOLQUERY_S3_BUCKET` (+ `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ENDPOINT`, `_REGION`, `_URL_STYLE`, `_STAGING_DIR`) | sealed tier on an S3-compatible store instead of the data dir |
 | `GEN_RPC_PORT` | inter-node transport port (`5369`) |
 | `CATALOG_DATABASE_URL` | Postgres URL (e.g. `postgres://user:pass@host/db`); tiers the DuckLake catalog onto it (loading DuckDB's `postgres` extension alongside `ducklake`) and enables node discovery (`Smolquery.Cluster`, over `libcluster_postgres`) through that same database — one node is not a cluster, so a single-node deployment leaves this unset. `SMOLQUERY_CATALOG` overrides just the catalog side, e.g. to point it at a different database than discovery uses |
@@ -604,6 +606,71 @@ loopback to `0.0.0.0`, since peers read each other's hot tiers over HTTP
 (`SMOLQUERY_HOT_SERVER_IP` overrides). `scripts/gen-dev-certs.sh` generates a
 throwaway CA and per-node certificates for `GEN_RPC_TLS`/`DIST_TLS` in local
 (kind) testing.
+
+### Local cluster (kind)
+
+`deploy/` holds kustomize manifests for the clustered deployment: `base/` is
+the smolquery fleet itself, `overlays/kind/` adds what local dev needs around
+it (Postgres, MinIO, NodePorts, dev TLS certs). One command boots the whole
+stack — six smolquery nodes with split roles, clustered over TLS, sealing to
+object storage through a Postgres catalog:
+
+```sh
+./scripts/kind-up.sh    # kind cluster + certs + image build/load + apply + wait
+./scripts/kind-smoke.sh # the whole exit criterion: ingest, fan-out, seal, drain, kill
+```
+
+The topology (all StatefulSets — every cluster member needs a stable pod name,
+since the per-node TLS certificate is looked up by `POD_NAME` and peers derive
+each other's URLs from node names):
+
+| workload | replicas | roles | state |
+| --- | --- | --- | --- |
+| `smolquery-api` | 1 | `api,ingest,query,web` | none (`emptyDir`) |
+| `smolquery-buffer` | 3 | `buffer` | PVC — the acked-but-unsealed tail lives here |
+| `smolquery-storage` | 2 | `storage` | none — sealed segments live in MinIO, the catalog in Postgres |
+| `postgres` / `minio` | 1 each | — | kind-overlay only |
+
+The API lands on `http://localhost:8080` (Bearer `kind-only-api-key`), the web
+UI on `http://localhost:8082`. The smoke script asserts every Milestone 8 path
+that needs real distinct hosts:
+
+| clause | how it is asserted |
+| --- | --- |
+| the fleet ingests and seals | rows land through the API edge, a segment appears in MinIO through the Postgres catalog, and the same count reads back over `s3://` under the query lockdown |
+| a query fans out across owners | the two tables are *chosen* by walking the ring until they land on two different buffer nodes, so the fan-out cannot pass vacuously |
+| draining loses nothing | `Drain.drain/2` on `smolquery-buffer-0`, after which inserts route to the remaining owners and the count is exact |
+| a killed owner does not hang queries | the owner is force-deleted and queries are issued under a 20 s deadline; a timeout fails the run |
+| two storage replicas never double-merge | both replicas must be Running, and every row stays unique (`count(*) = count(DISTINCT id)`) across the seals |
+
+The drain step is worth knowing on its own, since it is the one operation with
+no HTTP surface:
+
+```sh
+kubectl -n smolquery exec smolquery-buffer-0 -c smolquery -- /app/bin/smolquery rpc \
+  ':ok = Smolquery.BufferService.Drain.drain(Smolquery.BufferService, timeout_ms: 120_000)'
+```
+
+The kill step is there because it found a real bug (**T-94**, fixed): a query
+over a force-killed owner's tables used to return `200 OK` with its
+acked-but-unsealed rows silently missing. The rows were never lost — the tail is
+on the pod's PVC and `Adopter` re-registers it on restart — but the answer was
+quietly incomplete in between, because the planner fanned out to live `:pg`
+membership and a dead node is simply no longer in it. Reads now fan out over
+`Smolquery.BufferService.Client.manifest_nodes/1` (the live ring *plus*
+`SMOLQUERY_BUFFER_NODES`), so an absent expected node is an unreachable member
+and fails the read with `503 UNAVAILABLE` rather than a short answer with a green
+status. It is deliberately coarse — one dead buffer node fails every query, not
+only those over tables it held — because nothing durable records which nodes
+hold unsealed rows for which table; **T-95** tracks the per-table registry that
+would narrow it.
+
+Throughput is measured off peer BEAMs rather than here — see
+`bench/cluster_ingest.exs`; a 4 GB Docker VM with every pod on a shrunken
+request measures VM contention, not the fleet.
+
+Iterate with `./scripts/kind-up.sh` again (rebuilds the image, reloads it,
+restarts the fleet); tear down with `kind delete cluster --name smolquery`.
 
 ## HTTP API
 
@@ -702,9 +769,10 @@ Three layers, each fail-closed:
   engines via an http `CREATE SECRET`. A single node generates one at boot; a
   cluster sets `SMOLQUERY_INTERNAL_SECRET` everywhere or reads fail with 401s.
 - **User SQL** runs with DuckDB's external access disabled and locked after
-  planning: readable is exactly `allowed_directories` plus the micro-segment
-  URLs the plan itself produced. Single-tenant remains the model — auth says
-  *whether* you may query, not *which tables*.
+  planning: readable is exactly `allowed_directories`, the micro-segment
+  URLs the plan itself produced, and the sealed tier's `s3://<bucket>/`
+  prefix when the sealed tier is an object store. Single-tenant remains the
+  model — auth says *whether* you may query, not *which tables*.
 
 ## Web UI
 
@@ -819,7 +887,11 @@ actually alive and hosting this instance, via `:pg`
 if clustering is off. `Smolquery.BufferService.Drain.drain/2` takes a node
 out of the ring on purpose — force-sealing everything it owns and waiting
 for the seal to land before it stops being an owner, so a planned fleet
-shrink loses nothing an unplanned node death wouldn't already risk.
+shrink loses nothing an unplanned node death wouldn't already risk. A drained
+node is still expected to answer reads until it is dropped from
+`SMOLQUERY_BUFFER_NODES`; since draining leaves it holding nothing, it answers
+an honest empty manifest, and the order to shrink by is drain, stop, then
+un-configure.
 
 The storage service's own `ring:` is the static fallback for a *second*,
 independent ring — which storage node seals a table's work, not which buffer
@@ -876,7 +948,10 @@ the table's current owner, because a ring change moves ownership instantly
 while the previous owner still holds the table's acked, unsealed tail —
 asking only the new owner would silently drop those rows from results until
 they seal. Any member that cannot answer fails the whole plan, the same
-honesty as single-node. `store` takes the same `Store.S3` config as the storage
+honesty as single-node — and "member" means the live ring *plus* the fleet
+`SMOLQUERY_BUFFER_NODES` says to expect, because a crashed node leaves `:pg`
+indistinguishably from a drained one and would otherwise be absent rather than
+unreachable (T-94; the failure is a `503`, not a `400`). `store` takes the same `Store.S3` config as the storage
 service's when the sealed tier lives there — every job's engine needs the
 matching `CREATE SECRET` to read it, even though the query path never
 writes through the store itself. `max_concurrent_jobs` refuses rather
@@ -918,6 +993,14 @@ Engine options can also be passed per instance to
 Toolchain versions are pinned in `.tool-versions`, matching CI — OTP 29.0.2 /
 Elixir 1.20.2.
 
+`kubectl` in this repo is scoped to the local kind cluster via
+[direnv](https://direnv.net): `.envrc` exports `KUBECONFIG=$PWD/.kube/config`,
+a gitignored single-context kubeconfig (run `direnv allow` once), so a bare
+`kubectl` can never hit an ambient context from another cluster.
+`scripts/kind-up.sh` writes that file itself when it creates the cluster; the
+scripts additionally pin every `kubectl` they run to the `kind-smolquery`
+context.
+
 ```sh
 mise install     # or asdf install
 mix deps.get
@@ -956,11 +1039,13 @@ mix run bench/sealer.exs                          # what a seal costs, and how f
 mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
 mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
 mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
+mix run bench/cluster_ingest.exs                  # does aggregate ingest scale with buffer-node count?
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs   # push the fetch and concurrency sizes
 CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs # more samples, more concurrency
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs     # bigger claims, bigger merges
+NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
 ```
 
 `bench/results/` holds the last recorded run of each script — the tables verbatim,
@@ -1000,6 +1085,19 @@ and **`flush_interval_ms` drops out entirely**. So at the default config a
 — which is the case for partitioned writes (PL-6). Partitioning divides the overload
 factor but does not define the cliff; `ack_budget_ms` now defines it (T-56,
 `bench/results/ack_budget.md`).
+
+`bench/cluster_ingest.exs` answers Milestone 8's exit criterion in the other
+direction — not "is it correct across nodes" but "is it faster across nodes". It
+stands up a fleet of peer BEAMs running the `:buffer` role, joined into one ring
+through the same `:pg` membership production uses, and sweeps node count against
+two driver topologies: `edge` (one node fans out to the fleet, the kind
+cluster's api ×1 / buffer ×3 shape) and `fleet` (a driver on every buffer node,
+writing only what it owns). `WRITERS` is per node, so offered load grows with the
+fleet and flat per-node throughput is what scaling looks like. **Aggregate ingest
+goes 215 → 420 → 603 krows/s over one, two, and three buffer nodes** — 1.95× and
+2.80× — with per-node throughput holding at 215 / 210 / 201, so near-linear but
+not free. Fan-out costs ~11%, and the edge is not the bottleneck at three nodes
+(`bench/results/cluster_ingest.md`).
 
 `bench/sealer.exs` compares the two merge implementations, measures merge
 throughput against input count and rows, times the whole handoff, and reports the

@@ -164,6 +164,18 @@ defmodule Smolquery.BufferService.Client do
   @spec nodes(atom()) :: [node()]
   def nodes(name), do: name |> Routing.resolve() |> Routing.nodes()
 
+  @doc """
+  Every node a hot-manifest fetch must reach — `nodes/1` plus the nodes the
+  deployment expects in the ring.
+
+  What the planner fans out over, and deliberately not what writes route on. See
+  `Smolquery.BufferService.Routing.manifest_nodes/1`: a crashed node leaves `:pg`
+  exactly the way a drained one does, so a reader that asks only the live ring
+  counts a crashed owner's tables short instead of failing (T-94).
+  """
+  @spec manifest_nodes(atom()) :: [node()]
+  def manifest_nodes(name), do: Routing.manifest_nodes(name)
+
   defp route(name, channel, function, args, table_ref, timeout_kind) do
     routing = Routing.resolve(name)
 

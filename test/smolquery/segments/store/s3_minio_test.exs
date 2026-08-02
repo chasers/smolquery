@@ -6,15 +6,30 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
   segment `Store.S3.put/3` writes is readable back by DuckDB's `httpfs`
   once `create_secret_statement/1` has run, the same as
   `StorageService.Supervisor`/`QueryService.Runner` bootstrap it.
+
+  The last two tests pin seams the L7 kind cluster found broken. The storage
+  subtree's *catalog* engine also reads segments back (DuckLake's
+  add-data-files collects footer stats), so a registration commits only if
+  that engine was bootstrapped with the sealed tier's secret too — not just
+  the merge engine. And a locked-down job engine (PL-8 D7) must keep the
+  sealed tier's `s3://` prefix readable after external access is disabled,
+  or every query touching sealed data fails with a permission error.
   """
 
   use ExUnit.Case, async: false
 
+  alias Smolquery.BufferService
+  alias Smolquery.BufferService.HotServer
+  alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.QueryService
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.S3
   alias Smolquery.Segments.Writer
+  alias Smolquery.StorageService
+  alias Smolquery.StorageService.Runtime
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -150,6 +165,113 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     assert result.rows |> List.flatten() |> List.first() == 5
   after
     File.rm_rf!(tmp_dir)
+  end
+
+  test "the storage subtree's catalog engine registers a segment living on S3", %{
+    store: store,
+    tmp_dir: tmp_dir
+  } do
+    %Store{config: %S3{} = config} = store
+    name = :"storage_s3_catalog_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {StorageService.Supervisor,
+       name: name,
+       dir: Path.join(tmp_dir, "sealed"),
+       store:
+         {S3,
+          bucket: config.bucket,
+          access_key_id: config.access_key_id,
+          secret_access_key: config.secret_access_key,
+          endpoint: config.endpoint,
+          staging_dir: config.staging_dir},
+       catalog: [
+         metadata: "sqlite:#{Path.join(tmp_dir, "catalog.sqlite")}",
+         data_path: Path.join(tmp_dir, "lake")
+       ]}
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    {:ok, runtime} = Runtime.fetch(name)
+
+    schema = Schema.new!([{"id", :int64, nullable: false}])
+    rows = for i <- 1..5, do: %{"id" => i}
+    {:ok, segment} = Writer.write(rows, schema, store: store, prefix: "catalog-register")
+
+    :ok = Catalog.create_dataset(runtime.catalog, "smoke")
+    :ok = Catalog.create_table(runtime.catalog, {"smoke", "a"}, schema)
+
+    assert {:ok, _snapshot} =
+             Catalog.register_segments(runtime.catalog, {"smoke", "a"}, [segment])
+  end
+
+  test "a locked-down query reads sealed segments back from S3", %{
+    store: store,
+    tmp_dir: tmp_dir
+  } do
+    %Store{config: %S3{} = config} = store
+    metadata = "sqlite:#{Path.join(tmp_dir, "catalog.sqlite")}"
+    data_path = Path.join(tmp_dir, "lake")
+    lake = :"s3_query_lake_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {DuckLake,
+       name: lake,
+       metadata: metadata,
+       data_path: data_path,
+       extensions: [:httpfs],
+       statements: [S3.create_secret_statement(config)]}
+    )
+
+    catalog = DuckLake.new(engine: lake)
+
+    schema = Schema.new!([{"id", :int64, nullable: false}])
+    :ok = Catalog.create_dataset(catalog, "smoke")
+    :ok = Catalog.create_table(catalog, {"smoke", "q"}, schema)
+
+    rows = for i <- 1..5, do: %{"id" => i}
+    {:ok, segment} = Writer.write(rows, schema, store: store, prefix: "query-lockdown")
+    {:ok, _snapshot} = Catalog.register_segments(catalog, {"smoke", "q"}, [segment])
+
+    buffer = :"s3_query_buffer_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {BufferService.Supervisor, name: buffer, dir: Path.join(tmp_dir, "buffer")},
+      id: buffer
+    )
+
+    on_exit(fn -> BufferService.Runtime.delete(buffer) end)
+
+    query = :"s3_query_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {QueryService.Supervisor,
+       name: query,
+       catalog: catalog,
+       buffer_base_url: HotServer.base_url(buffer),
+       engine_extensions: [:httpfs],
+       allowed_directories: [tmp_dir],
+       store:
+         {S3,
+          bucket: config.bucket,
+          access_key_id: config.access_key_id,
+          secret_access_key: config.secret_access_key,
+          endpoint: config.endpoint,
+          staging_dir: config.staging_dir},
+       job_bootstrap: [
+         DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
+       ]},
+      id: query
+    )
+
+    on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+    assert {:ok, job, frame} =
+             QueryService.Client.query(query, "SELECT sum(id)::BIGINT AS s FROM smoke.q")
+
+    assert job.state == :done
+    assert Explorer.DataFrame.to_columns(frame)["s"] == [15]
   end
 
   defp unique_key, do: "segments/#{:erlang.unique_integer([:positive])}.parquet"

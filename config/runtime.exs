@@ -79,6 +79,15 @@ if base_url = System.get_env("SMOLQUERY_BUFFER_BASE_URL") do
   config :smolquery, Smolquery.QueryService, buffer_base_url: base_url
 end
 
+if buffer_nodes = System.get_env("SMOLQUERY_BUFFER_NODES") do
+  config :smolquery,
+         Smolquery.BufferService,
+         expected_nodes:
+           buffer_nodes
+           |> String.split(",", trim: true)
+           |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
+end
+
 if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
   config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end

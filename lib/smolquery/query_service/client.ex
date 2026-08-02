@@ -26,8 +26,9 @@ defmodule Smolquery.QueryService.Client do
 
   SQL given to this module is untrusted by default (PL-8 D7): after planning,
   each job engine disables DuckDB's external access for the user's SQL,
-  leaving readable exactly the runtime's `allowed_directories` and the plan's
-  own micro-segment URLs — `read_csv('/etc/passwd')` is a permission error,
+  leaving readable exactly the runtime's `allowed_directories`, the plan's
+  own micro-segment URLs, and the sealed tier's object-store prefix when the
+  runtime's `store` is S3 — `read_csv('/etc/passwd')` is a permission error,
   not a data source. `lockdown: false` restores the old trusted posture for
   deployments that want it.
   """

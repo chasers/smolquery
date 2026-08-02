@@ -31,6 +31,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.Segments.Store
 
   @type option :: {:timeout_ms, pos_integer()}
 
@@ -215,13 +216,18 @@ defmodule Smolquery.QueryService.Runner do
       EngineSecrets.sealed_tier(runtime.store)
   end
 
+  defp store_prefixes(%Store{impl: Store.S3, config: config}),
+    do: [Store.S3.location_prefix(config)]
+
+  defp store_prefixes(_store), do: []
+
   defp lockdown(%Runtime{lockdown: false}, _plan), do: []
 
   defp lockdown(%Runtime{} = runtime, plan) do
     urls = plan.hot |> Map.values() |> List.flatten() |> Enum.map(& &1["url"])
 
     [
-      "SET allowed_directories = #{sql_list(runtime.allowed_directories)}",
+      "SET allowed_directories = #{sql_list(runtime.allowed_directories ++ store_prefixes(runtime.store))}",
       "SET allowed_paths = #{sql_list(urls)}",
       "SET enable_external_access = false",
       "SET lock_configuration = true"

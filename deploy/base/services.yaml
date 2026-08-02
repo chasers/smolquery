@@ -1,0 +1,37 @@
+# One headless service governs every StatefulSet in the cluster: pod DNS names
+# are <pod>.smolquery-headless.<ns>.svc.cluster.local across all roles, which is
+# exactly the host part rel/env.sh.eex bakes into RELEASE_NODE — and so the
+# address peers derive HotServer URLs from (Milestone 8 L5).
+apiVersion: v1
+kind: Service
+metadata:
+  name: smolquery-headless
+  namespace: smolquery
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    cluster: smolquery
+  ports:
+    - name: epmd
+      port: 4369
+    - name: gen-rpc
+      port: 5369
+    - name: gen-rpc-tls
+      port: 5870
+    - name: hot-server
+      port: 4001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smolquery-api
+  namespace: smolquery
+spec:
+  selector:
+    app: smolquery-api
+  ports:
+    - name: http
+      port: 4000
+    - name: web
+      port: 4002

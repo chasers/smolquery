@@ -124,7 +124,7 @@ defmodule Smolquery.BufferService.DrainTest do
 
     on_exit(fn -> restore_cluster(previous) end)
 
-    {:ok, _scope} = :pg.start_link(Cluster.pg_scope())
+    ensure_pg_scope!()
 
     name = start_buffer_service(context)
 
@@ -137,6 +137,13 @@ defmodule Smolquery.BufferService.DrainTest do
     start_supervised!({BufferService.Supervisor, service_options(context, name)}, id: {name, 2})
 
     assert PgGroup.nodes(BufferService, name, []) == []
+  end
+
+  defp ensure_pg_scope! do
+    case :pg.start_link(Cluster.pg_scope()) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
   end
 
   defp restore_cluster({:ok, value}), do: Application.put_env(:smolquery, Cluster, value)

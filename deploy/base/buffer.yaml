@@ -1,0 +1,95 @@
+# The buffer fleet: the only workload with a PersistentVolumeClaim, because a
+# buffer node's /data holds the acked-but-unsealed tail (micro-segments +
+# manifest logs) that nothing else in the system has a copy of. Stable pod DNS
+# names are load-bearing here — the query planner and the sealer derive each
+# buffer node's HotServer URL from its node name (Milestone 8 L5/L6).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smolquery-buffer
+  namespace: smolquery
+spec:
+  serviceName: smolquery-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: smolquery-buffer
+  template:
+    metadata:
+      labels:
+        app: smolquery-buffer
+        cluster: smolquery
+    spec:
+      # Service links would inject SMOLQUERY_API_PORT=tcp://... (from the
+      # smolquery-api Service) into every pod, shadowing the real config var.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -U postgres; do sleep 1; done
+      containers:
+        - name: smolquery
+          image: smolquery:latest
+          ports:
+            - name: hot-server
+              containerPort: 4001
+            - name: epmd
+              containerPort: 4369
+            - name: gen-rpc
+              containerPort: 5369
+            - name: gen-rpc-tls
+              containerPort: 5870
+          envFrom:
+            - secretRef:
+                name: smolquery-env
+          env:
+            - name: SMOLQUERY_ROLES
+              value: buffer
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: smolquery-headless
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gen-rpc-tls
+              mountPath: /etc/smolquery/gen-rpc-tls
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 4001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 4001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: gen-rpc-tls
+          secret:
+            secretName: smolquery-gen-rpc-tls
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

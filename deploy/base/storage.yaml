@@ -1,0 +1,78 @@
+# The storage service: two replicas so the storage ring's ownership gate
+# (Milestone 8 L6 — no double-merge of one table's seal work) is exercised by
+# the default deployment, not just by tests. No PVC: sealed segments live in
+# the object store and the catalog in Postgres; /data holds only upload
+# staging and the DuckDB extension cache. No probes: a storage node exposes
+# no listener — its health is its Erlang-cluster membership.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smolquery-storage
+  namespace: smolquery
+spec:
+  serviceName: smolquery-headless
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: smolquery-storage
+  template:
+    metadata:
+      labels:
+        app: smolquery-storage
+        cluster: smolquery
+    spec:
+      # Service links would inject SMOLQUERY_API_PORT=tcp://... (from the
+      # smolquery-api Service) into every pod, shadowing the real config var.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -U postgres; do sleep 1; done
+      containers:
+        - name: smolquery
+          image: smolquery:latest
+          ports:
+            - name: epmd
+              containerPort: 4369
+            - name: gen-rpc
+              containerPort: 5369
+            - name: gen-rpc-tls
+              containerPort: 5870
+          envFrom:
+            - secretRef:
+                name: smolquery-env
+          env:
+            - name: SMOLQUERY_ROLES
+              value: storage
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: smolquery-headless
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gen-rpc-tls
+              mountPath: /etc/smolquery/gen-rpc-tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: gen-rpc-tls
+          secret:
+            secretName: smolquery-gen-rpc-tls
+            optional: true

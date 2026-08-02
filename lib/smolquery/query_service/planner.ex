@@ -59,16 +59,26 @@ defmodule Smolquery.QueryService.Planner do
   An unreachable buffer node fails the plan — answering from the sealed tier
   alone would be a wrong answer with a green status. Single-node,
   `buffer_base_url` is the hot tier's whole address. Clustered (Milestone 8
-  L5), each table's manifest is fetched from *every* ring member, at URLs
+  L5), each table's manifest is fetched from *every* member, at URLs
   derived from node names (`Smolquery.Cluster.node_host/1`), and the entries
   merged. Asking only the ring's current owner would be cheaper but silently
   wrong across ring changes: a node that just joined answers an honest empty
   manifest while the previous owner still holds the table's unsealed,
   already-acked tail, and nothing hands that tail over until it seals. Asking
   every member makes hot rows visible wherever they physically sit, at the
-  cost of one control-plane GET per member per table — and keeps the failure
-  rule honest in both directions, since any member that cannot answer fails
-  the plan.
+  cost of one control-plane GET per member per table.
+
+  "Every member" means `Smolquery.BufferService.Client.manifest_nodes/1`, not
+  the live ring — the distinction is the whole of T-94. A node that dies leaves
+  `:pg` membership immediately and indistinguishably from one that drained, so a
+  fan-out over live membership alone silently stops counting a crashed owner's
+  acked-but-unsealed rows: the query returns a short answer with a green status
+  rather than failing, and the number changes back when the pod restarts and
+  `Smolquery.BufferService.Adopter` re-registers the tail. Including the nodes
+  the deployment expects to be in the ring is what turns that back into an
+  unreachable-member failure. It is coarse — an expected node that is down fails
+  every query, not only those over tables it held — because nothing durable
+  records which nodes hold unsealed rows for which table.
   """
 
   alias Smolquery.BufferService.Client
@@ -245,7 +255,7 @@ defmodule Smolquery.QueryService.Planner do
   defp manifest_urls(%Runtime{buffer_base_url: url} = runtime) do
     if Cluster.enabled?() do
       runtime.buffer_name
-      |> Client.nodes()
+      |> Client.manifest_nodes()
       |> Enum.map(&"http://#{Cluster.node_host(&1)}:#{runtime.buffer_hot_port}")
     else
       [url]

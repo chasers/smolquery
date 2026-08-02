@@ -24,6 +24,13 @@ defmodule Smolquery.QueryService.ClusterFanoutTest do
   has unit coverage (`planner_test.exs`, "an unreachable hot tier fails
   the plan") — that path is `manifests/2`'s `Task.async_stream` halting on
   any error, which L5 does not touch.
+
+  What L5 *did* leave open, and L8 closes (T-94), is which nodes count as
+  members. Fanning out over live `:pg` membership alone means a crashed buffer
+  node is not unreachable, it is simply absent — so its acked-but-unsealed rows
+  stop being counted and the query succeeds with a short answer. The second test
+  here pins the fix: a node the deployment expects, absent from the ring and
+  unresolvable, fails the plan instead.
   """
 
   use ExUnit.Case, async: false
@@ -109,6 +116,21 @@ defmodule Smolquery.QueryService.ClusterFanoutTest do
   defp hot_server_port(buffer) do
     %{port: port} = buffer |> BufferService.HotServer.base_url() |> URI.parse()
     port
+  end
+
+  test "fails the plan when a node the deployment expects has left the ring", %{runtime: runtime} do
+    previous = Application.get_env(:smolquery, BufferService, [])
+
+    Application.put_env(
+      :smolquery,
+      BufferService,
+      Keyword.put(previous, :expected_nodes, [:"smolquery@buffer-9.nonexistent.invalid"])
+    )
+
+    on_exit(fn -> Application.put_env(:smolquery, BufferService, previous) end)
+
+    assert {:error, {:hot_tier_unavailable, @table, _reason}} =
+             Planner.plan(runtime, Engine.connection_name(@job), "SELECT * FROM analytics.events")
   end
 
   test "reads a table through its real owner's node-derived HotServer URL", %{runtime: runtime} do

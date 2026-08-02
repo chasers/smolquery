@@ -21,6 +21,7 @@ COPY assets assets
 COPY priv/static priv/static
 RUN mix assets.deploy
 RUN mix run --no-start -e 'Adbc.download_driver!(:duckdb)'
+COPY rel rel
 RUN mix release
 
 FROM elixir:1.20-slim
