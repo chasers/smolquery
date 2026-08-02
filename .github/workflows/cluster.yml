@@ -1,0 +1,65 @@
+name: Cluster
+
+# The :cluster suite, against a real kind cluster — the paths that need distinct
+# hosts and so have no :peer equivalent (see test/smolquery/cluster/).
+#
+# Runs on merges to main, not on pull_request: a run is ~5 minutes (image build
+# and cluster boot ~2:40, the tests themselves ~2:00) against ~1 minute for the
+# other jobs, so gating every PR on it would make it the long pole. Add
+# `pull_request:` below if that trade ever looks worth it.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  MIX_ENV: test
+
+jobs:
+  cluster:
+    name: Cluster tests (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.2"
+          elixir-version: "1.20.2"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+
+      - run: mix deps.get
+
+      # Runners ship docker and kubectl but not kind, and scripts/kind-up.sh
+      # creates the cluster from deploy/overlays/kind/kind-config.yaml itself —
+      # so install the binary rather than using an action that would create its
+      # own cluster.
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          sudo install -m 0755 ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Bring up the cluster
+        run: ./scripts/kind-up.sh
+
+      - name: Cluster tests
+        run: mix test --only cluster
+
+      - name: Fleet state on failure
+        if: failure()
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kube/config
+        run: |
+          kubectl --context kind-smolquery -n smolquery get pods -o wide
+          kubectl --context kind-smolquery -n smolquery describe pods
+          kubectl --context kind-smolquery -n smolquery logs -l app=smolquery-buffer \
+            --tail=200 --prefix --all-containers
