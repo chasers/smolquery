@@ -115,18 +115,32 @@ defmodule Smolquery.BufferService.Endpoint do
 
   @doc """
   Applies a claim, retire, or drop a table's owner replicated here (T-96).
+
+  A node holding nothing for the table answers `:ok` without starting a
+  buffer: owners fan mutations out past their followers to *every* node that
+  might hold stale copies (T-104), and on the nodes that hold none the no-op
+  must cost a single ETS read, not a buffer start and a manifest recovery.
   """
   @spec apply_replica_mutation(atom(), Store.table_ref(), :claim | :retire | :drop, map(), term()) ::
           :ok | {:error, term()}
   def apply_replica_mutation(name, table_ref, op, args, epoch)
       when op in [:claim, :retire, :drop] do
     with {:ok, runtime} <- runtime(name),
-         :ok <- replica_epoch_check(name, epoch),
-         {:ok, buffer} <- buffer(runtime, table_ref) do
-      TableBuffer.apply_replica_mutation(buffer, op, args, runtime.control_timeout_ms)
+         :ok <- replica_epoch_check(name, epoch) do
+      if HotManifest.entries(runtime.manifest, table_ref) == [] do
+        :ok
+      else
+        apply_held_mutation(runtime, table_ref, op, args)
+      end
     end
   catch
     :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
+  end
+
+  defp apply_held_mutation(runtime, table_ref, op, args) do
+    with {:ok, buffer} <- buffer(runtime, table_ref) do
+      TableBuffer.apply_replica_mutation(buffer, op, args, runtime.control_timeout_ms)
+    end
   end
 
   defp replica_epoch_check(name, epoch) do

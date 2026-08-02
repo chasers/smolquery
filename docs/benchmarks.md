@@ -17,6 +17,7 @@ mix run bench/cluster_ingest.exs                  # does aggregate ingest scale 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs   # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurrency sizes
 CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs   # more samples, more concurrency
+BENCH_SECTION=replication_delta mix run bench/buffer.exs   # one section by name
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs       # bigger claims, bigger merges
 NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
 ```

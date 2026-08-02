@@ -134,6 +134,64 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert entry.sealed_at
   end
 
+  test "an unreachable follower's compensation clears the applied copy", context do
+    follower = start_instance(context)
+
+    owner =
+      start_instance(context,
+        replicator:
+          {SegmentShipping,
+           replication_factor: 3,
+           targets: fn _name, _ref ->
+             {:ok,
+              [
+                {Transport.Local, node(), follower},
+                {Transport.Local, node(), :no_such_instance}
+              ]}
+           end}
+      )
+
+    assert {:error, {:replication_failed, _node, :buffer_service_unavailable}} =
+             Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-7"))
+
+    assert entries(owner) == []
+    assert entries(follower) == []
+  end
+
+  test "mutations fan out past the followers to stale holders", context do
+    follower = start_instance(context)
+    stale = start_instance(context)
+
+    owner =
+      start_instance(context,
+        replicator:
+          {SegmentShipping,
+           replication_factor: 2,
+           targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end,
+           holders: fn _name -> [{Transport.Local, node(), stale}] end}
+      )
+
+    assert {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-8"))
+
+    [entry] = entries(follower)
+    assert :ok = Endpoint.accept_replica(stale, @table, entry, nil, nil)
+    assert [_copy] = entries(stale)
+
+    assert :ok = Client.retire(owner, @table, [ack.segment_id], 42)
+
+    assert [stale_entry] = entries(stale)
+    assert stale_entry.sealed_at
+  end
+
+  test "a mutation for a table this node never held is free and starts nothing", context do
+    follower = start_instance(context)
+
+    assert :ok =
+             Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: ["nothing"]}, nil)
+
+    assert Registry.lookup(Runtime.registry(follower), @table) == []
+  end
+
   test "a shipment from a stale epoch is refused", context do
     {owner, follower} = start_pair(context)
 

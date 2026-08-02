@@ -310,3 +310,32 @@ the part PL-6 needs.
   measures throughput mechanics only. Per-partition manifest logs, the legacy
   log-filename rule, claim/retire routing, and flush fan-out remain unbuilt and
   unmeasured (PL-6 steps 2-3).
+
+## Replication: segment shipping's ack price (T-103, 2026-08-02)
+
+One local follower over `Transport.Local`, so the delta is the protocol —
+segment read-back, second `Store.put`, second manifest fsync, one `Endpoint`
+hop — without a network RTT. Run with
+`BENCH_SECTION=replication_delta CALLS=60 mix run bench/buffer.exs`
+(16 writers × 60 calls × 50-row batches, `flush_interval_ms: 25`), same
+machine as the tables above.
+
+```
+  mode      batches/s      rows/s      MB/s      p50     p95     p99  (ms)
+    none      519.9     25996.7      4.29    30.3    35.8    43.2
+     rf2      463.0     23149.5      3.82    33.9    38.5    49.9
+```
+
+- **The protocol costs ~3.6 ms p50 / ~6.7 ms p99 per flush, ~11% of
+  throughput at this cadence.** Against a 25 ms flush interval that is a
+  12% p50 ack increase; against the default 1 s cadence it vanishes into
+  the interval, exactly as PL-5 predicted for a per-flush (not per-batch)
+  round trip.
+- **What this does not price: the network.** In kind or any real fleet the
+  delta gains one RTT plus the follower's scheduling jitter; the
+  `cluster_ingest.md` baseline (215.4/420.2/603.1 krows/s over 1-3 nodes)
+  is what the kind re-run should be diffed against. This run bounds the
+  protocol's own overhead from below.
+- **D3 still holds.** The two extra fsyncs on the follower are the same
+  ~sub-millisecond pair D3 priced locally; the visible delta is dominated
+  by the read-back and the extra hop, not the fsyncs.
