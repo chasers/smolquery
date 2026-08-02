@@ -79,15 +79,18 @@ defmodule Smolquery.BufferService.Client do
 
   `{:badrpc, :timeout}` is ambiguous: the call may have reached the owner and
   committed after the deadline. A batch carrying a `:batch_id` idempotency
-  key makes the retry safe *while the table's owner has not changed* — the
-  owner answers a committed id with the original ack instead of writing
-  again (T-41). The dedup record lives only in the owner's local manifest,
-  so a retry that lands after a ring change routes to a node that has never
-  seen the id and commits the batch again (Milestone 8 L4): across an owner
-  move — a node joining, a drain completing between attempts — a `:batch_id`
-  batch is at-least-once like any other, and the ambiguity belongs to the
-  caller. Owner-move-proof dedup would need the id recorded somewhere the
-  ring cannot move away from, which PL-11 leaves open.
+  key makes the retry safe — the owner answers a committed id with the
+  original ack instead of writing again (T-41), and the dedup record is
+  fsynced in the manifest entry, so it survives a restart. What it survives
+  *across an owner move* depends on the replicator (T-96): under
+  `Smolquery.BufferService.Replicator.SegmentShipping` the entry — batch ids
+  included — is on every follower before the ack, and the ring promotes a
+  follower, so a retry against the new owner is answered with the original
+  ack; this also covers a flush the caller saw *fail* after a follower had
+  already applied it (the compensating drop can be lost with the owner), where
+  the retry is answered from the surviving copy and the rows exist once.
+  Single-copy (`Replicator.None`), the record lives only on the owner, and
+  across an owner move a `:batch_id` batch is at-least-once like any other.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}

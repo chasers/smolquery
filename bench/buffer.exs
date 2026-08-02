@@ -167,16 +167,68 @@ defmodule Bench.Buffer do
   @weights [:light, :heavy, :huge]
 
   def run do
+    sections = [
+      throughput_and_latency: &throughput_and_latency/1,
+      flush_cadence: &flush_cadence/1,
+      fsync_cost: &fsync_cost/1,
+      inline_flush_ceiling: &inline_flush_ceiling/1,
+      encode_in_isolation: &encode_in_isolation/1,
+      fsyncs_at_the_ceiling: &fsyncs_at_the_ceiling/1,
+      byte_bound: &byte_bound/1,
+      partition_proxy: &partition_proxy/1,
+      replication_delta: &replication_delta/1
+    ]
+
+    only = System.get_env("BENCH_SECTION")
+
     with_tmp_dir("buffer", fn dir ->
-      throughput_and_latency(dir)
-      flush_cadence(dir)
-      fsync_cost(dir)
-      inline_flush_ceiling(dir)
-      encode_in_isolation(dir)
-      fsyncs_at_the_ceiling(dir)
-      byte_bound(dir)
-      partition_proxy(dir)
+      for {name, section} <- sections, only in [nil, Atom.to_string(name)] do
+        section.(dir)
+      end
     end)
+  end
+
+  defp replication_delta(dir) do
+    heading(
+      "replication: segment shipping's ack price (T-103) — one local follower over " <>
+        "Transport.Local, so the delta is the protocol (segment read-back, second put, " <>
+        "second manifest fsync, one Endpoint hop) without a network RTT; kind adds the RTT"
+    )
+
+    writers = env("WRITERS", 16)
+    calls = env("CALLS", 20)
+    size = env("BATCH", 50)
+
+    IO.puts("\n  mode      batches/s      rows/s      MB/s      p50     p95     p99  (ms)")
+
+    {follower, follower_pid} =
+      start_buffer(dir, flush_interval_ms: 25, flush_max_rows: 1_000_000)
+
+    modes = [
+      {"none", []},
+      {"rf2",
+       [
+         replicator:
+           {Smolquery.BufferService.Replicator.SegmentShipping,
+            replication_factor: 2,
+            targets: fn _name, _ref ->
+              {:ok, [{Smolquery.BufferService.Transport.Local, node(), follower}]}
+            end}
+       ]}
+    ]
+
+    for {label, extra} <- modes do
+      {name, pid} =
+        start_buffer(dir, [flush_interval_ms: 25, flush_max_rows: 1_000_000] ++ extra)
+
+      {wall_us, latencies} = hammer(name, [{@dataset, "events"}], writers, calls, size)
+
+      stop_buffer(name, pid)
+
+      report([pad(label, 6)], latencies, wall_us, writers * calls, size)
+    end
+
+    stop_buffer(follower, follower_pid)
   end
 
   defp throughput_and_latency(dir) do

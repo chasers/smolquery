@@ -30,12 +30,22 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   re-answers the batch's `:batch_id` with the original ack, which is why
   idempotency keys are the recommended write mode under replication.
 
-  ## Mutations ship first
+  ## Mutations ship first, and past the followers
 
   Claims, retires, and drops replicate *before* the owner applies them
   (`append/2`): all three are idempotent, so a follower that is ahead is
   harmless, while a follower left behind freezes divergent claims — and two
   different claims over the same rows double-commit them to the catalog.
+
+  After the followers ack, the same mutation fans out best-effort to every
+  other node the read side might ask (`Routing.manifest_nodes/1`): a ring
+  change strands replicated copies on an ex-owner or ex-follower that the
+  successor set no longer includes, and without hearing retires and drops
+  those copies would sit unsealed forever — read-correct (the planner
+  dedupes and prefers the furthest-along copy) but never reaped (T-104). A
+  node holding nothing for the table answers `:ok` for free, and a node
+  missing the fan-out just stays stale until the next mutation or its own
+  reap; only the followers' acks gate the operation.
 
   ## Shared stores ship no bytes
 
@@ -68,7 +78,8 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   def new(opts) do
     %{
       replication_factor: Keyword.get(opts, :replication_factor, @default_replication_factor),
-      targets: Keyword.get(opts, :targets)
+      targets: Keyword.get(opts, :targets),
+      holders: Keyword.get(opts, :holders)
     }
   end
 
@@ -89,13 +100,13 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   def append(config, mutation) do
     with {:ok, targets} <- targets(config, mutation.name, mutation.table_ref) do
       epoch = RingEpoch.current_epoch(mutation.name)
+      args = [mutation.table_ref, mutation.op, mutation.args, epoch]
 
-      ship(
-        targets,
-        mutation.name,
-        :apply_replica_mutation,
-        [mutation.table_ref, mutation.op, mutation.args, epoch]
-      )
+      with :ok <- ship(targets, mutation.name, :apply_replica_mutation, args) do
+        config
+        |> other_holders(mutation.name, targets)
+        |> ship_best_effort(mutation.name, args)
+      end
     end
   end
 
@@ -140,6 +151,35 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
         other -> {:halt, {:error, {:replication_failed, node, other}}}
       end
     end)
+  end
+
+  defp other_holders(%{holders: resolve}, name, _followers) when is_function(resolve, 1),
+    do: resolve.(name)
+
+  defp other_holders(_config, name, followers) do
+    follower_nodes = Enum.map(followers, fn {_transport, node, _instance} -> node end)
+    routing = Routing.resolve(name)
+
+    name
+    |> Routing.manifest_nodes()
+    |> Enum.reject(&(&1 == node() or &1 in follower_nodes))
+    |> Enum.map(&{Routing.transport(routing, &1), &1, name})
+  end
+
+  defp ship_best_effort(targets, name, args) do
+    Enum.each(targets, fn {transport, node, instance} ->
+      _outcome =
+        Transport.invoke(
+          transport,
+          node,
+          :bulk,
+          :apply_replica_mutation,
+          [instance | args],
+          timeout(name)
+        )
+    end)
+
+    :ok
   end
 
   defp compensate(targets, commit, reason) do
