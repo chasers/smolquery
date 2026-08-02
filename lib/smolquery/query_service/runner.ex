@@ -203,7 +203,7 @@ defmodule Smolquery.QueryService.Runner do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
-         :ok <- run_statements(connection, plan.statements ++ lockdown(runtime, plan)),
+         :ok <- run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan)),
          {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
       duration = System.monotonic_time(:millisecond) - started
 
@@ -238,13 +238,38 @@ defmodule Smolquery.QueryService.Runner do
     "[" <> Enum.map_join(values, ", ", &Smolquery.Identifier.sql_string/1) <> "]"
   end
 
-  defp run_statements(connection, statements) do
+  defp run_statements(connection, plan, statements) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->
       case Connection.query(connection, statement, [], :infinity) do
         {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:error, reason} -> {:halt, {:error, classify(plan, statement, reason)}}
       end
     end)
+  end
+
+  @doc """
+  Wraps a failed statement's error as `{:hot_tier_unavailable, reason}` when
+  the statement is one of the plan's hot-tier attaches — a `read_parquet`
+  over a buffer node's segment URLs.
+
+  A hot attach fails when the node whose manifest answered the plan died
+  before the engine's read — it answered, so the planner's absence
+  tolerance (T-97) never saw it missing. That is the hot tier being
+  unreachable, not the query being wrong: the API answers it 503 with the
+  same retry contract as a planning-time absence (T-94), and the retry
+  plans afresh against the survivors. Every other statement failure passes
+  through untouched.
+  """
+  @spec classify(Smolquery.QueryService.Plan.t(), String.t(), term()) :: term()
+  def classify(plan, statement, reason) do
+    hot_attach? =
+      String.contains?(statement, "read_parquet") and
+        plan.hot
+        |> Map.values()
+        |> List.flatten()
+        |> Enum.any?(fn entry -> String.contains?(statement, entry["url"]) end)
+
+    if hot_attach?, do: {:hot_tier_unavailable, reason}, else: reason
   end
 
   defp halt(%{task: nil} = state), do: state
