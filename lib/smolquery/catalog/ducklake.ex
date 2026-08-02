@@ -16,6 +16,14 @@ defmodule Smolquery.Catalog.DuckLake do
       metadata: "sqlite:/var/lib/smolquery/catalog.sqlite"
       metadata: "postgres:dbname=smolquery host=catalog.internal"
 
+  A `"postgres:"` metadata string also loads DuckDB's `postgres` extension
+  (Milestone 8 L2) — DuckLake needs it to talk to the metadata database
+  itself, on top of `ducklake` — added automatically from the metadata
+  string's own prefix, not a separate option. `config/runtime.exs` builds
+  this string from `CATALOG_DATABASE_URL`, the same URL
+  `Smolquery.Cluster` uses for node discovery (PL-11 D1); `SMOLQUERY_CATALOG`
+  overrides it explicitly when the two need to differ.
+
   ## Setup
 
   A DuckLake catalog is an engine whose connection has the `ducklake` extension
@@ -127,9 +135,10 @@ defmodule Smolquery.Catalog.DuckLake do
 
     extensions = Keyword.get(config, :extensions, engine_extensions())
     statements = Keyword.get(config, :statements, [])
+    required = if postgres_metadata?(metadata), do: [:postgres, :ducklake], else: [:ducklake]
 
     config
-    |> Keyword.put(:extensions, Enum.uniq([:ducklake | extensions]))
+    |> Keyword.put(:extensions, Enum.uniq(required ++ extensions))
     |> Keyword.put(:statements, [attach_statement(catalog, metadata, data_path) | statements])
     |> Engine.start_link()
   end
@@ -213,6 +222,9 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))
   defp ensure_metadata_dir(_metadata), do: :ok
+
+  defp postgres_metadata?("postgres:" <> _), do: true
+  defp postgres_metadata?(_metadata), do: false
 
   @impl Catalog
   def create_dataset(%__MODULE__{} = config, dataset) do

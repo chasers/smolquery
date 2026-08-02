@@ -53,6 +53,7 @@ defmodule Smolquery.MixProject do
       {:req, "~> 0.7"},
       {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},
       {:libcluster_postgres, "~> 0.2"},
+      {:postgrex, "~> 0.22"},
       {:phoenix, "~> 1.8"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_view, "~> 1.2"},

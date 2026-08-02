@@ -577,7 +577,7 @@ Configuration is environment variables, resolved at boot in
 | `SMOLQUERY_HOT_SERVER_PORT` | hot-tier HTTP port (`4001`) |
 | `SMOLQUERY_BUFFER_BASE_URL` | where readers reach the hot tier (`http://127.0.0.1:4001`) |
 | `GEN_RPC_PORT` | inter-node transport port (`5369`) |
-| `CATALOG_DATABASE_URL` | Postgres URL (e.g. `postgres://user:pass@host/db`); when set, also enables node discovery (`Smolquery.Cluster`, over `libcluster_postgres`) through that same database — one node is not a cluster, so a single-node deployment leaves this unset |
+| `CATALOG_DATABASE_URL` | Postgres URL (e.g. `postgres://user:pass@host/db`); tiers the DuckLake catalog onto it (loading DuckDB's `postgres` extension alongside `ducklake`) and enables node discovery (`Smolquery.Cluster`, over `libcluster_postgres`) through that same database — one node is not a cluster, so a single-node deployment leaves this unset. `SMOLQUERY_CATALOG` overrides just the catalog side, e.g. to point it at a different database than discovery uses |
 | `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to TLS, verified with per-node certificates (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the cert file) |
 | `DIST_TLS` | `true` to run Erlang distribution (cluster membership only) over TLS with the same certificates — set in `rel/env.sh.eex`, not `config/runtime.exs`, since distribution starts before the release's Elixir config does |
 | `POD_NAME` / `POD_NAMESPACE` | when set (a k8s Downward API convention), `rel/env.sh.eex` derives `RELEASE_NODE` from the pod's stable headless-service DNS name — the same name a peer needs to reach this node |
