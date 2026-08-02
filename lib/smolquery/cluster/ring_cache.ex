@@ -16,10 +16,40 @@ defmodule Smolquery.Cluster.RingCache do
   degenerates to build-once; clustered, a rebuild happens once per actual
   ring change rather than once per write.
 
-  `:persistent_term` fits because updates are that rare: a put triggers a
-  global GC, and the fleet changing shape is an operator event, not a data
-  path one.
+  The cache is one named ETS table, created at application boot by this
+  process and owned by it for the node's lifetime — deliberately not
+  `:persistent_term`, which this module once used: a term is written at
+  boot and never again, because every re-put triggers a global heap scan,
+  and `:pg` membership changes are not the rare operator events that would
+  excuse one — every pod crash, rolling restart, and network flap moves the
+  fingerprint on every node. The table is `:public` so callers insert their
+  own rebuilds without a serialization hop; two racing rebuilds of the same
+  fingerprint insert the same value, and reads are lock-free
+  (`read_concurrency: true`). Without the table — the application not
+  booted, a bare script — `resolve/3` degrades to building every time,
+  which is only the cost the cache exists to amortize, never a wrong
+  answer.
   """
+
+  use GenServer
+
+  @table __MODULE__
+
+  @doc """
+  Starts the process whose only job is to own the cache table for the
+  node's lifetime.
+  """
+  @spec start_link(term()) :: GenServer.on_start()
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl GenServer
+  def init(_opts) do
+    :ets.new(@table, [:named_table, :public, read_concurrency: true])
+
+    {:ok, %{}}
+  end
 
   @doc """
   The value built from `fingerprint`, cached under `key` — `build.()` runs
@@ -28,13 +58,13 @@ defmodule Smolquery.Cluster.RingCache do
   """
   @spec resolve(term(), term(), (-> value)) :: value when value: term()
   def resolve(key, fingerprint, build) do
-    case :persistent_term.get(key, :miss) do
-      {^fingerprint, value} ->
+    case cached(key) do
+      {:ok, {^fingerprint, value}} ->
         value
 
       _miss_or_stale ->
         value = build.()
-        :persistent_term.put(key, {fingerprint, value})
+        cache(key, {fingerprint, value})
 
         value
     end
@@ -42,7 +72,27 @@ defmodule Smolquery.Cluster.RingCache do
 
   @doc """
   Drops a cached value, so the next `resolve/3` for `key` rebuilds it.
+  Answers whether anything was actually cached.
   """
   @spec forget(term()) :: boolean()
-  def forget(key), do: :persistent_term.erase(key)
+  def forget(key) do
+    :ets.take(@table, key) != []
+  rescue
+    ArgumentError -> false
+  end
+
+  defp cached(key) do
+    case :ets.lookup(@table, key) do
+      [{^key, cached}] -> {:ok, cached}
+      [] -> :miss
+    end
+  rescue
+    ArgumentError -> :no_table
+  end
+
+  defp cache(key, entry) do
+    :ets.insert(@table, {key, entry})
+  rescue
+    ArgumentError -> false
+  end
 end

@@ -143,18 +143,19 @@ defmodule Smolquery.BufferService.RingEpochTest do
     assert config.prev_members == [node()]
   end
 
-  test "a keeper that stops verifying fails closed one lease later" do
+  test "a dead keeper fails closed immediately, never back to unfenced" do
     name = unique_name(:epoch)
-    start_epoch(name, start_store(), fn -> [node()] end, lease_ms: 100, refresh_ms: 20)
+    start_epoch(name, start_store(), fn -> [node()] end)
 
     ref = {"analytics", "events"}
     assert RingEpoch.check_write(name, ref) == :ok
+    assert RingEpoch.owner?(name, ref)
 
     stop_supervised!({:epoch, name})
 
-    assert Eventually.until(fn ->
-             RingEpoch.check_write(name, ref) == {:error, :ring_config_stale}
-           end)
+    assert RingEpoch.check_write(name, ref) == {:error, :ring_config_stale}
+    refute RingEpoch.owner?(name, ref)
+    assert RingEpoch.current_epoch(name) == nil
   end
 
   test "advance is compare-and-swap: a stale epoch conflicts" do

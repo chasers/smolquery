@@ -47,15 +47,23 @@ defmodule Smolquery.BufferService.RingEpoch do
 
   ## Publication
 
-  The configuration lands in `:persistent_term` (reads are free on the write
-  path) and the verification timestamp in an `:atomics` cell (bumped every
-  refresh — a `:persistent_term` put per second would trigger a global GC
-  per second). A node where this process has never run — clustering off,
-  every test that predates it — has no published configuration, and
-  `check_write/2` answers `:ok`: single-copy, single-node behavior is
-  unchanged. If this process dies, the atomic stops advancing and every gate
-  fails closed one lease later; deliberately, there is no cleanup that could
-  turn a crash into fail-open.
+  Two substrates, split by write frequency. A marker holding the `:atomics`
+  cell for the verification timestamp lands in `:persistent_term` exactly
+  once, the first time a keeper ever runs here — a term is written at boot
+  and never again, because every re-put triggers a global heap scan, and
+  epoch changes are runtime events (a divergent-view flap could make them
+  frequent). The configuration itself — epoch, ring, settle obligations —
+  lives in a named ETS table the keeper owns, updated on epoch change and
+  read lock-free on the write path; the timestamp is bumped every refresh
+  in the atomic, which costs no scan at all.
+
+  A node where this process has never run — clustering off, every test that
+  predates it — has no marker, and `check_write/2` answers `:ok`:
+  single-copy, single-node behavior is unchanged. Once the marker exists it
+  outlives every crash, so a fenced node can never fall back to unfenced:
+  if the keeper dies its table dies with it, and a marker with no table
+  fails every gate closed immediately — sooner than the old one-lease grace,
+  and in the only safe direction — until the restarted keeper republishes.
 
   Started by `Smolquery.BufferService.Supervisor` only where epoch fencing
   is configured: `config/runtime.exs` sets `:epoch_fencing` wherever
@@ -124,8 +132,17 @@ defmodule Smolquery.BufferService.RingEpoch do
   @spec check_write(atom(), term()) :: :ok | {:error, check_error()}
   def check_write(name, table_ref) do
     case :persistent_term.get(key(name), nil) do
-      nil -> :ok
-      config -> check(config, table_ref, System.monotonic_time(:millisecond))
+      nil ->
+        :ok
+
+      marker ->
+        case config(name) do
+          {:ok, config} ->
+            check(marker, config, table_ref, System.monotonic_time(:millisecond))
+
+          :error ->
+            {:error, :ring_config_stale}
+        end
     end
   end
 
@@ -144,11 +161,17 @@ defmodule Smolquery.BufferService.RingEpoch do
       nil ->
         Routing.owner(Routing.resolve(name), table_ref) == node()
 
-      config ->
-        now = System.monotonic_time(:millisecond)
+      marker ->
+        case config(name) do
+          {:ok, config} ->
+            now = System.monotonic_time(:millisecond)
 
-        now - :atomics.get(config.verified, 1) <= config.lease_ms and
-          Ring.owner(config.ring, table_ref) == node()
+            now - :atomics.get(marker.verified, 1) <= config.lease_ms and
+              Ring.owner(config.ring, table_ref) == node()
+
+          :error ->
+            false
+        end
     end
   end
 
@@ -159,9 +182,9 @@ defmodule Smolquery.BufferService.RingEpoch do
   """
   @spec current_epoch(atom()) :: non_neg_integer() | nil
   def current_epoch(name) do
-    case :persistent_term.get(key(name), nil) do
-      nil -> nil
-      config -> config.epoch
+    case config(name) do
+      {:ok, config} -> config.epoch
+      :error -> nil
     end
   end
 
@@ -185,6 +208,7 @@ defmodule Smolquery.BufferService.RingEpoch do
         state = %{
           name: name,
           scope: "buffer:#{name}",
+          table: :ets.new(process_name(name), [:named_table, :protected, read_concurrency: true]),
           store_impl: store_impl,
           store: store,
           setup_done: false,
@@ -193,7 +217,7 @@ defmodule Smolquery.BufferService.RingEpoch do
           refresh_ms: option(opts, config, :refresh_ms, :epoch_refresh_ms, @default_refresh_ms),
           epoch: nil,
           settles: [],
-          verified: :atomics.new(1, signed: true)
+          verified: ensure_marker(name).verified
         }
 
         publish_prestale(state)
@@ -202,6 +226,19 @@ defmodule Smolquery.BufferService.RingEpoch do
 
       {:error, reason} ->
         {:stop, reason}
+    end
+  end
+
+  defp ensure_marker(name) do
+    case :persistent_term.get(key(name), nil) do
+      nil ->
+        marker = %{verified: :atomics.new(1, signed: true)}
+        :persistent_term.put(key(name), marker)
+
+        marker
+
+      marker ->
+        marker
     end
   end
 
@@ -222,9 +259,9 @@ defmodule Smolquery.BufferService.RingEpoch do
     {:reply, :ok, attempt_refresh(state)}
   end
 
-  defp check(config, table_ref, now) do
+  defp check(marker, config, table_ref, now) do
     cond do
-      now - :atomics.get(config.verified, 1) > config.lease_ms ->
+      now - :atomics.get(marker.verified, 1) > config.lease_ms ->
         {:error, :ring_config_stale}
 
       Ring.owner(config.ring, table_ref) != node() ->
@@ -236,6 +273,17 @@ defmodule Smolquery.BufferService.RingEpoch do
       true ->
         :ok
     end
+  end
+
+  defp config(name) do
+    with table when table != :undefined <- :ets.whereis(process_name(name)),
+         [{:config, config}] <- :ets.lookup(table, :config) do
+      {:ok, config}
+    else
+      _absent -> :error
+    end
+  rescue
+    ArgumentError -> :error
   end
 
   defp settling?(%{settles: []}, _table_ref, _now), do: false
@@ -298,12 +346,14 @@ defmodule Smolquery.BufferService.RingEpoch do
     else
       settles = carry_settles(state, config, System.monotonic_time(:millisecond))
 
-      :persistent_term.put(key(state.name), %{
-        epoch: config.epoch,
-        ring: Ring.new!(config.members),
-        settles: settles,
-        lease_ms: state.lease_ms,
-        verified: state.verified
+      :ets.insert(state.table, {
+        :config,
+        %{
+          epoch: config.epoch,
+          ring: Ring.new!(config.members),
+          settles: settles,
+          lease_ms: state.lease_ms
+        }
       })
 
       %{state | epoch: config.epoch, settles: settles}
@@ -322,12 +372,14 @@ defmodule Smolquery.BufferService.RingEpoch do
   defp publish_prestale(state) do
     :atomics.put(state.verified, 1, System.monotonic_time(:millisecond) - state.lease_ms - 1)
 
-    :persistent_term.put(key(state.name), %{
-      epoch: nil,
-      ring: Ring.new!(state.members.()),
-      settles: [],
-      lease_ms: state.lease_ms,
-      verified: state.verified
+    :ets.insert(state.table, {
+      :config,
+      %{
+        epoch: nil,
+        ring: Ring.new!(state.members.()),
+        settles: [],
+        lease_ms: state.lease_ms
+      }
     })
   end
 
