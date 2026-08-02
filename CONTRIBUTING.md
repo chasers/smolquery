@@ -1,7 +1,8 @@
 # Contributing to smolquery
 
 Thanks for your interest. This is an early, opinionated project; see
-[`README.md`](README.md) for what smolquery is.
+[`README.md`](README.md) for what smolquery is, and
+[`docs/architecture.md`](docs/architecture.md) for how it works.
 
 ## Dev setup
 
@@ -36,8 +37,10 @@ checking format) for local use before committing.
 ## Pull requests
 
 1. Branch off `main` — it's protected, so you can't push to it directly.
-2. Keep changes focused; update `README.md` (and other docs) in the same
-   change when behavior/commands/structure move.
+2. Keep changes focused; update `README.md` and [`docs/`](docs/) in the same
+   change when behavior/commands/structure move. The README is the one-screen
+   overview — depth belongs in `docs/architecture.md`, and the reference tables
+   in `docs/configuration.md` and `docs/api.md`.
 3. Get `mix ci` + `mix dialyzer` + tests green locally.
 4. Open a PR against `main` with a clear what/why. Reference tracker items by
    their display key (`T-12`, `PL-1`) — never a bare `#<id>`, which GitHub

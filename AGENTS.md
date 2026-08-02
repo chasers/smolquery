@@ -1,8 +1,9 @@
 smolquery is an open source BigQuery alternative on DuckDB + Elixir: four
 services in one OTP app (`Smolquery.IngestService`, `Smolquery.BufferService`,
 `Smolquery.StorageService`, `Smolquery.QueryService`) around immutable Parquet
-segments and a DuckLake catalog. The architecture plan lives in the project
-tracker (see below), not in local markdown.
+segments and a DuckLake catalog. [`docs/architecture.md`](docs/architecture.md)
+is the walk-through of how it works; the architecture *plan* lives in the
+project tracker (see below), not in local markdown.
 
 ## Project guidelines
 
