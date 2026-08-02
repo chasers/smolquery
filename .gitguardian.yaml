@@ -1,0 +1,9 @@
+version: 2
+
+# Dummy credentials only: CI service containers (postgres/postgres, MinIO
+# smolquery/smolquery-secret) and test fixtures keep tripping GitGuardian's
+# Generic Password detector. Nothing under these paths may hold a real secret.
+secret:
+  ignored_paths:
+    - "test/**"
+    - ".github/workflows/ci.yml"
