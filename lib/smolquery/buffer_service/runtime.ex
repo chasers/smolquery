@@ -42,6 +42,12 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
+  `:replicator` is what a group commit requires beyond this node's disk
+  before it acks (`Smolquery.BufferService.Replicator`), defaulting to the
+  single-copy `Smolquery.BufferService.Replicator.None`:
+
+      replicator: {Smolquery.BufferService.Replicator.None, []}
+
   `ack_budget_ms` is the write path's latency promise (PL-9): a batch whose
   Little's-law wait estimate exceeds it is refused at the `Endpoint` with
   `{:error, {:overloaded, predicted_ms}}` rather than queued in the buffer's
@@ -62,15 +68,17 @@ defmodule Smolquery.BufferService.Runtime do
   """
 
   alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
   alias Smolquery.Segments.Store
 
-  @enforce_keys [:name, :manifest, :store, :ring]
+  @enforce_keys [:name, :manifest, :store, :ring, :replicator]
   defstruct [
     :name,
     :manifest,
     :store,
     :ring,
+    :replicator,
     flush_interval_ms: 1_000,
     flush_max_rows: 100_000,
     flush_max_bytes: 8_000_000,
@@ -95,6 +103,7 @@ defmodule Smolquery.BufferService.Runtime do
           manifest: HotManifest.t(),
           store: Store.t(),
           ring: Ring.t(),
+          replicator: Replicator.t(),
           flush_interval_ms: pos_integer(),
           flush_max_rows: pos_integer(),
           flush_max_bytes: pos_integer(),
@@ -159,7 +168,11 @@ defmodule Smolquery.BufferService.Runtime do
             log_dir: Keyword.get(config, :log_dir, Path.join(dir, "manifests")),
             store: store
           ),
-        ring: Ring.new!(Keyword.get(config, :ring, [node()]))
+        ring: Ring.new!(Keyword.get(config, :ring, [node()])),
+        replicator:
+          Replicator.new(
+            Keyword.get(config, :replicator, {Smolquery.BufferService.Replicator.None, []})
+          )
       },
       Keyword.take(config, @limits)
     )
