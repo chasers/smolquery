@@ -231,6 +231,27 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
+  Records an entry another node committed, verbatim (T-96).
+
+  The replication path's half of `add/5`: the owner minted the entry, and the
+  follower must hold the *same* record — same `added_at`, same batch ids —
+  because a follower's disk has to be indistinguishable from a crashed
+  owner's for `Smolquery.BufferService.Adopter` replay to be the promotion
+  path. Re-applying an entry already held is harmless: the ETS insert
+  overwrites with identical state, exactly as a log replay would.
+  """
+  @spec put_entry(t(), Store.table_ref(), Entry.t(), log() | nil) ::
+          {:ok, Entry.t()} | {:error, term()}
+  def put_entry(%__MODULE__{} = manifest, table_ref, %Entry{} = entry, log \\ nil) do
+    with :ok <- append(manifest, table_ref, Entry.to_record(entry), log) do
+      insert(manifest, table_ref, entry)
+      index_batches(manifest, table_ref, entry)
+
+      {:ok, entry}
+    end
+  end
+
+  @doc """
   The ack a committed batch was (or would have been) answered with.
 
   The T-41 dedup read: a caller retrying a batch — after a lost ack, a

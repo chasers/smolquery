@@ -3,6 +3,7 @@ defmodule Smolquery.BufferService.ReplicatorTest do
 
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.Endpoint
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Schema
@@ -26,6 +27,13 @@ defmodule Smolquery.BufferService.ReplicatorTest do
     @impl Smolquery.BufferService.Replicator
     def commit(%{sink: sink, reply: reply}, commit) do
       send(sink, {:replicated, commit})
+
+      reply
+    end
+
+    @impl Smolquery.BufferService.Replicator
+    def append(%{sink: sink, reply: reply}, mutation) do
+      send(sink, {:appended, mutation})
 
       reply
     end
@@ -75,7 +83,7 @@ defmodule Smolquery.BufferService.ReplicatorTest do
     assert commit.segment.key =~ commit.entry.id
   end
 
-  test "a refused commit fails the flush, and the batch-id retry dedups", context do
+  test "a refused commit fails the flush and compensates the local entry", context do
     name =
       start_buffer_service(context,
         replicator: {Probe, sink: self(), reply: {:error, :follower_down}}
@@ -84,10 +92,13 @@ defmodule Smolquery.BufferService.ReplicatorTest do
     assert {:error, :follower_down} =
              Client.write_batch(name, @table, batch([%{"id" => 1}], "batch-9"))
 
-    assert_receive {:replicated, _refused}
+    assert_receive {:replicated, refused}
+    assert Endpoint.hot_manifest(name, @table) == {:ok, []}
 
-    assert {:ok, ack} = Client.write_batch(name, @table, batch([%{"id" => 1}], "batch-9"))
-    assert ack.row_count == 1
-    refute_receive {:replicated, _second}, 100
+    assert {:error, :follower_down} =
+             Client.write_batch(name, @table, batch([%{"id" => 1}], "batch-9"))
+
+    assert_receive {:replicated, retried}
+    assert retried.entry.id != refused.entry.id
   end
 end

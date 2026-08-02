@@ -88,6 +88,13 @@ if buffer_nodes = System.get_env("SMOLQUERY_BUFFER_NODES") do
            |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
 end
 
+if replication = System.get_env("SMOLQUERY_BUFFER_REPLICATION") do
+  config :smolquery, Smolquery.BufferService,
+    replicator:
+      {Smolquery.BufferService.Replicator.SegmentShipping,
+       replication_factor: String.to_integer(replication)}
+end
+
 if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
   config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end

@@ -112,4 +112,32 @@ defmodule Smolquery.BufferService.RingTest do
       refute Ring.own?(ring, {"analytics", "events"})
     end
   end
+
+  describe "successors/3" do
+    test "the owner leads, followed by distinct clockwise nodes" do
+      ring = Ring.new!(@nodes)
+
+      for key <- keys(1_000) do
+        assert [owner | followers] = Ring.successors(ring, key, 2)
+        assert owner == Ring.owner(ring, key)
+        assert [follower] = followers
+        assert follower != owner
+        assert follower in Ring.nodes(ring)
+      end
+    end
+
+    test "a replica set never exceeds the ring" do
+      ring = Ring.new!(Enum.take(@nodes, 2))
+
+      assert [_owner, _follower] = Ring.successors(ring, {"analytics", "events"}, 3)
+      assert Ring.successors(Ring.new!([node()]), {"analytics", "events"}, 2) == [node()]
+    end
+
+    test "the same key always gets the same replica set" do
+      ring = Ring.new!(@nodes)
+      key = {"analytics", "events"}
+
+      assert Ring.successors(ring, key, 3) == Ring.successors(ring, key, 3)
+    end
+  end
 end

@@ -100,8 +100,9 @@ defmodule Smolquery.QueryService.Planner do
   for.
 
   That ranking is a backstop, not a substitute for replicating the handoff:
-  Stage 1 has to ship retires to followers too, or a promoted follower will
-  re-present rows the sealed tier already holds.
+  segment shipping replicates claims, retires, and drops to followers for
+  exactly that reason (T-96), and the ranking covers the one-round-trip lag
+  while a mutation propagates.
   """
 
   alias Smolquery.BufferService.Client

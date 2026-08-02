@@ -102,6 +102,38 @@ defmodule Smolquery.BufferService.Ring do
   @spec own?(t(), routing_key()) :: boolean()
   def own?(%__MODULE__{} = ring, key), do: owner(ring, key) == node()
 
+  @doc """
+  The first `count` distinct nodes clockwise from `key`'s position — the owner
+  first, then its successors.
+
+  This is the replica set (PL-5): followers are the next
+  `replication_factor - 1` distinct nodes after the owner, so failover
+  ownership and replica location are one computation — the node the ring
+  promotes is a node that already holds the data. Fewer than `count` nodes in
+  the ring returns them all.
+  """
+  @spec successors(t(), routing_key(), pos_integer()) :: [node()]
+  def successors(%__MODULE__{nodes: [node]}, _key, _count), do: [node]
+
+  def successors(%__MODULE__{nodes: nodes, points: points}, key, count) do
+    hash = :erlang.phash2(key, @space)
+    size = tuple_size(points)
+
+    collect(points, size, search(points, hash, 0, size), min(count, length(nodes)), [])
+  end
+
+  defp collect(_points, _size, _index, 0, acc), do: Enum.reverse(acc)
+
+  defp collect(points, size, index, remaining, acc) do
+    {_hash, node} = elem(points, rem(index, size))
+
+    if node in acc do
+      collect(points, size, index + 1, remaining, acc)
+    else
+      collect(points, size, index + 1, remaining - 1, [node | acc])
+    end
+  end
+
   defp points(nodes) do
     for node <- nodes, index <- 0..(@points_per_node - 1) do
       {:erlang.phash2({node, index}, @space), node}

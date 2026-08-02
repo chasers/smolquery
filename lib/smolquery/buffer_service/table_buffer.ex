@@ -171,6 +171,30 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
+  Records an entry another node's group commit shipped here (T-96).
+
+  The follower half of `Smolquery.BufferService.Replicator.SegmentShipping`:
+  store the bytes (`nil` when the store is shared and there is nothing to
+  ship), then append the owner's entry verbatim. Runs in the table's own
+  buffer process so this node keeps exactly one writer per manifest log,
+  replica traffic included.
+  """
+  @spec accept_replica(GenServer.server(), Entry.t(), binary() | nil, timeout()) ::
+          :ok | {:error, term()}
+  def accept_replica(buffer, %Entry{} = entry, bytes, timeout) do
+    GenServer.call(buffer, {:accept_replica, entry, bytes}, timeout)
+  end
+
+  @doc """
+  Applies a claim, retire, or drop the table's owner replicated here (T-96).
+  """
+  @spec apply_replica_mutation(GenServer.server(), :claim | :retire | :drop, map(), timeout()) ::
+          :ok | {:error, term()}
+  def apply_replica_mutation(buffer, op, args, timeout) do
+    GenServer.call(buffer, {:apply_replica_mutation, op, args}, timeout)
+  end
+
+  @doc """
   Flushes the accumulator now, without waiting for the interval.
 
   Returns what the commit returned: a caller draining before shutdown must know
@@ -261,10 +285,27 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_call({:retire, ids, snapshot}, _from, state) do
-    case HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log) do
-      :ok -> {:reply, :ok, run_maintenance(state)}
+    with :ok <- append_replicas(state, :retire, %{ids: ids, snapshot: snapshot}),
+         :ok <-
+           HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log) do
+      {:reply, :ok, run_maintenance(state)}
+    else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:accept_replica, entry, bytes}, _from, state) do
+    with :ok <- put_replica_bytes(state, entry, bytes),
+         {:ok, _entry} <-
+           HotManifest.put_entry(state.runtime.manifest, state.table_ref, entry, state.log) do
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:apply_replica_mutation, op, args}, _from, state) do
+    {:reply, apply_replica_mutation(state, op, args), state}
   end
 
   def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
@@ -314,10 +355,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp drop(state, ids) do
-    case HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log) do
-      :ok ->
-        state
-
+    with :ok <- append_replicas(state, :drop, %{ids: ids}),
+         :ok <- HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log) do
+      state
+    else
       {:error, reason} ->
         Logger.warning(
           "hot tier sweep for #{inspect(state.table_ref)} failed: #{inspect(reason)}"
@@ -328,9 +369,13 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp signal_when_ready(state) do
-    case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-      {:ok, claim} -> resignal(state, claim)
-      :error -> claim_when_sealable(state)
+    if RingEpoch.owner?(state.runtime.name, state.table_ref) do
+      case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
+        {:ok, claim} -> resignal(state, claim)
+        :error -> claim_when_sealable(state)
+      end
+    else
+      state
     end
   end
 
@@ -352,9 +397,13 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp force_signal(state) do
-    case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-      {:ok, claim} -> signal(state, claim)
-      :error -> force_claim(state)
+    if RingEpoch.owner?(state.runtime.name, state.table_ref) do
+      case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
+        {:ok, claim} -> signal(state, claim)
+        :error -> force_claim(state)
+      end
+    else
+      state
     end
   end
 
@@ -371,6 +420,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     ids = Enum.map(unsealed, & &1.id)
 
     with {:ok, keys} <- sealed_keys(state, ids),
+         :ok <- append_replicas(state, :claim, %{ids: ids, keys: keys}),
          {:ok, claim} <-
            HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, state.log) do
       signal(state, claim)
@@ -433,6 +483,40 @@ defmodule Smolquery.BufferService.TableBuffer do
     else
       RingEpoch.check_write(state.runtime.name, state.table_ref)
     end
+  end
+
+  defp append_replicas(state, op, args) do
+    Replicator.append(state.runtime.replicator, %{
+      name: state.runtime.name,
+      table_ref: state.table_ref,
+      op: op,
+      args: args
+    })
+  end
+
+  defp put_replica_bytes(_state, _entry, nil), do: :ok
+
+  defp put_replica_bytes(state, entry, bytes) do
+    with {:ok, key} <- Store.key(state.prefix, entry.id),
+         {:ok, _put} <-
+           Store.put(state.runtime.store, key, fn path -> File.write(path, bytes) end) do
+      :ok
+    end
+  end
+
+  defp apply_replica_mutation(state, :claim, %{ids: ids, keys: keys}) do
+    case HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, state.log) do
+      {:ok, _claim} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp apply_replica_mutation(state, :retire, %{ids: ids, snapshot: snapshot}) do
+    HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log)
+  end
+
+  defp apply_replica_mutation(state, :drop, %{ids: ids}) do
+    HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log)
   end
 
   defp write_or_join(state, schema, rows, batch_id, from) do
@@ -532,14 +616,36 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp replicate(state, segment, entry) do
-    Replicator.commit(state.runtime.replicator, %{
+    commit = %{
       name: state.runtime.name,
       table_ref: state.table_ref,
       store: state.runtime.store,
       segment: segment,
       entry: entry,
       batch_ids: Enum.reverse(state.batch_ids)
-    })
+    }
+
+    case Replicator.commit(state.runtime.replicator, commit) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        compensate(state, entry, reason)
+    end
+  end
+
+  defp compensate(state, entry, reason) do
+    case HotManifest.drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
+      :ok ->
+        :ok
+
+      {:error, drop_reason} ->
+        Logger.warning(
+          "compensating drop for #{inspect(state.table_ref)} failed: #{inspect(drop_reason)}"
+        )
+    end
+
+    {:error, reason}
   end
 
   defp add(state, segment) do
