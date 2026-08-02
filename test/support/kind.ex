@@ -156,7 +156,7 @@ defmodule Smolquery.Test.Kind do
   Deletes `pod` without waiting for a graceful stop — an ungraceful departure,
   the way a crash leaves the ring rather than the way a drain does.
   """
-  @spec kill!(String.t()) :: String.t()
+  @spec kill!(String.t()) :: :ok
   defdelegate kill!(pod), to: Pods
 
   @doc """
