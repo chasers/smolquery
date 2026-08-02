@@ -183,6 +183,14 @@ defmodule Smolquery.BufferService.Client do
   @spec manifest_nodes(atom()) :: [node()]
   def manifest_nodes(name), do: Routing.manifest_nodes(name)
 
+  @doc """
+  How many of `manifest_nodes/1` a reader may fail to reach and still answer
+  completely — `replication_factor - 1` under segment shipping, zero
+  single-copy. See `Smolquery.BufferService.Routing.absence_tolerance/1`.
+  """
+  @spec absence_tolerance(atom()) :: non_neg_integer()
+  def absence_tolerance(name), do: Routing.absence_tolerance(name)
+
   defp route(name, channel, function, args, table_ref, timeout_kind) do
     routing = Routing.resolve(name)
 

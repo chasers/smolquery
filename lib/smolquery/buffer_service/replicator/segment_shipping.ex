@@ -99,6 +99,9 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end
   end
 
+  @impl Smolquery.BufferService.Replicator
+  def redundancy(config), do: config.replication_factor - 1
+
   defp targets(%{targets: resolve}, name, table_ref) when is_function(resolve, 2),
     do: resolve.(name, table_ref)
 

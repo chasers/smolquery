@@ -305,12 +305,23 @@ defmodule Smolquery.Test.Kind do
   def insert!(dataset, table, count, from \\ 0) do
     rows = for i <- from..(from + count - 1), do: %{"id" => i, "v" => "r#{i}"}
 
-    %{status: 200, body: body} =
-      post!("/v1/datasets/#{dataset}/tables/#{table}/insert", %{"rows" => rows})
+    insert_with_retry(dataset, table, rows, 15)
+  end
 
-    case Map.get(body, "insertErrors", []) do
-      [] -> :ok
-      errors -> raise "insert into #{dataset}.#{table} reported errors: #{inspect(errors)}"
+  defp insert_with_retry(dataset, table, rows, attempts) do
+    case post!("/v1/datasets/#{dataset}/tables/#{table}/insert", %{"rows" => rows}) do
+      %{status: 200, body: body} ->
+        case Map.get(body, "insertErrors", []) do
+          [] -> :ok
+          errors -> raise "insert into #{dataset}.#{table} reported errors: #{inspect(errors)}"
+        end
+
+      %{status: _refused} when attempts > 1 ->
+        Process.sleep(2_000)
+        insert_with_retry(dataset, table, rows, attempts - 1)
+
+      %{status: status} ->
+        raise "insert into #{dataset}.#{table} kept failing with HTTP #{status}"
     end
   end
 

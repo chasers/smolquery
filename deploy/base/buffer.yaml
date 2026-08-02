@@ -50,6 +50,8 @@ spec:
           env:
             - name: SMOLQUERY_ROLES
               value: buffer
+            - name: SMOLQUERY_BUFFER_REPLICATION
+              value: "2"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -66,6 +68,17 @@ spec:
             - name: gen-rpc-tls
               mountPath: /etc/smolquery/gen-rpc-tls
               readOnly: true
+          # The rollout half of leaving the ring (T-97): stop taking writes,
+          # flush-and-replicate the accumulators, leave — no force-seal, the
+          # followers already hold every acked row. Without it every pod exit
+          # is indistinguishable from a crash.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /app/bin/smolquery
+                  - rpc
+                  - ":ok = Smolquery.BufferService.Drain.handoff(Smolquery.BufferService)"
           readinessProbe:
             tcpSocket:
               port: 4001

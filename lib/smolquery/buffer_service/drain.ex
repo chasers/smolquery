@@ -88,6 +88,41 @@ defmodule Smolquery.BufferService.Drain do
   end
 
   @doc """
+  The rollout half of leaving (T-97): refuse new writes, flush what is
+  accumulated, leave the ring — and seal nothing.
+
+  `drain/2` is for shrinking the fleet: it force-seals because the node's
+  disk holds the only copy and nobody is coming back for it. A rolling
+  restart is the opposite situation — the same pod returns in seconds, and
+  under replication (T-96) every acked row is already on a follower's disk,
+  so force-sealing every table on every deploy would be pure churn. The
+  flush pass commits (and therefore replicates) whatever is accumulated but
+  not yet acked-and-shipped, so the successor's copy is complete before the
+  ring stops naming this node.
+
+  Without a replicating `Smolquery.BufferService.Replicator` this is still
+  safe but not seamless: the unsealed tail becomes unreachable until the pod
+  returns and re-adopts, which the planner's expected-nodes rule (T-94)
+  surfaces as a failed read rather than a short answer.
+
+  A flush that fails is logged and skipped rather than blocking the exit —
+  the pod is stopping either way, and rows that failed to flush were never
+  acked.
+  """
+  @spec handoff(atom()) :: :ok | {:error, term()}
+  def handoff(name) do
+    case Runtime.fetch(name) do
+      {:ok, runtime} ->
+        :persistent_term.put(draining_key(name), true)
+        Enum.each(owned_tables(runtime), &flush_table(runtime, &1))
+        leave(name)
+
+      :error ->
+        {:error, :buffer_service_unavailable}
+    end
+  end
+
+  @doc """
   Whether `name` is mid-drain on this node.
 
   `Endpoint.write_batch/3` checks this before accepting a write for a table
@@ -107,6 +142,17 @@ defmodule Smolquery.BufferService.Drain do
 
   defp owned_tables(runtime) do
     Registry.select(Runtime.registry(runtime.name), [{{:"$1", :_, :_}, [], [:"$1"]}])
+  end
+
+  defp flush_table(runtime, table_ref) do
+    case Registry.lookup(Runtime.registry(runtime.name), table_ref) do
+      [{pid, _load}] -> TableBuffer.flush(pid)
+      [] -> :ok
+    end
+  catch
+    :exit, reason ->
+      Logger.warning("handoff: flush of #{inspect(table_ref)} failed: #{inspect(reason)}")
+      :ok
   end
 
   defp force_seal_table(runtime, table_ref) do

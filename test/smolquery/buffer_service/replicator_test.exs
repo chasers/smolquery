@@ -5,6 +5,7 @@ defmodule Smolquery.BufferService.ReplicatorTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Endpoint
   alias Smolquery.BufferService.Replicator
+  alias Smolquery.BufferService.Replicator.SegmentShipping
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Schema
 
@@ -66,6 +67,11 @@ defmodule Smolquery.BufferService.ReplicatorTest do
 
     assert Replicator.commit(replicator, %{}) == :ok
     assert Runtime.new(name: :none_default).replicator.impl == Replicator.None
+  end
+
+  test "redundancy is what a reader may lean on" do
+    assert Replicator.redundancy(Replicator.new({Replicator.None, []})) == 0
+    assert Replicator.redundancy(Replicator.new({SegmentShipping, replication_factor: 3})) == 2
   end
 
   test "the commit crosses the seam after the local commit, before the ack", context do

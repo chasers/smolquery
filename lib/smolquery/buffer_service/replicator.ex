@@ -97,6 +97,15 @@ defmodule Smolquery.BufferService.Replicator do
   @callback append(term(), mutation()) :: :ok | {:error, term()}
 
   @doc """
+  How many copies exist beyond the owner's, once `commit/2` has said `:ok`.
+
+  What the read side may lean on: a planner can tolerate this many absent
+  buffer nodes and still answer completely, because every acked row an
+  absent node held exists on that many other disks (T-97).
+  """
+  @callback redundancy(term()) :: non_neg_integer()
+
+  @doc """
   A replicator from `{impl, opts}` configuration.
   """
   @spec new({module(), keyword()} | t()) :: t()
@@ -117,5 +126,13 @@ defmodule Smolquery.BufferService.Replicator do
   @spec append(t(), mutation()) :: :ok | {:error, term()}
   def append(%__MODULE__{impl: impl, config: config}, mutation) do
     impl.append(config, mutation)
+  end
+
+  @doc """
+  The configured implementation's copy count beyond the owner.
+  """
+  @spec redundancy(t()) :: non_neg_integer()
+  def redundancy(%__MODULE__{impl: impl, config: config}) do
+    impl.redundancy(config)
   end
 end

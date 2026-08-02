@@ -78,7 +78,13 @@ defmodule Smolquery.QueryService.Planner do
   the deployment expects to be in the ring is what turns that back into an
   unreachable-member failure. It is coarse — an expected node that is down fails
   every query, not only those over tables it held — because nothing durable
-  records which nodes hold unsealed rows for which table.
+  records which nodes hold unsealed rows for which table. Under replication the
+  coarseness relaxes exactly as far as the copies allow (T-97): up to
+  `Smolquery.BufferService.Client.absence_tolerance/1` unreachable members —
+  `replication_factor - 1` under segment shipping, zero single-copy — are
+  tolerated, because every acked row an absent node held exists on that many
+  reachable disks and the dedupe below counts the surviving copy exactly once.
+  One more absent than the copies can cover still fails the plan.
 
   ## The merged manifest is deduped by segment id
 
@@ -246,34 +252,36 @@ defmodule Smolquery.QueryService.Planner do
 
   defp manifests(runtime, refs) do
     urls = manifest_urls(runtime)
+    pairs = Enum.flat_map(refs, fn ref -> Enum.map(urls, &{ref, &1}) end)
 
-    refs
-    |> Enum.flat_map(fn ref -> Enum.map(urls, &{ref, &1}) end)
-    |> Task.async_stream(
-      fn {ref, url} ->
-        {ref, HotClient.manifest(url, ref, timeout_ms: runtime.buffer_timeout_ms)}
-      end,
-      ordered: false,
-      on_timeout: :kill_task,
-      timeout: fetch_deadline(runtime)
-    )
-    |> Enum.reduce_while({:ok, Map.new(refs, &{&1, []})}, fn
-      {:ok, {ref, {:ok, entries}}}, {:ok, acc} ->
-        {:cont, {:ok, Map.update!(acc, ref, &[entries | &1])}}
+    {gathered, failures} =
+      pairs
+      |> Task.async_stream(
+        fn {ref, url} ->
+          {ref, HotClient.manifest(url, ref, timeout_ms: runtime.buffer_timeout_ms)}
+        end,
+        ordered: true,
+        on_timeout: :kill_task,
+        timeout: fetch_deadline(runtime)
+      )
+      |> Enum.zip(pairs)
+      |> Enum.reduce({Map.new(refs, &{&1, []}), %{}}, fn
+        {{:ok, {ref, {:ok, entries}}}, _pair}, {acc, failed} ->
+          {Map.update!(acc, ref, &[entries | &1]), failed}
 
-      {:ok, {ref, {:error, reason}}}, _acc ->
-        {:halt, {:error, {:hot_tier_unavailable, ref, reason}}}
+        {{:ok, {ref, {:error, reason}}}, {ref, url}}, {acc, failed} ->
+          {acc, Map.put_new(failed, url, {ref, reason})}
 
-      {:exit, reason}, _acc ->
-        {:halt, {:error, {:hot_tier_unavailable, reason}}}
-    end)
-    |> case do
-      {:ok, gathered} ->
-        {:ok,
-         Map.new(gathered, fn {ref, pages} -> {ref, pages |> List.flatten() |> dedupe()} end)}
+        {{:exit, reason}, {ref, url}}, {acc, failed} ->
+          {acc, Map.put_new(failed, url, {ref, reason})}
+      end)
 
-      {:error, reason} ->
-        {:error, reason}
+    if map_size(failures) <= Client.absence_tolerance(runtime.buffer_name) do
+      {:ok, Map.new(gathered, fn {ref, pages} -> {ref, pages |> List.flatten() |> dedupe()} end)}
+    else
+      {_url, {ref, reason}} = Enum.min_by(failures, fn {url, _failure} -> url end)
+
+      {:error, {:hot_tier_unavailable, ref, reason}}
     end
   end
 

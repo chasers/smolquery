@@ -53,6 +53,8 @@ spec:
           env:
             - name: SMOLQUERY_ROLES
               value: api,ingest,query,web
+            - name: SMOLQUERY_BUFFER_REPLICATION
+              value: "2"
             - name: POD_NAME
               valueFrom:
                 fieldRef:

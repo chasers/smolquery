@@ -17,4 +17,7 @@ defmodule Smolquery.BufferService.Replicator.None do
 
   @impl Smolquery.BufferService.Replicator
   def append(_config, _mutation), do: :ok
+
+  @impl Smolquery.BufferService.Replicator
+  def redundancy(_config), do: 0
 end
