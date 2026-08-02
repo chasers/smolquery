@@ -24,6 +24,15 @@ defmodule Smolquery.StorageService.Compactor do
   same reason: the undersized run is still there next sweep, and the sweep is
   the retry.
 
+  This is exactly the "polling for a compaction-due signal" case Milestone 8
+  L6 (PL-11 D6) calls out: `Catalog.tables/1` returns the same catalog-wide
+  list to every storage node's compactor, so without a gate every node would
+  plan and race to compact the same undersized run. Each sweep filters to
+  tables this node owns per `Smolquery.StorageService.Routing.own?/2` before
+  planning anything — a wrong transient owner during a ring change is safe by
+  construction (see D6), so this needs no lock, just the same ring the sealer
+  gates on.
+
   ## The policy is deliberately boring
 
   Per table, per sweep: segments under `compact_below_bytes` (sizes summed
@@ -59,6 +68,7 @@ defmodule Smolquery.StorageService.Compactor do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Merge
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
@@ -87,7 +97,9 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp run(state) do
     with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
-      outcomes = Enum.map(tables, &compact_table(state.runtime, &1))
+      routing = Routing.resolve(state.runtime.name)
+      owned = Enum.filter(tables, &Routing.own?(routing, &1))
+      outcomes = Enum.map(owned, &compact_table(state.runtime, &1))
 
       {:ok,
        %{

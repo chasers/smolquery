@@ -11,9 +11,9 @@ defmodule Smolquery.BufferService.DrainTest do
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Drain
-  alias Smolquery.BufferService.Membership
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Cluster
+  alias Smolquery.Cluster.PgGroup
   alias Smolquery.Schema
   alias Smolquery.Test.SealCollector
 
@@ -126,12 +126,12 @@ defmodule Smolquery.BufferService.DrainTest do
     on_exit(fn -> restore_cluster(previous) end)
 
     :pg.start_link(Cluster.pg_scope())
-    Membership.join(name, supervisor)
+    PgGroup.join(BufferService, name, supervisor)
 
-    assert Membership.nodes(name, []) == [node()]
+    assert PgGroup.nodes(BufferService, name, []) == [node()]
 
     assert :ok = Drain.drain(name, poll_ms: 10, timeout_ms: 500)
-    assert Membership.nodes(name, []) == []
+    assert PgGroup.nodes(BufferService, name, []) == []
   end
 
   defp restore_cluster({:ok, value}), do: Application.put_env(:smolquery, Cluster, value)
