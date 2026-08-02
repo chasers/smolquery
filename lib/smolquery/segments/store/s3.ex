@@ -201,6 +201,15 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   @doc """
+  The `s3://` prefix every location of this store lives under — what a
+  locked-down job engine appends to `allowed_directories`, so the sealed
+  segments a plan references stay readable after external access is
+  disabled (`Smolquery.QueryService.Runner`).
+  """
+  @spec location_prefix(t()) :: String.t()
+  def location_prefix(%__MODULE__{bucket: bucket}), do: "s3://" <> bucket <> "/"
+
+  @doc """
   The bootstrap `CREATE SECRET` that lets a DuckDB engine read `s3://`
   locations under `:bucket` — engines only ever read through it; every write
   goes through this module's own `put/3`.

@@ -605,6 +605,45 @@ loopback to `0.0.0.0`, since peers read each other's hot tiers over HTTP
 throwaway CA and per-node certificates for `GEN_RPC_TLS`/`DIST_TLS` in local
 (kind) testing.
 
+### Local cluster (kind)
+
+`deploy/` holds kustomize manifests for the clustered deployment: `base/` is
+the smolquery fleet itself, `overlays/kind/` adds what local dev needs around
+it (Postgres, MinIO, NodePorts, dev TLS certs). One command boots the whole
+stack — six smolquery nodes with split roles, clustered over TLS, sealing to
+object storage through a Postgres catalog:
+
+```sh
+./scripts/kind-up.sh    # kind cluster + certs + image build/load + apply + wait
+./scripts/kind-smoke.sh # end-to-end: ingest, fan-out query, seal to MinIO, drain
+```
+
+The topology (all StatefulSets — every cluster member needs a stable pod name,
+since the per-node TLS certificate is looked up by `POD_NAME` and peers derive
+each other's URLs from node names):
+
+| workload | replicas | roles | state |
+| --- | --- | --- | --- |
+| `smolquery-api` | 1 | `api,ingest,query,web` | none (`emptyDir`) |
+| `smolquery-buffer` | 3 | `buffer` | PVC — the acked-but-unsealed tail lives here |
+| `smolquery-storage` | 2 | `storage` | none — sealed segments live in MinIO, the catalog in Postgres |
+| `postgres` / `minio` | 1 each | — | kind-overlay only |
+
+The API lands on `http://localhost:8080` (Bearer `kind-only-api-key`), the web
+UI on `http://localhost:8082`. The smoke script exercises the Milestone 8
+paths that need real distinct hosts: a query fanning out to every buffer node,
+a seal landing in MinIO through the Postgres catalog and reading back over
+`s3://`, and draining a buffer node —
+
+```sh
+kubectl -n smolquery exec smolquery-buffer-0 -c smolquery -- /app/bin/smolquery rpc \
+  ':ok = Smolquery.BufferService.Drain.drain(Smolquery.BufferService, timeout_ms: 120_000)'
+```
+
+— after which inserts route to the remaining owners and no acked row is lost.
+Iterate with `./scripts/kind-up.sh` again (rebuilds the image, reloads it,
+restarts the fleet); tear down with `kind delete cluster --name smolquery`.
+
 ## HTTP API
 
 `Smolquery.Api` is the front door — one Bandit listener, started by the `:api`
@@ -702,9 +741,10 @@ Three layers, each fail-closed:
   engines via an http `CREATE SECRET`. A single node generates one at boot; a
   cluster sets `SMOLQUERY_INTERNAL_SECRET` everywhere or reads fail with 401s.
 - **User SQL** runs with DuckDB's external access disabled and locked after
-  planning: readable is exactly `allowed_directories` plus the micro-segment
-  URLs the plan itself produced. Single-tenant remains the model — auth says
-  *whether* you may query, not *which tables*.
+  planning: readable is exactly `allowed_directories`, the micro-segment
+  URLs the plan itself produced, and the sealed tier's `s3://<bucket>/`
+  prefix when the sealed tier is an object store. Single-tenant remains the
+  model — auth says *whether* you may query, not *which tables*.
 
 ## Web UI
 
@@ -917,6 +957,14 @@ Engine options can also be passed per instance to
 
 Toolchain versions are pinned in `.tool-versions`, matching CI — OTP 29.0.2 /
 Elixir 1.20.2.
+
+`kubectl` in this repo is scoped to the local kind cluster via
+[direnv](https://direnv.net): `.envrc` exports `KUBECONFIG=$PWD/.kube/config`,
+a gitignored single-context kubeconfig (run `direnv allow` once), so a bare
+`kubectl` can never hit an ambient context from another cluster.
+`scripts/kind-up.sh` writes that file itself when it creates the cluster; the
+scripts additionally pin every `kubectl` they run to the `kind-smolquery`
+context.
 
 ```sh
 mise install     # or asdf install

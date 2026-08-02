@@ -12,7 +12,10 @@ defmodule Smolquery.StorageService.Supervisor do
   The catalog and the merge run on separate engines deliberately. An
   `Adbc.Connection` serializes the queries it is given, so sharing one would put
   every catalog commit behind whatever multi-gigabyte `COPY` happened to be in
-  flight.
+  flight. Both engines need the sealed tier's `CREATE SECRET` when the store is
+  S3: the merge engine writes and re-reads segments, and the catalog engine
+  reads each just-uploaded segment back when a commit registers it (DuckLake's
+  add-data-files collects the file's footer stats).
 
   The strategy is `rest_for_one`, in that order, because the dependency runs one
   way. A seal attempt commits through the catalog and merges through the engine and
@@ -68,7 +71,7 @@ defmodule Smolquery.StorageService.Supervisor do
 
     children =
       [{PgGroup.Member, {Smolquery.StorageService, runtime.name}}] ++
-        DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
+        DuckLake.children(catalog_opts(runtime), Runtime.catalog_engine(runtime.name)) ++
         [
           {Engine,
            name: Runtime.engine(runtime.name),
@@ -87,5 +90,14 @@ defmodule Smolquery.StorageService.Supervisor do
   defp engine_secrets(%Runtime{} = runtime) do
     EngineSecrets.hot_tier(runtime.engine_extensions, runtime.buffer_base_url) ++
       EngineSecrets.sealed_tier(runtime.store)
+  end
+
+  defp catalog_opts(%Runtime{catalog_opts: nil}), do: nil
+
+  defp catalog_opts(%Runtime{catalog_opts: opts} = runtime) do
+    case EngineSecrets.sealed_tier(runtime.store) do
+      [] -> opts
+      secrets -> Keyword.update(opts, :statements, secrets, &(&1 ++ secrets))
+    end
   end
 end

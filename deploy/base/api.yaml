@@ -1,0 +1,94 @@
+# The front door: a single node whose roles are the stateless edges — the HTTP
+# API, the ingest edge it forwards through, the query service whose planner
+# fans out to the buffer fleet, and the web UI. A StatefulSet (not a
+# Deployment) because every cluster member needs a stable pod name: the
+# per-node TLS certificate is looked up by POD_NAME, and the Erlang node name
+# must be a DNS name peers can dial back.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smolquery-api
+  namespace: smolquery
+spec:
+  serviceName: smolquery-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: smolquery-api
+  template:
+    metadata:
+      labels:
+        app: smolquery-api
+        cluster: smolquery
+    spec:
+      # Service links would inject SMOLQUERY_API_PORT=tcp://... (from the
+      # smolquery-api Service) into every pod, shadowing the real config var.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -U postgres; do sleep 1; done
+      containers:
+        - name: smolquery
+          image: smolquery:latest
+          ports:
+            - name: http
+              containerPort: 4000
+            - name: web
+              containerPort: 4002
+            - name: epmd
+              containerPort: 4369
+            - name: gen-rpc
+              containerPort: 5369
+            - name: gen-rpc-tls
+              containerPort: 5870
+          envFrom:
+            - secretRef:
+                name: smolquery-env
+          env:
+            - name: SMOLQUERY_ROLES
+              value: api,ingest,query,web
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: smolquery-headless
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gen-rpc-tls
+              mountPath: /etc/smolquery/gen-rpc-tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: gen-rpc-tls
+          secret:
+            secretName: smolquery-gen-rpc-tls
+            optional: true

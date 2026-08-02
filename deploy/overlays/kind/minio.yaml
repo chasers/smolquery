@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: smolquery
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: smolquery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: smolquery
+            - name: MINIO_ROOT_PASSWORD
+              value: smolquery-secret
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# Store.S3 expects its bucket to exist (segment PUTs do not create it); this
+# closes the "bucket creation at boot is a manifest concern" item deferred
+# from L3.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-bucket
+  namespace: smolquery
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mc alias set local http://minio:9000 smolquery smolquery-secret; do sleep 2; done
+              mc mb --ignore-existing local/smolquery-sealed
