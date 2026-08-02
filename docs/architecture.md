@@ -199,6 +199,18 @@ What that ack means:
   owning buffer node by consistent hashing; a call for a table this node does
   not own is forwarded to the owner rather than refused. Clustered, the ring
   tracks live membership through `:pg`; single-node, it is just `[node()]`.
+- **Ownership is fenced by epoch (T-92).** `:pg` is eventually consistent, so
+  two nodes can transiently each believe they own the same table. Clustered,
+  `Smolquery.BufferService.RingEpoch` anchors the member list to a
+  compare-and-swap epoch in Postgres (the same database discovery and the
+  catalog already use) and refuses writes the epoch-stamped configuration
+  does not permit: a non-owner answers `{:error, :not_owner}`, a node that
+  just acquired a table waits out the previous owner's lease
+  (`{:error, :ownership_settling}`), and a node that cannot verify its
+  configuration within `epoch_lease_ms` (default 10s) fails closed
+  (`{:error, :ring_config_stale}`). All three surface as a 503 with
+  `retry-after`; Postgres being unreachable for longer than one lease
+  therefore pauses buffer writes rather than risking a dual owner.
 - **The loss window is honest.** With the default local store, a buffer node's
   disk holds a single copy of its unsealed tail: acked rows survive a process,
   BEAM, or node crash, and losing the disk loses that tail. Sealing is what

@@ -68,6 +68,13 @@ defmodule Smolquery.BufferService.Client do
       ring has not moved yet, but this node has already stopped taking new
       writes for tables it owns, so a retry should expect the owner to
       change
+    * `{:error, :not_owner | :ownership_settling | :ring_config_stale}` —
+      the epoch fence refused the write (T-92,
+      `Smolquery.BufferService.RingEpoch`): the node this call routed to is
+      not the owner at the current ring epoch, just became the owner and is
+      waiting out the previous owner's lease, or cannot verify its own lease.
+      All three are retryable the way `:draining` is; routing catches up
+      within an `epoch_refresh_ms`
     * `{:error, {:badrpc | :badtcp, reason}}` — the owner could not be reached
 
   `{:badrpc, :timeout}` is ambiguous: the call may have reached the owner and

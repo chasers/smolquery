@@ -82,6 +82,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Load
+  alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Schema
@@ -153,6 +154,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   serialization point, so the check here is the one with a happens-before:
   the flag is set before the drain's force-seal call is enqueued, and every
   write processed after that call sees it.
+
+  The ownership fence is re-checked here for the same reason (T-92,
+  `Smolquery.BufferService.RingEpoch`): a write can sit in this mailbox for
+  up to the write timeout, long past the lease the endpoint's check ran
+  under, and this is the last gate before rows enter the accumulator.
   """
   @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
           {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
@@ -237,10 +243,9 @@ defmodule Smolquery.BufferService.TableBuffer do
         {:reply, {:duplicate, ack}, state}
 
       :error ->
-        if Drain.draining?(state.runtime.name) do
-          {:reply, {:error, :draining}, state}
-        else
-          write_or_join(state, schema, rows, batch_id, from)
+        case write_gate(state) do
+          :ok -> write_or_join(state, schema, rows, batch_id, from)
+          {:error, _reason} = refusal -> {:reply, refusal, state}
         end
     end
   end
@@ -417,6 +422,14 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp committed_ack(state, batch_id),
     do: HotManifest.batch_ack(state.runtime.manifest, state.table_ref, batch_id)
+
+  defp write_gate(state) do
+    if Drain.draining?(state.runtime.name) do
+      {:error, :draining}
+    else
+      RingEpoch.check_write(state.runtime.name, state.table_ref)
+    end
+  end
 
   defp write_or_join(state, schema, rows, batch_id, from) do
     if not is_nil(batch_id) and batch_id in state.batch_ids do

@@ -65,6 +65,13 @@ defmodule Smolquery.Api.Inserts do
     Errors.send_error(conn, 503, "UNAVAILABLE", "the write path is not available here")
   end
 
+  def insert_error(conn, reason)
+      when reason in [:not_owner, :ownership_settling, :ring_config_stale] do
+    conn
+    |> put_resp_header("retry-after", "1")
+    |> Errors.send_error(503, "UNAVAILABLE", "table ownership is moving; retry")
+  end
+
   def insert_error(conn, reason), do: Errors.from_reason(conn, reason)
 
   defp insert_rows(conn, table_ref, rows, batch_id) do

@@ -91,7 +91,9 @@ config :smolquery, Smolquery.BufferService,
   maintenance_interval_ms: 5_000,
   seal_consumer: {Smolquery.StorageService.Client, []},
   hot_server_ip: {127, 0, 0, 1},
-  hot_server_port: 4001
+  hot_server_port: 4001,
+  epoch_lease_ms: 10_000,
+  epoch_refresh_ms: 1_000
 
 config :smolquery, Smolquery.StorageService,
   dir: "priv/data/sealed",
