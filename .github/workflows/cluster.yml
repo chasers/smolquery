@@ -9,6 +9,8 @@ name: Cluster
 # has proven green here.
 on:
   workflow_dispatch:
+  push:
+    branches: [cluster-tests]
 
 env:
   MIX_ENV: test
@@ -36,7 +38,15 @@ jobs:
 
       - run: mix deps.get
 
-      - uses: docker/setup-buildx-action@v3
+      # Runners ship docker and kubectl but not kind, and scripts/kind-up.sh
+      # creates the cluster from deploy/overlays/kind/kind-config.yaml itself —
+      # so install the binary rather than using an action that would create its
+      # own cluster.
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          sudo install -m 0755 ./kind /usr/local/bin/kind
+          kind version
 
       - name: Bring up the cluster
         run: ./scripts/kind-up.sh
