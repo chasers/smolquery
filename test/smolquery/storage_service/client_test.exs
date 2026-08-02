@@ -50,7 +50,7 @@ defmodule Smolquery.StorageService.ClientTest do
         end)
 
       assert log =~ "seal_ready analytics.events: 2 unsealed micro-segments"
-      assert log =~ "is not running on this node"
+      assert log =~ "no node is running"
     end
 
     test "defaults to the application's instance name" do

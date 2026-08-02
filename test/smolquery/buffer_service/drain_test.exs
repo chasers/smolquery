@@ -26,10 +26,8 @@ defmodule Smolquery.BufferService.DrainTest do
     %{schema: Schema.new!([{"id", :int64}]), rows: for(i <- range, do: %{"id" => i})}
   end
 
-  defp start_buffer_service(context) do
-    name = :"drain_#{:erlang.unique_integer([:positive])}"
-
-    opts = [
+  defp service_options(context, name) do
+    [
       name: name,
       dir: Path.join(context.tmp_dir, "buffer"),
       flush_interval_ms: 25,
@@ -40,8 +38,12 @@ defmodule Smolquery.BufferService.DrainTest do
       seal_max_age_ms: 60_000,
       retire_grace_ms: 600_000
     ]
+  end
 
-    start_supervised!({BufferService.Supervisor, opts}, id: name)
+  defp start_buffer_service(context) do
+    name = :"drain_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!({BufferService.Supervisor, service_options(context, name)}, id: name)
     on_exit(fn -> Runtime.delete(name) end)
 
     name
@@ -112,10 +114,7 @@ defmodule Smolquery.BufferService.DrainTest do
     assert Drain.draining?(name)
   end
 
-  test "leave/2 is called with this instance's supervisor pid on success", context do
-    name = start_buffer_service(context)
-    supervisor = Process.whereis(Runtime.supervisor(name))
-
+  test "drain leaves the ring on success, and a restarted subtree does not rejoin", context do
     previous = Application.fetch_env(:smolquery, Cluster)
 
     Application.put_env(:smolquery, Cluster,
@@ -125,12 +124,18 @@ defmodule Smolquery.BufferService.DrainTest do
 
     on_exit(fn -> restore_cluster(previous) end)
 
-    :pg.start_link(Cluster.pg_scope())
-    PgGroup.join(BufferService, name, supervisor)
+    {:ok, _scope} = :pg.start_link(Cluster.pg_scope())
+
+    name = start_buffer_service(context)
 
     assert PgGroup.nodes(BufferService, name, []) == [node()]
 
     assert :ok = Drain.drain(name, poll_ms: 10, timeout_ms: 500)
+    assert PgGroup.nodes(BufferService, name, []) == []
+
+    stop_supervised!(name)
+    start_supervised!({BufferService.Supervisor, service_options(context, name)}, id: {name, 2})
+
     assert PgGroup.nodes(BufferService, name, []) == []
   end
 

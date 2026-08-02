@@ -55,6 +55,16 @@ defmodule Smolquery.StorageService.GC do
   another `gc_grace_ms`. That is the right trade: leaking a file for one more grace
   period is cheap, and persisting this state would mean a second durable thing to
   keep honest for no correctness gain.
+
+  ## One watcher per table, not per fleet
+
+  Candidates are filtered to tables this node owns per
+  `Smolquery.StorageService.Routing.own?/2` (Milestone 8 L6), the same gate
+  the sealer, compactor, and retention apply: a shared store means every node
+  lists the same keys, and without the gate an N-node fleet watches and
+  deletes every orphan N times over. A key that names no table (nothing this
+  system wrote) stays visible to every node — deleting it twice is idempotent,
+  and no single owner can be derived for it.
   """
 
   use GenServer
@@ -63,6 +73,7 @@ defmodule Smolquery.StorageService.GC do
 
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
@@ -123,7 +134,8 @@ defmodule Smolquery.StorageService.GC do
   defp run(state) do
     with {:ok, known} <- Catalog.known_segments(state.runtime.catalog),
          {:ok, keys} <- Store.list(state.runtime.store, "") do
-      {expired, watching} = partition(state, unreferenced(state.runtime, keys, known))
+      candidates = owned(state.runtime, unreferenced(state.runtime, keys, known))
+      {expired, watching} = partition(state, candidates)
 
       with {:ok, swept} <- sweep_expired(state.runtime, expired),
            {:ok, staged} <-
@@ -154,6 +166,24 @@ defmodule Smolquery.StorageService.GC do
     referenced = MapSet.new(known)
 
     Enum.reject(keys, &MapSet.member?(referenced, Store.location(runtime.store, &1)))
+  end
+
+  defp owned(runtime, keys) do
+    routing = Routing.resolve(runtime.name)
+
+    Enum.filter(keys, fn key ->
+      case table_ref(key) do
+        {:ok, ref} -> Routing.own?(routing, ref)
+        :error -> true
+      end
+    end)
+  end
+
+  defp table_ref(key) do
+    case Path.split(key) do
+      [dataset, table, _file] -> {:ok, {dataset, table}}
+      _unrecognized -> :error
+    end
   end
 
   defp partition(state, keys) do

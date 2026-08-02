@@ -36,11 +36,18 @@ defmodule Smolquery.StorageService.Retention do
 
   Policies and segments both live in the catalog, so a sweep reads and acts;
   a failed table costs nothing but waiting for the next sweep, and there is
-  deliberately no per-table state here to keep honest.
+  deliberately no per-table state here to keep honest. And like the
+  compactor, each table is gated on `Smolquery.StorageService.Routing.own?/2`
+  (Milestone 8 L6): the catalog hands every storage node the same table list,
+  and without the gate an N-node fleet runs N identical drops per interval,
+  N-1 of which exist only to lose a commit conflict and burn its retry
+  backoff. Snapshot expiry stays ungated — it is one catalog-wide call, not
+  per-table work, and a duplicate expiry is a no-op.
   """
 
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
@@ -91,12 +98,14 @@ defmodule Smolquery.StorageService.Retention do
   end
 
   defp sweep_table(runtime, table_ref) do
-    with {:ok, %{column: column, ttl_ms: ttl_ms}} <-
+    with true <- runtime.name |> Routing.resolve() |> Routing.own?(table_ref),
+         {:ok, %{column: column, ttl_ms: ttl_ms}} <-
            Catalog.retention(runtime.catalog, table_ref),
          {:ok, paths} when paths != [] <- Catalog.segments(runtime.catalog, table_ref, :current),
          {:ok, expired} <- expired_paths(runtime, paths, column, ttl_ms) do
       drop(runtime, table_ref, expired)
     else
+      false -> :skip
       {:ok, nil} -> :skip
       {:ok, []} -> :skip
       {:error, reason} -> failed(table_ref, reason)

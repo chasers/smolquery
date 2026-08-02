@@ -78,6 +78,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   require Logger
 
+  alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Load
@@ -142,6 +143,16 @@ defmodule Smolquery.BufferService.TableBuffer do
   its rows twice. The `{:duplicate, ack}` shape exists for the endpoint's
   load accounting — rows that were never accepted must not wait to be
   drained — and callers who do not care treat it as `{:ok, ack}`.
+
+  Mid-drain (Milestone 8 L4), a non-duplicate batch is refused with
+  `{:error, :draining}` here as well as at the endpoint. The endpoint's gate
+  runs in the caller's process, so a write that passed it just before the
+  drain flag went up could otherwise accumulate, commit, and *ack* after the
+  drain's point-in-time force-seal — rows durably acked on a node the
+  operator was just told is safe to decommission. This process is the
+  serialization point, so the check here is the one with a happens-before:
+  the flag is set before the drain's force-seal call is enqueued, and every
+  write processed after that call sees it.
   """
   @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
           {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
@@ -222,8 +233,15 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   def handle_call({:write, schema, rows, batch_id}, from, state) do
     case committed_ack(state, batch_id) do
-      {:ok, ack} -> {:reply, {:duplicate, ack}, state}
-      :error -> write_or_join(state, schema, rows, batch_id, from)
+      {:ok, ack} ->
+        {:reply, {:duplicate, ack}, state}
+
+      :error ->
+        if Drain.draining?(state.runtime.name) do
+          {:reply, {:error, :draining}, state}
+        else
+          write_or_join(state, schema, rows, batch_id, from)
+        end
     end
   end
 

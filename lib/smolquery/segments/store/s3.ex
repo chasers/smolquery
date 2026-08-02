@@ -55,7 +55,8 @@ defmodule Smolquery.Segments.Store.S3 do
     :staging_dir,
     :endpoint,
     region: "us-east-1",
-    url_style: nil
+    url_style: nil,
+    list_max_keys: nil
   ]
 
   @type t :: %__MODULE__{
@@ -65,7 +66,8 @@ defmodule Smolquery.Segments.Store.S3 do
           staging_dir: String.t(),
           endpoint: String.t() | nil,
           region: String.t(),
-          url_style: String.t() | nil
+          url_style: String.t() | nil,
+          list_max_keys: pos_integer() | nil
         }
 
   @type option ::
@@ -76,6 +78,7 @@ defmodule Smolquery.Segments.Store.S3 do
           | {:endpoint, String.t()}
           | {:region, String.t()}
           | {:url_style, String.t()}
+          | {:list_max_keys, pos_integer()}
 
   @staging ".tmp"
   @chunk_bytes 1_048_576
@@ -97,6 +100,10 @@ defmodule Smolquery.Segments.Store.S3 do
     * `:url_style` — `"path"` or `"vhost"`; defaults to `"path"` when
       `:endpoint` is set (MinIO and most self-hosted stores require it),
       otherwise DuckDB's own default
+    * `:list_max_keys` — ListObjectsV2 page size; unset takes S3's default
+      (1000). `list/2` follows continuation tokens either way, so this only
+      shapes how many round trips a listing costs — and gives tests a page
+      size small enough to prove the pagination loop against a real store.
 
   """
   @spec new([option()]) :: Store.t()
@@ -108,7 +115,8 @@ defmodule Smolquery.Segments.Store.S3 do
       staging_dir: Keyword.fetch!(opts, :staging_dir),
       endpoint: Keyword.get(opts, :endpoint),
       region: Keyword.get(opts, :region, "us-east-1"),
-      url_style: Keyword.get(opts, :url_style)
+      url_style: Keyword.get(opts, :url_style),
+      list_max_keys: Keyword.get(opts, :list_max_keys)
     }
 
     %Store{impl: __MODULE__, config: config}
@@ -135,13 +143,37 @@ defmodule Smolquery.Segments.Store.S3 do
   def location(%__MODULE__{bucket: bucket}, key), do: "s3://#{bucket}/#{key}"
 
   @impl Store
-  def list(%__MODULE__{bucket: bucket} = config, prefix) do
-    case Req.get(request(config), url: "s3://#{bucket}?#{list_query(prefix)}") do
-      {:ok, %{status: 200, body: body}} -> {:ok, keys_from_listing(body)}
-      {:ok, %{status: status, body: body}} -> {:error, {:s3_status, status, body}}
-      {:error, reason} -> {:error, reason}
+  def list(%__MODULE__{} = config, prefix) do
+    list_pages(config, directory_prefix(prefix), nil, [])
+  end
+
+  defp list_pages(%__MODULE__{bucket: bucket} = config, prefix, continuation, acc) do
+    case Req.get(request(config),
+           url: "s3://#{bucket}?#{list_query(config, prefix, continuation)}"
+         ) do
+      {:ok, %{status: 200, body: body}} ->
+        pages = [keys_from_listing(body) | acc]
+
+        case next_continuation(body) do
+          nil -> {:ok, pages |> List.flatten() |> Enum.sort()}
+          token -> list_pages(config, prefix, token, pages)
+        end
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:s3_status, status, body}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp directory_prefix(""), do: ""
+  defp directory_prefix(prefix), do: String.trim_trailing(prefix, "/") <> "/"
+
+  defp next_continuation(%{"ListBucketResult" => %{"IsTruncated" => "true"} = listing}),
+    do: listing["NextContinuationToken"]
+
+  defp next_continuation(_final_page), do: nil
 
   @impl Store
   def delete(%__MODULE__{bucket: bucket} = config, key) do
@@ -169,9 +201,9 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   @doc """
-  The bootstrap `CREATE SECRET` that lets a DuckDB engine read (and, for the
-  sealer's own uploads via `httpfs` rather than this module, write) `s3://`
-  locations under `:bucket`.
+  The bootstrap `CREATE SECRET` that lets a DuckDB engine read `s3://`
+  locations under `:bucket` — engines only ever read through it; every write
+  goes through this module's own `put/3`.
   """
   @spec create_secret_statement(t()) :: String.t()
   def create_secret_statement(%__MODULE__{} = config) do
@@ -215,14 +247,22 @@ defmodule Smolquery.Segments.Store.S3 do
     end
   end
 
-  defp list_query(""), do: "list-type=2"
-  defp list_query(prefix), do: "list-type=2&prefix=#{URI.encode_www_form(prefix)}"
+  defp list_query(config, prefix, continuation) do
+    [
+      {"list-type", "2"},
+      {"prefix", prefix},
+      {"continuation-token", continuation},
+      {"max-keys", config.list_max_keys}
+    ]
+    |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+    |> URI.encode_query()
+  end
 
   defp keys_from_listing(%{"ListBucketResult" => %{"Contents" => contents}}) do
     contents
     |> List.wrap()
     |> Enum.map(& &1["Key"])
-    |> Enum.sort()
+    |> Enum.filter(&String.ends_with?(&1, ".parquet"))
   end
 
   defp keys_from_listing(_empty), do: []
@@ -246,7 +286,8 @@ defmodule Smolquery.Segments.Store.S3 do
     |> ReqS3.attach(
       aws_sigv4: [
         access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key
+        secret_access_key: config.secret_access_key,
+        region: config.region
       ],
       aws_endpoint_url_s3: config.endpoint
     )

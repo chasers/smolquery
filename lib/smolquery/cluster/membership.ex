@@ -2,11 +2,14 @@ defmodule Smolquery.Cluster.Membership do
   @moduledoc """
   Debounced node-up/node-down events, broadcast to subscribers.
 
-  `Smolquery.BufferService.Routing`'s ring cache and the per-node ownership
-  ring `Smolquery.StorageService` uses for seal-work distribution both need
-  to react when the node list changes; neither should each run its own
-  `:net_kernel.monitor_nodes/2` subscription and coalescing logic. This is the
-  one place that does.
+  Nothing in the ring path consumes these events today: ownership reads live
+  `:pg` membership per call (`Smolquery.Cluster.PgGroup`,
+  `Smolquery.Cluster.RingCache`), which needs no debounce. This exists for
+  the things that should react to the *fleet* changing shape rather than to
+  a group — reactive maintenance like force-sealing tables whose ownership
+  moved away is the intended consumer (PL-11), and anything growing such a
+  need should subscribe here rather than run its own
+  `:net_kernel.monitor_nodes/2` and coalescing.
 
   ## Debouncing
 
@@ -94,21 +97,25 @@ defmodule Smolquery.Cluster.Membership do
   def handle_info({:nodeup, _node, _info}, state), do: {:noreply, debounce(state)}
   def handle_info({:nodedown, _node, _info}, state), do: {:noreply, debounce(state)}
 
-  def handle_info(:broadcast, state) do
+  def handle_info({:broadcast, ref}, %{timer: {_timer, ref}} = state) do
     current = current_members()
     Enum.each(state.subscribers, &send(&1, {:cluster_membership, current}))
     {:noreply, %{state | timer: nil}}
   end
+
+  def handle_info({:broadcast, _stale}, state), do: {:noreply, state}
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     {:noreply, %{state | subscribers: MapSet.delete(state.subscribers, pid)}}
   end
 
   defp debounce(%{timer: nil} = state) do
-    %{state | timer: Process.send_after(self(), :broadcast, state.debounce_ms)}
+    ref = make_ref()
+
+    %{state | timer: {Process.send_after(self(), {:broadcast, ref}, state.debounce_ms), ref}}
   end
 
-  defp debounce(%{timer: timer} = state) do
+  defp debounce(%{timer: {timer, _ref}} = state) do
     Process.cancel_timer(timer)
     debounce(%{state | timer: nil})
   end

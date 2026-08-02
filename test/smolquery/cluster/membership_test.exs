@@ -34,14 +34,23 @@ defmodule Smolquery.Cluster.MembershipTest do
     refute node in left
   end
 
-  test "coalesces nodes joining inside the debounce window into one broadcast", %{name: name} do
+  test "coalesces nodes joining inside the debounce window into one broadcast" do
+    name = :"membership_coalesce_#{:erlang.unique_integer([:positive])}"
+    {:ok, _pid} = Membership.start_link(name: name, debounce_ms: 1_000)
+
     :ok = Membership.subscribe(name)
     assert_receive {:cluster_membership, initial}
 
-    {:ok, peer_a, node_a} = start_peer()
-    {:ok, peer_b, node_b} = start_peer()
+    [{:ok, peer_a, node_a}, {:ok, peer_b, node_b}] =
+      [Task.async(&boot_peer/0), Task.async(&boot_peer/0)]
+      |> Task.await_many(15_000)
 
-    assert_receive {:cluster_membership, members}, 2_000
+    on_exit(fn ->
+      safely_stop(peer_a)
+      safely_stop(peer_b)
+    end)
+
+    assert_receive {:cluster_membership, members}, 3_000
     assert node_a in members
     assert node_b in members
     refute_receive {:cluster_membership, _more}, 250
@@ -81,6 +90,15 @@ defmodule Smolquery.Cluster.MembershipTest do
     on_exit(fn -> safely_stop(peer) end)
 
     {:ok, peer, node}
+  end
+
+  defp boot_peer do
+    :peer.start(%{
+      name: :"membership_peer_#{:erlang.unique_integer([:positive])}",
+      host: ~c"127.0.0.1",
+      longnames: true,
+      args: [~c"-setcookie", ~c"smolquery_test_cookie"]
+    })
   end
 
   defp safely_stop(peer) do

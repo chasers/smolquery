@@ -29,11 +29,12 @@ defmodule Smolquery.StorageService.Supervisor do
   what makes a storage node disposable: it can die mid-seal and another node (or
   this one, restarted) reconciles from what the catalog says.
 
-  This process's own pid joins `Smolquery.Cluster.PgGroup`'s `:pg`
-  group on init (Milestone 8 L6, PL-11 D6) — a no-op when clustering is off,
-  and otherwise what puts this node in the storage ring at all. The pid dies
-  with this subtree, so an ungraceful crash removes the node from the ring the
-  same way it does for the buffer side.
+  Ring membership is the first child, a `Smolquery.Cluster.PgGroup.Member`
+  (Milestone 8 L6, PL-11 D6) — a no-op when clustering is off, and otherwise
+  what puts this node in the storage ring at all. Its pid dies with this
+  subtree, so an ungraceful crash removes the node from the ring the same way
+  it does for the buffer side — and it re-asserts membership after a `:pg`
+  scope restart, which a one-shot join from `init/1` would silently lose.
   """
 
   use Supervisor
@@ -64,10 +65,10 @@ defmodule Smolquery.StorageService.Supervisor do
   @impl Supervisor
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
-    PgGroup.join(Smolquery.StorageService, runtime.name, self())
 
     children =
-      DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
+      [{PgGroup.Member, {Smolquery.StorageService, runtime.name}}] ++
+        DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
         [
           {Engine,
            name: Runtime.engine(runtime.name),

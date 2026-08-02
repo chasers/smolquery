@@ -8,18 +8,22 @@ defmodule Smolquery.BufferService.Adopter do
   forever: never signalled, never sealed, never reaped. The data is safe and
   queryable, and permanently stuck.
 
-  So adoption is the boot half of ownership: the manifest logs on disk say which
-  tables this node was accumulating, and every one it still owns gets its buffer
-  back. Starting a buffer recovers that table's manifest, which is also what
-  re-adopts its segments and clears any that were never acked.
+  So adoption is the boot half of holding data: the manifest logs on disk say
+  which tables this node was accumulating, and every one of them gets its
+  buffer back — owned or not. The hot tier is single-copy and the bytes are
+  *here*, so this is the only node that can ever seal them; filtering on a
+  ring (static or live) strands acked rows exactly when a restart and a ring
+  change coincide, because the ring's new owner starts with an empty manifest
+  and nothing hands the tail over. A recovered table this node no longer owns
+  takes no new writes — routing sends those to the ring's owner — but its
+  seal check still runs, its tail still seals, and until it does the query
+  planner's member-wide manifest fan-out (Milestone 8 L5) keeps its rows
+  visible.
 
   Boot is also the one moment the store's staging directory can be swept with no
   age guard at all: this runs before any buffer starts, so nothing can be
   mid-write, and whatever a killed encoder left staged is deleted rather than
   leaked forever (`Smolquery.Segments.Store.sweep_staging/2`).
-
-  Tables this node no longer owns are left alone. Handing an unsealed tail to a
-  new owner is a ring-change problem, and ring changes are Milestone 8.
 
   ## Adoption blocks the boot, on purpose
 
@@ -37,7 +41,6 @@ defmodule Smolquery.BufferService.Adopter do
   require Logger
 
   alias Smolquery.BufferService.HotManifest
-  alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Segments.Store
 
@@ -64,14 +67,14 @@ defmodule Smolquery.BufferService.Adopter do
   end
 
   @doc """
-  Starts a buffer for every owned table with a manifest log, returning their refs.
+  Starts a buffer for every table with a manifest log, returning their refs.
   """
   @spec adopt(Runtime.t()) :: [Smolquery.Segments.Store.table_ref()]
   def adopt(%Runtime{} = runtime) do
     adopted =
       runtime.manifest
       |> HotManifest.tables()
-      |> Enum.filter(&(Ring.own?(runtime.ring, &1) and start_buffer(runtime, &1)))
+      |> Enum.filter(&start_buffer(runtime, &1))
 
     log(adopted)
 

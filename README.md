@@ -9,7 +9,10 @@ in one self-hostable BEAM release.
 > service's hot tier, the seal handoff, query jobs planned across both tiers,
 > the HTTP API (Milestone 6), and storage maintenance — compaction,
 > retention, snapshot expiry, telemetry, and a Docker release (Milestone 7) —
-> work, on a single node. Cluster + object storage is next (Milestone 8).
+> work, on a single node. Milestone 8's cluster layers — Postgres-backed
+> membership and catalog, an S3 sealed tier, live ownership rings with drain,
+> query fan-out, and seal-work distribution — have landed; the kind-cluster
+> test harness (L7) is next.
 > Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
@@ -182,9 +185,10 @@ What that ack means:
   p50 under overload becomes p99 ≤ the budget). The ingest edge turns both into
   a 429, with the prediction as `retry-after`.
 - **One table, one node.** `Smolquery.BufferService.Ring` maps a table to its
-  owning buffer node by consistent hashing; a table this node does not own is
-  refused with `{:error, {:not_owner, node}}`. Milestone 3 runs a single-node
-  ring.
+  owning buffer node by consistent hashing; a call for a table this node does
+  not own is forwarded to the owner rather than refused. Clustered
+  (Milestone 8), the ring tracks live membership through `:pg`; single-node,
+  it is just `[node()]`.
 - **The loss window is honest.** With the default local store, a buffer node's
   disk holds a single copy of its unsealed tail: acked rows survive a process,
   BEAM, or node crash, and losing the disk loses that tail. Sealing (Milestone 4)
@@ -581,17 +585,25 @@ Configuration is environment variables, resolved at boot in
 | `SMOLQUERY_MAX_RESULT_ROWS` | `query/3` conversion ceiling (`100000`, or `infinity`) |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence (`1000`) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
-| `SMOLQUERY_HOT_SERVER_PORT` | hot-tier HTTP port (`4001`) |
+| `SMOLQUERY_HOT_SERVER_PORT` | hot-tier HTTP port (`4001`), on every node — peers derive each other's hot-tier URLs from node name + this port |
+| `SMOLQUERY_HOT_SERVER_IP` | hot-tier HTTP bind (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
 | `SMOLQUERY_BUFFER_BASE_URL` | where readers reach the hot tier (`http://127.0.0.1:4001`) |
+| `SMOLQUERY_S3_BUCKET` (+ `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ENDPOINT`, `_REGION`, `_URL_STYLE`, `_STAGING_DIR`) | sealed tier on an S3-compatible store instead of the data dir |
 | `GEN_RPC_PORT` | inter-node transport port (`5369`) |
 | `CATALOG_DATABASE_URL` | Postgres URL (e.g. `postgres://user:pass@host/db`); tiers the DuckLake catalog onto it (loading DuckDB's `postgres` extension alongside `ducklake`) and enables node discovery (`Smolquery.Cluster`, over `libcluster_postgres`) through that same database — one node is not a cluster, so a single-node deployment leaves this unset. `SMOLQUERY_CATALOG` overrides just the catalog side, e.g. to point it at a different database than discovery uses |
-| `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to TLS, verified with per-node certificates (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the cert file) |
+| `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to mutual TLS. Verification is chain-only against the cluster CA (the emqx gen_rpc fork does no hostname/CN check), so the CA is the trust boundary: certificate files are per node (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the file) but any CA-signed certificate authenticates to any peer — a leaked node cert means rotating the CA, not just that node |
+| `GEN_RPC_SSL_PORT` | gen_rpc TLS port (`5870`) |
 | `DIST_TLS` | `true` to run Erlang distribution (cluster membership only) over TLS with the same certificates — set in `rel/env.sh.eex`, not `config/runtime.exs`, since distribution starts before the release's Elixir config does |
 | `POD_NAME` / `POD_NAMESPACE` | when set (a k8s Downward API convention), `rel/env.sh.eex` derives `RELEASE_NODE` from the pod's stable headless-service DNS name — the same name a peer needs to reach this node |
+| `HEADLESS_SERVICE` | the k8s headless-service name in that derived node name (`smolquery-headless`) |
+| `RELEASE_NODE_HOST` | overrides the derived host part of `RELEASE_NODE` outright (non-StatefulSet deployments) |
 
 A cluster is `CATALOG_DATABASE_URL` plus one Postgres every node can reach —
-nothing else to stand up. `scripts/gen-dev-certs.sh` generates a throwaway CA
-and per-node certificates for `GEN_RPC_TLS`/`DIST_TLS` in local (kind) testing.
+nothing else to stand up. Setting it also flips `HotServer`'s bind from
+loopback to `0.0.0.0`, since peers read each other's hot tiers over HTTP
+(`SMOLQUERY_HOT_SERVER_IP` overrides). `scripts/gen-dev-certs.sh` generates a
+throwaway CA and per-node certificates for `GEN_RPC_TLS`/`DIST_TLS` in local
+(kind) testing.
 
 ## HTTP API
 
@@ -813,24 +825,36 @@ The storage service's own `ring:` is the static fallback for a *second*,
 independent ring — which storage node seals a table's work, not which buffer
 node accumulates it (Milestone 8 L6). With clustering on it likewise tracks
 live `:pg` membership (`Smolquery.Cluster.PgGroup`), and
-`Smolquery.StorageService.Routing.own?/2` is what `Sealer` and `Compactor`
-gate on before acting; a wrong transient owner during a ring change is safe by
-construction, since `Catalog.replace_segments/4` is atomic and
-idempotent-by-key.
+`Smolquery.StorageService.Routing.own?/2` is what the sealer, compactor,
+retention, and GC gate on before acting. The gate is advisory, not mutual
+exclusion — during a ring change two nodes can transiently both pass it; what
+keeps that from double-registering a segment is the catalog re-deriving its
+registration diff inside every commit retry (see
+`Smolquery.StorageService.Routing` for the residual window).
 
 The storage service's `:dir` is where sealed segments land, and `:store`
 overrides it the same way — including onto an object store (Milestone 8 L3):
 
     store: {Smolquery.Segments.Store.S3,
             bucket: "smolquery-sealed",
-            access_key_id: System.get_env("S3_ACCESS_KEY_ID"),
-            secret_access_key: System.get_env("S3_SECRET_ACCESS_KEY"),
+            access_key_id: "...",
+            secret_access_key: "...",
             endpoint: "http://minio:9000",
             staging_dir: "/mnt/scratch/sealed-staging"}
 
-`buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and
-segment bytes — honest for a single node, and replaced by ownership-ring
-lookup when the cluster arrives. `engine_extensions` loads `httpfs` into the
+In a release, configure it through the `SMOLQUERY_S3_*` environment variables
+(below) rather than a config snippet: `config/config.exs` is evaluated at
+*build* time, so `System.get_env/1` there bakes the builder's credentials (or
+`nil`) into the artifact. The env wiring configures the query service's
+`store:` with the same values, which every job engine needs to read the
+sealed tier back.
+
+`buffer_base_url` is where the sealer reaches `HotServer` to pull manifests
+and segment bytes — honest for a single node. Clustered, each seal signal
+carries the node it came from, and the sealer derives that node's URL from
+the node name (`buffer_hot_port`), since the signal's origin — not the
+static config, and not even the ring's current owner — is where the claimed
+bytes physically live. `engine_extensions` loads `httpfs` into the
 sealer's own engine, which the merge cannot work without — the same engine
 also authenticates to the sealed tier's `Store.S3` credentials, when
 configured, via `CREATE SECRET` (`Smolquery.EngineSecrets`), so a compaction
@@ -843,13 +867,16 @@ given a `%Smolquery.Catalog{}` it starts none — but then `job_bootstrap:` must
 carry the `ATTACH` job engines need, since they attach the lake themselves.
 `buffer_base_url` is where the planner reaches `HotServer` for hot
 manifests on a single node. Clustered (`CATALOG_DATABASE_URL` set,
-Milestone 8 L5), the planner ignores it per table and instead derives each
-owning node's URL from the node name itself
+Milestone 8 L5), the planner ignores it and instead fans each table's
+manifest fetch out to *every* ring member, at URLs derived from node names
 (`http://<host-part-of-node-name>:<buffer_hot_port>`) — `buffer_hot_port`
 is the port every buffer node's `HotServer` binds
-(`Smolquery.BufferService`'s own `hot_server_port`); a table whose owner
-is unreachable still fails the whole plan, the same honesty as
-single-node. `store` takes the same `Store.S3` config as the storage
+(`Smolquery.BufferService`'s own `hot_server_port`). Every member, not just
+the table's current owner, because a ring change moves ownership instantly
+while the previous owner still holds the table's acked, unsealed tail —
+asking only the new owner would silently drop those rows from results until
+they seal. Any member that cannot answer fails the whole plan, the same
+honesty as single-node. `store` takes the same `Store.S3` config as the storage
 service's when the sealed tier lives there — every job's engine needs the
 matching `CREATE SECRET` to read it, even though the query path never
 writes through the store itself. `max_concurrent_jobs` refuses rather
@@ -872,9 +899,16 @@ Runtime environment variables:
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`infinity` to disable) |
 | `SMOLQUERY_BUFFER_DIR` | buffer service root for micro-segments and manifest logs |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound |
-| `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` |
+| `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs`; also sets the port the query planner and sealer derive peer URLs with (`buffer_hot_port`) when clustered |
+| `SMOLQUERY_HOT_SERVER_IP` | address `HotServer` binds (`127.0.0.1` single-node; `0.0.0.0` once `CATALOG_DATABASE_URL` enables clustering) |
 | `SMOLQUERY_SEALED_DIR` | storage service root for sealed segments |
 | `SMOLQUERY_BUFFER_BASE_URL` | `HotServer` base URL the sealer and the query planner pull the hot tier from |
+| `SMOLQUERY_S3_BUCKET` | sealed tier on S3 (Milestone 8 L3): setting it points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
+| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | S3 credentials (required with `SMOLQUERY_S3_BUCKET`) |
+| `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
+| `SMOLQUERY_S3_REGION` | S3 region (`us-east-1`) |
+| `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (defaults to `path` when an endpoint is set) |
+| `SMOLQUERY_S3_STAGING_DIR` | local scratch for segments before upload (`<data dir>/sealed-staging`) |
 
 Engine options can also be passed per instance to
 `Smolquery.Engine.start_link/1`, which overrides the application config.
@@ -893,8 +927,20 @@ mix precommit    # format + full local quality gate before committing
 ```
 
 Integration-tagged tests are excluded by default: they download DuckDB
-extensions and serve Parquet over a real HTTP server. CI runs them in a
-dedicated job (`mix test --only integration`).
+extensions, serve Parquet over a real HTTP server, boot `:peer` nodes
+(`epmd` must be running: `epmd -daemon`), and — since Milestone 8 — expect a
+Postgres on `localhost:5432` (`postgres`/`postgres`, override with
+`TEST_POSTGRES_*`) and a MinIO on `localhost:9000`
+(`smolquery`/`smolquery-secret`, override with `TEST_S3_*`):
+
+```sh
+docker run -d --rm -p 9000:9000 \
+  -e MINIO_ROOT_USER=smolquery -e MINIO_ROOT_PASSWORD=smolquery-secret \
+  minio/minio server /data
+```
+
+CI runs them in a dedicated job (`mix test --only integration`) with both
+services provided.
 
 ### Benchmarks
 

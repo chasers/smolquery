@@ -112,7 +112,7 @@ defmodule Smolquery.StorageService.Merge do
           {:ok, Segment.t()} | {:error, term()}
   def run(%Runtime{} = runtime, table_ref, claim) do
     with {:ok, key} <- output_key(claim),
-         {:ok, entries} <- HotTier.manifest(runtime, table_ref),
+         {:ok, entries} <- HotTier.manifest(runtime, table_ref, claim[:origin]),
          {:ok, inputs} <- inputs(entries, claim) do
       merge(runtime, table_ref, key, inputs)
     end

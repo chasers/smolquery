@@ -85,10 +85,12 @@ defmodule Smolquery.QueryService.Runtime do
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
   8 L3), every job engine still needs the same credentials to
   `read_parquet('s3://...')` the locations the catalog hands back. Passing
-  the identical `Segments.Store.S3` config `StorageService` was given (same
-  bucket, same keys) gets each job's engine the matching `CREATE SECRET`;
-  `nil` (the default) means no sealed data lives in an object store this
-  service must authenticate to.
+  the identical store config `StorageService` was given (same bucket, same
+  keys) gets each job's engine the matching `CREATE SECRET` — either shape
+  `StorageService` accepts, `{Smolquery.Segments.Store.S3, opts}` or a built
+  `%Smolquery.Segments.Store{}`, normalized here at boot; `nil` (the
+  default) means no sealed data lives in an object store this service must
+  authenticate to.
   """
 
   alias Smolquery.Catalog
@@ -145,8 +147,7 @@ defmodule Smolquery.QueryService.Runtime do
     :max_concurrent_jobs,
     :default_timeout_ms,
     :job_memory_limit,
-    :result_ttl_ms,
-    :store
+    :result_ttl_ms
   ]
 
   @doc """
@@ -167,6 +168,7 @@ defmodule Smolquery.QueryService.Runtime do
       name: name,
       catalog: catalog,
       catalog_opts: catalog_opts,
+      store: build_store(config),
       job_bootstrap: Keyword.get_lazy(config, :job_bootstrap, fn -> bootstrap(catalog_opts) end),
       history_metadata:
         Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
@@ -174,6 +176,14 @@ defmodule Smolquery.QueryService.Runtime do
         Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end)
     }
     |> struct!(Keyword.take(config, @limits))
+  end
+
+  defp build_store(config) do
+    case Keyword.get(config, :store) do
+      nil -> nil
+      {impl, opts} -> impl.new(opts)
+      %Store{} = store -> store
+    end
   end
 
   use Smolquery.Runtime

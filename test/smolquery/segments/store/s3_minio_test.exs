@@ -69,6 +69,39 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     assert {:ok, ^keys} = Store.list(store, prefix)
   end
 
+  test "list/2 follows continuation tokens past the page size", %{store: store} do
+    prefix = "paging-#{:erlang.unique_integer([:positive])}"
+    keys = for i <- 1..3, do: "#{prefix}/#{i}.parquet"
+
+    for key <- keys, do: {:ok, _} = Store.put(store, key, &File.write!(&1, "x"))
+
+    %Store{config: config} = store
+    paged = %Store{store | config: %S3{config | list_max_keys: 1}}
+
+    assert {:ok, ^keys} = Store.list(paged, prefix)
+  end
+
+  test "list/2 scopes a prefix as a directory, not a string prefix", %{store: store} do
+    base = "scoping-#{:erlang.unique_integer([:positive])}"
+    {:ok, _} = Store.put(store, "#{base}/events/1.parquet", &File.write!(&1, "x"))
+    {:ok, _} = Store.put(store, "#{base}/events_v2/1.parquet", &File.write!(&1, "x"))
+
+    assert Store.list(store, "#{base}/events") == {:ok, ["#{base}/events/1.parquet"]}
+  end
+
+  test "list/2 returns only parquet keys — foreign objects are not segments", %{store: store} do
+    prefix = "foreign-#{:erlang.unique_integer([:positive])}"
+    {:ok, _} = Store.put(store, "#{prefix}/1.parquet", &File.write!(&1, "x"))
+
+    %Store{config: config} = store
+
+    {:ok, %{status: status}} =
+      Req.put(request(config), url: "s3://#{@bucket}/#{prefix}/export.csv", body: "a,b")
+
+    assert status in 200..299
+    assert Store.list(store, prefix) == {:ok, ["#{prefix}/1.parquet"]}
+  end
+
   test "delete/2 removes the object, and is :ok on a key that never existed", %{store: store} do
     key = unique_key()
     {:ok, _put} = Store.put(store, key, &File.write!(&1, "x"))
