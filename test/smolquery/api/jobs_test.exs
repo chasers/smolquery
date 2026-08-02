@@ -122,6 +122,39 @@ defmodule Smolquery.Api.JobsTest do
       assert %{"error" => %{"status" => "INVALID_QUERY"}} = JSON.decode!(response.resp_body)
     end
 
+    test "an unreachable buffer node is a 503, not the caller's 400" do
+      table = {"analytics", "events"}
+
+      catalog =
+        FixedCatalog.new(%{
+          snapshot: 1,
+          schemas: %{table => Smolquery.Schema.new!([{"id", :int64}])},
+          segments: %{}
+        })
+
+      query = :"api_jobs_down_query_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {QueryService.Supervisor,
+         name: query,
+         catalog: catalog,
+         buffer_base_url: "http://127.0.0.1:1",
+         buffer_timeout_ms: 500},
+        id: query
+      )
+
+      on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+      name = :"api_down_#{:erlang.unique_integer([:positive])}"
+      Runtime.put(Runtime.new(name: name, api_key: @key, catalog: catalog, query_name: query))
+      on_exit(fn -> Runtime.delete(name) end)
+
+      response = post_json(name, "/v1/queries", %{"query" => "SELECT * FROM analytics.events"})
+
+      assert response.status == 503
+      assert %{"error" => %{"status" => "UNAVAILABLE"}} = JSON.decode!(response.resp_body)
+    end
+
     test "a missing query field is a 400", %{name: name} do
       assert post_json(name, "/v1/queries", %{"sql" => "SELECT 1"}).status == 400
     end

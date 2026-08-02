@@ -63,6 +63,11 @@ spec:
                   fieldPath: metadata.namespace
             - name: HEADLESS_SERVICE
               value: smolquery-headless
+            # Must match buffer.yaml's replicas: the query role fails a read
+            # when an expected buffer node cannot answer, rather than counting
+            # its unsealed rows as zero (T-94).
+            - name: SMOLQUERY_BUFFER_REPLICAS
+              value: "3"
           volumeMounts:
             - name: data
               mountPath: /data
