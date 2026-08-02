@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
+  - rbac.yaml
   - services.yaml
   - api.yaml
   - buffer.yaml

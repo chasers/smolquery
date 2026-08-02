@@ -51,6 +51,9 @@ defmodule SmolqueryWeb.Layouts do
             <a href={~p"/query"} class="btn btn-ghost">Query</a>
           </li>
           <li>
+            <a href={~p"/cluster"} class="btn btn-ghost">Cluster</a>
+          </li>
+          <li>
             <.theme_toggle />
           </li>
         </ul>
