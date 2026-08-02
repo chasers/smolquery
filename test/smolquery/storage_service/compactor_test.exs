@@ -64,6 +64,8 @@ defmodule Smolquery.StorageService.CompactorTest do
       )
 
     start_supervised!({Compactor, runtime}, id: {:compactor, context.storage})
+    Runtime.put(runtime)
+    on_exit(fn -> Runtime.delete(context.storage) end)
 
     runtime
   end
@@ -192,5 +194,14 @@ defmodule Smolquery.StorageService.CompactorTest do
     start_compactor(context, [])
 
     assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+  end
+
+  test "a table this node's storage ring hands to another node is left alone", context do
+    runtime = start_compactor(context, ring: [:"storage1@elsewhere.invalid"])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 end

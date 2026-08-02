@@ -30,7 +30,7 @@ defmodule Smolquery.BufferService.Drain do
   3. Poll each forced table's hot manifest until every entry is sealed —
      `StorageService.Handoff` completed the merge/registration and called
      back `Client.retire/3` — or `:timeout_ms` elapses.
-  4. Leave the ring (`Membership.leave/2`) — reached only on success; a
+  4. Leave the ring (`Smolquery.Cluster.PgGroup.leave/3`) — reached only on success; a
      step-3 timeout does **not** leave, and does not clear the draining
      flag either. A retried `drain/2` call finds the same tables already
      claimed (so it re-polls the same in-flight handoff rather than forcing
@@ -44,9 +44,9 @@ defmodule Smolquery.BufferService.Drain do
 
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
-  alias Smolquery.BufferService.Membership
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer
+  alias Smolquery.Cluster.PgGroup
 
   @default_poll_ms 200
   @default_timeout_ms 30_000
@@ -92,7 +92,10 @@ defmodule Smolquery.BufferService.Drain do
   def draining?(name), do: :persistent_term.get(draining_key(name), false)
 
   defp leave(name) do
-    name |> Runtime.supervisor() |> Process.whereis() |> then(&Membership.leave(name, &1))
+    name
+    |> Runtime.supervisor()
+    |> Process.whereis()
+    |> then(&PgGroup.leave(Smolquery.BufferService, name, &1))
   end
 
   defp draining_key(name), do: {__MODULE__, name}

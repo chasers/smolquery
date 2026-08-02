@@ -330,9 +330,16 @@ that wiring is configuration. So far the scheduling half is built:
   by the first success, and the log escalates from a warning to an error once a
   table stops looking transient. Distinguishing "retrying" from "stuck" is the part
   that was missing; stopping is not.
-- **Signalling a node that runs no storage service is reported, not raised.**
-  Raising would take down the `TableBuffer` that signalled, and it signals from
-  the write path.
+- **A signal is routed to its ring owner, not cast blindly to whatever node
+  raised it** (Milestone 8 L6). `Smolquery.StorageService.Client` resolves
+  `table_ref`'s owner through `Smolquery.StorageService.Routing` — a second
+  `Ring`, keyed by the storage-node subset of cluster membership rather than
+  the buffer's — and casts to that node directly, the same way `Sealer` and
+  `Compactor` gate on `Routing.own?/2` before acting on a signal or a sweep's
+  table so two storage replicas never double-merge the same one. Only a
+  cluster with no storage node reachable anywhere is reported rather than
+  raised — raising would take down the `TableBuffer` that signalled, and it
+  signals from the write path.
 - **Sealed segments get their own store handle** (`dir: "priv/data/sealed"`),
   separate from the buffer's. The two tiers have opposite write profiles — one put
   per flush against one per seal — and that difference is what makes an object
@@ -796,11 +803,20 @@ the current group commit, so lowering it trades throughput for latency.
 `ring:` is the static fallback only — with `CATALOG_DATABASE_URL` set
 (clustering on, Milestone 8 L4), ownership instead tracks which nodes are
 actually alive and hosting this instance, via `:pg`
-(`Smolquery.BufferService.Membership`); the config value only matters again
+(`Smolquery.Cluster.PgGroup`); the config value only matters again
 if clustering is off. `Smolquery.BufferService.Drain.drain/2` takes a node
 out of the ring on purpose — force-sealing everything it owns and waiting
 for the seal to land before it stops being an owner, so a planned fleet
 shrink loses nothing an unplanned node death wouldn't already risk.
+
+The storage service's own `ring:` is the static fallback for a *second*,
+independent ring — which storage node seals a table's work, not which buffer
+node accumulates it (Milestone 8 L6). With clustering on it likewise tracks
+live `:pg` membership (`Smolquery.Cluster.PgGroup`), and
+`Smolquery.StorageService.Routing.own?/2` is what `Sealer` and `Compactor`
+gate on before acting; a wrong transient owner during a ring change is safe by
+construction, since `Catalog.replace_segments/4` is atomic and
+idempotent-by-key.
 
 The storage service's `:dir` is where sealed segments land, and `:store`
 overrides it the same way — including onto an object store (Milestone 8 L3):

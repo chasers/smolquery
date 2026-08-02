@@ -3,6 +3,7 @@ defmodule Smolquery.StorageService.SealerTest do
 
   import ExUnit.CaptureLog
 
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
   alias Smolquery.Test.Eventually
@@ -209,5 +210,55 @@ defmodule Smolquery.StorageService.SealerTest do
 
     assert Sealer.sealing(name) == []
     assert Process.alive?(sealer)
+  end
+
+  describe "storage-ring ownership (Milestone 8 L6)" do
+    setup context do
+      name = :"sealer_owned_#{:erlang.unique_integer([:positive])}"
+
+      runtime =
+        Runtime.new(
+          name: name,
+          dir: Path.join(context.tmp_dir, "sealed"),
+          ring: [node(), :"storage1@elsewhere.invalid"],
+          handoff: {HandoffProbe, {self(), :ok}}
+        )
+
+      start_supervised!({Task.Supervisor, name: Runtime.seals(name)}, id: {:seals, name})
+      start_supervised!({Sealer, runtime}, id: {:sealer, name})
+      Runtime.put(runtime)
+      on_exit(fn -> Runtime.delete(name) end)
+
+      %{name: name}
+    end
+
+    @tag :tmp_dir
+    test "a signal for a table this node's ring hands to someone else is ignored", %{name: name} do
+      foreign_table = find_table_owned_by(name, :"storage1@elsewhere.invalid")
+
+      assert Sealer.seal_ready(name, foreign_table, claim(["a"])) == :ok
+
+      refute_receive {:sealing, ^foreign_table, _claim, _attempt}, 50
+      assert Sealer.sealing(name) == []
+    end
+
+    @tag :tmp_dir
+    test "a signal for a table this node owns still runs", %{name: name} do
+      own_table = find_table_owned_by(name, node())
+
+      assert Sealer.seal_ready(name, own_table, claim(["a"])) == :ok
+
+      assert_receive {:sealing, ^own_table, %{ids: ["a"]}, attempt}
+      HandoffProbe.release(attempt)
+    end
+  end
+
+  defp find_table_owned_by(name, target_node) do
+    routing = Routing.resolve(name)
+
+    Enum.find(1..1_000, fn i ->
+      Routing.owner(routing, {"analytics", "t#{i}"}) == target_node
+    end)
+    |> then(&{"analytics", "t#{&1}"})
   end
 end

@@ -23,7 +23,7 @@ defmodule Smolquery.Cluster do
 
   This starts Erlang distribution membership only — `Node.list/0` becomes
   real. It says nothing by itself about which node owns which table; that is
-  `Smolquery.BufferService.Membership`'s `:pg` scope (Milestone 8 L4), built
+  `Smolquery.Cluster.PgGroup`, scoped per service (Milestone 8 L4), built
   on the `:pg` server this module starts. `Smolquery.Cluster.Membership`'s
   debounced events are for things that react to the fleet changing shape —
   the pg-backed ring lookups themselves need no debounce, since `:pg` is

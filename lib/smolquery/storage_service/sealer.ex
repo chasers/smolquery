@@ -9,13 +9,21 @@ defmodule Smolquery.StorageService.Sealer do
 
   ## Dropping a signal is always safe
 
-  Two rules discard signals: a table already being sealed coalesces (its running
-  attempt covers the same claim), and a signal arriving at `max_concurrent_seals`
-  is shed. Both are safe because signalling is level-triggered —
-  `Smolquery.BufferService.SealConsumer` re-signals every `seal_retry_ms` until
-  the claim is retired, so a dropped signal costs a retry interval and nothing
-  else. That is the whole reason this process needs no queue: the buffer holds the
-  only durable record of what wants sealing, and it repeats itself.
+  Three rules discard signals: a signal for a table this node does not own per
+  `Smolquery.StorageService.Routing.own?/2` is ignored outright (Milestone 8 L6,
+  PL-11 D6 — the seal-work-distribution gate: `Smolquery.StorageService.Client`
+  routes a signal to the storage ring's current owner, but a ring change between
+  that decision and this cast arriving can make the receiving node a stale owner,
+  and a two-node race during that window is safe by construction, not something
+  this gate needs to prevent — see D6), a table already being sealed coalesces
+  (its running attempt covers the same claim), and a signal arriving at
+  `max_concurrent_seals` is shed. All three are safe because signalling is
+  level-triggered — `Smolquery.BufferService.SealConsumer` re-signals every
+  `seal_retry_ms` until the claim is retired, so a dropped signal costs a retry
+  interval and nothing else (the retry re-resolves the owner too, so a table
+  that moved during a ring change gets a fresh, correctly-routed signal next
+  time). That is the whole reason this process needs no queue: the buffer holds
+  the only durable record of what wants sealing, and it repeats itself.
 
   ## Attempts fail rather than block
 
@@ -44,6 +52,7 @@ defmodule Smolquery.StorageService.Sealer do
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Handoff
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
@@ -60,15 +69,21 @@ defmodule Smolquery.StorageService.Sealer do
   end
 
   @doc """
-  Hands a seal signal to the sealer, without waiting for the seal.
+  Hands a seal signal to the sealer running on `node`, without waiting for the
+  seal.
 
   A cast rather than a call, because the caller is the owning `TableBuffer` and
   its write path must not wait on storage. Returns `:ok` whether the signal
   becomes work or is dropped; see the coalescing rules above.
+
+  `node` defaults to this node — `Smolquery.StorageService.Client` passes the
+  storage ring's current owner explicitly (Milestone 8 L6), so the signal
+  reaches the sealer that will actually accept it rather than only ever the
+  one running alongside the caller.
   """
-  @spec seal_ready(atom(), Store.table_ref(), SealConsumer.claim()) :: :ok
-  def seal_ready(name, table_ref, claim) do
-    GenServer.cast(Runtime.sealer(name), {:seal_ready, table_ref, claim})
+  @spec seal_ready(atom(), Store.table_ref(), SealConsumer.claim(), node()) :: :ok
+  def seal_ready(name, table_ref, claim, node \\ node()) do
+    GenServer.cast({Runtime.sealer(name), node}, {:seal_ready, table_ref, claim})
   end
 
   @doc """
@@ -96,6 +111,7 @@ defmodule Smolquery.StorageService.Sealer do
   @impl GenServer
   def handle_cast({:seal_ready, table_ref, claim}, state) do
     cond do
+      not owner?(state, table_ref) -> {:noreply, ignore_foreign(state, table_ref)}
       sealing?(state, table_ref) -> {:noreply, state}
       at_capacity?(state) -> {:noreply, shed(state, table_ref)}
       true -> {:noreply, start_attempt(state, table_ref, claim)}
@@ -170,6 +186,17 @@ defmodule Smolquery.StorageService.Sealer do
   defp log_failure(table_ref, description, consecutive),
     do:
       Logger.warning("seal of #{inspect(table_ref)} #{description} (#{consecutive} consecutive)")
+
+  defp owner?(state, table_ref),
+    do: state.runtime.name |> Routing.resolve() |> Routing.own?(table_ref)
+
+  defp ignore_foreign(state, table_ref) do
+    Logger.debug(fn ->
+      "seal of #{inspect(table_ref)} ignored: not this node's storage-ring owner"
+    end)
+
+    state
+  end
 
   defp sealing?(state, table_ref), do: table_ref in Map.values(state.attempts)
 

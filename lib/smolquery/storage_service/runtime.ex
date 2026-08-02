@@ -28,7 +28,8 @@ defmodule Smolquery.StorageService.Runtime do
         compact_max_bytes: 134_217_728,
         retention_interval_ms: 3_600_000,
         snapshot_keep_ms: 86_400_000,
-        handoff: {Smolquery.StorageService.Handoff.Seal, []}
+        handoff: {Smolquery.StorageService.Handoff.Seal, []},
+        ring: [:"storage1@host"]
 
   `:dir` is where sealed segments land, through a `Store.Local` beneath it. Pass
   `:store` to override the store outright — it is a wholly separate handle from
@@ -47,6 +48,14 @@ defmodule Smolquery.StorageService.Runtime do
   `max_concurrent_seals` bounds seals in flight on this node. Signalling is
   level-triggered, so a signal shed at the bound costs a `seal_retry_ms` delay
   rather than a lost seal.
+
+  `ring` is the static node list `Smolquery.StorageService.Routing` falls back
+  to — the storage-side ownership ring's node set once clustering is off, or
+  before any node has joined `Smolquery.Cluster.PgGroup`'s `:pg` group for
+  this service. It defaults to `[node()]`, so a single-node deployment owns every
+  table's seal work, unchanged from before Milestone 8 L6. Distinct from
+  `Smolquery.BufferService.Runtime`'s `ring`: the two rings are independent —
+  which node buffers a table and which node seals it need not be the same.
 
   `retention_interval_ms` paces `Smolquery.StorageService.Retention`'s sweep;
   which tables expire and how fast is per-table policy in the catalog, not
@@ -96,15 +105,17 @@ defmodule Smolquery.StorageService.Runtime do
   extension download.
   """
 
+  alias Smolquery.BufferService.Ring
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
 
-  @enforce_keys [:name, :store, :catalog]
+  @enforce_keys [:name, :store, :catalog, :ring]
   defstruct [
     :name,
     :store,
     :catalog,
     :catalog_opts,
+    :ring,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_timeout_ms: 30_000,
@@ -128,6 +139,7 @@ defmodule Smolquery.StorageService.Runtime do
           store: Store.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
+          ring: Ring.t(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
           buffer_timeout_ms: timeout(),
@@ -191,7 +203,8 @@ defmodule Smolquery.StorageService.Runtime do
       name: name,
       store: build_store(config),
       catalog: catalog,
-      catalog_opts: catalog_opts
+      catalog_opts: catalog_opts,
+      ring: Ring.new!(Keyword.get(config, :ring, [node()]))
     }
     |> struct!(Keyword.take(config, @limits))
     |> validate_compression()

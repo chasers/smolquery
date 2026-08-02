@@ -17,21 +17,21 @@ defmodule Smolquery.BufferService.Routing do
   ## Ring changes at runtime (Milestone 8 L4)
 
   The ring's node list is no longer read from `runtime.ring` /
-  `config[:ring]` directly — both paths ask
-  `Smolquery.BufferService.Membership.nodes/2` first, which answers from
-  live `:pg` group membership when `Smolquery.Cluster.enabled?/0`, falling
-  back to the same static list as before otherwise. `:pg` membership is
-  already a fast, per-node-replicated read (no network round trip), so the
-  clustered path recomputes fresh on every `resolve/1` rather than caching —
-  the `:persistent_term` cache below only ever applies to the single-node,
+  `config[:ring]` directly — both paths ask `Smolquery.Cluster.PgGroup.nodes/3`
+  first, which answers from live `:pg` group membership when
+  `Smolquery.Cluster.enabled?/0`, falling back to the same static list as
+  before otherwise. `:pg` membership is already a fast, per-node-replicated
+  read (no network round trip), so the clustered path recomputes fresh on
+  every `resolve/1` rather than caching — the `:persistent_term` cache below
+  (`Smolquery.Cluster.RingCache`) only ever applies to the single-node,
   clustering-disabled case, where the ring genuinely is immutable.
   """
 
-  alias Smolquery.BufferService.Membership
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.Transport
-  alias Smolquery.Cluster
+  alias Smolquery.Cluster.PgGroup
+  alias Smolquery.Cluster.RingCache
 
   @enforce_keys [:name, :ring, :remote_transport, :write_timeout_ms, :control_timeout_ms]
   defstruct [:name, :ring, :remote_transport, :write_timeout_ms, :control_timeout_ms]
@@ -79,31 +79,20 @@ defmodule Smolquery.BufferService.Routing do
   Drops a cached routing, so the next resolve rebuilds it from configuration.
   """
   @spec forget(atom()) :: boolean()
-  def forget(name), do: :persistent_term.erase(key(name))
+  def forget(name), do: RingCache.forget(key(name))
 
   defp from_runtime(%Runtime{} = runtime) do
     %__MODULE__{
       name: runtime.name,
-      ring: Ring.new!(Membership.nodes(runtime.name, Ring.nodes(runtime.ring))),
+      ring:
+        Ring.new!(PgGroup.nodes(Smolquery.BufferService, runtime.name, Ring.nodes(runtime.ring))),
       remote_transport: remote_transport(),
       write_timeout_ms: runtime.write_timeout_ms,
       control_timeout_ms: runtime.control_timeout_ms
     }
   end
 
-  defp cached(name) do
-    if Cluster.enabled?(), do: build(name), else: cached_static(name)
-  end
-
-  defp cached_static(name) do
-    :persistent_term.get(key(name))
-  rescue
-    ArgumentError ->
-      routing = build(name)
-      :persistent_term.put(key(name), routing)
-
-      routing
-  end
+  defp cached(name), do: RingCache.resolve(key(name), fn -> build(name) end)
 
   defp build(name) do
     config = Application.get_env(:smolquery, Smolquery.BufferService, [])
@@ -111,7 +100,7 @@ defmodule Smolquery.BufferService.Routing do
 
     %__MODULE__{
       name: name,
-      ring: Ring.new!(Membership.nodes(name, static)),
+      ring: Ring.new!(PgGroup.nodes(Smolquery.BufferService, name, static)),
       remote_transport: remote_transport(),
       write_timeout_ms: Keyword.get(config, :write_timeout_ms, @default_write_timeout_ms),
       control_timeout_ms: Keyword.get(config, :control_timeout_ms, @default_control_timeout_ms)
