@@ -45,6 +45,26 @@ defmodule Smolquery.BufferService.ExpectedNodesTest do
     assert {:ok, %{epoch: 0}} = Memory.fetch(store, scope(name))
   end
 
+  test "an empty static configuration seeds nothing and answers the fallback" do
+    name = unique_name(:expected)
+    store = start_store()
+    start_keeper(name, store, [])
+
+    assert Memory.fetch(store, scope(name)) == :not_found
+    assert ExpectedNodes.list(name) == []
+  end
+
+  test "an empty-config keeper adopts the row a configured node seeds" do
+    name = unique_name(:expected)
+    store = start_store()
+    start_keeper(name, store, [])
+
+    {:ok, _config} = Memory.ensure(store, scope(name), [node(), @joiner])
+    ExpectedNodes.refresh(name)
+
+    assert ExpectedNodes.list(name) == Enum.sort([node(), @joiner])
+  end
+
   test "an existing row wins over this node's static configuration" do
     name = unique_name(:expected)
     store = start_store()
