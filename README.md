@@ -147,9 +147,17 @@ iex -S mix
 The API is on [`localhost:4000`](http://localhost:4000) (dev Bearer key:
 `smolquery-dev`) and the LiveView UI on
 [`localhost:4002`](http://localhost:4002) — browse datasets and tables, create
-both, edit a table's retention policy, preview rows, and run SQL through the
-query service's job lifecycle (submit, live state, paged results, cancel). The
-UI calls service client modules directly, never loopback HTTP, and binds
+both, edit a table's retention policy, preview rows, run SQL through the query
+service's job lifecycle (submit, live state, paged results, cancel), and watch
+the fleet on `/cluster` — every node's alive/ring-epoch/drain state, live, with
+three ways to disturb one on purpose: **kill** (ungraceful pod force-delete —
+watches `RingEpoch`'s fencing actually earn its keep), **restart** (a plain
+pod delete — also what un-sticks a drained node), and **drain** (a genuinely
+graceful ring exit over distributed Erlang, no pod involved). Kill/restart
+work against a local `kind` cluster (below) via `kubectl`, or against a real
+deployment via the in-cluster ServiceAccount `deploy/base/rbac.yaml` grants —
+same `Smolquery.Cluster.Pods` module either way. The UI calls service client
+modules directly, never loopback HTTP, and binds
 `127.0.0.1` because it has no auth story yet; exposing it
 (`SMOLQUERY_WEB_IP=0.0.0.0`) is a deliberate act.
 
@@ -209,6 +217,12 @@ node stops being an owner:
 kubectl -n smolquery exec smolquery-buffer-0 -c smolquery -- /app/bin/smolquery rpc \
   ':ok = Smolquery.BufferService.Drain.drain(Smolquery.BufferService, timeout_ms: 120_000)'
 ```
+
+All three of drain, restart, and an *ungraceful* kill are a click away
+instead: the web UI's `/cluster` page lists the fleet with buttons per node
+when it detects this `kind-smolquery` context (kill/restart) or an alive
+buffer node to RPC into (drain), so you can watch ring ownership, `RingEpoch`,
+and `ExpectedNodes` recover live.
 
 Iterate with `./scripts/kind-up.sh` again (rebuilds the image, reloads it,
 restarts the fleet); tear down with `kind delete cluster --name smolquery`.

@@ -1,0 +1,35 @@
+# The api/web pod's own identity for one purpose: /cluster's kill/restart
+# buttons (Smolquery.Cluster.Pods) delete pods in this namespace via the
+# Kubernetes API server directly, using this ServiceAccount's mounted token
+# — no kubectl, no kubeconfig, nothing extra in the release image. Scoped to
+# exactly this namespace and exactly these verbs on exactly `pods`; nothing
+# else in this deployment needs API server access at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: smolquery-api
+  namespace: smolquery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: smolquery-pod-ops
+  namespace: smolquery
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: smolquery-api-pod-ops
+  namespace: smolquery
+subjects:
+  - kind: ServiceAccount
+    name: smolquery-api
+    namespace: smolquery
+roleRef:
+  kind: Role
+  name: smolquery-pod-ops
+  apiGroup: rbac.authorization.k8s.io

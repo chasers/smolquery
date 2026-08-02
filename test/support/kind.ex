@@ -8,14 +8,13 @@ defmodule Smolquery.Test.Kind do
   see — kept here rather than in the tests so that each one is stated once and
   the destructive ones are hard to point at the wrong cluster.
 
-  ## Every kubectl is pinned
-
-  `kubectl/1` supplies `--context kind-smolquery` and a repo-scoped
-  `KUBECONFIG` on every invocation, so no caller can inherit an ambient context.
-  That is not stylistic: these tests delete pods, and a `kubectl` that silently
-  followed `~/.kube/config` would delete them somewhere else. The shell scripts
-  make the same guarantee by repeating the flag at each call site; a single
-  wrapper cannot be forgotten.
+  The pinned-context `kubectl` primitives (`context/0`, `available?/0`,
+  `kubectl/1`, `kubectl!/1`, `pod_of_node/1`, `kill!/1`, `restart!/1`) live in
+  `Smolquery.Cluster.Pods` — shared with the operator-facing kill/restart
+  buttons in `SmolqueryWeb.ClusterLive.Index`, so the "never point this at
+  the wrong cluster" guarantee has exactly one implementation. Everything
+  else here is test-only: RPC-driven fleet assertions and the API's HTTP
+  surface.
 
   ## What replication will want from this
 
@@ -27,10 +26,9 @@ defmodule Smolquery.Test.Kind do
   merged manifest counts a replicated row once rather than once per copy.
   """
 
+  alias Smolquery.Cluster.Pods
   alias Smolquery.Test.Eventually
 
-  @context "kind-smolquery"
-  @namespace "smolquery"
   @statefulset "statefulset/smolquery-buffer"
   @api_pod "smolquery-api-0"
 
@@ -38,7 +36,7 @@ defmodule Smolquery.Test.Kind do
   The kube context every command here is pinned to.
   """
   @spec context() :: String.t()
-  def context, do: @context
+  defdelegate context, to: Pods
 
   @doc """
   Whether the kind cluster's context exists at all.
@@ -48,40 +46,19 @@ defmodule Smolquery.Test.Kind do
   pile of connection errors.
   """
   @spec available?() :: boolean()
-  def available? do
-    case System.cmd("kubectl", ["config", "get-contexts", "-o", "name"],
-           env: env(),
-           stderr_to_stdout: true
-         ) do
-      {output, 0} -> @context in String.split(output, "\n", trim: true)
-      _other -> false
-    end
-  end
+  defdelegate available?, to: Pods
 
   @doc """
   Runs `kubectl` against the kind cluster, in the smolquery namespace.
   """
   @spec kubectl([String.t()]) :: {String.t(), non_neg_integer()}
-  def kubectl(args) do
-    System.cmd("kubectl", ["--context", @context, "-n", @namespace] ++ args,
-      env: env(),
-      stderr_to_stdout: true
-    )
-  end
+  defdelegate kubectl(args), to: Pods
 
   @doc """
   `kubectl/1`, raising on a non-zero exit and returning trimmed output.
   """
   @spec kubectl!([String.t()]) :: String.t()
-  def kubectl!(args) do
-    case kubectl(args) do
-      {output, 0} ->
-        String.trim(output)
-
-      {output, status} ->
-        raise "kubectl #{Enum.join(args, " ")} exited #{status}:\n#{output}"
-    end
-  end
+  defdelegate kubectl!(args), to: Pods
 
   @doc """
   Evaluates `code` inside a running pod's release.
@@ -130,9 +107,7 @@ defmodule Smolquery.Test.Kind do
   `smolquery-buffer-1`.
   """
   @spec pod_of_node(String.t()) :: String.t()
-  def pod_of_node(node) do
-    node |> String.split("@", parts: 2) |> List.last() |> String.split(".") |> hd()
-  end
+  defdelegate pod_of_node(node), to: Pods
 
   @doc """
   Two table names the ring places on two *different* buffer nodes.
@@ -181,10 +156,8 @@ defmodule Smolquery.Test.Kind do
   Deletes `pod` without waiting for a graceful stop — an ungraceful departure,
   the way a crash leaves the ring rather than the way a drain does.
   """
-  @spec kill!(String.t()) :: String.t()
-  def kill!(pod) do
-    kubectl!(["delete", "pod", pod, "--force", "--grace-period=0", "--wait=false"])
-  end
+  @spec kill!(String.t()) :: :ok
+  defdelegate kill!(pod), to: Pods
 
   @doc """
   Restarts `pod`, then waits for the fleet.
@@ -197,7 +170,7 @@ defmodule Smolquery.Test.Kind do
   """
   @spec restore!(String.t(), pos_integer()) :: :ok
   def restore!(pod, size \\ 3) do
-    kubectl(["delete", "pod", pod, "--wait=false"])
+    :ok = Pods.restart!(pod)
 
     await_fleet!(size)
   end
@@ -382,8 +355,6 @@ defmodule Smolquery.Test.Kind do
   defp base_url, do: System.get_env("BASE", "http://localhost:8080")
 
   defp api_key, do: System.get_env("SMOLQUERY_API_KEY", "kind-only-api-key")
-
-  defp env, do: [{"KUBECONFIG", Path.join(File.cwd!(), ".kube/config")}]
 
   defp presence(""), do: nil
   defp presence(value), do: value

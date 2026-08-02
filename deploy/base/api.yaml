@@ -26,6 +26,9 @@ spec:
       # smolquery-api Service) into every pod, shadowing the real config var.
       enableServiceLinks: false
       terminationGracePeriodSeconds: 60
+      # Grants /cluster's kill/restart buttons (Smolquery.Cluster.Pods) API
+      # server access to delete pods in this namespace — see rbac.yaml.
+      serviceAccountName: smolquery-api
       initContainers:
         - name: wait-for-postgres
           image: postgres:17-alpine
