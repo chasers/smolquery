@@ -20,7 +20,7 @@ defmodule Smolquery.Application do
     Smolquery.InternalSecret.ensure()
 
     children =
-      [Smolquery.Telemetry] ++
+      [Smolquery.Telemetry, Smolquery.Cluster.RingCache] ++
         Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)
