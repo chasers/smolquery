@@ -214,7 +214,11 @@ What that ack means:
 - **The loss window is honest.** With the default local store, a buffer node's
   disk holds a single copy of its unsealed tail: acked rows survive a process,
   BEAM, or node crash, and losing the disk loses that tail. Sealing is what
-  bounds it.
+  bounds it. What a commit requires beyond the local disk before it acks is a
+  seam, not a constant: `Smolquery.BufferService.Replicator` (default
+  `Replicator.None`, the single-copy policy above) is where segment shipping
+  (T-96) or a shared-store manifest policy (T-26) plugs in without the group
+  commit knowing which.
 - **A batch with an id is exactly-once; one without is at-least-once.** A batch
   carrying a `:batch_id` idempotency key can be retried through any failure — a
   lost ack, a transport timeout, a buffer crash-before-reply — and its rows land

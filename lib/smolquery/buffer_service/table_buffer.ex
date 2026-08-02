@@ -11,8 +11,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   `write/4` is a `GenServer.call` whose reply is deliberately *not* sent from
   `handle_call`. Callers accumulate in a pending list while their rows sit in
   memory, and every one of them is answered together, after the segment is in the
-  store and its entry is fsynced into the manifest. Nothing here can reply early,
-  because the reply is not in the code path that accepts the batch.
+  store, its entry is fsynced into the manifest, and the runtime's
+  `Smolquery.BufferService.Replicator` reports the commit durable to its own
+  standard — one replication round per flush, amortized exactly the way the
+  fsync is. Nothing here can reply early, because the reply is not in the code
+  path that accepts the batch.
 
   A flush that fails answers every waiting caller with the error and discards the
   rows. That is the honest outcome: those rows were never acked, so the client is
@@ -82,6 +85,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Load
+  alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
@@ -521,9 +525,21 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp persist(state, rows) do
     with {:ok, segment} <-
            Writer.write(rows, state.schema, store: state.runtime.store, prefix: state.prefix),
-         {:ok, entry} <- add(state, segment) do
+         {:ok, entry} <- add(state, segment),
+         :ok <- replicate(state, segment, entry) do
       {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
     end
+  end
+
+  defp replicate(state, segment, entry) do
+    Replicator.commit(state.runtime.replicator, %{
+      name: state.runtime.name,
+      table_ref: state.table_ref,
+      store: state.runtime.store,
+      segment: segment,
+      entry: entry,
+      batch_ids: Enum.reverse(state.batch_ids)
+    })
   end
 
   defp add(state, segment) do
