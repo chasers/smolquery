@@ -44,6 +44,14 @@ defmodule Smolquery.Catalog.DuckLake do
   catalog already holds and commits only the remainder. Commits use optimistic
   concurrency and DuckLake does not retry them, so a conflicting commit is
   retried here with backoff before surfacing `{:error, :commit_conflict}`.
+  The diff runs *inside* the retry, against a fresh read each attempt —
+  replaying the pre-conflict statement would re-add exactly the paths the
+  winning commit just registered, turning a lost race into the double-count
+  this diff exists to prevent (Milestone 8 L6: two storage nodes can each
+  believe they own a table's seal work while a ring change propagates). A
+  simultaneous two-committer race — both reading before either commits, and
+  DuckLake accepting both appends — is not closed by this and remains the
+  ring gate's residual window; see `Smolquery.StorageService.Routing`.
 
   DuckLake collects its own min-max statistics from the Parquet footer at
   registration, which is why nothing here passes stats: the sealed tier prunes
@@ -282,15 +290,21 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def register_segments(%__MODULE__{} = config, {dataset, table} = ref, segments) do
+  def register_segments(%__MODULE__{} = config, {dataset, table}, segments) do
     paths = segments |> Enum.map(& &1.path) |> Enum.uniq()
 
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         {:ok, registered} <- segments(config, ref, :current) do
+         :ok <- with_commit_retries(fn -> add_missing(config, {dataset, table}, paths) end) do
+      current_snapshot(config)
+    end
+  end
+
+  defp add_missing(config, ref, paths) do
+    with {:ok, registered} <- segments(config, ref, :current) do
       case paths -- registered do
-        [] -> current_snapshot(config)
-        pending -> add_data_files(config, {dataset, table}, pending)
+        [] -> {:ok, :already_registered}
+        pending -> query(config, add_statement(config, ref, pending))
       end
     end
   end
@@ -345,29 +359,36 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def replace_segments(%__MODULE__{} = _config, _table, [], _paths), do: {:error, :no_segments}
 
-  def replace_segments(%__MODULE__{} = config, {dataset, table} = ref, segments, paths) do
+  def replace_segments(%__MODULE__{} = config, {dataset, table}, segments, paths) do
     add = segments |> Enum.map(& &1.path) |> Enum.uniq()
+    drop = Enum.uniq(paths)
 
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         {:ok, registered} <- segments(config, ref, :current) do
+         :ok <- with_commit_retries(fn -> swap_missing(config, {dataset, table}, add, drop) end) do
+      current_snapshot(config)
+    end
+  end
+
+  defp swap_missing(config, ref, add, drop) do
+    with {:ok, registered} <- segments(config, ref, :current) do
       case add -- registered do
-        [] -> current_snapshot(config)
-        pending -> swap(config, {dataset, table}, pending, Enum.uniq(paths))
+        [] -> {:ok, :already_swapped}
+        pending -> swap(config, ref, pending, drop)
       end
     end
   end
 
-  defp swap(config, ref, add, []), do: add_data_files(config, ref, add)
+  defp swap(config, ref, add, []), do: query(config, add_statement(config, ref, add))
 
   defp swap(config, ref, add, drop) do
     with {:ok, name} <- table_name(config, ref),
          :ok <-
-           commit_transaction(config, [
+           Engine.transaction(config.engine, [
              delete_statement(name, drop),
              add_statement(config, ref, add)
            ]) do
-      current_snapshot(config)
+      {:ok, :committed}
     end
   end
 
@@ -490,10 +511,6 @@ defmodule Smolquery.Catalog.DuckLake do
   defp metadata_schema(%__MODULE__{catalog: catalog}),
     do: Identifier.quote_name!("__ducklake_metadata_" <> catalog)
 
-  defp add_data_files(config, ref, paths) do
-    with :ok <- commit(config, add_statement(config, ref, paths)), do: current_snapshot(config)
-  end
-
   defp add_statement(config, {dataset, table}, paths) do
     literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)
 
@@ -509,12 +526,6 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp commit(config, sql), do: with_commit_retries(fn -> query(config, sql) end)
-
-  defp commit_transaction(config, statements) do
-    with_commit_retries(fn ->
-      with :ok <- Engine.transaction(config.engine, statements), do: {:ok, :committed}
-    end)
-  end
 
   defp with_commit_retries(run, attempt \\ 1) do
     case run.() do
@@ -533,7 +544,10 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp backoff(attempt), do: (1 <<< attempt) * 5 + :rand.uniform(10)
 
-  defp conflict?(error), do: Exception.message(error) =~ "Failed to commit"
+  defp conflict?(%{__exception__: true} = error),
+    do: Exception.message(error) =~ "Failed to commit"
+
+  defp conflict?(_error), do: false
 
   defp classify(error) do
     if conflict?(error), do: :commit_conflict, else: error

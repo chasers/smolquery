@@ -274,9 +274,19 @@ defmodule Smolquery.Engine.Connection do
     bootstrap(statements, fn sql ->
       case Adbc.Connection.query(adbc, sql) do
         {:ok, _result} -> :ok
-        {:error, reason} -> {:error, {:statement_failed, sql, reason}}
+        {:error, reason} -> {:error, {:statement_failed, safe_sql(sql), reason}}
       end
     end)
+  end
+
+  defp safe_sql(sql) do
+    if sql =~ ~r/password|secret|key_id/i do
+      prefix = sql |> String.split(["'", "("], parts: 2) |> hd() |> String.trim()
+
+      prefix <> " … [statement redacted: carries credentials]"
+    else
+      sql
+    end
   end
 
   defp invalidate(state, error) do

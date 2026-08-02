@@ -41,9 +41,12 @@ defmodule Smolquery.StorageService.Runtime do
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/bulk/sealed"}
 
   `buffer_base_url` is where the sealer reaches `BufferService.HotServer` to pull
-  a table's manifest and micro-segment bytes. Configuration is honest for a
-  single-node deployment; a cluster resolves it from the ownership ring instead,
-  which arrives with Milestone 8.
+  a table's manifest and micro-segment bytes — honest for a single-node
+  deployment. With clustering on, a seal signal carries its `:origin` node and
+  `Smolquery.StorageService.HotTier` derives that node's URL from its name
+  instead, using `buffer_hot_port` — the port every buffer node's `HotServer`
+  binds (`Smolquery.BufferService`'s own `hot_server_port`) — the same
+  derivation the query planner uses (Milestone 8 L5/L6).
 
   `max_concurrent_seals` bounds seals in flight on this node. Signalling is
   level-triggered, so a signal shed at the bound costs a `seal_retry_ms` delay
@@ -118,6 +121,7 @@ defmodule Smolquery.StorageService.Runtime do
     :ring,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
+    buffer_hot_port: 4001,
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
     compression: :zstd,
@@ -142,6 +146,7 @@ defmodule Smolquery.StorageService.Runtime do
           ring: Ring.t(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
+          buffer_hot_port: :inet.port_number(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
           compression: atom(),
@@ -161,6 +166,7 @@ defmodule Smolquery.StorageService.Runtime do
   @limits [
     :buffer_name,
     :buffer_base_url,
+    :buffer_hot_port,
     :buffer_timeout_ms,
     :engine_extensions,
     :compression,

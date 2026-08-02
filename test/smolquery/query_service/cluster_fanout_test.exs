@@ -1,24 +1,26 @@
 defmodule Smolquery.QueryService.ClusterFanoutTest do
   @moduledoc """
-  Milestone 8 L5: `Planner.base_url/2` derives an owner's `HotServer` URL
-  from the owning node's own name once clustering is on, instead of the
-  single-node `buffer_base_url` — the "one function" change the L1-era
-  moduledoc called out ("the ring is `[self]`; Milestone 8 replaces that
-  one function with ring lookup").
+  Milestone 8 L5: once clustering is on, the planner derives each ring
+  member's `HotServer` URL from the member's node name
+  (`Smolquery.Cluster.node_host/1`) and fans the manifest fetch out over
+  all of them, instead of reading the single-node `buffer_base_url` — and
+  the job engine's hot-tier secret (`Smolquery.EngineSecrets.hot_tier/2`,
+  used here exactly as `QueryService.Runner` uses it) widens its scope so
+  the internal header actually reaches those derived URLs.
 
   This proves the derivation reaches a real, live `HotServer` through a
   real (if loopback) node name rather than the static config string —
   distribution starts with a connectable name (`@127.0.0.1`) so
-  `node_host/1` has something real to compute from. It does not attempt a
-  *second* real node on the same machine: two peers sharing one loopback
-  host cannot both bind the one port every real deployment's buffer nodes
-  share (`hot_server_port`), which is exactly the assumption `base_url/2`
-  relies on — different real hosts, same port. Genuine cross-host fan-out
-  (distinct pod IPs, same port) is what the kind cluster (Milestone 8 L7)
-  exists to prove for real; T-77 already scoped it as "the harness for
-  ring drain and fan-out testing".
+  `Cluster.node_host/1` has something real to compute from. It does not
+  attempt a *second* real node on the same machine: two peers sharing one
+  loopback host cannot both bind the one port every real deployment's
+  buffer nodes share (`hot_server_port`), which is exactly the assumption
+  the URL derivation relies on — different real hosts, same port. Genuine
+  cross-host fan-out (distinct pod IPs, same port) is what the kind
+  cluster (Milestone 8 L7) exists to prove for real; T-77 already scoped
+  it as "the harness for ring drain and fan-out testing".
 
-  "An unreachable owner fails the whole plan" is not new here and already
+  "An unreachable member fails the whole plan" is not new here and already
   has unit coverage (`planner_test.exs`, "an unreachable hot tier fails
   the plan") — that path is `manifests/2`'s `Task.async_stream` halting on
   any error, which L5 does not touch.
@@ -85,10 +87,9 @@ defmodule Smolquery.QueryService.ClusterFanoutTest do
       {Engine,
        name: @job,
        extensions: [:ducklake, :httpfs],
-       statements: [
-         Smolquery.InternalSecret.create_secret_statement("http://"),
-         DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
-       ]}
+       statements:
+         Smolquery.EngineSecrets.hot_tier([:httpfs], "http://static-config.invalid:1") ++
+           [DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)]}
     )
 
     runtime =
@@ -115,6 +116,13 @@ defmodule Smolquery.QueryService.ClusterFanoutTest do
              Planner.plan(runtime, Engine.connection_name(@job), "SELECT * FROM analytics.events")
 
     assert [_entry] = plan.hot[@table]
+
+    for statement <- plan.statements do
+      assert {:ok, _result} = Engine.query(@job, statement)
+    end
+
+    assert {:ok, result} = Engine.query(@job, plan.sql)
+    assert result.rows == [[1, "local"]]
   end
 
   defp ensure_distributed do

@@ -13,9 +13,10 @@ defmodule Smolquery.StorageService.Sealer do
   `Smolquery.StorageService.Routing.own?/2` is ignored outright (Milestone 8 L6,
   PL-11 D6 — the seal-work-distribution gate: `Smolquery.StorageService.Client`
   routes a signal to the storage ring's current owner, but a ring change between
-  that decision and this cast arriving can make the receiving node a stale owner,
-  and a two-node race during that window is safe by construction, not something
-  this gate needs to prevent — see D6), a table already being sealed coalesces
+  that decision and this cast arriving can make the receiving node a stale owner;
+  the gate narrows the two-owner overlap a ring change opens, and the catalog's
+  re-diffed commit retries are what keep the remainder from double-registering —
+  see `Smolquery.StorageService.Routing`), a table already being sealed coalesces
   (its running attempt covers the same claim), and a signal arriving at
   `max_concurrent_seals` is shed. All three are safe because signalling is
   level-triggered — `Smolquery.BufferService.SealConsumer` re-signals every
@@ -80,10 +81,31 @@ defmodule Smolquery.StorageService.Sealer do
   storage ring's current owner explicitly (Milestone 8 L6), so the signal
   reaches the sealer that will actually accept it rather than only ever the
   one running alongside the caller.
+
+  The send itself must not touch distribution setup: `GenServer.cast/2` to a
+  `{name, node}` tuple blocks the caller for the connection attempt when no
+  connection to `node` exists (up to `net_setuptime`), and the caller here is
+  the owning `TableBuffer`'s write path. `:noconnect`/`:nosuspend` sends the
+  message only over an established connection and hands the connect attempt to
+  a throwaway process otherwise — the same shape as Erlang's own
+  `gen_server:cast/2`.
   """
   @spec seal_ready(atom(), Store.table_ref(), SealConsumer.claim(), node()) :: :ok
   def seal_ready(name, table_ref, claim, node \\ node()) do
-    GenServer.cast({Runtime.sealer(name), node}, {:seal_ready, table_ref, claim})
+    destination = {Runtime.sealer(name), node}
+    message = {:"$gen_cast", {:seal_ready, table_ref, claim}}
+
+    case :erlang.send(destination, message, [:noconnect, :nosuspend]) do
+      :ok ->
+        :ok
+
+      _unconnected ->
+        spawn(fn -> send(destination, message) end)
+
+        :ok
+    end
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc """

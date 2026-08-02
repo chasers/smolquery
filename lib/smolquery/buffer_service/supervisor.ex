@@ -19,16 +19,21 @@ defmodule Smolquery.BufferService.Supervisor do
   `HotServer` is last — it only reads the manifest and the store, so nothing
   beneath it depends on it being up.
 
-  This process's own pid joins `Smolquery.Cluster.PgGroup`'s `:pg`
-  group on init (Milestone 8 L4) — a no-op when clustering is off, and
-  otherwise what puts this node in the ring at all. The pid dies with this
-  subtree, so an ungraceful crash removes the node from the ring the same
-  way `Smolquery.BufferService.Drain.drain/2`'s explicit `leave` does.
+  Ring membership is the first child, a
+  `Smolquery.Cluster.PgGroup.Member` (Milestone 8 L4) — a no-op when
+  clustering is off, and otherwise what puts this node in the ring at all.
+  Its pid dies with this subtree, so an ungraceful crash removes the node
+  from the ring the same way `Smolquery.BufferService.Drain.drain/2`'s
+  explicit `leave` does — and unlike a one-shot join from `init/1`, it
+  re-asserts membership after a `:pg` scope restart. It is omitted entirely
+  when the drain flag is already up: a subtree restarted after a completed
+  drain must not silently rejoin a ring whose writes it refuses.
   """
 
   use Supervisor
 
   alias Smolquery.BufferService.Adopter
+  alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Runtime
@@ -50,9 +55,9 @@ defmodule Smolquery.BufferService.Supervisor do
   @impl Supervisor
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
-    PgGroup.join(Smolquery.BufferService, runtime.name, self())
 
     children = [
+      membership(runtime),
       {HotManifest, name: Runtime.manifest(runtime.name)},
       {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
       {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
@@ -67,6 +72,12 @@ defmodule Smolquery.BufferService.Supervisor do
       )
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
+  end
+
+  defp membership(runtime) do
+    unless Drain.draining?(runtime.name) do
+      {PgGroup.Member, {Smolquery.BufferService, runtime.name}}
+    end
   end
 end

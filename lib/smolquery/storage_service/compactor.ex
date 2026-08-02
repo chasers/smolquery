@@ -27,11 +27,14 @@ defmodule Smolquery.StorageService.Compactor do
   This is exactly the "polling for a compaction-due signal" case Milestone 8
   L6 (PL-11 D6) calls out: `Catalog.tables/1` returns the same catalog-wide
   list to every storage node's compactor, so without a gate every node would
-  plan and race to compact the same undersized run. Each sweep filters to
-  tables this node owns per `Smolquery.StorageService.Routing.own?/2` before
-  planning anything — a wrong transient owner during a ring change is safe by
-  construction (see D6), so this needs no lock, just the same ring the sealer
-  gates on.
+  plan and race to compact the same undersized run. Ownership is checked per
+  table, immediately before planning it, rather than once per sweep — a sweep
+  merges serially and can run for minutes, and an ownership snapshot from its
+  start would widen the two-owner overlap a ring change already opens. The
+  gate narrows that overlap; what makes the overlap survivable is the
+  catalog's registration diff being re-derived inside every commit retry
+  (`Smolquery.Catalog.DuckLake`), so the losing node's retry re-reads what
+  the winner committed instead of replaying a stale swap.
 
   ## The policy is deliberately boring
 
@@ -97,9 +100,7 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp run(state) do
     with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
-      routing = Routing.resolve(state.runtime.name)
-      owned = Enum.filter(tables, &Routing.own?(routing, &1))
-      outcomes = Enum.map(owned, &compact_table(state.runtime, &1))
+      outcomes = Enum.map(tables, &compact_table(state.runtime, &1))
 
       {:ok,
        %{
@@ -110,10 +111,12 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp compact_table(runtime, table_ref) do
-    with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
+    with true <- runtime.name |> Routing.resolve() |> Routing.own?(table_ref),
+         {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          {:ok, group} <- plan(runtime, paths) do
       swap(runtime, table_ref, group)
     else
+      false -> :skip
       :skip -> :skip
       {:error, reason} -> failed(table_ref, reason)
     end

@@ -64,6 +64,21 @@ defmodule Smolquery.Cluster do
   @spec pg_scope() :: atom()
   def pg_scope, do: @pg_scope
 
+  @doc """
+  The host part of a node's name — the address peers dial its HTTP
+  services on.
+
+  This is the contract `rel/env.sh.eex` sets up: `RELEASE_NODE` is the pod's
+  headless-service DNS name, so `smolquery@pod-1.smolquery.ns.svc` answers
+  `"pod-1.smolquery.ns.svc"`. `Smolquery.QueryService.Planner` (Milestone 8
+  L5) and `Smolquery.StorageService.HotTier` derive `HotServer` URLs from it,
+  so a clustered deployment needs no separate service-discovery call.
+  """
+  @spec node_host(node()) :: String.t()
+  def node_host(node) do
+    node |> Atom.to_string() |> String.split("@", parts: 2) |> List.last()
+  end
+
   defp topologies do
     Application.get_env(:libcluster, :topologies) || default_topologies()
   end

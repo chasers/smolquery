@@ -84,7 +84,11 @@ if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
 end
 
 if hot_server_port = System.get_env("SMOLQUERY_HOT_SERVER_PORT") do
-  config :smolquery, Smolquery.BufferService, hot_server_port: String.to_integer(hot_server_port)
+  port = String.to_integer(hot_server_port)
+
+  config :smolquery, Smolquery.BufferService, hot_server_port: port
+  config :smolquery, Smolquery.QueryService, buffer_hot_port: port
+  config :smolquery, Smolquery.StorageService, buffer_hot_port: port
 end
 
 if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
@@ -94,35 +98,49 @@ if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
 end
 
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
-  uri = URI.parse(catalog_database_url)
-  [db_username | db_password] = String.split(uri.userinfo || "postgres", ":", parts: 2)
-  db_password = List.first(db_password) || ""
-  database = String.trim_leading(uri.path || "/smolquery", "/")
-  port = uri.port || 5432
+  db = Smolquery.DatabaseUrl.parse!(catalog_database_url)
 
   config :smolquery, Smolquery.Cluster,
     enabled: true,
     postgres: [
-      hostname: uri.host,
-      port: port,
-      username: db_username,
-      password: db_password,
-      database: database
+      hostname: db.hostname,
+      port: db.port,
+      username: db.username,
+      password: db.password,
+      database: db.database
     ]
 
-  # The catalog's own metadata connection, split from the same URL (PL-11
-  # D1) — SMOLQUERY_CATALOG below still wins if an operator sets it
-  # explicitly, since that block runs after this one.
   config :smolquery, Smolquery.Catalog.DuckLake,
-    metadata:
-      "postgres:dbname=#{database} host=#{uri.host} port=#{port} " <>
-        "user=#{db_username} password=#{db_password}"
+    metadata: Smolquery.DatabaseUrl.libpq_metadata(db)
+
+  config :smolquery, Smolquery.BufferService, hot_server_ip: {0, 0, 0, 0}
 end
 
-# Inter-node query traffic over TLS. Certificates are per node (gen_rpc
-# verifies the peer certificate CN against the dialed node name), mounted
-# from a k8s secret; scripts/gen-dev-certs.sh generates a dev CA + node
-# certs for the kind overlay.
+if hot_server_ip = System.get_env("SMOLQUERY_HOT_SERVER_IP") do
+  {:ok, ip} = hot_server_ip |> String.to_charlist() |> :inet.parse_address()
+
+  config :smolquery, Smolquery.BufferService, hot_server_ip: ip
+end
+
+if s3_bucket = System.get_env("SMOLQUERY_S3_BUCKET") do
+  s3_options =
+    [
+      bucket: s3_bucket,
+      access_key_id: System.fetch_env!("SMOLQUERY_S3_ACCESS_KEY_ID"),
+      secret_access_key: System.fetch_env!("SMOLQUERY_S3_SECRET_ACCESS_KEY"),
+      staging_dir:
+        System.get_env("SMOLQUERY_S3_STAGING_DIR") ||
+          Path.join(System.get_env("SMOLQUERY_DATA_DIR", "priv/data"), "sealed-staging"),
+      endpoint: System.get_env("SMOLQUERY_S3_ENDPOINT"),
+      region: System.get_env("SMOLQUERY_S3_REGION"),
+      url_style: System.get_env("SMOLQUERY_S3_URL_STYLE")
+    ]
+    |> Enum.reject(fn {_option, value} -> is_nil(value) end)
+
+  config :smolquery, Smolquery.StorageService, store: {Smolquery.Segments.Store.S3, s3_options}
+  config :smolquery, Smolquery.QueryService, store: {Smolquery.Segments.Store.S3, s3_options}
+end
+
 if System.get_env("GEN_RPC_TLS") in ~w(true 1) do
   tls_dir = System.get_env("GEN_RPC_TLS_DIR") || "/etc/smolquery/gen-rpc-tls"
 

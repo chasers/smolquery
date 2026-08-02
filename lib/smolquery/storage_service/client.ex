@@ -41,7 +41,7 @@ defmodule Smolquery.StorageService.Client do
   require Logger
 
   alias Smolquery.BufferService.SealConsumer
-  alias Smolquery.Cluster
+  alias Smolquery.Cluster.PgGroup
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
@@ -60,12 +60,15 @@ defmodule Smolquery.StorageService.Client do
     end
   end
 
-  defp reachable?(name), do: Cluster.enabled?() or match?({:ok, _runtime}, Runtime.fetch(name))
+  defp reachable?(name) do
+    match?({:ok, _runtime}, Runtime.fetch(name)) or
+      PgGroup.nodes(Smolquery.StorageService, name, []) != []
+  end
 
   defp report_missing(name, {dataset, table}, ids) do
     Logger.warning(fn ->
       "seal_ready #{dataset}.#{table}: #{length(ids)} unsealed micro-segments, " <>
-        "#{inspect(name)} is not running on this node"
+        "no node is running #{inspect(name)} — the hot tier is accumulating unsealed"
     end)
 
     :ok

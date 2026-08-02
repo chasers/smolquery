@@ -42,9 +42,21 @@ defmodule Smolquery.BufferService.SealConsumer do
   alias Smolquery.Segments.Store
 
   @typedoc """
-  The frozen set to seal, and the sealed segment key(s) it becomes.
+  The frozen set to seal, the sealed segment key(s) it becomes, and the node
+  whose hot tier holds the claimed micro-segments.
+
+  `:origin` is stamped per signal rather than frozen in the manifest log: it
+  names where the bytes are *now*, which a consumer on another node needs to
+  pull the manifest and segments from (Milestone 8 L6) — the buffer ring's
+  current owner is the wrong node exactly when a ring change moved ownership
+  away from the data. A claim without it (an old log, a direct test call)
+  falls back to the consumer's configured `buffer_base_url`.
   """
-  @type claim :: HotManifest.claim()
+  @type claim :: %{
+          required(:ids) => [String.t()],
+          required(:keys) => [String.t()],
+          optional(:origin) => node()
+        }
 
   @doc """
   Reports that `claim` is ready to be sealed for `table_ref`.
@@ -52,8 +64,10 @@ defmodule Smolquery.BufferService.SealConsumer do
   @callback seal_ready(config :: term(), Store.table_ref(), claim()) :: :ok
 
   @doc """
-  Dispatches a signal to a configured consumer.
+  Dispatches a signal to a configured consumer, stamped with this node as the
+  claim's `:origin`.
   """
-  @spec seal_ready({module(), term()}, Store.table_ref(), claim()) :: :ok
-  def seal_ready({impl, config}, table_ref, claim), do: impl.seal_ready(config, table_ref, claim)
+  @spec seal_ready({module(), term()}, Store.table_ref(), HotManifest.claim()) :: :ok
+  def seal_ready({impl, config}, table_ref, claim),
+    do: impl.seal_ready(config, table_ref, Map.put(claim, :origin, node()))
 end

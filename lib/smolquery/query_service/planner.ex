@@ -56,13 +56,19 @@ defmodule Smolquery.QueryService.Planner do
 
   ## Failure honesty
 
-  An unreachable buffer owner fails the plan — answering from the sealed tier
+  An unreachable buffer node fails the plan — answering from the sealed tier
   alone would be a wrong answer with a green status. Single-node,
-  `buffer_base_url` is that one owner's whole address; clustered (Milestone 8
-  L5), each table's actual owner (`Client.owner/2`, resolved off the live
-  ring) gets its own derived URL — `base_url/2` is the one function that
-  changed, `manifests/2`'s per-ref fetch already fanned out to whatever
-  `manifest/2` returned.
+  `buffer_base_url` is the hot tier's whole address. Clustered (Milestone 8
+  L5), each table's manifest is fetched from *every* ring member, at URLs
+  derived from node names (`Smolquery.Cluster.node_host/1`), and the entries
+  merged. Asking only the ring's current owner would be cheaper but silently
+  wrong across ring changes: a node that just joined answers an honest empty
+  manifest while the previous owner still holds the table's unsealed,
+  already-acked tail, and nothing hands that tail over until it seals. Asking
+  every member makes hot rows visible wherever they physically sit, at the
+  cost of one control-plane GET per member per table — and keeps the failure
+  rule honest in both directions, since any member that cannot answer fails
+  the plan.
   """
 
   alias Smolquery.BufferService.Client
@@ -205,15 +211,21 @@ defmodule Smolquery.QueryService.Planner do
   defp manifests(_runtime, []), do: {:ok, %{}}
 
   defp manifests(runtime, refs) do
+    urls = manifest_urls(runtime)
+
     refs
-    |> Task.async_stream(&{&1, manifest(runtime, &1)},
+    |> Enum.flat_map(fn ref -> Enum.map(urls, &{ref, &1}) end)
+    |> Task.async_stream(
+      fn {ref, url} ->
+        {ref, HotClient.manifest(url, ref, timeout_ms: runtime.buffer_timeout_ms)}
+      end,
       ordered: false,
       on_timeout: :kill_task,
       timeout: fetch_deadline(runtime)
     )
-    |> Enum.reduce_while({:ok, %{}}, fn
+    |> Enum.reduce_while({:ok, Map.new(refs, &{&1, []})}, fn
       {:ok, {ref, {:ok, entries}}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, ref, entries)}}
+        {:cont, {:ok, Map.update!(acc, ref, &[entries | &1])}}
 
       {:ok, {ref, {:error, reason}}}, _acc ->
         {:halt, {:error, {:hot_tier_unavailable, ref, reason}}}
@@ -221,24 +233,23 @@ defmodule Smolquery.QueryService.Planner do
       {:exit, reason}, _acc ->
         {:halt, {:error, {:hot_tier_unavailable, reason}}}
     end)
-  end
+    |> case do
+      {:ok, gathered} ->
+        {:ok, Map.new(gathered, fn {ref, pages} -> {ref, List.flatten(pages)} end)}
 
-  defp manifest(runtime, ref) do
-    owner = Client.owner(runtime.buffer_name, ref)
-
-    HotClient.manifest(base_url(runtime, owner), ref, timeout_ms: runtime.buffer_timeout_ms)
-  end
-
-  defp base_url(%Runtime{buffer_base_url: url} = runtime, owner) do
-    if Cluster.enabled?() do
-      "http://#{node_host(owner)}:#{runtime.buffer_hot_port}"
-    else
-      url
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp node_host(node) do
-    node |> Atom.to_string() |> String.split("@", parts: 2) |> List.last()
+  defp manifest_urls(%Runtime{buffer_base_url: url} = runtime) do
+    if Cluster.enabled?() do
+      runtime.buffer_name
+      |> Client.nodes()
+      |> Enum.map(&"http://#{Cluster.node_host(&1)}:#{runtime.buffer_hot_port}")
+    else
+      [url]
+    end
   end
 
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity

@@ -7,11 +7,18 @@ defmodule Smolquery.StorageService.Routing do
   (`Smolquery.Cluster.PgGroup`, scoped to `Smolquery.StorageService` rather
   than the buffer's). Reusing `Ring` — already table-agnostic per its own
   moduledoc — rather than a Postgres advisory lock means naming an owner
-  costs no round trip, and a
-  transiently wrong owner during a ring change is safe by construction:
-  `Smolquery.Catalog.replace_segments/4` is atomic and idempotent-by-key, so
-  two nodes racing a stale view produces at worst a duplicate merge attempt,
-  not corruption.
+  costs no round trip. The price is that ownership is advisory, not mutual
+  exclusion: `:pg` propagates per node, so during a ring change two nodes can
+  each pass their own `own?/2` for the same table and run the same merge.
+  What keeps that from corrupting the catalog is
+  `Smolquery.Catalog.DuckLake` re-deriving its registration diff inside every
+  commit retry — the loser of a commit conflict re-reads what the winner
+  registered instead of replaying a stale statement. The residual window —
+  both nodes reading before either commits, and the metadata store accepting
+  both appends without a conflict — is accepted and narrow (one merge each,
+  same derived key, sub-second commit against a minute-scale merge), but it
+  is a window, not a proof; closing it outright needs a per-table catalog
+  lock, which PL-11 D6 declined for now.
 
   Two sources, in the same order `BufferService.Routing` uses and for the
   same reason — resolvable from a node that runs no storage subtree at all,
@@ -20,8 +27,8 @@ defmodule Smolquery.StorageService.Routing do
 
     * a published `Smolquery.StorageService.Runtime`, on nodes running the
       `:storage` role
-    * otherwise application configuration — cached in `:persistent_term` when
-      clustering is off, since the ring is then genuinely immutable
+    * otherwise application configuration — either way the built ring is
+      cached against the member list it came from (`Smolquery.Cluster.RingCache`)
 
   `Smolquery.StorageService.Sealer` and `Smolquery.StorageService.Compactor`
   both call `own?/2` before acting on a signal or a sweep's table — the gate
@@ -71,23 +78,21 @@ defmodule Smolquery.StorageService.Routing do
   def forget(name), do: RingCache.forget(key(name))
 
   defp from_runtime(%Runtime{} = runtime) do
-    %__MODULE__{
-      name: runtime.name,
-      ring:
-        Ring.new!(PgGroup.nodes(Smolquery.StorageService, runtime.name, Ring.nodes(runtime.ring)))
-    }
+    members = PgGroup.nodes(Smolquery.StorageService, runtime.name, Ring.nodes(runtime.ring))
+
+    RingCache.resolve(key(runtime.name), {:runtime, members}, fn ->
+      %__MODULE__{name: runtime.name, ring: Ring.new!(members)}
+    end)
   end
 
-  defp cached(name), do: RingCache.resolve(key(name), fn -> build(name) end)
-
-  defp build(name) do
+  defp cached(name) do
     config = Application.get_env(:smolquery, Smolquery.StorageService, [])
     static = Keyword.get(config, :ring, [node()])
+    members = PgGroup.nodes(Smolquery.StorageService, name, static)
 
-    %__MODULE__{
-      name: name,
-      ring: Ring.new!(PgGroup.nodes(Smolquery.StorageService, name, static))
-    }
+    RingCache.resolve(key(name), {:config, members}, fn ->
+      %__MODULE__{name: name, ring: Ring.new!(members)}
+    end)
   end
 
   defp key(name), do: {__MODULE__, name}

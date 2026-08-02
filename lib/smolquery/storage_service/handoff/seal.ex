@@ -39,9 +39,12 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   The manifest and the segment bytes come over HTTP because `httpfs` needs them
   to. Retirement is a control-plane call with no bulk data, `HotServer` is
-  read-only, and `Smolquery.BufferService.Client` already owns ownership routing
+  read-only, and `Smolquery.BufferService.Client` already owns transport
   and the idempotence guarantee. That is the same bulk/control split the buffer
-  service draws internally.
+  service draws internally. Both the pull and the retire target the claim's
+  `:origin` node rather than the buffer ring's current owner — the entries
+  live where the signal came from, and a ring change between signal and seal
+  must not point either call at a node that never held them.
 
   ## The snapshot a retirement is stamped with
 
@@ -95,7 +98,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   end
 
   defp retire(runtime, table_ref, claim, snapshot) do
-    Client.retire(runtime.buffer_name, table_ref, claim.ids, snapshot)
+    Client.retire_at(claim[:origin], runtime.buffer_name, table_ref, claim.ids, snapshot)
   end
 
   defp sealed_paths(runtime, %{keys: keys}) when is_list(keys) and keys != [],

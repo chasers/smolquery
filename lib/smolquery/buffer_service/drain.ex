@@ -17,27 +17,32 @@ defmodule Smolquery.BufferService.Drain do
   ## Sequence
 
   1. Flag this instance draining (`draining?/1`) — `Endpoint.write_batch/3`
-     refuses new writes for tables this node owns with `{:error, :draining}`
-     from this point on, so nothing lands here after the point-in-time seal
-     below. This is an honest, bounded write-unavailability window, not a
-     correctness gap: a caller retries and, once step 4 completes, reaches
-     whatever node the ring now names instead — the same shape as any other
-     "this owner is temporarily unreachable" failure the write path already
-     has to tolerate.
+     refuses new writes with `{:error, :draining}` from this point on, and
+     `TableBuffer` refuses them again at its own mailbox, which is the check
+     with a happens-before: a write that passed the endpoint's gate just
+     before the flag went up cannot slip into an accumulator after the
+     force-seal below and be acked on a node about to leave. This is an
+     honest, bounded write-unavailability window, not a correctness gap: a
+     caller retries and, once step 3 completes, reaches whatever node the
+     ring now names instead.
   2. Force-seal every table with a running `TableBuffer` on this node
      (`TableBuffer.force_seal/2`), regardless of the size/age thresholds
-     that gate a normal seal.
-  3. Poll each forced table's hot manifest until every entry is sealed —
-     `StorageService.Handoff` completed the merge/registration and called
-     back `Client.retire/3` — or `:timeout_ms` elapses.
-  4. Leave the ring (`Smolquery.Cluster.PgGroup.leave/3`) — reached only on success; a
-     step-3 timeout does **not** leave, and does not clear the draining
-     flag either. A retried `drain/2` call finds the same tables already
-     claimed (so it re-polls the same in-flight handoff rather than forcing
-     a second, redundant seal) and returns `{:error, {:drain_timeout,
-     table_refs}}` so an operator can see *why* — a slow object-store
-     upload, a wedged catalog commit — rather than the node silently
-     refusing to leave.
+     that gate a normal seal — and do it again on *every* poll pass, over a
+     freshly-read registry. Re-deriving catches a buffer that started
+     between the flag and the first pass; re-forcing catches entries a
+     first pass could not claim because a normal seal's claim was still
+     live — they become claimable the moment that claim retires, and a
+     single point-in-time force would strand them into a guaranteed
+     timeout.
+  3. Between force passes, poll until every entry of every owned table is
+     sealed — `StorageService.Handoff` completed the merge/registration and
+     called back `Client.retire/4` — then leave the ring
+     (`Smolquery.Cluster.PgGroup`). A `:timeout_ms` expiry does **not**
+     leave, and does not clear the draining flag either: the retried
+     `drain/2` re-polls the same in-flight handoffs and returns
+     `{:error, {:drain_timeout, table_refs}}` so an operator can see *why*
+     — a slow object-store upload, a wedged catalog commit — rather than
+     the node silently refusing to leave.
   """
 
   require Logger
@@ -64,20 +69,21 @@ defmodule Smolquery.BufferService.Drain do
   """
   @spec drain(atom(), keyword()) :: :ok | {:error, term()}
   def drain(name, opts \\ []) do
-    with {:ok, runtime} <- Runtime.fetch(name) do
-      :persistent_term.put(draining_key(name), true)
+    case Runtime.fetch(name) do
+      {:ok, runtime} ->
+        :persistent_term.put(draining_key(name), true)
 
-      tables = owned_tables(runtime)
-      Enum.each(tables, &force_seal_table(runtime, &1))
+        timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+        poll_ms = Keyword.get(opts, :poll_ms, @default_poll_ms)
+        deadline = System.monotonic_time(:millisecond) + timeout_ms
 
-      timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-      poll_ms = Keyword.get(opts, :poll_ms, @default_poll_ms)
-      deadline = System.monotonic_time(:millisecond) + timeout_ms
+        case wait_for_retirement(runtime, deadline, poll_ms) do
+          :ok -> leave(name)
+          {:error, _reason} = error -> error
+        end
 
-      case wait_for_retirement(runtime, tables, deadline, poll_ms) do
-        :ok -> leave(name)
-        {:error, _reason} = error -> error
-      end
+      :error ->
+        {:error, :buffer_service_unavailable}
     end
   end
 
@@ -92,10 +98,9 @@ defmodule Smolquery.BufferService.Drain do
   def draining?(name), do: :persistent_term.get(draining_key(name), false)
 
   defp leave(name) do
-    name
-    |> Runtime.supervisor()
-    |> Process.whereis()
-    |> then(&PgGroup.leave(Smolquery.BufferService, name, &1))
+    Smolquery.BufferService
+    |> PgGroup.Member.process_name(name)
+    |> PgGroup.Member.leave()
   end
 
   defp draining_key(name), do: {__MODULE__, name}
@@ -115,9 +120,10 @@ defmodule Smolquery.BufferService.Drain do
       :ok
   end
 
-  defp wait_for_retirement(_runtime, [], _deadline, _poll_ms), do: :ok
+  defp wait_for_retirement(runtime, deadline, poll_ms) do
+    tables = owned_tables(runtime)
+    Enum.each(tables, &force_seal_table(runtime, &1))
 
-  defp wait_for_retirement(runtime, tables, deadline, poll_ms) do
     case unretired(runtime, tables) do
       [] ->
         :ok
@@ -127,7 +133,7 @@ defmodule Smolquery.BufferService.Drain do
           {:error, {:drain_timeout, pending}}
         else
           Process.sleep(poll_ms)
-          wait_for_retirement(runtime, tables, deadline, poll_ms)
+          wait_for_retirement(runtime, deadline, poll_ms)
         end
     end
   end

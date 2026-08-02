@@ -12,20 +12,34 @@ defmodule Smolquery.EngineSecrets do
   S3-backed".
   """
 
+  alias Smolquery.Cluster
   alias Smolquery.InternalSecret
   alias Smolquery.Segments.Store
 
   @doc """
   The hot tier's `CREATE SECRET`, if `engine_extensions` loads `httpfs` —
   otherwise `[]`, since nothing here reads the hot tier over HTTP at all.
+
+  Single-node, the secret is scoped to `buffer_base_url` — the one address
+  hot-tier bytes can come from. Clustered, plans read micro-segments at
+  per-owner URLs derived from node names (Milestone 8 L5), which no static
+  scope can enumerate up front; the scope widens to `http://` so the header
+  reaches every buffer node's `HotServer`. That widening leaks nothing new:
+  the header is one shared internal secret either way, and the query path's
+  lockdown (`allowed_paths`) still pins exactly which URLs an engine may
+  touch.
   """
   @spec hot_tier([atom() | String.t()], String.t()) :: [String.t()]
   def hot_tier(engine_extensions, buffer_base_url) do
     if :httpfs in engine_extensions do
-      [InternalSecret.create_secret_statement(buffer_base_url)]
+      [InternalSecret.create_secret_statement(hot_tier_scope(buffer_base_url))]
     else
       []
     end
+  end
+
+  defp hot_tier_scope(buffer_base_url) do
+    if Cluster.enabled?(), do: "http://", else: buffer_base_url
   end
 
   @doc """

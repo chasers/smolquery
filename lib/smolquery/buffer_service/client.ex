@@ -72,9 +72,15 @@ defmodule Smolquery.BufferService.Client do
 
   `{:badrpc, :timeout}` is ambiguous: the call may have reached the owner and
   committed after the deadline. A batch carrying a `:batch_id` idempotency
-  key makes the retry safe — the owner answers a committed id with the
-  original ack instead of writing again (T-41). A batch without one is
-  at-least-once, and the ambiguity belongs to the caller.
+  key makes the retry safe *while the table's owner has not changed* — the
+  owner answers a committed id with the original ack instead of writing
+  again (T-41). The dedup record lives only in the owner's local manifest,
+  so a retry that lands after a ring change routes to a node that has never
+  seen the id and commits the batch again (Milestone 8 L4): across an owner
+  move — a node joining, a drain completing between attempts — a `:batch_id`
+  batch is at-least-once like any other, and the ambiguity belongs to the
+  caller. Owner-move-proof dedup would need the id recorded somewhere the
+  ring cannot move away from, which PL-11 leaves open.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
@@ -110,6 +116,25 @@ defmodule Smolquery.BufferService.Client do
   end
 
   @doc """
+  `retire/4`, pinned to the node holding the entries rather than routed to the
+  ring's current owner.
+
+  The sealer's path (Milestone 8 L6): a claim's `:origin` names where its
+  micro-segments physically live, and a ring change between signal and seal
+  means the ring owner and the holder are different nodes. `nil` falls back to
+  ring routing, for claims that carry no origin.
+  """
+  @spec retire_at(node() | nil, atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
+          :ok | {:error, term()}
+  def retire_at(nil, name, table_ref, ids, snapshot), do: retire(name, table_ref, ids, snapshot)
+
+  def retire_at(node, name, table_ref, ids, snapshot) do
+    name
+    |> Routing.resolve()
+    |> invoke(node, :control, :retire, [name, table_ref, ids, snapshot], :control)
+  end
+
+  @doc """
   Flushes a table's accumulator now.
 
   For a caller that needs the tail durable without waiting out the interval — a
@@ -128,12 +153,27 @@ defmodule Smolquery.BufferService.Client do
   @spec owner(atom(), Store.table_ref()) :: node()
   def owner(name, table_ref), do: name |> Routing.resolve() |> Routing.owner(table_ref)
 
+  @doc """
+  Every node the ring currently names.
+
+  What the query planner fans hot-manifest fetches out over (Milestone 8 L5):
+  asking every member rather than only a table's current owner is what keeps
+  acked rows visible while a ring change moves ownership away from the node
+  still holding them.
+  """
+  @spec nodes(atom()) :: [node()]
+  def nodes(name), do: name |> Routing.resolve() |> Routing.nodes()
+
   defp route(name, channel, function, args, table_ref, timeout_kind) do
     routing = Routing.resolve(name)
-    owner = Routing.owner(routing, table_ref)
-    transport = Routing.transport(routing, owner)
 
-    Transport.invoke(transport, owner, channel, function, args, timeout(routing, timeout_kind))
+    invoke(routing, Routing.owner(routing, table_ref), channel, function, args, timeout_kind)
+  end
+
+  defp invoke(routing, node, channel, function, args, timeout_kind) do
+    transport = Routing.transport(routing, node)
+
+    Transport.invoke(transport, node, channel, function, args, timeout(routing, timeout_kind))
   end
 
   defp timeout(routing, :write), do: routing.write_timeout_ms

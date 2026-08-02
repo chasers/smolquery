@@ -76,7 +76,7 @@ defmodule Smolquery.BufferService.AdopterTest do
     assert Registry.lookup(Runtime.registry(name), @table) == []
   end
 
-  test "leaves tables this node no longer owns alone", context do
+  test "adopts a table the ring no longer assigns here — the bytes are local", context do
     name = start_buffer_service(context)
 
     {:ok, _ack} = Client.write_batch(name, @table, batch())
@@ -85,7 +85,7 @@ defmodule Smolquery.BufferService.AdopterTest do
 
     restarted = start_buffer_service(context, name: name, ring: [:buffer1@host])
 
-    assert Registry.lookup(Runtime.registry(restarted), @table) == []
+    assert Registry.lookup(Runtime.registry(restarted), @table) != []
   end
 
   test "reports the tables it adopted", context do

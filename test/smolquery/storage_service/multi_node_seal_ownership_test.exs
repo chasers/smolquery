@@ -10,6 +10,11 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
   production. Both nodes are told to seal both tables — the worst case a
   stale or duplicated signal could produce — and only the owner named by the
   shared `ring` ever hands its table to `Smolquery.StorageService.Handoff`.
+
+  The peer's subtree is started through the real application supervisor
+  (`Application.ensure_all_started/1`), not a bare `Supervisor.start_link/2`
+  erpc call, which dies the moment its transient erpc-worker caller exits —
+  the same fix `multi_node_ring_test.exs` documents for `:pg`.
   """
 
   use ExUnit.Case, async: false
@@ -17,7 +22,6 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
   alias Smolquery.BufferService.Ring
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
-  alias Smolquery.StorageService.Supervisor, as: StorageSupervisor
   alias Smolquery.Test.HandoffProbe
 
   @moduletag :integration
@@ -35,7 +39,7 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
     test = self()
 
     {:ok, primary_sup} =
-      StorageSupervisor.start_link(
+      Smolquery.StorageService.Supervisor.start_link(
         name: name,
         dir: Path.join(context.tmp_dir, "primary"),
         ring: ring,
@@ -70,10 +74,6 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
 
     :erpc.call(peer_node, Application, :put_env, [:smolquery, Smolquery.StorageService, peer_opts])
 
-    # Started through the real application supervisor (not a bare
-    # `Supervisor.start_link/2` erpc call, which dies the moment its transient
-    # erpc-worker caller exits) — the same fix `multi_node_ring_test.exs`
-    # documents for `:pg`.
     {:ok, _started} = :erpc.call(peer_node, Application, :ensure_all_started, [:smolquery])
 
     assert wait_until(fn -> peer_sealer_alive?(peer_node, name) end)
@@ -90,10 +90,6 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
 
   test "a table is only ever handed to its ring owner's handoff, never both",
        %{name: name, peer_node: peer_node, primary_table: primary_table, peer_table: peer_table} do
-    # Both nodes are told about both tables — the worst case a stale or
-    # duplicated signal could produce (PL-11 D6: a wrong transient owner is
-    # safe by construction, not something the gate needs to prevent, but a
-    # signal a genuine non-owner sees must still be ignored outright).
     Sealer.seal_ready(name, primary_table, claim(["a"]), node())
     Sealer.seal_ready(name, primary_table, claim(["a"]), peer_node)
     Sealer.seal_ready(name, peer_table, claim(["b"]), node())
