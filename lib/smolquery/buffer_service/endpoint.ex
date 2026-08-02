@@ -119,7 +119,13 @@ defmodule Smolquery.BufferService.Endpoint do
   A node holding nothing for the table answers `:ok` without starting a
   buffer: owners fan mutations out past their followers to *every* node that
   might hold stale copies (T-104), and on the nodes that hold none the no-op
-  must cost a single ETS read, not a buffer start and a manifest recovery.
+  must stay cheap — a manifest read, a registry lookup, a file stat — not a
+  buffer start and a manifest recovery. Holding nothing is all three checks:
+  no manifest entries, no running buffer (an `accept_replica` queued in the
+  buffer's mailbox may be about to create entries, and the mutation that
+  compensates it must stay ordered behind it), and no manifest log on disk
+  (a restarting node's entries live there until recovery replays them, and
+  fast-pathing a gating claim in that window would falsely ack it).
   """
   @spec apply_replica_mutation(atom(), Store.table_ref(), :claim | :retire | :drop, map(), term()) ::
           :ok | {:error, term()}
@@ -127,7 +133,7 @@ defmodule Smolquery.BufferService.Endpoint do
       when op in [:claim, :retire, :drop] do
     with {:ok, runtime} <- runtime(name),
          :ok <- replica_epoch_check(name, epoch) do
-      if HotManifest.entries(runtime.manifest, table_ref) == [] do
+      if holds_nothing?(runtime, table_ref) do
         :ok
       else
         apply_held_mutation(runtime, table_ref, op, args)
@@ -135,6 +141,19 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   catch
     :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
+  end
+
+  defp holds_nothing?(runtime, table_ref) do
+    HotManifest.entries(runtime.manifest, table_ref) == [] and
+      running_buffer(runtime, table_ref) == {:error, :noproc} and
+      not log_on_disk?(runtime, table_ref)
+  end
+
+  defp log_on_disk?(runtime, table_ref) do
+    case HotManifest.log_path(runtime.manifest, table_ref) do
+      {:ok, path} -> File.exists?(path)
+      {:error, _reason} -> false
+    end
   end
 
   defp apply_held_mutation(runtime, table_ref, op, args) do

@@ -19,6 +19,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
   alias Smolquery.Cluster.ConfigStore.Memory
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
+  alias Smolquery.Test.Eventually
 
   @moduletag :tmp_dir
 
@@ -179,8 +180,59 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
 
     assert :ok = Client.retire(owner, @table, [ack.segment_id], 42)
 
-    assert [stale_entry] = entries(stale)
-    assert stale_entry.sealed_at
+    assert Eventually.until(fn ->
+             match?([%{sealed_at: sealed_at}] when not is_nil(sealed_at), entries(stale))
+           end)
+  end
+
+  test "a re-shipped claim is absorbed as ok, a different claim is refused", context do
+    {owner, follower} = start_pair(context)
+
+    assert {:ok, _ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-10"))
+    [entry] = entries(follower)
+    claim = %{ids: [entry.id], keys: ["sealed-key"]}
+
+    assert :ok = Endpoint.apply_replica_mutation(follower, @table, :claim, claim, nil)
+    assert :ok = Endpoint.apply_replica_mutation(follower, @table, :claim, claim, nil)
+
+    other = %{ids: [entry.id], keys: ["other-key"]}
+
+    assert {:error, :claim_outstanding} =
+             Endpoint.apply_replica_mutation(follower, @table, :claim, other, nil)
+  end
+
+  test "a mutation racing a queued accept_replica stays ordered behind it", context do
+    {owner, follower} = start_pair(context)
+
+    assert {:ok, _ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-11"))
+    [entry] = entries(follower)
+
+    assert :ok = Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: [entry.id]}, nil)
+    assert entries(follower) == []
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(follower), @table)
+    :sys.suspend(buffer)
+
+    accept = Task.async(fn -> Endpoint.accept_replica(follower, @table, entry, nil, nil) end)
+    assert Eventually.until(fn -> queued(buffer) == 1 end)
+
+    drop =
+      Task.async(fn ->
+        Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: [entry.id]}, nil)
+      end)
+
+    assert Eventually.until(fn -> queued(buffer) == 2 end)
+    :sys.resume(buffer)
+
+    assert Task.await(accept) == :ok
+    assert Task.await(drop) == :ok
+    assert entries(follower) == []
+  end
+
+  defp queued(pid) do
+    {:message_queue_len, queued} = Process.info(pid, :message_queue_len)
+
+    queued
   end
 
   test "a mutation for a table this node never held is free and starts nothing", context do

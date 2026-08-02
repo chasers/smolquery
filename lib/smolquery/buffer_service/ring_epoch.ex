@@ -6,8 +6,9 @@ defmodule Smolquery.BufferService.RingEpoch do
   membership, which is eventually consistent: during a partition or a slow
   gossip window two nodes can each hold a member list naming themselves owner
   of the same table, and both accept and commit its writes. Reads survive that
-  (the planner fans out over every member), but a retried batch can commit on
-  two owners, and two nodes can independently seal the same table.
+  (the planner fans out over every member), but a batch retried into the
+  divergence can commit on both nodes, and two nodes can independently seal
+  the same table.
 
   This process makes ownership *decidable* by anchoring it to an epoch in a
   `Smolquery.Cluster.ConfigStore` — the strongly consistent Postgres the
@@ -29,14 +30,16 @@ defmodule Smolquery.BufferService.RingEpoch do
       writes — deliberately; sealing already depends on the same Postgres.
     * the ring built from the current configuration names this node the
       owner — otherwise `{:error, :not_owner}`.
-    * the configuration is older than one lease, or the previous
-      configuration also named this node — otherwise
-      `{:error, :ownership_settling}`. A node that just acquired a table
-      waits out the previous owner's lease before accepting, because until
-      that lease expires the previous owner may still be accepting on a
-      stale-but-leased view. This arm is what actually closes the window;
-      the wait is bounded, and a caller retries into it the same way it
-      retries `{:error, :draining}`.
+    * every configuration replaced within the last lease also named this
+      node the owner — otherwise `{:error, :ownership_settling}`. A node
+      that just acquired a table waits out the previous owner's lease before
+      accepting, because until that lease expires the previous owner may
+      still be accepting on a stale-but-leased view. Settle obligations are
+      carried across epoch changes rather than replaced by them: a second
+      advance inside the window (a replacement joining moments after a node
+      died) must not release the wait the first advance started. This arm is
+      what actually closes the window; the wait is bounded, and a caller
+      retries into it the same way it retries `{:error, :draining}`.
 
   The guarantee rests on bounded clock *rate* drift only — `age_ms` is
   computed by the store's clock, deadlines by each node's monotonic clock;
@@ -75,6 +78,7 @@ defmodule Smolquery.BufferService.RingEpoch do
   require Logger
 
   alias Smolquery.BufferService.Ring
+  alias Smolquery.BufferService.Routing
   alias Smolquery.Cluster.PgGroup
 
   @default_lease_ms 10_000
@@ -137,7 +141,7 @@ defmodule Smolquery.BufferService.RingEpoch do
   def owner?(name, table_ref) do
     case :persistent_term.get(key(name), nil) do
       nil ->
-        true
+        Routing.owner(Routing.resolve(name), table_ref) == node()
 
       config ->
         now = System.monotonic_time(:millisecond)
@@ -187,7 +191,7 @@ defmodule Smolquery.BufferService.RingEpoch do
           lease_ms: option(opts, config, :lease_ms, :epoch_lease_ms, @default_lease_ms),
           refresh_ms: option(opts, config, :refresh_ms, :epoch_refresh_ms, @default_refresh_ms),
           epoch: nil,
-          settle_until: nil,
+          settles: [],
           verified: :atomics.new(1, signed: true)
         }
 
@@ -233,18 +237,22 @@ defmodule Smolquery.BufferService.RingEpoch do
     end
   end
 
-  defp settling?(%{prev_ring: nil}, _table_ref, _now), do: false
+  defp settling?(%{settles: []}, _table_ref, _now), do: false
 
   defp settling?(config, table_ref, now) do
-    now < config.settle_until and Ring.owner(config.prev_ring, table_ref) != node()
+    Enum.any?(config.settles, fn {ring, settle_until} ->
+      now < settle_until and Ring.owner(ring, table_ref) != node()
+    end)
   end
 
   defp attempt_refresh(state) do
+    verified_at = System.monotonic_time(:millisecond)
+
     with {:ok, state} <- setup(state),
          members = Enum.sort(state.members.()),
          {:ok, config} <- current(state, members),
          {:ok, config} <- reconcile(state, config, members) do
-      publish(state, config)
+      publish(state, config, verified_at)
     else
       {:error, reason} ->
         Logger.warning(fn ->
@@ -277,30 +285,45 @@ defmodule Smolquery.BufferService.RingEpoch do
   defp reconcile(state, config, members) do
     case state.store_impl.advance(state.store, state.scope, config.epoch, members) do
       {:ok, advanced} -> {:ok, advanced}
-      {:error, :conflict} -> state.store_impl.fetch(state.store, state.scope)
+      {:error, :conflict} -> refetch(state)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp publish(state, config) do
-    now = System.monotonic_time(:millisecond)
-    :atomics.put(state.verified, 1, now)
+  defp refetch(state) do
+    case state.store_impl.fetch(state.store, state.scope) do
+      {:ok, config} -> {:ok, config}
+      :not_found -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp publish(state, config, verified_at) do
+    :atomics.put(state.verified, 1, verified_at)
 
     if config.epoch == state.epoch do
       state
     else
-      settle_until = now + max(state.lease_ms - config.age_ms, 0)
+      settles = carry_settles(state, config, System.monotonic_time(:millisecond))
 
       :persistent_term.put(key(state.name), %{
         epoch: config.epoch,
         ring: Ring.new!(config.members),
-        prev_ring: prev_ring(config.prev_members),
-        settle_until: settle_until,
+        settles: settles,
         lease_ms: state.lease_ms,
         verified: state.verified
       })
 
-      %{state | epoch: config.epoch, settle_until: settle_until}
+      %{state | epoch: config.epoch, settles: settles}
+    end
+  end
+
+  defp carry_settles(state, config, now) do
+    live = Enum.reject(state.settles, fn {_ring, settle_until} -> settle_until <= now end)
+
+    case prev_ring(config.prev_members) do
+      nil -> live
+      ring -> [{ring, now + max(state.lease_ms - config.age_ms, 0)} | live]
     end
   end
 
@@ -310,8 +333,7 @@ defmodule Smolquery.BufferService.RingEpoch do
     :persistent_term.put(key(state.name), %{
       epoch: nil,
       ring: Ring.new!(state.members.()),
-      prev_ring: nil,
-      settle_until: 0,
+      settles: [],
       lease_ms: state.lease_ms,
       verified: state.verified
     })

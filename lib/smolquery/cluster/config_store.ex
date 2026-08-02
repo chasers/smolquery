@@ -61,8 +61,9 @@ defmodule Smolquery.Cluster.ConfigStore do
 
   @doc """
   Advances `scope` to a new configuration naming `members`, iff the stored
-  epoch is still `expected_epoch`. `{:error, :conflict}` means another node
-  advanced first; refetch and reconsider.
+  epoch is still `expected_epoch`. `{:error, :conflict}` means the epoch no
+  longer matches — another node advanced first, or the scope does not exist —
+  so the refetch that reconsiders it must also handle `:not_found`.
   """
   @callback advance(server(), scope(), non_neg_integer(), [node()]) ::
               {:ok, config()} | {:error, :conflict} | {:error, term()}

@@ -47,16 +47,15 @@ defmodule Smolquery.BufferService.Replicator do
 
   @typedoc """
   One committed flush, as the implementation sees it: the instance and table
-  it belongs to, the segment the store holds, the manifest entry that made it
-  durable here, and the batch ids the entry carries.
+  it belongs to, the segment the store holds, and the manifest entry that made
+  it durable here — batch ids included, on the entry.
   """
   @type commit :: %{
           name: atom(),
           table_ref: Store.table_ref(),
           store: Store.t(),
           segment: Segment.t(),
-          entry: Entry.t(),
-          batch_ids: [String.t()]
+          entry: Entry.t()
         }
 
   @doc """

@@ -47,6 +47,16 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   missing the fan-out just stays stale until the next mutation or its own
   reap; only the followers' acks gate the operation.
 
+  The fan-out runs in its own task, off the group-commit path: its target
+  set deliberately includes nodes that are down (`:expected_nodes` — a
+  crashed ex-owner is exactly who it exists to reach), and a best-effort
+  courtesy must not stall every claim, retire, and drop in the buffer for a
+  dead node's transport timeout. Two mutations' fan-outs may therefore reach
+  a stale holder out of order — harmless for the same reason missing one is:
+  each mutation strictly advances an entry (claim, seal, drop), so the later
+  state wins and the earlier arrival degrades to the no-op its idempotency
+  already promises.
+
   ## Shared stores ship no bytes
 
   When `Smolquery.Segments.Store.shared?/1` — the T-26 fork — the segment
@@ -61,7 +71,9 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
 
   `:targets` overrides follower resolution — a
   `(name, table_ref -> {:ok, [{transport, node, instance}]} | {:error, term()})`
-  fun, the seam single-BEAM tests stand two instances up with.
+  fun, the seam single-BEAM tests stand two instances up with. `:holders`
+  overrides the fan-out's stale-holder resolution the same way — a
+  `(name -> [{transport, node, instance}])` fun.
   """
 
   @behaviour Smolquery.BufferService.Replicator
@@ -166,18 +178,25 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     |> Enum.map(&{Routing.transport(routing, &1), &1, name})
   end
 
+  defp ship_best_effort([], _name, _args), do: :ok
+
   defp ship_best_effort(targets, name, args) do
-    Enum.each(targets, fn {transport, node, instance} ->
-      _outcome =
-        Transport.invoke(
-          transport,
-          node,
-          :bulk,
-          :apply_replica_mutation,
-          [instance | args],
-          timeout(name)
-        )
-    end)
+    timeout = timeout(name)
+
+    {:ok, _pid} =
+      Task.start(fn ->
+        Enum.each(targets, fn {transport, node, instance} ->
+          _outcome =
+            Transport.invoke(
+              transport,
+              node,
+              :bulk,
+              :apply_replica_mutation,
+              [instance | args],
+              timeout
+            )
+        end)
+      end)
 
     :ok
   end

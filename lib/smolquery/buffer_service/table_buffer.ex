@@ -21,7 +21,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   rows. That is the honest outcome: those rows were never acked, so the client is
   entitled to retry, and keeping them would write them twice. A segment that made
   it to the store before the manifest append failed is deleted on the spot, and
-  recovery would have deleted it anyway.
+  recovery would have deleted it anyway. A commit the replicator refused is
+  compensated the same way — entry dropped, bytes deleted, batch ids forgotten —
+  so a retry commits fresh instead of deduping into an ack the replicator never
+  granted. A follower that durably applied the copy before the refusal may hold
+  an orphan until the compensating drop reaches it (T-104's reaper family).
 
   ## Flushing is inline, until a benchmark says otherwise
 
@@ -355,7 +359,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp drop(state, ids) do
-    with :ok <- append_replicas(state, :drop, %{ids: ids}),
+    with :ok <- append_replicas_as_owner(state, :drop, %{ids: ids}),
          :ok <- HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log) do
       state
     else
@@ -494,6 +498,14 @@ defmodule Smolquery.BufferService.TableBuffer do
     })
   end
 
+  defp append_replicas_as_owner(state, op, args) do
+    if RingEpoch.owner?(state.runtime.name, state.table_ref) do
+      append_replicas(state, op, args)
+    else
+      :ok
+    end
+  end
+
   defp put_replica_bytes(_state, _entry, nil), do: :ok
 
   defp put_replica_bytes(state, entry, bytes) do
@@ -621,8 +633,7 @@ defmodule Smolquery.BufferService.TableBuffer do
       table_ref: state.table_ref,
       store: state.runtime.store,
       segment: segment,
-      entry: entry,
-      batch_ids: Enum.reverse(state.batch_ids)
+      entry: entry
     }
 
     case Replicator.commit(state.runtime.replicator, commit) do

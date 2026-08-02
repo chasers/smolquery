@@ -107,7 +107,10 @@ defmodule Smolquery.BufferService.Drain do
 
   A flush that fails is logged and skipped rather than blocking the exit —
   the pod is stopping either way, and rows that failed to flush were never
-  acked.
+  acked. The flush wait is sized to the commit's real bound — a replicated
+  commit holds the buffer for up to its `write_timeout_ms` — so a busy
+  table's handoff flush is not abandoned at a smaller default while its
+  commit is still in flight.
   """
   @spec handoff(atom()) :: :ok | {:error, term()}
   def handoff(name) do
@@ -146,7 +149,7 @@ defmodule Smolquery.BufferService.Drain do
 
   defp flush_table(runtime, table_ref) do
     case Registry.lookup(Runtime.registry(runtime.name), table_ref) do
-      [{pid, _load}] -> TableBuffer.flush(pid)
+      [{pid, _load}] -> TableBuffer.flush(pid, commit_bound_ms(runtime))
       [] -> :ok
     end
   catch
@@ -157,7 +160,7 @@ defmodule Smolquery.BufferService.Drain do
 
   defp force_seal_table(runtime, table_ref) do
     case Registry.lookup(Runtime.registry(runtime.name), table_ref) do
-      [{pid, _load}] -> TableBuffer.force_seal(pid)
+      [{pid, _load}] -> TableBuffer.force_seal(pid, commit_bound_ms(runtime))
       [] -> :ok
     end
   catch
@@ -165,6 +168,8 @@ defmodule Smolquery.BufferService.Drain do
       Logger.warning("drain: force-seal of #{inspect(table_ref)} failed: #{inspect(reason)}")
       :ok
   end
+
+  defp commit_bound_ms(runtime), do: runtime.write_timeout_ms + 1_000
 
   defp wait_for_retirement(runtime, deadline, poll_ms) do
     tables = owned_tables(runtime)
