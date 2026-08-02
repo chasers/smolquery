@@ -79,6 +79,29 @@ defmodule Smolquery.QueryService.Planner do
   unreachable-member failure. It is coarse — an expected node that is down fails
   every query, not only those over tables it held — because nothing durable
   records which nodes hold unsealed rows for which table.
+
+  ## The merged manifest is deduped by segment id
+
+  Today a micro-segment lives on exactly one node, so merging across members is a
+  concatenation and this costs nothing. It exists for the moment that stops being
+  true: under buffer replication (PL-5 Stage 1) the same segment sits on an owner
+  *and* its followers, and concatenating would count every replicated row once
+  per copy — a silently wrong `count(*)`, the same failure class as the bug
+  above, arriving the day the follower protocol starts working rather than the
+  day someone thinks to test it.
+
+  Copies are not always identical, which is why this picks rather than takes the
+  first. The seal handoff mutates an entry in place — `claim_keys`, then
+  `sealed_at` — so a replica can lag its owner by one step of it, and the copy
+  furthest along wins. A laggard would be the unsafe choice: an entry whose rows
+  the catalog has already registered, presented as unclaimed, is counted twice at
+  every snapshot that includes the sealed segment. The membership rule above then
+  applies to the winner and decides inclusion by snapshot, which is what it is
+  for.
+
+  That ranking is a backstop, not a substitute for replicating the handoff:
+  Stage 1 has to ship retires to followers too, or a promoted follower will
+  re-present rows the sealed tier already holds.
   """
 
   alias Smolquery.BufferService.Client
@@ -245,10 +268,34 @@ defmodule Smolquery.QueryService.Planner do
     end)
     |> case do
       {:ok, gathered} ->
-        {:ok, Map.new(gathered, fn {ref, pages} -> {ref, List.flatten(pages)} end)}
+        {:ok,
+         Map.new(gathered, fn {ref, pages} -> {ref, pages |> List.flatten() |> dedupe()} end)}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp dedupe(entries) do
+    entries
+    |> Enum.with_index()
+    |> Enum.group_by(fn {entry, _position} -> entry["id"] end)
+    |> Enum.map(fn {_id, copies} -> Enum.reduce(copies, &further_along/2) end)
+    |> Enum.sort_by(fn {_entry, position} -> position end)
+    |> Enum.map(fn {entry, _position} -> entry end)
+  end
+
+  defp further_along({entry, position}, {best, best_position}) do
+    keep = if handoff_rank(entry) > handoff_rank(best), do: entry, else: best
+
+    {keep, min(position, best_position)}
+  end
+
+  defp handoff_rank(entry) do
+    cond do
+      entry["sealed_at"] -> 2
+      entry["claim_keys"] not in [nil, []] -> 1
+      true -> 0
     end
   end
 
