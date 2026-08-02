@@ -57,15 +57,19 @@ defmodule Smolquery.QueryService.Planner do
   ## Failure honesty
 
   An unreachable buffer owner fails the plan — answering from the sealed tier
-  alone would be a wrong answer with a green status. The v1 owner-to-URL map
-  is the runtime's single `buffer_base_url` (the ring is `[self]`); Milestone
-  8 replaces that one function with ring lookup.
+  alone would be a wrong answer with a green status. Single-node,
+  `buffer_base_url` is that one owner's whole address; clustered (Milestone 8
+  L5), each table's actual owner (`Client.owner/2`, resolved off the live
+  ring) gets its own derived URL — `base_url/2` is the one function that
+  changed, `manifests/2`'s per-ref fetch already fanned out to whatever
+  `manifest/2` returned.
   """
 
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Cluster
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
@@ -225,7 +229,17 @@ defmodule Smolquery.QueryService.Planner do
     HotClient.manifest(base_url(runtime, owner), ref, timeout_ms: runtime.buffer_timeout_ms)
   end
 
-  defp base_url(%Runtime{buffer_base_url: url}, _owner), do: url
+  defp base_url(%Runtime{buffer_base_url: url} = runtime, owner) do
+    if Cluster.enabled?() do
+      "http://#{node_host(owner)}:#{runtime.buffer_hot_port}"
+    else
+      url
+    end
+  end
+
+  defp node_host(node) do
+    node |> Atom.to_string() |> String.split("@", parts: 2) |> List.last()
+  end
 
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000

@@ -30,12 +30,21 @@ defmodule Smolquery.QueryService.Runtime do
 
   `buffer_base_url` is where the planner reaches `BufferService.HotServer` for
   a table's hot manifest, and where the job engines it plans for read
-  micro-segment bytes. Configuration is honest for a single-node deployment; a
-  cluster resolves the owning node from the ownership ring instead, which
-  arrives with Milestone 8.
+  micro-segment bytes — honest for a single-node deployment. With clustering
+  on (Milestone 8 L5), `Planner` ignores this field per table and instead
+  derives each owning node's URL from the node name itself:
+  `http://<host-part-of-the-node-name>:<buffer_hot_port>` — which is exactly
+  the pod DNS name `rel/env.sh.eex` sets `RELEASE_NODE` to in a k8s
+  StatefulSet (Milestone 8 L1/L7), so no separate service-discovery call is
+  needed. A table whose owner cannot be reached fails the whole plan rather
+  than answering from the sealed tier alone (decided since M8's design,
+  exercised for real once fan-out means more than one possible owner).
 
   `buffer_name` is the buffer service instance ownership questions go to —
   `BufferService.Client.owner/2` answers even on a node running no buffer.
+  `buffer_hot_port` is the port every buffer node's `HotServer` binds
+  (`Smolquery.BufferService`'s own `hot_server_port`) — only consulted when
+  clustering is on, since a single node already knows its one true URL.
 
   `engine_extensions` are loaded into each job's private engine. `httpfs` is
   not optional in a real deployment — hot-tier micro-segments are read over
@@ -96,6 +105,7 @@ defmodule Smolquery.QueryService.Runtime do
     lockdown: true,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
+    buffer_hot_port: 4001,
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
     job_bootstrap: [],
@@ -114,6 +124,7 @@ defmodule Smolquery.QueryService.Runtime do
           lockdown: boolean(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
+          buffer_hot_port: :inet.port_number(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
           job_bootstrap: [String.t()],
@@ -128,6 +139,7 @@ defmodule Smolquery.QueryService.Runtime do
     :lockdown,
     :buffer_name,
     :buffer_base_url,
+    :buffer_hot_port,
     :buffer_timeout_ms,
     :engine_extensions,
     :max_concurrent_jobs,
