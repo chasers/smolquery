@@ -114,6 +114,6 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
   end
 
   defp decode_members(text) do
-    text |> String.split(",") |> Enum.map(&String.to_atom/1)
+    text |> String.split(",", trim: true) |> Enum.map(&String.to_atom/1)
   end
 end

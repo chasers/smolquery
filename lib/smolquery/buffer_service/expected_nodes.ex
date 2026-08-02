@@ -39,9 +39,13 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   config (`Smolquery.Cluster.ConfigStore.ensure/3` — the existing row wins a
   race), so upgrading a deployment from the static-config world is a no-op:
   day one reads answer exactly what the config said, and only `resize/3`
-  changes the row after that. Where no keeper runs (single-node, dev, tests
-  that predate it), `list/1` answers the static config directly and nothing
-  changes.
+  changes the row after that. A node whose static config is *empty* seeds
+  nothing and keeps polling: the expected set is per fleet, not per role,
+  and only some roles are told the fleet (the kind deployment sets
+  `SMOLQUERY_BUFFER_NODES` on api pods, not buffer pods) — an empty-config
+  keeper racing the seed must not make its own ignorance authoritative for
+  every reader. Where no keeper runs (single-node, dev, tests that predate
+  it), `list/1` answers the static config directly and nothing changes.
   """
 
   use GenServer
@@ -195,6 +199,9 @@ defmodule Smolquery.BufferService.ExpectedNodes do
          {:ok, config} <- current_row(state) do
       publish(state, config)
     else
+      :unseeded ->
+        state
+
       {:error, reason} ->
         Logger.warning(fn ->
           "expected-nodes refresh failed for #{inspect(state.name)}: #{inspect(reason)}"
@@ -207,10 +214,13 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   defp current_row(state) do
     case state.store_impl.fetch(state.store, state.scope) do
       {:ok, config} -> {:ok, config}
-      :not_found -> state.store_impl.ensure(state.store, state.scope, state.static)
+      :not_found -> seed(state)
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp seed(%{static: []}), do: :unseeded
+  defp seed(state), do: state.store_impl.ensure(state.store, state.scope, state.static)
 
   defp publish(state, config) do
     if config.epoch == state.epoch do
