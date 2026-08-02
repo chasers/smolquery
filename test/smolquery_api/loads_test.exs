@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.LoadsTest do
+defmodule SmolqueryApi.LoadControllerTest do
   use ExUnit.Case, async: true
 
   import Plug.Conn, only: [put_req_header: 3]
@@ -6,13 +6,13 @@ defmodule Smolquery.Api.LoadsTest do
 
   alias Explorer.DataFrame
   alias Explorer.Series
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
   alias Smolquery.BufferService
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.MapCatalog
+  alias SmolqueryApi.Runtime
 
   @moduletag :tmp_dir
 
@@ -59,7 +59,7 @@ defmodule Smolquery.Api.LoadsTest do
     conn(:post, path, body)
     |> put_req_header("content-type", content_type)
     |> put_req_header("authorization", "Bearer #{@key}")
-    |> Router.call(Router.init(name))
+    |> then(&ApiEndpoint.request(name, &1))
   end
 
   defp row_count(buffer) do

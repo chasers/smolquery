@@ -290,7 +290,7 @@ lib/smolquery/buffer_service*  # the hot tier: group commit, manifest log, HotSe
 lib/smolquery/storage_service* # seal, compact, retention, GC
 lib/smolquery/query_service*   # query jobs and the two-tier planner
 lib/smolquery/cluster*         # node discovery and :pg membership
-lib/smolquery/api*             # the HTTP front door (see docs/api.md)
+lib/smolquery_api/             # the HTTP front door, Phoenix (see docs/api.md)
 lib/smolquery_web/             # Phoenix LiveView UI
 deploy/                        # kustomize manifests (base + kind overlay)
 bench/                         # performance harnesses + results/ (see docs/benchmarks.md)

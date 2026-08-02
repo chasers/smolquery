@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.CrudIntegrationTest do
+defmodule SmolqueryApi.CrudIntegrationTest do
   @moduledoc """
   The L2 exit proof: datasets/tables CRUD over a real listener and a real
   DuckLake catalog — curl-shaped requests, catalog-backed answers.
@@ -9,9 +9,8 @@ defmodule Smolquery.Api.CrudIntegrationTest do
 
   use ExUnit.Case, async: false
 
-  alias Smolquery.Api
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
+  alias Smolquery.Test.ApiEndpoint
+  alias SmolqueryApi.Runtime
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -24,22 +23,27 @@ defmodule Smolquery.Api.CrudIntegrationTest do
   ]
 
   setup context do
-    name = :"api_crud_#{:erlang.unique_integer([:positive])}"
+    ApiEndpoint.stop_shared!()
+    config = Application.get_env(:smolquery, SmolqueryApi.Endpoint)
+    Application.put_env(:smolquery, SmolqueryApi.Endpoint, Keyword.put(config, :server, true))
+
+    on_exit(fn ->
+      Application.put_env(:smolquery, SmolqueryApi.Endpoint, config)
+      ApiEndpoint.start_shared!()
+    end)
 
     start_supervised!(
-      {Api.Supervisor,
-       name: name,
+      {SmolqueryApi.Supervisor,
        api_key: @key,
-       port: 0,
        catalog: [
          metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
          data_path: Path.join(context.tmp_dir, "data")
        ]}
     )
 
-    on_exit(fn -> Runtime.delete(name) end)
+    on_exit(fn -> Runtime.delete(SmolqueryApi) end)
 
-    %{base: Router.base_url(name)}
+    %{base: SmolqueryApi.Endpoint.base_url()}
   end
 
   defp req(base) do

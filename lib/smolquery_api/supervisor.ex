@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Supervisor do
+defmodule SmolqueryApi.Supervisor do
   @moduledoc """
   Top-level subtree for the `:api` role.
 
@@ -7,21 +7,22 @@ defmodule Smolquery.Api.Supervisor do
   key fails the boot right here — fail closed — rather than starting a
   listener that would wave requests through.
 
-  The strategy is `rest_for_one`, catalog engine first, because the listener
-  answers CRUD through it; a catalog engine that dies takes the listener down
-  with it rather than leaving routes serving through a dead handle.
+  The strategy is `rest_for_one`, catalog engine first, because the endpoint
+  answers CRUD through it; a catalog engine that dies takes the endpoint down
+  with it rather than leaving routes serving through a dead handle. The same
+  shape as `SmolqueryWeb.Supervisor` — both surfaces are Phoenix endpoints
+  under a role-gated subtree now (PL-16).
   """
 
   use Supervisor
 
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
   alias Smolquery.Catalog.DuckLake
+  alias SmolqueryApi.Runtime
 
   @doc """
   Starts the API.
 
-  Takes any `Smolquery.Api.Runtime` option; application config supplies
+  Takes any `SmolqueryApi.Runtime` option; application config supplies
   whatever is not passed.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -37,13 +38,7 @@ defmodule Smolquery.Api.Supervisor do
 
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
-        [
-          Supervisor.child_spec(
-            {Bandit,
-             plug: {Router, runtime.name}, ip: runtime.ip, port: runtime.port, startup_log: false},
-            id: Runtime.listener(runtime.name)
-          )
-        ]
+        [SmolqueryApi.Endpoint]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

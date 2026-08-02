@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Runtime do
+defmodule SmolqueryApi.Runtime do
   @moduledoc """
   A running API's resolved configuration.
 
@@ -9,9 +9,7 @@ defmodule Smolquery.Api.Runtime do
 
   ## Configuration
 
-      config :smolquery, Smolquery.Api,
-        ip: {127, 0, 0, 1},
-        port: 4000,
+      config :smolquery, SmolqueryApi,
         api_key: "..."
 
   `api_key` is the one static Bearer key every `/v1` route requires (PL-8 D5).
@@ -19,8 +17,11 @@ defmodule Smolquery.Api.Runtime do
   key configured refuses to boot rather than serve an open API. Multi-key and
   rotation are explicitly later.
 
-  `ip` defaults to loopback for the same reason — exposing the listener beyond
-  the node is a deliberate act (`SMOLQUERY_API_IP`), not a default.
+  The listener (ip, port) is Phoenix's own concern and lives under
+  `config :smolquery, SmolqueryApi.Endpoint` — the same split
+  `SmolqueryWeb.Runtime` made. `SMOLQUERY_API_IP`/`SMOLQUERY_API_PORT` still
+  land there, and the ip still defaults to loopback: exposing the listener
+  beyond the node is a deliberate act, not a default.
 
   `catalog` is where the CRUD routes resolve datasets, tables, and schemas —
   the same seam `Smolquery.QueryService` uses. Given options (or nothing), the
@@ -38,9 +39,7 @@ defmodule Smolquery.Api.Runtime do
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
-    load_max_bytes: 268_435_456,
-    ip: {127, 0, 0, 1},
-    port: 4000
+    load_max_bytes: 268_435_456
   ]
 
   @type t :: %__MODULE__{
@@ -50,21 +49,19 @@ defmodule Smolquery.Api.Runtime do
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
-          load_max_bytes: pos_integer(),
-          ip: :inet.socket_address(),
-          port: :inet.port_number()
+          load_max_bytes: pos_integer()
         }
 
   @doc """
   Resolves configuration into a runtime.
 
-  Application config for `Smolquery.Api` supplies the defaults; `opts`
+  Application config for `SmolqueryApi` supplies the defaults; `opts`
   overrides them. Raises if no non-empty `api_key` is present in either.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    config = Keyword.merge(Application.get_env(:smolquery, Smolquery.Api, []), opts)
-    name = Keyword.get(config, :name, Smolquery.Api)
+    config = Keyword.merge(Application.get_env(:smolquery, SmolqueryApi, []), opts)
+    name = Keyword.get(config, :name, SmolqueryApi)
 
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
@@ -75,7 +72,7 @@ defmodule Smolquery.Api.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :load_max_bytes, :ip, :port]))
+    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :load_max_bytes]))
   end
 
   use Smolquery.Runtime
@@ -85,12 +82,6 @@ defmodule Smolquery.Api.Runtime do
   """
   @spec supervisor(atom()) :: atom()
   def supervisor(name), do: Module.concat(name, "Supervisor")
-
-  @doc """
-  The Bandit listener's child id under an instance's supervisor.
-  """
-  @spec listener(atom()) :: atom()
-  def listener(name), do: Module.concat(name, "Listener")
 
   @doc """
   The engine instance CRUD routes resolve the catalog through.
@@ -106,7 +97,7 @@ defmodule Smolquery.Api.Runtime do
       _absent ->
         raise ArgumentError,
               "the API refuses to boot without an API key: set SMOLQUERY_API_KEY " <>
-                "(or config :smolquery, Smolquery.Api, api_key: ...) on every node " <>
+                "(or config :smolquery, SmolqueryApi, api_key: ...) on every node " <>
                 "running the :api role"
     end
   end

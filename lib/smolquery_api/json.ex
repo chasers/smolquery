@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Json do
+defmodule SmolqueryApi.Json do
   @moduledoc """
   The one way a route sends a JSON success body.
   """

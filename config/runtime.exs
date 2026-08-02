@@ -5,7 +5,7 @@ if roles = System.get_env("SMOLQUERY_ROLES") do
 end
 
 if api_key = System.get_env("SMOLQUERY_API_KEY") do
-  config :smolquery, Smolquery.Api, api_key: api_key
+  config :smolquery, SmolqueryApi, api_key: api_key
 end
 
 if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
@@ -13,13 +13,13 @@ if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
 end
 
 if api_port = System.get_env("SMOLQUERY_API_PORT") do
-  config :smolquery, Smolquery.Api, port: String.to_integer(api_port)
+  config :smolquery, SmolqueryApi.Endpoint, http: [port: String.to_integer(api_port)]
 end
 
 if api_ip = System.get_env("SMOLQUERY_API_IP") do
   {:ok, ip} = api_ip |> String.to_charlist() |> :inet.parse_address()
 
-  config :smolquery, Smolquery.Api, ip: ip
+  config :smolquery, SmolqueryApi.Endpoint, http: [ip: ip]
 end
 
 if web_port = System.get_env("SMOLQUERY_WEB_PORT") do

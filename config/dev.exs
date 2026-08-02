@@ -2,7 +2,7 @@ import Config
 
 config :logger, level: :debug
 
-config :smolquery, Smolquery.Api, api_key: "smolquery-dev"
+config :smolquery, SmolqueryApi, api_key: "smolquery-dev"
 
 config :smolquery, SmolqueryWeb.Endpoint,
   check_origin: false,

@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Jobs do
+defmodule SmolqueryApi.JobController do
   @moduledoc """
   The async-job routes' logic, over `Smolquery.QueryService.Client`.
 
@@ -15,15 +15,15 @@ defmodule Smolquery.Api.Jobs do
   unknown one 404 — a client can tell "too late" from "never existed".
   """
 
-  import Plug.Conn, only: [fetch_query_params: 1, put_resp_header: 3]
+  use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Json
-  alias Smolquery.Api.Runtime
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
 
   @default_max_results 1_000
   @max_max_results 10_000
@@ -31,8 +31,8 @@ defmodule Smolquery.Api.Jobs do
   @doc """
   Submits the body's query as an async job.
   """
-  @spec create(Plug.Conn.t()) :: Plug.Conn.t()
-  def create(conn) do
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, _params) do
     with {:ok, sql} <- sql(conn.body_params),
          {:ok, job} <- Client.submit(query_name(conn), sql, submit_opts(conn.body_params)) do
       Json.send_json(conn, 200, job_json(job, false))
@@ -45,8 +45,8 @@ defmodule Smolquery.Api.Jobs do
   A job's status and stats — from the registry, or from history once the
   registry has let it go.
   """
-  @spec get(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def get(conn, job_id) do
+  @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def show(conn, %{"id" => job_id}) do
     case Client.fetch(query_name(conn), job_id) do
       {:ok, %Job{} = job, frame} ->
         Json.send_json(conn, 200, job_json(job, job.state == :done and frame != nil))
@@ -59,8 +59,8 @@ defmodule Smolquery.Api.Jobs do
   @doc """
   One page of a finished job's rows.
   """
-  @spec results(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def results(conn, job_id) do
+  @spec results(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def results(conn, %{"id" => job_id}) do
     conn = fetch_query_params(conn)
 
     with {:ok, max_results} <- max_results(conn.query_params),
@@ -87,8 +87,8 @@ defmodule Smolquery.Api.Jobs do
   Cancels a job. Cancelling a finished or unknown job succeeds — the state
   the caller wanted is the state they have.
   """
-  @spec cancel(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def cancel(conn, job_id) do
+  @spec delete(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def delete(conn, %{"id" => job_id}) do
     :ok = Client.cancel(query_name(conn), job_id)
 
     Json.send_json(conn, 200, %{"id" => job_id})

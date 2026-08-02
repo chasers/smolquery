@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Errors do
+defmodule SmolqueryApi.Errors do
   @moduledoc """
   The one JSON error envelope every route answers failures with (PL-8 D11).
 

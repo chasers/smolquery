@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Loads do
+defmodule SmolqueryApi.LoadController do
   @moduledoc """
   Batch loads: a file in the request body, the insert path underneath
   (PL-8 D10).
@@ -20,15 +20,15 @@ defmodule Smolquery.Api.Loads do
            .../v1/datasets/analytics/tables/events/load
   """
 
-  import Plug.Conn, only: [read_body: 2]
+  use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Inserts
-  alias Smolquery.Api.Json
-  alias Smolquery.Api.Runtime
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.InsertController
+  alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
 
   @chunk_rows 10_000
   @max_reported_errors 100
@@ -36,8 +36,8 @@ defmodule Smolquery.Api.Loads do
   @doc """
   Loads the body's file into a table.
   """
-  @spec create(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
-  def create(conn, dataset, table) do
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, %{"dataset" => dataset, "table" => table}) do
     case format(conn) do
       {:ok, format} -> spool(conn, {dataset, table}, format)
       :error -> unsupported(conn)
@@ -123,7 +123,7 @@ defmodule Smolquery.Api.Loads do
 
     case outcome do
       {:error, reason} ->
-        Inserts.insert_error(conn, reason)
+        InsertController.insert_error(conn, reason)
 
       {inserted, error_chunks} ->
         errors = parse_errors ++ (error_chunks |> Enum.reverse() |> List.flatten())
@@ -131,7 +131,8 @@ defmodule Smolquery.Api.Loads do
         Json.send_json(conn, 200, %{
           "insertedRows" => inserted,
           "errorCount" => length(errors),
-          "insertErrors" => errors |> Enum.take(@max_reported_errors) |> Inserts.errors_json()
+          "insertErrors" =>
+            errors |> Enum.take(@max_reported_errors) |> InsertController.errors_json()
         })
     end
   end

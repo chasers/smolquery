@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.Tables do
+defmodule SmolqueryApi.TableController do
   @moduledoc """
   The table routes' logic: list, create, and describe, over `Smolquery.Catalog`.
 
@@ -8,22 +8,24 @@ defmodule Smolquery.Api.Tables do
   schema back and answers 409 when what exists is not what was asked for.
   """
 
-  alias Smolquery.Api.Datasets
-  alias Smolquery.Api.Errors
-  alias Smolquery.Api.Json
-  alias Smolquery.Api.Runtime
-  alias Smolquery.Api.TableSchema
+  use SmolqueryApi, :controller
+
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias SmolqueryApi.DatasetController
+  alias SmolqueryApi.Errors
+  alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
+  alias SmolqueryApi.TableSchema
 
   @doc """
   Every table in a dataset.
   """
-  @spec list(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def list(conn, dataset) do
-    with :ok <- Datasets.exists(conn, dataset),
-         {:ok, tables} <- Catalog.list_tables(Datasets.catalog(conn), dataset) do
+  @spec index(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def index(conn, %{"dataset" => dataset}) do
+    with :ok <- DatasetController.exists(conn, dataset),
+         {:ok, tables} <- Catalog.list_tables(DatasetController.catalog(conn), dataset) do
       Json.send_json(conn, 200, %{"tables" => tables})
     else
       {:error, reason} -> Errors.from_reason(conn, reason)
@@ -33,13 +35,13 @@ defmodule Smolquery.Api.Tables do
   @doc """
   Creates the table the body names, with the schema it carries.
   """
-  @spec create(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def create(conn, dataset) do
-    catalog = Datasets.catalog(conn)
+  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def create(conn, %{"dataset" => dataset}) do
+    catalog = DatasetController.catalog(conn)
 
     with {:ok, id} <- id(conn.body_params),
          {:ok, schema} <- TableSchema.from_json(conn.body_params["schema"]),
-         :ok <- Datasets.exists(conn, dataset),
+         :ok <- DatasetController.exists(conn, dataset),
          :ok <- Catalog.create_table(catalog, {dataset, id}, schema),
          :ok <- invalidate_schema_cache(conn, {dataset, id}),
          {:ok, existing} <- Catalog.table_schema(catalog, {dataset, id}) do
@@ -61,9 +63,9 @@ defmodule Smolquery.Api.Tables do
   @doc """
   A table's schema and retention policy.
   """
-  @spec get(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
-  def get(conn, dataset, table) do
-    catalog = Datasets.catalog(conn)
+  @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def show(conn, %{"dataset" => dataset, "table" => table}) do
+    catalog = DatasetController.catalog(conn)
 
     with {:ok, schema} <- Catalog.table_schema(catalog, {dataset, table}),
          {:ok, policy} <- Catalog.retention(catalog, {dataset, table}) do
@@ -82,9 +84,9 @@ defmodule Smolquery.Api.Tables do
   deliberately too conservative to complain, so this is where a typo gets
   caught by the person who made it.
   """
-  @spec update(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
-  def update(conn, dataset, table) do
-    catalog = Datasets.catalog(conn)
+  @spec update(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def update(conn, %{"dataset" => dataset, "table" => table}) do
+    catalog = DatasetController.catalog(conn)
 
     with {:ok, schema} <- Catalog.table_schema(catalog, {dataset, table}),
          {:ok, policy} <- retention_from_json(conn.body_params, schema),

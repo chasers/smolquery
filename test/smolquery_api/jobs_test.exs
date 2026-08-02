@@ -1,14 +1,14 @@
-defmodule Smolquery.Api.JobsTest do
+defmodule SmolqueryApi.JobControllerTest do
   use ExUnit.Case, async: false
 
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
   alias Smolquery.QueryService
+  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
+  alias SmolqueryApi.Runtime
 
   @key "jobs-test-key"
 
@@ -42,7 +42,7 @@ defmodule Smolquery.Api.JobsTest do
   defp request(name, conn) do
     conn
     |> put_req_header("authorization", "Bearer #{@key}")
-    |> Router.call(Router.init(name))
+    |> then(&ApiEndpoint.request(name, &1))
   end
 
   defp post_json(name, path, body) do

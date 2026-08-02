@@ -1,4 +1,4 @@
-defmodule Smolquery.Api.TableSchema do
+defmodule SmolqueryApi.TableSchema do
   @moduledoc """
   Table-schema JSON, in and out.
 

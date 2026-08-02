@@ -1,11 +1,11 @@
-defmodule Smolquery.Api.RouterTest do
+defmodule SmolqueryApi.RouterTest do
   use ExUnit.Case, async: true
 
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
-  alias Smolquery.Api.Router
-  alias Smolquery.Api.Runtime
+  alias Smolquery.Test.ApiEndpoint
+  alias SmolqueryApi.Runtime
 
   @key "test-api-key"
 
@@ -18,7 +18,7 @@ defmodule Smolquery.Api.RouterTest do
     name
   end
 
-  defp request(name, conn), do: Router.call(conn, Router.init(name))
+  defp request(name, conn), do: ApiEndpoint.request(name, conn)
 
   defp authorized(conn, key \\ @key), do: put_req_header(conn, "authorization", "Bearer #{key}")
 
