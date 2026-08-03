@@ -33,11 +33,15 @@ defmodule Bench.Load do
         mix run bench/load.exs 2>/dev/null
         ROWS=100000 SCALE=25000,100000 mix run bench/load.exs 2>/dev/null
 
-  `ROWS` is the shootout's row count, `SCALE` the sweep's (comma-separated),
-  `BATCH` the insert comparison's batch size, `CHUNK` a reminder of the
-  controller's own 10,000-row chunking (not configurable at runtime). Redirecting
-  stderr is not cosmetic: ADBC's Explorer callback deprecation warns once per
-  query.
+  `ROWS` is the shootout's row count, `SCALE` the sweep's (comma-separated), `BATCH`
+  the insert comparison's batch size, `POOL` the fixture's cardinality. The
+  controller's own chunking is a fixed 10,000 rows. Redirecting stderr is not
+  cosmetic: ADBC's Explorer callback deprecation warns once per query.
+
+  Every load reports `cores` — whole CPUs consumed, from the OS process's CPU time,
+  so it counts DuckDB's native threads as well as the BEAM. On a 10-core machine a
+  load measures ~1.0, because one request is one process: that is the parallelism
+  gap, not an inference about it.
 
   Fixture files are built through the production writer — the Parquet file comes
   from `Smolquery.Segments.Writer.write/3`, which is exactly what an export from
@@ -86,6 +90,7 @@ defmodule Bench.Load do
           "#{base_url()}/v1/…/load, cap #{mib(load_max_bytes())} MiB"
       )
 
+      schedulers()
       files = build!(dir, config.rows)
 
       shootout(req, files, config.rows)
@@ -200,18 +205,22 @@ defmodule Bench.Load do
         label("format", 10) <>
         pad("MiB", 8) <>
         pad("load ms", 10) <>
-        pad("rows/s", 10) <> pad("MiB/s", 8) <> pad("inserted", 10) <> pad("status", 8)
+        pad("rows/s", 10) <>
+        pad("MiB/s", 8) <>
+        pad("inserted", 10) <>
+        pad("status", 8) <> pad("cores", 8) <> pad("sched%", 9)
     )
 
     for {format, content_type, _extension} <- @formats do
       file = Map.fetch!(files, format)
+      cpu = cpu_snapshot()
       {us, response} = load(req, table(), content_type, file.path)
 
-      report_load(format, file.bytes, us, response)
+      report_load(format, file.bytes, us, response, cpu_since(cpu))
     end
   end
 
-  defp report_load(label_text, bytes, us, response) do
+  defp report_load(label_text, bytes, us, response, used) do
     seconds = us / 1_000_000
     inserted = response.body["insertedRows"] || 0
 
@@ -222,7 +231,8 @@ defmodule Bench.Load do
         pad(ms(us), 10) <>
         pad(round(inserted / seconds), 10) <>
         pad(Float.round(bytes / seconds / 1_048_576, 1), 8) <>
-        pad(inserted, 10) <> pad(response.status, 8)
+        pad(inserted, 10) <>
+        pad(response.status, 8) <> pad(used.cores, 8) <> pad(used.scheduler, 9)
     )
   end
 
@@ -353,22 +363,26 @@ defmodule Bench.Load do
         "#{config.batch}-row inserts, both serial"
     )
 
-    IO.puts("  " <> label("path", 24) <> pad("ms", 10) <> pad("rows/s", 10))
+    IO.puts("  " <> label("path", 24) <> pad("ms", 10) <> pad("rows/s", 10) <> pad("cores", 8))
 
     path = Path.join(dir, "versus.ndjson")
     :ok = write_fixture!(:ndjson, path, dir, rows)
 
+    cpu = cpu_snapshot()
     {load_us, response} = load(req, table(), "application/x-ndjson", path)
+    load_used = cpu_since(cpu)
     File.rm(path)
 
     IO.puts(
       "  " <>
         label("POST /load, one file", 24) <>
         pad(ms(load_us), 10) <>
-        pad(round((response.body["insertedRows"] || 0) / (load_us / 1_000_000)), 10)
+        pad(round((response.body["insertedRows"] || 0) / (load_us / 1_000_000)), 10) <>
+        pad(load_used.cores, 8)
     )
 
     pool = pool()
+    insert_cpu = cpu_snapshot()
 
     {insert_us, inserted} =
       :timer.tc(fn ->
@@ -377,10 +391,13 @@ defmodule Bench.Load do
         end)
       end)
 
+    insert_used = cpu_since(insert_cpu)
+
     IO.puts(
       "  " <>
         label("POST /insert × #{div(rows, config.batch)}", 24) <>
-        pad(ms(insert_us), 10) <> pad(round(inserted / (insert_us / 1_000_000)), 10)
+        pad(ms(insert_us), 10) <>
+        pad(round(inserted / (insert_us / 1_000_000)), 10) <> pad(insert_used.cores, 8)
     )
   end
 

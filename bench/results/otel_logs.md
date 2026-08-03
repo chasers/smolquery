@@ -7,6 +7,7 @@
 | Command | `mix run bench/otel_logs.exs 2>/dev/null` (defaults: `WRITERS=4,8,16,32`, `BATCH=2000`, `TABLES=1`, `SECONDS=10`, `TAIL_SECONDS=10`, `SUSTAINED_SECONDS=30`, `TAIL_INTERVAL_MS=1000`, `REPS=5`, buffer `flush_interval_ms: 1000`) |
 | Machine | Apple M1 Max · 10 cores · 64 GiB · macOS 26.5.2 |
 | Runtime | Elixir 1.20.2 / OTP 29 · DuckDB v1.5.1 |
+| Parallelism | 10 logical processors · 10 schedulers online · 10 dirty-CPU · 10 dirty-IO · 10 DuckDB threads per engine |
 
 One node, every role but `:web`, everything over HTTP: 61-column OTel log
 records (~2.1 KB of JSON each, 4.2 MiB per 2,000-row batch) through
@@ -16,14 +17,20 @@ driver shares the machine with the node it measures.
 
 ## Headline
 
-**One table takes ~37.7k wide log records/s (80 MiB/s of JSON) through the HTTP
-API; eight tables take 57.1k. A live tail over half the single-table stream
-costs 331 ms at p50 while showing rows 1.15 s old.** The ceiling is per-row
-Elixir CPU, not bytes and not disk: one batch costs 107.5 ms on a core, of which
-**51% is row-by-row validation and 25% is JSON decode** — only 24% is the Arrow
-encode and Parquet write. Nothing drifts over 30 seconds of sustained load,
-because the sealer pins the hot tier at ~50 unsealed micro-segments while 2M
-rows land on it.
+**One table takes ~38.4k wide log records/s (82 MiB/s of JSON) through the HTTP API
+while using 4.8 of 10 cores; eight tables take 57.1k. A live tail over half the
+single-table stream costs 331 ms at p50 while showing rows 1.12 s old.**
+
+Two things set that ceiling, and the CPU measurement separates them. Per row, the
+cost is Elixir term work: one batch takes 107.5 ms on a core, **51% row-by-row
+validation, 25% JSON decode**, only 24% the Arrow encode and Parquet write. But the
+node reaches its ceiling at **under half the machine** — 4.79 of 10 cores, with
+throughput *falling* at 32 writers while CPU stays flat — so what caps it is
+serialization, not capacity. Not bytes, not the disk (~1 MiB/s of zstd Parquet
+against a 2.2 GB/s SSD), and not the fsync (`buffer.md`'s toggle: ±2–6%).
+
+Nothing drifts over 30 seconds of sustained load, because the sealer pins the hot
+tier near 55 unsealed micro-segments while 2M rows land on it.
 
 ## Phase 0 — stage profile: one 2,000-row batch (4.2 MiB of JSON), median of 5
 
@@ -39,7 +46,7 @@ rows land on it.
 ```
 
 This is where the ceiling comes from. A single core moves 18.6k rows/s through
-the insert path, and the measured 37.7k is that work spread across cores while
+the insert path, and the measured 38.4k is that work spread across cores while
 each writer waits on a group commit.
 
 **The biggest stage is `IngestService.Validator` — 51%, more than double the
@@ -66,15 +73,27 @@ reporting without `to_rows`.
 ## Phase 1 — ingest ceiling (writers sweep, 10s each, no reader)
 
 ```
-    writers    rows/s   MiB/s   req/s      p50      p95      p99      max   429s    prep
-          4     26292    55.9      13    258.4    313.7    394.3    395.6      0    37.0
-          8     35946    76.4      18    387.5    496.6    564.2    566.3      0    42.4
-         16     37665    80.0      19    786.9    916.5   1058.2   1062.4      0    48.2
-         32     36371    77.3      18   1635.4   2145.4   2588.7   2610.1      0    77.5
+    writers    rows/s   MiB/s   req/s      p50      p95      p99      max   429s    prep   cores   sched%
+          4     26726    56.8      13    256.3    292.2    327.6    328.7      0    38.2    3.16     19.4
+          8     35028    74.4      18    393.0    560.7    611.5    613.5      0    41.7    4.42     26.0
+         16     38426    81.6      19    763.8    959.1   1068.0   1176.5      0    44.9    4.79     29.1
+         32     33298    70.7      17   1675.1   1979.0   2265.0   2318.0      0    66.3    4.21     28.7
 ```
 
-The knee is at 8 writers. From 8 to 32 the achieved rate moves ±4% while p50
-goes 388 → 1635 ms: four times the offered load, four times the wait, the same
+**The ceiling is coordination, not CPU, and now that is measured rather than
+inferred.** At the 16-writer peak the process consumes **4.79 of 10 cores** and the
+BEAM's normal schedulers are 29% busy. At 32 writers throughput *drops* 13% while
+cores stay flat at 4.21 — more offered load buys nothing and costs latency, which is
+what a serialization ceiling looks like. Half the machine is idle at maximum
+throughput.
+
+`cores` comes from the OS process's CPU time, so it counts DuckDB's and Polars'
+native threads that no BEAM statistic sees — and the co-resident driver. The gap
+between it and `sched%` × 10 is that native work: ~4.8 cores total against ~2.9
+core-equivalents on BEAM schedulers, so roughly **1.9 cores of native work**.
+
+The knee is at 8 writers. From 8 to 32 the achieved rate moves ±8% while p50
+goes 393 → 1675 ms: four times the offered load, four times the wait, the same
 work done. That is the Little's-law regime `bench/results/buffer.md` found for
 group commit — arriving through Phoenix and the ingest edge does not change its
 shape. The dip at 32 is the driver and the node competing for the same 10 cores,
@@ -119,23 +138,23 @@ frame-through path is what attacks the other three quarters. They compose.
 ## Phase 2 — tail floor (no ingest, 10s, last 100)
 
 ```
-  1438000 rows × 61 columns in otel_logs, 55 unsealed micro-segments a tail reads (360 in the manifest, the rest retired inside their grace period)
+  1440000 rows × 61 columns in otel_logs, 54 unsealed micro-segments a tail reads (361 in the manifest, the rest retired inside their grace period)
   shape       tails      p50      p95      p99      max      rows  fresh p50
-  all            21    231.3    285.9    366.7    366.7   100-100     3957.4
-  filtered       20    250.8    301.6    301.6    301.6   100-100     9194.4
+  all            22    234.5    253.8    282.7    282.7   100-100     4997.0
+  filtered       20    256.4    304.5    304.5    304.5   100-100    10244.9
 ```
 
-231 ms to tail 1.4M rows with nothing competing: `bench/results/query.md`'s
-~50 ms job engine and ~10 ms plan, plus the union scan over 55 unsealed
+234 ms to tail 1.4M rows with nothing competing: `bench/results/query.md`'s
+~50 ms job engine and ~10 ms plan, plus the union scan over 54 unsealed
 micro-segments and the sealed tier, plus framing 100 wide rows.
 
 The filtered tail (`service_name = 'checkout-api' AND severity_number >= 17`) is
-**slower**, not faster: 251 ms. `ORDER BY timestamp DESC LIMIT 100` has to touch
+**slower**, not faster: 256 ms. `ORDER BY timestamp DESC LIMIT 100` has to touch
 every surviving file either way, and the predicate only adds work. Pruning has
 nothing to prune — both columns are low-cardinality and present in every
 segment, unlike the id-range case `query.md` measured.
 
-Its freshness is 9.2 s against the unfiltered 4.0 s, and that is structural: ERROR
+Its freshness is 10.2 s against the unfiltered 5.0 s, and that is structural: ERROR
 is ~4% of rows on one service in five, so the newest *matching* row is inherently
 older than the newest row. A filtered tail is staler than an unfiltered one
 roughly by the reciprocal of its selectivity — worth knowing before promising a
@@ -143,26 +162,28 @@ roughly by the reciprocal of its selectivity — worth knowing before promising 
 they mostly say how long ago phase 1 ended; phase 3's is the one that means
 something.)
 
-## Phase 3 — sustained: 18,832 rows/s offered, tail every 1000 ms, 30s
+## Phase 3 — sustained: 19,213 rows/s offered, tail every 1000 ms, 30s
 
 ```
-     offered  achieved      p50      p95      p99      max   429s   late
-       18832     19010    407.8    571.5    644.1    647.9      0      0
+     offered  achieved      p50      p95      p99      max   429s   late   cores   sched%
+       19213     19414    419.3    587.0    610.9    627.9      0      0    3.43     17.9
   shape       tails      p50      p95      p99      max      rows  fresh p50
-  all            30    331.0    470.5    513.9    513.9   100-100     1153.0
-  2014000 rows × 61 columns in otel_logs, 48 unsealed micro-segments a tail reads (504 in the manifest, the rest retired inside their grace period)
+  all            30    331.1    479.8    495.5    495.5   100-100     1124.9
+  2032000 rows × 61 columns in otel_logs, 60 unsealed micro-segments a tail reads (509 in the manifest, the rest retired inside their grace period)
 ```
 
-Offered and achieved agree to 0.9% and no tick ran late, so this is the paced
-load it claims to be: half the measured ceiling, with a reader on it.
+Offered and achieved agree to 1% and no tick ran late, so this is the paced load it
+claims to be: half the measured ceiling, with a reader on it. It runs on **3.43
+cores** — 72% of the ceiling's CPU for 51% of the ceiling's throughput, so the fixed
+overhead per unit of work is real but modest.
 
-- **Inserts cost 408 ms at p50, 572 ms at p95.** A batch waits for the group
+- **Inserts cost 419 ms at p50, 587 ms at p95.** A batch waits for the group
   commit it lands in — the same cost as the 8-writer saturating case at half the
   load, which is what "the ack is the flush, not the queue" looks like.
-- **The tail costs 331 ms at p50, 471 ms at p95** — 100 ms over the idle floor.
-  Hot depth is *lower* than in phase 2 (48 vs 55 files), so that is contention
-  for the box, not more files to read.
-- **Freshness sits at 1.15 s at p50**: rows become visible at the next group
+- **The tail costs 331 ms at p50, 480 ms at p95** — ~97 ms over the idle floor,
+  against a hot tier that grew only 54 → 60 files, so most of that is contention
+  for the box rather than more files to read.
+- **Freshness sits at 1.12 s at p50**: rows become visible at the next group
   commit, then the query takes ~330 ms. With a 1,000 ms flush interval that is
   the floor, and it is where the workload sat.
 
@@ -170,83 +191,87 @@ load it claims to be: half the measured ceiling, with a reader on it.
 
 ```
     second    rows/s  insert p50   tail ms  fresh ms
-         0     16000       443.7     385.6   11904.1
-         1     16000       461.3     323.5    1319.2
-         2     24000       377.8     290.9    1433.2
-         3     24000       424.4     275.9     721.4
-         4     16000       391.6     358.7     952.3
-         5     16000       493.8     470.5    1203.3
-         6     16000       413.8     256.1    1153.0
-         7     16000       460.2     216.7    1262.8
-         8     28000       377.1     238.9     585.5
-         9     20000       400.2     199.4     695.6
-        10     16000       423.0     232.2     880.4
-        11     16000       414.8     331.0    1124.0
-        12     16000       465.7     306.0    1249.0
-        13     20000       369.9     245.8    1344.8
-        14     28000       392.9     299.8     698.9
-        15     16000       392.2     268.6     817.4
-        16     16000       446.4     435.6    1136.3
-        17     16000       458.2     396.3    1247.3
-        18     16000       503.1     341.4    1343.5
-        19     24000       424.9     335.7    1486.9
-        20     20000       435.5     360.5     811.7
-        21     20000       501.7     513.9    1116.3
-        22     16000       485.9     370.6    1104.2
-        23     16000       490.3     339.7    1240.7
-        24     20000       433.9     275.5    1332.8
-        25     24000       451.4     275.0     631.2
-        26     20000       450.1     228.7     734.9
-        27     16000       481.4     390.3    1054.2
-        28     16000       464.9     391.5    1205.1
-        29     16000       542.1     405.8    1359.5
-        30     16000       423.8         -         -
+         0     16000       455.3     401.2   13004.5
+         1     20000       485.2     402.6    1396.5
+         2     24000       388.1     314.6     644.3
+         3     20000       436.0     265.3     759.2
+         4     16000       427.9     465.1    1124.9
+         5     16000       445.4     324.1    1153.7
+         6     20000       458.2     331.1    1326.1
+         7     24000       407.7     210.9     541.1
+         8     20000       383.8     246.0     741.7
+         9     16000       413.0     309.5     974.5
+        10     16000       458.2     442.6    1253.5
+        11     20000       453.2     331.1    1333.9
+        12     24000       419.3     270.3     603.5
+        13     20000       415.2     253.7     754.5
+        14     16000       432.2     438.7    1106.4
+        15     16000       512.8     479.8    1329.4
+        16     16000       540.5     350.6    1333.7
+        17     28000       421.1     306.9     646.7
+        18     20000       492.2     325.6     830.6
+        19     16000       452.7     495.5    1166.0
+        20     16000       430.9     355.2    1193.7
+        21     20000       460.9     313.8    1319.8
+        22     24000       413.2     230.3     574.5
+        23     20000       412.6     216.8     725.8
+        24     16000       458.6     388.4    1062.4
+        25     16000       482.9     381.0    1219.3
+        26     20000       455.6     312.9    1321.8
+        27     24000       400.8     278.5     624.6
+        28     20000       445.5     413.6     924.5
+        29     16000       541.5     468.0    1138.5
+        30     16000       382.5         -         -
 ```
 
-The first sample is 11.9 s stale because nothing had been written since phase 1
+The first sample is 13.0 s stale because nothing had been written since phase 1
 ended — that is the tail catching up, and it does so within one interval. After
-that, freshness oscillates between 0.59 s and 1.49 s for 29 straight seconds with
+that, freshness oscillates between 0.54 s and 1.40 s for 29 straight seconds with
 no trend. The oscillation is the flush interval beating against the 1 Hz tail: a
 tail landing just before a commit sees rows a full interval old, one landing just
 after sees them fresh. Half a flush interval of jitter is the expected shape.
 
-Nothing degrades: insert p50 holds a 370–542 ms band, tail p50 a 199–514 ms band,
-while the table grows 1.4M → 2.0M rows. The per-second rows/s alternates 16k/24k
-because eight writers paced at 850 ms per batch put one batch in some one-second
+Nothing degrades: insert p50 holds a 383–541 ms band, tail p50 a 211–496 ms band,
+while the table grows 1.4M → 2.0M rows. The per-second rows/s alternates 16k–28k
+because eight writers paced at 833 ms per batch put one batch in some one-second
 buckets and two in others; the 30-second mean is flat.
 
 ## Node counters (`GET /metrics`)
 
 ```
-  buffer_commits_total                     504
-  buffer_rows_committed_total              2014000
+  buffer_commits_total                     509
+  buffer_rows_committed_total              2032000
   buffer_admission_refused_rows_total      -
   seal_attempts_total                      5
   ingest_rows_rejected_total               -
   query_jobs_total                         73
 ```
 
-2M rows in 504 group commits — 4,000 rows a commit, two 2,000-row batches merged
+2M rows in 509 group commits — 4,000 rows a commit, two 2,000-row batches merged
 on average, so group commit is earning its name at this rate. Nothing was refused
 by admission and nothing was rejected in validation.
 
-**Five seal attempts retired 456 of those 504 micro-segments, and that is why the
-tail's latency is flat.** The hot tier sat at 55 files after phase 1 and 48 after
-phase 3 — pinned well under `seal_max_files: 64` while 576k more rows landed on
-it. Sealing is not falling behind at 19k rows/s; it is holding the read side's
+**Five seal attempts retired 449 of those 509 micro-segments, and that is why the
+tail's latency is flat.** The hot tier sat at 54 files after phase 1 and 60 after
+phase 3 — pinned under `seal_max_files: 64` while 592k more rows landed on it. Sealing is not falling behind at 19k rows/s; it is holding the read side's
 cost constant, which is exactly what the tier boundary is for.
 
 ## What this settles
 
-- **The e2e numbers exist now**: ~37.7k wide (61-column) records/s and 80 MiB/s
-  of JSON through the front door on one table, 57.1k over eight, with a
-  co-resident client; half the single-table rate sustained with a live tail, all
-  at sub-second p95.
-- **The bottleneck is per-row Elixir CPU in the row-shaped middle of the write
-  path, and validation owns half of it.** 51% validate, 25% JSON decode, 24%
-  Arrow + Parquet + fsync, for 18.6k rows/s per core. Not bytes, not the disk
-  (the workload writes ~1 MiB/s of zstd Parquet against a 2.2 GB/s SSD), and not
-  the fsync (`buffer.md`'s toggle: ±2–6%).
+- **The e2e numbers exist now**: ~38.4k wide (61-column) records/s and 82 MiB/s of
+  JSON through the front door on one table, 57.1k over eight, with a co-resident
+  client; half the single-table rate sustained with a live tail, all at sub-second
+  p95.
+- **The ceiling is serialization, not CPU — measured, not inferred.** Maximum
+  throughput consumes 4.79 of 10 cores (29% BEAM scheduler busy, so ~1.9 cores of
+  native DuckDB/Polars work), and pushing to 32 writers *lowers* throughput while
+  CPU stays flat. Half the machine is idle at the ceiling, which is why the
+  `TABLES` sweep buys anything at all and why more concurrency alone does not.
+- **The per-row cost lives in the row-shaped middle of the write path, and
+  validation owns half of it.** 51% validate, 25% JSON decode, 24% Arrow + Parquet
+  + fsync, for 18.6k rows/s per core. Not bytes, not the disk (the workload writes
+  ~1 MiB/s of zstd Parquet against a 2.2 GB/s SSD), and not the fsync
+  (`buffer.md`'s toggle: ±2–6%).
 - **A different wire format is not the fix while the buffer takes rows.** Parquet
   parses 38× faster than JSON, and `DataFrame.to_rows` gives all of it back and
   then some. The fix is frames end to end — `Writer.write/3` already accepts
@@ -256,7 +281,7 @@ cost constant, which is exactly what the tier boundary is for.
   PL-6's expected win for an HTTP-fronted workload, as against `buffer.md`'s
   3.1–4.1× measured with no edge in front.
 - **The ack contract holds under load.** A 200 means queryable, and end to end
-  that reads out as 1.15 s of staleness at p50 — flush interval plus query —
+  that reads out as 1.12 s of staleness at p50 — flush interval plus query —
   stable for 30 seconds with no drift.
 - **Insert latency is the flush interval and the batch size, not the API.** Ask
   for lower insert latency by turning `flush_interval_ms` down or batches
@@ -271,7 +296,7 @@ cost constant, which is exactly what the tier boundary is for.
   query fetches the whole hot manifest and drops the entries the catalog already
   has (`Planner.include?/2`); a sealed segment stays listed for
   `retire_grace_ms` (10 min) so a query holding an older snapshot cannot lose
-  rows underneath it. This run fetched 504 entries per query to scan 48, so the
+  rows underneath it. This run fetched 509 entries per query to scan 60, so the
   planner's input grows with grace period × ingest rate while the scan's grows
-  only with seal lag. No cost was visible at 504 (`query.md` measured planning
+  only with seal lag. No cost was visible at 509 (`query.md` measured planning
   flat to 256), but that is the term that moves if the grace period lengthens.

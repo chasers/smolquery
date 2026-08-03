@@ -73,6 +73,12 @@ defmodule Bench.OtelLogs do
   The driver runs on the same machine as the node it measures, so the ceiling
   is a *node* ceiling with a co-resident client — the reported prep cost per
   batch is how much of the machine the driver took.
+
+  `cores` and `sched%` say whether a ceiling is CPU or coordination. `cores` comes
+  from the OS process's CPU time, so it counts DuckDB's native threads that no BEAM
+  statistic sees; `sched%` is normal-scheduler busy time, and the gap between them
+  is native work. A ceiling reached at half the machine's cores is a serialization
+  ceiling, not a capacity one.
   """
 
   import Bench.Otel
@@ -118,6 +124,7 @@ defmodule Bench.OtelLogs do
           "flush every #{flush_interval_ms()} ms"
       )
 
+      schedulers()
       stage_profile(pool, config, dir)
 
       ceiling = ingest_ceiling(req, pool, config)
@@ -210,7 +217,8 @@ defmodule Bench.OtelLogs do
         pad("req/s", 8) <>
         pad("p50", 9) <>
         pad("p95", 9) <>
-        pad("p99", 9) <> pad("max", 9) <> pad("429s", 7) <> pad("prep", 8)
+        pad("p99", 9) <>
+        pad("max", 9) <> pad("429s", 7) <> pad("prep", 8) <> pad("cores", 8) <> pad("sched%", 9)
     )
 
     warm(req, pool, config.batch)
@@ -221,6 +229,8 @@ defmodule Bench.OtelLogs do
   end
 
   defp saturate(req, pool, writers, config) do
+    cpu = cpu_snapshot()
+
     {us, results} =
       :timer.tc(fn ->
         drive(writers, config.tables, fn acc ->
@@ -230,6 +240,7 @@ defmodule Bench.OtelLogs do
         end)
       end)
 
+    used = cpu_since(cpu)
     totals = totals(results)
     seconds = us / 1_000_000
     stats = percentiles(totals.latencies)
@@ -245,7 +256,9 @@ defmodule Bench.OtelLogs do
         pad(stats.p95, 9) <>
         pad(stats.p99, 9) <>
         pad(stats.max, 9) <>
-        pad(totals.shed, 7) <> pad(ms(div(totals.prep, max(totals.requests, 1))), 8)
+        pad(totals.shed, 7) <>
+        pad(ms(div(totals.prep, max(totals.requests, 1))), 8) <>
+        pad(used.cores, 8) <> pad(used.scheduler, 9)
     )
 
     rows
@@ -280,6 +293,7 @@ defmodule Bench.OtelLogs do
     )
 
     period = round(config.batch / (target / config.writers) * 1_000_000)
+    cpu = cpu_snapshot()
     started = System.monotonic_time(:microsecond)
     deadline = started + config.sustained_seconds * 1_000_000
 
@@ -299,6 +313,7 @@ defmodule Bench.OtelLogs do
       end)
 
     tails = Task.await(tailer, :infinity)
+    used = cpu_since(cpu)
 
     elapsed = (System.monotonic_time(:microsecond) - started) / 1_000_000
     totals = totals(writes)
@@ -308,7 +323,10 @@ defmodule Bench.OtelLogs do
         pad("offered", 10) <>
         pad("achieved", 10) <>
         pad("p50", 9) <>
-        pad("p95", 9) <> pad("p99", 9) <> pad("max", 9) <> pad("429s", 7) <> pad("late", 7)
+        pad("p95", 9) <>
+        pad("p99", 9) <>
+        pad("max", 9) <>
+        pad("429s", 7) <> pad("late", 7) <> pad("cores", 8) <> pad("sched%", 9)
     )
 
     stats = percentiles(totals.latencies)
@@ -320,7 +338,9 @@ defmodule Bench.OtelLogs do
         pad(stats.p50, 9) <>
         pad(stats.p95, 9) <>
         pad(stats.p99, 9) <>
-        pad(stats.max, 9) <> pad(totals.shed, 7) <> pad(totals.late, 7)
+        pad(stats.max, 9) <>
+        pad(totals.shed, 7) <>
+        pad(totals.late, 7) <> pad(used.cores, 8) <> pad(used.scheduler, 9)
     )
 
     IO.puts("  inserts above, tail below — ms")
@@ -540,17 +560,24 @@ defmodule Bench.OtelLogs do
     "#{low}-#{high}"
   end
 
+  defp row_count(req) do
+    response =
+      Req.post!(req,
+        url: "/v1/queries",
+        json: %{"query" => "SELECT count(*) AS n FROM #{dataset()}.#{table()}"}
+      )
+
+    case response.status do
+      200 -> hd(response.body["rows"])["n"]
+      status -> "count unavailable (HTTP #{status})"
+    end
+  end
+
   defp state(req, tables) do
     {unsealed, in_manifest} = hot_depth(tables)
 
-    rows =
-      Req.post!(req,
-        url: "/v1/queries",
-        json: %{"query" => "SELECT count(*) AS n FROM #{dataset()}.#{table()} "}
-      ).body["rows"]
-
     IO.puts(
-      "  #{hd(rows)["n"]} rows × #{length(columns())} columns in #{table()}, " <>
+      "  #{row_count(req)} rows × #{length(columns())} columns in #{table()}, " <>
         "#{unsealed} unsealed micro-segments a tail reads " <>
         "(#{in_manifest} in the manifest, the rest retired inside their grace period)"
     )
