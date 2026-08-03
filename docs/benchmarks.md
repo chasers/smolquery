@@ -14,6 +14,7 @@ mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc ter
 mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
 mix run bench/cluster_ingest.exs                  # does aggregate ingest scale with buffer-node count?
 mix run bench/otel_logs.exs 2>/dev/null           # OTel logs over HTTP: wide ingest with a live tail
+mix run bench/load.exs 2>/dev/null                # batch loads: which format, and what a file costs
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs   # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurrency sizes
@@ -22,6 +23,7 @@ BENCH_SECTION=replication_delta mix run bench/buffer.exs   # one section by name
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs       # bigger claims, bigger merges
 NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
 WRITERS=8,32 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null   # a different sweep and offered rate
+POOL=20000 ROWS=100000 mix run bench/load.exs 2>/dev/null         # higher-cardinality rows, bigger files
 ```
 
 Each script's `@moduledoc` records what it measures and what it concluded.
@@ -140,6 +142,36 @@ knowing before optimizing anything here:
 A *filtered* tail is slower (251 vs 231 ms) and staler than an unfiltered one:
 `ORDER BY timestamp DESC LIMIT 100` reads every surviving file regardless, and
 rarer matches mean an older newest match (`bench/results/otel_logs.md`).
+
+## Batch loads — `bench/load.exs`
+
+`POST /…/load` takes the file as the body — NDJSON, CSV, or Parquet by content
+type — spools it to disk, parses it, and pushes 10,000-row chunks through the same
+insert path a streaming write uses. Same 61-column OTel fixture as
+`bench/otel_logs.exs`, so the two compare. Knobs: `ROWS`, `SCALE` (the size sweep),
+`BATCH`, `POOL` (fixture cardinality), `FLUSH_MS`.
+
+**Format choice is worth at most 1.8×, and Parquet's 531× size advantage buys
+almost none of it**: NDJSON 8.9k rows/s, CSV 14.3k, Parquet 16.0k, from files of
+106 MiB, 50 MiB, and 0.2 MiB. Parsing is ~49 µs of a row's ~112 µs; the remaining
+~63 µs is format-independent, because all three formats converge on
+`DataFrame.to_rows` → validate → re-encode. That is the same floor the insert
+bench's stage profile found, and it is the argument for frames end to end (T-139) —
+a new content type on today's `parse/3` cannot remove it.
+
+Three more findings, none of them visible from inside the code:
+
+- **A load costs ~10× the file in peak BEAM heap**, essentially all process memory:
+  a 106 MiB NDJSON load peaks 1.09 GiB above baseline, while *binary* memory grows
+  only 1.04× the file. The disk spool bounds the request body; `parse/3`
+  materializes every row anyway. At the 256 MiB `load_max_bytes` default that
+  extrapolates to ~2.5 GiB for one request.
+- **`/load` is not the fast path.** It beats *serial* inserts 6.5× by amortizing
+  group commits, but it is **2.4× slower than concurrent `/insert`** (16k vs 37.7k
+  rows/s) — one request is one process. Fan out `/insert` for throughput; use
+  `/load` for convenience and format support.
+- **`load_max_bytes` is a byte cap, so it is a different row limit per format**:
+  ~120k rows for 61-column NDJSON, ~254k for CSV (`bench/results/load.md`).
 
 ## Sealing — `bench/sealer.exs`
 

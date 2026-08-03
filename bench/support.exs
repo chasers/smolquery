@@ -179,6 +179,18 @@ defmodule Bench.Support do
     end
   end
 
+  @doc """
+  A comma-separated list of integers from an environment variable, or `default`.
+
+  For the knobs a script sweeps rather than sets — `WRITERS=4,8,16,32`.
+  """
+  def sweep_env(name, default) do
+    case System.get_env(name) do
+      nil -> default
+      value -> value |> String.split(",", trim: true) |> Enum.map(&String.to_integer/1)
+    end
+  end
+
   def ms(microseconds), do: Float.round(microseconds / 1000, 1)
 
   def mib(bytes), do: Float.round(bytes / 1_048_576, 1)
