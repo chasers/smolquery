@@ -6,15 +6,20 @@ defmodule Bench.OtelLogs do
 
   Every other script in `bench/` isolates a component and calls its client
   directly against a four-column fixture. This one is the opposite: a wide
-  OTel log record (~60 flattened columns, ~1 KB of JSON) streaming in through
+  OTel log record (61 flattened columns, ~2.1 KB of JSON) streaming in through
   `POST /v1/datasets/:ds/tables/:t/insert` while somebody tails the last 100
   rows through `POST /v1/queries` — Phoenix, the auth plug, the JSON parser,
   the ingest edge's validator, group commit, sealing, the planner, the job
   engine, and result framing all inside the measurement.
 
-  Three phases, because a ceiling, a floor, and the interference between them
-  are different numbers:
+  Four sections. One prices a single batch stage by stage; the other three are
+  a ceiling, a floor, and the interference between them, which are different
+  numbers:
 
+    * **stage profile** — JSON decode, validation, and the rows → Arrow →
+      Parquet write for one batch, plus what a *columnar* load would cost
+      (Parquet decode, then `DataFrame.to_rows`). This is where the ceiling
+      comes from, and it is why a faster wire format alone does not move it.
     * **ingest ceiling** — saturating writers, no reader. Achieved rows/s and
       MiB/s through the front door for a wide row, insert latency percentiles,
       and how much the ack budget (PL-9) shed.
@@ -33,12 +38,20 @@ defmodule Bench.OtelLogs do
 
       mix run bench/otel_logs.exs 2>/dev/null
       WRITERS=8,32 BATCH=4000 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null
+      TABLES=8 WRITERS=16 mix run bench/otel_logs.exs 2>/dev/null
 
   `WRITERS` is the phase-1 sweep (comma-separated); `SUSTAINED_WRITERS`,
   `BATCH`, `SECONDS`, `TAIL_SECONDS`, `SUSTAINED_SECONDS`, `TAIL_INTERVAL_MS`,
-  `RATE` (phase 3's offered rows/s), and `FLUSH_MS` are the rest. Redirecting
-  stderr is not cosmetic: ADBC's Explorer callback deprecation warns once per
-  query, which would otherwise interleave with every table.
+  `REPS` (the stage profile's), `RATE` (phase 3's offered rows/s), and
+  `FLUSH_MS` are the rest. Redirecting stderr is not cosmetic: ADBC's Explorer
+  callback deprecation warns once per query, which would otherwise interleave
+  with every table.
+
+  `TABLES` spreads the writers over N tables, which is how to tell a *table's*
+  ceiling from the *node's*: one table is one `TableBuffer` doing its encode
+  inline, so throughput that scales with `TABLES` says that process is the
+  serialization point rather than the machine. The tail always reads the first
+  table, so at `TABLES > 1` it sees its share of the rows, not all of them.
 
   ## Why this script owns the node's boot
 
@@ -63,12 +76,16 @@ defmodule Bench.OtelLogs do
 
   import Bench.Support
 
+  alias Explorer.DataFrame
   alias Smolquery.BufferService
+  alias Smolquery.IngestService.Validator
   alias Smolquery.InternalSecret
+  alias Smolquery.Schema
+  alias Smolquery.Segments.Store.Local
+  alias Smolquery.Segments.Writer
 
   @dataset "logs"
   @table "otel_logs"
-  @table_ref {@dataset, @table}
   @api_key "otel-logs-bench-key"
   @tail_limit 100
   @pool_size 256
@@ -160,10 +177,12 @@ defmodule Bench.OtelLogs do
       sweep: sweep_env("WRITERS", [4, 8, 16, 32]),
       writers: env("SUSTAINED_WRITERS", 8),
       batch: env("BATCH", 2_000),
+      tables: env("TABLES", 1),
       seconds: env("SECONDS", 10),
       tail_seconds: env("TAIL_SECONDS", 10),
       sustained_seconds: env("SUSTAINED_SECONDS", 30),
       tail_interval_ms: env("TAIL_INTERVAL_MS", 1_000),
+      reps: env("REPS", 5),
       rate: env("RATE", 0)
     }
 
@@ -175,16 +194,20 @@ defmodule Bench.OtelLogs do
 
     try do
       req = boot!(dir)
-      create_table!(req)
+      create_tables!(req, config.tables)
+      pool = pool()
 
       heading(
         "OTel logs e2e — #{length(@columns)}-column rows through #{base_url()}, " <>
-          "#{config.batch} rows/batch, flush every #{flush_interval_ms()} ms"
+          "#{config.batch} rows/batch × #{config.tables} table(s), " <>
+          "flush every #{flush_interval_ms()} ms"
       )
 
-      ceiling = ingest_ceiling(req, config)
+      stage_profile(pool, config, dir)
+
+      ceiling = ingest_ceiling(req, pool, config)
       tail_floor(req, config)
-      sustained(req, config, target_rate(config, ceiling))
+      sustained(req, pool, config, target_rate(config, ceiling))
 
       counters()
     after
@@ -256,23 +279,102 @@ defmodule Bench.OtelLogs do
     IO.puts("")
   end
 
-  defp create_table!(req) do
+  defp create_tables!(req, count) do
     schema = for {name, type} <- @columns, do: %{"name" => name, "type" => type}
 
     %{status: 200} = Req.post!(req, url: "/v1/datasets", json: %{"id" => @dataset})
 
-    %{status: 200} =
-      Req.post!(req,
-        url: "/v1/datasets/#{@dataset}/tables",
-        json: %{"id" => @table, "schema" => schema}
-      )
+    for index <- 0..(count - 1) do
+      %{status: 200} =
+        Req.post!(req,
+          url: "/v1/datasets/#{@dataset}/tables",
+          json: %{"id" => table_at(index), "schema" => schema}
+        )
+    end
 
     :ok
   end
 
+  defp table_at(0), do: @table
+  defp table_at(index), do: "#{@table}_#{index + 1}"
+
+  # ── phase 0: where one batch's time goes ──────────────────────────────
+
+  defp stage_profile(pool, config, dir) do
+    body = body(pool, config.batch, 0)
+    schema = table_schema()
+    store = Local.new(dir: Path.join(dir, "profile"))
+    File.mkdir_p!(Path.join(dir, "profile"))
+
+    heading(
+      "Phase 0 — stage profile: one #{config.batch}-row batch " <>
+        "(#{mib(byte_size(body))} MiB of JSON), median of #{config.reps}"
+    )
+
+    IO.puts("  " <> label("stage", 34) <> pad("ms", 9) <> pad("krows/s", 10) <> pad("share", 8))
+
+    decode = timed(fn -> JSON.decode!(body) end, config.reps)
+    rows = Map.fetch!(decode.value, "rows")
+    validate = timed(fn -> Validator.validate(schema, rows) end, config.reps)
+    {valid, []} = validate.value
+    write = timed(fn -> segment!(valid, schema, store) end, config.reps)
+
+    total = decode.median + validate.median + write.median
+
+    for {name, stage} <- [
+          {"JSON decode (Phoenix parser)", decode},
+          {"validate + coerce (per row)", validate},
+          {"rows → Arrow → Parquet + fsync", write}
+        ] do
+      stage_row(name, stage.median, config.batch, total)
+    end
+
+    stage_row("insert path, one core", total, config.batch, total)
+
+    columnar_profile(valid, schema, store, config, total)
+  end
+
+  defp columnar_profile(valid, schema, store, config, insert_total) do
+    path = segment!(valid, schema, store).path
+    read = timed(fn -> {:ok, _frame} = DataFrame.from_parquet(path) end, config.reps)
+    {:ok, frame} = DataFrame.from_parquet(path)
+    explode = timed(fn -> DataFrame.to_rows(frame) end, config.reps)
+
+    IO.puts("")
+
+    stage_row("Parquet decode → Arrow", read.median, config.batch, insert_total)
+    stage_row("Arrow → rows (DataFrame.to_rows)", explode.median, config.batch, insert_total)
+  end
+
+  defp stage_row(name, us, batch, total) do
+    IO.puts(
+      "  " <>
+        label(name, 34) <>
+        pad(ms(us), 9) <>
+        pad(Float.round(batch / us * 1_000, 1), 10) <>
+        pad("#{round(us / total * 100)}%", 8)
+    )
+  end
+
+  defp segment!(rows, schema, store) do
+    {:ok, segment} = Writer.write(rows, schema, store: store)
+
+    segment
+  end
+
+  defp table_schema do
+    Schema.new!(
+      for {name, api_type} <- @columns do
+        {:ok, type} = Schema.type_from_api(api_type)
+
+        {name, type}
+      end
+    )
+  end
+
   # ── phase 1: what the front door sustains ─────────────────────────────
 
-  defp ingest_ceiling(req, config) do
+  defp ingest_ceiling(req, pool, config) do
     heading(
       "Phase 1 — ingest ceiling: writers sweep, #{config.seconds}s each, no reader " <>
         "(latencies in ms)"
@@ -289,7 +391,6 @@ defmodule Bench.OtelLogs do
         pad("p99", 9) <> pad("max", 9) <> pad("429s", 7) <> pad("prep", 8)
     )
 
-    pool = pool()
     warm(req, pool, config.batch)
 
     config.sweep
@@ -300,10 +401,10 @@ defmodule Bench.OtelLogs do
   defp saturate(req, pool, writers, config) do
     {us, results} =
       :timer.tc(fn ->
-        drive(writers, fn writer ->
+        drive(writers, config.tables, fn acc ->
           deadline = System.monotonic_time(:microsecond) + config.seconds * 1_000_000
 
-          collect(deadline, writer, fn acc -> insert(req, pool, config.batch, acc) end)
+          step(deadline, fn acc -> insert(req, pool, config.batch, acc) end, acc)
         end)
       end)
 
@@ -333,7 +434,7 @@ defmodule Bench.OtelLogs do
   defp tail_floor(req, config) do
     heading("Phase 2 — tail floor (no ingest, #{config.tail_seconds}s, last #{@tail_limit})")
 
-    state(req)
+    state(req, config.tables)
     tail_header()
 
     for shape <- [:all, :filtered] do
@@ -350,27 +451,29 @@ defmodule Bench.OtelLogs do
 
   # ── phase 3: the workload ─────────────────────────────────────────────
 
-  defp sustained(req, config, target) do
+  defp sustained(req, pool, config, target) do
     heading(
       "Phase 3 — sustained (#{config.sustained_seconds}s, #{target} rows/s offered, " <>
         "tail every #{config.tail_interval_ms} ms)"
     )
 
-    pool = pool()
     period = round(config.batch / (target / config.writers) * 1_000_000)
     started = System.monotonic_time(:microsecond)
     deadline = started + config.sustained_seconds * 1_000_000
 
     tailer =
       Task.async(fn ->
-        paced(deadline, config.tail_interval_ms * 1_000, 0, fn acc -> tail(req, :all, acc) end)
+        paced(
+          deadline,
+          config.tail_interval_ms * 1_000,
+          fn acc -> tail(req, :all, acc) end,
+          acc(0, @table)
+        )
       end)
 
     writes =
-      drive(config.writers, fn writer ->
-        paced(deadline, period, writer, fn acc ->
-          insert(req, pool, config.batch, acc)
-        end)
+      drive(config.writers, config.tables, fn acc ->
+        paced(deadline, period, fn acc -> insert(req, pool, config.batch, acc) end, acc)
       end)
 
     tails = Task.await(tailer, :infinity)
@@ -403,7 +506,7 @@ defmodule Bench.OtelLogs do
     tail_header()
     report_tail(:all, tails)
 
-    state(req)
+    state(req, config.tables)
     timeline(writes, tails, started, elapsed)
   end
 
@@ -442,15 +545,20 @@ defmodule Bench.OtelLogs do
 
   # ── driving ───────────────────────────────────────────────────────────
 
-  defp drive(writers, fun) do
+  defp drive(writers, tables, fun) do
     1..writers
-    |> Task.async_stream(fun, max_concurrency: writers, timeout: :infinity, ordered: false)
+    |> Task.async_stream(
+      fn writer -> fun.(acc(writer, table_at(rem(writer - 1, tables)))) end,
+      max_concurrency: writers,
+      timeout: :infinity,
+      ordered: false
+    )
     |> Enum.map(fn {:ok, result} -> result end)
   end
 
-  defp collect(deadline, writer, fun), do: step(deadline, fun, acc(writer))
+  defp collect(deadline, writer, fun), do: step(deadline, fun, acc(writer, @table))
 
-  defp acc(writer) do
+  defp acc(writer, table) do
     %{
       samples: [],
       rows: 0,
@@ -459,7 +567,8 @@ defmodule Bench.OtelLogs do
       shed: 0,
       errors: 0,
       late: 0,
-      writer: writer
+      writer: writer,
+      table: table
     }
   end
 
@@ -471,8 +580,8 @@ defmodule Bench.OtelLogs do
     end
   end
 
-  defp paced(deadline, period, writer, fun),
-    do: pace(deadline, period, System.monotonic_time(:microsecond), fun, acc(writer))
+  defp paced(deadline, period, fun, acc),
+    do: pace(deadline, period, System.monotonic_time(:microsecond), fun, acc)
 
   defp pace(deadline, period, tick, fun, acc) do
     now = System.monotonic_time(:microsecond)
@@ -501,7 +610,7 @@ defmodule Bench.OtelLogs do
     {us, response} =
       :timer.tc(fn ->
         Req.post!(req,
-          url: "/v1/datasets/#{@dataset}/tables/#{@table}/insert",
+          url: "/v1/datasets/#{@dataset}/tables/#{acc.table}/insert",
           headers: [{"content-type", "application/json"}],
           body: body
         )
@@ -570,7 +679,7 @@ defmodule Bench.OtelLogs do
     NaiveDateTime.diff(NaiveDateTime.utc_now(), at, :microsecond) / 1_000_000
   end
 
-  defp warm(req, pool, batch), do: insert(req, pool, batch, acc(0))
+  defp warm(req, pool, batch), do: insert(req, pool, batch, acc(0, @table))
 
   # ── reporting ─────────────────────────────────────────────────────────
 
@@ -609,8 +718,15 @@ defmodule Bench.OtelLogs do
     "#{low}-#{high}"
   end
 
-  defp state(req) do
-    {:ok, entries} = BufferService.Client.hot_manifest(Smolquery.BufferService, @table_ref)
+  defp state(req, tables) do
+    entries =
+      Enum.flat_map(0..(tables - 1), fn index ->
+        {:ok, entries} =
+          BufferService.Client.hot_manifest(Smolquery.BufferService, {@dataset, table_at(index)})
+
+        entries
+      end)
+
     unsealed = Enum.count(entries, &is_nil(&1.retired_at))
 
     rows =
@@ -620,7 +736,7 @@ defmodule Bench.OtelLogs do
       ).body["rows"]
 
     IO.puts(
-      "  #{hd(rows)["n"]} rows × #{length(@columns)} columns, " <>
+      "  #{hd(rows)["n"]} rows × #{length(@columns)} columns in #{@table}, " <>
         "#{unsealed} unsealed micro-segments a tail reads " <>
         "(#{length(entries)} in the manifest, the rest retired inside their grace period)"
     )
