@@ -27,13 +27,22 @@ defmodule Smolquery.BufferService.TableBuffer do
   granted. A follower that durably applied the copy before the refusal may hold
   an orphan until the compensating drop reaches it (T-104's reaper family).
 
-  ## Flushing is inline, until a benchmark says otherwise
+  ## Flushing is pipelined
 
-  The encode happens in this process, so a table's throughput is capped at one
-  Polars encode per cycle. The alternative — swap the accumulator and encode in a
-  `Task` — is two state machines instead of one, and worth it only if the ceiling
-  turns out to matter. `bench/buffer.exs` is what decides that; until then this is
-  one clear state machine.
+  This process only accumulates; a flush freezes the accumulator and hands it
+  to a linked `Smolquery.BufferService.TableBuffer.Committer`, which owns the
+  encode, the manifest log, and the replication round, and answers the
+  waiting callers itself. Accumulation continues while a commit is in
+  flight, so a table's throughput is no longer one inline encode per cycle —
+  `bench/results/otel_logs.md` is the benchmark that said otherwise (one
+  table at 39k rows/s under a node that does 57k). Every flush trigger —
+  the interval, the size thresholds, a schema change, a drain — hands off
+  immediately, so under load the committer runs a FIFO of
+  `flush_max_bytes`-sized commits back to back while the accumulator keeps
+  filling. The admission bounds measure the accumulator, exactly as they
+  did when flushing was inline; what used to wait uncounted in this
+  process's mailbox now waits in the committer's queue, the same rows one
+  hop later.
 
   ## Backpressure is immediate
 
@@ -69,11 +78,16 @@ defmodule Smolquery.BufferService.TableBuffer do
   ## Recovery, and what a crash costs
 
   On start the buffer recovers its table's manifest, which re-adopts the segments
-  it had acked and deletes any that were never acknowledged, then opens the
-  table's manifest log and holds it for its lifetime — reopening the file around
-  every append costs more than the append itself. A graceful shutdown flushes
-  the accumulator first, so a rolling restart loses nothing. A `:kill` loses
-  only rows that had not yet been acked — which no caller was told about.
+  it had acked and deletes any that were never acknowledged; the committer then
+  opens the table's manifest log and holds it for its lifetime — reopening the
+  file around every append costs more than the append itself. The committer's
+  registered name is the exclusion that makes this safe across restarts: a new
+  buffer waits for its predecessor's committer to release the log before
+  recovering. A graceful shutdown flushes the accumulator and syncs the
+  committer first, so a rolling restart loses nothing. A `:kill` loses only
+  rows that had not yet been acked — which no caller was told about; the
+  committer drops any batches still queued behind the crash rather than
+  committing them to callers who already saw it fail.
 
   A crash never re-runs the commit from `terminate/2`. The pre-crash state may
   already be half committed — the log record fsynced, the ETS insert not yet done
@@ -93,6 +107,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
+  alias Smolquery.BufferService.TableBuffer.Committer
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
@@ -102,7 +117,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :runtime,
     :table_ref,
     :prefix,
-    :log,
+    :committer,
     :schema,
     :timer,
     :signaled_at,
@@ -111,7 +126,9 @@ defmodule Smolquery.BufferService.TableBuffer do
     pending: [],
     batch_ids: [],
     row_count: 0,
-    byte_size: 0
+    byte_size: 0,
+    in_flight: 0,
+    in_flight_ids: MapSet.new()
   ]
 
   @type ack :: %{segment_id: String.t(), row_count: non_neg_integer()}
@@ -171,7 +188,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
           {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
   def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) do
-    GenServer.call(buffer, {:write, schema, rows, batch_id}, timeout)
+    GenServer.call(buffer, {:write, schema, rows, batch_id, :erlang.external_size(rows)}, timeout)
   end
 
   @doc """
@@ -235,19 +252,55 @@ defmodule Smolquery.BufferService.TableBuffer do
   @impl GenServer
   def init({runtime, table_ref}) do
     Process.flag(:trap_exit, true)
+    load = publish_load(runtime, table_ref)
 
     with {:ok, prefix} <- Store.prefix(table_ref),
+         {:ok, committer} <- start_committer(runtime, table_ref, prefix, load),
          {:ok, _report} <- recover(runtime, table_ref),
-         {:ok, log} <- HotManifest.open_log(runtime.manifest, table_ref) do
+         :ok <- Committer.open(committer) do
       state = %__MODULE__{
         runtime: runtime,
         table_ref: table_ref,
         prefix: prefix,
-        log: log,
-        load: publish_load(runtime, table_ref)
+        committer: committer,
+        load: load
       }
 
       {:ok, schedule_maintenance(state)}
+    end
+  end
+
+  defp start_committer(runtime, table_ref, prefix, load) do
+    opts = [
+      name: Runtime.committer_via(runtime, table_ref),
+      runtime: runtime,
+      table_ref: table_ref,
+      prefix: prefix,
+      load: load
+    ]
+
+    case Committer.start_link(opts) do
+      {:ok, committer} -> {:ok, committer}
+      {:error, {:already_started, previous}} -> await_release(previous, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp await_release(previous, opts) do
+    reference = Process.monitor(previous)
+
+    receive do
+      {:DOWN, ^reference, :process, _pid, _reason} ->
+        case Committer.start_link(opts) do
+          {:ok, committer} -> {:ok, committer}
+          {:error, {:already_started, next}} -> await_release(next, opts)
+          {:error, reason} -> {:error, reason}
+        end
+    after
+      15_000 ->
+        Process.demonitor(reference, [:flush])
+
+        {:error, :committer_held}
     end
   end
 
@@ -266,46 +319,61 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @impl GenServer
-  def handle_call({:write, _schema, [], _batch_id}, _from, state),
+  def handle_call({:write, _schema, [], _batch_id, _bytes}, _from, state),
     do: {:reply, {:error, :no_rows}, state}
 
-  def handle_call({:write, schema, rows, batch_id}, from, state) do
+  def handle_call({:write, schema, rows, batch_id, bytes}, from, state) do
     case committed_ack(state, batch_id) do
       {:ok, ack} ->
         {:reply, {:duplicate, ack}, state}
 
       :error ->
         case write_gate(state) do
-          :ok -> write_or_join(state, schema, rows, batch_id, from)
+          :ok -> write_or_join(state, schema, rows, batch_id, bytes, from)
           {:error, _reason} = refusal -> {:reply, refusal, state}
         end
     end
   end
 
-  def handle_call(:flush, _from, state) do
-    {result, state} = commit_and_report(state)
+  def handle_call(:flush, _from, %__MODULE__{chunks: []} = state) do
+    state = await_in_flight(state)
 
-    {:reply, result, run_maintenance(state)}
+    {:reply, :ok, run_maintenance(state)}
+  end
+
+  def handle_call(:flush, from, state) do
+    state =
+      %{state | pending: [{from, :flush} | state.pending]}
+      |> handoff()
+
+    {:noreply, run_maintenance(state)}
   end
 
   def handle_call({:retire, ids, snapshot}, _from, state) do
-    with :ok <- append_replicas(state, :retire, %{ids: ids, snapshot: snapshot}),
-         :ok <-
-           HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log) do
-      {:reply, :ok, run_maintenance(state)}
-    else
+    result =
+      Committer.with_log(state.committer, fn log ->
+        with :ok <- append_replicas(state, :retire, %{ids: ids, snapshot: snapshot}) do
+          HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, log)
+        end
+      end)
+
+    case result do
+      :ok -> {:reply, :ok, run_maintenance(state)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:accept_replica, entry, bytes}, _from, state) do
-    with :ok <- put_replica_bytes(state, entry, bytes),
-         {:ok, _entry} <-
-           HotManifest.put_entry(state.runtime.manifest, state.table_ref, entry, state.log) do
-      {:reply, :ok, state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
+    result =
+      Committer.with_log(state.committer, fn log ->
+        with :ok <- put_replica_bytes(state, entry, bytes),
+             {:ok, _entry} <-
+               HotManifest.put_entry(state.runtime.manifest, state.table_ref, entry, log) do
+          :ok
+        end
+      end)
+
+    {:reply, result, state}
   end
 
   def handle_call({:apply_replica_mutation, op, args}, _from, state) do
@@ -315,32 +383,72 @@ defmodule Smolquery.BufferService.TableBuffer do
   def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
 
   def handle_call(:force_seal, _from, state) do
-    {_result, state} = commit_and_report(state)
+    state = state |> handoff() |> await_in_flight()
 
     {:reply, :ok, state |> reap() |> force_signal()}
   end
 
   @impl GenServer
   def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag}} = state) do
-    {:noreply, %{state | timer: nil} |> commit() |> run_maintenance()}
+    {:noreply, %{state | timer: nil} |> handoff() |> run_maintenance()}
   end
 
   def handle_info({:flush, _stale}, state), do: {:noreply, state}
+
+  def handle_info({:commit_done, batch_ids}, state) do
+    {:noreply, state |> settle(batch_ids) |> run_maintenance()}
+  end
 
   def handle_info(:maintain, state) do
     {:noreply, state |> run_maintenance() |> schedule_maintenance()}
   end
 
-  @impl GenServer
-  def terminate(:normal, state), do: state |> commit() |> close_log()
-  def terminate(:shutdown, state), do: state |> commit() |> close_log()
-  def terminate({:shutdown, _reason}, state), do: state |> commit() |> close_log()
-  def terminate(_crash, state), do: close_log(state)
+  def handle_info({:EXIT, committer, reason}, %__MODULE__{committer: committer} = state) do
+    {:stop, reason, state}
+  end
 
-  defp close_log(state) do
-    HotManifest.close_log(state.log)
+  def handle_info(_message, state), do: {:noreply, state}
+
+  @impl GenServer
+  def terminate(:normal, state), do: shutdown_commit(state)
+  def terminate(:shutdown, state), do: shutdown_commit(state)
+  def terminate({:shutdown, _reason}, state), do: shutdown_commit(state)
+  def terminate(_crash, state), do: state
+
+  defp shutdown_commit(state) do
+    state = state |> handoff() |> await_in_flight()
+
+    GenServer.stop(state.committer, :normal, 5_000)
 
     state
+  catch
+    :exit, _reason -> state
+  end
+
+  defp settle(state, batch_ids) do
+    %{
+      state
+      | in_flight: state.in_flight - 1,
+        in_flight_ids: Enum.reduce(batch_ids, state.in_flight_ids, &MapSet.delete(&2, &1))
+    }
+  end
+
+  defp await_in_flight(%__MODULE__{in_flight: 0} = state), do: state
+
+  defp await_in_flight(state) do
+    :ok = Committer.sync(state.committer)
+
+    drain_commit_done(state)
+  end
+
+  defp drain_commit_done(%__MODULE__{in_flight: 0} = state), do: state
+
+  defp drain_commit_done(state) do
+    receive do
+      {:commit_done, batch_ids} -> drain_commit_done(settle(state, batch_ids))
+    after
+      0 -> state
+    end
   end
 
   defp run_maintenance(state) do
@@ -359,10 +467,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp drop(state, ids) do
-    with :ok <- append_replicas_as_owner(state, :drop, %{ids: ids}),
-         :ok <- HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log) do
-      state
-    else
+    result =
+      Committer.with_log(state.committer, fn log ->
+        with :ok <- append_replicas_as_owner(state, :drop, %{ids: ids}) do
+          HotManifest.drop(state.runtime.manifest, state.table_ref, ids, log)
+        end
+      end)
+
+    case result do
+      :ok ->
+        state
+
       {:error, reason} ->
         Logger.warning(
           "hot tier sweep for #{inspect(state.table_ref)} failed: #{inspect(reason)}"
@@ -423,16 +538,25 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp claim_and_signal(state, unsealed) do
     ids = Enum.map(unsealed, & &1.id)
 
-    with {:ok, keys} <- sealed_keys(state, ids),
-         :ok <- append_replicas(state, :claim, %{ids: ids, keys: keys}),
-         {:ok, claim} <-
-           HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, state.log) do
-      signal(state, claim)
-    else
+    result =
+      with {:ok, keys} <- sealed_keys(state, ids) do
+        Committer.with_log(state.committer, &claim_with_log(state, ids, keys, &1))
+      end
+
+    case result do
+      {:ok, claim} ->
+        signal(state, claim)
+
       {:error, reason} ->
         Logger.warning("claiming #{inspect(state.table_ref)} failed: #{inspect(reason)}")
 
         state
+    end
+  end
+
+  defp claim_with_log(state, ids, keys, log) do
+    with :ok <- append_replicas(state, :claim, %{ids: ids, keys: keys}) do
+      HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, log)
     end
   end
 
@@ -517,31 +641,53 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp apply_replica_mutation(state, :claim, %{ids: ids, keys: keys}) do
-    case HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, state.log) do
+    result =
+      Committer.with_log(state.committer, fn log ->
+        HotManifest.claim(state.runtime.manifest, state.table_ref, ids, keys, log)
+      end)
+
+    case result do
       {:ok, _claim} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp apply_replica_mutation(state, :retire, %{ids: ids, snapshot: snapshot}) do
-    HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, state.log)
+    Committer.with_log(state.committer, fn log ->
+      HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, log)
+    end)
   end
 
   defp apply_replica_mutation(state, :drop, %{ids: ids}) do
-    HotManifest.drop(state.runtime.manifest, state.table_ref, ids, state.log)
+    Committer.with_log(state.committer, fn log ->
+      HotManifest.drop(state.runtime.manifest, state.table_ref, ids, log)
+    end)
   end
 
-  defp write_or_join(state, schema, rows, batch_id, from) do
-    if not is_nil(batch_id) and batch_id in state.batch_ids do
-      {:noreply, %{state | pending: [{from, :duplicate} | state.pending]}}
-    else
-      write_new(state, schema, rows, batch_id, from)
+  defp write_or_join(state, schema, rows, batch_id, bytes, from) do
+    cond do
+      not is_nil(batch_id) and batch_id in state.batch_ids ->
+        {:noreply, %{state | pending: [{from, :duplicate} | state.pending]}}
+
+      not is_nil(batch_id) and MapSet.member?(state.in_flight_ids, batch_id) ->
+        settle_in_flight_duplicate(state, schema, rows, batch_id, bytes, from)
+
+      true ->
+        write_new(state, schema, rows, batch_id, bytes, from)
     end
   end
 
-  defp write_new(state, schema, rows, batch_id, from) do
+  defp settle_in_flight_duplicate(state, schema, rows, batch_id, bytes, from) do
+    state = await_in_flight(state)
+
+    case committed_ack(state, batch_id) do
+      {:ok, ack} -> {:reply, {:duplicate, ack}, state}
+      :error -> write_new(state, schema, rows, batch_id, bytes, from)
+    end
+  end
+
+  defp write_new(state, schema, rows, batch_id, bytes, from) do
     count = length(rows)
-    bytes = :erlang.external_size(rows)
     state = flush_on_schema_change(state, schema)
 
     if full?(state, count, bytes) do
@@ -554,12 +700,12 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp accept(state, schema, rows, count, bytes, batch_id, from) do
     state
     |> accumulate(schema, rows, count, bytes, batch_id, from)
-    |> commit_when_full()
+    |> handoff_when_full()
   end
 
   defp flush_on_schema_change(%__MODULE__{chunks: []} = state, _schema), do: state
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
-  defp flush_on_schema_change(state, _schema), do: commit(state)
+  defp flush_on_schema_change(state, _schema), do: handoff(state)
 
   defp accumulate(state, schema, rows, count, bytes, batch_id, from) do
     %{
@@ -577,111 +723,29 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp track_batch(batch_ids, nil), do: batch_ids
   defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
 
-  defp commit_when_full(state) do
+  defp handoff_when_full(state) do
     if state.row_count >= state.runtime.flush_max_rows or
          state.byte_size >= state.runtime.flush_max_bytes do
-      commit(state)
+      handoff(state)
     else
       state
     end
   end
 
-  defp commit(state), do: state |> commit_and_report() |> elem(1)
+  defp handoff(%__MODULE__{chunks: []} = state), do: state
 
-  defp commit_and_report(%__MODULE__{chunks: []} = state), do: {:ok, state}
-
-  defp commit_and_report(state) do
-    rows = state.chunks |> Enum.reverse() |> Enum.concat()
-    started = System.monotonic_time(:microsecond)
-    result = persist(state, rows)
-    duration_us = System.monotonic_time(:microsecond) - started
-
-    Load.drained(state.load, state.row_count)
-
-    if match?({:ok, _ack}, result) do
-      Load.sample_rate(state.load, state.row_count, duration_us)
-    end
-
-    :telemetry.execute(
-      [:smolquery, :buffer, :commit],
-      %{rows: state.row_count, bytes: state.byte_size, duration_us: duration_us},
-      %{result: if(match?({:ok, _ack}, result), do: :ok, else: :error)}
-    )
-
-    state.pending
-    |> Enum.reverse()
-    |> reply_all(result)
-
-    {flush_result(result), reset(state)}
-  end
-
-  defp flush_result({:ok, _ack}), do: :ok
-  defp flush_result({:error, reason}), do: {:error, reason}
-
-  defp persist(state, rows) do
-    with {:ok, segment} <-
-           Writer.write(rows, state.schema, store: state.runtime.store, prefix: state.prefix),
-         {:ok, entry} <- add(state, segment),
-         :ok <- replicate(state, segment, entry) do
-      {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
-    end
-  end
-
-  defp replicate(state, segment, entry) do
-    commit = %{
-      name: state.runtime.name,
-      table_ref: state.table_ref,
-      store: state.runtime.store,
-      segment: segment,
-      entry: entry
-    }
-
-    case Replicator.commit(state.runtime.replicator, commit) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        compensate(state, entry, reason)
-    end
-  end
-
-  defp compensate(state, entry, reason) do
-    case HotManifest.drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
-      :ok ->
-        :ok
-
-      {:error, drop_reason} ->
-        Logger.warning(
-          "compensating drop for #{inspect(state.table_ref)} failed: #{inspect(drop_reason)}"
-        )
-    end
-
-    {:error, reason}
-  end
-
-  defp add(state, segment) do
+  defp handoff(state) do
     batch_ids = Enum.reverse(state.batch_ids)
 
-    case HotManifest.add(state.runtime.manifest, state.table_ref, segment, state.log, batch_ids) do
-      {:ok, entry} ->
-        {:ok, entry}
+    Committer.commit(state.committer, %{
+      schema: state.schema,
+      rows: state.chunks |> Enum.reverse() |> Enum.concat(),
+      pending: Enum.reverse(state.pending),
+      batch_ids: batch_ids,
+      row_count: state.row_count,
+      byte_size: state.byte_size
+    })
 
-      {:error, reason} ->
-        Store.delete(state.runtime.store, segment.key)
-
-        {:error, reason}
-    end
-  end
-
-  defp reply_all(pending, result) do
-    Enum.each(pending, fn {from, kind} -> GenServer.reply(from, reply_for(kind, result)) end)
-  end
-
-  defp reply_for(:new, result), do: result
-  defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
-  defp reply_for(:duplicate, error), do: error
-
-  defp reset(state) do
     %{
       state
       | chunks: [],
@@ -689,7 +753,9 @@ defmodule Smolquery.BufferService.TableBuffer do
         batch_ids: [],
         row_count: 0,
         byte_size: 0,
-        timer: cancel(state.timer)
+        timer: cancel(state.timer),
+        in_flight: state.in_flight + 1,
+        in_flight_ids: Enum.into(batch_ids, state.in_flight_ids)
     }
   end
 

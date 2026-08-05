@@ -193,6 +193,15 @@ defmodule Smolquery.BufferService.Runtime do
   def registry(name), do: Module.concat(name, "Registry")
 
   @doc """
+  The registry mapping a table to its `TableBuffer.Committer`.
+
+  Separate from `registry/1` so everything that enumerates buffers — drain,
+  load queries — keeps seeing exactly one process per table.
+  """
+  @spec committer_registry(atom()) :: atom()
+  def committer_registry(name), do: Module.concat(name, "CommitterRegistry")
+
+  @doc """
   The child id `HotServer`'s listener is started under.
 
   Bandit's own id is an opaque ref, so this is what lets a test find the
@@ -220,6 +229,13 @@ defmodule Smolquery.BufferService.Runtime do
   @spec via(t(), Store.table_ref()) :: GenServer.name()
   def via(%__MODULE__{name: name}, table_ref),
     do: {:via, Registry, {registry(name), table_ref}}
+
+  @doc """
+  The name a table's committer registers under.
+  """
+  @spec committer_via(t(), Store.table_ref()) :: GenServer.name()
+  def committer_via(%__MODULE__{name: name}, table_ref),
+    do: {:via, Registry, {committer_registry(name), table_ref}}
 
   defp build_store(config, dir) do
     case Keyword.get(config, :store) do
