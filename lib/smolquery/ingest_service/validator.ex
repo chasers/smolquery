@@ -21,18 +21,19 @@ defmodule Smolquery.IngestService.Validator do
 
   @doc """
   Splits `rows` into coerced valid rows and per-index rejections.
+
+  One walk per row: each value is coerced as it is checked, so a valid value
+  pays `Smolquery.Schema.value_from_json/2` exactly once.
   """
   @spec validate(Schema.t(), [term()]) :: {[Writer.row()], [row_errors()]}
   def validate(%Schema{} = schema, rows) when is_list(rows) do
-    names = Schema.names(schema)
+    names = MapSet.new(Schema.names(schema))
 
-    {valid, errors} =
-      rows
-      |> Stream.with_index()
-      |> Enum.reduce({[], []}, fn {row, index}, {valid, errors} ->
+    {valid, errors, _count} =
+      Enum.reduce(rows, {[], [], 0}, fn row, {valid, errors, index} ->
         case validate_row(schema, names, row) do
-          {:ok, row} -> {[row | valid], errors}
-          {:error, messages} -> {valid, [%{index: index, errors: messages} | errors]}
+          {:ok, row} -> {[row | valid], errors, index + 1}
+          {:error, messages} -> {valid, [%{index: index, errors: messages} | errors], index + 1}
         end
       end)
 
@@ -40,10 +41,10 @@ defmodule Smolquery.IngestService.Validator do
   end
 
   defp validate_row(schema, names, row) when is_map(row) do
-    problems = unknown_columns(names, row) ++ field_problems(schema, row)
+    {pairs, problems} = coerce_fields(schema, row)
 
-    case problems do
-      [] -> {:ok, coerce(schema, row)}
+    case unknown_columns(names, row) ++ problems do
+      [] -> {:ok, Map.new(pairs)}
       problems -> {:error, Enum.map(problems, &%{message: &1})}
     end
   end
@@ -55,23 +56,32 @@ defmodule Smolquery.IngestService.Validator do
   defp unknown_columns(names, row) do
     row
     |> Map.keys()
-    |> Enum.reject(&(&1 in names))
+    |> Enum.reject(&MapSet.member?(names, &1))
     |> Enum.sort()
     |> Enum.map(&"unknown column: #{inspect(&1)}")
   end
 
-  defp field_problems(schema, row) do
-    Enum.flat_map(schema.fields, &value_problems(&1, Map.get(row, &1.name)))
+  defp coerce_fields(schema, row) do
+    {pairs, problems} =
+      Enum.reduce(schema.fields, {[], []}, fn %Field{} = field, acc ->
+        coerce_field(field, Map.get(row, field.name), acc)
+      end)
+
+    {pairs, Enum.reverse(problems)}
   end
 
-  defp value_problems(%Field{nullable: true}, nil), do: []
+  defp coerce_field(%Field{nullable: true}, nil, acc), do: acc
 
-  defp value_problems(%Field{} = field, nil), do: ["column #{field.name} must not be null"]
+  defp coerce_field(%Field{} = field, nil, {pairs, problems}),
+    do: {pairs, ["column #{field.name} must not be null" | problems]}
 
-  defp value_problems(%Field{} = field, value) do
+  defp coerce_field(%Field{} = field, value, {pairs, problems}) do
     case Schema.value_from_json(field.type, value) do
-      {:ok, _value} -> []
-      {:error, {:invalid_value, type, value}} -> [invalid_message(field, type, value)]
+      {:ok, coerced} ->
+        {[{field.name, coerced} | pairs], problems}
+
+      {:error, {:invalid_value, type, value}} ->
+        {pairs, [invalid_message(field, type, value) | problems]}
     end
   end
 
@@ -79,20 +89,5 @@ defmodule Smolquery.IngestService.Validator do
     {:ok, name} = Schema.api_type(type)
 
     "column #{field.name} (#{name}) cannot accept #{inspect(value)}"
-  end
-
-  defp coerce(schema, row) do
-    schema.fields
-    |> Enum.flat_map(fn %Field{} = field ->
-      case Map.get(row, field.name) do
-        nil ->
-          []
-
-        value ->
-          {:ok, coerced} = Schema.value_from_json(field.type, value)
-          [{field.name, coerced}]
-      end
-    end)
-    |> Map.new()
   end
 end
