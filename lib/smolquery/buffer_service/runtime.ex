@@ -20,7 +20,7 @@ defmodule Smolquery.BufferService.Runtime do
         flush_max_rows: 100_000,
         flush_max_bytes: 8_000_000,
         max_buffered_rows: 500_000,
-        max_buffered_bytes: 128_000_000,
+        max_buffered_bytes: 64_000_000,
         ack_budget_ms: 5_000,
         write_timeout_ms: 15_000,
         control_timeout_ms: 15_000,
@@ -53,11 +53,8 @@ defmodule Smolquery.BufferService.Runtime do
   `{:error, {:overloaded, predicted_ms}}` rather than queued in the buffer's
   mailbox toward a timeout. `:infinity` disables admission and restores
   silent queueing. It bounds *waiting*, where `max_buffered_rows`/`bytes`
-  bound *memory*. Since the commit pipeline landed (T-152), writes accepted
-  during an in-flight commit accumulate instead of waiting in the mailbox,
-  so the byte bound now sees roughly the whole outstanding set — the
-  default is sized so a saturating writer pool fits where it used to hide
-  in the mailbox.
+  bound *memory* — the bench proved the queue that hurts is the mailbox,
+  which the memory bounds never see.
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
@@ -86,7 +83,7 @@ defmodule Smolquery.BufferService.Runtime do
     flush_max_rows: 100_000,
     flush_max_bytes: 8_000_000,
     max_buffered_rows: 500_000,
-    max_buffered_bytes: 128_000_000,
+    max_buffered_bytes: 64_000_000,
     ack_budget_ms: 5_000,
     write_timeout_ms: 15_000,
     control_timeout_ms: 15_000,

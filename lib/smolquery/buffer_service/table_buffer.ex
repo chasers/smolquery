@@ -35,14 +35,14 @@ defmodule Smolquery.BufferService.TableBuffer do
   waiting callers itself. Accumulation continues while a commit is in
   flight, so a table's throughput is no longer one inline encode per cycle —
   `bench/results/otel_logs.md` is the benchmark that said otherwise (one
-  table at 39k rows/s under a node that does 57k). Steady state keeps at
-  most one commit in flight: a flush interval or threshold that trips while
-  one is running marks the flush due, and the next commit starts the moment
-  `:commit_done` lands — batches grow under load instead of queueing as
-  fragments. Only the barriers (a schema change, an explicit flush, a drain)
-  may briefly queue a second commit. The admission bounds still measure the
-  accumulator, exactly as they did when flushing was inline, so with one
-  commit in flight the heap holds at most two accumulators' worth.
+  table at 39k rows/s under a node that does 57k). Every flush trigger —
+  the interval, the size thresholds, a schema change, a drain — hands off
+  immediately, so under load the committer runs a FIFO of
+  `flush_max_bytes`-sized commits back to back while the accumulator keeps
+  filling. The admission bounds measure the accumulator, exactly as they
+  did when flushing was inline; what used to wait uncounted in this
+  process's mailbox now waits in the committer's queue, the same rows one
+  hop later.
 
   ## Backpressure is immediate
 
@@ -127,7 +127,6 @@ defmodule Smolquery.BufferService.TableBuffer do
     batch_ids: [],
     row_count: 0,
     byte_size: 0,
-    flush_due: false,
     in_flight: 0,
     in_flight_ids: MapSet.new()
   ]
@@ -391,21 +390,13 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @impl GenServer
   def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag}} = state) do
-    state = %{state | timer: nil}
-
-    if state.in_flight == 0 do
-      {:noreply, state |> handoff() |> run_maintenance()}
-    else
-      {:noreply, %{state | flush_due: true}}
-    end
+    {:noreply, %{state | timer: nil} |> handoff() |> run_maintenance()}
   end
 
   def handle_info({:flush, _stale}, state), do: {:noreply, state}
 
   def handle_info({:commit_done, batch_ids}, state) do
-    state = state |> settle(batch_ids) |> handoff_when_due()
-
-    {:noreply, run_maintenance(state)}
+    {:noreply, state |> settle(batch_ids) |> run_maintenance()}
   end
 
   def handle_info(:maintain, state) do
@@ -733,26 +724,12 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
 
   defp handoff_when_full(state) do
-    if state.in_flight == 0 and over_threshold?(state) do
+    if state.row_count >= state.runtime.flush_max_rows or
+         state.byte_size >= state.runtime.flush_max_bytes do
       handoff(state)
     else
       state
     end
-  end
-
-  defp handoff_when_due(%__MODULE__{chunks: []} = state), do: %{state | flush_due: false}
-
-  defp handoff_when_due(state) do
-    if state.in_flight == 0 and (state.flush_due or over_threshold?(state)) do
-      handoff(state)
-    else
-      state
-    end
-  end
-
-  defp over_threshold?(state) do
-    state.row_count >= state.runtime.flush_max_rows or
-      state.byte_size >= state.runtime.flush_max_bytes
   end
 
   defp handoff(%__MODULE__{chunks: []} = state), do: state
@@ -776,7 +753,6 @@ defmodule Smolquery.BufferService.TableBuffer do
         batch_ids: [],
         row_count: 0,
         byte_size: 0,
-        flush_due: false,
         timer: cancel(state.timer),
         in_flight: state.in_flight + 1,
         in_flight_ids: Enum.into(batch_ids, state.in_flight_ids)
