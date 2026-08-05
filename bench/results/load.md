@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Run | 2026-08-03 |
-| Commit | `77861ce` (plus the commit adding this script) |
+| Run | 2026-08-04 |
+| Commit | `29bb13d` (PL-20: one-pass validation T-151, pipelined commit T-152; baseline 2026-08-03 numbers in parentheses where they moved) |
 | Command | `mix run bench/load.exs 2>/dev/null` (defaults: `ROWS=50000`, `SCALE=10000,50000`, `BATCH=2000`, `POOL=256`, buffer `flush_interval_ms: 1000`, `load_max_bytes: 256 MiB`) |
 | Machine | Apple M1 Max · 10 cores · 64 GiB · macOS 26.5.2 |
 | Runtime | Elixir 1.20.2 / OTP 29 · DuckDB v1.5.1 |
@@ -19,14 +19,14 @@ that file re-serialized by Polars, NDJSON is built by hand.
 ## Headline
 
 **Format choice is worth at most 1.6×, and Parquet's 531× size advantage buys
-almost none of it.** NDJSON 9.0k rows/s, CSV 14.3k, Parquet 14.6k — while the
-files are 106 MiB, 50 MiB, and 0.2 MiB. CSV and Parquet land within 10% of each
-other despite a 250× size difference, because after parsing all three converge on
-`DataFrame.to_rows` → validate → re-encode. **And a 106 MiB NDJSON load costs
-1.06 GiB of peak BEAM heap — 10× the file** — because the disk spool bounds the
-request body while `parse/3` materializes every row anyway. Finally, **a load uses 1.0 of 10 cores** — one request is one process — so it beats
-*serial* inserts 7.1× by amortizing group commits while sitting 2.6× below the
-concurrent `/insert` ceiling, which itself only reaches 4.8 cores.
+almost none of it.** NDJSON 10.8k rows/s (was 9.0k), CSV 17.3k (14.3k),
+Parquet 15.0k (14.6k) — PL-20's faster validator lifted the text formats
+~20% without touching this path, which is itself evidence the shared
+row-shaped tail sets the floor. The files are 106 MiB, 50 MiB, and 0.2 MiB.
+**A 106 MiB NDJSON load still costs ~12× the file in peak BEAM heap**
+because `parse/3` materializes every row before chunking, and **a load
+still uses 1.0 of 10 cores** — one request is one process. Both remain
+T-144's brief; nothing in PL-20 changed them.
 
 ## Fixture files — 50,000 rows
 
@@ -48,18 +48,19 @@ Phase 1).
 
 ```
   format         MiB   load ms    rows/s   MiB/s  inserted  status   cores   sched%
-  ndjson       106.2    5570.1      8976    19.1     50000     200    1.03      5.2
-  csv           50.4    3500.9     14282    14.4     50000     200    1.04      6.4
-  parquet        0.2    3434.8     14557     0.1     50000     200     1.0      6.5
+  ndjson       106.2    4615.5     10833    23.0     50000     200    1.03      4.7
+  csv           50.4    2894.3     17275    17.4     50000     200    1.06      5.7
+  parquet        0.2    3344.2     14951     0.1     50000     200    1.02      4.9
 ```
 
-**Every load uses exactly one core of ten**, with BEAM schedulers 5–7% busy. That is
+**Every load uses exactly one core of ten**, with BEAM schedulers 5–6% busy. That is
 the parallelism gap stated as a measurement rather than an inference: `/load` is one
 HTTP request handled by one process, parsing and then inserting chunk after chunk,
 while nine cores watch.
 
-Per row: 111 µs NDJSON, 70 µs CSV, 69 µs Parquet. So parsing JSON costs ~42 µs a
-row and everything else costs ~69 µs, whatever the format.
+Per row: 92 µs NDJSON (was 111), 58 µs CSV (70), 67 µs Parquet (69). The
+one-pass validator (T-151) shaved the shared tail; the format spread is
+unchanged.
 
 **This refutes the prediction PL-18 was written to test, but confirms its
 mechanism.** `otel_logs.md`'s stage profile showed Parquet decoding 38× faster
@@ -95,23 +96,23 @@ again; at `POOL=20000`'s 64 B/row it is ~4.2M rows.)
 
 ```
   format          rows     MiB   load ms    rows/s
-  ndjson         10000    21.2    1078.9      9268
-  ndjson         50000   106.2    5064.2      9873
-  csv            10000    10.1     662.2     15102
-  csv            50000    50.4    4918.2     10166
-  parquet        10000     0.1     963.6     10378
-  parquet        50000     0.2    4420.9     11310
+  ndjson         10000    21.2     947.7     10552
+  ndjson         50000   106.2    3834.1     13041
+  csv            10000    10.1     598.0     16723
+  csv            50000    50.4    4110.7     12163
+  parquet        10000     0.1     678.9     14729
+  parquet        50000     0.2    3941.0     12687
 ```
 
-NDJSON is flat from 10k to 50k rows (9.3k → 9.9k), so parse-then-chunk is not
+NDJSON holds 10.6k → 13.0k from 10k to 50k rows, so parse-then-chunk is not
 super-linear at this size. CSV and Parquet are not stable enough to read as a trend:
-CSV goes 15.1k → 10.2k here while Phase 1 measured 14.3k on the same 50k file, and
-Parquet's 10.4k at 10k rows sits below its own 14.6k in Phase 1. Their totals are
+CSV goes 16.7k → 12.2k here while Phase 1 measured 17.3k on the same 50k file, and
+Parquet's 14.7k at 10k rows sits below its own 15.0k in Phase 1. Their totals are
 small enough that group-commit timing and GC move them by thousands of rows/s.
 **Treat the non-NDJSON cells as variance, and re-run with a longer sweep before
 building any argument on them.**
 
-The 10,000-row cells sit near the 1,000 ms flush interval (662–1079 ms), so they are
+The 10,000-row cells sit near the 1,000 ms flush interval (598–948 ms), so they are
 substantially group-commit wait rather than parse work — the script prints that
 warning above the table for the same reason.
 
@@ -119,20 +120,20 @@ warning above the table for the same reason.
 
 ```
   kind          baseline        peak       delta   × file
-  total            613.4      1701.0      1087.6    10.24
-  binary             9.4       120.2       110.8     1.04
-  processes        547.0      1523.8       976.8      9.2
+  total            887.3      2183.6      1296.3     12.2
+  binary             9.8       120.6       110.8     1.04
+  processes        820.3      2014.2      1193.9    11.24
 ```
 
 **The disk spool bounds the request body, not the heap.** Binary memory grows by
 110.8 MiB — 1.04× the file, which is the spool and the body chunks doing exactly
-what they were designed to do. But *process* memory grows by 977 MiB, because
+what they were designed to do. But *process* memory grows by 1,194 MiB, because
 `parse/3` turns the whole file into Elixir maps before chunking (`Enum.reduce` for
 NDJSON, `DataFrame.to_rows` for CSV and Parquet) and `Stream.chunk_every` then runs
 over an already-complete list.
 
-So a load costs **~10× the file in peak heap**, and `load_max_bytes` defaults to
-256 MiB. Extrapolated, one request at the cap wants roughly **2.5 GiB** of BEAM
+So a load costs **~12× the file in peak heap**, and `load_max_bytes` defaults to
+256 MiB. Extrapolated, one request at the cap wants roughly **3 GiB** of BEAM
 memory, and nothing in the config says so. That is the finding here: either the
 default cap is too high for the parser behind it, or `parse/3` needs to stream into
 `insert_chunks/5` instead of materializing. A 50 ms sampler can miss a spike, so
@@ -142,21 +143,21 @@ every peak above is a floor on the real one.
 
 ```
   path                            ms    rows/s   cores
-  POST /load, one file         838.2     11931    1.02
-  POST /insert × 5            5968.6      1675    0.17
+  POST /load, one file         745.0     13422     1.0
+  POST /insert × 5            5836.9      1713    0.15
 ```
 
 The `cores` column is the whole story in miniature: the load uses one core, five
-serial inserts use **0.17** — they spend their time *waiting* on group commits, not
+serial inserts use **0.15** — they spend their time *waiting* on group commits, not
 computing.
 
-`/load` wins 7.1×, and the reason is group-commit amortization, not parsing: five
+`/load` wins 7.8×, and the reason is group-commit amortization, not parsing: five
 serial inserts each wait for their own ~1,000 ms flush, while the load's 10,000
 rows arrive as one chunk and wait once. This is the *single-threaded client*
 comparison.
 
 Set against `bench/results/otel_logs.md`'s concurrent ceiling — 38.4k rows/s from
-16 concurrent writers on one table — **`/load` at 14.6k rows/s is 2.6× slower than
+16 concurrent writers on one table (42.5k after PL-20) — **`/load` at 15–17k rows/s is ~2.5× slower than
 just running `/insert` in parallel.** A load is one request handled by one process,
 and the measurement says so exactly: 1.0 core against the concurrent path's 4.8.
 It amortizes commits; it does not use the machine. So the guidance is
@@ -189,11 +190,11 @@ load's 10,000-row chunks arrive as fast as the buffer takes them. No seal fired
   file parsed in under a millisecond yields 1.6×, because `to_rows` → validate →
   re-encode is the floor. Frames end to end is what removes that floor; a new
   content type on today's `parse/3` cannot.
-- **`/load` is not the fast path.** It is 2.6× slower than concurrent `/insert`,
-  and its 7.1× win over *serial* inserts is commit amortization. Anyone chasing
+- **`/load` is not the fast path.** It is ~2.5× slower than concurrent `/insert`,
+  and its 7.8× win over *serial* inserts is commit amortization. Anyone chasing
   ingest throughput should fan out `/insert`, not batch into `/load`.
-- **A load costs ~10× the file in peak heap**, all of it process memory, and the
-  256 MiB default cap therefore implies ~2.5 GiB per request. Worth either a
+- **A load costs ~12× the file in peak heap**, all of it process memory, and the
+  256 MiB default cap therefore implies ~3 GiB per request. Worth either a
   smaller default or a streaming `parse/3` (and worth a caveat in `docs/api.md`
   meanwhile).
 - **`load_max_bytes` in rows: ~120k for 61-column NDJSON, ~254k for CSV.** A
