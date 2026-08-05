@@ -85,6 +85,10 @@ defmodule Smolquery.BufferService.Supervisor do
       ring_epoch(runtime),
       {HotManifest, name: Runtime.manifest(runtime.name)},
       {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
+      Supervisor.child_spec(
+        {Registry, keys: :unique, name: Runtime.committer_registry(runtime.name)},
+        id: Runtime.committer_registry(runtime.name)
+      ),
       {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
       {Adopter, runtime},
       Supervisor.child_spec(

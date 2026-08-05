@@ -247,8 +247,9 @@ defmodule Smolquery.BufferService.TableBufferTest do
       {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
 
       [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
-      held = :sys.get_state(pid).log
-      :sys.replace_state(pid, fn state -> %{state | log: nil} end)
+      committer = :sys.get_state(pid).committer
+      held = :sys.get_state(committer).log
+      :sys.replace_state(committer, fn state -> %{state | log: nil} end)
 
       {:ok, path} = HotManifest.log_path(runtime.manifest, @table)
       File.chmod!(path, 0o400)
@@ -259,7 +260,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       assert {:ok, [_first]} = Store.list(runtime.store, "analytics/events")
 
-      :sys.replace_state(pid, fn state -> %{state | log: held} end)
+      :sys.replace_state(committer, fn state -> %{state | log: held} end)
     end
   end
 
