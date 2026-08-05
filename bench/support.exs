@@ -133,6 +133,22 @@ defmodule Bench.Support do
   end
 
   @doc """
+  Millisecond percentiles over microsecond samples.
+
+  A sustained-load script reports a distribution rather than a median: the
+  interesting number in a tail latency is where it stops being typical.
+  """
+  def percentiles([]), do: %{n: 0, p50: nil, p95: nil, p99: nil, max: nil}
+
+  def percentiles(samples) do
+    sorted = Enum.sort(samples)
+    count = length(sorted)
+    at = fn fraction -> ms(Enum.at(sorted, min(count - 1, trunc(fraction * count)))) end
+
+    %{n: count, p50: at.(0.50), p95: at.(0.95), p99: at.(0.99), max: at.(1.0)}
+  end
+
+  @doc """
   How many files a query's scan actually opened, per `EXPLAIN ANALYZE`.
 
   This is the number a pruning measurement lives on. Wall clock alone hides a

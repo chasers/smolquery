@@ -13,6 +13,7 @@ mix run bench/query.exs                           # what a query job costs, and 
 mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
 mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
 mix run bench/cluster_ingest.exs                  # does aggregate ingest scale with buffer-node count?
+mix run bench/otel_logs.exs 2>/dev/null           # OTel logs over HTTP: wide ingest with a live tail
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs   # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurrency sizes
@@ -20,6 +21,7 @@ CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs   # more samples, more concurr
 BENCH_SECTION=replication_delta mix run bench/buffer.exs   # one section by name
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs       # bigger claims, bigger merges
 NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
+WRITERS=8,32 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null   # a different sweep and offered rate
 ```
 
 Each script's `@moduledoc` records what it measures and what it concluded.
@@ -94,6 +96,50 @@ bottleneck at three nodes (`bench/results/cluster_ingest.md`).
 Throughput is measured off peer BEAMs rather than against the local kind
 cluster: a 4 GB Docker VM with every pod on a shrunken request measures VM
 contention, not the fleet.
+
+## The workload end to end — `bench/otel_logs.exs`
+
+The only script that measures a *workload* rather than a component: 61-column
+OpenTelemetry log records streaming in through `POST …/insert` while a tailer
+asks for the last 100 rows through `POST /v1/queries`, everything over the real
+HTTP front door. Because `SmolqueryApi.Endpoint` is a singleton Phoenix endpoint,
+the script takes over the node's boot — it terminates the role subtrees, points
+the catalog, buffer, and sealed dirs at a scratch directory, and restarts all but
+`:web`. Four sections: a stage profile of one batch, an ingest ceiling (writers
+sweep, no reader), a tail floor (no ingest), and the sustained case (paced ingest
+at half the ceiling plus a 1 Hz tail, with a per-second timeline). Knobs:
+`WRITERS` (the sweep, comma-separated), `TABLES`, `SUSTAINED_WRITERS`, `BATCH`,
+`SECONDS`, `TAIL_SECONDS`, `SUSTAINED_SECONDS`, `TAIL_INTERVAL_MS`, `REPS`,
+`RATE`, `FLUSH_MS`. Redirect stderr — ADBC warns once per query.
+
+**One table takes ~37.7k wide records/s (80 MiB/s of JSON), eight tables 57.1k,
+and a live tail over half the single-table stream costs 331 ms at p50 while
+showing rows 1.15 s old** — stable for 30 seconds with no drift in insert
+latency, tail latency, or freshness, because the sealer pins the hot tier near
+50 unsealed micro-segments while 2M rows land. Ingest saturates at 8 writers;
+past that only latency grows.
+
+**The ceiling is per-row Elixir CPU, and validation owns half of it.** One
+2,000-row batch costs 107.5 ms on a core: 51% `IngestService.Validator` (it
+coerces every value of every column — 1.8M coercions at 61 columns), 25% JSON
+decode, and only 24% the Arrow encode plus Parquet write. Two consequences worth
+knowing before optimizing anything here:
+
+- **A faster wire format alone does not help.** Parquet decodes 38× faster than
+  the same rows parse from JSON (0.7 vs 26.8 ms), but `/load` immediately calls
+  `DataFrame.to_rows` at 29.2 ms — more than the JSON decode it replaces — and
+  then validation and the re-encode still run. `bench/results/ingest_transport.md`
+  said the same from the transport side: the frame→rows conversion, not the wire,
+  is the cost. The win needs frames end to end; `Writer.write/3` already takes one.
+- **Partitioning one table's writes is worth ~1.5×, not 8×.** Holding offered load
+  at 16 writers, spreading it over 1/2/4/8 tables gives 39.0k → 46.9k → 55.1k →
+  57.1k rows/s, because only the last quarter of a batch's CPU runs inside the
+  `TableBuffer`. `buffer.md`'s 3.1–4.1× from 8 buffers was measured with no HTTP
+  edge in front of the encode.
+
+A *filtered* tail is slower (251 vs 231 ms) and staler than an unfiltered one:
+`ORDER BY timestamp DESC LIMIT 100` reads every surviving file regardless, and
+rarer matches mean an older newest match (`bench/results/otel_logs.md`).
 
 ## Sealing — `bench/sealer.exs`
 
