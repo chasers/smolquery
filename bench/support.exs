@@ -179,9 +179,120 @@ defmodule Bench.Support do
     end
   end
 
+  @doc """
+  Prints how much parallelism this VM actually has.
+
+  Every throughput number in `bench/` is against this, and "10 cores" is not the
+  whole story: DuckDB gets its own thread pool (`:threads`), and the BEAM has three
+  scheduler classes, only one of which shows up in `:scheduler_wall_time`'s
+  denominator alongside the normal ones.
+  """
+  def schedulers do
+    heading("Runtime parallelism")
+
+    for {key, value} <- [
+          {"logical processors", :erlang.system_info(:logical_processors_available)},
+          {"schedulers (online)",
+           "#{:erlang.system_info(:schedulers)} (#{:erlang.system_info(:schedulers_online)})"},
+          {"dirty CPU schedulers (online)",
+           "#{:erlang.system_info(:dirty_cpu_schedulers)} " <>
+             "(#{:erlang.system_info(:dirty_cpu_schedulers_online)})"},
+          {"dirty IO schedulers", :erlang.system_info(:dirty_io_schedulers)},
+          {"DuckDB threads per engine", engine_threads()}
+        ] do
+      IO.puts("  #{label(key, 32)} #{value}")
+    end
+  end
+
+  defp engine_threads do
+    :smolquery |> Application.get_env(Smolquery.Engine, []) |> Keyword.get(:threads, :default)
+  end
+
+  @doc """
+  A point to measure CPU consumption from; pair with `cpu_since/1`.
+  """
+  def cpu_snapshot do
+    :erlang.system_flag(:scheduler_wall_time, true)
+
+    %{
+      at: System.monotonic_time(:microsecond),
+      cpu_us: os_cpu_microseconds(),
+      scheduler: :erlang.statistics(:scheduler_wall_time)
+    }
+  end
+
+  @doc """
+  CPU used since `before`: whole cores consumed, and BEAM scheduler busy percent.
+
+  `cores` comes from the OS process's CPU time, so it counts DuckDB's native
+  threads — which no BEAM statistic sees — and it counts the co-resident driver too.
+  `scheduler` covers the normal schedulers only: the dirty pools sit idle here and
+  would dilute the ratio toward meaninglessness.
+  """
+  def cpu_since(before) do
+    now = cpu_snapshot()
+    wall = now.at - before.at
+
+    %{
+      cores: Float.round((now.cpu_us - before.cpu_us) / wall, 2),
+      scheduler: scheduler_busy(before.scheduler, now.scheduler)
+    }
+  end
+
+  defp scheduler_busy(before, now) when is_list(before) and is_list(now) do
+    normal = :erlang.system_info(:schedulers)
+
+    {active, total} =
+      Enum.zip(Enum.sort(before), Enum.sort(now))
+      |> Enum.take(normal)
+      |> Enum.reduce({0, 0}, fn {{id, a0, t0}, {id, a1, t1}}, {active, total} ->
+        {active + (a1 - a0), total + (t1 - t0)}
+      end)
+
+    case total do
+      0 -> nil
+      _busy -> Float.round(active / total * 100, 1)
+    end
+  end
+
+  defp scheduler_busy(_before, _now), do: nil
+
+  defp os_cpu_microseconds do
+    {output, 0} = System.cmd("ps", ["-o", "cputime=", "-p", System.pid()])
+
+    seconds =
+      output
+      |> String.trim()
+      |> String.split(":")
+      |> Enum.reduce(0.0, fn part, acc -> acc * 60 + parse_seconds(part) end)
+
+    round(seconds * 1_000_000)
+  end
+
+  defp parse_seconds(part) do
+    {value, _rest} = Float.parse(part)
+
+    value
+  end
+
+  @doc """
+  A comma-separated list of integers from an environment variable, or `default`.
+
+  For the knobs a script sweeps rather than sets — `WRITERS=4,8,16,32`.
+  """
+  def sweep_env(name, default) do
+    case System.get_env(name) do
+      nil -> default
+      value -> value |> String.split(",", trim: true) |> Enum.map(&String.to_integer/1)
+    end
+  end
+
   def ms(microseconds), do: Float.round(microseconds / 1000, 1)
 
   def mib(bytes), do: Float.round(bytes / 1_048_576, 1)
+
+  def pad(value, width) when is_float(value) and abs(value) >= 1000,
+    do: value |> :erlang.float_to_binary(decimals: 1) |> String.pad_leading(width)
 
   def pad(value, width), do: value |> to_string() |> String.pad_leading(width)
 
