@@ -407,6 +407,7 @@ defmodule Bench.OtelLogs do
       bytes: 0,
       prep: 0,
       shed: 0,
+      shed_why: %{},
       errors: 0,
       late: 0,
       writer: writer,
@@ -467,10 +468,16 @@ defmodule Bench.OtelLogs do
 
     case response.status do
       200 -> %{acc | rows: acc.rows + response.body["insertedRows"]}
-      429 -> %{acc | shed: acc.shed + 1}
+      429 -> %{acc | shed: acc.shed + 1, shed_why: shed_why(acc.shed_why, response.body)}
       _other -> %{acc | errors: acc.errors + 1}
     end
   end
+
+  defp shed_why(seen, %{"error" => %{"status" => status} = error}) do
+    Map.update(seen, {status, error["message"]}, 1, &(&1 + 1))
+  end
+
+  defp shed_why(seen, _body), do: seen
 
   defp tail(req, shape, acc) do
     {us, response} =
@@ -584,22 +591,36 @@ defmodule Bench.OtelLogs do
   end
 
   defp totals(results) do
-    Enum.reduce(
-      results,
-      %{rows: 0, bytes: 0, prep: 0, shed: 0, errors: 0, late: 0, requests: 0, latencies: []},
-      fn result, acc ->
-        %{
-          rows: acc.rows + result.rows,
-          bytes: acc.bytes + result.bytes,
-          prep: acc.prep + result.prep,
-          shed: acc.shed + result.shed,
-          errors: acc.errors + result.errors,
-          late: acc.late + result.late,
-          requests: acc.requests + length(result.samples),
-          latencies: acc.latencies ++ Enum.map(result.samples, & &1.us)
-        }
-      end
-    )
+    totals =
+      Enum.reduce(
+        results,
+        %{rows: 0, bytes: 0, prep: 0, shed: 0, errors: 0, late: 0, requests: 0, latencies: []},
+        fn result, acc ->
+          %{
+            rows: acc.rows + result.rows,
+            bytes: acc.bytes + result.bytes,
+            prep: acc.prep + result.prep,
+            shed: acc.shed + result.shed,
+            errors: acc.errors + result.errors,
+            late: acc.late + result.late,
+            requests: acc.requests + length(result.samples),
+            latencies: acc.latencies ++ Enum.map(result.samples, & &1.us)
+          }
+        end
+      )
+
+    report_shed(results)
+
+    totals
+  end
+
+  defp report_shed(results) do
+    results
+    |> Enum.flat_map(&Map.to_list(Map.get(&1, :shed_why, %{})))
+    |> Enum.reduce(%{}, fn {why, count}, acc -> Map.update(acc, why, count, &(&1 + count)) end)
+    |> Enum.each(fn {{status, message}, count} ->
+      IO.puts("    shed #{count} × #{status}: #{message}")
+    end)
   end
 end
 

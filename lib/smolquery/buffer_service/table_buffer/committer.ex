@@ -76,8 +76,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   @doc """
   Enqueues a frozen batch. The committer replies to every pending caller
-  once the batch is durable, then reports `{:commit_done, batch_ids, rows,
-  bytes}` to the buffer.
+  once the batch is durable, then reports `{:commit_done, batch_ids}` to
+  the buffer.
   """
   @spec commit(GenServer.server(), commit()) :: :ok
   def commit(committer, commit), do: GenServer.cast(committer, {:commit, commit})
@@ -167,7 +167,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       GenServer.reply(from, reply_for(kind, result))
     end)
 
-    send(state.buffer, {:commit_done, commit.batch_ids, commit.row_count, commit.byte_size})
+    send(state.buffer, {:commit_done, commit.batch_ids})
 
     state
   end
