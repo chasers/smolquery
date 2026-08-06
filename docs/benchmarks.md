@@ -12,6 +12,7 @@ mix run bench/sealer.exs                          # what a seal costs, and how f
 mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
 mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
 mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
+mix run bench/clustering.exs                      # does the ORDER BY analog work, and what does it cost?
 mix run bench/cluster_ingest.exs                  # does aggregate ingest scale with buffer-node count?
 mix run bench/otel_logs.exs 2>/dev/null           # OTel logs over HTTP: wide ingest with a live tail
 mix run bench/load.exs 2>/dev/null                # batch loads: which format, and what a file costs
@@ -190,3 +191,15 @@ count and rows, times the whole handoff, and reports the sealed-to-hot size
 ratio. That last number is why it exists: DuckDB's `COPY` defaults to snappy
 while segments are written with zstd, so sealing silently made data 2.85× larger
 until the codec was matched. No correctness test could catch that.
+
+## Clustering — `bench/clustering.exs`
+
+Does the ORDER BY analog work, and what does it cost — the same zipf-ish row
+stream on two tables (`clustered` with `["project_id", "ts"]` vs `plain` with
+`[]`), measuring correctness, flush and seal write throughput, BEAM heap and OS
+RSS around the sort, and sealed-tier pruning under a point lookup. Knobs: `P`,
+`R`, `MICRO`, `BATCH`, `REPS`.
+
+**Correctness holds; flush costs +28.4% rows/s at saturation; seal RSS peaks
+~+190 MiB higher under `memory_limit=2GB`; sealed point lookups win ~1.8×**
+(`bench/results/clustering.md`).
