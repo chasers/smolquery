@@ -243,7 +243,15 @@ Integration-tagged tests are excluded by default: they download DuckDB
 extensions, serve Parquet over a real HTTP server, boot `:peer` nodes (`epmd`
 must be running: `epmd -daemon`), and expect a Postgres on `localhost:5432`
 (`postgres`/`postgres`, override with `TEST_POSTGRES_*`) and a MinIO on
-`localhost:9000` (`smolquery`/`smolquery-secret`, override with `TEST_S3_*`):
+`localhost:9000` (`smolquery`/`smolquery-secret`, override with `TEST_S3_*`).
+
+The DuckLake catalog suite creates and uses a `smolquery_test` database rather
+than sharing `postgres`. DuckLake's metadata tables carry no primary keys, and
+a database under a `FOR ALL TABLES` publication — a developer Postgres also
+used for logical replication or CDC — rejects the `UPDATE`s those tables need,
+failing every catalog commit after a table's first. Publications are
+per-database, so a database of its own settles it; override with
+`TEST_POSTGRES_DATABASE` only toward a database under no such publication:
 
 ```sh
 docker run -d --rm -p 9000:9000 \

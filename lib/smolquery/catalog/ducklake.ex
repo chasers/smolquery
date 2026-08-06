@@ -53,6 +53,34 @@ defmodule Smolquery.Catalog.DuckLake do
   DuckLake accepting both appends — is not closed by this and remains the
   ring gate's residual window; see `Smolquery.StorageService.Routing`.
 
+  What that retry fires on is matched narrowly, against four markers. Two came
+  from failures observed here: DuckLake's own `"Transaction conflict"`, and
+  SQLite metadata's `"database is locked"`. Two are the metadata database's
+  own ordinary transient commits — Postgres `"deadlock detected"` and
+  `"could not serialize access"` — which arrive verbatim, a metadata error
+  being passed through whole rather than summarised (that pass-through is what
+  finally made the bug below readable). Those two are not hypothetical here:
+  `replace_segments/4` sends a `DELETE` and an add in one transaction, and L6
+  below has two nodes committing against one metadata database, which is the
+  shape that deadlocks. Nothing else in smolquery retries them, so dropping
+  them from this list would strand compaction on a failure that clears itself.
+
+  DuckDB wraps *every* commit-time failure in `"Failed to commit"`, permanent
+  ones included, so keying on that prefix spent all five attempts on errors no
+  retry could clear and then reported them as `:commit_conflict` — which named
+  a race that had not happened and hid the one thing that would have explained
+  the failure. The case that found this was a Postgres metadata database whose
+  `ducklake_table_stats` a `FOR ALL TABLES` publication covers and no primary
+  key identifies: Postgres refuses the `UPDATE` for want of a replica identity,
+  so every commit after a table's first one fails, the first having inserted
+  the stats row each later one updates. A non-retryable commit now fails at
+  once and carries the metadata database's own message.
+
+  All four exhaust into `:commit_conflict`, which therefore names contention
+  rather than strictly a lost race — a held SQLite file lock and a deadlock are
+  neither of them races. Worth knowing when reading that atom out of a
+  compaction log, where it is the whole of what an operator gets.
+
   DuckLake collects its own min-max statistics from the Parquet footer at
   registration, which is why nothing here passes stats: the sealed tier prunes
   on numbers DuckLake derives, and a segment's own stats serve the hot tier.
@@ -104,6 +132,12 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @default_catalog "lake"
   @commit_attempts 5
+  @retryable_markers [
+    "Transaction conflict",
+    "database is locked",
+    "deadlock detected",
+    "could not serialize access"
+  ]
 
   @doc """
   A child spec starting the engine that backs this catalog.
@@ -533,7 +567,7 @@ defmodule Smolquery.Catalog.DuckLake do
         :ok
 
       {:error, error} ->
-        if conflict?(error) and attempt < @commit_attempts do
+        if retryable?(error) and attempt < @commit_attempts do
           Process.sleep(backoff(attempt))
           with_commit_retries(run, attempt + 1)
         else
@@ -544,13 +578,28 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp backoff(attempt), do: (1 <<< attempt) * 5 + :rand.uniform(10)
 
-  defp conflict?(%{__exception__: true} = error),
-    do: Exception.message(error) =~ "Failed to commit"
+  @doc """
+  Whether a failed commit is worth retrying.
 
-  defp conflict?(_error), do: false
+  Public for the same reason `Smolquery.Engine.Connection.fatal?/1` is: it
+  classifies DuckDB by message text, so the strings it keys on are pinned by a
+  test rather than trusted. Four are retryable — DuckLake's own
+  `"Transaction conflict"`, SQLite metadata's `"database is locked"`, and
+  Postgres metadata's `"deadlock detected"` and `"could not serialize access"`.
+  A commit that failed for any other reason is permanent, however much its
+  wrapper reads like a lost race; see the moduledoc.
+  """
+  @spec retryable?(Exception.t() | term()) :: boolean()
+  def retryable?(%{__exception__: true} = error) do
+    message = Exception.message(error)
+
+    Enum.any?(@retryable_markers, &String.contains?(message, &1))
+  end
+
+  def retryable?(_error), do: false
 
   defp classify(error) do
-    if conflict?(error), do: :commit_conflict, else: error
+    if retryable?(error), do: :commit_conflict, else: error
   end
 
   defp snapshot_argument(:current), do: []

@@ -9,6 +9,16 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
   they do not coexist. So unlike the SQLite suite (a fresh tmp file per
   test), every test here drops the shared `ducklake_*` tables first to get
   a clean catalog, which also means these tests cannot run `async: true`.
+
+  The suite owns a database (`smolquery_test`, created on demand) rather than
+  sharing `postgres`. DuckLake creates `ducklake_table_stats` and
+  `ducklake_table_column_stats` without primary keys, and Postgres refuses an
+  `UPDATE` on a table that a publication covers but no replica identity
+  identifies. A developer database carrying a `FOR ALL TABLES` publication —
+  logical replication, CDC tooling — therefore fails every commit after a
+  table's first one, since the first inserts those stats rows and each later
+  one updates them. Publications are per-database, so a database of our own is
+  the whole fix.
   """
 
   use ExUnit.Case, async: false
@@ -25,11 +35,14 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
 
   @engine __MODULE__.Lake
   @catalog_name "smolquery_postgres_test"
+  @database "smolquery_test"
   @table {"analytics", "events"}
 
   setup context do
-    metadata = postgres_metadata()
-    reset_ducklake_tables!(metadata)
+    connection = postgres_connection()
+    ensure_database!(connection)
+    reset_ducklake_tables!(connection)
+    metadata = postgres_metadata(connection)
 
     start_supervised!(
       {DuckLake,
@@ -112,43 +125,44 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     result.rows |> List.flatten() |> List.first()
   end
 
-  defp postgres_metadata do
-    hostname = System.get_env("TEST_POSTGRES_HOST", "localhost")
-    port = System.get_env("TEST_POSTGRES_PORT", "5432")
-    username = System.get_env("TEST_POSTGRES_USER", "postgres")
-    password = System.get_env("TEST_POSTGRES_PASSWORD", "postgres")
-    database = System.get_env("TEST_POSTGRES_DATABASE", "postgres")
-
-    "postgres:dbname=#{database} host=#{hostname} port=#{port} " <>
-      "user=#{username} password=#{password}"
+  defp postgres_connection do
+    [
+      hostname: System.get_env("TEST_POSTGRES_HOST", "localhost"),
+      port: System.get_env("TEST_POSTGRES_PORT", "5432") |> String.to_integer(),
+      username: System.get_env("TEST_POSTGRES_USER", "postgres"),
+      password: System.get_env("TEST_POSTGRES_PASSWORD", "postgres"),
+      database: System.get_env("TEST_POSTGRES_DATABASE", @database)
+    ]
   end
 
-  defp reset_ducklake_tables!("postgres:" <> params) do
-    opts =
-      params
-      |> String.split(" ", trim: true)
-      |> Map.new(fn pair ->
-        [key, value] = String.split(pair, "=", parts: 2)
-        {String.to_existing_atom(translate_key(key)), value}
-      end)
+  defp postgres_metadata(connection) do
+    "postgres:dbname=#{connection[:database]} host=#{connection[:hostname]} " <>
+      "port=#{connection[:port]} user=#{connection[:username]} " <>
+      "password=#{connection[:password]}"
+  end
 
-    {:ok, conn} =
-      Postgrex.start_link(
-        hostname: opts.hostname,
-        port: String.to_integer(opts.port),
-        username: opts.username,
-        password: opts.password,
-        database: opts.database
-      )
+  # Already existing is the ordinary case and the one thing worth ignoring;
+  # anything else — no permission to create, wrong host — is raised here rather
+  # than left to resurface as a stranger error from the next connection.
+  defp ensure_database!(connection) do
+    {:ok, conn} = Postgrex.start_link(Keyword.put(connection, :database, "postgres"))
+
+    result = Postgrex.query(conn, ~s|CREATE DATABASE "#{connection[:database]}"|, [])
+    GenServer.stop(conn)
+
+    case result do
+      {:ok, _result} -> :ok
+      {:error, %Postgrex.Error{postgres: %{code: :duplicate_database}}} -> :ok
+      {:error, error} -> raise error
+    end
+  end
+
+  defp reset_ducklake_tables!(connection) do
+    {:ok, conn} = Postgrex.start_link(connection)
 
     Postgrex.query!(conn, drop_ducklake_tables_sql(), [])
     GenServer.stop(conn)
   end
-
-  defp translate_key("dbname"), do: "database"
-  defp translate_key("host"), do: "hostname"
-  defp translate_key("user"), do: "username"
-  defp translate_key(key), do: key
 
   defp drop_ducklake_tables_sql do
     """
