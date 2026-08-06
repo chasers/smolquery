@@ -21,6 +21,13 @@ defmodule Smolquery.Schema do
   The API names are the BigQuery-flavored strings `SmolqueryApi` speaks in
   table-schema JSON.
 
+  A schema also carries the table's `clustering` key — the column names writes
+  sort by, smolquery's analog of ClickHouse's `ORDER BY`. It rides here because
+  this is the one description of a table that already reaches every write point,
+  from the catalog through the ingest cache to `Smolquery.Segments.Writer`, and
+  because sorting is the only thing the key ever does. `clustering_columns/1`,
+  not the raw field, is what a write point should sort by.
+
   Milestone 1 verified that every one of these round-trips byte-identically
   through Explorer's Parquet writer, so a segment written here reads back
   through DuckDB unchanged.
@@ -40,9 +47,9 @@ defmodule Smolquery.Schema do
   alias Smolquery.Schema.Field
 
   @enforce_keys [:fields]
-  defstruct [:fields]
+  defstruct fields: nil, clustering: []
 
-  @type t :: %__MODULE__{fields: [Field.t()]}
+  @type t :: %__MODULE__{fields: [Field.t()], clustering: [String.t()]}
 
   @type logical_type ::
           :int64
@@ -114,6 +121,30 @@ defmodule Smolquery.Schema do
   """
   @spec names(t()) :: [String.t()]
   def names(%__MODULE__{fields: fields}), do: Enum.map(fields, & &1.name)
+
+  @doc """
+  The clustering key's columns that this schema actually declares, in the key's
+  own order — what a write point sorts by.
+
+  Not the same list as the `:clustering` field, and the difference is the point.
+  The field is what an operator asked for, which is what the API reports back.
+  This is what is safe to sort on, and the two can disagree: the key is catalog
+  metadata living beside the table rather than inside it, so dropping a table
+  and recreating it without a column leaves a key still naming that column.
+
+  Sorting on the columns that remain is the only answer that keeps data moving.
+  Erroring instead would fail identically on every retry, so a seal would never
+  retire and the table's tail would stay in the hot tier for good — and a key is
+  a pruning optimization, never a correctness property, so degrading it is free.
+  """
+  @spec clustering_columns(t()) :: [String.t()]
+  def clustering_columns(%__MODULE__{clustering: []}), do: []
+
+  def clustering_columns(%__MODULE__{clustering: clustering} = schema) do
+    names = MapSet.new(names(schema))
+
+    Enum.filter(clustering, &MapSet.member?(names, &1))
+  end
 
   @doc """
   The field named `name`, if the schema has one.

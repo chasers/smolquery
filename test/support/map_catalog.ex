@@ -17,7 +17,9 @@ defmodule Smolquery.Test.MapCatalog do
   @spec new() :: Catalog.t()
   def new do
     {:ok, agent} =
-      Agent.start_link(fn -> %{datasets: MapSet.new(), tables: %{}, retention: %{}} end)
+      Agent.start_link(fn ->
+        %{datasets: MapSet.new(), tables: %{}, retention: %{}, clustering: %{}}
+      end)
 
     %Catalog{impl: __MODULE__, config: agent}
   end
@@ -52,9 +54,15 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def table_schema(agent, table_ref) do
-    case agent |> Agent.get(& &1.tables) |> Map.fetch(table_ref) do
-      {:ok, schema} -> {:ok, schema}
-      :error -> {:error, {:unknown_table, table_ref}}
+    state = Agent.get(agent, & &1)
+
+    case Map.fetch(state.tables, table_ref) do
+      {:ok, schema} ->
+        clustering = Map.get(state.clustering, table_ref, [])
+        {:ok, %{schema | clustering: clustering}}
+
+      :error ->
+        {:error, {:unknown_table, table_ref}}
     end
   end
 
@@ -85,6 +93,20 @@ defmodule Smolquery.Test.MapCatalog do
   @impl Catalog
   def retention(agent, table_ref) do
     {:ok, agent |> Agent.get(& &1.retention) |> Map.get(table_ref)}
+  end
+
+  @impl Catalog
+  def put_clustering(agent, table_ref, []) do
+    Agent.update(agent, &%{&1 | clustering: Map.delete(&1.clustering, table_ref)})
+  end
+
+  def put_clustering(agent, table_ref, columns) when is_list(columns) do
+    Agent.update(agent, &%{&1 | clustering: Map.put(&1.clustering, table_ref, columns)})
+  end
+
+  @impl Catalog
+  def clustering(agent, table_ref) do
+    {:ok, agent |> Agent.get(& &1.clustering) |> Map.get(table_ref, [])}
   end
 
   @impl Catalog

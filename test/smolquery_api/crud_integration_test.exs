@@ -75,7 +75,8 @@ defmodule SmolqueryApi.CrudIntegrationTest do
     assert fetched.body == %{
              "id" => "events",
              "schema" => @schema_json,
-             "retention" => nil
+             "retention" => nil,
+             "clustering" => []
            }
   end
 

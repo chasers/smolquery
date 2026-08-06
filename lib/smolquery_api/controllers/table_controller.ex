@@ -45,7 +45,7 @@ defmodule SmolqueryApi.TableController do
          :ok <- Catalog.create_table(catalog, {dataset, id}, schema),
          :ok <- invalidate_schema_cache(conn, {dataset, id}),
          {:ok, existing} <- Catalog.table_schema(catalog, {dataset, id}) do
-      if existing == schema do
+      if existing.fields == schema.fields do
         Json.send_json(conn, 200, %{"id" => id, "schema" => TableSchema.to_json(schema)})
       else
         Errors.send_error(
@@ -61,7 +61,7 @@ defmodule SmolqueryApi.TableController do
   end
 
   @doc """
-  A table's schema and retention policy.
+  A table's schema, retention policy, and clustering key.
   """
   @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def show(conn, %{"dataset" => dataset, "table" => table}) do
@@ -76,21 +76,29 @@ defmodule SmolqueryApi.TableController do
   end
 
   @doc """
-  Updates a table's retention policy — the only mutable thing a table has.
+  Updates a table's retention policy and/or clustering key.
 
-  `{"retention": {"column": "ts", "ttlMs": 86400000}}` sets it,
+  Retention: `{"retention": {"column": "ts", "ttlMs": 86400000}}` sets it,
   `{"retention": null}` clears it. The column must exist and carry a time
   type, checked here against the schema — the sweeper downstream is
   deliberately too conservative to complain, so this is where a typo gets
   caught by the person who made it.
+
+  Clustering: `{"clustering": ["project_id", "ts"]}` sets the sort key for
+  future writes; `{"clustering": []}` clears it. Columns must exist on the
+  schema. Existing segments are not rewritten.
   """
   @spec update(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def update(conn, %{"dataset" => dataset, "table" => table}) do
     catalog = DatasetController.catalog(conn)
+    table_ref = {dataset, table}
 
-    with {:ok, schema} <- Catalog.table_schema(catalog, {dataset, table}),
-         {:ok, policy} <- retention_from_json(conn.body_params, schema),
-         :ok <- Catalog.put_retention(catalog, {dataset, table}, policy) do
+    with {:ok, schema} <- Catalog.table_schema(catalog, table_ref),
+         {:ok, updates} <- patch_from_json(conn.body_params, schema),
+         :ok <- apply_patch(catalog, table_ref, updates),
+         :ok <- invalidate_schema_cache(conn, table_ref),
+         {:ok, schema} <- Catalog.table_schema(catalog, table_ref),
+         {:ok, policy} <- Catalog.retention(catalog, table_ref) do
       Json.send_json(conn, 200, table_body(table, schema, policy))
     else
       {:error, reason} -> Errors.from_reason(conn, reason)
@@ -101,8 +109,51 @@ defmodule SmolqueryApi.TableController do
     %{
       "id" => table,
       "schema" => TableSchema.to_json(schema),
-      "retention" => retention_to_json(policy)
+      "retention" => retention_to_json(policy),
+      "clustering" => schema.clustering
     }
+  end
+
+  defp apply_patch(catalog, table_ref, updates) do
+    with :ok <- maybe_put(updates, :retention, &Catalog.put_retention(catalog, table_ref, &1)) do
+      maybe_put(updates, :clustering, &Catalog.put_clustering(catalog, table_ref, &1))
+    end
+  end
+
+  defp maybe_put(updates, key, fun) do
+    case Map.fetch(updates, key) do
+      {:ok, value} -> fun.(value)
+      :error -> :ok
+    end
+  end
+
+  defp patch_from_json(body, schema) do
+    has_retention = Map.has_key?(body, "retention")
+    has_clustering = Map.has_key?(body, "clustering")
+
+    if has_retention or has_clustering do
+      with {:ok, updates} <- maybe_retention(body, schema, has_retention, %{}) do
+        maybe_clustering(body, schema, has_clustering, updates)
+      end
+    else
+      {:error, {:missing_field, "retention"}}
+    end
+  end
+
+  defp maybe_retention(_body, _schema, false, updates), do: {:ok, updates}
+
+  defp maybe_retention(body, schema, true, updates) do
+    with {:ok, policy} <- retention_from_json(body, schema) do
+      {:ok, Map.put(updates, :retention, policy)}
+    end
+  end
+
+  defp maybe_clustering(_body, _schema, false, updates), do: {:ok, updates}
+
+  defp maybe_clustering(body, schema, true, updates) do
+    with {:ok, clustering} <- clustering_from_json(body, schema) do
+      {:ok, Map.put(updates, :clustering, clustering)}
+    end
   end
 
   defp retention_to_json(nil), do: nil
@@ -129,7 +180,34 @@ defmodule SmolqueryApi.TableController do
   defp retention_from_json(%{"retention" => retention}, _schema),
     do: {:error, {:invalid_retention, retention}}
 
-  defp retention_from_json(_body, _schema), do: {:error, {:missing_field, "retention"}}
+  defp clustering_from_json(%{"clustering" => columns}, schema) when is_list(columns) do
+    malformed = {:error, {:invalid_clustering, columns}}
+
+    columns
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn
+      column, {:ok, seen} when is_binary(column) ->
+        cond do
+          MapSet.member?(seen, column) ->
+            {:halt, malformed}
+
+          Schema.field(schema, column) == :error ->
+            {:halt, {:error, {:unknown_clustering_column, column}}}
+
+          true ->
+            {:cont, {:ok, MapSet.put(seen, column)}}
+        end
+
+      _column, _acc ->
+        {:halt, malformed}
+    end)
+    |> case do
+      {:ok, _seen} -> {:ok, columns}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp clustering_from_json(%{"clustering" => clustering}, _schema),
+    do: {:error, {:invalid_clustering, clustering}}
 
   defp id(%{"id" => id}) when is_binary(id), do: {:ok, id}
   defp id(_body), do: {:error, {:missing_field, "id"}}

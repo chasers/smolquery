@@ -93,6 +93,19 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
+  def from_reason(conn, {:invalid_clustering, _clustering}) do
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      ~s|clustering must be a list of unique column name strings|
+    )
+  end
+
+  def from_reason(conn, {:unknown_clustering_column, column}) do
+    send_error(conn, 422, "INVALID_ARGUMENT", "clustering column does not exist: #{column}")
+  end
+
   def from_reason(conn, _reason) do
     send_error(conn, 500, "INTERNAL", "internal error")
   end

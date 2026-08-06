@@ -496,6 +496,65 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "clustering key" do
+    test "round-trips a key through the metadata database", %{catalog: catalog} do
+      assert Catalog.clustering(catalog, @table) == {:ok, []}
+
+      key = ["id", "ts"]
+      assert Catalog.put_clustering(catalog, @table, key) == :ok
+      assert Catalog.clustering(catalog, @table) == {:ok, key}
+
+      replaced = ["ts"]
+      assert Catalog.put_clustering(catalog, @table, replaced) == :ok
+      assert Catalog.clustering(catalog, @table) == {:ok, replaced}
+
+      assert Catalog.put_clustering(catalog, @table, []) == :ok
+      assert Catalog.clustering(catalog, @table) == {:ok, []}
+    end
+
+    test "keys are per table", %{catalog: catalog} do
+      :ok = Catalog.create_table(catalog, {"analytics", "clicks"}, schema())
+
+      assert Catalog.put_clustering(catalog, @table, ["id"]) == :ok
+      assert Catalog.clustering(catalog, {"analytics", "clicks"}) == {:ok, []}
+    end
+
+    test "refuses a malformed key", %{catalog: catalog} do
+      assert {:error, {:invalid_clustering, _columns}} =
+               Catalog.put_clustering(catalog, @table, ["id", "id"])
+
+      assert {:error, {:invalid_clustering, _columns}} =
+               catalog.impl.put_clustering(catalog.config, @table, :not_a_list)
+    end
+
+    test "table_schema attaches clustering to the Schema struct", %{catalog: catalog} do
+      assert Catalog.put_clustering(catalog, @table, ["id", "ts"]) == :ok
+
+      assert {:ok, schema} = Catalog.table_schema(catalog, @table)
+      assert schema.clustering == ["id", "ts"]
+    end
+
+    test "key rows survive a connection restart", %{catalog: catalog} do
+      key = ["id", "ts"]
+      :ok = Catalog.put_clustering(catalog, @table, key)
+
+      connection = Process.whereis(Engine.connection_name(@engine))
+      ref = Process.monitor(connection)
+      Process.exit(connection, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^connection, :killed}, 1_000
+
+      assert eventually(fn ->
+               case Process.whereis(Engine.connection_name(@engine)) do
+                 nil -> false
+                 ^connection -> false
+                 _restarted -> true
+               end
+             end)
+
+      assert Catalog.clustering(catalog, @table) == {:ok, key}
+    end
+  end
+
   describe "expire_snapshots/2 (the T-14 spike for this maintenance function)" do
     test "expires old snapshots over externally-registered files without crashing", %{
       catalog: catalog,

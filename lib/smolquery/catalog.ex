@@ -56,6 +56,14 @@ defmodule Smolquery.Catalog do
   """
   @type retention :: %{column: String.t(), ttl_ms: pos_integer()}
 
+  @typedoc """
+  Column names a table is physically sorted by at write time, in key order.
+
+  Empty means unsorted (the default). Like retention, this is table metadata —
+  mutating it affects future writes only; existing segments are not rewritten.
+  """
+  @type clustering :: [String.t()]
+
   @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
@@ -78,6 +86,10 @@ defmodule Smolquery.Catalog do
               :ok | {:error, term()}
   @callback retention(config :: term(), table_ref()) ::
               {:ok, retention() | nil} | {:error, term()}
+  @callback put_clustering(config :: term(), table_ref(), clustering()) ::
+              :ok | {:error, term()}
+  @callback clustering(config :: term(), table_ref()) ::
+              {:ok, clustering()} | {:error, term()}
   @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
 
@@ -247,6 +259,24 @@ defmodule Smolquery.Catalog do
   @spec retention(t(), table_ref()) :: {:ok, retention() | nil} | {:error, term()}
   def retention(%__MODULE__{} = catalog, table),
     do: catalog.impl.retention(catalog.config, table)
+
+  @doc """
+  Sets a table's clustering key — the columns future writes sort by.
+
+  `[]` clears it. Whether each name exists on the table is the caller's check
+  (`Smolquery.Schema`), made where a validation error can still reach the user
+  who typed it. Changing the key does not rewrite existing segments.
+  """
+  @spec put_clustering(t(), table_ref(), clustering()) :: :ok | {:error, term()}
+  def put_clustering(%__MODULE__{} = catalog, table, columns) when is_list(columns),
+    do: catalog.impl.put_clustering(catalog.config, table, columns)
+
+  @doc """
+  A table's clustering key, or `[]` when writes are unsorted.
+  """
+  @spec clustering(t(), table_ref()) :: {:ok, clustering()} | {:error, term()}
+  def clustering(%__MODULE__{} = catalog, table),
+    do: catalog.impl.clustering(catalog.config, table)
 
   @doc """
   Expires snapshots older than `older_than_ms`, returning how many expired.
