@@ -18,6 +18,7 @@ defmodule Smolquery.StorageService.Runtime do
         buffer_timeout_ms: 30_000,
         engine_extensions: [:httpfs],
         compression: :zstd,
+        seal_row_group_size: 16_384,
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -101,6 +102,11 @@ defmodule Smolquery.StorageService.Runtime do
   match matters: DuckDB's own `COPY` default is snappy, which made sealed segments
   2.85 times larger than the micro-segments they replaced (`bench/sealer.exs`).
 
+  `seal_row_group_size` is the `ROW_GROUP_SIZE` passed to DuckDB's `COPY` when
+  the sealer and compactor write sealed Parquet. It defaults to `16_384` and is
+  validated here at boot for the same reason as `compression`: a bad value
+  discovered per attempt would crash every re-signalled seal forever.
+
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
   object-store tier would need it too — so it is the default rather than something
@@ -125,6 +131,7 @@ defmodule Smolquery.StorageService.Runtime do
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
     compression: :zstd,
+    seal_row_group_size: 16_384,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,
@@ -150,6 +157,7 @@ defmodule Smolquery.StorageService.Runtime do
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
           compression: atom(),
+          seal_row_group_size: pos_integer(),
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
           gc_interval_ms: pos_integer(),
@@ -170,6 +178,7 @@ defmodule Smolquery.StorageService.Runtime do
     :buffer_timeout_ms,
     :engine_extensions,
     :compression,
+    :seal_row_group_size,
     :target_segment_bytes,
     :max_concurrent_seals,
     :gc_interval_ms,
@@ -214,6 +223,7 @@ defmodule Smolquery.StorageService.Runtime do
     }
     |> struct!(Keyword.take(config, @limits))
     |> validate_compression()
+    |> validate_seal_row_group_size()
   end
 
   use Smolquery.Runtime
@@ -278,6 +288,15 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported sealed-segment compression: #{inspect(compression)} " <>
             "(expected one of #{inspect(@codecs)})"
+  end
+
+  defp validate_seal_row_group_size(%__MODULE__{seal_row_group_size: size} = runtime)
+       when is_integer(size) and size > 0,
+       do: runtime
+
+  defp validate_seal_row_group_size(%__MODULE__{seal_row_group_size: size}) do
+    raise ArgumentError,
+          "unsupported seal_row_group_size: #{inspect(size)} (expected a positive integer)"
   end
 
   defp build_store(config) do

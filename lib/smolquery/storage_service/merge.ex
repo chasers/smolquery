@@ -64,6 +64,34 @@ defmodule Smolquery.StorageService.Merge do
   `Smolquery.StorageService.Handoff`'s job, which is where the ordering that makes
   the handoff exactly-once lives.
 
+  ## Clustering keys sort at seal so row-group stats prune like ClickHouse
+
+  A table's `clustering` columns are an `ORDER BY` on the `COPY` that writes
+  the sealed file. DuckDB's Parquet row groups carry min/max per column; sorted
+  data makes those bounds tight, so scans with predicates on the clustering key
+  skip row groups the way ClickHouse's sparse index does — without a separate
+  index structure. `NULLS LAST` and stable ordering match the writer's flush sort.
+  An empty clustering key omits `ORDER BY` entirely, so tables without one seal
+  exactly as before.
+
+  The columns are `Smolquery.Schema.clustering_columns/1`, not the schema's raw
+  `:clustering` field, and here that matters more than at flush: the `ORDER BY`
+  composes with the projection above, whose output columns are exactly the ones
+  the catalog declares. A key naming a column the table no longer has would be
+  an unresolvable identifier, so the `COPY` would fail — identically on every
+  retry, since a claim's inputs are frozen — and the claim would never retire.
+  Intersecting first turns a stranded table back into a slightly worse sort.
+
+  `ROW_GROUP_SIZE` is set only when clustering columns are non-empty — the same
+  `Schema.clustering_columns/1` gate as `ORDER BY`. Row groups buy pruning only
+  when the seal sorts: tight min/max bounds on the clustering key let scans skip
+  groups. Without that sort the knob changes nothing about what a scan can prune
+  and still splits the file into smaller groups, which cost more metadata and
+  compress worse — measured at +25% sealed size on an unclustered table in
+  `bench/sealer.exs` (64 micro-segments × 10k rows). Unclustered tables therefore
+  keep DuckDB's default row group. The value is configured once at boot as
+  `seal_row_group_size` on `Smolquery.StorageService.Runtime`.
+
   ## Compression has to match the writer's, or sealing inflates the data
 
   `COPY`'s default codec is snappy while `Smolquery.Segments.Writer` writes
@@ -86,6 +114,7 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -148,7 +177,7 @@ defmodule Smolquery.StorageService.Merge do
     with {:ok, schema} <- Catalog.table_schema(runtime.catalog, table_ref),
          {:ok, projection} <- projection(runtime, schema, inputs.urls),
          {:ok, put} <-
-           Store.put(runtime.store, key, &copy(runtime, projection, inputs.urls, &1)) do
+           Store.put(runtime.store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
       {:ok, segment(key, put, inputs.row_count)}
     end
   end
@@ -225,13 +254,33 @@ defmodule Smolquery.StorageService.Merge do
     end
   end
 
-  defp copy(runtime, projection, urls, staged) do
+  defp copy(runtime, schema, projection, urls, staged) do
     sql = """
-    COPY (SELECT #{projection} FROM #{scan(urls)})
-    TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)})
+    COPY (SELECT #{projection} FROM #{scan(urls)}#{order_by(schema)})
+    TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
     """
 
     with {:ok, _result} <- query(runtime, sql, urls ++ [staged]), do: :ok
+  end
+
+  defp row_group_option(%Schema{} = schema, %Runtime{} = runtime) do
+    case Schema.clustering_columns(schema) do
+      [] -> ""
+      _ -> ", ROW_GROUP_SIZE #{runtime.seal_row_group_size}"
+    end
+  end
+
+  defp order_by(%Schema{} = schema) do
+    case Schema.clustering_columns(schema) do
+      [] ->
+        ""
+
+      columns ->
+        " ORDER BY " <>
+          Enum.map_join(columns, ", ", fn column ->
+            "#{Identifier.quote_name!(column)} ASC NULLS LAST"
+          end)
+    end
   end
 
   defp scan(urls), do: "read_parquet([#{placeholders(urls)}], union_by_name := true)"

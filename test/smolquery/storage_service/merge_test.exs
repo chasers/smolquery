@@ -43,6 +43,7 @@ defmodule Smolquery.StorageService.MergeTest do
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.MergeTest.ManifestStub
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.SegmentServer
 
   @moduletag :integration
@@ -113,6 +114,116 @@ defmodule Smolquery.StorageService.MergeTest do
     ])
     |> Map.fetch!(:rows)
     |> List.flatten()
+  end
+
+  defp clustered_rows_in(runtime, segment) do
+    Runtime.engine(runtime.name)
+    |> Engine.query!("SELECT project_id, ts FROM read_parquet($1)", [
+      Store.location(runtime.store, segment.key)
+    ])
+    |> Map.fetch!(:rows)
+  end
+
+  defp row_group_count(runtime, segment) do
+    Runtime.engine(runtime.name)
+    |> Engine.query!(
+      "SELECT count(DISTINCT row_group_id) FROM parquet_metadata($1)",
+      [Store.location(runtime.store, segment.key)]
+    )
+    |> Map.fetch!(:rows)
+    |> hd()
+    |> hd()
+  end
+
+  defp seal_many(buffer, table, batches) do
+    Enum.map(batches, fn range ->
+      {:ok, ack} = Client.write_batch(buffer, table, batch(range))
+      ack.segment_id
+    end)
+  end
+
+  test "leaves DuckDB's default row group on unclustered tables", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    ids = seal_many(buffer, @table, [1..1000, 1001..2000, 2001..3000, 3001..4000, 4001..5000])
+
+    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert segment.row_count == 5000
+    assert row_group_count(runtime, segment) == 1
+  end
+
+  test "sets row group size when clustering columns are non-empty", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    :ok = Catalog.put_clustering(runtime.catalog, @table, ["id"])
+    runtime = %{runtime | seal_row_group_size: 500}
+
+    ids = seal_many(buffer, @table, [1..1000, 1001..2000, 2001..3000, 3001..4000, 4001..5000])
+
+    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert segment.row_count == 5000
+    assert row_group_count(runtime, segment) > 1
+  end
+
+  test "orders sealed output by the clustering columns the schema still has", context do
+    schema = Schema.new!([{"project_id", :int64}, {"ts", :int64}])
+
+    catalog = MapCatalog.new()
+    :ok = Catalog.create_dataset(catalog, "analytics")
+    :ok = Catalog.create_table(catalog, @table, schema)
+    :ok = Catalog.put_clustering(catalog, @table, ["project_id", "dropped", "ts"])
+
+    buffer = :"merge_cluster_buffer_#{:erlang.unique_integer([:positive])}"
+    storage = :"merge_cluster_storage_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {BufferService.Supervisor,
+       name: buffer, dir: Path.join(context.tmp_dir, "buffer"), flush_interval_ms: 25},
+      id: buffer
+    )
+
+    on_exit(fn -> BufferService.Runtime.delete(buffer) end)
+
+    runtime =
+      Runtime.new(
+        name: storage,
+        dir: Path.join(context.tmp_dir, "sealed"),
+        buffer_base_url: HotServer.base_url(buffer),
+        catalog: catalog
+      )
+
+    start_supervised!(
+      {Engine,
+       name: Runtime.engine(storage),
+       extensions: [:httpfs],
+       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]},
+      id: Runtime.engine(storage)
+    )
+
+    first_batch = %{
+      schema: schema,
+      rows: [%{"project_id" => 2, "ts" => 100}, %{"project_id" => 1, "ts" => 200}]
+    }
+
+    second_batch = %{
+      schema: schema,
+      rows: [%{"project_id" => 1, "ts" => 50}, %{"project_id" => 2, "ts" => 50}]
+    }
+
+    {:ok, first} = Client.write_batch(buffer, @table, first_batch)
+    {:ok, second} = Client.write_batch(buffer, @table, second_batch)
+
+    assert {:ok, segment} =
+             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+
+    assert clustered_rows_in(runtime, segment) == [
+             [1, 50],
+             [1, 200],
+             [2, 50],
+             [2, 100]
+           ]
   end
 
   test "merges a claim's micro-segments into one sealed segment", %{
