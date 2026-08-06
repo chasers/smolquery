@@ -87,6 +87,10 @@ defmodule SmolqueryApi.TableController do
   Clustering: `{"clustering": ["project_id", "ts"]}` sets the sort key for
   future writes; `{"clustering": []}` clears it. Columns must exist on the
   schema. Existing segments are not rewritten.
+
+  A body carrying both applies them as one change
+  (`Smolquery.Catalog.put_table_options/3`): an error response means neither
+  stuck.
   """
   @spec update(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def update(conn, %{"dataset" => dataset, "table" => table}) do
@@ -95,7 +99,7 @@ defmodule SmolqueryApi.TableController do
 
     with {:ok, schema} <- Catalog.table_schema(catalog, table_ref),
          {:ok, updates} <- patch_from_json(conn.body_params, schema),
-         :ok <- apply_patch(catalog, table_ref, updates),
+         :ok <- Catalog.put_table_options(catalog, table_ref, updates),
          :ok <- invalidate_schema_cache(conn, table_ref),
          {:ok, schema} <- Catalog.table_schema(catalog, table_ref),
          {:ok, policy} <- Catalog.retention(catalog, table_ref) do
@@ -112,19 +116,6 @@ defmodule SmolqueryApi.TableController do
       "retention" => retention_to_json(policy),
       "clustering" => schema.clustering
     }
-  end
-
-  defp apply_patch(catalog, table_ref, updates) do
-    with :ok <- maybe_put(updates, :retention, &Catalog.put_retention(catalog, table_ref, &1)) do
-      maybe_put(updates, :clustering, &Catalog.put_clustering(catalog, table_ref, &1))
-    end
-  end
-
-  defp maybe_put(updates, key, fun) do
-    case Map.fetch(updates, key) do
-      {:ok, value} -> fun.(value)
-      :error -> :ok
-    end
   end
 
   defp patch_from_json(body, schema) do

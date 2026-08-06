@@ -365,5 +365,25 @@ defmodule SmolqueryApi.TableControllerTest do
       assert body["retention"] == policy
       assert body["clustering"] == ["id", "ts"]
     end
+
+    test "a rejected patch applies none of it", %{name: name} do
+      create_events(name)
+      kept = %{"column" => "ts", "ttlMs" => 1_000}
+
+      assert patch_json(name, "/v1/datasets/analytics/tables/events", %{"retention" => kept}).status ==
+               200
+
+      rejected =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => %{"column" => "ts", "ttlMs" => 2_000},
+          "clustering" => ["no_such_column"]
+        })
+
+      assert rejected.status == 422
+
+      shown = JSON.decode!(get_json(name, "/v1/datasets/analytics/tables/events").resp_body)
+      assert shown["retention"] == kept
+      assert shown["clustering"] == []
+    end
   end
 end

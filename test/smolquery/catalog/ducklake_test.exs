@@ -555,6 +555,53 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "put_table_options/3" do
+    test "applies retention and clustering as one change", %{catalog: catalog} do
+      policy = %{column: "ts", ttl_ms: 86_400_000}
+
+      assert Catalog.put_table_options(catalog, @table, %{
+               retention: policy,
+               clustering: ["id", "ts"]
+             }) == :ok
+
+      assert Catalog.retention(catalog, @table) == {:ok, policy}
+      assert Catalog.clustering(catalog, @table) == {:ok, ["id", "ts"]}
+
+      assert Catalog.put_table_options(catalog, @table, %{retention: nil, clustering: []}) == :ok
+
+      assert Catalog.retention(catalog, @table) == {:ok, nil}
+      assert Catalog.clustering(catalog, @table) == {:ok, []}
+    end
+
+    test "an empty options map writes nothing", %{catalog: catalog} do
+      assert Catalog.put_table_options(catalog, @table, %{}) == :ok
+    end
+
+    test "refuses an option it does not know", %{catalog: catalog} do
+      assert {:error, {:unknown_table_option, :compression, :zstd}} =
+               Catalog.put_table_options(catalog, @table, %{compression: :zstd})
+    end
+
+    test "a failing statement applies neither option", %{catalog: catalog} do
+      kept = %{column: "ts", ttl_ms: 1_000}
+      :ok = Catalog.put_retention(catalog, @table, kept)
+
+      {:ok, _dropped} =
+        Engine.query(
+          @engine,
+          "DROP TABLE #{Identifier.quote_name!("__ducklake_metadata_lake")}.smolquery_clustering"
+        )
+
+      assert {:error, _reason} =
+               Catalog.put_table_options(catalog, @table, %{
+                 retention: %{column: "ts", ttl_ms: 2_000},
+                 clustering: ["id"]
+               })
+
+      assert Catalog.retention(catalog, @table) == {:ok, kept}
+    end
+  end
+
   describe "expire_snapshots/2 (the T-14 spike for this maintenance function)" do
     test "expires old snapshots over externally-registered files without crashing", %{
       catalog: catalog,
