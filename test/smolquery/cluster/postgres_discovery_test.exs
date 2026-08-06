@@ -1,4 +1,19 @@
 defmodule Smolquery.Cluster.PostgresDiscoveryTest do
+  @moduledoc """
+  End-to-end check that two nodes sharing one Postgres discover each other
+  through `libcluster_postgres` and surface the join/leave on
+  `Smolquery.Cluster.Membership`.
+
+  The supervised subtree deliberately omits the `:pg` child from
+  `Cluster.children/0`. This assertion only needs Erlang distribution and
+  Membership; the `:smolquery` `:pg` scope is started (and left running) by
+  other `async: false` cluster tests via `ensure_pg_scope!` / `start_scope`
+  with no matching stop. Supervising `:pg` here therefore fails with
+  `already_started` whenever those tests run first — seed-dependent, not a
+  production race. Reusing a pre-existing scope would also be wrong: the
+  temporary supervisor would terminate a process it does not own on exit.
+  """
+
   use ExUnit.Case, async: false
 
   alias Smolquery.Cluster
@@ -14,7 +29,8 @@ defmodule Smolquery.Cluster.PostgresDiscoveryTest do
 
     on_exit(fn -> restore(previous) end)
 
-    {:ok, sup} = Supervisor.start_link(Cluster.children(), strategy: :one_for_one)
+    children = Enum.reject(Cluster.children(), &match?(%{id: :pg}, &1))
+    {:ok, sup} = Supervisor.start_link(children, strategy: :one_for_one)
     on_exit(fn -> safely_stop_supervisor(sup) end)
 
     :ok
