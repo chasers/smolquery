@@ -22,9 +22,14 @@ defmodule Smolquery.Segments.Writer do
 
   Rows are sorted by the schema's clustering key before the frame is encoded —
   stably, in declared order, nulls last — so the row-group stats above are tight
-  enough for a reader to prune on. Sorting before the frame is built is what
-  keeps the stats themselves computed exactly as they were; an empty key sorts
-  nothing, and both row-list and DataFrame inputs take the same path.
+  enough for a reader to prune on. An empty key sorts nothing, and both
+  row-list and DataFrame inputs take the same path: the frame is built first
+  and Polars sorts it. Sorting the frame rather than the row list is a
+  correctness requirement, not a convenience — Elixir's `Enum.sort` orders
+  `NaiveDateTime`, `Date` and `Decimal` values by Erlang term order, which
+  compares struct fields alphabetically (`:day` before `:month` before
+  `:year`), so January 31 would sort after February 1. Polars compares the
+  column's logical values.
 
   The columns come from `Smolquery.Schema.clustering_columns/1` rather than the
   `:clustering` field, so a key naming a column this schema no longer has sorts
@@ -110,36 +115,16 @@ defmodule Smolquery.Segments.Writer do
 
   defp build_frame(rows, schema) when is_list(rows) do
     with {:ok, dtypes} <- Schema.explorer_dtypes(schema) do
-      rows
-      |> sort_rows(schema)
-      |> frame_from_rows(dtypes)
+      columns =
+        Enum.map(dtypes, fn {name, dtype} ->
+          {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
+        end)
+
+      {:ok, sort_frame(DataFrame.new(columns), schema)}
     end
   rescue
     error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
   end
-
-  defp frame_from_rows(rows, dtypes) do
-    columns =
-      Enum.map(dtypes, fn {name, dtype} ->
-        {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
-      end)
-
-    {:ok, DataFrame.new(columns)}
-  end
-
-  defp sort_rows(rows, schema) do
-    case Schema.clustering_columns(schema) do
-      [] -> rows
-      columns -> Enum.sort_by(rows, &cluster_keys(&1, columns))
-    end
-  end
-
-  defp cluster_keys(row, columns) do
-    Enum.map(columns, fn column -> cluster_key(Map.get(row, column)) end)
-  end
-
-  defp cluster_key(nil), do: {1, nil}
-  defp cluster_key(value), do: {0, value}
 
   defp sort_frame(frame, schema) do
     case Schema.clustering_columns(schema) do

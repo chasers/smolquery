@@ -234,6 +234,40 @@ defmodule Smolquery.Segments.WriterTest do
       assert DataFrame.to_columns(sorted)["id"] == [1, 2, 3]
     end
 
+    test "sorts timestamps chronologically, not by Erlang term order", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 1, "ts" => ~N[2026-02-01 00:00:00]},
+        %{"id" => 1, "ts" => ~N[2026-01-31 23:59:59]},
+        %{"id" => 1, "ts" => ~N[2026-01-31 12:00:30.000001]},
+        %{"id" => 1, "ts" => ~N[2026-01-31 12:00:00.500000]}
+      ]
+
+      assert {:ok, segment} =
+               Writer.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
+
+      frame = DataFrame.from_parquet!(segment.path)
+
+      assert DataFrame.to_columns(frame)["ts"] == [
+               ~N[2026-01-31 12:00:00.500000],
+               ~N[2026-01-31 12:00:30.000001],
+               ~N[2026-01-31 23:59:59.000000],
+               ~N[2026-02-01 00:00:00.000000]
+             ]
+    end
+
+    test "sorts dates chronologically across a month boundary", %{tmp_dir: dir} do
+      rows = [
+        %{"day" => ~D[2026-02-01]},
+        %{"day" => ~D[2026-01-31]}
+      ]
+
+      schema = %{Schema.new!([{"day", :date}]) | clustering: ["day"]}
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["day"] == [~D[2026-01-31], ~D[2026-02-01]]
+    end
+
     test "places null clustering keys last", %{tmp_dir: dir} do
       rows = [
         %{"id" => nil},

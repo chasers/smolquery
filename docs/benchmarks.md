@@ -200,6 +200,7 @@ stream on two tables (`clustered` with `["project_id", "ts"]` vs `plain` with
 RSS around the sort, and sealed-tier pruning under a point lookup. Knobs: `P`,
 `R`, `MICRO`, `BATCH`, `REPS`.
 
-**Correctness holds; flush costs +28.4% rows/s at saturation; seal RSS peaks
-~+190 MiB higher under `memory_limit=2GB`; sealed point lookups win ~1.8×**
+**Correctness holds (chronological, verified across a month boundary with
+microsecond timestamps); flush costs ~7% rows/s at saturation; seal RSS peaks
+~+180 MiB higher under `memory_limit=2GB`; sealed point lookups win ~1.7×**
 (`bench/results/clustering.md`).

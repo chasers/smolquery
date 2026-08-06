@@ -522,9 +522,16 @@ on the storage service's `COPY`). There is no new index structure — the sorted
 Parquet's row-group min/max stats are the sparse index, which is why the sealed
 tier's `ROW_GROUP_SIZE` is explicit configuration (`seal_row_group_size`) rather
 than a DuckDB default. The write path pays for it: flush throughput at
-saturation is **+28.4%** slower — on the ack path the [ack budget](benchmarks.md)
-governs — and seal merge peaks **~+190 MiB** higher in transient OS RSS under
-`memory_limit` ([`bench/results/clustering.md`](../bench/results/clustering.md)).
+saturation is **~7%** slower — Polars sorts the built frame in Rust, and on the
+ack path the [ack budget](benchmarks.md) governs — and seal merge peaks
+**~+180 MiB** higher in transient OS RSS under `memory_limit`
+([`bench/results/clustering.md`](../bench/results/clustering.md)).
+
+The sort compares column values logically, in Polars, never Elixir terms:
+Erlang term order on `NaiveDateTime`/`Date`/`Decimal` structs is not
+chronological (struct fields compare alphabetically, `:day` before `:month`),
+so sorting row maps with `Enum.sort_by` would order January 31 after
+February 1.
 
 Two properties keep the key from ever being able to break a write. An empty
 clustering key is a hard no-op, so a table without one behaves exactly as
