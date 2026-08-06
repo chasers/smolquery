@@ -18,6 +18,19 @@ defmodule Smolquery.Segments.Writer do
   (Milestone 3) without a DuckDB round trip. The sealed tier needs no help
   here — DuckLake reads the Parquet footer itself when a segment is registered.
 
+  ## Sorting on the clustering key
+
+  Rows are sorted by the schema's clustering key before the frame is encoded —
+  stably, in declared order, nulls last — so the row-group stats above are tight
+  enough for a reader to prune on. Sorting before the frame is built is what
+  keeps the stats themselves computed exactly as they were; an empty key sorts
+  nothing, and both row-list and DataFrame inputs take the same path.
+
+  The columns come from `Smolquery.Schema.clustering_columns/1` rather than the
+  `:clustering` field, so a key naming a column this schema no longer has sorts
+  by the rest instead of failing the write. That function documents why the two
+  can differ.
+
   ## Usage
 
       schema = Smolquery.Schema.new!([{"id", :int64}, {"ts", :timestamp}])
@@ -74,7 +87,7 @@ defmodule Smolquery.Segments.Writer do
     with {:ok, key} <- Store.key(prefix, id),
          {:ok, frame} <- build_frame(rows, schema),
          {:ok, put} <-
-           Store.put(store, key, &DataFrame.to_parquet(frame, &1, compression: compression)) do
+           Store.put(store, key, &encode_parquet(frame, &1, compression)) do
       {:ok,
        %Segment{
          id: id,
@@ -87,21 +100,58 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
-  defp build_frame(%DataFrame{} = frame, _schema), do: {:ok, frame}
+  defp encode_parquet(frame, device, compression) do
+    DataFrame.to_parquet(frame, device, compression: compression)
+  end
+
+  defp build_frame(%DataFrame{} = frame, schema), do: {:ok, sort_frame(frame, schema)}
 
   defp build_frame([], _schema), do: {:error, :no_rows}
 
   defp build_frame(rows, schema) when is_list(rows) do
     with {:ok, dtypes} <- Schema.explorer_dtypes(schema) do
-      columns =
-        Enum.map(dtypes, fn {name, dtype} ->
-          {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
-        end)
-
-      {:ok, DataFrame.new(columns)}
+      rows
+      |> sort_rows(schema)
+      |> frame_from_rows(dtypes)
     end
   rescue
     error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
+  end
+
+  defp frame_from_rows(rows, dtypes) do
+    columns =
+      Enum.map(dtypes, fn {name, dtype} ->
+        {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
+      end)
+
+    {:ok, DataFrame.new(columns)}
+  end
+
+  defp sort_rows(rows, schema) do
+    case Schema.clustering_columns(schema) do
+      [] -> rows
+      columns -> Enum.sort_by(rows, &cluster_keys(&1, columns))
+    end
+  end
+
+  defp cluster_keys(row, columns) do
+    Enum.map(columns, fn column -> cluster_key(Map.get(row, column)) end)
+  end
+
+  defp cluster_key(nil), do: {1, nil}
+  defp cluster_key(value), do: {0, value}
+
+  defp sort_frame(frame, schema) do
+    case Schema.clustering_columns(schema) do
+      [] ->
+        frame
+
+      columns ->
+        DataFrame.sort_with(frame, fn lf -> Enum.map(columns, &lf[&1]) end,
+          stable: true,
+          nils: :last
+        )
+    end
   end
 
   defp stats(frame, %Schema{fields: fields}) do

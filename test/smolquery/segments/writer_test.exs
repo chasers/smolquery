@@ -24,6 +24,8 @@ defmodule Smolquery.Segments.WriterTest do
     ])
   end
 
+  defp clustered_schema(clustering), do: %{schema() | clustering: clustering}
+
   defp rows(count) do
     for i <- 1..count do
       %{
@@ -173,6 +175,117 @@ defmodule Smolquery.Segments.WriterTest do
       {:ok, segment} = Writer.write(rows(1), schema(), store: store(dir))
 
       assert Map.keys(segment.stats) |> Enum.sort() == Schema.names(schema()) |> Enum.sort()
+    end
+  end
+
+  describe "clustering" do
+    test "leaves row order unchanged when clustering is empty", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 3, "ts" => ~N[2026-07-31 12:00:03]},
+        %{"id" => 1, "ts" => ~N[2026-07-31 12:00:01]},
+        %{"id" => 2, "ts" => ~N[2026-07-31 12:00:02]}
+      ]
+
+      schema = Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["id"] == [3, 1, 2]
+    end
+
+    test "sorts list rows by clustering columns in declared order", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 2, "ts" => ~N[2026-07-31 12:00:02]},
+        %{"id" => 1, "ts" => ~N[2026-07-31 12:00:03]},
+        %{"id" => 1, "ts" => ~N[2026-07-31 12:00:01]}
+      ]
+
+      assert {:ok, segment} =
+               Writer.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
+
+      frame = DataFrame.from_parquet!(segment.path)
+
+      assert DataFrame.to_columns(frame)["id"] == [1, 1, 2]
+
+      assert DataFrame.to_columns(frame)["ts"] == [
+               ~N[2026-07-31 12:00:01.000000],
+               ~N[2026-07-31 12:00:03.000000],
+               ~N[2026-07-31 12:00:02.000000]
+             ]
+    end
+
+    test "sorts DataFrame input by clustering columns", %{tmp_dir: dir} do
+      frame =
+        DataFrame.new(
+          id: [3, 1, 2],
+          ts: [
+            ~N[2026-07-31 12:00:03],
+            ~N[2026-07-31 12:00:01],
+            ~N[2026-07-31 12:00:02]
+          ]
+        )
+
+      schema =
+        %{Schema.new!([{"id", :int64}, {"ts", :timestamp}]) | clustering: ["id"]}
+
+      assert {:ok, segment} = Writer.write(frame, schema, store: store(dir))
+
+      sorted = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(sorted)["id"] == [1, 2, 3]
+    end
+
+    test "places null clustering keys last", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => nil},
+        %{"id" => 2},
+        %{"id" => 1}
+      ]
+
+      schema =
+        %{Schema.new!([{"id", :int64}]) | clustering: ["id"]}
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["id"] == [1, 2, nil]
+    end
+
+    test "sorts by the clustering columns the schema still has", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 2, "ts" => ~N[2026-07-31 12:00:02]},
+        %{"id" => 1, "ts" => ~N[2026-07-31 12:00:01]}
+      ]
+
+      schema = %{
+        Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+        | clustering: ["dropped", "id"]
+      }
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["id"] == [1, 2]
+    end
+
+    test "a key naming only dropped columns sorts nothing", %{tmp_dir: dir} do
+      rows = [%{"id" => 2}, %{"id" => 1}]
+      schema = %{Schema.new!([{"id", :int64}]) | clustering: ["dropped"]}
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["id"] == [2, 1]
+    end
+
+    test "keeps equal clustering keys in stable input order", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 1, "name" => "first"},
+        %{"id" => 1, "name" => "second"}
+      ]
+
+      schema =
+        %{Schema.new!([{"id", :int64}, {"name", :string}]) | clustering: ["id"]}
+
+      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["name"] == ["first", "second"]
     end
   end
 
