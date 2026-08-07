@@ -24,11 +24,16 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
-  defp start_manifest(context, store) do
+  defp start_manifest(context, store, opts \\ []) do
     name = :"manifest_#{:erlang.unique_integer([:positive])}"
     start_supervised!({HotManifest, name: name})
 
-    HotManifest.new(name: name, log_dir: Path.join(context.tmp_dir, "logs"), store: store)
+    HotManifest.new(
+      Keyword.merge(
+        [name: name, log_dir: Path.join(context.tmp_dir, "logs"), store: store],
+        opts
+      )
+    )
   end
 
   defp write(manifest, table_ref, rows) do
@@ -567,5 +572,50 @@ defmodule Smolquery.BufferService.HotManifestTest do
       assert [%Entry{id: id}] = HotManifest.entries(manifest, @table)
       assert id == entry.id
     end
+  end
+
+  describe "fsync" do
+    test "defaults to fsyncing the log", context do
+      manifest = start_manifest(context, context.local)
+
+      assert manifest.fsync == true
+    end
+
+    test "with fsync: false still produces a correct, readable manifest", context do
+      synced = start_manifest(context, context.local)
+
+      unsynced =
+        start_manifest(context, context.local,
+          fsync: false,
+          log_dir: Path.join(context.tmp_dir, "unsynced")
+        )
+
+      assert unsynced.fsync == false
+
+      segment = write(synced, @table, rows(3))
+      {:ok, synced_entry} = HotManifest.add(synced, @table, segment)
+      {:ok, unsynced_entry} = HotManifest.add(unsynced, @table, segment)
+
+      assert Map.drop(unsynced_entry, [:added_at]) == Map.drop(synced_entry, [:added_at])
+      assert HotManifest.entries(unsynced, @table) == [unsynced_entry]
+
+      {:ok, synced_path} = HotManifest.log_path(synced, @table)
+      {:ok, unsynced_path} = HotManifest.log_path(unsynced, @table)
+
+      assert normalize_log(File.read!(unsynced_path)) == normalize_log(File.read!(synced_path))
+
+      rebuilt = %{
+        start_manifest(context, context.local, fsync: false)
+        | log_dir: unsynced.log_dir
+      }
+
+      assert {:ok, report} = HotManifest.recover(rebuilt, @table)
+      assert report.entries == 1
+      assert HotManifest.entries(rebuilt, @table) == [unsynced_entry]
+    end
+  end
+
+  defp normalize_log(contents) do
+    String.replace(contents, ~r/"added_at":\d+/, ~s("added_at":0))
   end
 end
