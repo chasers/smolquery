@@ -73,6 +73,12 @@ defmodule Smolquery.StorageService.RuntimeTest do
         Runtime.new(name: __MODULE__.BadCodec, compression: :lz4)
       end
     end
+
+    test "refuses a non-positive seal_row_group_size at boot, not per seal attempt" do
+      assert_raise ArgumentError, ~r/unsupported seal_row_group_size/, fn ->
+        Runtime.new(name: __MODULE__.BadRowGroup, seal_row_group_size: 0)
+      end
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do

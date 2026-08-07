@@ -72,5 +72,13 @@ defmodule Smolquery.CatalogTest do
       assert Catalog.current_snapshot(catalog) == {:ok, StubCatalog.snapshot()}
       assert_received {:called, :current_snapshot, []}
     end
+
+    test "put_clustering/3 and clustering/2 reach the implementation", %{catalog: catalog} do
+      assert Catalog.put_clustering(catalog, {"ds", "t"}, ["id"]) == :ok
+      assert_received {:called, :put_clustering, [{"ds", "t"}, ["id"]]}
+
+      assert Catalog.clustering(catalog, {"ds", "t"}) == {:ok, []}
+      assert_received {:called, :clustering, [{"ds", "t"}]}
+    end
   end
 end

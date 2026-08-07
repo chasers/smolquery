@@ -27,8 +27,9 @@ defmodule Smolquery.Catalog.DuckLake do
   ## Setup
 
   A DuckLake catalog is an engine whose connection has the `ducklake` extension
-  loaded and the lake attached. Both happen as connection bootstrap statements,
-  so a connection is never observable un-attached and a restart re-attaches:
+  loaded, the lake attached, and the clustering side table created. All three
+  happen as connection bootstrap statements, so a connection is never
+  observable half-set-up and a restart redoes them:
 
       {Smolquery.Catalog.DuckLake,
        name: MyLake,
@@ -52,6 +53,34 @@ defmodule Smolquery.Catalog.DuckLake do
   simultaneous two-committer race — both reading before either commits, and
   DuckLake accepting both appends — is not closed by this and remains the
   ring gate's residual window; see `Smolquery.StorageService.Routing`.
+
+  What that retry fires on is matched narrowly, against four markers. Two came
+  from failures observed here: DuckLake's own `"Transaction conflict"`, and
+  SQLite metadata's `"database is locked"`. Two are the metadata database's
+  own ordinary transient commits — Postgres `"deadlock detected"` and
+  `"could not serialize access"` — which arrive verbatim, a metadata error
+  being passed through whole rather than summarised (that pass-through is what
+  finally made the bug below readable). Those two are not hypothetical here:
+  `replace_segments/4` sends a `DELETE` and an add in one transaction, and L6
+  below has two nodes committing against one metadata database, which is the
+  shape that deadlocks. Nothing else in smolquery retries them, so dropping
+  them from this list would strand compaction on a failure that clears itself.
+
+  DuckDB wraps *every* commit-time failure in `"Failed to commit"`, permanent
+  ones included, so keying on that prefix spent all five attempts on errors no
+  retry could clear and then reported them as `:commit_conflict` — which named
+  a race that had not happened and hid the one thing that would have explained
+  the failure. The case that found this was a Postgres metadata database whose
+  `ducklake_table_stats` a `FOR ALL TABLES` publication covers and no primary
+  key identifies: Postgres refuses the `UPDATE` for want of a replica identity,
+  so every commit after a table's first one fails, the first having inserted
+  the stats row each later one updates. A non-retryable commit now fails at
+  once and carries the metadata database's own message.
+
+  All four exhaust into `:commit_conflict`, which therefore names contention
+  rather than strictly a lost race — a held SQLite file lock and a deadlock are
+  neither of them races. Worth knowing when reading that atom out of a
+  compaction log, where it is the whole of what an operator gets.
 
   DuckLake collects its own min-max statistics from the Parquet footer at
   registration, which is why nothing here passes stats: the sealed tier prunes
@@ -104,6 +133,12 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @default_catalog "lake"
   @commit_attempts 5
+  @retryable_markers [
+    "Transaction conflict",
+    "database is locked",
+    "deadlock detected",
+    "could not serialize access"
+  ]
 
   @doc """
   A child spec starting the engine that backs this catalog.
@@ -145,9 +180,14 @@ defmodule Smolquery.Catalog.DuckLake do
     statements = Keyword.get(config, :statements, [])
     required = if postgres_metadata?(metadata), do: [:postgres, :ducklake], else: [:ducklake]
 
+    bootstrap = [
+      attach_statement(catalog, metadata, data_path),
+      create_clustering_statement(catalog)
+    ]
+
     config
     |> Keyword.put(:extensions, Enum.uniq(required ++ extensions))
-    |> Keyword.put(:statements, [attach_statement(catalog, metadata, data_path) | statements])
+    |> Keyword.put(:statements, bootstrap ++ statements)
     |> Engine.start_link()
   end
 
@@ -284,8 +324,10 @@ defmodule Smolquery.Catalog.DuckLake do
                "WHERE table_catalog = $1 AND table_schema = $2 AND table_name = $3 " <>
                "ORDER BY ordinal_position",
              [config.catalog, dataset, table]
-           ) do
-      build_schema(result.rows, {dataset, table})
+           ),
+         {:ok, schema} <- build_schema(result.rows, {dataset, table}),
+         {:ok, clustering} <- clustering(config, {dataset, table}) do
+      {:ok, %{schema | clustering: clustering}}
     end
   end
 
@@ -336,9 +378,11 @@ defmodule Smolquery.Catalog.DuckLake do
            query(
              config,
              "SELECT DISTINCT df.path, df.path_is_relative " <>
-               "FROM #{metadata_schema(config)}.ducklake_data_file df " <>
-               "JOIN #{metadata_schema(config)}.ducklake_table t ON t.table_id = df.table_id " <>
-               "JOIN #{metadata_schema(config)}.ducklake_schema s ON s.schema_id = t.schema_id " <>
+               "FROM #{metadata_schema(config.catalog)}.ducklake_data_file df " <>
+               "JOIN #{metadata_schema(config.catalog)}.ducklake_table t " <>
+               "ON t.table_id = df.table_id " <>
+               "JOIN #{metadata_schema(config.catalog)}.ducklake_schema s " <>
+               "ON s.schema_id = t.schema_id " <>
                "WHERE s.schema_name = $1 AND t.table_name = $2 AND df.begin_snapshot <= $3",
              [dataset, table, snapshot]
            ) do
@@ -411,7 +455,8 @@ defmodule Smolquery.Catalog.DuckLake do
     with {:ok, result} <-
            query(
              config,
-             "SELECT path, path_is_relative FROM #{metadata_schema(config)}.ducklake_data_file"
+             "SELECT path, path_is_relative FROM " <>
+               "#{metadata_schema(config.catalog)}.ducklake_data_file"
            ) do
       absolute_paths(result.rows)
     end
@@ -465,6 +510,63 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def put_clustering(%__MODULE__{} = config, {dataset, table}, []) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, _result} <- query(config, delete_clustering_sql(config, dataset, table)) do
+      :ok
+    end
+  end
+
+  def put_clustering(%__MODULE__{} = config, {dataset, table}, columns)
+      when is_list(columns) and columns != [] do
+    if valid_clustering?(columns) do
+      replace_clustering(config, dataset, table, columns)
+    else
+      {:error, {:invalid_clustering, columns}}
+    end
+  end
+
+  def put_clustering(%__MODULE__{} = _config, _table, columns),
+    do: {:error, {:invalid_clustering, columns}}
+
+  @impl Catalog
+  def clustering(%__MODULE__{} = config, {dataset, table}) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, result} <-
+           query(
+             config,
+             "SELECT column_name FROM #{clustering_table(config.catalog)} " <>
+               "WHERE dataset = $1 AND table_name = $2 ORDER BY position",
+             [dataset, table]
+           ) do
+      {:ok, Enum.map(result.rows, fn [column] -> column end)}
+    end
+  end
+
+  defp replace_clustering(config, dataset, table, columns) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table) do
+      Engine.transaction(
+        config.engine,
+        [
+          delete_clustering_sql(config, dataset, table)
+          | clustering_insert_sqls(config, dataset, table, columns)
+        ]
+      )
+    end
+  end
+
+  defp clustering_insert_sqls(config, dataset, table, columns) do
+    Enum.map(Enum.with_index(columns), fn {column, position} ->
+      "INSERT INTO #{clustering_table(config.catalog)} VALUES (" <>
+        "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
+        "#{Identifier.sql_string(column)}, #{position})"
+    end)
+  end
+
+  @impl Catalog
   def expire_snapshots(%__MODULE__{} = config, older_than_ms)
       when is_integer(older_than_ms) and older_than_ms > 0 do
     sql =
@@ -477,7 +579,7 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp retention_table(config), do: "#{metadata_schema(config)}.smolquery_retention"
+  defp retention_table(config), do: "#{metadata_schema(config.catalog)}.smolquery_retention"
 
   defp ensure_retention_table(config) do
     sql =
@@ -491,6 +593,41 @@ defmodule Smolquery.Catalog.DuckLake do
   defp delete_retention_sql(config, dataset, table) do
     "DELETE FROM #{retention_table(config)} WHERE dataset = " <>
       "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)}"
+  end
+
+  defp clustering_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_clustering"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its clustering side table.
+
+  Public for the same reason `attach_statement/3` is: it is bootstrap SQL, run
+  once per connection right after the `ATTACH` that makes the metadata schema
+  reachable.
+
+  Retention creates its own side table lazily, on the retention path, and that
+  is still right for it — retention is read when a sweep runs. Clustering is
+  read by `table_schema/2`, which the query planner calls per query per table
+  and does not cache, so a lazy `CREATE TABLE IF NOT EXISTS` would put DDL on
+  the hottest catalog read in the system: measured at 1.5 ms of a 5.2 ms
+  `table_schema/2` on sqlite, serialized behind the engine's single connection,
+  and on Postgres metadata a concurrent first use can fail outright with a
+  duplicate-relation error. Bootstrapping it costs one statement per
+  connection instead.
+  """
+  @spec create_clustering_statement(String.t()) :: String.t()
+  def create_clustering_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{clustering_table(catalog)} (" <>
+      "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
+      "column_name VARCHAR NOT NULL, position INTEGER NOT NULL)"
+  end
+
+  defp delete_clustering_sql(config, dataset, table) do
+    "DELETE FROM #{clustering_table(config.catalog)} WHERE dataset = " <>
+      "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)}"
+  end
+
+  defp valid_clustering?(columns) do
+    columns != [] and Enum.all?(columns, &is_binary/1) and columns == Enum.uniq(columns)
   end
 
   defp absolute_paths(rows) do
@@ -508,7 +645,7 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp metadata_schema(%__MODULE__{catalog: catalog}),
+  defp metadata_schema(catalog),
     do: Identifier.quote_name!("__ducklake_metadata_" <> catalog)
 
   defp add_statement(config, {dataset, table}, paths) do
@@ -533,7 +670,7 @@ defmodule Smolquery.Catalog.DuckLake do
         :ok
 
       {:error, error} ->
-        if conflict?(error) and attempt < @commit_attempts do
+        if retryable?(error) and attempt < @commit_attempts do
           Process.sleep(backoff(attempt))
           with_commit_retries(run, attempt + 1)
         else
@@ -544,13 +681,28 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp backoff(attempt), do: (1 <<< attempt) * 5 + :rand.uniform(10)
 
-  defp conflict?(%{__exception__: true} = error),
-    do: Exception.message(error) =~ "Failed to commit"
+  @doc """
+  Whether a failed commit is worth retrying.
 
-  defp conflict?(_error), do: false
+  Public for the same reason `Smolquery.Engine.Connection.fatal?/1` is: it
+  classifies DuckDB by message text, so the strings it keys on are pinned by a
+  test rather than trusted. Four are retryable — DuckLake's own
+  `"Transaction conflict"`, SQLite metadata's `"database is locked"`, and
+  Postgres metadata's `"deadlock detected"` and `"could not serialize access"`.
+  A commit that failed for any other reason is permanent, however much its
+  wrapper reads like a lost race; see the moduledoc.
+  """
+  @spec retryable?(Exception.t() | term()) :: boolean()
+  def retryable?(%{__exception__: true} = error) do
+    message = Exception.message(error)
+
+    Enum.any?(@retryable_markers, &String.contains?(message, &1))
+  end
+
+  def retryable?(_error), do: false
 
   defp classify(error) do
-    if conflict?(error), do: :commit_conflict, else: error
+    if retryable?(error), do: :commit_conflict, else: error
   end
 
   defp snapshot_argument(:current), do: []

@@ -14,6 +14,11 @@ defmodule SmolqueryApi.TableSchema do
   identifier rules, duplicate columns, an empty list — is rejected by
   `Smolquery.Schema.new/1`, so a schema that parses here is one the catalog
   will accept.
+
+  Clustering is a `Smolquery.Schema` field (`clustering: [String.t()]`) but
+  not part of this field-list JSON: the table routes surface it beside
+  `schema` / `retention` on GET/PATCH, and the catalog attaches it when
+  loading `table_schema/2` so SchemaCache carries it on the write path.
   """
 
   alias Smolquery.Schema

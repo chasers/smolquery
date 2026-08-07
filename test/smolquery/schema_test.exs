@@ -25,6 +25,7 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.names(schema) == ["id", "ts", "label"]
       assert [%Field{nullable: false}, %Field{nullable: true}, %Field{}] = schema.fields
+      assert schema.clustering == []
     end
 
     test "rejects an empty schema" do
@@ -49,6 +50,36 @@ defmodule Smolquery.SchemaTest do
   describe "new!/1" do
     test "raises on an invalid schema" do
       assert_raise ArgumentError, ~r/invalid schema/, fn -> Schema.new!([{"id", :int32}]) end
+    end
+  end
+
+  describe "clustering_columns/1" do
+    test "is empty for a schema with no clustering key" do
+      assert Schema.clustering_columns(Schema.new!([{"id", :int64}])) == []
+    end
+
+    test "keeps the key's own order, not the schema's" do
+      schema = %{
+        Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+        | clustering: ["ts", "id"]
+      }
+
+      assert Schema.clustering_columns(schema) == ["ts", "id"]
+    end
+
+    test "drops a column the schema no longer declares" do
+      schema = %{
+        Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+        | clustering: ["ts", "gone", "id"]
+      }
+
+      assert Schema.clustering_columns(schema) == ["ts", "id"]
+    end
+
+    test "is empty when the schema declares none of the key" do
+      schema = %{Schema.new!([{"id", :int64}]) | clustering: ["gone", "also_gone"]}
+
+      assert Schema.clustering_columns(schema) == []
     end
   end
 

@@ -505,6 +505,38 @@ a single merged segment, capped at `compact_max_bytes`:
   the sorted input ids, the same identity rule sealing uses, so a compaction that
   crashed before its swap re-plans the same group into the same key next sweep.
 
+### Clustering key
+
+A table may declare a clustering key — smolquery's analog of ClickHouse's
+`ORDER BY`. It is metadata, set by `PATCH`ing the table with
+`{"clustering": ["project_id", "ts"]}` and cleared with `{"clustering": []}`;
+the columns must exist on the schema or the request is a 422. The key is
+persisted in a `smolquery_clustering` side table beside retention's, read back
+onto `Smolquery.Schema.clustering`, and carried through the ingest schema cache
+into every flush.
+
+When `clustering` is non-empty, rows are stably sorted by those columns in
+declared order with nulls last at every write point: the buffer's micro-segment
+flush (`Smolquery.Segments.Writer`), the seal merge, and compaction (`ORDER BY`
+on the storage service's `COPY`). There is no new index structure — the sorted
+Parquet's row-group min/max stats are the sparse index, which is why the sealed
+tier's `ROW_GROUP_SIZE` is explicit configuration (`seal_row_group_size`) rather
+than a DuckDB default. The write path pays for it: flush throughput at
+saturation is **+28.4%** slower — on the ack path the [ack budget](benchmarks.md)
+governs — and seal merge peaks **~+190 MiB** higher in transient OS RSS under
+`memory_limit` ([`bench/results/clustering.md`](../bench/results/clustering.md)).
+
+Two properties keep the key from ever being able to break a write. An empty
+clustering key is a hard no-op, so a table without one behaves exactly as
+before. And both sort points intersect the key with the schema's own field names
+first: the side table outlives a `DROP TABLE`, so an operator who recreates a
+table narrower would otherwise leave an `ORDER BY` naming a column that no longer
+exists — a merge that fails identically on every retry, which strands the claim
+and pins the table's tail in the hot tier forever.
+
+Setting or clearing a key affects future writes only. Existing segments are
+never rewritten.
+
 ### Retention and snapshot expiry
 
 `Smolquery.StorageService.Retention` ages data out, for tables that opt in with

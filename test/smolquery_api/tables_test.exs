@@ -50,6 +50,15 @@ defmodule SmolqueryApi.TableControllerTest do
 
   defp create_dataset(name, id), do: post_json(name, "/v1/datasets", %{"id" => id})
 
+  defp create_events(name) do
+    create_dataset(name, "analytics")
+
+    post_json(name, "/v1/datasets/analytics/tables", %{
+      "id" => "events",
+      "schema" => @schema_json
+    })
+  end
+
   describe "datasets" do
     test "create then list", %{name: name} do
       assert create_dataset(name, "analytics").status == 200
@@ -126,7 +135,8 @@ defmodule SmolqueryApi.TableControllerTest do
       assert JSON.decode!(fetched.resp_body) == %{
                "id" => "events",
                "schema" => @schema_json,
-               "retention" => nil
+               "retention" => nil,
+               "clustering" => []
              }
     end
 
@@ -223,15 +233,6 @@ defmodule SmolqueryApi.TableControllerTest do
   end
 
   describe "retention" do
-    defp create_events(name) do
-      create_dataset(name, "analytics")
-
-      post_json(name, "/v1/datasets/analytics/tables", %{
-        "id" => "events",
-        "schema" => @schema_json
-      })
-    end
-
     test "sets, reads back, and clears a policy", %{name: name} do
       create_events(name)
       policy = %{"column" => "ts", "ttlMs" => 86_400_000}
@@ -299,6 +300,70 @@ defmodule SmolqueryApi.TableControllerTest do
         })
 
       assert response.status == 404
+    end
+  end
+
+  describe "clustering" do
+    test "sets, reads back, and clears a clustering key", %{name: name} do
+      create_events(name)
+      key = ["amount", "ts"]
+
+      updated =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"clustering" => key})
+
+      assert updated.status == 200
+      assert JSON.decode!(updated.resp_body)["clustering"] == key
+
+      fetched = get_json(name, "/v1/datasets/analytics/tables/events")
+      assert JSON.decode!(fetched.resp_body)["clustering"] == key
+
+      cleared =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"clustering" => []})
+
+      assert cleared.status == 200
+      assert JSON.decode!(cleared.resp_body)["clustering"] == []
+    end
+
+    test "refuses a column the schema does not have with 422", %{name: name} do
+      create_events(name)
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "clustering" => ["missing"]
+        })
+
+      assert response.status == 422
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "does not exist"
+    end
+
+    test "refuses duplicates and a non-list", %{name: name} do
+      create_events(name)
+
+      duped =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "clustering" => ["ts", "ts"]
+        })
+
+      assert duped.status == 400
+
+      bad = patch_json(name, "/v1/datasets/analytics/tables/events", %{"clustering" => "ts"})
+      assert bad.status == 400
+    end
+
+    test "can patch clustering alongside retention", %{name: name} do
+      create_events(name)
+      policy = %{"column" => "ts", "ttlMs" => 1_000}
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => policy,
+          "clustering" => ["id", "ts"]
+        })
+
+      assert response.status == 200
+      body = JSON.decode!(response.resp_body)
+      assert body["retention"] == policy
+      assert body["clustering"] == ["id", "ts"]
     end
   end
 end

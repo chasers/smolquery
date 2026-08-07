@@ -213,10 +213,12 @@ defmodule Bench.Sealer do
     {:ok, entries} = HotTier.manifest(stack.runtime, @table)
     claimed = MapSet.new(claim.ids)
 
+    headers = [{Smolquery.InternalSecret.header(), Smolquery.InternalSecret.value()}]
+
     frames =
       entries
       |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
-      |> Enum.map(&DataFrame.from_parquet!(&1["url"]))
+      |> Enum.map(&DataFrame.from_parquet!(&1["url"], config: [headers: headers]))
 
     {:ok, key} = sealed_key()
 

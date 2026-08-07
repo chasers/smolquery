@@ -3,9 +3,14 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
   The Postgres configuration store against a real Postgres (T-92) — the same
   `TEST_POSTGRES_*` environment the DuckLake Postgres suite uses.
 
-  Scopes are unique per test, so tests share the one `smolquery_ring_config`
-  table without stepping on each other; the table itself is created by
-  `setup/1`, which the first test to run exercises for real.
+  Scopes must be unique across BEAM runs, not merely within one VM:
+  `smolquery_ring_config` lives in the shared test Postgres and
+  `ensure/3` is insert-or-fetch (`ON CONFLICT DO NOTHING`). Scopes built
+  from `:erlang.unique_integer/1` collide across mix invocations —
+  counters restart, leftover rows from a prior advance make the next
+  `ensure` return epoch > 0 and the following `advance(..., 0, _)` look
+  like a CAS conflict. Random scope keys keep tests from inheriting that
+  durable state; the table itself is still created by `setup/1`.
   """
 
   use ExUnit.Case, async: false
@@ -25,7 +30,7 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
   end
 
   setup %{conn: conn} do
-    %{conn: conn, scope: "test:#{:erlang.unique_integer([:positive])}"}
+    %{conn: conn, scope: unique_scope()}
   end
 
   test "ensure creates at epoch 0 and a racing ensure returns the winner", ctx do
@@ -58,7 +63,7 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
   end
 
   test "fetch of an unknown scope is :not_found", ctx do
-    assert Postgres.fetch(ctx.conn, "test:never-written") == :not_found
+    assert Postgres.fetch(ctx.conn, unique_scope()) == :not_found
   end
 
   test "an empty member list round-trips as empty, not as one blank node", ctx do
@@ -67,6 +72,10 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
 
     assert {:ok, config} = Postgres.fetch(ctx.conn, ctx.scope)
     assert config.members == []
+  end
+
+  defp unique_scope do
+    "test:#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
   end
 
   defp connection_opts do
