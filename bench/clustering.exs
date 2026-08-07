@@ -88,7 +88,10 @@ defmodule Bench.Clustering do
       |> Enum.take(200)
       |> Kernel.++([
         %{"project_id" => nil, "ts" => ~N[2026-06-01 00:00:00], "payload" => null_payload()},
-        %{"project_id" => 1, "ts" => nil, "payload" => null_payload()}
+        %{"project_id" => 1, "ts" => nil, "payload" => null_payload()},
+        %{"project_id" => 1, "ts" => ~N[2026-02-01 00:00:00], "payload" => null_payload()},
+        %{"project_id" => 1, "ts" => ~N[2026-01-31 23:59:59.500000], "payload" => null_payload()},
+        %{"project_id" => 1, "ts" => ~N[2026-01-31 23:59:59.000001], "payload" => null_payload()}
       ])
       |> Enum.shuffle()
 
@@ -450,13 +453,17 @@ defmodule Bench.Clustering do
 
   defp cluster_le({p1, t1}, {p2, t2}) do
     cond do
-      p1 == p2 -> cluster_key(t1) <= cluster_key(t2)
+      p1 == p2 -> ts_le(t1, t2)
       true -> cluster_key(p1) <= cluster_key(p2)
     end
   end
 
   defp cluster_key(nil), do: {1, nil}
   defp cluster_key(value), do: {0, value}
+
+  defp ts_le(_earlier, nil), do: true
+  defp ts_le(nil, _later), do: false
+  defp ts_le(t1, t2), do: NaiveDateTime.compare(t1, t2) != :gt
 
   defp measure_writer_heap(rows, schema, store) do
     shuffled = Enum.shuffle(rows)
@@ -542,7 +549,7 @@ defmodule Bench.Clustering do
 
       %{
         "project_id" => project_id,
-        "ts" => NaiveDateTime.add(~N[2026-01-01 00:00:00], i, :second),
+        "ts" => NaiveDateTime.add(~N[2026-01-31 22:00:00], i * 1_000_001, :microsecond),
         "payload" => payload(i)
       }
     end
