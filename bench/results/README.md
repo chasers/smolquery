@@ -4,6 +4,10 @@ One file per script in `bench/`, holding the last recorded run: the numbers, the
 machine they came from, and what they settled. The scripts say *what is measured*;
 these files say *what it measured to*.
 
+The exception is `bench/profile.exs`, which settles nothing by itself: it is a
+diagnostic, and its output is read at the commit it ran against rather than
+recorded here.
+
 A decision made on a benchmark is only re-checkable if the old numbers are still
 around to compare against. Re-run a script after a DuckDB, DuckLake, Explorer, or
 OTP upgrade — or before revisiting the decision it settled — and overwrite its

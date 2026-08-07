@@ -16,6 +16,7 @@ mix run bench/clustering.exs                      # does the ORDER BY analog wor
 mix run bench/cluster_ingest.exs                  # does aggregate ingest scale with buffer-node count?
 mix run bench/otel_logs.exs 2>/dev/null           # OTel logs over HTTP: wide ingest with a live tail
 mix run bench/load.exs 2>/dev/null                # batch loads: which format, and what a file costs
+mix run bench/profile.exs 2>/dev/null             # where BEAM CPU goes under ingest: threads, processes, microstates
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs   # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurrency sizes
@@ -25,6 +26,7 @@ INPUTS=64 ROWS=20000 mix run bench/sealer.exs       # bigger claims, bigger merg
 NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
 WRITERS=8,32 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null   # a different sweep and offered rate
 POOL=20000 ROWS=100000 mix run bench/load.exs 2>/dev/null         # higher-cardinality rows, bigger files
+WRITERS=32 SECONDS=20 mix run bench/profile.exs 2>/dev/null       # profile at a saturating writer count
 ```
 
 Each script's `@moduledoc` records what it measures and what it concluded.
@@ -204,3 +206,19 @@ RSS around the sort, and sealed-tier pruning under a point lookup. Knobs: `P`,
 microsecond timestamps); flush costs ~7% rows/s at saturation; seal RSS peaks
 ~+180 MiB higher under `memory_limit=2GB`; sealed point lookups win ~1.7×**
 (`bench/results/clustering.md`).
+
+## Profiling — `bench/profile.exs`
+
+Not a benchmark: a diagnostic. It drives the same ingest load as
+`bench/otel_logs.exs` and, over one measured window, reports where the VM spent
+that CPU — per-thread scheduler utilization, the top processes by reductions,
+and `:msacc` microstates per thread class. It answers "why is the beam hot"
+from inside the VM: whether the time is on normal schedulers (Bandit, JSON
+decode, validation), dirty CPU schedulers (Polars encode, offloaded major GCs),
+or dirty IO, and in which processes. Reaching for perf or eBPF in a Linux VM is
+only warranted once this says the time is inside `emulator` state — the one
+bucket no in-VM view can open. Knobs: `WRITERS`, `BATCH`, `SECONDS`,
+`WARMUP_MS`.
+
+It settles nothing by itself, so it keeps no `bench/results/` file — its output
+is read at the commit it ran against, next to the change being diagnosed.
