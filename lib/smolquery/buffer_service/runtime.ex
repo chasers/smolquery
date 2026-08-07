@@ -21,6 +21,7 @@ defmodule Smolquery.BufferService.Runtime do
         flush_max_bytes: 8_000_000,
         max_buffered_rows: 500_000,
         max_buffered_bytes: 64_000_000,
+        encode_concurrency: 1,
         ack_budget_ms: 5_000,
         write_timeout_ms: 15_000,
         control_timeout_ms: 15_000,
@@ -41,6 +42,20 @@ defmodule Smolquery.BufferService.Runtime do
   Pass `:store` to override the segment store outright:
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
+
+  `:fsync` (default `true`) is passed to both the default `Store.Local` and the
+  `HotManifest` — the two fsyncs on the write path. An explicit `:store` keeps
+  its own opts (pass `fsync: false` there to turn the segment sync off alone);
+  the top-level key still reaches the manifest. Turning either off is a
+  durability trade — see `HotManifest` and `Store.Local`.
+
+  `:encode_concurrency` (default `1`) is how many of a table's Parquet encodes
+  may run at once. It bounds only the encode — the manifest append and the
+  replication round stay serialized in the table's
+  `Smolquery.BufferService.TableBuffer.Committer`, which is what keeps one
+  writer per manifest log. At `1` a commit runs inline exactly as it always
+  has; above `1`, up to that many encodes are in flight and the next commit
+  waits, so a table's resident rows are bounded by the number of slots.
 
   `:replicator` is what a group commit requires beyond this node's disk
   before it acks (`Smolquery.BufferService.Replicator`), defaulting to the
@@ -84,6 +99,7 @@ defmodule Smolquery.BufferService.Runtime do
     flush_max_bytes: 8_000_000,
     max_buffered_rows: 500_000,
     max_buffered_bytes: 64_000_000,
+    encode_concurrency: 1,
     ack_budget_ms: 5_000,
     write_timeout_ms: 15_000,
     control_timeout_ms: 15_000,
@@ -109,6 +125,7 @@ defmodule Smolquery.BufferService.Runtime do
           flush_max_bytes: pos_integer(),
           max_buffered_rows: pos_integer(),
           max_buffered_bytes: pos_integer(),
+          encode_concurrency: pos_integer(),
           ack_budget_ms: timeout(),
           write_timeout_ms: timeout(),
           control_timeout_ms: timeout(),
@@ -129,6 +146,7 @@ defmodule Smolquery.BufferService.Runtime do
     :flush_max_bytes,
     :max_buffered_rows,
     :max_buffered_bytes,
+    :encode_concurrency,
     :ack_budget_ms,
     :write_timeout_ms,
     :control_timeout_ms,
@@ -156,7 +174,8 @@ defmodule Smolquery.BufferService.Runtime do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.BufferService, []), opts)
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
-    store = build_store(config, dir)
+    fsync = Keyword.get(config, :fsync, true)
+    store = build_store(config, dir, fsync)
 
     struct!(
       %__MODULE__{
@@ -166,7 +185,8 @@ defmodule Smolquery.BufferService.Runtime do
           HotManifest.new(
             name: manifest(name),
             log_dir: Keyword.get(config, :log_dir, Path.join(dir, "manifests")),
-            store: store
+            store: store,
+            fsync: fsync
           ),
         ring: Ring.new!(Keyword.get(config, :ring, [node()])),
         replicator:
@@ -237,9 +257,9 @@ defmodule Smolquery.BufferService.Runtime do
   def committer_via(%__MODULE__{name: name}, table_ref),
     do: {:via, Registry, {committer_registry(name), table_ref}}
 
-  defp build_store(config, dir) do
+  defp build_store(config, dir, fsync) do
     case Keyword.get(config, :store) do
-      nil -> Store.Local.new(dir: Path.join(dir, "segments"))
+      nil -> Store.Local.new(dir: Path.join(dir, "segments"), fsync: fsync)
       {impl, opts} -> impl.new(opts)
       %Store{} = store -> store
     end

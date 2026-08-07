@@ -104,7 +104,7 @@ contention, not the fleet.
 
 ## The workload end to end — `bench/otel_logs.exs`
 
-The only script that measures a *workload* rather than a component: 61-column
+The only script that measures a *workload* rather than a component: 62-column
 OpenTelemetry log records streaming in through `POST …/insert` while a tailer
 asks for the last 100 rows through `POST /v1/queries`, everything over the real
 HTTP front door. Because `SmolqueryApi.Endpoint` is a singleton Phoenix endpoint,
@@ -135,7 +135,7 @@ ceiling, which is why more concurrency alone buys nothing.
 
 **The ceiling is per-row Elixir CPU, and validation owns half of it.** One
 2,000-row batch costs 107.5 ms on a core: 51% `IngestService.Validator` (it
-coerces every value of every column — 1.8M coercions at 61 columns), 25% JSON
+coerces every value of every column — 1.8M coercions at 62 columns), 25% JSON
 decode, and only 24% the Arrow encode plus Parquet write. Two consequences worth
 knowing before optimizing anything here:
 
@@ -159,7 +159,7 @@ rarer matches mean an older newest match (`bench/results/otel_logs.md`).
 
 `POST /…/load` takes the file as the body — NDJSON, CSV, or Parquet by content
 type — spools it to disk, parses it, and pushes 10,000-row chunks through the same
-insert path a streaming write uses. Same 61-column OTel fixture as
+insert path a streaming write uses. Same 62-column OTel fixture as
 `bench/otel_logs.exs`, so the two compare. Knobs: `ROWS`, `SCALE` (the size sweep),
 `BATCH`, `POOL` (fixture cardinality), `FLUSH_MS`.
 
@@ -184,7 +184,7 @@ Three more findings, none of them visible from inside the code:
   (14.6k vs 38.4k rows/s, 1.0 core vs 4.8). Fan out `/insert` for throughput; use
   `/load` for convenience and format support.
 - **`load_max_bytes` is a byte cap, so it is a different row limit per format**:
-  ~120k rows for 61-column NDJSON, ~254k for CSV (`bench/results/load.md`).
+  ~120k rows for 62-column NDJSON, ~254k for CSV (`bench/results/load.md`).
 
 ## Sealing — `bench/sealer.exs`
 
@@ -222,3 +222,59 @@ bucket no in-VM view can open. Knobs: `WRITERS`, `BATCH`, `SECONDS`,
 
 It settles nothing by itself, so it keeps no `bench/results/` file — its output
 is read at the commit it ran against, next to the change being diagnosed.
+## ClickHouse comparison — `bench/compare.exs`
+
+ClickHouse is the reference point the market measures column stores against, so a
+claim about smolquery's read latency is only meaningful next to ClickHouse's on the
+same machine, same data, same queries. This script runs both arms through one
+driver: the same 62-column OTel log fixture, the same sort key, the same ten
+queries, sampled the same way.
+
+Three things are deliberately shared so the comparison cannot drift by accident.
+The column list lives in one place — `Bench.Otel.columns/0` — and the
+ClickHouse DDL is generated from it, so the two tables cannot diverge. The sort
+key lives in one place — `Bench.CompareSupport.clustering_key/0` returns
+`["project_id", "timestamp"]`, applied as smolquery's clustering key and as
+ClickHouse's `ORDER BY`. Both servers are measured as OS processes by pid, from
+outside, at the same interval, by the same sampler, with the driver in a separate
+process from both — the existing `bench/otel_logs.exs` pattern of sampling inside
+the same BEAM as the node is unusable for a cross-system comparison.
+
+ClickHouse runs natively, not in Docker. A container adds a network namespace hop
+and a storage driver between client and server, and this benchmark is measuring
+milliseconds. Lifecycle: `make ch_install`, `make ch_up`, `make bench_compare`,
+`make ch_down`. Knobs: `ROWS` (default 10M, headline 100M), `PROJECTS` (1_000 and
+100_000), `BATCH`, `WRITERS`, `REPS`, `QUERY_REPS`. `make bench_compare_smolquery`
+runs the smolquery arm alone for contributors without ClickHouse installed.
+
+Every write measurement reports three ClickHouse modes beside smolquery's single
+mode. smolquery's `200` means Parquet in the store, manifest log entry appended,
+fsynced, replicator satisfied. ClickHouse's MergeTree does not fsync on insert by
+default. Comparing our number against ClickHouse's default is comparing two
+different durability promises — the honest like-for-like number is `:durable`,
+with `:default` and `:async` shown beside it:
+
+| mode | ClickHouse settings | what it is |
+|------|---------------------|------------|
+| `:default` | stock (`fsync_after_insert=0`) | ClickHouse as people actually run it |
+| `:durable` | `fsync_after_insert=1, fsync_part_directory=1` | the same durability promise smolquery makes |
+| `:async` | `async_insert=1, wait_for_async_insert=1` | the architectural analog of our group commit |
+
+`PROJECTS` sweeps tenant cardinality at 1_000 and 100_000 with a log-uniform skew
+— a few enormous tenants and a long tail, the shape real multi-tenant log traffic
+has, because per-tenant behaviour is exactly what changes with cardinality.
+
+Cold and hot are separate numbers. Caches are dropped before the first repetition
+of each query; results are reported as cold / hot-min / hot-median, per ClickBench
+convention. On Linux dropping the OS page cache needs root; the script records
+whether the drop succeeded rather than pretending.
+
+Before any numbers exist, the losses are stated plainly. Q1 (`count(*)`) is answered
+from metadata by ClickHouse and cannot be beaten by a system that reads files. Cold
+reads favour ClickHouse. The tenant fan-out at 100k projects is where our design is
+least proven. Writing this down in advance is what stops the benchmark becoming a
+search for a configuration in which we win.
+
+Read `bench/results/compare.md` after a run — the tables verbatim, the machine they
+came from, and a fairness ledger: every knob where the two systems are not equal,
+which way each difference biases the result, and why it was not equalised.

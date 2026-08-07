@@ -84,6 +84,16 @@ defmodule Smolquery.BufferService.HotManifest do
   record can in principle vanish with its file on a hard power cut; from the
   second append on, the directory entry is old metadata.
 
+  `fsync: false` skips that sync. An acked write can then vanish on power
+  failure: the OS may never have flushed the log, the segment may be gone from
+  the store, and recovery's rule — drop a manifest record whose segment is
+  missing — silently discards the rows the client already saw a 200 for. That
+  trade is only defensible when a replicator provides durability beyond this
+  node. Today's default is `Replicator.None`, so it is not defensible in
+  production as shipped. Even with replication, the substitute holds only
+  against independent failures — a rack or AZ that loses power together takes
+  every copy that skipped fsync with it.
+
   Recovery also never empties a table's index on the way to rebuilding it. It
   inserts the recovered entries first and only then removes what is no longer
   live, so a reader mid-recovery sees the right set or briefly a superset of it —
@@ -110,11 +120,17 @@ defmodule Smolquery.BufferService.HotManifest do
   alias Smolquery.Segments.Store
 
   @enforce_keys [:table, :log_dir, :store]
-  defstruct [:table, :log_dir, :store]
+  defstruct [:table, :log_dir, :store, fsync: true]
 
-  @type t :: %__MODULE__{table: atom(), log_dir: String.t(), store: Store.t()}
+  @type t :: %__MODULE__{
+          table: atom(),
+          log_dir: String.t(),
+          store: Store.t(),
+          fsync: boolean()
+        }
 
-  @type option :: {:name, atom()} | {:log_dir, String.t()} | {:store, Store.t()}
+  @type option ::
+          {:name, atom()} | {:log_dir, String.t()} | {:store, Store.t()} | {:fsync, boolean()}
 
   @typedoc """
   A frozen set of micro-segment ids, and the sealed segment key(s) they become.
@@ -169,6 +185,14 @@ defmodule Smolquery.BufferService.HotManifest do
       when segments are not: the log is what makes an ack durable, so it stays on
       the node that gave the ack.
     * `:store` (required) — the store holding the segments the entries describe
+    * `:fsync` — whether each log append (and compaction rewrite, and torn-tail
+      repair) calls `:file.sync/1`. Defaults to `true`. With `false`, an acked
+      write can be lost on power failure: recovery drops a manifest record whose
+      segment is missing from the store, so the client saw a 200 and the rows
+      are silently gone. Only a defensible trade when a replicator provides
+      durability beyond this node — `Replicator.None` is the current default, so
+      today it is not — and even then only against independent failures, not a
+      rack or AZ losing power together.
 
   """
   @spec new([option()]) :: t()
@@ -176,7 +200,8 @@ defmodule Smolquery.BufferService.HotManifest do
     %__MODULE__{
       table: Keyword.get(opts, :name, __MODULE__),
       log_dir: Keyword.fetch!(opts, :log_dir),
-      store: Keyword.fetch!(opts, :store)
+      store: Keyword.fetch!(opts, :store),
+      fsync: Keyword.get(opts, :fsync, true)
     }
   end
 
@@ -464,7 +489,7 @@ defmodule Smolquery.BufferService.HotManifest do
       records = manifest |> entries(table_ref) |> Enum.map(&Entry.to_record/1)
 
       with :ok <- File.mkdir_p(Path.dirname(path)),
-           :ok <- write_records(staged, records),
+           :ok <- write_records(staged, records, manifest.fsync),
            :ok <- File.rename(staged, path) do
         :ok
       else
@@ -633,20 +658,20 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp append(%__MODULE__{} = manifest, table_ref, record, nil) do
     with {:ok, path} <- log_path(manifest, table_ref) do
-      path |> write_line(record) |> tag_append()
+      path |> write_line(record, manifest.fsync) |> tag_append()
     end
   end
 
-  defp append(%__MODULE__{}, _table_ref, record, {:hot_log, fd}) do
-    fd |> write_sync(record) |> tag_append()
+  defp append(%__MODULE__{fsync: fsync}, _table_ref, record, {:hot_log, fd}) do
+    fd |> write_sync(record, fsync) |> tag_append()
   end
 
   defp tag_append(:ok), do: :ok
   defp tag_append({:error, reason}), do: {:error, {:log_append_failed, reason}}
 
-  defp write_line(path, record) do
+  defp write_line(path, record, fsync) do
     with {:ok, fd} <- held_fd(path) do
-      result = write_sync(fd, record)
+      result = write_sync(fd, record, fsync)
 
       :file.close(fd)
 
@@ -654,9 +679,12 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp write_sync(fd, record) do
-    with :ok <- :file.write(fd, [JSON.encode!(record), "\n"]), do: :file.sync(fd)
+  defp write_sync(fd, record, fsync) do
+    with :ok <- :file.write(fd, [JSON.encode!(record), "\n"]), do: maybe_sync(fd, fsync)
   end
+
+  defp maybe_sync(_fd, false), do: :ok
+  defp maybe_sync(fd, true), do: :file.sync(fd)
 
   defp held_fd(path) do
     with :ok <- File.mkdir_p(Path.dirname(path)) do
@@ -664,11 +692,11 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp write_records(path, records) do
+  defp write_records(path, records, fsync) do
     with {:ok, fd} <- :file.open(path, [:write, :raw, :binary]) do
       lines = Enum.map(records, &[JSON.encode!(&1), "\n"])
 
-      result = with :ok <- :file.write(fd, lines), do: :file.sync(fd)
+      result = with :ok <- :file.write(fd, lines), do: maybe_sync(fd, fsync)
 
       :file.close(fd)
 
@@ -679,16 +707,16 @@ defmodule Smolquery.BufferService.HotManifest do
   defp read_log(%__MODULE__{} = manifest, table_ref) do
     with {:ok, path} <- log_path(manifest, table_ref) do
       case File.read(path) do
-        {:ok, contents} -> parse_and_repair(path, contents)
+        {:ok, contents} -> parse_and_repair(path, contents, manifest.fsync)
         {:error, :enoent} -> {:ok, []}
         {:error, reason} -> {:error, {:log_unreadable, reason}}
       end
     end
   end
 
-  defp parse_and_repair(path, contents) do
+  defp parse_and_repair(path, contents, fsync) do
     with {:ok, records, valid_bytes} <- parse_contents(contents),
-         :ok <- truncate_torn_tail(path, contents, valid_bytes) do
+         :ok <- truncate_torn_tail(path, contents, valid_bytes, fsync) do
       {:ok, records}
     end
   end
@@ -715,17 +743,17 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp truncate_torn_tail(_path, contents, valid_bytes)
+  defp truncate_torn_tail(_path, contents, valid_bytes, _fsync)
        when byte_size(contents) == valid_bytes,
        do: :ok
 
-  defp truncate_torn_tail(path, _contents, valid_bytes) do
+  defp truncate_torn_tail(path, _contents, valid_bytes, fsync) do
     case :file.open(path, [:read, :write, :raw, :binary]) do
       {:ok, fd} ->
         result =
           with {:ok, _position} <- :file.position(fd, valid_bytes),
                :ok <- :file.truncate(fd) do
-            :file.sync(fd)
+            maybe_sync(fd, fsync)
           end
 
         :file.close(fd)

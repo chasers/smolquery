@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- listen_host: loopback only so the bench server is not reachable off-box -->
+    <listen_host>127.0.0.1</listen_host>
+
+    <!-- http_port / tcp_port: fixed endpoints the bench driver and curl health-check use -->
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+
+    <!-- path: on-disk MergeTree data; token replaced by up.sh with CLICKHOUSE_DATA_ROOT -->
+    <path>__DATA_ROOT__/data/</path>
+    <!-- tmp_path: spill and temporary files during merges/sorts -->
+    <tmp_path>__DATA_ROOT__/tmp/</tmp_path>
+    <!-- user_files_path: local user-file imports; kept under the data root for isolation -->
+    <user_files_path>__DATA_ROOT__/user_files/</user_files_path>
+    <!-- format_schema_path: protobuf/format schemas; isolated under the data root -->
+    <format_schema_path>__DATA_ROOT__/format_schemas/</format_schema_path>
+
+    <!-- logger: warning level keeps bench logs small; rotation caps disk use -->
+    <logger>
+        <level>warning</level>
+        <log>__DATA_ROOT__/logs/clickhouse-server.log</log>
+        <errorlog>__DATA_ROOT__/logs/clickhouse-server.err.log</errorlog>
+        <size>10M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- max_server_memory_usage: 0 lets ClickHouse auto-detect; up.sh substitutes CLICKHOUSE_MAX_MEMORY -->
+    <max_server_memory_usage>__MAX_SERVER_MEMORY_USAGE__</max_server_memory_usage>
+    <!-- mark_cache_size: explicit cap on mark cache so cold/hot behaviour is reproducible -->
+    <mark_cache_size>1073741824</mark_cache_size>
+    <!-- uncompressed_cache_size: explicit cap on uncompressed block cache -->
+    <uncompressed_cache_size>1073741824</uncompressed_cache_size>
+    <!-- max_thread_pool_size: the server-wide global thread pool, NOT per-query parallelism.
+         This is deliberately left at ClickHouse's own default of 10000. It must not be set to
+         the machine's core count: the server draws startup, background merge, and connection
+         threads from this pool, and starving it deadlocks the server before it binds a socket
+         (observed: with 10, no listener after 90s and no error logged). The knob that matches
+         the DuckDB thread count is <max_threads> in the profiles below. -->
+    <max_thread_pool_size>10000</max_thread_pool_size>
+
+    <!-- max_concurrent_queries: explicit default so concurrency is not implicit -->
+    <max_concurrent_queries>100</max_concurrent_queries>
+    <!-- background_pool_size: merge/mutation worker pool size (affects settle latency) -->
+    <background_pool_size>16</background_pool_size>
+    <!-- background_merges_mutations_concurrency_ratio: per-pool merge concurrency -->
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <!-- mmap_cache_size: disable mmap cache so memory behaviour is dominated by the two caches above -->
+    <mmap_cache_size>0</mmap_cache_size>
+
+    <profiles>
+        <!-- bench: default profile for the comparison arm; max_threads matches DuckDB thread count -->
+        <bench>
+            <max_threads>__MAX_THREADS__</max_threads>
+            <!-- Write-mode fairness (:default, :durable, :async) is applied by the bench driver as
+                 per-query settings (fsync_after_insert, fsync_part_directory, async_insert,
+                 wait_for_async_insert), not here, so one server process serves all three modes. -->
+        </bench>
+        <default>
+            <max_threads>__MAX_THREADS__</max_threads>
+        </default>
+    </profiles>
+
+    <users>
+        <default>
+            <password></password>
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+            <profile>bench</profile>
+            <quota>default</quota>
+        </default>
+    </users>
+
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>

@@ -33,6 +33,40 @@ defmodule Smolquery.BufferService.TableBufferTest do
     def sweep_staging(_config, _age_ms), do: {:ok, []}
   end
 
+  defmodule GatedStore do
+    @moduledoc false
+    @behaviour Smolquery.Segments.Store
+
+    def new(dir, gate) do
+      %Store{impl: __MODULE__, config: %{local: Store.Local.new(dir: dir), gate: gate}}
+    end
+
+    @impl Store
+    def put(%{local: local, gate: gate}, key, encoder) do
+      send(gate, {:encoding, self(), key})
+
+      receive do
+        :encode -> Store.put(local, key, encoder)
+        {:refuse, reason} -> {:error, reason}
+      end
+    end
+
+    @impl Store
+    def location(%{local: local}, key), do: Store.location(local, key)
+
+    @impl Store
+    def list(%{local: local}, prefix), do: Store.list(local, prefix)
+
+    @impl Store
+    def delete(%{local: local}, key), do: Store.delete(local, key)
+
+    @impl Store
+    def shared?(%{local: local}), do: Store.shared?(local)
+
+    @impl Store
+    def sweep_staging(%{local: local}, age_ms), do: Store.sweep_staging(local, age_ms)
+  end
+
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
@@ -289,6 +323,163 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       assert match?([_first, _second], HotManifest.entries(runtime.manifest, @table))
     end
+  end
+
+  describe "encode concurrency" do
+    test "the default of 1 encodes one commit at a time", context do
+      %{name: name, runtime: runtime} = start_gated(context, "serial", [])
+
+      assert runtime.encode_concurrency == 1
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert Eventually.until(fn -> handed_off(name) == 2 end)
+
+      refute_receive {:encoding, _pid, _key}, 200
+
+      # Inline, not merely serialized: the committer is itself inside the
+      # encode, so it cannot answer a call while one is running.
+      [{buffer, _value}] = Registry.lookup(Runtime.registry(name), @table)
+      committer = :sys.get_state(buffer).committer
+
+      assert {:timeout, _call} = catch_exit(:sys.get_state(committer, 100))
+
+      send(one, :encode)
+      assert_receive {:encoding, two, _key}, 5_000
+      send(two, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+
+    test "runs up to :encode_concurrency encodes at once, and no more", context do
+      %{name: name} = start_gated(context, "parallel", encode_concurrency: 2)
+
+      writers =
+        for i <- 1..3, do: Task.async(fn -> Client.write_batch(name, @table, batch(i..i)) end)
+
+      assert_receive {:encoding, one, _key}, 5_000
+      assert_receive {:encoding, two, _key}, 5_000
+      assert Eventually.until(fn -> handed_off(name) == 3 end)
+
+      refute_receive {:encoding, _pid, _key}, 200
+
+      send(one, :encode)
+      send(two, :encode)
+
+      assert_receive {:encoding, three, _key}, 5_000
+      send(three, :encode)
+
+      assert Enum.all?(Task.await_many(writers, 30_000), &match?({:ok, _ack}, &1))
+    end
+
+    test "appends to the manifest log in commit order however the encodes finish", context do
+      %{name: name, runtime: runtime} = start_gated(context, "ordered", encode_concurrency: 2)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      send(two, :encode)
+      Process.sleep(50)
+      send(one, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+
+      assert ack_one.row_count == 1
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+
+    test "a failing encode fails only its own commit", context do
+      %{name: name, runtime: runtime} = start_gated(context, "isolated", encode_concurrency: 3)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      doomed = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      third = Task.async(fn -> Client.write_batch(name, @table, batch(3..3)) end)
+      assert_receive {:encoding, three, _key}, 5_000
+
+      send(two, {:refuse, :encode_refused})
+      send(one, :encode)
+      send(three, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert Task.await(doomed, 30_000) == {:error, :encode_refused}
+      assert {:ok, ack_three} = Task.await(third, 30_000)
+
+      assert added_ids(runtime) == [ack_one.segment_id, ack_three.segment_id]
+      assert {:ok, keys} = Store.list(runtime.store, "analytics/events")
+      assert match?([_one, _two], keys)
+    end
+
+    test "a graceful shutdown waits for the encodes still in flight", context do
+      %{name: name, runtime: runtime} = start_gated(context, "drained", encode_concurrency: 2)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      [{buffer, _value}] = Registry.lookup(Runtime.registry(name), @table)
+      stopper = Task.async(fn -> GenServer.stop(buffer, :normal) end)
+
+      send(two, :encode)
+      send(one, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+      assert Task.await(stopper, 30_000) == :ok
+
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+  end
+
+  defp start_gated(context, label, opts) do
+    dir = Path.join(context.tmp_dir, label)
+
+    start_buffer_service(
+      context,
+      Keyword.merge(
+        [
+          store: GatedStore.new(Path.join(dir, "segments"), self()),
+          dir: dir,
+          flush_max_rows: 1,
+          flush_interval_ms: 60_000
+        ],
+        opts
+      )
+    )
+  end
+
+  defp handed_off(name) do
+    case Registry.lookup(Runtime.registry(name), @table) do
+      [{pid, _value}] -> :sys.get_state(pid).in_flight
+      [] -> 0
+    end
+  end
+
+  defp added_ids(runtime) do
+    {:ok, path} = HotManifest.log_path(runtime.manifest, @table)
+
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&JSON.decode!/1)
+    |> Enum.filter(&(&1["op"] == "add"))
+    |> Enum.map(& &1["id"])
   end
 
   defp accumulated_rows(name) do

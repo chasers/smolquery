@@ -34,6 +34,30 @@ defmodule Smolquery.BufferService.RuntimeTest do
       assert runtime.control_timeout_ms == 123
       assert runtime.flush_interval_ms == 1_000
     end
+
+    test "defaults to fsync on the store and the manifest", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+
+      assert runtime.manifest.fsync == true
+      assert runtime.store.config.fsync == true
+    end
+
+    test "passes :fsync through to the default store and the manifest", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir, fsync: false)
+
+      assert runtime.manifest.fsync == false
+      assert runtime.store.config.fsync == false
+    end
+
+    test "defaults :encode_concurrency to one encode at a time", %{tmp_dir: dir} do
+      assert Runtime.new(name: unique_name(), dir: dir).encode_concurrency == 1
+    end
+
+    test "takes :encode_concurrency from the config", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir, encode_concurrency: 4)
+
+      assert runtime.encode_concurrency == 4
+    end
   end
 
   describe "put/1, fetch/1, delete/1" do
