@@ -463,31 +463,8 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def put_retention(%__MODULE__{} = config, {dataset, table}, nil) do
-    with {:ok, dataset} <- Identifier.validate(dataset),
-         {:ok, table} <- Identifier.validate(table),
-         :ok <- ensure_retention_table(config),
-         {:ok, _result} <- query(config, delete_retention_sql(config, dataset, table)) do
-      :ok
-    end
-  end
-
-  def put_retention(%__MODULE__{} = config, {dataset, table}, %{column: column, ttl_ms: ttl_ms})
-      when is_binary(column) and is_integer(ttl_ms) and ttl_ms > 0 do
-    with {:ok, dataset} <- Identifier.validate(dataset),
-         {:ok, table} <- Identifier.validate(table),
-         :ok <- ensure_retention_table(config) do
-      Engine.transaction(config.engine, [
-        delete_retention_sql(config, dataset, table),
-        "INSERT INTO #{retention_table(config)} VALUES (" <>
-          "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
-          "#{Identifier.sql_string(column)}, #{ttl_ms})"
-      ])
-    end
-  end
-
-  def put_retention(%__MODULE__{} = _config, _table, policy),
-    do: {:error, {:invalid_retention, policy}}
+  def put_retention(%__MODULE__{} = config, table_ref, policy),
+    do: put_table_options(config, table_ref, %{retention: policy})
 
   @impl Catalog
   def retention(%__MODULE__{} = config, {dataset, table}) do
@@ -510,25 +487,8 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def put_clustering(%__MODULE__{} = config, {dataset, table}, []) do
-    with {:ok, dataset} <- Identifier.validate(dataset),
-         {:ok, table} <- Identifier.validate(table),
-         {:ok, _result} <- query(config, delete_clustering_sql(config, dataset, table)) do
-      :ok
-    end
-  end
-
-  def put_clustering(%__MODULE__{} = config, {dataset, table}, columns)
-      when is_list(columns) and columns != [] do
-    if valid_clustering?(columns) do
-      replace_clustering(config, dataset, table, columns)
-    else
-      {:error, {:invalid_clustering, columns}}
-    end
-  end
-
-  def put_clustering(%__MODULE__{} = _config, _table, columns),
-    do: {:error, {:invalid_clustering, columns}}
+  def put_clustering(%__MODULE__{} = config, table_ref, columns),
+    do: put_table_options(config, table_ref, %{clustering: columns})
 
   @impl Catalog
   def clustering(%__MODULE__{} = config, {dataset, table}) do
@@ -545,25 +505,94 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp replace_clustering(config, dataset, table, columns) do
-    with {:ok, dataset} <- Identifier.validate(dataset),
-         {:ok, table} <- Identifier.validate(table) do
-      Engine.transaction(
-        config.engine,
-        [
-          delete_clustering_sql(config, dataset, table)
-          | clustering_insert_sqls(config, dataset, table, columns)
-        ]
-      )
-    end
-  end
-
   defp clustering_insert_sqls(config, dataset, table, columns) do
     Enum.map(Enum.with_index(columns), fn {column, position} ->
       "INSERT INTO #{clustering_table(config.catalog)} VALUES (" <>
         "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
         "#{Identifier.sql_string(column)}, #{position})"
     end)
+  end
+
+  @impl Catalog
+  def put_table_options(%__MODULE__{} = config, {dataset, table}, options)
+      when is_map(options) do
+    with :ok <- validate_options(options),
+         {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- maybe_ensure_retention_table(config, options) do
+      case option_statements(config, dataset, table, options) do
+        [] -> :ok
+        statements -> Engine.transaction(config.engine, statements)
+      end
+    end
+  end
+
+  defp maybe_ensure_retention_table(config, options) do
+    if Map.has_key?(options, :retention), do: ensure_retention_table(config), else: :ok
+  end
+
+  defp validate_options(options) do
+    Enum.reduce_while(options, :ok, fn
+      {:retention, nil}, :ok ->
+        {:cont, :ok}
+
+      {:retention, %{column: column, ttl_ms: ttl_ms}}, :ok
+      when is_binary(column) and is_integer(ttl_ms) and ttl_ms > 0 ->
+        {:cont, :ok}
+
+      {:retention, policy}, :ok ->
+        {:halt, {:error, {:invalid_retention, policy}}}
+
+      {:clustering, []}, :ok ->
+        {:cont, :ok}
+
+      {:clustering, columns}, :ok when is_list(columns) ->
+        if valid_clustering?(columns),
+          do: {:cont, :ok},
+          else: {:halt, {:error, {:invalid_clustering, columns}}}
+
+      {:clustering, columns}, :ok ->
+        {:halt, {:error, {:invalid_clustering, columns}}}
+
+      {key, value}, :ok ->
+        {:halt, {:error, {:unknown_table_option, key, value}}}
+    end)
+  end
+
+  defp option_statements(config, dataset, table, options) do
+    retention_statements(config, dataset, table, options) ++
+      clustering_statements(config, dataset, table, options)
+  end
+
+  defp retention_statements(config, dataset, table, options) do
+    case Map.fetch(options, :retention) do
+      :error ->
+        []
+
+      {:ok, nil} ->
+        [delete_retention_sql(config, dataset, table)]
+
+      {:ok, %{column: column, ttl_ms: ttl_ms}} ->
+        [
+          delete_retention_sql(config, dataset, table),
+          "INSERT INTO #{retention_table(config)} VALUES (" <>
+            "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
+            "#{Identifier.sql_string(column)}, #{ttl_ms})"
+        ]
+    end
+  end
+
+  defp clustering_statements(config, dataset, table, options) do
+    case Map.fetch(options, :clustering) do
+      :error ->
+        []
+
+      {:ok, columns} ->
+        [
+          delete_clustering_sql(config, dataset, table)
+          | clustering_insert_sqls(config, dataset, table, columns)
+        ]
+    end
   end
 
   @impl Catalog
@@ -585,7 +614,8 @@ defmodule Smolquery.Catalog.DuckLake do
     sql =
       "CREATE TABLE IF NOT EXISTS #{retention_table(config)} (" <>
         "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
-        "column_name VARCHAR NOT NULL, ttl_ms BIGINT NOT NULL)"
+        "column_name VARCHAR NOT NULL, ttl_ms BIGINT NOT NULL, " <>
+        "PRIMARY KEY (dataset, table_name))"
 
     with {:ok, _result} <- query(config, sql), do: :ok
   end
@@ -613,12 +643,26 @@ defmodule Smolquery.Catalog.DuckLake do
   and on Postgres metadata a concurrent first use can fail outright with a
   duplicate-relation error. Bootstrapping it costs one statement per
   connection instead.
+
+  The primary key (here and on retention's table) is not for lookups — the
+  tables are tiny — it is the replica identity. The moduledoc's retry story
+  turns on Postgres refusing `UPDATE`s to a published table that has no
+  identity to replicate rows by, and the same rule covers the `DELETE` every
+  `put_clustering`/`put_retention` starts with. DuckLake's own PK-less tables
+  make such a database unusable as metadata anyway, but that is DuckLake's
+  bug to carry, not one to add to. DuckDB passes the constraint through both
+  metadata attaches, verified: sqlite stores it, and on Postgres
+  `pg_constraint` shows the key with `relreplident` defaulting to it. An
+  `IF NOT EXISTS` no-ops on a table created before the key existed, so a lake
+  from before this change keeps its PK-less side tables until they are
+  recreated.
   """
   @spec create_clustering_statement(String.t()) :: String.t()
   def create_clustering_statement(catalog) do
     "CREATE TABLE IF NOT EXISTS #{clustering_table(catalog)} (" <>
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
-      "column_name VARCHAR NOT NULL, position INTEGER NOT NULL)"
+      "column_name VARCHAR NOT NULL, position INTEGER NOT NULL, " <>
+      "PRIMARY KEY (dataset, table_name, position))"
   end
 
   defp delete_clustering_sql(config, dataset, table) do

@@ -513,7 +513,12 @@ A table may declare a clustering key — smolquery's analog of ClickHouse's
 the columns must exist on the schema or the request is a 422. The key is
 persisted in a `smolquery_clustering` side table beside retention's, read back
 onto `Smolquery.Schema.clustering`, and carried through the ingest schema cache
-into every flush.
+into every flush. Both side tables carry a primary key so a Postgres metadata
+database whose tables a publication covers (CDC, logical replication) still
+accepts the `DELETE`s their writes start with — the replica-identity refusal
+that makes DuckLake's own PK-less stats tables unusable under one. A `PATCH`
+setting retention and clustering together applies them in one metadata
+transaction: on error, neither sticks.
 
 When `clustering` is non-empty, rows are stably sorted by those columns in
 declared order with nulls last at every write point: the buffer's micro-segment

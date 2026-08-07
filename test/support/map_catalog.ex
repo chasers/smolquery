@@ -110,6 +110,23 @@ defmodule Smolquery.Test.MapCatalog do
   end
 
   @impl Catalog
+  def put_table_options(agent, table_ref, options) when is_map(options) do
+    Agent.update(agent, fn state ->
+      state
+      |> apply_option(options, :retention, table_ref)
+      |> apply_option(options, :clustering, table_ref)
+    end)
+  end
+
+  defp apply_option(state, options, key, table_ref) do
+    case Map.fetch(options, key) do
+      {:ok, value} when value in [nil, []] -> %{state | key => Map.delete(state[key], table_ref)}
+      {:ok, value} -> %{state | key => Map.put(state[key], table_ref, value)}
+      :error -> state
+    end
+  end
+
+  @impl Catalog
   def expire_snapshots(_agent, _older_than_ms), do: {:ok, 0}
 
   @impl Catalog

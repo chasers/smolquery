@@ -88,6 +88,32 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     assert row_count() == 3
   end
 
+  test "retention and clustering survive a publication covering their tables", %{
+    catalog: catalog
+  } do
+    :ok = Catalog.put_retention(catalog, @table, nil)
+    connection = postgres_connection()
+    publish_side_tables!(connection)
+    on_exit(fn -> drop_side_table_publication!(connection) end)
+
+    assert Catalog.put_clustering(catalog, @table, ["id", "ts"]) == :ok
+    assert Catalog.put_clustering(catalog, @table, ["id"]) == :ok
+
+    policy = %{column: "ts", ttl_ms: 86_400_000}
+
+    assert Catalog.put_table_options(catalog, @table, %{
+             retention: policy,
+             clustering: ["ts"]
+           }) == :ok
+
+    assert Catalog.retention(catalog, @table) == {:ok, policy}
+    assert Catalog.clustering(catalog, @table) == {:ok, ["ts"]}
+
+    assert Catalog.put_table_options(catalog, @table, %{retention: nil, clustering: []}) == :ok
+    assert Catalog.retention(catalog, @table) == {:ok, nil}
+    assert Catalog.clustering(catalog, @table) == {:ok, []}
+  end
+
   test "replaces segments atomically (M7's swap primitive, over postgres metadata)", %{
     catalog: catalog,
     segments_dir: segments_dir
@@ -164,13 +190,40 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     GenServer.stop(conn)
   end
 
+  # A publication makes Postgres refuse UPDATE/DELETE on any covered table
+  # that lacks a replica identity — the trap the moduledoc describes for
+  # DuckLake's own PK-less tables. Covering only the smolquery side tables
+  # proves their primary keys keep writes working without breaking the rest
+  # of this suite the way FOR ALL TABLES would.
+  defp publish_side_tables!(connection) do
+    {:ok, conn} = Postgrex.start_link(connection)
+
+    Postgrex.query!(
+      conn,
+      "CREATE PUBLICATION smolquery_side_table_pub " <>
+        "FOR TABLE smolquery_retention, smolquery_clustering",
+      []
+    )
+
+    GenServer.stop(conn)
+  end
+
+  defp drop_side_table_publication!(connection) do
+    {:ok, conn} = Postgrex.start_link(connection)
+
+    Postgrex.query!(conn, "DROP PUBLICATION IF EXISTS smolquery_side_table_pub", [])
+    GenServer.stop(conn)
+  end
+
   defp drop_ducklake_tables_sql do
     """
     DO $$
     DECLARE r RECORD;
     BEGIN
       FOR r IN SELECT tablename FROM pg_tables
-                WHERE schemaname = current_schema() AND tablename LIKE 'ducklake\\_%' ESCAPE '\\'
+                WHERE schemaname = current_schema()
+                  AND (tablename LIKE 'ducklake\\_%' ESCAPE '\\'
+                       OR tablename LIKE 'smolquery\\_%' ESCAPE '\\')
       LOOP
         EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
       END LOOP;

@@ -64,6 +64,17 @@ defmodule Smolquery.Catalog do
   """
   @type clustering :: [String.t()]
 
+  @typedoc """
+  The mutable table settings a `PATCH` can carry, keyed by which were present.
+
+  A key that is absent is left untouched; `retention: nil` and `clustering: []`
+  are the explicit clears.
+  """
+  @type table_options :: %{
+          optional(:retention) => retention() | nil,
+          optional(:clustering) => clustering()
+        }
+
   @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
@@ -90,8 +101,12 @@ defmodule Smolquery.Catalog do
               :ok | {:error, term()}
   @callback clustering(config :: term(), table_ref()) ::
               {:ok, clustering()} | {:error, term()}
+  @callback put_table_options(config :: term(), table_ref(), table_options()) ::
+              :ok | {:error, term()}
   @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks put_table_options: 3
 
   @doc """
   Creates a dataset, if it does not already exist.
@@ -277,6 +292,37 @@ defmodule Smolquery.Catalog do
   @spec clustering(t(), table_ref()) :: {:ok, clustering()} | {:error, term()}
   def clustering(%__MODULE__{} = catalog, table),
     do: catalog.impl.clustering(catalog.config, table)
+
+  @doc """
+  Applies a table's mutable settings — retention and/or clustering — as one
+  change: on an error, none of them stick.
+
+  This is the write behind a `PATCH`, and atomicity is why it exists as its
+  own operation rather than a loop over `put_retention/3` and
+  `put_clustering/3`: those are two writes, and an infrastructure failure
+  between them would persist the first while reporting an error for the whole
+  request. An implementation that can bind both into one transaction exports
+  the optional callback; for one that cannot, this falls back to sequential
+  puts — retention first — and keeps only the sequential guarantee.
+  """
+  @spec put_table_options(t(), table_ref(), table_options()) :: :ok | {:error, term()}
+  def put_table_options(%__MODULE__{} = catalog, table, options) when is_map(options) do
+    if function_exported?(catalog.impl, :put_table_options, 3) do
+      catalog.impl.put_table_options(catalog.config, table, options)
+    else
+      with :ok <- sequential_put(catalog, table, options, :retention) do
+        sequential_put(catalog, table, options, :clustering)
+      end
+    end
+  end
+
+  defp sequential_put(catalog, table, %{retention: policy}, :retention),
+    do: put_retention(catalog, table, policy)
+
+  defp sequential_put(catalog, table, %{clustering: columns}, :clustering),
+    do: put_clustering(catalog, table, columns)
+
+  defp sequential_put(_catalog, _table, _options, _key), do: :ok
 
   @doc """
   Expires snapshots older than `older_than_ms`, returning how many expired.
