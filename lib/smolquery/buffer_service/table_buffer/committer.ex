@@ -76,13 +76,24 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     syncers: []
   ]
 
+  @typedoc """
+  A group commit handed over by the buffer.
+
+  `opened_at` and `handed_off_at` are monotonic microseconds stamping when the
+  accumulator took its first chunk and when it cast — the two spans of the ack
+  that happen before this process sees the commit, and so the two no timer here
+  could measure (T-181). Both are optional: a commit built by hand carries
+  neither, and an unmeasured span is reported as 0.
+  """
   @type commit :: %{
-          schema: Smolquery.Schema.t(),
-          chunks: [[Writer.row()] | Explorer.DataFrame.t()],
-          pending: [{GenServer.from(), :new | :duplicate | :flush}],
-          batch_ids: [String.t()],
-          row_count: non_neg_integer(),
-          byte_size: non_neg_integer()
+          :schema => Smolquery.Schema.t(),
+          :chunks => [[Writer.row()] | Explorer.DataFrame.t()],
+          :pending => [{GenServer.from(), :new | :duplicate | :flush}],
+          :batch_ids => [String.t()],
+          :row_count => non_neg_integer(),
+          :byte_size => non_neg_integer(),
+          optional(:opened_at) => integer() | nil,
+          optional(:handed_off_at) => integer() | nil
         }
 
   @doc """
@@ -243,14 +254,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp finish(state, commit, encoded, started) do
-    result =
-      with {:ok, segment} <- encoded,
-           {:ok, entry} <- add(state, segment, commit.batch_ids),
-           :ok <- replicate(state, segment, entry) do
-        {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
-      end
+    encoded_at = System.monotonic_time(:microsecond)
 
-    duration_us = System.monotonic_time(:microsecond) - started
+    {result, added_at} = commit_durably(state, commit, encoded, encoded_at)
+
+    done_at = System.monotonic_time(:microsecond)
+    duration_us = done_at - started
 
     Load.drained(state.load, commit.row_count)
 
@@ -260,7 +269,16 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     :telemetry.execute(
       [:smolquery, :buffer, :commit],
-      %{rows: commit.row_count, bytes: commit.byte_size, duration_us: duration_us},
+      %{
+        rows: commit.row_count,
+        bytes: commit.byte_size,
+        duration_us: duration_us,
+        accumulate_us: span(commit[:opened_at], commit[:handed_off_at]),
+        queue_us: span(commit[:handed_off_at], started),
+        encode_us: encoded_at - started,
+        manifest_us: added_at - encoded_at,
+        replicate_us: done_at - added_at
+      },
       %{result: if(match?({:ok, _ack}, result), do: :ok, else: :error)}
     )
 
@@ -272,6 +290,31 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     state
   end
+
+  # Split so the manifest append and the replication round can be timed apart:
+  # they are the two serialized steps, and T-181 exists because the encode —
+  # the one step that already runs in parallel — turned out to be 5% of the ack.
+  defp commit_durably(state, commit, {:ok, segment}, _encoded_at) do
+    added = add(state, segment, commit.batch_ids)
+    added_at = System.monotonic_time(:microsecond)
+
+    result =
+      with {:ok, entry} <- added,
+           :ok <- replicate(state, segment, entry) do
+        {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
+      end
+
+    {result, added_at}
+  end
+
+  defp commit_durably(_state, _commit, {:error, _reason} = error, encoded_at),
+    do: {error, encoded_at}
+
+  # A commit built before this instrumentation shipped, or one a test hands over
+  # by hand, carries no stamps; an unmeasured span is 0 rather than a crash.
+  defp span(nil, _to), do: 0
+  defp span(_from, nil), do: 0
+  defp span(from, to), do: to - from
 
   defp settle_syncers(state) do
     if idle?(state) do
