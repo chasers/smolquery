@@ -40,6 +40,10 @@ full set of dials behind them.
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
+| `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`8000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
+| `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch |
+| `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (`2`); the manifest append, replication round and replies stay serialized in the Committer regardless |
+| `SMOLQUERY_WRITE_PARTITIONS` | how many buffer identities one table's writes spread over, and so how many nodes ingest it (`1`). Reader and writer counts must match — set it identically on ingest and query roles |
 | `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` (`4001`), on every node — peers derive each other's hot-tier URLs from node name plus this port |
 | `SMOLQUERY_HOT_SERVER_IP` | `HotServer` bind (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
 | `SMOLQUERY_BUFFER_BASE_URL` | where the sealer and query planner reach the hot tier on a single node (`http://127.0.0.1:4001`) |
@@ -137,6 +141,17 @@ stays on the node that gave the ack. Point the segments elsewhere with
 
 `flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
 the current group commit, so lowering it trades throughput for latency.
+
+It is only half the trigger, though, and under load usually not the half that
+fires. `flush_max_rows` and `flush_max_bytes` end a commit as soon as the
+accumulator reaches either, so a deployment whose arrival rate reaches
+`flush_max_bytes` in less than `flush_interval_ms` is running a cadence it
+never configured — the interval becomes decorative and commit size is pinned
+to the byte cap instead. Two 2 MB batches against the 8 MB default is a
+four-batch commit however long the interval says to wait. When tuning the
+cadence, check which one is actually ending the commit: divide
+`flush_max_bytes` by the offered bytes per second and compare against
+`flush_interval_ms`.
 
 `ring:` is the static fallback only — with `CATALOG_DATABASE_URL` set,
 ownership instead tracks which nodes are actually alive and hosting this
