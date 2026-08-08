@@ -40,9 +40,9 @@ defmodule Smolquery.BufferService.Endpoint do
   owner's accumulator, since the admission bound cannot measure a resource.
 
   Those three shapes are already validated. `:ndjson` is not: it is the bytes
-  the client sent, forwarded unparsed, with `:row_count` the sender's newline
-  count. The flush parses it, so a value the schema cannot take fails the whole
-  commit rather than one row.
+  the client sent, forwarded unparsed, with `:row_count` the sender's count of
+  non-blank lines. The flush parses it, so a value the schema cannot take fails
+  the whole commit rather than one row.
   """
   @type batch :: %{
           required(:schema) => Schema.t(),
@@ -86,7 +86,7 @@ defmodule Smolquery.BufferService.Endpoint do
           | {:error, term()}
   def write_batch(name, table_ref, %{schema: %Schema{} = schema} = batch) do
     with {:ok, runtime} <- runtime(name),
-         {:ok, payload} <- payload(batch) do
+         {:ok, payload} <- payload(runtime, batch) do
       batch_id = Map.get(batch, :batch_id)
 
       case committed_ack(runtime, table_ref, batch_id) do
@@ -101,12 +101,14 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp payload(%{rows: rows}) when is_list(rows), do: {:ok, rows}
+  defp payload(_runtime, %{rows: rows}) when is_list(rows), do: {:ok, rows}
 
-  defp payload(%{frame: %DataFrame{} = frame, byte_size: bytes}) when is_integer(bytes),
-    do: {:ok, frame}
+  defp payload(_runtime, %{frame: %DataFrame{} = frame, byte_size: bytes})
+       when is_integer(bytes),
+       do: {:ok, frame}
 
-  defp payload(%{frame_ipc: ipc, byte_size: bytes}) when is_binary(ipc) and is_integer(bytes) do
+  defp payload(_runtime, %{frame_ipc: ipc, byte_size: bytes})
+       when is_binary(ipc) and is_integer(bytes) do
     case DataFrame.load_ipc(ipc) do
       {:ok, frame} -> {:ok, frame}
       {:error, _reason} -> {:error, :invalid_frame}
@@ -117,13 +119,23 @@ defmodule Smolquery.BufferService.Endpoint do
 
   # NDJSON crosses the wire as the bytes the client sent, so there is nothing to
   # decode here and nothing to validate yet — the flush parses it. `row_count` is
-  # the sender's newline count, and the ack is built from it, so it is carried
+  # the sender's line count, and the ack is built from it, so it is carried
   # rather than recomputed.
-  defp payload(%{ndjson: body, row_count: count, byte_size: bytes})
-       when is_binary(body) and is_integer(count) and is_integer(bytes),
-       do: {:ok, {:ndjson, body, count}}
+  #
+  # Only the DuckDB flush writer can turn those bytes into a segment, and the
+  # sender's config says nothing about this node's, so the check runs where the
+  # payload is accepted: refusing here fails one request cleanly instead of
+  # crashing every flush of the table against an engine that was never started.
+  defp payload(runtime, %{ndjson: body, row_count: count, byte_size: bytes})
+       when is_binary(body) and is_integer(count) and is_integer(bytes) do
+    if runtime.flush_writer == :duckdb do
+      {:ok, {:ndjson, body, count}}
+    else
+      {:error, :ndjson_unsupported}
+    end
+  end
 
-  defp payload(_batch), do: {:error, :invalid_batch}
+  defp payload(_runtime, _batch), do: {:error, :invalid_batch}
 
   defp payload_count(rows) when is_list(rows), do: length(rows)
   defp payload_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
@@ -307,9 +319,10 @@ defmodule Smolquery.BufferService.Endpoint do
             {:ok, ack, errors}
 
           # Nothing in this body survived, so nothing was made durable for it.
+          # No `Load.leave/2` here: the rows were accumulated, so the commit's
+          # own `Load.drained/2` already removed them — leaving too would drive
+          # the meter negative, the one drift direction admission cannot absorb.
           {:invalid, errors} ->
-            Load.leave(load, count)
-
             {:invalid, errors}
 
           {:duplicate, ack} ->

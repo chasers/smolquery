@@ -351,17 +351,11 @@ defmodule Smolquery.Segments.Writer do
 
   defp columns_spec(%Schema{fields: fields}) do
     Enum.map_join(fields, ", ", fn %Field{} = field ->
-      "'#{field.name}': '#{sql_type(field.type)}'"
+      {:ok, type} = Schema.duckdb_type(field.type)
+
+      "'#{field.name}': '#{type}'"
     end)
   end
-
-  defp sql_type(:timestamp), do: "TIMESTAMP"
-  defp sql_type(:date), do: "DATE"
-  defp sql_type(:int64), do: "BIGINT"
-  defp sql_type(:float64), do: "DOUBLE"
-  defp sql_type(:bool), do: "BOOLEAN"
-  defp sql_type({:numeric, precision, scale}), do: "DECIMAL(#{precision},#{scale})"
-  defp sql_type(_other), do: "VARCHAR"
 
   defp placeholders(count), do: Enum.map_join(1..count, ", ", &"$#{&1}")
 

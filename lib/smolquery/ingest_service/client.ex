@@ -92,8 +92,8 @@ defmodule Smolquery.IngestService.Client do
   # parses it, so this node spends no CPU per row and the frame never exists to be
   # serialized — T-182 measured those two as 32% and 1% of the ack.
   #
-  # The row count is the newline count, which is one pass over the bytes rather
-  # than a parse, and is what the ack reports. The trade is stated in
+  # The row count is the non-blank line count, which is one pass over the bytes
+  # rather than a parse, and is what the ack reports. The trade is stated in
   # `insert_ndjson/4`'s docs: nothing validates per row on this path, so
   # `insertErrors` is always empty and a value the schema cannot take fails the
   # whole flush instead of one row.
@@ -142,19 +142,23 @@ defmodule Smolquery.IngestService.Client do
 
         {:ok, %{inserted: 0, errors: errors}}
 
+      # The owning buffer's flush writer cannot take unparsed bytes — its config
+      # and this node's disagree. Parsing here costs what passthrough saves, but
+      # answers the request instead of failing it over a deployment seam.
+      {:error, :ndjson_unsupported} ->
+        parse_and_write(runtime, table_ref, schema, body, opts)
+
       {:error, _reason} = error ->
         error
     end
   end
 
-  # A body whose last line has no newline still holds a row, so the count is the
-  # newlines plus one unless the bytes end on a newline.
-  defp count_rows(<<>>), do: 0
-
+  # Non-blank lines, not newlines: the flush's `read_json` skips a blank line,
+  # so counting it would ack a row that was never committed. Splitting keeps
+  # this a pass over the bytes without a parse, and its indices are the ones
+  # `decode_lines/1` and the salvage path report errors at.
   defp count_rows(body) do
-    newlines = body |> :binary.matches("\n") |> length()
-
-    if String.ends_with?(body, "\n"), do: newlines, else: newlines + 1
+    body |> String.split("\n", trim: true) |> length()
   end
 
   defp parse_and_write(runtime, table_ref, schema, body, opts) do
