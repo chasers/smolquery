@@ -99,6 +99,10 @@ if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
   config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end
 
+if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
+  config :smolquery, Smolquery.BufferService, encode_concurrency: String.to_integer(concurrency)
+end
+
 if hot_server_port = System.get_env("SMOLQUERY_HOT_SERVER_PORT") do
   port = String.to_integer(hot_server_port)
 
