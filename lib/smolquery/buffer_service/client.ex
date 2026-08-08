@@ -98,8 +98,8 @@ defmodule Smolquery.BufferService.Client do
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()}
-          | {:ok, TableBuffer.ack(), [Smolquery.IngestService.Validator.row_errors()]}
-          | {:invalid, [Smolquery.IngestService.Validator.row_errors()]}
+          | {:ok, TableBuffer.ack(), [TableBuffer.row_errors()]}
+          | {:invalid, [TableBuffer.row_errors()]}
           | {:error, term()}
   def write_batch(name, table_ref, batch) do
     routing = Routing.resolve(name)

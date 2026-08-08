@@ -109,7 +109,6 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.BufferService.TableBuffer.Committer
-  alias Smolquery.IngestService.Validator
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
@@ -135,6 +134,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   ]
 
   @type ack :: %{segment_id: String.t(), row_count: non_neg_integer()}
+
+  @typedoc """
+  Rows a flush refused, at their index in the caller's body.
+
+  Structurally what `Smolquery.IngestService.Validator` produces, declared here
+  because `buffer_service -> ingest_service` is forbidden and the buffer must
+  stay deployable without the ingest edge.
+  """
+  @type row_errors :: %{index: non_neg_integer(), errors: [%{message: String.t()}]}
 
   @doc """
   A child spec identified by the table the buffer owns.
@@ -240,8 +248,8 @@ defmodule Smolquery.BufferService.TableBuffer do
           String.t() | nil
         ) ::
           {:ok, ack()}
-          | {:ok, ack(), [Validator.row_errors()]}
-          | {:invalid, [Validator.row_errors()]}
+          | {:ok, ack(), [row_errors()]}
+          | {:invalid, [row_errors()]}
           | {:duplicate, ack()}
           | {:error, term()}
   def write_ndjson(

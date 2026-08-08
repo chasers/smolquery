@@ -62,7 +62,6 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.IngestService.Validator
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
@@ -343,8 +342,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   # The bad body, split: which rows the schema rejects, and the ones it takes.
-  # `Validator.validate/2` is the JSON route's own validator, so the errors a
-  # caller sees here are the errors it would have seen there.
+  #
+  # The validator is injected rather than called by name. Row validation belongs
+  # to the ingest edge, and `buffer_service -> ingest_service` is forbidden — the
+  # buffer has to stay deployable without it. `:row_validator` is configured the
+  # way `:seal_consumer` already is, so the errors a caller sees here are the
+  # errors the JSON route would have given it, without the dependency.
   defp recover(runtime, commit, id, {path, index}) do
     {valid, errors} =
       path
@@ -356,10 +359,22 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
           {:error, _reason} -> line
         end
       end)
-      |> then(&Validator.validate(commit.schema, &1))
+      |> then(&validate_rows(runtime, commit.schema, &1))
 
     %{index: index, errors: errors, paths: respool(runtime, id, index, valid)}
   end
+
+  # No validator configured means no way to attribute rows to a caller, so the
+  # body is rejected whole rather than guessed at.
+  defp validate_rows(%{row_validator: {module, function}}, schema, rows),
+    do: apply(module, function, [schema, rows])
+
+  defp validate_rows(_runtime, _schema, rows),
+    do:
+      {[],
+       Enum.map(Enum.with_index(rows), fn {_row, index} ->
+         %{index: index, errors: [%{message: "no row validator configured"}]}
+       end)}
 
   defp respool(_runtime, _id, _index, []), do: []
 

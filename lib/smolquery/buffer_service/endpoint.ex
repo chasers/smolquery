@@ -25,7 +25,6 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer
-  alias Smolquery.IngestService.Validator
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
@@ -82,8 +81,8 @@ defmodule Smolquery.BufferService.Endpoint do
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()}
-          | {:ok, TableBuffer.ack(), [Validator.row_errors()]}
-          | {:invalid, [Validator.row_errors()]}
+          | {:ok, TableBuffer.ack(), [TableBuffer.row_errors()]}
+          | {:invalid, [TableBuffer.row_errors()]}
           | {:error, term()}
   def write_batch(name, table_ref, %{schema: %Schema{} = schema} = batch) do
     with {:ok, runtime} <- runtime(name),

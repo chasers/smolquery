@@ -270,13 +270,15 @@ defmodule Smolquery.Segments.Writer do
   # the API, but a quoted literal in a COPY is exactly the place a future
   # caller-supplied name would become an injection.
   defp copy_ndjson(engine, paths, staged, schema, compression) do
+    count = length(paths)
+
     sql = """
     COPY (
-      SELECT * FROM read_json([#{placeholders(length(paths))}],
+      SELECT * FROM read_json([#{placeholders(count)}],
         format = 'newline_delimited',
         columns = {#{columns_spec(schema)}})#{order_clause(schema)}
     )
-    TO $#{length(paths) + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)})
+    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)})
     """
 
     case Engine.query(engine, sql, paths ++ [staged]) do
@@ -323,9 +325,14 @@ defmodule Smolquery.Segments.Writer do
     fields
     |> Enum.zip(Enum.chunk_every(values, 3))
     |> Map.new(fn {%Field{} = field, [min, max, nulls]} ->
-      {field.name, %{min: min, max: max, null_count: nulls}}
+      {field.name, column_stats(min, max, nulls)}
     end)
   end
+
+  # One shape for a column's manifest stats, whichever writer produced them —
+  # `Smolquery.BufferService.HotManifest.Entry` reads them by these names.
+  defp column_stats(min, max, null_count),
+    do: %{min: min, max: max, null_count: null_count}
 
   defp ndjson_bounded?({:numeric, _precision, _scale}), do: true
   defp ndjson_bounded?(:string), do: true
@@ -375,11 +382,11 @@ defmodule Smolquery.Segments.Writer do
       null_count = Series.nil_count(series)
 
       {field.name,
-       %{
-         min: bound(series, field, sorted, :min, row_count, null_count),
-         max: bound(series, field, sorted, :max, row_count, null_count),
-         null_count: null_count
-       }}
+       column_stats(
+         bound(series, field, sorted, :min, row_count, null_count),
+         bound(series, field, sorted, :max, row_count, null_count),
+         null_count
+       )}
     end)
   end
 

@@ -101,6 +101,7 @@ defmodule Smolquery.BufferService.Runtime do
     encode_concurrency: 2,
     flush_writer: :polars,
     write_pool_size: 1,
+    row_validator: nil,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
   ]
@@ -131,6 +132,7 @@ defmodule Smolquery.BufferService.Runtime do
           encode_concurrency: pos_integer(),
           flush_writer: :polars | :duckdb,
           write_pool_size: pos_integer(),
+          row_validator: {module(), atom()} | nil,
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
         }
@@ -155,6 +157,7 @@ defmodule Smolquery.BufferService.Runtime do
     :encode_concurrency,
     :flush_writer,
     :write_pool_size,
+    :row_validator,
     :hot_server_ip,
     :hot_server_port
   ]
