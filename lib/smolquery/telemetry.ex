@@ -26,7 +26,9 @@ defmodule Smolquery.Telemetry do
 
       [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status
       [:smolquery, :ingest, :insert]      %{accepted, rejected}
-      [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us}, meta %{result: :ok | :error}
+      [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
+                                            queue_us, encode_us, manifest_us,
+                                            replicate_us}, meta %{result: :ok | :error}
       [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused}
       [:smolquery, :buffer, :dedup]       %{rows}
       [:smolquery, :seal, :attempt]       %{}, meta %{result: :ok | :error | :crashed}
@@ -62,6 +64,8 @@ defmodule Smolquery.Telemetry do
     "smolquery_buffer_rows_committed_total" => "Rows made durable by group commits.",
     "smolquery_buffer_commit_microseconds_total" =>
       "Time spent in group commits; divide by commits for the mean.",
+    "smolquery_buffer_commit_phase_microseconds_total" =>
+      "Time spent in each term of a group commit; divide by commits for the mean.",
     "smolquery_buffer_admission_refused_rows_total" =>
       "Rows refused by Little's-law admission (PL-9).",
     "smolquery_buffer_dedup_rows_total" =>
@@ -139,6 +143,13 @@ defmodule Smolquery.Telemetry do
       {"smolquery_buffer_commit_microseconds_total", []},
       Map.get(measurements, :duration_us, 0)
     )
+
+    for phase <- ~w(accumulate queue encode manifest replicate)a do
+      bump(
+        {"smolquery_buffer_commit_phase_microseconds_total", [phase: phase]},
+        Map.get(measurements, :"#{phase}_us", 0)
+      )
+    end
   end
 
   def handle_event([:smolquery, :buffer, :admission], measurements, _meta, nil) do
