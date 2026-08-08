@@ -80,9 +80,19 @@ defmodule Smolquery.IngestService.Client do
   def insert_ndjson(name, table_ref, body, opts \\ []) when is_binary(body) do
     with {:ok, runtime} <- runtime(name),
          {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      case ColumnarValidator.validate(schema, body) do
-        {:ok, frame} -> write_frame(runtime, table_ref, schema, frame, byte_size(body), opts)
-        :fallback -> insert_decoded_lines(runtime, table_ref, schema, body, opts)
+      # The parse is timed separately from the write because they are the two
+      # halves of the ack that live on this side of the wire, and T-181 left
+      # ~400ms of it unattributed (T-182).
+      started = System.monotonic_time(:microsecond)
+      validated = ColumnarValidator.validate(schema, body)
+      parse_us = System.monotonic_time(:microsecond) - started
+
+      case validated do
+        {:ok, frame} ->
+          write_frame(runtime, table_ref, schema, frame, byte_size(body), opts, parse_us)
+
+        :fallback ->
+          insert_decoded_lines(runtime, table_ref, schema, body, opts)
       end
     end
   end
@@ -110,7 +120,7 @@ defmodule Smolquery.IngestService.Client do
     end)
   end
 
-  defp write_frame(runtime, table_ref, schema, frame, byte_size, opts) do
+  defp write_frame(runtime, table_ref, schema, frame, byte_size, opts, parse_us) do
     batch = %{schema: schema, frame: frame, byte_size: byte_size}
     batch_id = Keyword.get(opts, :batch_id)
     target = Partitions.write_ref(table_ref, runtime.write_partitions, batch_id)
@@ -121,9 +131,13 @@ defmodule Smolquery.IngestService.Client do
         batch_id -> Map.put(batch, :batch_id, batch_id)
       end
 
-    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
+    started = System.monotonic_time(:microsecond)
+    written = BufferService.Client.write_batch(runtime.buffer_name, target, batch)
+    write_us = System.monotonic_time(:microsecond) - started
+
+    with {:ok, _ack} <- written do
       inserted = DataFrame.n_rows(frame)
-      measure(inserted, [])
+      measure(inserted, [], parse_us, write_us)
 
       {:ok, %{inserted: inserted, errors: []}}
     end
@@ -155,10 +169,15 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
-  defp measure(accepted, errors) do
+  defp measure(accepted, errors, parse_us \\ 0, write_us \\ 0) do
     :telemetry.execute(
       [:smolquery, :ingest, :insert],
-      %{accepted: accepted, rejected: length(errors)},
+      %{
+        accepted: accepted,
+        rejected: length(errors),
+        parse_us: parse_us,
+        write_us: write_us
+      },
       %{}
     )
   end

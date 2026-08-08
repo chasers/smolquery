@@ -102,7 +102,18 @@ defmodule Smolquery.BufferService.Client do
     routing = Routing.resolve(name)
     owner = Routing.owner(routing, table_ref)
     transport = Routing.transport(routing, owner)
+
+    # Timed apart from the call because on a partitioned table most batches are
+    # remote, and serializing a multi-megabyte frame to Arrow IPC before every
+    # one of them is a per-request cost nothing had ever priced (T-182).
+    started = System.monotonic_time(:microsecond)
     batch = wire_batch(transport, batch)
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :wire],
+      %{duration_us: System.monotonic_time(:microsecond) - started},
+      %{transport: if(transport == Transport.Local, do: :local, else: :remote)}
+    )
 
     Transport.invoke(
       transport,
