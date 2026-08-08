@@ -50,6 +50,44 @@ defmodule Smolquery.BufferService.ClientTest do
       assert is_binary(ack.segment_id)
     end
 
+    test "a columnar batch lands as a frame, and row and frame batches share a commit",
+         context do
+      name = start_buffer_service(context, flush_interval_ms: 200)
+      schema = Schema.new!([{"id", :int64}])
+
+      frame = Explorer.DataFrame.new([{"id", Explorer.Series.from_list([3, 4], dtype: {:s, 64})}])
+
+      rows_write = Task.async(fn -> Client.write_batch(name, @table, batch([%{"id" => 1}])) end)
+
+      frame_write =
+        Task.async(fn ->
+          Client.write_batch(name, @table, %{schema: schema, frame: frame, byte_size: 64})
+        end)
+
+      assert {:ok, _rows_ack} = Task.await(rows_write)
+      assert {:ok, _frame_ack} = Task.await(frame_write)
+
+      {:ok, entries} = Client.hot_manifest(name, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 3
+    end
+
+    test "a columnar batch arriving as Arrow IPC bytes — the wire shape — lands", context do
+      name = start_buffer_service(context)
+      schema = Schema.new!([{"id", :int64}])
+
+      frame = Explorer.DataFrame.new([{"id", Explorer.Series.from_list([7], dtype: {:s, 64})}])
+      ipc = Explorer.DataFrame.dump_ipc!(frame)
+
+      assert {:ok, ack} =
+               Client.write_batch(name, @table, %{
+                 schema: schema,
+                 frame_ipc: ipc,
+                 byte_size: byte_size(ipc)
+               })
+
+      assert ack.row_count == 1
+    end
+
     test "sheds a write whose predicted wait exceeds the ack budget, then recovers", context do
       name = start_buffer_service(context, flush_max_rows: 1, ack_budget_ms: 100)
 

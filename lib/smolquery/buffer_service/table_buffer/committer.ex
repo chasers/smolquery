@@ -49,7 +49,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   @type commit :: %{
           schema: Smolquery.Schema.t(),
-          rows: [Writer.row()],
+          chunks: [[Writer.row()] | Explorer.DataFrame.t()],
           pending: [{GenServer.from(), :new | :duplicate | :flush}],
           batch_ids: [String.t()],
           row_count: non_neg_integer(),
@@ -179,8 +179,9 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp reply_for(:flush, error), do: error
 
   defp persist(state, commit) do
-    with {:ok, segment} <-
-           Writer.write(commit.rows, commit.schema,
+    with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema),
+         {:ok, segment} <-
+           Writer.write(merged, commit.schema,
              store: state.runtime.store,
              prefix: state.prefix
            ),
