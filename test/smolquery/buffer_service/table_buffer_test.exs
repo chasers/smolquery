@@ -114,6 +114,39 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert ack.row_count == 5
     end
 
+    test "a train of commits lands complete through concurrent encodes (T-169)", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context, flush_max_rows: 1, encode_concurrency: 2)
+
+      acks =
+        1..12
+        |> Task.async_stream(fn i -> Client.write_batch(name, @table, batch(i..i)) end,
+          timeout: 5_000
+        )
+        |> Enum.map(fn {:ok, ack} -> ack end)
+
+      assert Enum.all?(acks, &match?({:ok, _ack}, &1))
+
+      total =
+        runtime.manifest
+        |> HotManifest.entries(@table)
+        |> Enum.map(& &1.row_count)
+        |> Enum.sum()
+
+      assert total == 12
+    end
+
+    test "an encode failure fails only its own commit, and the next lands", context do
+      %{name: name} =
+        start_buffer_service(context, flush_max_rows: 1, encode_concurrency: 2)
+
+      poisoned = %{schema: schema(), rows: [%{"id" => :not_encodable}]}
+
+      assert {:error, {:invalid_rows, _message}} = Client.write_batch(name, @table, poisoned)
+      assert {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+      assert ack.row_count == 1
+    end
+
     test "flushes on the byte threshold", context do
       %{name: name} = start_buffer_service(context, flush_max_bytes: 1, flush_interval_ms: 60_000)
 

@@ -18,21 +18,40 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   a claim queued behind the commit that created its entries cannot ship to a
   follower before the entries themselves have replicated.
 
+  ## Encodes run concurrently; everything durable stays serial (T-169)
+
+  The encode — merge, sort, Parquet, the store put — is the group commit's
+  CPU, and it needs nothing from the log, so up to `encode_concurrency`
+  commits encode in parallel as linked tasks. What each encode *becomes*
+  durable through — the manifest append and fsync, the replication round,
+  the callers' replies, the load accounting — runs in this process, one
+  commit at a time, in encode-completion order. Completion order is not
+  handoff order, and nothing here needs it to be: segments are independent
+  entries, batch-id dedup is set-shaped on both ends, and a caller only
+  ever waits on its own commit.
+
+  The with_log ordering guarantee survives because a commit's manifest add
+  and its replication round finish inside one serialized step: a claim
+  reaching the log can only run between finishes, so every entry it can
+  freeze has already replicated, exactly as when commits were fully serial.
+
   ## Commits queue; nothing re-runs
 
-  Handoffs are casts and process strictly in order, so a burst of flushes
-  becomes a queue of commits, each replied to as it lands. Before running a
-  commit, the committer probes for its buffer's exit: a killed buffer's
-  queued batches were never acked, so they are dropped rather than committed
-  to callers who already saw the crash. With nothing queued, the buffer is
-  this process's OTP parent, so gen_server handles the exit itself —
-  `terminate/2` closes the log either way. The registered name doubles as an
-  exclusion lock — a restarted buffer cannot recover the table or reopen the
-  log while the previous committer still holds it.
+  Handoffs are casts; a burst of flushes becomes encode tasks up to the
+  concurrency bound and a FIFO of waiting commits behind them. Before
+  accepting a commit, the committer probes for its buffer's exit: a killed
+  buffer's queued batches were never acked, so they are dropped rather than
+  committed to callers who already saw the crash. With nothing queued, the
+  buffer is this process's OTP parent, so gen_server handles the exit
+  itself — `terminate/2` closes the log either way, and the encode tasks
+  are linked, so they die with it. The registered name doubles as an
+  exclusion lock — a restarted buffer cannot recover the table or reopen
+  the log while the previous committer still holds it.
 
   `sync/2` is the barrier the buffer uses where it must not run ahead: a
   schema-change flush, a drain's force-seal, an in-flight duplicate, a
-  graceful shutdown.
+  graceful shutdown. It replies once every queued and encoding commit has
+  finished.
   """
 
   use GenServer
@@ -45,7 +64,17 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
-  defstruct [:buffer, :runtime, :table_ref, :prefix, :load, :log]
+  defstruct [
+    :buffer,
+    :runtime,
+    :table_ref,
+    :prefix,
+    :load,
+    :log,
+    queue: :queue.new(),
+    encoding: %{},
+    syncers: []
+  ]
 
   @type commit :: %{
           schema: Smolquery.Schema.t(),
@@ -118,7 +147,13 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     end
   end
 
-  def handle_call(:sync, _from, state), do: {:reply, :ok, state}
+  def handle_call(:sync, from, state) do
+    if idle?(state) do
+      {:reply, :ok, state}
+    else
+      {:noreply, %{state | syncers: [from | state.syncers]}}
+    end
+  end
 
   def handle_call({:with_log, fun}, _from, state), do: {:reply, fun.(state.log), state}
 
@@ -127,11 +162,33 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     if buffer_exited?(state) do
       {:stop, :shutdown, state}
     else
-      {:noreply, run(state, commit)}
+      {:noreply, accept(state, commit)}
     end
   end
 
   @impl GenServer
+  def handle_info({ref, result}, state) when is_map_key(state.encoding, ref) do
+    Process.demonitor(ref, [:flush])
+    {{commit, started}, encoding} = Map.pop(state.encoding, ref)
+
+    %{state | encoding: encoding}
+    |> finish(commit, result, started)
+    |> start_queued()
+    |> settle_syncers()
+    |> then(&{:noreply, &1})
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state)
+      when is_map_key(state.encoding, ref) do
+    {{commit, started}, encoding} = Map.pop(state.encoding, ref)
+
+    %{state | encoding: encoding}
+    |> finish(commit, {:error, {:encode_crashed, reason}}, started)
+    |> start_queued()
+    |> settle_syncers()
+    |> then(&{:noreply, &1})
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
@@ -146,9 +203,53 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     end
   end
 
-  defp run(state, commit) do
+  defp idle?(state), do: :queue.is_empty(state.queue) and map_size(state.encoding) == 0
+
+  defp accept(state, commit) do
+    if map_size(state.encoding) < state.runtime.encode_concurrency do
+      start_encode(state, commit)
+    else
+      %{state | queue: :queue.in(commit, state.queue)}
+    end
+  end
+
+  defp start_queued(state) do
+    with false <- map_size(state.encoding) >= state.runtime.encode_concurrency,
+         {{:value, commit}, queue} <- :queue.out(state.queue) do
+      start_encode(%{state | queue: queue}, commit)
+    else
+      _at_capacity_or_empty -> state
+    end
+  end
+
+  defp start_encode(state, commit) do
     started = System.monotonic_time(:microsecond)
-    result = persist(state, commit)
+    runtime = state.runtime
+    prefix = state.prefix
+
+    task = Task.async(fn -> encode(runtime, prefix, commit) end)
+
+    %{state | encoding: Map.put(state.encoding, task.ref, {commit, started})}
+  end
+
+  defp encode(runtime, prefix, commit) do
+    with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
+      Writer.write(merged, commit.schema,
+        store: runtime.store,
+        prefix: prefix,
+        compression: runtime.compression
+      )
+    end
+  end
+
+  defp finish(state, commit, encoded, started) do
+    result =
+      with {:ok, segment} <- encoded,
+           {:ok, entry} <- add(state, segment, commit.batch_ids),
+           :ok <- replicate(state, segment, entry) do
+        {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
+      end
+
     duration_us = System.monotonic_time(:microsecond) - started
 
     Load.drained(state.load, commit.row_count)
@@ -172,25 +273,21 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     state
   end
 
+  defp settle_syncers(state) do
+    if idle?(state) do
+      Enum.each(state.syncers, &GenServer.reply(&1, :ok))
+
+      %{state | syncers: []}
+    else
+      state
+    end
+  end
+
   defp reply_for(:new, result), do: result
   defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
   defp reply_for(:duplicate, error), do: error
   defp reply_for(:flush, {:ok, _ack}), do: :ok
   defp reply_for(:flush, error), do: error
-
-  defp persist(state, commit) do
-    with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema),
-         {:ok, segment} <-
-           Writer.write(merged, commit.schema,
-             store: state.runtime.store,
-             prefix: state.prefix,
-             compression: state.runtime.compression
-           ),
-         {:ok, entry} <- add(state, segment, commit.batch_ids),
-         :ok <- replicate(state, segment, entry) do
-      {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
-    end
-  end
 
   defp add(state, segment, batch_ids) do
     case HotManifest.add(state.runtime.manifest, state.table_ref, segment, state.log, batch_ids) do
