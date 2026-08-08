@@ -80,30 +80,45 @@ defmodule Smolquery.BufferService.Supervisor do
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
 
-    children = [
-      membership(runtime),
-      ring_epoch(runtime),
-      {HotManifest, name: Runtime.manifest(runtime.name)},
-      {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
-      Supervisor.child_spec(
-        {Registry, keys: :unique, name: Runtime.committer_registry(runtime.name)},
-        id: Runtime.committer_registry(runtime.name)
-      ),
-      {PartitionSupervisor, child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
-      {Adopter, runtime},
-      Supervisor.child_spec(
-        {Bandit,
-         plug: {HotServer, runtime.name},
-         ip: runtime.hot_server_ip,
-         port: runtime.hot_server_port,
-         startup_log: false},
-        id: Runtime.hot_server(runtime.name)
-      ),
-      expected_nodes(runtime)
-    ]
+    children =
+      write_engines(runtime) ++
+        [
+          membership(runtime),
+          ring_epoch(runtime),
+          {HotManifest, name: Runtime.manifest(runtime.name)},
+          {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
+          Supervisor.child_spec(
+            {Registry, keys: :unique, name: Runtime.committer_registry(runtime.name)},
+            id: Runtime.committer_registry(runtime.name)
+          ),
+          {PartitionSupervisor,
+           child_spec: DynamicSupervisor, name: Runtime.buffers(runtime.name)},
+          {Adopter, runtime},
+          Supervisor.child_spec(
+            {Bandit,
+             plug: {HotServer, runtime.name},
+             ip: runtime.hot_server_ip,
+             port: runtime.hot_server_port,
+             startup_log: false},
+            id: Runtime.hot_server(runtime.name)
+          ),
+          expected_nodes(runtime)
+        ]
 
     Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
   end
+
+  # The `:duckdb` flush writer needs its own DuckDB instances, and they start
+  # before everything else under `:rest_for_one` because a committer that cannot
+  # reach its engine cannot flush at all. `:polars` starts none, so the default
+  # deployment carries no extra process.
+  defp write_engines(%Runtime{flush_writer: :duckdb} = runtime) do
+    Enum.map(Runtime.engines(runtime), fn name ->
+      Supervisor.child_spec({Smolquery.Engine, name: name, extensions: []}, id: name)
+    end)
+  end
+
+  defp write_engines(_runtime), do: []
 
   defp membership(runtime) do
     unless Drain.draining?(runtime.name) do

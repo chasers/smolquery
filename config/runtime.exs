@@ -111,6 +111,20 @@ if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
   config :smolquery, Smolquery.BufferService, max_buffered_bytes: String.to_integer(bytes)
 end
 
+# One variable sets both halves, because they are one decision: the ingest edge
+# only stops parsing if the buffer it forwards to can write the bytes, and a
+# buffer that starts DuckDB instances for flushes nothing sends is waste.
+if writer = System.get_env("SMOLQUERY_FLUSH_WRITER") do
+  flush_writer = String.to_existing_atom(writer)
+
+  config :smolquery, Smolquery.BufferService, flush_writer: flush_writer
+  config :smolquery, Smolquery.IngestService, ndjson_passthrough: flush_writer == :duckdb
+end
+
+if size = System.get_env("SMOLQUERY_WRITE_POOL_SIZE") do
+  config :smolquery, Smolquery.BufferService, write_pool_size: String.to_integer(size)
+end
+
 if partitions = System.get_env("SMOLQUERY_WRITE_PARTITIONS") do
   count = String.to_integer(partitions)
 

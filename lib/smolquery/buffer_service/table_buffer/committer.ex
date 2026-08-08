@@ -61,6 +61,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
+  alias Smolquery.BufferService.Runtime
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
@@ -244,18 +246,162 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp encode(runtime, prefix, commit) do
-    with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
-      Writer.write(merged, commit.schema,
-        store: runtime.store,
-        prefix: prefix,
-        compression: runtime.compression
-      )
+    if ndjson_commit?(commit) do
+      encode_ndjson(runtime, prefix, commit)
+    else
+      with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
+        Writer.write(merged, commit.schema,
+          store: runtime.store,
+          prefix: prefix,
+          compression: runtime.compression
+        )
+      end
     end
+  end
+
+  defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
+  defp ndjson_commit?(_commit), do: false
+
+  # The bytes reach disk here rather than at the API, because the API no longer
+  # knows which node owns the table — #108's partitions send most batches to a
+  # peer, and a path on the sender's disk means nothing to the owner. Spooling on
+  # the owner is what makes the unparsed body survive the hop.
+  #
+  # The segment id is minted before the write so the pool can be selected on it,
+  # spreading a table's concurrent encodes across DuckDB instances instead of
+  # queueing them all on one ADBC connection.
+  defp encode_ndjson(runtime, prefix, commit) do
+    id = Id.generate()
+    engine = Runtime.engine_for(runtime, id)
+    paths = spool(runtime, id, commit.chunks)
+
+    try do
+      case write_ndjson(runtime, prefix, commit, id, engine, paths) do
+        {:ok, segment} -> {:ok, segment}
+        {:error, _reason} -> salvage(runtime, prefix, commit, id, engine, paths)
+      end
+    after
+      Enum.each(paths, &File.rm/1)
+    end
+  end
+
+  defp write_ndjson(runtime, prefix, commit, id, engine, paths) do
+    Writer.write({:ndjson, paths}, commit.schema,
+      store: runtime.store,
+      prefix: prefix,
+      id: id,
+      engine: engine,
+      compression: runtime.compression
+    )
+  end
+
+  # A group commit merges several callers' bodies, so one unparseable value would
+  # otherwise fail every caller that shared the commit — including the ones whose
+  # rows were fine. Worse, the failure is deterministic, so a client retrying a bad
+  # batch would keep poisoning its neighbours.
+  #
+  # Only reached when the whole-commit COPY already failed, so the cost is paid by
+  # the batch that caused it. Each body is checked on its own, the good ones commit
+  # together, and a bad one is decoded through the per-row validator so its caller
+  # gets the same `insertErrors` the JSON route would have given it. Rows that are
+  # valid inside a bad body are re-spooled and committed too — rejecting a whole
+  # request for one row is what this path is fixing.
+  defp salvage(runtime, prefix, commit, id, engine, paths) do
+    {good, bad} =
+      paths
+      |> Enum.with_index()
+      |> Enum.split_with(fn {path, _index} ->
+        Writer.readable_ndjson?(engine, path, commit.schema)
+      end)
+
+    if bad == [] do
+      {:error, :ndjson_commit_failed}
+    else
+      recovered = Enum.map(bad, &recover(runtime, commit, id, &1))
+
+      salvaged =
+        Enum.map(good, fn {path, _index} -> path end) ++ Enum.flat_map(recovered, & &1.paths)
+
+      rejected = Map.new(recovered, &{&1.index, &1.errors})
+
+      rewrite(runtime, prefix, commit, id, engine, salvaged, rejected)
+    end
+  after
+    Enum.each(Path.wildcard(Path.join(runtime.spool_dir, "#{id}-*-valid.ndjson")), &File.rm/1)
+  end
+
+  # Nothing left to write means every body in the commit was bad, so the callers
+  # are answered from their errors alone and no segment is made durable.
+  defp rewrite(_runtime, _prefix, _commit, _id, _engine, [], rejected), do: {:rejected, rejected}
+
+  defp rewrite(runtime, prefix, commit, id, engine, keep, rejected) do
+    case write_ndjson(runtime, prefix, commit, id, engine, keep) do
+      {:ok, segment} -> {:ok, segment, rejected}
+      {:error, _reason} -> {:rejected, rejected}
+    end
+  end
+
+  # The bad body, split: which rows the schema rejects, and the ones it takes.
+  #
+  # The validator is injected rather than called by name. Row validation belongs
+  # to the ingest edge, and `buffer_service -> ingest_service` is forbidden — the
+  # buffer has to stay deployable without it. `:row_validator` is configured the
+  # way `:seal_consumer` already is, so the errors a caller sees here are the
+  # errors the JSON route would have given it, without the dependency.
+  defp recover(runtime, commit, id, {path, index}) do
+    {valid, errors} =
+      path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(fn line ->
+        case JSON.decode(line) do
+          {:ok, row} -> row
+          {:error, _reason} -> line
+        end
+      end)
+      |> then(&validate_rows(runtime, commit.schema, &1))
+
+    %{index: index, errors: errors, paths: respool(runtime, id, index, valid)}
+  end
+
+  # No validator configured means no way to attribute rows to a caller, so the
+  # body is rejected whole rather than guessed at.
+  defp validate_rows(%{row_validator: {module, function}}, schema, rows),
+    do: apply(module, function, [schema, rows])
+
+  defp validate_rows(_runtime, _schema, rows),
+    do:
+      {[],
+       Enum.map(Enum.with_index(rows), fn {_row, index} ->
+         %{index: index, errors: [%{message: "no row validator configured"}]}
+       end)}
+
+  defp respool(_runtime, _id, _index, []), do: []
+
+  defp respool(runtime, id, index, rows) do
+    path = Path.join(runtime.spool_dir, "#{id}-#{index}-valid.ndjson")
+
+    File.write!(path, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n")
+
+    [path]
+  end
+
+  defp spool(runtime, id, chunks) do
+    File.mkdir_p!(runtime.spool_dir)
+
+    chunks
+    |> Enum.with_index()
+    |> Enum.map(fn {{:ndjson, body, _count}, index} ->
+      path = Path.join(runtime.spool_dir, "#{id}-#{index}.ndjson")
+      File.write!(path, body)
+      path
+    end)
   end
 
   defp finish(state, commit, encoded, started) do
     encoded_at = System.monotonic_time(:microsecond)
 
+    {encoded, rejected} = split_rejected(encoded)
     {result, added_at} = commit_durably(state, commit, encoded, encoded_at)
 
     done_at = System.monotonic_time(:microsecond)
@@ -282,9 +428,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       %{result: if(match?({:ok, _ack}, result), do: :ok, else: :error)}
     )
 
-    Enum.each(commit.pending, fn {from, kind} ->
-      GenServer.reply(from, reply_for(kind, result))
-    end)
+    reply_to_pending(commit.pending, result, rejected)
 
     send(state.buffer, {:commit_done, commit.batch_ids})
 
@@ -310,6 +454,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp commit_durably(_state, _commit, {:error, _reason} = error, encoded_at),
     do: {error, encoded_at}
 
+  # Nothing survived the salvage, so there is no segment to make durable and the
+  # rejected callers are answered from their own errors alone.
+  defp commit_durably(_state, _commit, {:rejected, _rejected} = rejected, encoded_at),
+    do: {rejected, encoded_at}
+
   # A commit built before this instrumentation shipped, or one a test hands over
   # by hand, carries no stamps; an unmeasured span is 0 rather than a crash.
   defp span(nil, _to), do: 0
@@ -325,6 +474,47 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       state
     end
   end
+
+  # The salvage path answers some callers differently from the rest of their
+  # commit, so replies are indexed rather than broadcast. Only `:new` entries
+  # carry a chunk — `:duplicate` and `:flush` join a commit without adding one —
+  # so the index that identifies a rejected body counts `:new` entries alone,
+  # which is the order the buffer spooled them in.
+  defp reply_to_pending(pending, result, rejected) when map_size(rejected) == 0 do
+    Enum.each(pending, fn {from, kind} -> GenServer.reply(from, reply_for(kind, result)) end)
+  end
+
+  defp reply_to_pending(pending, result, rejected) do
+    pending
+    |> Enum.reduce(0, fn {from, kind}, index ->
+      case {kind, Map.fetch(rejected, index)} do
+        {:new, {:ok, errors}} ->
+          GenServer.reply(from, rejected_reply(result, errors))
+          index + 1
+
+        {:new, :error} ->
+          GenServer.reply(from, reply_for(kind, result))
+          index + 1
+
+        _not_a_chunk ->
+          GenServer.reply(from, reply_for(kind, result))
+          index
+      end
+    end)
+    |> then(fn _index -> :ok end)
+  end
+
+  # A caller whose body held bad rows is answered the way the JSON route answers
+  # one: partial failure is a result, not an error. Its valid rows are in the
+  # segment that just committed, so the ack is real; `errors` names the rows the
+  # schema refused, at their index in that caller's body.
+  defp rejected_reply({:ok, ack}, errors), do: {:ok, ack, errors}
+  defp rejected_reply({:rejected, _rejected}, errors), do: {:invalid, errors}
+  defp rejected_reply(error, _errors), do: error
+
+  defp split_rejected({:ok, segment, rejected}), do: {{:ok, segment}, rejected}
+  defp split_rejected({:rejected, rejected}), do: {{:rejected, rejected}, rejected}
+  defp split_rejected(encoded), do: {encoded, %{}}
 
   defp reply_for(:new, result), do: result
   defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}

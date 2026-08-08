@@ -135,6 +135,15 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @type ack :: %{segment_id: String.t(), row_count: non_neg_integer()}
 
+  @typedoc """
+  Rows a flush refused, at their index in the caller's body.
+
+  Structurally what `Smolquery.IngestService.Validator` produces, declared here
+  because `buffer_service -> ingest_service` is forbidden and the buffer must
+  stay deployable without the ingest edge.
+  """
+  @type row_errors :: %{index: non_neg_integer(), errors: [%{message: String.t()}]}
+
   @doc """
   A child spec identified by the table the buffer owns.
   """
@@ -220,6 +229,44 @@ defmodule Smolquery.BufferService.TableBuffer do
         batch_id \\ nil
       ) do
     GenServer.call(buffer, {:write, schema, frame, batch_id, byte_size}, timeout)
+  end
+
+  @doc """
+  Accumulates an unparsed NDJSON body and returns once it is durable.
+
+  `row_count` is the sender's newline count, not a parse: this node does not
+  read the bytes, and the flush is what turns them into a segment. Otherwise
+  identical to `write_frame/6`, including the ack and the dedup semantics.
+  """
+  @spec write_ndjson(
+          GenServer.server(),
+          Schema.t(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          timeout(),
+          String.t() | nil
+        ) ::
+          {:ok, ack()}
+          | {:ok, ack(), [row_errors()]}
+          | {:invalid, [row_errors()]}
+          | {:duplicate, ack()}
+          | {:error, term()}
+  def write_ndjson(
+        buffer,
+        %Schema{} = schema,
+        body,
+        row_count,
+        byte_size,
+        timeout,
+        batch_id \\ nil
+      )
+      when is_binary(body) do
+    GenServer.call(
+      buffer,
+      {:write, schema, {:ndjson, body, row_count}, batch_id, byte_size},
+      timeout
+    )
   end
 
   @doc """
@@ -766,6 +813,10 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp chunk_count(rows) when is_list(rows), do: length(rows)
   defp chunk_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
+
+  # Counted by the sender, because counting newlines again here would be a second
+  # pass over bytes this node is deliberately not reading.
+  defp chunk_count({:ndjson, _body, count}), do: count
 
   defp handoff(%__MODULE__{chunks: []} = state), do: state
 

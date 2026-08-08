@@ -79,7 +79,8 @@ config :smolquery, Smolquery.BufferService,
   maintenance_interval_ms: 5_000,
   hot_server_ip: {127, 0, 0, 1},
   hot_server_port: 4001,
-  seal_consumer: {Smolquery.StorageService.Client, []}
+  seal_consumer: {Smolquery.StorageService.Client, []},
+  row_validator: {Smolquery.IngestService.Validator, :validate}
 
 config :smolquery, Smolquery.StorageService,
   dir: "priv/data/sealed",
