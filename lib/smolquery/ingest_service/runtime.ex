@@ -23,6 +23,17 @@ defmodule Smolquery.IngestService.Runtime do
   `schema_cache_ttl_ms` bounds how stale a cached table schema may be. CRUD
   through the API invalidates the cache on the node it runs on; the TTL is
   what bounds staleness everywhere else.
+
+  `request_fullsweep_after` and `request_min_heap_size` are `Smolquery.Heap`
+  flags applied to whatever process calls
+  `Smolquery.IngestService.Client.insert/4` — the web server's connection
+  handler, in a deployment. That is where the decoded request body and the
+  coerced rows are, so it is where the burst-then-discard pattern those flags
+  exist for actually happens. Both are `nil` — unset, the emulator's own
+  policy — by default, because the process is not this service's to configure:
+  a keep-alive connection outlives the insert, and the flag applies to
+  everything else the connection goes on to serve. Set them against a
+  measurement of an insert-heavy deployment, not as a matter of course.
   """
 
   alias Smolquery.Catalog
@@ -32,6 +43,8 @@ defmodule Smolquery.IngestService.Runtime do
     :name,
     :catalog,
     :catalog_opts,
+    :request_fullsweep_after,
+    :request_min_heap_size,
     buffer_name: Smolquery.BufferService,
     schema_cache_ttl_ms: 60_000
   ]
@@ -40,6 +53,8 @@ defmodule Smolquery.IngestService.Runtime do
           name: atom(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
+          request_fullsweep_after: non_neg_integer() | nil,
+          request_min_heap_size: non_neg_integer() | nil,
           buffer_name: atom(),
           schema_cache_ttl_ms: pos_integer()
         }
@@ -63,7 +78,14 @@ defmodule Smolquery.IngestService.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:buffer_name, :schema_cache_ttl_ms]))
+    |> struct!(
+      Keyword.take(config, [
+        :buffer_name,
+        :schema_cache_ttl_ms,
+        :request_fullsweep_after,
+        :request_min_heap_size
+      ])
+    )
   end
 
   use Smolquery.Runtime

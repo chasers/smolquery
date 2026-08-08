@@ -22,6 +22,12 @@ defmodule Smolquery.BufferService.Runtime do
         max_buffered_rows: 500_000,
         max_buffered_bytes: 64_000_000,
         encode_concurrency: 1,
+        flush_writer: :polars,
+        write_pool_size: 1,
+        buffer_fullsweep_after: 10,
+        buffer_min_heap_size: nil,
+        committer_fullsweep_after: 0,
+        committer_min_heap_size: nil,
         ack_budget_ms: 5_000,
         write_timeout_ms: 15_000,
         control_timeout_ms: 15_000,
@@ -56,6 +62,35 @@ defmodule Smolquery.BufferService.Runtime do
   writer per manifest log. At `1` a commit runs inline exactly as it always
   has; above `1`, up to that many encodes are in flight and the next commit
   waits, so a table's resident rows are bounded by the number of slots.
+
+  ## Heap policy for the two processes that hold a batch
+
+  A table's `TableBuffer` and its `Committer` are the processes decoded rows
+  live in, and `Smolquery.Heap` explains why the emulator's generational
+  default is the wrong shape for them. Four keys set the two flags on each,
+  and every one of them is a starting point for measurement rather than a
+  tuned number:
+
+    * `:committer_fullsweep_after` (default `0`) — the committer's live set
+      between commits is a queue, a struct and a log file descriptor; a
+      commit's rows are garbage the moment it reports done. A full sweep costs
+      the live set rather than the garbage, so at `0` — every collection a full
+      sweep — the rows are reclaimed where they die instead of being promoted
+      to an old heap that only a major collection empties. Above
+      `encode_concurrency: 1` the encode runs in a short-lived task instead,
+      which is deliberately left alone: its heap dies with it, and no
+      collection has to find that out.
+    * `:buffer_fullsweep_after` (default `10`) — the buffer is the opposite
+      case in one respect and the same in another. Its accumulator is *live*
+      until the handoff, up to `flush_max_bytes` of it, so full sweeping every
+      collection would copy that tail over and over; after the handoff the same
+      bytes are garbage on an old heap. Ten bounds how long a handed-off
+      accumulator survives without charging every collection for the live one.
+    * `:buffer_min_heap_size` / `:committer_min_heap_size` (default `nil`) —
+      the heap floor in words, unset. It is per process and there is one pair
+      per table, so a floor that helps one table's throughput multiplies by
+      every table the node owns. Raise it deliberately against a measurement,
+      not by default.
 
   `:replicator` is what a group commit requires beyond this node's disk
   before it acks (`Smolquery.BufferService.Replicator`), defaulting to the
@@ -100,6 +135,12 @@ defmodule Smolquery.BufferService.Runtime do
     max_buffered_rows: 500_000,
     max_buffered_bytes: 64_000_000,
     encode_concurrency: 1,
+    flush_writer: :polars,
+    write_pool_size: 1,
+    buffer_fullsweep_after: 10,
+    buffer_min_heap_size: nil,
+    committer_fullsweep_after: 0,
+    committer_min_heap_size: nil,
     ack_budget_ms: 5_000,
     write_timeout_ms: 15_000,
     control_timeout_ms: 15_000,
@@ -126,6 +167,12 @@ defmodule Smolquery.BufferService.Runtime do
           max_buffered_rows: pos_integer(),
           max_buffered_bytes: pos_integer(),
           encode_concurrency: pos_integer(),
+          flush_writer: :polars | :duckdb,
+          write_pool_size: pos_integer(),
+          buffer_fullsweep_after: non_neg_integer() | nil,
+          buffer_min_heap_size: non_neg_integer() | nil,
+          committer_fullsweep_after: non_neg_integer() | nil,
+          committer_min_heap_size: non_neg_integer() | nil,
           ack_budget_ms: timeout(),
           write_timeout_ms: timeout(),
           control_timeout_ms: timeout(),
@@ -147,6 +194,12 @@ defmodule Smolquery.BufferService.Runtime do
     :max_buffered_rows,
     :max_buffered_bytes,
     :encode_concurrency,
+    :flush_writer,
+    :write_pool_size,
+    :buffer_fullsweep_after,
+    :buffer_min_heap_size,
+    :committer_fullsweep_after,
+    :committer_min_heap_size,
     :ack_budget_ms,
     :write_timeout_ms,
     :control_timeout_ms,
@@ -211,6 +264,43 @@ defmodule Smolquery.BufferService.Runtime do
   """
   @spec registry(atom()) :: atom()
   def registry(name), do: Module.concat(name, "Registry")
+
+  @doc """
+  The DuckDB instance a `:duckdb` flush writes its segment with.
+
+  Its own instance, not the query path's, for two reasons the code states
+  elsewhere: `Smolquery.Engine.Connection` wraps one ADBC connection in a
+  GenServer and so is a per-query mutex, and a DuckDB internal fault invalidates
+  the whole database it happens on. Sharing one with reads would make a flush
+  queue behind a user's scan and let a scan's rare internal fault take unacked
+  rows with it. `Smolquery.StorageService.Runtime` already splits merge from
+  catalog commits for the first of those reasons.
+  """
+  @spec engine(atom(), non_neg_integer()) :: atom()
+  def engine(name, index), do: Module.concat(name, "Engine#{index}")
+
+  @doc """
+  Which of the pool's DuckDB instances writes the segment named by `key`.
+
+  Hashed on the **segment id**, not the table: a table has one buffer and one
+  committer, so hashing on the table would send every one of its flushes to the
+  same connection and the pool would do nothing for the case that needs it most.
+  Per-segment spreads a table's concurrent encodes across instances.
+
+  Measured: with a single instance, `encode_concurrency` stops paying at 4 —
+  slots run in parallel and then queue on the one `Smolquery.Engine.Connection`,
+  which wraps one ADBC connection.
+  """
+  @spec engine_for(t(), term()) :: atom()
+  def engine_for(%__MODULE__{name: name, write_pool_size: size}, key),
+    do: engine(name, :erlang.phash2(key, size))
+
+  @doc """
+  Every DuckDB instance the write pool runs, in index order.
+  """
+  @spec engines(t()) :: [atom()]
+  def engines(%__MODULE__{name: name, write_pool_size: size}),
+    do: Enum.map(0..(size - 1), &engine(name, &1))
 
   @doc """
   The registry mapping a table to its `TableBuffer.Committer`.

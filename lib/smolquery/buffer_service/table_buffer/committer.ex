@@ -72,6 +72,19 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   `with_log/3` therefore still cannot name an entry whose commit has not
   replicated, and an entry still encoding is simply not in that claim — it
   goes in the next one.
+
+  ## The heap a commit's rows land on
+
+  A commit is cast here, so its rows are copied onto this process's heap and
+  are garbage the moment the commit reports done — the pattern
+  `Smolquery.Heap` exists for. `:committer_fullsweep_after` and
+  `:committer_min_heap_size` on the runtime set the two flags, at `init/1`,
+  and the runtime documents why the defaults are what they are.
+
+  Above `encode_concurrency: 1` the rows are copied on again to the encode's
+  task, which is left on the emulator's defaults on purpose: a task that runs
+  one encode and exits frees its heap by exiting, and no collection has to
+  work that out.
   """
 
   use GenServer
@@ -81,6 +94,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
+  alias Smolquery.BufferService.Runtime
+  alias Smolquery.Heap
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -100,7 +115,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   @type commit :: %{
           schema: Smolquery.Schema.t(),
-          rows: [Writer.row()],
+          columns: [[term()]],
           pending: [{GenServer.from(), :new | :duplicate | :flush}],
           batch_ids: [String.t()],
           row_count: non_neg_integer(),
@@ -160,6 +175,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   def init({buffer, opts}) do
     Process.flag(:trap_exit, true)
     runtime = Keyword.fetch!(opts, :runtime)
+
+    Heap.tune(
+      fullsweep_after: runtime.committer_fullsweep_after,
+      min_heap_size: runtime.committer_min_heap_size
+    )
 
     {:ok,
      %__MODULE__{
@@ -288,13 +308,38 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp reply_for(:flush, error), do: error
 
   defp persist(state, commit) do
-    encoded = encode(state.runtime.store, state.prefix, commit.rows, commit.schema, [])
+    encoded =
+      encode(state.runtime, state.prefix, commit.columns, commit.schema, [])
 
     durable(state, encoded, commit)
   end
 
-  defp encode(store, prefix, rows, schema, opts) do
-    Writer.write(rows, schema, [store: store, prefix: prefix] ++ opts)
+  # A spooled batch is handed over as paths and written by DuckDB in one COPY. The
+  # bodies are deleted once the write has finished with them, whether it succeeded
+  # or not: a failed flush answers its waiters with the error and a retry spools
+  # its own body again, so keeping these would only leak.
+  defp encode(runtime, prefix, {:ndjson, paths}, schema, opts) do
+    # The id picks the pool member as well as naming the segment, so a table's
+    # concurrent encodes spread across connections instead of queueing on one.
+    {id, opts} = Keyword.pop_lazy(opts, :id, &Id.generate/0)
+
+    result =
+      Writer.write({:ndjson, paths}, schema,
+        [
+          store: runtime.store,
+          prefix: prefix,
+          id: id,
+          engine: Runtime.engine_for(runtime, id)
+        ] ++ opts
+      )
+
+    Enum.each(paths, &File.rm/1)
+
+    result
+  end
+
+  defp encode(runtime, prefix, columns, schema, opts) do
+    Writer.write({:columns, columns}, schema, [store: runtime.store, prefix: prefix] ++ opts)
   end
 
   defp durable(state, encoded, commit) do
@@ -368,16 +413,16 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   # The id is minted here rather than inside the task, so segment ids keep
   # sorting by the commit they belong to — which is what `HotManifest.entries/2`
-  # ordering by id means. The rows leave with the task and are dropped from the
-  # slot, so a slot holds one copy of its rows rather than two.
+  # ordering by id means. The columns leave with the task and are dropped from the
+  # slot, so a slot holds one copy of its columns rather than two.
   defp start_encode(state, commit) do
     id = Id.generate()
-    store = state.runtime.store
+    runtime = state.runtime
     prefix = state.prefix
-    rows = commit.rows
+    columns = commit.columns
     schema = commit.schema
 
-    task = Task.async(fn -> encode(store, prefix, rows, schema, id: id) end)
+    task = Task.async(fn -> encode(runtime, prefix, columns, schema, id: id) end)
 
     %{state | slots: state.slots ++ [open_slot(commit, task)]}
   end
@@ -385,7 +430,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   @spec open_slot(commit(), Task.t()) :: slot()
   defp open_slot(commit, task) do
     %{
-      commit: %{commit | rows: []},
+      commit: %{commit | columns: []},
       task: task,
       started: System.monotonic_time(:microsecond),
       encoded: :encoding

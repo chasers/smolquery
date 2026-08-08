@@ -18,6 +18,11 @@ config :smolquery, Smolquery.Engine,
 
 config :smolquery, :data_dir, "priv/data"
 
+# The largest request body the API reads. Counts wire bytes, unlike the buffer's
+# byte bounds below, which count the accumulated Elixir term — see
+# `SmolqueryApi.Parsers` for why the two do not coordinate.
+config :smolquery, SmolqueryApi, max_body_bytes: 8_000_000
+
 config :smolquery, SmolqueryApi.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   http: [ip: {127, 0, 0, 1}, port: 4000],
@@ -66,7 +71,13 @@ config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,
   flush_max_rows: 100_000,
-  flush_max_bytes: 8_000_000,
+  # Counts the accumulated Elixir term, which is column-major and so carries no
+  # column names — about 1.5 KiB per OTel-shaped row where the row-major term was
+  # 2.6 KiB. At the old 8 MB a single request could no longer reach this trigger
+  # at all, because `SmolqueryApi`'s `:max_body_bytes` caps a request below the
+  # rows it would have taken, so every lone writer waited out `flush_interval_ms`
+  # instead. Keep this reachable by one request, or that is what happens again.
+  flush_max_bytes: 4_500_000,
   max_buffered_rows: 500_000,
   max_buffered_bytes: 64_000_000,
   ack_budget_ms: 5_000,

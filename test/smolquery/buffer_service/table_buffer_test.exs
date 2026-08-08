@@ -217,6 +217,88 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       assert Client.write_batch(name, @table, batch(1..2)) == {:error, :buffer_full}
     end
+
+    test "the byte bound measures a batch's own :byte_size when it carries one", context do
+      %{name: name} =
+        start_buffer_service(context,
+          max_buffered_bytes: 1_000,
+          flush_max_rows: 1_000,
+          flush_max_bytes: 1_000_000,
+          flush_interval_ms: 60_000
+        )
+
+      generous = Map.put(batch(1..2), :byte_size, 5_000)
+
+      assert Client.write_batch(name, @table, generous) == {:error, :buffer_full}
+    end
+
+    test "a batch without a :byte_size is still measured, and admitted", context do
+      %{name: name} =
+        start_buffer_service(context, max_buffered_bytes: 1_000, flush_max_rows: 1_000)
+
+      assert {:ok, ack} = Client.write_batch(name, @table, batch(1..2))
+      assert ack.row_count == 2
+    end
+
+    test "an accumulated batch's :byte_size is what the flush trigger sees", context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_max_bytes: 4_000,
+          flush_max_rows: 1_000_000,
+          flush_interval_ms: 60_000
+        )
+
+      task =
+        Task.async(fn ->
+          Client.write_batch(name, @table, Map.put(batch(1..2), :byte_size, 4_000))
+        end)
+
+      assert {:ok, ack} = Task.await(task, 5_000)
+      assert ack.row_count == 2
+    end
+  end
+
+  describe "heap policy" do
+    test "the buffer and its committer take their flags from the runtime", context do
+      %{name: name} =
+        start_buffer_service(context,
+          buffer_fullsweep_after: 7,
+          committer_fullsweep_after: 3,
+          committer_min_heap_size: 8_192
+        )
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert fullsweep_after(Runtime.registry(name)) == 7
+      assert fullsweep_after(Runtime.committer_registry(name)) == 3
+      assert min_heap_size(Runtime.committer_registry(name)) >= 8_192
+    end
+
+    test "a nil leaves the emulator's own policy in place", context do
+      %{name: name} =
+        start_buffer_service(context,
+          buffer_fullsweep_after: nil,
+          committer_fullsweep_after: nil
+        )
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert fullsweep_after(Runtime.registry(name)) ==
+               :erlang.system_info(:fullsweep_after) |> elem(1)
+    end
+
+    defp garbage_collection(registry) do
+      [{pid, _value}] = Registry.lookup(registry, @table)
+      {:garbage_collection, info} = Process.info(pid, :garbage_collection)
+
+      info
+    end
+
+    defp fullsweep_after(registry),
+      do: registry |> garbage_collection() |> Keyword.fetch!(:fullsweep_after)
+
+    defp min_heap_size(registry),
+      do: registry |> garbage_collection() |> Keyword.fetch!(:min_heap_size)
   end
 
   describe "a flush that fails" do

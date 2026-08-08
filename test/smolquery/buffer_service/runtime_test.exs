@@ -58,6 +58,32 @@ defmodule Smolquery.BufferService.RuntimeTest do
 
       assert runtime.encode_concurrency == 4
     end
+
+    test "defaults the heap flags to full sweeps and no heap floor", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+
+      assert runtime.buffer_fullsweep_after == 10
+      assert runtime.committer_fullsweep_after == 0
+      assert runtime.buffer_min_heap_size == nil
+      assert runtime.committer_min_heap_size == nil
+    end
+
+    test "takes the heap flags from the config", %{tmp_dir: dir} do
+      runtime =
+        Runtime.new(
+          name: unique_name(),
+          dir: dir,
+          buffer_fullsweep_after: 5,
+          buffer_min_heap_size: 8_192,
+          committer_fullsweep_after: nil,
+          committer_min_heap_size: 16_384
+        )
+
+      assert runtime.buffer_fullsweep_after == 5
+      assert runtime.buffer_min_heap_size == 8_192
+      assert runtime.committer_fullsweep_after == nil
+      assert runtime.committer_min_heap_size == 16_384
+    end
   end
 
   describe "put/1, fetch/1, delete/1" do
