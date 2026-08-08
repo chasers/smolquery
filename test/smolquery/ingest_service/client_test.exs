@@ -111,6 +111,48 @@ defmodule Smolquery.IngestService.ClientTest do
              {:error, :ingest_service_unavailable}
   end
 
+  describe "write partitions (T-170)" do
+    test "id-less batches spread over the table's partition refs", context do
+      %{name: name, buffer: buffer} = start_stack(context, ingest: [write_partitions: 2])
+
+      for i <- 1..8 do
+        assert {:ok, %{inserted: 1, errors: []}} =
+                 IngestService.Client.insert(name, @table, [%{"id" => i}])
+      end
+
+      counts =
+        for ref <- Smolquery.Partitions.refs(@table, 2) do
+          {:ok, entries} = BufferService.Client.hot_manifest(buffer, ref)
+          Enum.sum(Enum.map(entries, & &1.row_count))
+        end
+
+      assert Enum.sum(counts) == 8
+      assert Enum.all?(counts, &(&1 > 0))
+    end
+
+    test "a retried insertId dedups against the partition that holds it", context do
+      %{name: name, buffer: buffer} = start_stack(context, ingest: [write_partitions: 4])
+
+      rows = [%{"id" => 1}, %{"id" => 2}]
+
+      assert {:ok, %{inserted: 2}} =
+               IngestService.Client.insert(name, @table, rows, batch_id: "retry-1")
+
+      assert {:ok, %{inserted: 2}} =
+               IngestService.Client.insert(name, @table, rows, batch_id: "retry-1")
+
+      total =
+        Smolquery.Partitions.refs(@table, 4)
+        |> Enum.flat_map(fn ref ->
+          {:ok, entries} = BufferService.Client.hot_manifest(buffer, ref)
+          entries
+        end)
+        |> Enum.sum_by(& &1.row_count)
+
+      assert total == 2
+    end
+  end
+
   describe "batch_id (T-41)" do
     test "an insert retried with the same batch id counts its rows once", context do
       %{name: name, buffer: buffer} = start_stack(context)

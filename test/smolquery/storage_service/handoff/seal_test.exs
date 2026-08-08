@@ -179,6 +179,27 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       assert Enum.all?(entries, &(&1.sealed_at != nil))
     end
 
+    test "a partition ref seals into its parent's catalog table (T-170)", context do
+      partition = {"analytics", "events__p1"}
+
+      {:ok, ack} = Client.write_batch(context.buffer, partition, batch(10..12))
+
+      {:ok, prefix} = Store.prefix(partition)
+      {:ok, key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SW")
+
+      {:ok, claim} =
+        HotManifest.claim(context.buffer_runtime.manifest, partition, [ack.segment_id], [key])
+
+      assert Handoff.seal(context.runtime.handoff, context.runtime, partition, claim) == :ok
+
+      {:ok, sealed} = Catalog.segments(context.catalog, @table, :current)
+      assert [_only_segment] = sealed
+      assert read_ids(context, sealed) == [10, 11, 12]
+
+      assert {:ok, entries} = Client.hot_manifest(context.buffer, partition)
+      assert Enum.all?(entries, &(&1.sealed_at != nil))
+    end
+
     test "leaves rows written after the claim in the hot tier", context do
       claimed = write(context.buffer, 1..2)
       claim = freeze_claim(context, [claimed])

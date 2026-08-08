@@ -115,7 +115,8 @@ defmodule Smolquery.QueryService.Runtime do
     max_concurrent_jobs: 8,
     default_timeout_ms: 60_000,
     job_memory_limit: "1GB",
-    result_ttl_ms: 300_000
+    result_ttl_ms: 300_000,
+    write_partitions: 1
   ]
 
   @type t :: %__MODULE__{
@@ -135,6 +136,7 @@ defmodule Smolquery.QueryService.Runtime do
           default_timeout_ms: pos_integer(),
           job_memory_limit: String.t(),
           result_ttl_ms: pos_integer(),
+          write_partitions: pos_integer(),
           store: Store.t() | nil
         }
 
@@ -148,7 +150,8 @@ defmodule Smolquery.QueryService.Runtime do
     :max_concurrent_jobs,
     :default_timeout_ms,
     :job_memory_limit,
-    :result_ttl_ms
+    :result_ttl_ms,
+    :write_partitions
   ]
 
   @doc """

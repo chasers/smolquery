@@ -103,6 +103,13 @@ if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
   config :smolquery, Smolquery.BufferService, encode_concurrency: String.to_integer(concurrency)
 end
 
+if partitions = System.get_env("SMOLQUERY_WRITE_PARTITIONS") do
+  count = String.to_integer(partitions)
+
+  config :smolquery, Smolquery.IngestService, write_partitions: count
+  config :smolquery, Smolquery.QueryService, write_partitions: count
+end
+
 if hot_server_port = System.get_env("SMOLQUERY_HOT_SERVER_PORT") do
   port = String.to_integer(hot_server_port)
 
