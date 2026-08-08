@@ -130,7 +130,16 @@ defmodule Bench.ParquetWrite do
     else
       case Writer.write(batch, schema, store: store, compression: codec) do
         {:ok, segment} ->
-          loop(batch, schema, store, codec, started, duration, batches + 1, bytes + segment.byte_size)
+          loop(
+            batch,
+            schema,
+            store,
+            codec,
+            started,
+            duration,
+            batches + 1,
+            bytes + segment.byte_size
+          )
 
         {:error, reason} ->
           {:error, reason}

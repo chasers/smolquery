@@ -95,7 +95,9 @@ defmodule Bench.BufferDuckDB do
       duration     #{div(duration, 1000)}s per arm
     """)
 
-    IO.puts("  #{pad("arm", 18)} #{lead("k", 3)} #{lead("rows/s", 10)} #{lead("flushes", 8)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)} #{lead("bytes/row", 10)} #{lead("RSS", 9)}")
+    IO.puts(
+      "  #{pad("arm", 18)} #{lead("k", 3)} #{lead("rows/s", 10)} #{lead("flushes", 8)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)} #{lead("bytes/row", 10)} #{lead("RSS", 9)}"
+    )
 
     for k <- [1, 4, 16] do
       terms(dir, columns, schema, duration, rows, k)
@@ -128,37 +130,58 @@ defmodule Bench.BufferDuckDB do
         name
       end)
 
-    IO.puts("  #{pad("arm", 22)} #{lead("k", 3)} #{lead("rows/s", 10)} #{lead("flushes", 8)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)}")
+    IO.puts(
+      "  #{pad("arm", 22)} #{lead("k", 3)} #{lead("rows/s", 10)} #{lead("flushes", 8)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)}"
+    )
 
     for k <- [1, 4] do
       shard_out = arm_dir(dir, "duckdb_shards", k)
 
-      race("duckdb x#{workers}", duration, rows * k, fn shard ->
-        engine = Enum.at(engines, shard - 1)
-        path = Path.join(shard_out, "sh#{shard}_#{:erlang.unique_integer([:positive])}.parquet")
+      race(
+        "duckdb x#{workers}",
+        duration,
+        rows * k,
+        fn shard ->
+          engine = Enum.at(engines, shard - 1)
+          path = Path.join(shard_out, "sh#{shard}_#{:erlang.unique_integer([:positive])}.parquet")
 
-        Enum.each(1..k, fn _ ->
-          {:ok, _r} = Engine.query(engine, "INSERT INTO buf SELECT * FROM #{scan}")
-        end)
+          Enum.each(1..k, fn _ ->
+            {:ok, _r} = Engine.query(engine, "INSERT INTO buf SELECT * FROM #{scan}")
+          end)
 
-        {:ok, _r} =
-          Engine.query(engine, """
-          COPY (SELECT * FROM buf ORDER BY #{@order})
-          TO '#{path}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE #{@row_group})
-          """)
+          {:ok, _r} =
+            Engine.query(engine, """
+            COPY (SELECT * FROM buf ORDER BY #{@order})
+            TO '#{path}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE #{@row_group})
+            """)
 
-        {:ok, _r} = Engine.query(engine, "DELETE FROM buf")
-      end, workers, k, shard_out)
+          {:ok, _r} = Engine.query(engine, "DELETE FROM buf")
+        end,
+        workers,
+        k,
+        shard_out
+      )
 
       elixir_out = arm_dir(dir, "elixir_shards", k)
 
-      race("elixir x#{workers}", duration, rows * k, fn shard ->
-        store = Store.Local.new(dir: elixir_out)
-        chunks = Enum.map(1..k, fn _ -> load_columns(@source, schema) end)
-        merged = chunks |> Enum.reverse() |> Enum.zip_with(&Enum.concat/1)
-        {:ok, _segment} = Writer.write({:columns, merged}, schema, store: store, compression: :zstd)
-        _ = shard
-      end, workers, k, elixir_out)
+      race(
+        "elixir x#{workers}",
+        duration,
+        rows * k,
+        fn shard ->
+          store = Store.Local.new(dir: elixir_out)
+          chunks = Enum.map(1..k, fn _ -> load_columns(@source, schema) end)
+          merged = chunks |> Enum.reverse() |> Enum.zip_with(&Enum.concat/1)
+
+          {:ok, _segment} =
+            Writer.write({:columns, merged}, schema, store: store, compression: :zstd)
+
+          _ = shard
+        end,
+        workers,
+        k,
+        elixir_out
+      )
     end
   end
 
@@ -347,8 +370,13 @@ defmodule Bench.BufferDuckDB do
     duck_rss = rss_mib() - before_duck
     {:ok, _result} = Engine.query(@engine, "DELETE FROM buf")
 
-    IO.puts("    terms   #{fmt(terms_rss)} MiB RSS delta  (#{fmt(terms_rss * 1_048_576 / (16 * rows))} bytes/row)")
-    IO.puts("    duckdb  #{fmt(duck_rss)} MiB RSS delta  (#{fmt(duck_rss * 1_048_576 / (16 * rows))} bytes/row)")
+    IO.puts(
+      "    terms   #{fmt(terms_rss)} MiB RSS delta  (#{fmt(terms_rss * 1_048_576 / (16 * rows))} bytes/row)"
+    )
+
+    IO.puts(
+      "    duckdb  #{fmt(duck_rss)} MiB RSS delta  (#{fmt(duck_rss * 1_048_576 / (16 * rows))} bytes/row)"
+    )
 
     IO.puts("""
 

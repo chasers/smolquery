@@ -172,7 +172,9 @@ defmodule Bench.SegmentEncoder do
   # Asked of DuckDB, which is also what reads segments on the query path, so this
   # is the pruning decision itself and not a description of it.
   defp row_groups(results) do
-    IO.puts("\n  #{pad("arm", 22)} #{lead("groups", 7)} #{lead("rows/group", 11)} #{lead("stats?", 7)}  clustering bounds")
+    IO.puts(
+      "\n  #{pad("arm", 22)} #{lead("groups", 7)} #{lead("rows/group", 11)} #{lead("stats?", 7)}  clustering bounds"
+    )
 
     Enum.each(results, fn result ->
       sql = """
@@ -201,7 +203,9 @@ defmodule Bench.SegmentEncoder do
   end
 
   defp report(results) do
-    IO.puts("  #{pad("arm", 22)} #{lead("rows/s", 10)} #{lead("segments", 9)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)} #{lead("bytes/row", 10)}")
+    IO.puts(
+      "  #{pad("arm", 22)} #{lead("rows/s", 10)} #{lead("segments", 9)} #{lead("avg %CPU", 9)} #{lead("CPU s/Mrow", 11)} #{lead("bytes/row", 10)}"
+    )
 
     Enum.each(results, fn result ->
       IO.puts(
