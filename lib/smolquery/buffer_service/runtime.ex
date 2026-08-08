@@ -31,6 +31,7 @@ defmodule Smolquery.BufferService.Runtime do
         retire_grace_ms: 600_000,
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
+        compression: :lz4raw,
         ring: [:"buffer1@host"]
 
   `:dir` is the root: segments go to a `Store.Local` beneath `segments/`, manifest
@@ -94,6 +95,7 @@ defmodule Smolquery.BufferService.Runtime do
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
     seal_consumer: {Smolquery.BufferService.SealLog, []},
+    compression: :zstd,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
   ]
@@ -119,6 +121,7 @@ defmodule Smolquery.BufferService.Runtime do
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
           seal_consumer: {module(), term()},
+          compression: atom(),
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
         }
@@ -139,9 +142,12 @@ defmodule Smolquery.BufferService.Runtime do
     :retire_grace_ms,
     :maintenance_interval_ms,
     :seal_consumer,
+    :compression,
     :hot_server_ip,
     :hot_server_port
   ]
+
+  @codecs [:lz4raw, :zstd, :snappy, :gzip, :uncompressed]
 
   @default_dir "priv/data/buffer"
 
@@ -150,10 +156,20 @@ defmodule Smolquery.BufferService.Runtime do
 
   Application config for `Smolquery.BufferService` supplies the defaults; `opts`
   overrides them, so a test passes what it needs and inherits the rest.
+
+  Raises on a `compression` outside #{inspect(@codecs)}, for the same reason
+  `Smolquery.StorageService.Runtime` does: a codec discovered bad per group
+  commit would fail every flush rather than once, here, at boot. The default
+  stays `:zstd` because switching to `:lz4raw` measured *neutral* on the
+  replication rig (71.6k vs 73.2k rows/s, run-to-run noise) — the group
+  commit's serial cost lives in its other legs, not the codec — and cheaper
+  encode was the only reason to prefer lz4 for segments the sealer re-encodes
+  within seconds anyway.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.BufferService, []), opts)
+    validate_compression!(Keyword.get(config, :compression, :zstd))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -176,6 +192,14 @@ defmodule Smolquery.BufferService.Runtime do
       },
       Keyword.take(config, @limits)
     )
+  end
+
+  defp validate_compression!(compression) when compression in @codecs, do: :ok
+
+  defp validate_compression!(compression) do
+    raise ArgumentError,
+          "unsupported hot-tier compression: #{inspect(compression)} " <>
+            "(expected one of #{inspect(@codecs)})"
   end
 
   use Smolquery.Runtime
