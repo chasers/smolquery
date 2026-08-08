@@ -125,13 +125,32 @@ defmodule Smolquery.BufferService.Supervisor do
 
   # Started only for `flush_writer: :duckdb`, so the default path pays nothing —
   # not a database, not a connection, not the extension load its bootstrap runs.
+  #
+  # Each member is sized for the pool rather than left to inherit
+  # `Smolquery.Engine`'s application config whole, because that config describes
+  # *one* instance: a pool of eight inheriting `threads: System.schedulers_online()`
+  # declares eight times the node's schedulers, and `memory_limit: "2GB"` eight
+  # times over. Threads divide here, where the pool size is known. The memory
+  # limit cannot be divided without parsing DuckDB's size grammar, so it is a
+  # configured value instead — `:write_engine_memory_limit`, whose docstring on
+  # `Runtime` states the multiplication an operator is choosing when they leave
+  # it unset.
   defp write_engines(%Runtime{flush_writer: :duckdb} = runtime) do
     Enum.map(Runtime.engines(runtime), fn name ->
-      Supervisor.child_spec({Engine, name: name}, id: name)
+      Supervisor.child_spec({Engine, [name: name] ++ engine_budget(runtime)}, id: name)
     end)
   end
 
   defp write_engines(%Runtime{}), do: []
+
+  defp engine_budget(%Runtime{write_pool_size: size} = runtime) do
+    threads = [threads: max(div(System.schedulers_online(), size), 1)]
+
+    case runtime.write_engine_memory_limit do
+      nil -> threads
+      limit -> [{:memory_limit, limit} | threads]
+    end
+  end
 
   defp expected_nodes(runtime) do
     if ExpectedNodes.configured?() do

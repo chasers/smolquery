@@ -78,42 +78,22 @@ defmodule Smolquery.BufferService.Endpoint do
         table_ref,
         %{schema: %Schema{}, columns: columns, row_count: count} = batch
       )
-      when is_list(columns) and is_integer(count) do
-    with {:ok, runtime} <- runtime(name) do
-      case committed_ack(runtime, table_ref, Map.get(batch, :batch_id)) do
-        {:ok, ack} ->
-          deduped(count)
-
-          {:ok, ack}
-
-        :error ->
-          admit(runtime, table_ref, batch)
-      end
-    end
-  end
+      when is_list(columns) and is_integer(count),
+      do: dedup_or_admit(name, table_ref, batch, count)
 
   # A spooled body takes the same admission and dedup path; only the accumulator's
   # payload differs. Kept as its own clause rather than loosening the guard above,
   # so a batch carrying neither columns nor a path still fails to match instead of
-  # reaching the buffer as something it cannot accumulate.
+  # reaching the buffer as something it cannot accumulate. The two clauses share a
+  # body because there is nothing shape-specific in it — a second copy is a second
+  # place for the dedup answer and the admission gate to drift apart.
   def write_batch(
         name,
         table_ref,
         %{schema: %Schema{}, ndjson: path, row_count: count} = batch
       )
-      when is_binary(path) and is_integer(count) do
-    with {:ok, runtime} <- runtime(name) do
-      case committed_ack(runtime, table_ref, Map.get(batch, :batch_id)) do
-        {:ok, ack} ->
-          deduped(count)
-
-          {:ok, ack}
-
-        :error ->
-          admit(runtime, table_ref, batch)
-      end
-    end
-  end
+      when is_binary(path) and is_integer(count),
+      do: dedup_or_admit(name, table_ref, batch, count)
 
   def write_batch(name, table_ref, %{schema: %Schema{} = schema, rows: rows} = batch)
       when is_list(rows) do
@@ -131,6 +111,20 @@ defmodule Smolquery.BufferService.Endpoint do
       columns: Enum.map(schema.fields, fn field -> Enum.map(rows, &Map.get(&1, field.name)) end),
       row_count: length(rows)
     }
+  end
+
+  defp dedup_or_admit(name, table_ref, batch, count) do
+    with {:ok, runtime} <- runtime(name) do
+      case committed_ack(runtime, table_ref, Map.get(batch, :batch_id)) do
+        {:ok, ack} ->
+          deduped(count)
+
+          {:ok, ack}
+
+        :error ->
+          admit(runtime, table_ref, batch)
+      end
+    end
   end
 
   defp admit(runtime, table_ref, batch) do

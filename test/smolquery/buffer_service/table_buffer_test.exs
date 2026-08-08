@@ -657,4 +657,120 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert {:ok, []} = Store.list(runtime.store, "analytics/events")
     end
   end
+
+  describe "ndjson flush" do
+    alias Explorer.DataFrame
+
+    defp ndjson_batch(dir, schema, rows, label) do
+      path = Path.join(dir, "#{label}.ndjson")
+      body = Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
+      File.write!(path, body)
+
+      %{
+        schema: schema,
+        ndjson: path,
+        row_count: length(rows),
+        byte_size: byte_size(body)
+      }
+    end
+
+    # A spooled body is committed on its own, never grouped with another. That is
+    # what makes the acked row count the footer count of *this* caller's segment,
+    # and what keeps one caller's uncoercible line from failing every other
+    # caller's write in the same COPY. The cost is one segment per body, which
+    # the sealer merges later.
+    test "each spooled body commits as its own segment, in arrival order", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-buffer"),
+          flush_interval_ms: 60_000,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}, {"tag", :string}])
+      spool = Path.join(context.tmp_dir, "ndjson-spool")
+      File.mkdir_p!(spool)
+
+      first =
+        ndjson_batch(
+          spool,
+          schema,
+          [%{"id" => 10, "tag" => "first"}, %{"id" => 11, "tag" => "second"}],
+          "a"
+        )
+
+      second = ndjson_batch(spool, schema, [%{"id" => 1, "tag" => "third"}], "b")
+
+      # No flush call: the handoff is immediate, so a spooled body does not wait
+      # for `flush_interval_ms` (60 s here) or for a size threshold.
+      assert {:ok, ack_one} = Client.write_batch(name, @table, first)
+      assert {:ok, ack_two} = Client.write_batch(name, @table, second)
+
+      refute ack_one.segment_id == ack_two.segment_id
+      assert ack_one.row_count == 2
+      assert ack_two.row_count == 1
+
+      assert [entry_one, entry_two] =
+               runtime.manifest
+               |> HotManifest.entries(@table)
+               |> Enum.sort_by(& &1.id)
+
+      assert entry_one.id == ack_one.segment_id
+      assert entry_two.id == ack_two.segment_id
+
+      assert rows(runtime, entry_one) == {[10, 11], ["first", "second"]}
+      assert rows(runtime, entry_two) == {[1], ["third"]}
+    end
+
+    defp rows(runtime, entry) do
+      columns =
+        runtime.store
+        |> Store.location(entry.key)
+        |> DataFrame.from_parquet!()
+        |> DataFrame.to_columns()
+
+      {columns["id"], columns["tag"]}
+    end
+
+    test "deletes every spooled file after a successful flush", context do
+      %{name: name} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-delete"),
+          flush_max_rows: 1,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}])
+      spool = Path.join(context.tmp_dir, "ndjson-delete-spool")
+      File.mkdir_p!(spool)
+      batch = ndjson_batch(spool, schema, [%{"id" => 1}], "keep")
+
+      assert File.exists?(batch.ndjson)
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch)
+      refute File.exists?(batch.ndjson)
+    end
+
+    test "deletes the spooled file after a failed flush too", context do
+      %{name: name} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-fail"),
+          flush_max_rows: 1,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}])
+      spool = Path.join(context.tmp_dir, "ndjson-fail-spool")
+      File.mkdir_p!(spool)
+      path = Path.join(spool, "bad.ndjson")
+      body = ~s({"id": "not-an-int"}\n)
+      File.write!(path, body)
+
+      batch = %{schema: schema, ndjson: path, row_count: 1, byte_size: byte_size(body)}
+
+      assert {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} =
+               Client.write_batch(name, @table, batch)
+
+      refute File.exists?(path)
+    end
+  end
 end

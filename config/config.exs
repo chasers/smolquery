@@ -10,6 +10,14 @@ config :gen_rpc,
   rpc_module_control: :whitelist,
   rpc_module_list: [Smolquery.BufferService.Endpoint]
 
+# These describe *one* engine instance, and a node runs more than one. The
+# buffer's `flush_writer: :duckdb` write pool starts `write_pool_size` further
+# instances, each of which merges this config, so the memory limit a node
+# declares is `(1 + write_pool_size) × :memory_limit` unless
+# `Smolquery.BufferService`'s `:write_engine_memory_limit` narrows the pool's
+# members. Thread counts are divided across the pool by
+# `Smolquery.BufferService.Supervisor`; memory cannot be, because the value is a
+# DuckDB size string rather than a number.
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   threads: System.schedulers_online(),

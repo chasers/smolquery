@@ -9,7 +9,9 @@ defmodule Smolquery.IngestService.Runtime do
   ## Configuration
 
       config :smolquery, Smolquery.IngestService,
-        schema_cache_ttl_ms: 60_000
+        schema_cache_ttl_ms: 60_000,
+        spool_sweep_interval_ms: 60_000,
+        spool_sweep_age_ms: 900_000
 
   `catalog` is where insert validation resolves table schemas — the same seam
   the API and the query service use. Given options (or nothing), the service
@@ -34,6 +36,12 @@ defmodule Smolquery.IngestService.Runtime do
   a keep-alive connection outlives the insert, and the flag applies to
   everything else the connection goes on to serve. Set them against a
   measurement of an insert-heavy deployment, not as a matter of course.
+
+  `spool_sweep_interval_ms` and `spool_sweep_age_ms` belong to
+  `Smolquery.IngestService.SpoolSweeper`, which reclaims `application/x-ndjson`
+  request bodies whose handler was killed before it could delete its own. The
+  age must stay above the slowest insert this node serves — see that module for
+  why sweeping too eagerly is the worse failure.
   """
 
   alias Smolquery.Catalog
@@ -46,7 +54,9 @@ defmodule Smolquery.IngestService.Runtime do
     :request_fullsweep_after,
     :request_min_heap_size,
     buffer_name: Smolquery.BufferService,
-    schema_cache_ttl_ms: 60_000
+    schema_cache_ttl_ms: 60_000,
+    spool_sweep_interval_ms: 60_000,
+    spool_sweep_age_ms: 900_000
   ]
 
   @type t :: %__MODULE__{
@@ -56,7 +66,9 @@ defmodule Smolquery.IngestService.Runtime do
           request_fullsweep_after: non_neg_integer() | nil,
           request_min_heap_size: non_neg_integer() | nil,
           buffer_name: atom(),
-          schema_cache_ttl_ms: pos_integer()
+          schema_cache_ttl_ms: pos_integer(),
+          spool_sweep_interval_ms: pos_integer(),
+          spool_sweep_age_ms: non_neg_integer()
         }
 
   @doc """
@@ -83,7 +95,9 @@ defmodule Smolquery.IngestService.Runtime do
         :buffer_name,
         :schema_cache_ttl_ms,
         :request_fullsweep_after,
-        :request_min_heap_size
+        :request_min_heap_size,
+        :spool_sweep_interval_ms,
+        :spool_sweep_age_ms
       ])
     )
   end
@@ -101,6 +115,12 @@ defmodule Smolquery.IngestService.Runtime do
   """
   @spec cache(atom()) :: atom()
   def cache(name), do: Module.concat(name, "SchemaCache")
+
+  @doc """
+  The spool sweeper's process name for an instance.
+  """
+  @spec spool_sweeper(atom()) :: atom()
+  def spool_sweeper(name), do: Module.concat(name, "SpoolSweeper")
 
   @doc """
   The engine instance schema lookups resolve the catalog through.

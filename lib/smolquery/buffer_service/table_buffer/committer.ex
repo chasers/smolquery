@@ -115,7 +115,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   @type commit :: %{
           schema: Smolquery.Schema.t(),
-          columns: [[term()]],
+          columns: [[term()]] | {:ndjson, [Path.t()]},
           pending: [{GenServer.from(), :new | :duplicate | :flush}],
           batch_ids: [String.t()],
           row_count: non_neg_integer(),
@@ -314,28 +314,51 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     durable(state, encoded, commit)
   end
 
+  # `flush_writer: :polars` starts no write pool (`Smolquery.BufferService.Supervisor`),
+  # so handing this shape to the writer would call an `Smolquery.Engine` that was
+  # never started — an unhandled `:noproc` exit that takes this process, and with
+  # it every unacked caller the buffer is holding, JSON and spooled alike. The API
+  # refuses the body before it spools one; this clause is what keeps a shape that
+  # reaches here anyway an error to its own caller rather than a process exit.
+  defp encode(%Runtime{flush_writer: writer}, _prefix, {:ndjson, paths}, _schema, _opts)
+       when writer != :duckdb do
+    Enum.each(paths, &File.rm/1)
+
+    {:error, {:ndjson_unsupported, writer}}
+  end
+
   # A spooled batch is handed over as paths and written by DuckDB in one COPY. The
   # bodies are deleted once the write has finished with them, whether it succeeded
   # or not: a failed flush answers its waiters with the error and a retry spools
   # its own body again, so keeping these would only leak.
+  #
+  # The delete is in an `after` rather than after the call, because most of the
+  # ways this write fails are not returns. A DuckDB call that times out, a column
+  # name the writer refuses to quote, or a connection that dies without replying
+  # all leave through an exception or an exit, and a plain statement below the
+  # call is simply not reached — one leaked request body each, on a directory
+  # nothing sweeps in-process.
   defp encode(runtime, prefix, {:ndjson, paths}, schema, opts) do
     # The id picks the pool member as well as naming the segment, so a table's
     # concurrent encodes spread across connections instead of queueing on one.
     {id, opts} = Keyword.pop_lazy(opts, :id, &Id.generate/0)
 
-    result =
-      Writer.write({:ndjson, paths}, schema,
-        [
-          store: runtime.store,
-          prefix: prefix,
-          id: id,
-          engine: Runtime.engine_for(runtime, id)
-        ] ++ opts
-      )
-
+    Writer.write(
+      {:ndjson, paths},
+      schema,
+      [
+        store: runtime.store,
+        prefix: prefix,
+        id: id,
+        engine: Runtime.engine_for(runtime, id),
+        # Under this buffer's own `write_timeout_ms`, so a stuck DuckDB call
+        # fails here with a reportable error before the caller gives up on the
+        # flush and a late exit arrives with nobody left to answer.
+        timeout: Runtime.engine_timeout(runtime)
+      ] ++ opts
+    )
+  after
     Enum.each(paths, &File.rm/1)
-
-    result
   end
 
   defp encode(runtime, prefix, columns, schema, opts) do

@@ -79,6 +79,20 @@ defmodule Smolquery.IngestService.Client do
   weaker promise than `docs/api.md` makes for `insert/4`. Callers that need
   per-row errors must use `insert/4`.
 
+  `row_count` is the caller's line count and is what the admission bounds
+  measure the request as. It is *not* what comes back: `result.inserted` is the
+  Parquet footer's count, read back from the segment the flush wrote, which is
+  the only number in this path that says what landed. Nothing here counted a
+  row, and a line count and a row count disagree over blank lines, trailing
+  whitespace, and a body whose last line has no newline.
+
+  The caller owns `path` and must delete it on every outcome. This function
+  never does: it hands the accumulator a name, not the bytes, and a delete here
+  would race the flush that is about to read it. It is safe to delete once this
+  returns — the reply is sent after the commit the body was written by, and a
+  spooled body is never grouped with another, so nothing else is still holding
+  it. `sweep_spool/1` is the backstop for a caller that did not live to return.
+
   Refuses when this node does not own the table: the path names a file on this
   node's disk, and a `:gen_rpc` forward would hand the owner a name it cannot
   open. `insert/4` has no such restriction.
@@ -103,8 +117,92 @@ defmodule Smolquery.IngestService.Client do
           batch_id -> Map.put(batch, :batch_id, batch_id)
         end
 
-      write(runtime, table_ref, batch, [])
+      write_spooled(runtime, table_ref, batch)
     end
+  end
+
+  @doc """
+  Whether this node can take a spooled body at all.
+
+  `insert_file/5` hands the accumulator a path instead of rows, and only
+  `flush_writer: :duckdb` starts the DuckDB write pool that reads it back.
+  Under the default `:polars` there is no engine to call, and discovering that
+  at flush time costs far more than the one request: the call exits `:noproc`
+  inside the table's committer, which takes the `TableBuffer` with it and drops
+  every batch it was holding unacked — including the ordinary JSON inserts of
+  clients that never sent an NDJSON body.
+
+  So the edge asks before it spools, and answers
+  `{:error, {:spooled_inserts_unsupported, writer}}` — which names the
+  configured writer, because the operator reading that message is the one who
+  has to change it. The answer is about *this* node because the path is: the
+  body lands on this node's disk and `insert_file/5` refuses a table this node
+  does not own.
+  """
+  @spec check_file_writer(atom()) :: :ok | {:error, term()}
+  def check_file_writer(name) do
+    with {:ok, runtime} <- runtime(name),
+         {:ok, buffer} <- buffer_runtime(runtime) do
+      case buffer.flush_writer do
+        :duckdb -> :ok
+        writer -> {:error, {:spooled_inserts_unsupported, writer}}
+      end
+    end
+  end
+
+  defp buffer_runtime(runtime) do
+    case BufferService.Runtime.fetch(runtime.buffer_name) do
+      {:ok, buffer} -> {:ok, buffer}
+      :error -> {:error, :buffer_service_unavailable}
+    end
+  end
+
+  @doc """
+  Where a request body spools before `insert_file/5` forwards it.
+
+  One function so the writer of those files and the sweeper of them cannot
+  drift apart on which directory they mean.
+  """
+  @spec spool_dir() :: Path.t()
+  def spool_dir do
+    Path.join(Application.get_env(:smolquery, :data_dir, System.tmp_dir!()), "tmp")
+  end
+
+  @doc """
+  Deletes spooled bodies older than `age_ms`, returning what was deleted.
+
+  The backstop for `insert_file/5`'s ownership rule, and the counterpart of
+  `Smolquery.Segments.Store.sweep_staging/2` for the other temporary directory
+  the write path uses. The edge deletes the body it spooled on every outcome it
+  lives to see; what it cannot delete is a body whose request handler was killed
+  outright, or one a node left behind by going down mid-upload. Nothing else
+  names those files — they never become segments, so no manifest, catalog, or
+  garbage collector will ever find them — and they sit on the same volume as the
+  manifest logs and the catalog, so what they fill up is the write path itself.
+
+  The age is the guard against sweeping a body that is merely still uploading:
+  pass a duration comfortably longer than the slowest request this node serves,
+  or `0` only from a boot path, where nothing can be writing yet.
+  """
+  @spec sweep_spool(non_neg_integer()) :: {:ok, [Path.t()]} | {:error, term()}
+  def sweep_spool(age_ms) when is_integer(age_ms) and age_ms >= 0 do
+    dir = spool_dir()
+    cutoff = System.os_time(:second) - div(age_ms, 1000)
+
+    case File.ls(dir) do
+      {:ok, names} -> {:ok, sweep(dir, names, cutoff)}
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Only the two prefixes the API mints, so a sweep can never take a file some
+  # other part of the system put in the data directory's `tmp/`.
+  defp sweep(dir, names, cutoff) do
+    names
+    |> Enum.filter(&(String.starts_with?(&1, "insert-") or String.starts_with?(&1, "load-")))
+    |> Enum.map(&Path.join(dir, &1))
+    |> Enum.filter(&(Store.staged_at(&1) <= cutoff and File.rm(&1) == :ok))
   end
 
   defp local_owner(runtime, table_ref) do
@@ -144,12 +242,36 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
+  # `inserted` is the batch's own accepted row count rather than the ack's,
+  # because a JSON flush groups every request in its window into one segment and
+  # the ack's `row_count` is that whole group's. The validator counted these rows
+  # here, one request at a time, so this number is already per-request and
+  # already true.
   defp write(runtime, table_ref, batch, errors) do
-    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
+    with {:ok, _ack} <- commit(runtime, table_ref, batch) do
       measure(batch.row_count, errors)
 
       {:ok, %{inserted: batch.row_count, errors: errors}}
     end
+  end
+
+  # The spooled path has no such count to fall back on — nothing parsed a row on
+  # the way in, and the line count the edge took while streaming the body is a
+  # newline tally, not a row tally. So the ack is the answer: its `row_count` is
+  # the Parquet footer's, read back from the segment the flush wrote, and it is
+  # this request's alone because `TableBuffer` never groups a spooled body with
+  # another. A retry that dedups is answered with the original commit's count,
+  # which is the same batch and so the same number.
+  defp write_spooled(runtime, table_ref, batch) do
+    with {:ok, ack} <- commit(runtime, table_ref, batch) do
+      measure(ack.row_count, [])
+
+      {:ok, %{inserted: ack.row_count, errors: []}}
+    end
+  end
+
+  defp commit(runtime, table_ref, batch) do
+    BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch)
   end
 
   defp measure(accepted, errors) do

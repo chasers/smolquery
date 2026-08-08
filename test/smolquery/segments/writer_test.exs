@@ -331,4 +331,187 @@ defmodule Smolquery.Segments.WriterTest do
       assert File.ls!(Path.join(dir, ".tmp")) == []
     end
   end
+
+  describe "ndjson" do
+    setup %{tmp_dir: dir} do
+      engine = :"writer_ndjson_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({Smolquery.Engine, name: engine})
+      spool = Path.join(dir, "spool")
+      File.mkdir_p!(spool)
+
+      %{engine: engine, store: store(Path.join(dir, "segments")), spool: spool}
+    end
+
+    defp write_ndjson(spool, name, lines) do
+      path = Path.join(spool, name)
+      body = Enum.map_join(lines, "\n", &JSON.encode!/1) <> "\n"
+      File.write!(path, body)
+      path
+    end
+
+    test "row_count comes from the parquet footer, not the caller", %{
+      engine: engine,
+      store: store,
+      spool: spool
+    } do
+      path =
+        write_ndjson(spool, "rows.ndjson", [
+          %{"id" => 1, "name" => "a"},
+          %{"id" => 2, "name" => "b"},
+          %{"id" => 3, "name" => "c"}
+        ])
+
+      schema = Schema.new!([{"id", :int64}, {"name", :string}])
+
+      assert {:ok, %Segment{} = segment} =
+               Writer.write({:ndjson, [path]}, schema, store: store, engine: engine)
+
+      assert segment.row_count == 3
+      assert File.exists?(segment.path)
+    end
+
+    test "sorts by the clustering key with NULLS LAST", %{
+      engine: engine,
+      store: store,
+      spool: spool
+    } do
+      path =
+        write_ndjson(spool, "cluster.ndjson", [
+          %{"id" => nil, "name" => "nullish"},
+          %{"id" => 2, "name" => "b"},
+          %{"id" => 1, "name" => "a"}
+        ])
+
+      schema = %{Schema.new!([{"id", :int64}, {"name", :string}]) | clustering: ["id"]}
+
+      assert {:ok, segment} =
+               Writer.write({:ndjson, [path]}, schema, store: store, engine: engine)
+
+      frame = DataFrame.from_parquet!(segment.path)
+      assert DataFrame.to_columns(frame)["id"] == [1, 2, nil]
+      assert DataFrame.to_columns(frame)["name"] == ["a", "b", "nullish"]
+    end
+
+    test "stats carry min/max for orderable types and strings, and null_count for every column",
+         %{engine: engine, store: store, spool: spool} do
+      path =
+        write_ndjson(spool, "stats.ndjson", [
+          %{
+            "id" => 1,
+            "ratio" => 0.5,
+            "ts" => "2026-07-31T12:00:01",
+            "day" => "2026-08-01",
+            "name" => "alpha",
+            "ok" => true
+          },
+          %{
+            "id" => 4,
+            "ratio" => 2.0,
+            "ts" => "2026-07-31T12:00:04",
+            "day" => "2026-08-04",
+            "name" => "delta",
+            "ok" => false
+          },
+          %{
+            "id" => nil,
+            "ratio" => nil,
+            "ts" => nil,
+            "day" => nil,
+            "name" => nil,
+            "ok" => nil
+          }
+        ])
+
+      schema =
+        Schema.new!([
+          {"id", :int64},
+          {"ratio", :float64},
+          {"ts", :timestamp},
+          {"day", :date},
+          {"name", :string},
+          {"ok", :bool}
+        ])
+
+      assert {:ok, segment} =
+               Writer.write({:ndjson, [path]}, schema, store: store, engine: engine)
+
+      assert segment.stats["id"] == %{min: 1, max: 4, null_count: 1}
+      assert segment.stats["ratio"] == %{min: 0.5, max: 2.0, null_count: 1}
+
+      assert segment.stats["ts"] == %{
+               min: ~N[2026-07-31 12:00:01.000000],
+               max: ~N[2026-07-31 12:00:04.000000],
+               null_count: 1
+             }
+
+      assert segment.stats["day"] == %{
+               min: ~D[2026-08-01],
+               max: ~D[2026-08-04],
+               null_count: 1
+             }
+
+      assert segment.stats["name"] == %{min: "alpha", max: "delta", null_count: 1}
+      assert segment.stats["ok"] == %{min: nil, max: nil, null_count: 1}
+    end
+
+    test "an empty paths list is :no_rows", %{engine: engine, store: store} do
+      assert Writer.write({:ndjson, []}, Schema.new!([{"id", :int64}]),
+               store: store,
+               engine: engine
+             ) == {:error, :no_rows}
+    end
+
+    test "a missing :engine option raises KeyError", %{store: store, spool: spool} do
+      path = write_ndjson(spool, "no-engine.ndjson", [%{"id" => 1}])
+
+      assert_raise KeyError, ~r/:engine/, fn ->
+        Writer.write({:ndjson, [path]}, Schema.new!([{"id", :int64}]), store: store)
+      end
+    end
+
+    test "a malformed row returns an error and leaves no segment", %{
+      engine: engine,
+      store: store,
+      spool: spool,
+      tmp_dir: dir
+    } do
+      path = write_ndjson(spool, "bad.ndjson", [%{"id" => "not-an-int"}])
+      segments_dir = Path.join(dir, "segments")
+
+      assert {:error, {:put_failed, _key, {:ndjson_copy_failed, message}}} =
+               Writer.write({:ndjson, [path]}, Schema.new!([{"id", :int64}]),
+                 store: store,
+                 engine: engine
+               )
+
+      assert message =~ "cast"
+      assert File.ls!(segments_dir) |> Enum.reject(&(&1 == ".tmp")) == []
+    end
+
+    # `Schema.Field.new/3` rejects a name like this, but the write path does not
+    # only see fields built that way: `Catalog.DuckLake.build_schema/2` mints
+    # `%Field{}` structs straight from `information_schema`. So the writer checks
+    # again, and it checks *before* anything is staged or put.
+    test "a column name with a single quote is refused before the COPY is built", %{
+      engine: engine,
+      store: store,
+      spool: spool,
+      tmp_dir: dir
+    } do
+      path = Path.join(spool, "quote.ndjson")
+      File.write!(path, ~s({"o'brien": "x"}\n))
+
+      schema = %Schema{
+        fields: [%Smolquery.Schema.Field{name: "o'brien", type: :string, nullable: true}],
+        clustering: []
+      }
+
+      assert {:error, {:invalid_identifier, "o'brien"}} =
+               Writer.write({:ndjson, [path]}, schema, store: store, engine: engine)
+
+      # Not merely empty: the refusal comes before `Store.put/3`, so the store
+      # never opened its staging directory at all.
+      refute File.exists?(Path.join(dir, "segments"))
+    end
+  end
 end

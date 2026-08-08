@@ -85,8 +85,10 @@ defmodule Smolquery.Segments.Writer do
   parsing. DuckDB reads them itself, sorts on the clustering key and writes the
   Parquet, so no row in the batch ever becomes an Elixir term.
 
-  Needs `:engine` and a store whose staging path is a local file — DuckDB's
-  `COPY` writes to a filesystem path, not to an object store.
+  Needs `:engine` and a store whose `location/2` is a local file — DuckDB's
+  `COPY` writes to a filesystem path, and the read-back this path does after
+  the put has no object-store credentials to read one with. `write/3` refuses a
+  shared store rather than upload a segment it cannot then describe.
   """
   @type ndjson :: {:ndjson, [Path.t()]}
 
@@ -96,8 +98,22 @@ defmodule Smolquery.Segments.Writer do
           | {:id, String.t()}
           | {:compression, atom() | {atom(), integer() | nil}}
           | {:engine, atom()}
+          | {:timeout, timeout()}
 
   @orderable [:int64, :float64, :timestamp, :date]
+
+  # Every DuckDB call a flush makes is a `GenServer.call` against one connection
+  # that is a per-query mutex, and `Smolquery.Engine.Connection` defaults those to
+  # 30 s — longer than the buffer's shipped `write_timeout_ms` of 15 s. The caller
+  # would therefore give up first and the late exit would take the committer, and
+  # every unacked batch it holds, with it. This default is under that 15 s so the
+  # inner call fails first with an error the commit can report; a buffer that has
+  # moved `write_timeout_ms` passes `Smolquery.BufferService.Runtime.engine_timeout/1`
+  # here instead.
+  @default_timeout 10_000
+
+  # A URI scheme in front of a path means the bytes are not on this filesystem.
+  @scheme ~r|^[A-Za-z][A-Za-z0-9+.-]*://|
 
   @doc """
   Writes `rows` as a segment in `:store`, returning the `Segment` describing it.
@@ -115,6 +131,9 @@ defmodule Smolquery.Segments.Writer do
     * `:id` — segment id, and so the last component of its key. Defaults to a
       fresh ULID.
     * `:compression` — Parquet codec, defaulting to `:zstd`
+    * `:timeout` — how long each of the `{:ndjson, paths}` path's DuckDB calls
+      may take, defaulting to `#{@default_timeout}` ms. Keep it under the
+      caller's own deadline: see the note beside `@default_timeout`.
 
   """
   @spec write(columns() | [row()] | DataFrame.t(), Schema.t(), [option()]) ::
@@ -125,13 +144,19 @@ defmodule Smolquery.Segments.Writer do
     prefix = Keyword.get(opts, :prefix, "")
     id = Keyword.get_lazy(opts, :id, &Id.generate/0)
     compression = Keyword.get(opts, :compression, :zstd)
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
 
+    # `local_store/1` and `writable_names/1` run before `Store.put/3`, not after:
+    # a check that fires once the put has returned has already uploaded a segment
+    # nothing will ever name, and an orphan in a bucket is what this path has no
+    # way to clean up.
     with :ok <- some_paths(paths),
+         :ok <- local_store(store),
+         :ok <- writable_names(schema),
          {:ok, key} <- Store.key(prefix, id),
          {:ok, put} <-
-           Store.put(store, key, &copy_ndjson(engine, paths, &1, schema, compression)),
-         {:ok, row_count} <- footer_rows(engine, put.location),
-         {:ok, stats} <- read_stats(engine, put.location, schema) do
+           Store.put(store, key, &copy_ndjson(engine, paths, &1, schema, compression, timeout)),
+         {:ok, row_count, stats} <- read_stats(engine, put.location, schema, timeout) do
       {:ok,
        %Segment{
          id: id,
@@ -173,6 +198,49 @@ defmodule Smolquery.Segments.Writer do
   defp some_paths([]), do: {:error, :no_rows}
   defp some_paths(_paths), do: :ok
 
+  # The `COPY` writes to a filesystem path and the stats read the file back
+  # through the write pool, whose engines are started without an object store's
+  # credential statements. A shared store therefore uploads the segment and
+  # *then* fails, leaving an object no manifest, catalog or GC pass names.
+  # `Smolquery.BufferService.Runtime.new/1` refuses that configuration at boot;
+  # this is the same refusal one layer down, for a caller that built its own
+  # store.
+  defp local_store(%Store{} = store) do
+    if Store.shared?(store) do
+      {:error, {:ndjson_store_not_local, store.impl}}
+    else
+      :ok
+    end
+  end
+
+  defp local_path(path) do
+    if Regex.match?(@scheme, path) do
+      {:error, {:ndjson_store_not_local, path}}
+    else
+      :ok
+    end
+  end
+
+  # Every column name in this path's SQL is interpolated — `read_json`'s
+  # `columns` map takes a string key, and DuckDB takes no parameter for an
+  # identifier — so all of them are validated once, here, before any reaches a
+  # statement. The caller cannot be trusted to have done it:
+  # `Smolquery.Catalog.DuckLake.build_schema/2` builds `%Field{}` structs
+  # straight from `information_schema`, bypassing `Field.new/3` and so
+  # `Identifier.validate/1`, and that schema is what the cache serves the write
+  # path. Failing here is also what keeps `Identifier.quote_name!/1` below from
+  # raising out of a flush and killing the committer with it.
+  defp writable_names(%Schema{fields: fields} = schema) do
+    names = Enum.map(fields, & &1.name) ++ Schema.clustering_columns(schema)
+
+    Enum.reduce_while(names, :ok, fn name, :ok ->
+      case Identifier.validate(name) do
+        {:ok, _name} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   # One statement for the whole flush: DuckDB reads every spooled body, sorts the
   # union on the clustering key and writes one Parquet file. `read_json` with an
   # explicit `columns` map pins the types, so nothing is inferred per request and
@@ -181,41 +249,44 @@ defmodule Smolquery.Segments.Writer do
   # Paths are parameters rather than interpolated: a spool path is generated here,
   # but a quoted literal in a COPY is exactly the place a future caller-supplied
   # name would become an injection.
-  defp copy_ndjson(engine, paths, staged, schema, compression) do
+  defp copy_ndjson(engine, paths, staged, schema, compression, timeout) do
+    # Once, not twice: the placeholder list and the destination's index are the
+    # same count, and `length/1` walks the list to find it.
+    count = length(paths)
+
     sql = """
     COPY (
-      SELECT * FROM read_json([#{placeholders(length(paths))}],
+      SELECT * FROM read_json([#{placeholders(count)}],
         format = 'newline_delimited',
         columns = {#{columns_spec(schema)}})#{order_clause(schema)}
     )
-    TO $#{length(paths) + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)})
+    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)})
     """
 
-    case Engine.query(engine, sql, paths ++ [staged]) do
-      {:ok, _result} -> :ok
-      {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
+    with :ok <- local_path(staged),
+         {:ok, _result} <- query(engine, sql, paths ++ [staged], timeout) do
+      :ok
     end
   end
 
-  # The footer, not the data: `parquet_file_metadata` reads the tail of the file,
-  # so the authoritative row count costs no pass over the rows. Trusting a count
-  # the caller sent instead would let a miscounted body scale the ack.
-  defp footer_rows(engine, path) do
-    case Engine.query(engine, "SELECT num_rows FROM parquet_file_metadata($1)", [path]) do
-      {:ok, %{rows: [[rows] | _rest]}} -> {:ok, rows}
-      {:ok, _other} -> {:error, {:ndjson_copy_failed, "no parquet footer at #{path}"}}
-      {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
-    end
-  end
-
-  # The manifest's stats, computed by DuckDB over the file just written. One pass
-  # over a local file still in the page cache.
+  # The manifest's stats and its row count together, in one pass over a local
+  # file still in the page cache. `count(*)` is the number
+  # `parquet_file_metadata` used to be asked for in a query of its own — the
+  # same count, one fewer round trip on a connection that is a per-query mutex,
+  # and one fewer chance for a flush to die between two statements.
+  #
+  # The footer's own per-row-group statistics would make this a metadata read
+  # rather than a scan, but `parquet_metadata` hands every bound back as a
+  # VARCHAR: folding those into typed manifest values needs a per-type cast
+  # this code cannot honestly promise for `DECIMAL`, and a bound that comes
+  # back subtly wrong silently prunes a segment out of a query rather than
+  # failing. The scan is the price of stats that are right.
   #
   # Unlike the Polars path this includes bounds for string columns:
   # `Explorer.Series.min/1` raises for `:string`, so `@orderable` cannot carry
   # them, and without them `Smolquery.QueryService.Pruner` cannot prune on a
   # tenant id — the first column of every clustering key this schema is used with.
-  defp read_stats(engine, path, %Schema{fields: fields}) do
+  defp read_stats(engine, path, %Schema{fields: fields}, timeout) do
     selects =
       Enum.map_join(fields, ", ", fn %Field{} = field ->
         name = Identifier.quote_name!(field.name)
@@ -227,19 +298,47 @@ defmodule Smolquery.Segments.Writer do
         end
       end)
 
-    case Engine.query(engine, "SELECT #{selects} FROM read_parquet($1)", [path]) do
-      {:ok, %{rows: [values]}} -> {:ok, zip_stats(fields, values)}
+    case query(engine, "SELECT count(*), #{selects} FROM read_parquet($1)", [path], timeout) do
+      {:ok, %{rows: [[row_count | values]]}} -> {:ok, row_count, zip_stats(fields, values)}
       {:ok, _other} -> {:error, {:ndjson_copy_failed, "no stats row for #{path}"}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # `Engine.query/3` passes no timeout, so it inherits `Engine.Connection`'s
+  # 30 s — see `@default_timeout` for why that is the wrong deadline for a
+  # flush. Called through the connection directly because the timeout is the
+  # point.
+  defp query(engine, sql, params, timeout) do
+    case Engine.Connection.query(Engine.connection_name(engine), sql, params, timeout) do
+      {:ok, result} -> {:ok, result}
       {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
     end
+  catch
+    # A `GenServer.call` that times out, or that lands on an engine the pool
+    # never started, exits the *caller* — and the caller here is the committer,
+    # whose death drops every batch waiting on this flush without a reply. Tag
+    # it instead, so a slow or missing engine fails the commit the same way a
+    # rejected line does.
+    :exit, reason -> {:error, {:ndjson_engine_exit, reason}}
   end
 
   defp zip_stats(fields, values) do
     fields
     |> Enum.zip(Enum.chunk_every(values, 3))
     |> Map.new(fn {%Field{} = field, [min, max, nulls]} ->
-      {field.name, %{min: min, max: max, null_count: nulls}}
+      {field.name, column_stats(min, max, nulls)}
     end)
+  end
+
+  # The one place either encoder spells the per-column statistic out. The shape
+  # is a contract that crosses two module boundaries — the writer produces it,
+  # `Smolquery.BufferService.HotManifest.Entry` serialises it into the manifest
+  # log and reads it back, and `Smolquery.QueryService.Pruner` decides on it — so
+  # the two encoders having drifted apart would have shown up as segments that
+  # prune differently depending on which one wrote them.
+  defp column_stats(min, max, null_count) do
+    %{min: min, max: max, null_count: null_count}
   end
 
   defp bounded?({:numeric, _precision, _scale}), do: true
@@ -257,9 +356,14 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
+  # Escaped as well as validated by `writable_names/1`. Its two neighbours quote
+  # through `Identifier.quote_name!/1` and this one did not, which is exactly the
+  # asymmetry a name reaching here from outside `Field.new/3` would exploit — a
+  # single quote closes the key and the rest of the `columns` map is attacker
+  # SQL. Two guards, because only one of them is enforced by a caller.
   defp columns_spec(%Schema{fields: fields}) do
     Enum.map_join(fields, ", ", fn %Field{} = field ->
-      "'#{field.name}': '#{sql_type(field.type)}'"
+      "#{Identifier.sql_string(field.name)}: '#{sql_type(field.type)}'"
     end)
   end
 
@@ -346,11 +450,11 @@ defmodule Smolquery.Segments.Writer do
       series = frame[field.name]
 
       {field.name,
-       %{
-         min: bound(series, field.type, &Series.min/1),
-         max: bound(series, field.type, &Series.max/1),
-         null_count: Series.nil_count(series)
-       }}
+       column_stats(
+         bound(series, field.type, &Series.min/1),
+         bound(series, field.type, &Series.max/1),
+         Series.nil_count(series)
+       )}
     end)
   end
 

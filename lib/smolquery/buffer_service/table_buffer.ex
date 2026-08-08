@@ -66,6 +66,25 @@ defmodule Smolquery.BufferService.TableBuffer do
   therefore works at the file level for free — `read_parquet(union_by_name = true)`
   handles the read side.
 
+  ## A batch of the other *shape* flushes too, and a spooled body never groups
+
+  The accumulator takes two shapes — column-major rows (`t:batch/0`) and the
+  path of a spooled NDJSON body (`t:file_batch/0`) — and it holds one of them
+  at a time. A batch of the other shape hands the accumulated one off first,
+  exactly as a batch under a different schema does, because the two cannot be
+  merged into one commit and a list holding both is a crash in the flush rather
+  than an error to a caller.
+
+  A spooled body is then handed off on its own: one body, one commit, one
+  `COPY`. Grouping them would cost two things this path cannot pay. The flush's
+  Parquet footer count is the only statement of what actually landed — nothing
+  parsed a row on the way in — and a grouped footer count covers every request
+  in the window, so no caller could be told its own number. And a single line
+  DuckDB cannot coerce fails the whole statement, so a grouped flush lets one
+  tenant's malformed body fail every other tenant's write in the same second.
+  Ungrouped, both are contained: the count is this request's, and the failure is
+  this request's.
+
   ## Sealing is signalled against a frozen set
 
   Crossing a seal threshold does not signal the tail as it stands; it first freezes
@@ -126,6 +145,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :prefix,
     :committer,
     :schema,
+    :kind,
     :timer,
     :signaled_at,
     :load,
@@ -160,11 +180,14 @@ defmodule Smolquery.BufferService.TableBuffer do
   What the accumulator takes when the request was never parsed: the path of one
   spooled NDJSON body.
 
-  Accepted only under `flush_writer: :duckdb`. The accumulator then holds paths
-  instead of rows — one small binary per request rather than a column-major term
-  — and the flush hands every path to DuckDB in a single `COPY`, so a batch's
-  rows never become Elixir terms at all. `:byte_size` is the body's size on disk,
-  which is what the admission and flush bounds then measure.
+  Accepted only under `flush_writer: :duckdb`. The accumulator then holds a path
+  instead of rows — one small binary rather than a column-major term — and the
+  flush hands it to DuckDB in a `COPY`, so a batch's rows never become Elixir
+  terms at all. `:byte_size` is the body's size on disk, which is what the
+  admission bound then measures.
+
+  One body is one commit: the accumulator hands it off rather than grouping it
+  with the next one, for the two reasons the moduledoc gives.
   """
   @type file_batch :: %{
           required(:schema) => Schema.t(),
@@ -763,7 +786,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp write_new(state, schema, columns, count, batch_id, bytes, from) do
-    state = flush_on_schema_change(state, schema)
+    state =
+      state
+      |> flush_on_schema_change(schema)
+      |> flush_on_kind_change(kind(columns))
 
     if full?(state, count, bytes) do
       {:reply, {:error, :buffer_full}, state}
@@ -782,6 +808,19 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
   defp flush_on_schema_change(state, _schema), do: handoff(state)
 
+  # The same handoff a schema change forces, for the same reason: an accumulator
+  # holding both shapes cannot be merged into one commit, and `merge_chunks/2`
+  # would find that out inside the flush — where the failure is a crash of this
+  # process, not a reply to a caller, and takes every other batch waiting here
+  # down unacked with it. So the shape is a property of the whole accumulator,
+  # decided by whichever batch opened it.
+  defp flush_on_kind_change(%__MODULE__{chunks: []} = state, kind), do: %{state | kind: kind}
+  defp flush_on_kind_change(%__MODULE__{kind: kind} = state, kind), do: state
+  defp flush_on_kind_change(state, kind), do: %{handoff(state) | kind: kind}
+
+  defp kind({:ndjson, _path}), do: :ndjson
+  defp kind(_columns), do: :columns
+
   defp accumulate(state, schema, columns, count, bytes, batch_id, from) do
     %{
       state
@@ -797,6 +836,12 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp track_batch(batch_ids, nil), do: batch_ids
   defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
+
+  # A spooled body is its own commit, whatever the size triggers say — the
+  # moduledoc's "A spooled body never groups" is enforced here, and it is what
+  # makes the flush's footer row count attributable to this one caller and its
+  # `COPY` failure this one caller's.
+  defp handoff_when_full(%__MODULE__{kind: :ndjson} = state), do: handoff(state)
 
   defp handoff_when_full(state) do
     if state.row_count >= state.runtime.flush_max_rows or
@@ -814,7 +859,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     Committer.commit(state.committer, %{
       schema: state.schema,
-      columns: merge_chunks(state.chunks),
+      columns: merge_chunks(state.kind, state.chunks),
       pending: Enum.reverse(state.pending),
       batch_ids: batch_ids,
       row_count: state.row_count,
@@ -834,22 +879,28 @@ defmodule Smolquery.BufferService.TableBuffer do
     }
   end
 
+  # Dispatched on the accumulator's own recorded shape rather than on whichever
+  # chunk happens to be at the head of the list. Head-dispatch decided what the
+  # *whole* list was from one element, so a list holding both shapes — which
+  # `flush_on_kind_change/2` now prevents, and nothing did before — picked a
+  # clause that then failed halfway through the merge, inside this process.
+  #
+  # Spooled bodies join into one list, not a zip: a chunk here is a path and the
+  # flush hands it to a COPY. There is only ever one of them per commit
+  # (`handoff_when_full/1`), and the list shape is the writer's interface.
+  defp merge_chunks(:ndjson, chunks) do
+    {:ndjson, chunks |> Enum.reverse() |> Enum.map(fn {:ndjson, path} -> path end)}
+  end
+
   # Chunks are whole column-major batches, newest first, so joining them is a
   # zip and not a concat: column `n` of the commit is column `n` of every chunk
   # in arrival order. Every chunk has one list per field of `state.schema`, which
   # `flush_on_schema_change/2` is what guarantees — a batch under a different
   # schema hands off first and starts its own accumulator, so no accumulator ever
   # mixes two column counts.
-  # Spooled bodies join into one list, not a zip: a chunk here is a path, and the
-  # flush hands all of them to one COPY. Newest-first, like the column-major case,
-  # so reversing restores arrival order.
-  defp merge_chunks([{:ndjson, _path} | _rest] = chunks) do
-    {:ndjson, chunks |> Enum.reverse() |> Enum.map(fn {:ndjson, path} -> path end)}
-  end
+  defp merge_chunks(:columns, [chunk]), do: chunk
 
-  defp merge_chunks([chunk]), do: chunk
-
-  defp merge_chunks(chunks) do
+  defp merge_chunks(:columns, chunks) do
     chunks
     |> Enum.reverse()
     |> Enum.zip_with(&Enum.concat/1)
