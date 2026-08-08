@@ -33,6 +33,15 @@ defmodule Smolquery.BufferService.RuntimeTest do
       assert runtime.write_timeout_ms == 456
       assert runtime.control_timeout_ms == 123
       assert runtime.flush_interval_ms == 1_000
+      assert runtime.compression == :zstd
+    end
+
+    test "refuses an unsupported compression codec at boot, not per group commit", %{
+      tmp_dir: dir
+    } do
+      assert_raise ArgumentError, ~r/unsupported hot-tier compression/, fn ->
+        Runtime.new(name: unique_name(), dir: dir, compression: :lz4)
+      end
     end
   end
 
