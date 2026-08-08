@@ -204,6 +204,12 @@ mix test --only cluster # ingest, fan-out, seal, drain, kill
 | `smolquery-storage` | 2 | `storage` | none — sealed segments in MinIO, catalog in Postgres |
 | `postgres` / `minio` | 1 each | — | kind-overlay only |
 
+`SMOLQUERY_KIND_OVERLAY=kind-symmetric ./scripts/kind-up.sh` deploys the same
+release as three identical all-role servers instead (`smolquery-server`, 3
+replicas, `SMOLQUERY_ROLES=all`, PVC each) — the ClickHouse-replica shape,
+where any stage's demand can use any node's CPU and there is no per-tier
+capacity split to get wrong.
+
 All StatefulSets, because every cluster member needs a stable pod name: the
 per-node TLS certificate is looked up by `POD_NAME`, and peers derive each
 other's URLs from node names. The API lands on `http://localhost:8080` (Bearer

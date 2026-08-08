@@ -1,10 +1,30 @@
+# The symmetric kind topology: base/core plus a fleet of three identical
+# all-role servers, instead of base's disaggregated api/buffer/storage split.
+# Select it with SMOLQUERY_KIND_OVERLAY=kind-symmetric ./scripts/kind-up.sh.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - ../../base
-  - deps
+  - ../../base/core
+  - ../kind/deps
+  - server.yaml
   - external-service.yaml
+
+# The front-door Service comes from base/core pointing at the api pod; here
+# every server answers it.
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: smolquery-api
+        namespace: smolquery
+      spec:
+        selector:
+          app: smolquery-server
+    target:
+      kind: Service
+      name: smolquery-api
 
 images:
   - name: smolquery
@@ -30,18 +50,12 @@ secretGenerator:
     namespace: smolquery
     files:
       - tls/ca.pem
-      - tls/smolquery-api-0.pem
-      - tls/smolquery-api-0.key
-      - tls/smolquery-buffer-0.pem
-      - tls/smolquery-buffer-0.key
-      - tls/smolquery-buffer-1.pem
-      - tls/smolquery-buffer-1.key
-      - tls/smolquery-buffer-2.pem
-      - tls/smolquery-buffer-2.key
-      - tls/smolquery-storage-0.pem
-      - tls/smolquery-storage-0.key
-      - tls/smolquery-storage-1.pem
-      - tls/smolquery-storage-1.key
+      - tls/smolquery-server-0.pem
+      - tls/smolquery-server-0.key
+      - tls/smolquery-server-1.pem
+      - tls/smolquery-server-1.key
+      - tls/smolquery-server-2.pem
+      - tls/smolquery-server-2.key
 
 generatorOptions:
   disableNameSuffixHash: true
