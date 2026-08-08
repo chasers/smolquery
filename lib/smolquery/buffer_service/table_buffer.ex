@@ -244,7 +244,15 @@ defmodule Smolquery.BufferService.TableBuffer do
           | {:invalid, [Validator.row_errors()]}
           | {:duplicate, ack()}
           | {:error, term()}
-  def write_ndjson(buffer, %Schema{} = schema, body, row_count, byte_size, timeout, batch_id \\ nil)
+  def write_ndjson(
+        buffer,
+        %Schema{} = schema,
+        body,
+        row_count,
+        byte_size,
+        timeout,
+        batch_id \\ nil
+      )
       when is_binary(body) do
     GenServer.call(
       buffer,
