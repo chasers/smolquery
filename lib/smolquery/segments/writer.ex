@@ -192,20 +192,55 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
-  defp stats(frame, %Schema{fields: fields}) do
+  defp stats(frame, %Schema{fields: fields} = schema) do
+    sorted = leading_clustering_column(schema)
+    row_count = DataFrame.n_rows(frame)
+
     Map.new(fields, fn %Field{} = field ->
       series = frame[field.name]
+      null_count = Series.nil_count(series)
 
       {field.name,
        %{
-         min: bound(series, field.type, &Series.min/1),
-         max: bound(series, field.type, &Series.max/1),
-         null_count: Series.nil_count(series)
+         min: bound(series, field, sorted, :min, row_count, null_count),
+         max: bound(series, field, sorted, :max, row_count, null_count),
+         null_count: null_count
        }}
     end)
   end
 
-  defp bound(series, {:numeric, _precision, _scale}, fun), do: fun.(series)
-  defp bound(series, type, fun) when type in @orderable, do: fun.(series)
-  defp bound(_series, _type, _fun), do: nil
+  # `Series.min/1` refuses `:string`, so a text column would carry no bounds and
+  # `Smolquery.QueryService.Pruner` could not prune on a tenant id — the first
+  # column of most clustering keys, and the one an equality predicate names most.
+  #
+  # The leading clustering column needs no comparison pass to answer: `sort_frame/2`
+  # has already ordered the whole frame by it, ascending with nulls last, so its
+  # bounds are the first and last non-null positions. Later clustering columns are
+  # ordered only within a run of the first, and unclustered columns not at all, so
+  # neither gets bounds this way — a wrong bound prunes away real rows, which is
+  # worse than no bound at all.
+  defp bound(series, %Field{name: name, type: :string}, name, which, row_count, null_count) do
+    case row_count - null_count do
+      0 -> nil
+      present -> Series.at(series, if(which == :min, do: 0, else: present - 1))
+    end
+  end
+
+  defp bound(series, %Field{type: {:numeric, _precision, _scale}}, _sorted, which, _rows, _nulls),
+    do: extreme(series, which)
+
+  defp bound(series, %Field{type: type}, _sorted, which, _rows, _nulls) when type in @orderable,
+    do: extreme(series, which)
+
+  defp bound(_series, _field, _sorted, _which, _rows, _nulls), do: nil
+
+  defp extreme(series, :min), do: Series.min(series)
+  defp extreme(series, :max), do: Series.max(series)
+
+  defp leading_clustering_column(%Schema{} = schema) do
+    case Schema.clustering_columns(schema) do
+      [column | _rest] -> column
+      [] -> nil
+    end
+  end
 end

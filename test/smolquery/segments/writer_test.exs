@@ -26,6 +26,10 @@ defmodule Smolquery.Segments.WriterTest do
 
   defp clustered_schema(clustering), do: %{schema() | clustering: clustering}
 
+  defp tenant_schema(clustering) do
+    %{Schema.new!([{"tenant", :string}, {"id", :int64}]) | clustering: clustering}
+  end
+
   defp rows(count) do
     for i <- 1..count do
       %{
@@ -169,6 +173,43 @@ defmodule Smolquery.Segments.WriterTest do
 
       assert segment.stats["name"] == %{min: nil, max: nil, null_count: 0}
       assert segment.stats["ok"] == %{min: nil, max: nil, null_count: 0}
+    end
+
+    test "bounds a string column that leads the clustering key", %{tmp_dir: dir} do
+      rows = [%{"tenant" => "c"}, %{"tenant" => "a"}, %{"tenant" => "b"}]
+
+      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+
+      assert segment.stats["tenant"] == %{min: "a", max: "c", null_count: 0}
+    end
+
+    test "excludes trailing nulls from a leading string column's max", %{tmp_dir: dir} do
+      rows = [%{"tenant" => "b"}, %{"tenant" => nil}, %{"tenant" => "a"}]
+
+      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+
+      assert segment.stats["tenant"] == %{min: "a", max: "b", null_count: 1}
+    end
+
+    test "leaves an all-null leading string column unbounded", %{tmp_dir: dir} do
+      rows = [%{"tenant" => nil}, %{"tenant" => nil}]
+
+      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+
+      assert segment.stats["tenant"] == %{min: nil, max: nil, null_count: 2}
+    end
+
+    test "skips a string column the frame is not globally sorted by", %{tmp_dir: dir} do
+      rows = [
+        %{"id" => 2, "tenant" => "a"},
+        %{"id" => 1, "tenant" => "z"},
+        %{"id" => 1, "tenant" => "m"}
+      ]
+
+      {:ok, segment} = Writer.write(rows, tenant_schema(["id", "tenant"]), store: store(dir))
+
+      assert segment.stats["tenant"] == %{min: nil, max: nil, null_count: 0}
+      assert segment.stats["id"] == %{min: 1, max: 2, null_count: 0}
     end
 
     test "has an entry for every schema column", %{tmp_dir: dir} do
