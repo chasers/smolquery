@@ -81,6 +81,7 @@ defmodule Smolquery.BufferService.Runtime do
     :store,
     :ring,
     :replicator,
+    :spool_dir,
     flush_interval_ms: 1_000,
     flush_max_rows: 100_000,
     flush_max_bytes: 8_000_000,
@@ -98,6 +99,8 @@ defmodule Smolquery.BufferService.Runtime do
     seal_consumer: {Smolquery.BufferService.SealLog, []},
     compression: :zstd,
     encode_concurrency: 2,
+    flush_writer: :polars,
+    write_pool_size: 1,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
   ]
@@ -108,6 +111,7 @@ defmodule Smolquery.BufferService.Runtime do
           store: Store.t(),
           ring: Ring.t(),
           replicator: Replicator.t(),
+          spool_dir: Path.t(),
           flush_interval_ms: pos_integer(),
           flush_max_rows: pos_integer(),
           flush_max_bytes: pos_integer(),
@@ -125,6 +129,8 @@ defmodule Smolquery.BufferService.Runtime do
           seal_consumer: {module(), term()},
           compression: atom(),
           encode_concurrency: pos_integer(),
+          flush_writer: :polars | :duckdb,
+          write_pool_size: pos_integer(),
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
         }
@@ -147,6 +153,8 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_consumer,
     :compression,
     :encode_concurrency,
+    :flush_writer,
+    :write_pool_size,
     :hot_server_ip,
     :hot_server_port
   ]
@@ -182,6 +190,7 @@ defmodule Smolquery.BufferService.Runtime do
       %__MODULE__{
         name: name,
         store: store,
+        spool_dir: Keyword.get(config, :spool_dir, Path.join(dir, "spool")),
         manifest:
           HotManifest.new(
             name: manifest(name),
@@ -197,6 +206,36 @@ defmodule Smolquery.BufferService.Runtime do
       Keyword.take(config, @limits)
     )
   end
+
+  @doc """
+  The DuckDB instance a `:duckdb` flush writes its segment with.
+
+  Its own instance, not the query path's, for two reasons stated elsewhere in
+  this codebase: `Smolquery.Engine.Connection` wraps one ADBC connection and is
+  therefore a per-query mutex, and a DuckDB internal fault invalidates the whole
+  database it happens on. Sharing one with reads would make a flush queue behind
+  a user's scan, and let a scan's rare fault take unacked rows with it.
+  """
+  @spec engine(atom(), non_neg_integer()) :: atom()
+  def engine(name, index), do: Module.concat(name, "Engine#{index}")
+
+  @doc """
+  Which of the pool's DuckDB instances writes the segment named by `key`.
+
+  Hashed on the segment id, not the table: a table has one buffer and one
+  committer, so hashing on the table would send every one of its flushes to the
+  same connection and the pool would do nothing for the case that needs it most.
+  """
+  @spec engine_for(t(), term()) :: atom()
+  def engine_for(%__MODULE__{name: name, write_pool_size: size}, key),
+    do: engine(name, :erlang.phash2(key, size))
+
+  @doc """
+  Every DuckDB instance the write pool runs, in index order.
+  """
+  @spec engines(t()) :: [atom()]
+  def engines(%__MODULE__{name: name, write_pool_size: size}),
+    do: Enum.map(0..(size - 1), &engine(name, &1))
 
   defp validate_compression!(compression) when compression in @codecs, do: :ok
 

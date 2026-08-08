@@ -223,6 +223,31 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
+  Accumulates an unparsed NDJSON body and returns once it is durable.
+
+  `row_count` is the sender's newline count, not a parse: this node does not
+  read the bytes, and the flush is what turns them into a segment. Otherwise
+  identical to `write_frame/6`, including the ack and the dedup semantics.
+  """
+  @spec write_ndjson(
+          GenServer.server(),
+          Schema.t(),
+          binary(),
+          non_neg_integer(),
+          non_neg_integer(),
+          timeout(),
+          String.t() | nil
+        ) :: {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
+  def write_ndjson(buffer, %Schema{} = schema, body, row_count, byte_size, timeout, batch_id \\ nil)
+      when is_binary(body) do
+    GenServer.call(
+      buffer,
+      {:write, schema, {:ndjson, body, row_count}, batch_id, byte_size},
+      timeout
+    )
+  end
+
+  @doc """
   Records an entry another node's group commit shipped here (T-96).
 
   The follower half of `Smolquery.BufferService.Replicator.SegmentShipping`:
@@ -766,6 +791,10 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp chunk_count(rows) when is_list(rows), do: length(rows)
   defp chunk_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
+
+  # Counted by the sender, because counting newlines again here would be a second
+  # pass over bytes this node is deliberately not reading.
+  defp chunk_count({:ndjson, _body, count}), do: count
 
   defp handoff(%__MODULE__{chunks: []} = state), do: state
 

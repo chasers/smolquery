@@ -61,6 +61,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
+  alias Smolquery.BufferService.Runtime
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
@@ -244,13 +246,57 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp encode(runtime, prefix, commit) do
-    with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
-      Writer.write(merged, commit.schema,
+    if ndjson_commit?(commit) do
+      encode_ndjson(runtime, prefix, commit)
+    else
+      with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
+        Writer.write(merged, commit.schema,
+          store: runtime.store,
+          prefix: prefix,
+          compression: runtime.compression
+        )
+      end
+    end
+  end
+
+  defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
+  defp ndjson_commit?(_commit), do: false
+
+  # The bytes reach disk here rather than at the API, because the API no longer
+  # knows which node owns the table — #108's partitions send most batches to a
+  # peer, and a path on the sender's disk means nothing to the owner. Spooling on
+  # the owner is what makes the unparsed body survive the hop.
+  #
+  # The segment id is minted before the write so the pool can be selected on it,
+  # spreading a table's concurrent encodes across DuckDB instances instead of
+  # queueing them all on one ADBC connection.
+  defp encode_ndjson(runtime, prefix, commit) do
+    id = Id.generate()
+    paths = spool(runtime, id, commit.chunks)
+
+    try do
+      Writer.write({:ndjson, paths}, commit.schema,
         store: runtime.store,
         prefix: prefix,
+        id: id,
+        engine: Runtime.engine_for(runtime, id),
         compression: runtime.compression
       )
+    after
+      Enum.each(paths, &File.rm/1)
     end
+  end
+
+  defp spool(runtime, id, chunks) do
+    File.mkdir_p!(runtime.spool_dir)
+
+    chunks
+    |> Enum.with_index()
+    |> Enum.map(fn {{:ndjson, body, _count}, index} ->
+      path = Path.join(runtime.spool_dir, "#{id}-#{index}.ndjson")
+      File.write!(path, body)
+      path
+    end)
   end
 
   defp finish(state, commit, encoded, started) do

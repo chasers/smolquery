@@ -80,20 +80,79 @@ defmodule Smolquery.IngestService.Client do
   def insert_ndjson(name, table_ref, body, opts \\ []) when is_binary(body) do
     with {:ok, runtime} <- runtime(name),
          {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      # The parse is timed separately from the write because they are the two
-      # halves of the ack that live on this side of the wire, and T-181 left
-      # ~400ms of it unattributed (T-182).
-      started = System.monotonic_time(:microsecond)
-      validated = ColumnarValidator.validate(schema, body)
-      parse_us = System.monotonic_time(:microsecond) - started
-
-      case validated do
-        {:ok, frame} ->
-          write_frame(runtime, table_ref, schema, frame, byte_size(body), opts, parse_us)
-
-        :fallback ->
-          insert_decoded_lines(runtime, table_ref, schema, body, opts)
+      if runtime.ndjson_passthrough do
+        forward_ndjson(runtime, table_ref, schema, body, opts)
+      else
+        parse_and_write(runtime, table_ref, schema, body, opts)
       end
+    end
+  end
+
+  # The body goes to the owning buffer as the bytes the client sent. Nothing here
+  # parses it, so this node spends no CPU per row and the frame never exists to be
+  # serialized — T-182 measured those two as 32% and 1% of the ack.
+  #
+  # The row count is the newline count, which is one pass over the bytes rather
+  # than a parse, and is what the ack reports. The trade is stated in
+  # `insert_ndjson/4`'s docs: nothing validates per row on this path, so
+  # `insertErrors` is always empty and a value the schema cannot take fails the
+  # whole flush instead of one row.
+  defp forward_ndjson(runtime, table_ref, schema, body, opts) do
+    started = System.monotonic_time(:microsecond)
+    row_count = count_rows(body)
+    count_us = System.monotonic_time(:microsecond) - started
+
+    batch = %{
+      schema: schema,
+      ndjson: body,
+      row_count: row_count,
+      byte_size: byte_size(body)
+    }
+
+    batch_id = Keyword.get(opts, :batch_id)
+    target = Partitions.write_ref(table_ref, runtime.write_partitions, batch_id)
+
+    batch =
+      case batch_id do
+        nil -> batch
+        batch_id -> Map.put(batch, :batch_id, batch_id)
+      end
+
+    written_at = System.monotonic_time(:microsecond)
+    written = BufferService.Client.write_batch(runtime.buffer_name, target, batch)
+    write_us = System.monotonic_time(:microsecond) - written_at
+
+    with {:ok, _ack} <- written do
+      measure(row_count, [], count_us, write_us)
+
+      {:ok, %{inserted: row_count, errors: []}}
+    end
+  end
+
+  # A body whose last line has no newline still holds a row, so the count is the
+  # newlines plus one unless the bytes end on a newline.
+  defp count_rows(<<>>), do: 0
+
+  defp count_rows(body) do
+    newlines = body |> :binary.matches("\n") |> length()
+
+    if String.ends_with?(body, "\n"), do: newlines, else: newlines + 1
+  end
+
+  defp parse_and_write(runtime, table_ref, schema, body, opts) do
+    # The parse is timed separately from the write because they are the two
+    # halves of the ack that live on this side of the wire, and T-181 left
+    # ~400ms of it unattributed (T-182).
+    started = System.monotonic_time(:microsecond)
+    validated = ColumnarValidator.validate(schema, body)
+    parse_us = System.monotonic_time(:microsecond) - started
+
+    case validated do
+      {:ok, frame} ->
+        write_frame(runtime, table_ref, schema, frame, byte_size(body), opts, parse_us)
+
+      :fallback ->
+        insert_decoded_lines(runtime, table_ref, schema, body, opts)
     end
   end
 

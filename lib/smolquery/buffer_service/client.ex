@@ -136,6 +136,8 @@ defmodule Smolquery.BufferService.Client do
     |> Map.put(:frame_ipc, Explorer.DataFrame.dump_ipc!(frame))
   end
 
+  # NDJSON is already bytes, so a remote batch needs no conversion — which is the
+  # point of the passthrough path: no frame exists on this node to serialize.
   defp wire_batch(_remote, batch), do: batch
 
   @doc """
