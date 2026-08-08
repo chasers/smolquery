@@ -23,6 +23,11 @@ defmodule Smolquery.IngestService.Runtime do
   `schema_cache_ttl_ms` bounds how stale a cached table schema may be. CRUD
   through the API invalidates the cache on the node it runs on; the TTL is
   what bounds staleness everywhere else.
+
+  `write_partitions` spreads each table's writes over that many buffer
+  identities (`Smolquery.Partitions`) — across the ring, so across nodes. The
+  query service's `write_partitions` must match; see the caveats there and in
+  `Smolquery.Partitions`.
   """
 
   alias Smolquery.Catalog
@@ -33,7 +38,8 @@ defmodule Smolquery.IngestService.Runtime do
     :catalog,
     :catalog_opts,
     buffer_name: Smolquery.BufferService,
-    schema_cache_ttl_ms: 60_000
+    schema_cache_ttl_ms: 60_000,
+    write_partitions: 1
   ]
 
   @type t :: %__MODULE__{
@@ -41,7 +47,8 @@ defmodule Smolquery.IngestService.Runtime do
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           buffer_name: atom(),
-          schema_cache_ttl_ms: pos_integer()
+          schema_cache_ttl_ms: pos_integer(),
+          write_partitions: pos_integer()
         }
 
   @doc """
@@ -63,7 +70,7 @@ defmodule Smolquery.IngestService.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:buffer_name, :schema_cache_ttl_ms]))
+    |> struct!(Keyword.take(config, [:buffer_name, :schema_cache_ttl_ms, :write_partitions]))
   end
 
   use Smolquery.Runtime

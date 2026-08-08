@@ -104,6 +104,39 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     assert run(plan).rows == [[5]]
   end
 
+  test "a partitioned table's hot tier reads as one (T-170)", %{
+    catalog: catalog,
+    buffer: buffer,
+    runtime: runtime,
+    tmp_dir: tmp
+  } do
+    seal_rows(catalog, Path.join(tmp, "segments"), 1..2)
+
+    partitioned =
+      Runtime.new(
+        name: :"planner_part_#{:erlang.unique_integer([:positive])}",
+        catalog: catalog,
+        buffer_base_url: HotServer.base_url(buffer),
+        write_partitions: 3
+      )
+
+    for {ref, base} <- Enum.zip(Smolquery.Partitions.refs(@table, 3), [10, 20, 30]) do
+      rows = for i <- base..(base + 1), do: %{"id" => i, "name" => "hot-#{i}"}
+      {:ok, _ack} = Client.write_batch(buffer, ref, %{schema: schema(), rows: rows})
+    end
+
+    {:ok, plan} =
+      Planner.plan(
+        partitioned,
+        Engine.connection_name(@job),
+        "SELECT count(*) FROM analytics.events"
+      )
+
+    assert run(plan).rows == [[8]]
+
+    on_exit(fn -> Runtime.delete(partitioned.name) end)
+  end
+
   test "the view shadows the lake rather than replacing it", %{
     catalog: catalog,
     runtime: runtime,

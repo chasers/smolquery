@@ -121,6 +121,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
+  alias Smolquery.Partitions
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
@@ -252,9 +253,19 @@ defmodule Smolquery.QueryService.Planner do
 
   defp manifests(_runtime, []), do: {:ok, %{}}
 
+  # A partitioned table's hot tier lives under several buffer refs
+  # (Smolquery.Partitions), so each table expands into its partition refs for
+  # the fetch and every page gathers under the parent — the rest of the plan
+  # keeps seeing one hot tier per table.
   defp manifests(runtime, refs) do
     urls = manifest_urls(runtime)
-    pairs = Enum.flat_map(refs, fn ref -> Enum.map(urls, &{ref, &1}) end)
+
+    pairs =
+      Enum.flat_map(refs, fn ref ->
+        for partition <- Partitions.refs(ref, runtime.write_partitions), url <- urls do
+          {partition, url}
+        end
+      end)
 
     {gathered, failures} =
       pairs
@@ -269,7 +280,7 @@ defmodule Smolquery.QueryService.Planner do
       |> Enum.zip(pairs)
       |> Enum.reduce({Map.new(refs, &{&1, []}), %{}}, fn
         {{:ok, {ref, {:ok, entries}}}, _pair}, {acc, failed} ->
-          {Map.update!(acc, ref, &[entries | &1]), failed}
+          {Map.update!(acc, Partitions.parent(ref), &[entries | &1]), failed}
 
         {{:ok, {ref, {:error, reason}}}, {ref, url}}, {acc, failed} ->
           {acc, Map.put_new(failed, url, {ref, reason})}

@@ -115,6 +115,20 @@ defmodule SmolqueryApi.TableControllerTest do
   end
 
   describe "tables" do
+    test "a partition-shaped id is refused — reserved for the write path (T-170)", %{
+      name: name
+    } do
+      create_dataset(name, "analytics")
+
+      response =
+        post_json(name, "/v1/datasets/analytics/tables", %{
+          "id" => "events__p1",
+          "schema" => @schema_json
+        })
+
+      assert response.status == 400
+    end
+
     test "create, list, and read the schema back", %{name: name} do
       create_dataset(name, "analytics")
 

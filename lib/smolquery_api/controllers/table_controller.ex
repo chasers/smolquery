@@ -200,7 +200,14 @@ defmodule SmolqueryApi.TableController do
   defp clustering_from_json(%{"clustering" => clustering}, _schema),
     do: {:error, {:invalid_clustering, clustering}}
 
-  defp id(%{"id" => id}) when is_binary(id), do: {:ok, id}
+  defp id(%{"id" => id}) when is_binary(id) do
+    if Smolquery.Partitions.reserved?(id) do
+      {:error, {:invalid_param, "id"}}
+    else
+      {:ok, id}
+    end
+  end
+
   defp id(_body), do: {:error, {:missing_field, "id"}}
 
   defp invalidate_schema_cache(conn, table_ref) do
