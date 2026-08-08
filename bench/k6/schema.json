@@ -1,0 +1,253 @@
+{
+  "id": "otel_logs",
+  "schema": [
+    {
+      "name": "project_id",
+      "type": "STRING"
+    },
+    {
+      "name": "timestamp",
+      "type": "TIMESTAMP"
+    },
+    {
+      "name": "observed_timestamp",
+      "type": "TIMESTAMP"
+    },
+    {
+      "name": "severity_number",
+      "type": "INT64"
+    },
+    {
+      "name": "severity_text",
+      "type": "STRING"
+    },
+    {
+      "name": "body",
+      "type": "STRING"
+    },
+    {
+      "name": "trace_id",
+      "type": "STRING"
+    },
+    {
+      "name": "span_id",
+      "type": "STRING"
+    },
+    {
+      "name": "trace_flags",
+      "type": "INT64"
+    },
+    {
+      "name": "dropped_attributes_count",
+      "type": "INT64"
+    },
+    {
+      "name": "service_name",
+      "type": "STRING"
+    },
+    {
+      "name": "service_namespace",
+      "type": "STRING"
+    },
+    {
+      "name": "service_version",
+      "type": "STRING"
+    },
+    {
+      "name": "service_instance_id",
+      "type": "STRING"
+    },
+    {
+      "name": "deployment_environment",
+      "type": "STRING"
+    },
+    {
+      "name": "cloud_provider",
+      "type": "STRING"
+    },
+    {
+      "name": "cloud_region",
+      "type": "STRING"
+    },
+    {
+      "name": "cloud_availability_zone",
+      "type": "STRING"
+    },
+    {
+      "name": "cloud_account_id",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_cluster_name",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_namespace_name",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_deployment_name",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_pod_name",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_pod_uid",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_container_name",
+      "type": "STRING"
+    },
+    {
+      "name": "k8s_node_name",
+      "type": "STRING"
+    },
+    {
+      "name": "host_name",
+      "type": "STRING"
+    },
+    {
+      "name": "host_arch",
+      "type": "STRING"
+    },
+    {
+      "name": "os_type",
+      "type": "STRING"
+    },
+    {
+      "name": "os_version",
+      "type": "STRING"
+    },
+    {
+      "name": "container_id",
+      "type": "STRING"
+    },
+    {
+      "name": "container_image_tag",
+      "type": "STRING"
+    },
+    {
+      "name": "telemetry_sdk_name",
+      "type": "STRING"
+    },
+    {
+      "name": "telemetry_sdk_language",
+      "type": "STRING"
+    },
+    {
+      "name": "telemetry_sdk_version",
+      "type": "STRING"
+    },
+    {
+      "name": "scope_name",
+      "type": "STRING"
+    },
+    {
+      "name": "scope_version",
+      "type": "STRING"
+    },
+    {
+      "name": "code_namespace",
+      "type": "STRING"
+    },
+    {
+      "name": "code_function",
+      "type": "STRING"
+    },
+    {
+      "name": "code_lineno",
+      "type": "INT64"
+    },
+    {
+      "name": "http_request_method",
+      "type": "STRING"
+    },
+    {
+      "name": "http_route",
+      "type": "STRING"
+    },
+    {
+      "name": "http_response_status_code",
+      "type": "INT64"
+    },
+    {
+      "name": "http_request_body_size",
+      "type": "INT64"
+    },
+    {
+      "name": "http_response_body_size",
+      "type": "INT64"
+    },
+    {
+      "name": "url_path",
+      "type": "STRING"
+    },
+    {
+      "name": "url_scheme",
+      "type": "STRING"
+    },
+    {
+      "name": "network_protocol_version",
+      "type": "STRING"
+    },
+    {
+      "name": "user_agent_original",
+      "type": "STRING"
+    },
+    {
+      "name": "client_address",
+      "type": "STRING"
+    },
+    {
+      "name": "server_address",
+      "type": "STRING"
+    },
+    {
+      "name": "server_port",
+      "type": "INT64"
+    },
+    {
+      "name": "duration_ms",
+      "type": "FLOAT64"
+    },
+    {
+      "name": "error_type",
+      "type": "STRING"
+    },
+    {
+      "name": "exception_type",
+      "type": "STRING"
+    },
+    {
+      "name": "exception_message",
+      "type": "STRING"
+    },
+    {
+      "name": "exception_stacktrace",
+      "type": "STRING"
+    },
+    {
+      "name": "enduser_id",
+      "type": "STRING"
+    },
+    {
+      "name": "session_id",
+      "type": "STRING"
+    },
+    {
+      "name": "thread_name",
+      "type": "STRING"
+    },
+    {
+      "name": "log_file_path",
+      "type": "STRING"
+    },
+    {
+      "name": "sampled",
+      "type": "BOOL"
+    }
+  ]
+}
