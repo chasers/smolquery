@@ -232,6 +232,32 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
+  @doc """
+  Whether DuckDB can read `path` as this schema, without writing anything.
+
+  `count(*)` over `read_json` still parses and casts every value, so this
+  answers the same question a `COPY` would at a fraction of the cost — no
+  Parquet, no sort, no bytes on disk. It exists so a failed group commit can
+  find *which* spooled body it choked on, instead of failing every caller that
+  happened to share the commit.
+  """
+  @spec readable_ndjson?(atom(), Path.t(), Schema.t()) :: boolean()
+  def readable_ndjson?(engine, path, %Schema{fields: fields} = schema) do
+    # `count(*)` is not enough: it needs no column values, so DuckDB is free to
+    # skip the casts and answer a row count for a body it could not actually
+    # read. Counting every column forces each one to be evaluated, which is the
+    # work a `COPY` would do, without writing a Parquet file to find out.
+    counts = Enum.map_join(fields, ", ", &"count(#{Identifier.quote_name!(&1.name)})")
+
+    sql = """
+    SELECT #{counts} FROM read_json([$1],
+      format = 'newline_delimited',
+      columns = {#{columns_spec(schema)}})
+    """
+
+    match?({:ok, _result}, Engine.query(engine, sql, [path]))
+  end
+
   defp some_paths([]), do: {:error, :no_rows}
   defp some_paths(_paths), do: :ok
 

@@ -122,10 +122,28 @@ defmodule Smolquery.IngestService.Client do
     written = BufferService.Client.write_batch(runtime.buffer_name, target, batch)
     write_us = System.monotonic_time(:microsecond) - written_at
 
-    with {:ok, _ack} <- written do
-      measure(row_count, [], count_us, write_us)
+    case written do
+      {:ok, _ack} ->
+        measure(row_count, [], count_us, write_us)
 
-      {:ok, %{inserted: row_count, errors: []}}
+        {:ok, %{inserted: row_count, errors: []}}
+
+      # The flush validated what this node did not. Rows the schema refused are
+      # reported at their index in this body, the way `insert/4` reports them,
+      # and the rest are durable.
+      {:ok, _ack, errors} ->
+        inserted = row_count - length(errors)
+        measure(inserted, errors, count_us, write_us)
+
+        {:ok, %{inserted: inserted, errors: errors}}
+
+      {:invalid, errors} ->
+        measure(0, errors, count_us, write_us)
+
+        {:ok, %{inserted: 0, errors: errors}}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

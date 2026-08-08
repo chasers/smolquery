@@ -96,16 +96,76 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
     assert entry.row_count == 5
   end
 
-  test "a value the schema cannot take fails the batch rather than acking it", %{name: name} do
-    body = ~s({"id": "not-an-integer", "tenant": "t0"}\n)
+  defp raw_batch(body) do
+    %{schema: schema(), ndjson: body, row_count: 1, byte_size: byte_size(body)}
+  end
 
-    batch = %{
-      schema: schema(),
-      ndjson: body,
-      row_count: 1,
-      byte_size: byte_size(body)
-    }
+  describe "rows the schema refuses" do
+    test "reports them at their index instead of failing the batch", %{name: name} do
+      body =
+        Enum.join(
+          [
+            ~s({"id": 1, "tenant": "a"}),
+            ~s({"id": "not-an-integer", "tenant": "b"}),
+            ~s({"id": 3, "tenant": "c"})
+          ],
+          "\n"
+        ) <> "\n"
 
-    assert {:error, _reason} = Client.write_batch(name, @table, batch)
+      assert {:ok, _ack, errors} =
+               Client.write_batch(name, @table, %{raw_batch(body) | row_count: 3})
+
+      assert [%{index: 1}] = errors
+    end
+
+    test "commits the valid rows of a body that had a bad one", %{name: name, runtime: runtime} do
+      body =
+        Enum.join(
+          [
+            ~s({"id": 1, "tenant": "a"}),
+            ~s({"id": "nope", "tenant": "b"}),
+            ~s({"id": 3, "tenant": "c"})
+          ],
+          "\n"
+        ) <> "\n"
+
+      assert {:ok, _ack, _errors} =
+               Client.write_batch(name, @table, %{raw_batch(body) | row_count: 3})
+
+      entries = HotManifest.entries(runtime.manifest, @table)
+
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+
+    # The blast radius this path exists to contain: one caller's bad row must not
+    # fail the other callers merged into the same group commit.
+    test "does not fail the other callers in the same commit", %{name: name} do
+      bad = ~s({"id": "nope", "tenant": "x"}\n)
+
+      tasks = [
+        Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(1..50)) end),
+        Task.async(fn -> Client.write_batch(name, @table, raw_batch(bad)) end),
+        Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(51..100)) end)
+      ]
+
+      [first, poisoned, last] = Task.await_many(tasks, 15_000)
+
+      assert {:ok, ack_first} = first
+      assert ack_first.row_count > 0
+      assert {:ok, ack_last} = last
+      assert ack_last.row_count > 0
+
+      # A commit did happen, so the ack is real; this caller simply contributed
+      # no rows to it. The ingest edge turns that into `insertedRows: 0` with the
+      # errors listed, which is what the JSON route answers for the same body.
+      assert {:ok, _ack, [%{index: 0}]} = poisoned
+    end
+
+    test "answers a wholly invalid body without acking anything", %{name: name} do
+      assert {:invalid, errors} =
+               Client.write_batch(name, @table, raw_batch(~s({"id": "nope"}\n)))
+
+      assert [%{index: 0}] = errors
+    end
   end
 end

@@ -109,6 +109,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.BufferService.TableBuffer.Committer
+  alias Smolquery.IngestService.Validator
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
@@ -237,7 +238,12 @@ defmodule Smolquery.BufferService.TableBuffer do
           non_neg_integer(),
           timeout(),
           String.t() | nil
-        ) :: {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
+        ) ::
+          {:ok, ack()}
+          | {:ok, ack(), [Validator.row_errors()]}
+          | {:invalid, [Validator.row_errors()]}
+          | {:duplicate, ack()}
+          | {:error, term()}
   def write_ndjson(buffer, %Schema{} = schema, body, row_count, byte_size, timeout, batch_id \\ nil)
       when is_binary(body) do
     GenServer.call(
