@@ -1,0 +1,128 @@
+# The symmetric topology: three identical servers, each running every role
+# (SMOLQUERY_ROLES=all), the way a ClickHouse cluster runs three replicas that
+# each parse, write, and merge. There is no separate ingest edge or seal tier
+# to provision — any stage's demand can use any node's CPU, and an insert that
+# lands on a table's buffer owner never crosses the network.
+#
+# Everything the disaggregated fleets set is merged here: the api pod's
+# ServiceAccount (the /cluster kill buttons), the buffer pod's PVC (the
+# acked-but-unsealed tail), its preStop drain, and the buffer-fleet identity
+# envs — SMOLQUERY_BUFFER_STATEFULSET tells rel/env.sh.eex the expected buffer
+# nodes are smolquery-server-*, not smolquery-buffer-*.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: smolquery-server
+  namespace: smolquery
+spec:
+  serviceName: smolquery-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: smolquery-server
+  template:
+    metadata:
+      labels:
+        app: smolquery-server
+        cluster: smolquery
+    spec:
+      # Service links would inject SMOLQUERY_API_PORT=tcp://... (from the
+      # smolquery-api Service) into every pod, shadowing the real config var.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: smolquery-api
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -U postgres; do sleep 1; done
+      containers:
+        - name: smolquery
+          image: smolquery:latest
+          ports:
+            - name: http
+              containerPort: 4000
+            - name: hot-server
+              containerPort: 4001
+            - name: web
+              containerPort: 4002
+            - name: epmd
+              containerPort: 4369
+            - name: gen-rpc
+              containerPort: 5369
+            - name: gen-rpc-tls
+              containerPort: 5870
+          envFrom:
+            - secretRef:
+                name: smolquery-env
+          env:
+            - name: SMOLQUERY_ROLES
+              value: all
+            - name: SMOLQUERY_BUFFER_REPLICATION
+              value: "2"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: smolquery-headless
+            # Must match this StatefulSet's replicas: the query role fails a
+            # read when an expected buffer node cannot answer, rather than
+            # counting its unsealed rows as zero (T-94).
+            - name: SMOLQUERY_BUFFER_REPLICAS
+              value: "3"
+            - name: SMOLQUERY_BUFFER_STATEFULSET
+              value: smolquery-server
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gen-rpc-tls
+              mountPath: /etc/smolquery/gen-rpc-tls
+              readOnly: true
+          # The rollout half of leaving the ring (T-97): stop taking writes,
+          # flush-and-replicate the accumulators, leave — no force-seal, the
+          # followers already hold every acked row. Without it every pod exit
+          # is indistinguishable from a crash.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /app/bin/smolquery
+                  - rpc
+                  - ":ok = Smolquery.BufferService.Drain.handoff(Smolquery.BufferService)"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: gen-rpc-tls
+          secret:
+            secretName: smolquery-gen-rpc-tls
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
