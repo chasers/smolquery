@@ -44,3 +44,7 @@ deploy/overlays/kind/tls/
 /assets/node_modules/
 
 .cache/*
+
+
+# DuckDB spill files from benchmark runs (engine tmp_path)
+/.tmp/
