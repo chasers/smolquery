@@ -42,3 +42,9 @@ deploy/overlays/kind/tls/
 # Built web assets and fetched JS deps (rebuilt by mix assets.build)
 /priv/static/assets/
 /assets/node_modules/
+
+.cache/*
+
+
+# DuckDB spill files from benchmark runs (engine tmp_path)
+/.tmp/

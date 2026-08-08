@@ -24,6 +24,9 @@ curl -H "$auth" -H "$json" -d '{"rows": [
       {"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"},
       {"id": 2}
     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
+curl -H "$auth" -H 'content-type: application/x-ndjson' \
+     -H 'x-smolquery-insert-id: 9f2c1b3a' --data-binary @events.ndjson \
+     http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
 curl -H "$auth" -H 'content-type: application/x-ndjson' --data-binary @events.ndjson \
      http://127.0.0.1:4000/v1/datasets/analytics/tables/events/load
 curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.events"}' \
@@ -42,13 +45,48 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 | `POST /v1/datasets/:ds/tables` | create a table — re-creating with the same schema is a 200, with a different one a 409, never a silent no-op |
 | `GET /v1/datasets/:ds/tables/:t` | a table's schema, retention policy, and clustering key |
 | `PATCH /v1/datasets/:ds/tables/:t` | set or clear retention and/or clustering. Retention: `{"retention": {"column": "ts", "ttlMs": 2592000000}}` ages rows out of `ts` after 30 days, segment-grained and conservative (a segment is dropped only once *every* row in it has aged out); `{"retention": null}` keeps rows forever again. Clustering: `{"clustering": ["project_id", "ts"]}` sorts future writes by those columns (ClickHouse `ORDER BY` analog); `{"clustering": []}` clears it. Columns must exist on the schema (unknown names are 422). Changing clustering does not rewrite existing segments. A body carrying both fields applies them atomically — an error response means neither changed |
-| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is. An optional `insertId` makes the request idempotent: retrying after a timeout or dropped response with the same id (and the same rows) cannot double-count — without one, retries are at-least-once |
+| `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — a 200 means the buffer service has every accepted row durable and queryable; a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is. The body may be JSON or NDJSON, and **the two are not the same contract** — see [Inserting](#inserting) below |
 | `POST /v1/datasets/:ds/tables/:t/load` | batch load — the body is the file (`application/x-ndjson`, `text/csv`, or `application/vnd.apache.parquet`), pushed through the same insert path in chunks; capped by `load_max_bytes` (413 past it), synchronous, and not atomic — a mid-load failure reports what was already durable, and unlike `/insert` it takes no `insertId`, so a retry re-inserts. Two measured caveats ([benchmarks](benchmarks.md)): the body spools to disk but the parser materializes every row, so a load peaks at **~10× the file in memory**; and the cap is in *bytes*, which at 61 columns is ~120k rows of NDJSON but ~254k of CSV. It is also **not** the fast path — concurrent `/insert` is 2.4× quicker |
 | `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504 |
 | `POST /v1/jobs` | the same query as an async job — returns it pending |
 | `GET /v1/jobs/:id` | status and stats; once the result TTL expires, answered from durable job history |
 | `GET /v1/jobs/:id/results` | page a finished job's rows with `max_results` + `page_token`; expired results are 410, unknown jobs 404 |
 | `DELETE /v1/jobs/:id` | cancel — cancelling a finished job is still a 200 |
+
+## Inserting
+
+`/insert` accepts two body shapes, and they make different promises. Pick the
+JSON one unless you have measured that you need the other.
+
+### `application/json` — the row contract
+
+Rows are validated against the table's schema before anything is accepted, one
+row at a time. Rejected rows come back per-index in `insertErrors` and the rest
+of the batch still commits, so a partial failure is a 200, BigQuery-style. An
+optional `insertId` in the body makes the request idempotent: retrying after a
+timeout or a dropped response with the same id (and the same rows) cannot
+double-count — without one, retries are at-least-once.
+
+### `application/x-ndjson` — the batch contract
+
+The body is spooled to disk unparsed and DuckDB reads it at flush time, so no
+row ever becomes an Elixir term. That is the whole point of it, and everything
+below is what it costs:
+
+* **It requires the buffer node to run `flush_writer: :duckdb`.** That is opt-in
+  and off by default; a node running the default `:polars` writer answers this
+  content type with a 415 rather than accept a body it has no engine to encode.
+* **Nothing validates the body.** There is no schema check between the socket
+  and DuckDB, so a value this table cannot hold is not discovered until the
+  flush.
+* **A malformed line fails the whole batch**, not one index. Worse, a flush
+  groups every request that arrived in the same window into one `COPY`, so one
+  bad line fails the other requests in that group too. They are safe to retry —
+  a failed flush writes nothing and records no id — but they do fail.
+* **`insertErrors` is always empty**, because there is no index to attribute a
+  failure to. `insertedRows` describes the batch, not any individual line.
+* **The idempotency key moves to a header**, `x-smolquery-insert-id`; an
+  `insertId` field cannot be read from a body nothing parses.
 
 ## Schema types
 

@@ -90,6 +90,37 @@ defmodule SmolqueryApi.InsertControllerTest do
     assert message =~ "INT64"
   end
 
+  test "a columnar body inserts the same rows a row-major one does", %{
+    name: name,
+    buffer: buffer
+  } do
+    conn =
+      conn(:post, @path, JSON.encode!(%{"columns" => %{"id" => [1, 2, 3]}, "rowCount" => 3}))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{@key}")
+
+    response = ApiEndpoint.request(name, conn)
+
+    assert response.status == 200
+    assert JSON.decode!(response.resp_body) == %{"insertedRows" => 3, "insertErrors" => []}
+
+    {:ok, entries} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+    assert Enum.sum(Enum.map(entries, & &1.row_count)) == 3
+  end
+
+  test "a columnar body without rowCount is a 400", %{name: name} do
+    conn =
+      conn(:post, @path, JSON.encode!(%{"columns" => %{"id" => [1]}}))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{@key}")
+
+    response = ApiEndpoint.request(name, conn)
+
+    assert response.status == 400
+    assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
+    assert message =~ "rowCount"
+  end
+
   test "an unknown table is a 404", %{name: name} do
     response =
       conn(:post, "/v1/datasets/analytics/tables/nope/insert", JSON.encode!(%{"rows" => [%{}]}))
@@ -112,6 +143,27 @@ defmodule SmolqueryApi.InsertControllerTest do
 
     assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
     assert message =~ "rows"
+  end
+
+  # Unrescued, `Plug.Parsers.RequestTooLargeError` answers 413 in the status line
+  # and the generic 500 envelope in the body, so a client reading the body — which
+  # is what it is told to do — is told the server broke.
+  test "a body over the limit is a 413 whose envelope says so", %{name: name} do
+    oversized = :binary.copy("a", SmolqueryApi.Parsers.max_body_bytes() + 1)
+
+    conn =
+      conn(:post, @path, oversized)
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{@key}")
+
+    response = ApiEndpoint.request(name, conn)
+
+    assert response.status == 413
+
+    assert %{"error" => %{"code" => 413, "status" => "REQUEST_TOO_LARGE", "message" => message}} =
+             JSON.decode!(response.resp_body)
+
+    assert message =~ Integer.to_string(SmolqueryApi.Parsers.max_body_bytes())
   end
 
   test "an overloaded buffer is a 429 whose retry-after is the prediction", %{

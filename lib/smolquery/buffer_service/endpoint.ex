@@ -26,12 +26,19 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
 
-  @type batch :: %{
+  @typedoc """
+  What a caller may send. The column-major shape is the accumulator's own
+  (`t:Smolquery.BufferService.TableBuffer.batch/0`); the row-major one is
+  transposed into it here and is for callers holding a handful of rows.
+  """
+  @type batch :: TableBuffer.batch() | rows_batch()
+
+  @type rows_batch :: %{
           required(:schema) => Schema.t(),
-          required(:rows) => [Writer.row()],
-          optional(:batch_id) => String.t()
+          required(:rows) => [%{optional(String.t()) => term()}],
+          optional(:batch_id) => String.t(),
+          optional(:byte_size) => non_neg_integer()
         }
 
   @retries 5
@@ -51,6 +58,12 @@ defmodule Smolquery.BufferService.Endpoint do
   a client retrying into an overloaded buffer is not refused for work that is
   already done.
 
+  A batch may also carry a `:byte_size` — what the buffer's memory bounds
+  measure it as, from a caller that already walked the rows
+  (`Smolquery.IngestService.Validator`). It has to be an over-estimate rather
+  than an under-estimate, for the reason `TableBuffer.write/3` gives; a batch
+  without one is walked and measured exactly, as every batch used to be.
+
   Ownership is fenced before admission (`Smolquery.BufferService.RingEpoch`,
   T-92): a clustered node refuses a write for a table the epoch-stamped
   configuration does not give it, so two nodes with divergent `:pg` views
@@ -60,29 +73,66 @@ defmodule Smolquery.BufferService.Endpoint do
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
+  def write_batch(
+        name,
+        table_ref,
+        %{schema: %Schema{}, columns: columns, row_count: count} = batch
+      )
+      when is_list(columns) and is_integer(count),
+      do: dedup_or_admit(name, table_ref, batch, count)
+
+  # A spooled body takes the same admission and dedup path; only the accumulator's
+  # payload differs. Kept as its own clause rather than loosening the guard above,
+  # so a batch carrying neither columns nor a path still fails to match instead of
+  # reaching the buffer as something it cannot accumulate. The two clauses share a
+  # body because there is nothing shape-specific in it — a second copy is a second
+  # place for the dedup answer and the admission gate to drift apart.
+  def write_batch(
+        name,
+        table_ref,
+        %{schema: %Schema{}, ndjson: path, row_count: count} = batch
+      )
+      when is_binary(path) and is_integer(count),
+      do: dedup_or_admit(name, table_ref, batch, count)
+
   def write_batch(name, table_ref, %{schema: %Schema{} = schema, rows: rows} = batch)
       when is_list(rows) do
-    with {:ok, runtime} <- runtime(name) do
-      batch_id = Map.get(batch, :batch_id)
+    write_batch(name, table_ref, batch |> Map.delete(:rows) |> Map.merge(transpose(schema, rows)))
+  end
 
-      case committed_ack(runtime, table_ref, batch_id) do
+  # Rows are accepted and transposed here, for the same reason
+  # `Smolquery.Segments.Writer.write/3` still takes them: a caller holding a
+  # handful of rows should not have to know the accumulator's shape. The write
+  # path does not come through here — `Smolquery.IngestService.Validator` emits
+  # columns directly, so the hot path never builds a row-shaped term for this to
+  # take apart. Doing it in one place is what keeps that true.
+  defp transpose(schema, rows) do
+    %{
+      columns: Enum.map(schema.fields, fn field -> Enum.map(rows, &Map.get(&1, field.name)) end),
+      row_count: length(rows)
+    }
+  end
+
+  defp dedup_or_admit(name, table_ref, batch, count) do
+    with {:ok, runtime} <- runtime(name) do
+      case committed_ack(runtime, table_ref, Map.get(batch, :batch_id)) do
         {:ok, ack} ->
-          deduped(rows)
+          deduped(count)
 
           {:ok, ack}
 
         :error ->
-          admit(runtime, table_ref, schema, rows, batch_id)
+          admit(runtime, table_ref, batch)
       end
     end
   end
 
-  defp admit(runtime, table_ref, schema, rows, batch_id) do
+  defp admit(runtime, table_ref, batch) do
     with :ok <- RingEpoch.check_write(runtime.name, table_ref) do
       if Drain.draining?(runtime.name) do
         {:error, :draining}
       else
-        deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+        deliver(runtime, table_ref, batch, @retries)
       end
     end
   end
@@ -220,31 +270,31 @@ defmodule Smolquery.BufferService.Endpoint do
     :exit, {:noproc, _call} -> :ok
   end
 
-  defp deliver(runtime, table_ref, schema, rows, batch_id, retries) do
+  defp deliver(runtime, table_ref, batch, retries) do
     case buffer(runtime, table_ref) do
-      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id)
-      {:error, :noproc} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
+      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, batch)
+      {:error, :noproc} -> retry(runtime, table_ref, batch, retries)
       {:error, reason} -> {:error, reason}
     end
   catch
-    :exit, {:noproc, _call} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
+    :exit, {:noproc, _call} -> retry(runtime, table_ref, batch, retries)
   end
 
-  defp admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id) do
+  defp admit_and_write(runtime, table_ref, buffer, batch) do
     load = load(runtime, table_ref)
-    count = length(rows)
+    count = batch.row_count
 
     case Load.admit(load, count, runtime.ack_budget_ms) do
       :ok ->
         Load.enter(load, count)
 
-        case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id) do
+        case write_rows(runtime, buffer, batch) do
           {:ok, ack} ->
             {:ok, ack}
 
           {:duplicate, ack} ->
             Load.leave(load, count)
-            deduped(rows)
+            deduped(count)
 
             {:ok, ack}
 
@@ -265,8 +315,12 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp deduped(rows) do
-    :telemetry.execute([:smolquery, :buffer, :dedup], %{rows: length(rows)}, %{})
+  defp write_rows(runtime, buffer, batch) do
+    TableBuffer.write(buffer, batch, runtime.write_timeout_ms)
+  end
+
+  defp deduped(count) do
+    :telemetry.execute([:smolquery, :buffer, :dedup], %{rows: count}, %{})
   end
 
   defp load(runtime, table_ref) do
@@ -276,13 +330,12 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp retry(_runtime, _table_ref, _schema, _rows, _batch_id, 0),
-    do: {:error, :buffer_unavailable}
+  defp retry(_runtime, _table_ref, _batch, 0), do: {:error, :buffer_unavailable}
 
-  defp retry(runtime, table_ref, schema, rows, batch_id, retries) do
+  defp retry(runtime, table_ref, batch, retries) do
     Process.sleep(@retry_interval_ms)
 
-    deliver(runtime, table_ref, schema, rows, batch_id, retries - 1)
+    deliver(runtime, table_ref, batch, retries - 1)
   end
 
   defp runtime(name) do

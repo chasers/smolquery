@@ -4,9 +4,11 @@ defmodule Smolquery.IngestService.Supervisor do
 
   Started only on nodes whose roles include `:ingest` (see `Smolquery.Roles`).
   The service is deliberately small — the ingest edge is stateless, so the
-  subtree is a catalog engine (when the runtime resolved one) and the schema
-  cache that reads through it. `rest_for_one`, catalog first, because the
-  cache is only as good as the catalog behind it.
+  subtree is a catalog engine (when the runtime resolved one), the schema
+  cache that reads through it, and the spool sweeper. `rest_for_one`, catalog
+  first, because the cache is only as good as the catalog behind it; the
+  sweeper is last because it depends on neither and reclaiming disk must not be
+  what keeps the edge from serving.
   """
 
   use Supervisor
@@ -14,6 +16,7 @@ defmodule Smolquery.IngestService.Supervisor do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.IngestService.Runtime
   alias Smolquery.IngestService.SchemaCache
+  alias Smolquery.IngestService.SpoolSweeper
 
   @doc """
   Starts the ingest service.
@@ -34,7 +37,7 @@ defmodule Smolquery.IngestService.Supervisor do
 
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
-        [{SchemaCache, runtime}]
+        [{SchemaCache, runtime}, {SpoolSweeper, runtime}]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

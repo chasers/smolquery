@@ -33,6 +33,40 @@ defmodule Smolquery.BufferService.TableBufferTest do
     def sweep_staging(_config, _age_ms), do: {:ok, []}
   end
 
+  defmodule GatedStore do
+    @moduledoc false
+    @behaviour Smolquery.Segments.Store
+
+    def new(dir, gate) do
+      %Store{impl: __MODULE__, config: %{local: Store.Local.new(dir: dir), gate: gate}}
+    end
+
+    @impl Store
+    def put(%{local: local, gate: gate}, key, encoder) do
+      send(gate, {:encoding, self(), key})
+
+      receive do
+        :encode -> Store.put(local, key, encoder)
+        {:refuse, reason} -> {:error, reason}
+      end
+    end
+
+    @impl Store
+    def location(%{local: local}, key), do: Store.location(local, key)
+
+    @impl Store
+    def list(%{local: local}, prefix), do: Store.list(local, prefix)
+
+    @impl Store
+    def delete(%{local: local}, key), do: Store.delete(local, key)
+
+    @impl Store
+    def shared?(%{local: local}), do: Store.shared?(local)
+
+    @impl Store
+    def sweep_staging(%{local: local}, age_ms), do: Store.sweep_staging(local, age_ms)
+  end
+
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
@@ -183,6 +217,88 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       assert Client.write_batch(name, @table, batch(1..2)) == {:error, :buffer_full}
     end
+
+    test "the byte bound measures a batch's own :byte_size when it carries one", context do
+      %{name: name} =
+        start_buffer_service(context,
+          max_buffered_bytes: 1_000,
+          flush_max_rows: 1_000,
+          flush_max_bytes: 1_000_000,
+          flush_interval_ms: 60_000
+        )
+
+      generous = Map.put(batch(1..2), :byte_size, 5_000)
+
+      assert Client.write_batch(name, @table, generous) == {:error, :buffer_full}
+    end
+
+    test "a batch without a :byte_size is still measured, and admitted", context do
+      %{name: name} =
+        start_buffer_service(context, max_buffered_bytes: 1_000, flush_max_rows: 1_000)
+
+      assert {:ok, ack} = Client.write_batch(name, @table, batch(1..2))
+      assert ack.row_count == 2
+    end
+
+    test "an accumulated batch's :byte_size is what the flush trigger sees", context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_max_bytes: 4_000,
+          flush_max_rows: 1_000_000,
+          flush_interval_ms: 60_000
+        )
+
+      task =
+        Task.async(fn ->
+          Client.write_batch(name, @table, Map.put(batch(1..2), :byte_size, 4_000))
+        end)
+
+      assert {:ok, ack} = Task.await(task, 5_000)
+      assert ack.row_count == 2
+    end
+  end
+
+  describe "heap policy" do
+    test "the buffer and its committer take their flags from the runtime", context do
+      %{name: name} =
+        start_buffer_service(context,
+          buffer_fullsweep_after: 7,
+          committer_fullsweep_after: 3,
+          committer_min_heap_size: 8_192
+        )
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert fullsweep_after(Runtime.registry(name)) == 7
+      assert fullsweep_after(Runtime.committer_registry(name)) == 3
+      assert min_heap_size(Runtime.committer_registry(name)) >= 8_192
+    end
+
+    test "a nil leaves the emulator's own policy in place", context do
+      %{name: name} =
+        start_buffer_service(context,
+          buffer_fullsweep_after: nil,
+          committer_fullsweep_after: nil
+        )
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert fullsweep_after(Runtime.registry(name)) ==
+               :erlang.system_info(:fullsweep_after) |> elem(1)
+    end
+
+    defp garbage_collection(registry) do
+      [{pid, _value}] = Registry.lookup(registry, @table)
+      {:garbage_collection, info} = Process.info(pid, :garbage_collection)
+
+      info
+    end
+
+    defp fullsweep_after(registry),
+      do: registry |> garbage_collection() |> Keyword.fetch!(:fullsweep_after)
+
+    defp min_heap_size(registry),
+      do: registry |> garbage_collection() |> Keyword.fetch!(:min_heap_size)
   end
 
   describe "a flush that fails" do
@@ -291,6 +407,163 @@ defmodule Smolquery.BufferService.TableBufferTest do
     end
   end
 
+  describe "encode concurrency" do
+    test "the default of 1 encodes one commit at a time", context do
+      %{name: name, runtime: runtime} = start_gated(context, "serial", [])
+
+      assert runtime.encode_concurrency == 1
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert Eventually.until(fn -> handed_off(name) == 2 end)
+
+      refute_receive {:encoding, _pid, _key}, 200
+
+      # Inline, not merely serialized: the committer is itself inside the
+      # encode, so it cannot answer a call while one is running.
+      [{buffer, _value}] = Registry.lookup(Runtime.registry(name), @table)
+      committer = :sys.get_state(buffer).committer
+
+      assert {:timeout, _call} = catch_exit(:sys.get_state(committer, 100))
+
+      send(one, :encode)
+      assert_receive {:encoding, two, _key}, 5_000
+      send(two, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+
+    test "runs up to :encode_concurrency encodes at once, and no more", context do
+      %{name: name} = start_gated(context, "parallel", encode_concurrency: 2)
+
+      writers =
+        for i <- 1..3, do: Task.async(fn -> Client.write_batch(name, @table, batch(i..i)) end)
+
+      assert_receive {:encoding, one, _key}, 5_000
+      assert_receive {:encoding, two, _key}, 5_000
+      assert Eventually.until(fn -> handed_off(name) == 3 end)
+
+      refute_receive {:encoding, _pid, _key}, 200
+
+      send(one, :encode)
+      send(two, :encode)
+
+      assert_receive {:encoding, three, _key}, 5_000
+      send(three, :encode)
+
+      assert Enum.all?(Task.await_many(writers, 30_000), &match?({:ok, _ack}, &1))
+    end
+
+    test "appends to the manifest log in commit order however the encodes finish", context do
+      %{name: name, runtime: runtime} = start_gated(context, "ordered", encode_concurrency: 2)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      send(two, :encode)
+      Process.sleep(50)
+      send(one, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+
+      assert ack_one.row_count == 1
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+
+    test "a failing encode fails only its own commit", context do
+      %{name: name, runtime: runtime} = start_gated(context, "isolated", encode_concurrency: 3)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      doomed = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      third = Task.async(fn -> Client.write_batch(name, @table, batch(3..3)) end)
+      assert_receive {:encoding, three, _key}, 5_000
+
+      send(two, {:refuse, :encode_refused})
+      send(one, :encode)
+      send(three, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert Task.await(doomed, 30_000) == {:error, :encode_refused}
+      assert {:ok, ack_three} = Task.await(third, 30_000)
+
+      assert added_ids(runtime) == [ack_one.segment_id, ack_three.segment_id]
+      assert {:ok, keys} = Store.list(runtime.store, "analytics/events")
+      assert match?([_one, _two], keys)
+    end
+
+    test "a graceful shutdown waits for the encodes still in flight", context do
+      %{name: name, runtime: runtime} = start_gated(context, "drained", encode_concurrency: 2)
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+      assert Eventually.until(fn -> handed_off(name) == 1 end)
+      assert_receive {:encoding, one, _key}, 5_000
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert_receive {:encoding, two, _key}, 5_000
+
+      [{buffer, _value}] = Registry.lookup(Runtime.registry(name), @table)
+      stopper = Task.async(fn -> GenServer.stop(buffer, :normal) end)
+
+      send(two, :encode)
+      send(one, :encode)
+
+      assert {:ok, ack_one} = Task.await(first, 30_000)
+      assert {:ok, ack_two} = Task.await(second, 30_000)
+      assert Task.await(stopper, 30_000) == :ok
+
+      assert added_ids(runtime) == [ack_one.segment_id, ack_two.segment_id]
+    end
+  end
+
+  defp start_gated(context, label, opts) do
+    dir = Path.join(context.tmp_dir, label)
+
+    start_buffer_service(
+      context,
+      Keyword.merge(
+        [
+          store: GatedStore.new(Path.join(dir, "segments"), self()),
+          dir: dir,
+          flush_max_rows: 1,
+          flush_interval_ms: 60_000
+        ],
+        opts
+      )
+    )
+  end
+
+  defp handed_off(name) do
+    case Registry.lookup(Runtime.registry(name), @table) do
+      [{pid, _value}] -> :sys.get_state(pid).in_flight
+      [] -> 0
+    end
+  end
+
+  defp added_ids(runtime) do
+    {:ok, path} = HotManifest.log_path(runtime.manifest, @table)
+
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&JSON.decode!/1)
+    |> Enum.filter(&(&1["op"] == "add"))
+    |> Enum.map(& &1["id"])
+  end
+
   defp accumulated_rows(name) do
     case Registry.lookup(Runtime.registry(name), @table) do
       [{pid, _value}] -> :sys.get_state(pid).row_count
@@ -382,6 +655,122 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert_received {:acked, {:error, {:badrpc, {:EXIT, {:killed, _call}}}}}
       assert HotManifest.entries(runtime.manifest, @table) == []
       assert {:ok, []} = Store.list(runtime.store, "analytics/events")
+    end
+  end
+
+  describe "ndjson flush" do
+    alias Explorer.DataFrame
+
+    defp ndjson_batch(dir, schema, rows, label) do
+      path = Path.join(dir, "#{label}.ndjson")
+      body = Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
+      File.write!(path, body)
+
+      %{
+        schema: schema,
+        ndjson: path,
+        row_count: length(rows),
+        byte_size: byte_size(body)
+      }
+    end
+
+    # A spooled body is committed on its own, never grouped with another. That is
+    # what makes the acked row count the footer count of *this* caller's segment,
+    # and what keeps one caller's uncoercible line from failing every other
+    # caller's write in the same COPY. The cost is one segment per body, which
+    # the sealer merges later.
+    test "each spooled body commits as its own segment, in arrival order", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-buffer"),
+          flush_interval_ms: 60_000,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}, {"tag", :string}])
+      spool = Path.join(context.tmp_dir, "ndjson-spool")
+      File.mkdir_p!(spool)
+
+      first =
+        ndjson_batch(
+          spool,
+          schema,
+          [%{"id" => 10, "tag" => "first"}, %{"id" => 11, "tag" => "second"}],
+          "a"
+        )
+
+      second = ndjson_batch(spool, schema, [%{"id" => 1, "tag" => "third"}], "b")
+
+      # No flush call: the handoff is immediate, so a spooled body does not wait
+      # for `flush_interval_ms` (60 s here) or for a size threshold.
+      assert {:ok, ack_one} = Client.write_batch(name, @table, first)
+      assert {:ok, ack_two} = Client.write_batch(name, @table, second)
+
+      refute ack_one.segment_id == ack_two.segment_id
+      assert ack_one.row_count == 2
+      assert ack_two.row_count == 1
+
+      assert [entry_one, entry_two] =
+               runtime.manifest
+               |> HotManifest.entries(@table)
+               |> Enum.sort_by(& &1.id)
+
+      assert entry_one.id == ack_one.segment_id
+      assert entry_two.id == ack_two.segment_id
+
+      assert rows(runtime, entry_one) == {[10, 11], ["first", "second"]}
+      assert rows(runtime, entry_two) == {[1], ["third"]}
+    end
+
+    defp rows(runtime, entry) do
+      columns =
+        runtime.store
+        |> Store.location(entry.key)
+        |> DataFrame.from_parquet!()
+        |> DataFrame.to_columns()
+
+      {columns["id"], columns["tag"]}
+    end
+
+    test "deletes every spooled file after a successful flush", context do
+      %{name: name} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-delete"),
+          flush_max_rows: 1,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}])
+      spool = Path.join(context.tmp_dir, "ndjson-delete-spool")
+      File.mkdir_p!(spool)
+      batch = ndjson_batch(spool, schema, [%{"id" => 1}], "keep")
+
+      assert File.exists?(batch.ndjson)
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch)
+      refute File.exists?(batch.ndjson)
+    end
+
+    test "deletes the spooled file after a failed flush too", context do
+      %{name: name} =
+        start_buffer_service(context,
+          dir: Path.join(context.tmp_dir, "ndjson-fail"),
+          flush_max_rows: 1,
+          flush_writer: :duckdb
+        )
+
+      schema = Schema.new!([{"id", :int64}])
+      spool = Path.join(context.tmp_dir, "ndjson-fail-spool")
+      File.mkdir_p!(spool)
+      path = Path.join(spool, "bad.ndjson")
+      body = ~s({"id": "not-an-int"}\n)
+      File.write!(path, body)
+
+      batch = %{schema: schema, ndjson: path, row_count: 1, byte_size: byte_size(body)}
+
+      assert {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} =
+               Client.write_batch(name, @table, batch)
+
+      refute File.exists?(path)
     end
   end
 end

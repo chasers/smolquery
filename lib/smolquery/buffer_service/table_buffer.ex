@@ -8,7 +8,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   ## The ack is withheld until the rows are durable
 
-  `write/4` is a `GenServer.call` whose reply is deliberately *not* sent from
+  `write/3` is a `GenServer.call` whose reply is deliberately *not* sent from
   `handle_call`. Callers accumulate in a pending list while their rows sit in
   memory, and every one of them is answered together, after the segment is in the
   store, its entry is fsynced into the manifest, and the runtime's
@@ -52,12 +52,38 @@ defmodule Smolquery.BufferService.TableBuffer do
   the in-memory term, not the encoded Parquet, because what it protects is this
   node's heap.
 
+  What supplies that measurement is the caller's business (`write/3`), because
+  the caller has already walked the batch and this process has not. A caller
+  that supplies nothing is measured here with `:erlang.external_size/1`,
+  exactly as every caller used to be; a caller that supplies an estimate owes
+  the bound an estimate that is never *smaller* than that, so admitting on it
+  can only admit fewer rows than the exact walk would.
+
   ## Schema changes flush rather than fail
 
   A batch whose schema differs from the one accumulating forces a flush and starts
   a fresh accumulator. One segment always has one schema, and additive evolution
   therefore works at the file level for free — `read_parquet(union_by_name = true)`
   handles the read side.
+
+  ## A batch of the other *shape* flushes too, and a spooled body never groups
+
+  The accumulator takes two shapes — column-major rows (`t:batch/0`) and the
+  path of a spooled NDJSON body (`t:file_batch/0`) — and it holds one of them
+  at a time. A batch of the other shape hands the accumulated one off first,
+  exactly as a batch under a different schema does, because the two cannot be
+  merged into one commit and a list holding both is a crash in the flush rather
+  than an error to a caller.
+
+  A spooled body is then handed off on its own: one body, one commit, one
+  `COPY`. Grouping them would cost two things this path cannot pay. The flush's
+  Parquet footer count is the only statement of what actually landed — nothing
+  parsed a row on the way in — and a grouped footer count covers every request
+  in the window, so no caller could be told its own number. And a single line
+  DuckDB cannot coerce fails the whole statement, so a grouped flush lets one
+  tenant's malformed body fail every other tenant's write in the same second.
+  Ungrouped, both are contained: the count is this request's, and the failure is
+  this request's.
 
   ## Sealing is signalled against a frozen set
 
@@ -108,10 +134,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.BufferService.TableBuffer.Committer
+  alias Smolquery.Heap
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
 
   defstruct [
     :runtime,
@@ -119,6 +145,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :prefix,
     :committer,
     :schema,
+    :kind,
     :timer,
     :signaled_at,
     :load,
@@ -132,6 +159,43 @@ defmodule Smolquery.BufferService.TableBuffer do
   ]
 
   @type ack :: %{segment_id: String.t(), row_count: non_neg_integer()}
+
+  @typedoc """
+  What the accumulator takes: a column-major batch, and the two numbers the
+  admission bounds and the dedup window need.
+
+  `:columns` is `t:Smolquery.Segments.Writer.columns/0` without its tag, in the
+  schema's field order. A batch without a `:byte_size` is measured here with
+  `:erlang.external_size/1`.
+  """
+  @type batch :: %{
+          required(:schema) => Schema.t(),
+          required(:columns) => [[term()]],
+          required(:row_count) => non_neg_integer(),
+          optional(:batch_id) => String.t(),
+          optional(:byte_size) => non_neg_integer()
+        }
+
+  @typedoc """
+  What the accumulator takes when the request was never parsed: the path of one
+  spooled NDJSON body.
+
+  Accepted only under `flush_writer: :duckdb`. The accumulator then holds a path
+  instead of rows — one small binary rather than a column-major term — and the
+  flush hands it to DuckDB in a `COPY`, so a batch's rows never become Elixir
+  terms at all. `:byte_size` is the body's size on disk, which is what the
+  admission bound then measures.
+
+  One body is one commit: the accumulator hands it off rather than grouping it
+  with the next one, for the two reasons the moduledoc gives.
+  """
+  @type file_batch :: %{
+          required(:schema) => Schema.t(),
+          required(:ndjson) => Path.t(),
+          required(:row_count) => non_neg_integer(),
+          required(:byte_size) => non_neg_integer(),
+          optional(:batch_id) => String.t()
+        }
 
   @doc """
   A child spec identified by the table the buffer owns.
@@ -157,7 +221,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
-  Accumulates `rows` and returns once they are durable.
+  Accumulates a column-major batch and returns once its rows are durable.
 
   The reply arrives after the group commit this batch lands in, so its latency is
   the remaining flush interval plus the encode — not the cost of these rows alone.
@@ -184,12 +248,41 @@ defmodule Smolquery.BufferService.TableBuffer do
   `Smolquery.BufferService.RingEpoch`): a write can sit in this mailbox for
   up to the write timeout, long past the lease the endpoint's check ran
   under, and this is the last gate before rows enter the accumulator.
+
+  `bytes` is what the byte-based admission bound (`max_buffered_bytes`) and
+  the byte-based flush trigger (`flush_max_bytes`) measure this batch as, and
+  `nil` means "walk the rows and measure them exactly". Both run in the
+  *calling* process, so an exact walk is a second full traversal of a term set
+  the caller has usually just built and walked once already — which is why
+  `Smolquery.IngestService.Validator` accumulates the number during the walk
+  it was making anyway and passes it here. An estimate is only admissible if
+  it can never come out below `:erlang.external_size/1` on the same rows: the
+  bound exists to protect this node's heap, and a bound fed an under-count
+  admits more than it promised. Over-counting is free of that risk — it
+  admits, and flushes, sooner.
   """
-  @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
+  @spec write(GenServer.server(), batch() | file_batch(), timeout()) ::
           {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
-  def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) do
-    GenServer.call(buffer, {:write, schema, rows, batch_id, :erlang.external_size(rows)}, timeout)
+  def write(buffer, %{schema: %Schema{}, ndjson: path, row_count: count} = batch, timeout) do
+    GenServer.call(
+      buffer,
+      {:write, batch.schema, {:ndjson, path}, count, Map.get(batch, :batch_id),
+       Map.fetch!(batch, :byte_size)},
+      timeout
+    )
   end
+
+  def write(buffer, %{schema: %Schema{}, columns: columns, row_count: count} = batch, timeout) do
+    GenServer.call(
+      buffer,
+      {:write, batch.schema, columns, count, Map.get(batch, :batch_id),
+       measured(Map.get(batch, :byte_size), columns)},
+      timeout
+    )
+  end
+
+  defp measured(nil, columns), do: :erlang.external_size(columns)
+  defp measured(bytes, _columns) when is_integer(bytes) and bytes >= 0, do: bytes
 
   @doc """
   Records an entry another node's group commit shipped here (T-96).
@@ -252,6 +345,12 @@ defmodule Smolquery.BufferService.TableBuffer do
   @impl GenServer
   def init({runtime, table_ref}) do
     Process.flag(:trap_exit, true)
+
+    Heap.tune(
+      fullsweep_after: runtime.buffer_fullsweep_after,
+      min_heap_size: runtime.buffer_min_heap_size
+    )
+
     load = publish_load(runtime, table_ref)
 
     with {:ok, prefix} <- Store.prefix(table_ref),
@@ -319,17 +418,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @impl GenServer
-  def handle_call({:write, _schema, [], _batch_id, _bytes}, _from, state),
+  def handle_call({:write, _schema, _columns, 0, _batch_id, _bytes}, _from, state),
     do: {:reply, {:error, :no_rows}, state}
 
-  def handle_call({:write, schema, rows, batch_id, bytes}, from, state) do
+  def handle_call({:write, schema, columns, count, batch_id, bytes}, from, state) do
     case committed_ack(state, batch_id) do
       {:ok, ack} ->
         {:reply, {:duplicate, ack}, state}
 
       :error ->
         case write_gate(state) do
-          :ok -> write_or_join(state, schema, rows, batch_id, bytes, from)
+          :ok -> write_or_join(state, schema, columns, count, batch_id, bytes, from)
           {:error, _reason} = refusal -> {:reply, refusal, state}
         end
     end
@@ -664,42 +763,44 @@ defmodule Smolquery.BufferService.TableBuffer do
     end)
   end
 
-  defp write_or_join(state, schema, rows, batch_id, bytes, from) do
+  defp write_or_join(state, schema, columns, count, batch_id, bytes, from) do
     cond do
       not is_nil(batch_id) and batch_id in state.batch_ids ->
         {:noreply, %{state | pending: [{from, :duplicate} | state.pending]}}
 
       not is_nil(batch_id) and MapSet.member?(state.in_flight_ids, batch_id) ->
-        settle_in_flight_duplicate(state, schema, rows, batch_id, bytes, from)
+        settle_in_flight_duplicate(state, schema, columns, count, batch_id, bytes, from)
 
       true ->
-        write_new(state, schema, rows, batch_id, bytes, from)
+        write_new(state, schema, columns, count, batch_id, bytes, from)
     end
   end
 
-  defp settle_in_flight_duplicate(state, schema, rows, batch_id, bytes, from) do
+  defp settle_in_flight_duplicate(state, schema, columns, count, batch_id, bytes, from) do
     state = await_in_flight(state)
 
     case committed_ack(state, batch_id) do
       {:ok, ack} -> {:reply, {:duplicate, ack}, state}
-      :error -> write_new(state, schema, rows, batch_id, bytes, from)
+      :error -> write_new(state, schema, columns, count, batch_id, bytes, from)
     end
   end
 
-  defp write_new(state, schema, rows, batch_id, bytes, from) do
-    count = length(rows)
-    state = flush_on_schema_change(state, schema)
+  defp write_new(state, schema, columns, count, batch_id, bytes, from) do
+    state =
+      state
+      |> flush_on_schema_change(schema)
+      |> flush_on_kind_change(kind(columns))
 
     if full?(state, count, bytes) do
       {:reply, {:error, :buffer_full}, state}
     else
-      {:noreply, accept(state, schema, rows, count, bytes, batch_id, from)}
+      {:noreply, accept(state, schema, columns, count, bytes, batch_id, from)}
     end
   end
 
-  defp accept(state, schema, rows, count, bytes, batch_id, from) do
+  defp accept(state, schema, columns, count, bytes, batch_id, from) do
     state
-    |> accumulate(schema, rows, count, bytes, batch_id, from)
+    |> accumulate(schema, columns, count, bytes, batch_id, from)
     |> handoff_when_full()
   end
 
@@ -707,11 +808,24 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
   defp flush_on_schema_change(state, _schema), do: handoff(state)
 
-  defp accumulate(state, schema, rows, count, bytes, batch_id, from) do
+  # The same handoff a schema change forces, for the same reason: an accumulator
+  # holding both shapes cannot be merged into one commit, and `merge_chunks/2`
+  # would find that out inside the flush — where the failure is a crash of this
+  # process, not a reply to a caller, and takes every other batch waiting here
+  # down unacked with it. So the shape is a property of the whole accumulator,
+  # decided by whichever batch opened it.
+  defp flush_on_kind_change(%__MODULE__{chunks: []} = state, kind), do: %{state | kind: kind}
+  defp flush_on_kind_change(%__MODULE__{kind: kind} = state, kind), do: state
+  defp flush_on_kind_change(state, kind), do: %{handoff(state) | kind: kind}
+
+  defp kind({:ndjson, _path}), do: :ndjson
+  defp kind(_columns), do: :columns
+
+  defp accumulate(state, schema, columns, count, bytes, batch_id, from) do
     %{
       state
       | schema: schema,
-        chunks: [rows | state.chunks],
+        chunks: [columns | state.chunks],
         pending: [{from, :new} | state.pending],
         batch_ids: track_batch(state.batch_ids, batch_id),
         row_count: state.row_count + count,
@@ -722,6 +836,12 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp track_batch(batch_ids, nil), do: batch_ids
   defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
+
+  # A spooled body is its own commit, whatever the size triggers say — the
+  # moduledoc's "A spooled body never groups" is enforced here, and it is what
+  # makes the flush's footer row count attributable to this one caller and its
+  # `COPY` failure this one caller's.
+  defp handoff_when_full(%__MODULE__{kind: :ndjson} = state), do: handoff(state)
 
   defp handoff_when_full(state) do
     if state.row_count >= state.runtime.flush_max_rows or
@@ -739,7 +859,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     Committer.commit(state.committer, %{
       schema: state.schema,
-      rows: state.chunks |> Enum.reverse() |> Enum.concat(),
+      columns: merge_chunks(state.kind, state.chunks),
       pending: Enum.reverse(state.pending),
       batch_ids: batch_ids,
       row_count: state.row_count,
@@ -757,6 +877,33 @@ defmodule Smolquery.BufferService.TableBuffer do
         in_flight: state.in_flight + 1,
         in_flight_ids: Enum.into(batch_ids, state.in_flight_ids)
     }
+  end
+
+  # Dispatched on the accumulator's own recorded shape rather than on whichever
+  # chunk happens to be at the head of the list. Head-dispatch decided what the
+  # *whole* list was from one element, so a list holding both shapes — which
+  # `flush_on_kind_change/2` now prevents, and nothing did before — picked a
+  # clause that then failed halfway through the merge, inside this process.
+  #
+  # Spooled bodies join into one list, not a zip: a chunk here is a path and the
+  # flush hands it to a COPY. There is only ever one of them per commit
+  # (`handoff_when_full/1`), and the list shape is the writer's interface.
+  defp merge_chunks(:ndjson, chunks) do
+    {:ndjson, chunks |> Enum.reverse() |> Enum.map(fn {:ndjson, path} -> path end)}
+  end
+
+  # Chunks are whole column-major batches, newest first, so joining them is a
+  # zip and not a concat: column `n` of the commit is column `n` of every chunk
+  # in arrival order. Every chunk has one list per field of `state.schema`, which
+  # `flush_on_schema_change/2` is what guarantees — a batch under a different
+  # schema hands off first and starts its own accumulator, so no accumulator ever
+  # mixes two column counts.
+  defp merge_chunks(:columns, [chunk]), do: chunk
+
+  defp merge_chunks(:columns, chunks) do
+    chunks
+    |> Enum.reverse()
+    |> Enum.zip_with(&Enum.concat/1)
   end
 
   defp full?(state, count, bytes) do

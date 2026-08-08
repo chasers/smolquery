@@ -10,6 +10,14 @@ config :gen_rpc,
   rpc_module_control: :whitelist,
   rpc_module_list: [Smolquery.BufferService.Endpoint]
 
+# These describe *one* engine instance, and a node runs more than one. The
+# buffer's `flush_writer: :duckdb` write pool starts `write_pool_size` further
+# instances, each of which merges this config, so the memory limit a node
+# declares is `(1 + write_pool_size) × :memory_limit` unless
+# `Smolquery.BufferService`'s `:write_engine_memory_limit` narrows the pool's
+# members. Thread counts are divided across the pool by
+# `Smolquery.BufferService.Supervisor`; memory cannot be, because the value is a
+# DuckDB size string rather than a number.
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   threads: System.schedulers_online(),
@@ -17,6 +25,11 @@ config :smolquery, Smolquery.Engine,
   max_result_rows: 100_000
 
 config :smolquery, :data_dir, "priv/data"
+
+# The largest request body the API reads. Counts wire bytes, unlike the buffer's
+# byte bounds below, which count the accumulated Elixir term — see
+# `SmolqueryApi.Parsers` for why the two do not coordinate.
+config :smolquery, SmolqueryApi, max_body_bytes: 8_000_000
 
 config :smolquery, SmolqueryApi.Endpoint,
   adapter: Bandit.PhoenixAdapter,
@@ -66,7 +79,13 @@ config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,
   flush_max_rows: 100_000,
-  flush_max_bytes: 8_000_000,
+  # Counts the accumulated Elixir term, which is column-major and so carries no
+  # column names — about 1.5 KiB per OTel-shaped row where the row-major term was
+  # 2.6 KiB. At the old 8 MB a single request could no longer reach this trigger
+  # at all, because `SmolqueryApi`'s `:max_body_bytes` caps a request below the
+  # rows it would have taken, so every lone writer waited out `flush_interval_ms`
+  # instead. Keep this reachable by one request, or that is what happens again.
+  flush_max_bytes: 4_500_000,
   max_buffered_rows: 500_000,
   max_buffered_bytes: 64_000_000,
   ack_budget_ms: 5_000,

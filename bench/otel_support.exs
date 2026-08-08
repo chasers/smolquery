@@ -11,7 +11,8 @@ defmodule Bench.Otel do
 
   ## The fixture
 
-  61 columns, flattened from OpenTelemetry's resource / scope / record /
+  62 columns — `project_id` leads as the tenant key both arms cluster on, then
+  the rest flattened from OpenTelemetry's resource / scope / record /
   HTTP-attribute groups, spanning `TIMESTAMP`, `INT64`, `FLOAT64`, `STRING`, and
   `BOOL` — `Smolquery.Schema` has no map or list type, which is what every log
   warehouse ends up doing anyway (see T-140). A record is ~2.1 KB of JSON.
@@ -57,6 +58,7 @@ defmodule Bench.Otel do
   ]
 
   @columns [
+    {"project_id", "STRING"},
     {"timestamp", "TIMESTAMP"},
     {"observed_timestamp", "TIMESTAMP"},
     {"severity_number", "INT64"},
@@ -186,6 +188,10 @@ defmodule Bench.Otel do
       merge_env(Smolquery.BufferService, flush_interval_ms: String.to_integer(interval))
     end
 
+    if fsync = System.get_env("FSYNC") do
+      merge_env(Smolquery.BufferService, fsync: fsync == "true")
+    end
+
     for id <- @subtrees -- [SmolqueryWeb.Supervisor] do
       {:ok, _pid} = Supervisor.restart_child(Smolquery.Supervisor, id)
     end
@@ -313,7 +319,68 @@ defmodule Bench.Otel do
   def pool_size, do: env("POOL", @default_pool_size)
 
   @doc """
+  How many distinct tenants the fixture spans — `PROJECTS`, default 1_000.
+  """
+  @spec projects() :: pos_integer()
+  def projects, do: env("PROJECTS", 1_000)
+
+  @doc """
+  Maps a tenant rank to a stable 20-character ref in the shape Supabase uses.
+
+  The leading five characters are the rank in base 26 (`a` = zero), which is
+  injective for ranks below 26⁵ (~11.9M); the remaining fifteen are a
+  position-indexed `phash2` suffix so every ref is full-width without reusing
+  the rank digits as padding noise.
+  """
+  @spec project_ref(non_neg_integer()) :: String.t()
+  def project_ref(rank) do
+    core = base26_padded(rank, 5)
+
+    suffix =
+      0..14
+      |> Enum.map(fn i -> :erlang.phash2({:ref_suffix, rank, i}, 26) + ?a end)
+      |> List.to_string()
+
+    core <> suffix
+  end
+
+  @doc """
+  Picks the tenant for a global row index with log-uniform skew over ranks
+  `0..projects()-1`.
+
+  `trunc(projects() ** u) - 1` for uniform `u` in `[0, 1)`, clamped into that
+  domain, concentrates mass on low ranks — rank 0 is the heaviest tenant and the
+  one the compare driver binds every per-tenant query to. A handful of projects
+  own most rows, the long tail almost none, so the compare bench measures
+  realistic multi-tenant fan-out rather than a flat shuffle. The `- 1` is
+  load-bearing: without it the domain starts at 1 and project 0 has zero rows.
+  """
+  @spec project_for(non_neg_integer()) :: String.t()
+  def project_for(index) do
+    count = projects()
+
+    if count == 1 do
+      project_ref(0)
+    else
+      u = :erlang.phash2({:project, index}, 1_000_000) / 1_000_000
+
+      rank =
+        (count + 1)
+        |> :math.pow(u)
+        |> trunc()
+        |> Kernel.-(1)
+        |> max(0)
+        |> min(count - 1)
+
+      project_ref(rank)
+    end
+  end
+
+  @doc """
   `count` rows drawn from `pool`, stamped now — the shape an insert body carries.
+
+  `project_id` is stamped per row here, not in the template pool, so tenant
+  cardinality is not capped at `pool_size/0`.
   """
   def rows(pool, count, offset) do
     base = DateTime.utc_now()
@@ -324,6 +391,7 @@ defmodule Bench.Otel do
       pool
       |> elem(rem(offset + i, tuple_size(pool)))
       |> Map.merge(%{
+        "project_id" => project_for(offset + i),
         "timestamp" => DateTime.to_iso8601(at),
         "observed_timestamp" => at |> DateTime.add(2, :millisecond) |> DateTime.to_iso8601()
       })
@@ -481,5 +549,14 @@ defmodule Bench.Otel do
     digest = :crypto.hash(:sha256, <<seed::64>>)
 
     digest |> Base.encode16(case: :lower) |> binary_part(0, length)
+  end
+
+  defp base26_padded(rank, width) do
+    {chars, _} =
+      Enum.map_reduce(1..width, rank, fn _, n ->
+        {rem(n, 26) + ?a, div(n, 26)}
+      end)
+
+    chars |> Enum.reverse() |> List.to_string()
   end
 end

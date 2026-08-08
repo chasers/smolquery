@@ -219,7 +219,8 @@ defmodule Smolquery.BufferService.RingEpochTest do
       [{buffer, _load}] = Registry.lookup(Runtime.registry(name), ref)
       schema = Schema.new!([{"id", :int64}])
 
-      assert {:error, :not_owner} = TableBuffer.write(buffer, schema, [%{"id" => 2}], 5_000)
+      assert {:error, :not_owner} =
+               TableBuffer.write(buffer, %{schema: schema, columns: [[2]], row_count: 1}, 5_000)
     end
   end
 end

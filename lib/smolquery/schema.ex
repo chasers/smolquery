@@ -302,8 +302,12 @@ defmodule Smolquery.Schema do
 
   def value_from_json(:timestamp, value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
+      # `DateTime.from_iso8601/1` has already applied the offset and returns the
+      # value in `Etc/UTC` — the offset it hands back is what the *input* carried,
+      # not one still to subtract. Shifting to UTC again was a no-op, and one
+      # `Calendar.get_time_zone_database/0` lookup per timestamp column per row.
       {:ok, datetime, _offset} ->
-        {:ok, DateTime.to_naive(DateTime.shift_zone!(datetime, "Etc/UTC"))}
+        {:ok, DateTime.to_naive(datetime)}
 
       {:error, :missing_offset} ->
         case NaiveDateTime.from_iso8601(value) do
