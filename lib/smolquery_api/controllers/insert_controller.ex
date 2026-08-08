@@ -16,8 +16,17 @@ defmodule SmolqueryApi.InsertController do
   alias SmolqueryApi.Json
   alias SmolqueryApi.Runtime
 
+  @max_ndjson_bytes 8_000_000
+
   @doc """
   Inserts the body's rows into a table.
+
+  Two body shapes, one contract. `application/json` carries
+  `{"rows": [...]}`; `application/x-ndjson` carries one JSON object per
+  line — the same bytes ClickHouse's `JSONEachRow` takes — and rides the
+  columnar fast path (`Smolquery.IngestService.Client.insert_ndjson/4`),
+  which never materializes valid rows as Elixir terms. NDJSON requests pass
+  `insertId` as a query parameter, since there is no envelope to put it in.
 
   An optional `insertId` makes the request idempotent: retrying it — after a
   timeout, a dropped connection, or a 5xx whose write may still have landed —
@@ -28,16 +37,69 @@ defmodule SmolqueryApi.InsertController do
   """
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"dataset" => dataset, "table" => table}) do
+    case List.first(Plug.Conn.get_req_header(conn, "content-type")) do
+      "application/x-ndjson" <> _params -> create_ndjson(conn, {dataset, table})
+      _json -> create_json(conn, {dataset, table})
+    end
+  end
+
+  defp create_json(conn, table_ref) do
     with {:ok, rows} <- rows(conn.body_params),
          {:ok, batch_id} <- insert_id(conn.body_params),
-         {:ok, result} <- insert_rows(conn, {dataset, table}, rows, batch_id) do
-      Json.send_json(conn, 200, %{
-        "insertedRows" => result.inserted,
-        "insertErrors" => errors_json(result.errors)
-      })
+         {:ok, result} <- insert_rows(conn, table_ref, rows, batch_id) do
+      respond(conn, result)
     else
       {:error, reason} -> insert_error(conn, reason)
     end
+  end
+
+  defp create_ndjson(conn, table_ref) do
+    with {:ok, batch_id} <- insert_id(conn.query_params),
+         {:ok, body, conn} <- read_ndjson(conn),
+         {:ok, result} <- insert_ndjson(conn, table_ref, body, batch_id) do
+      respond(conn, result)
+    else
+      {:error, :too_large} ->
+        Errors.send_error(
+          conn,
+          413,
+          "PAYLOAD_TOO_LARGE",
+          "NDJSON insert bodies are limited to #{@max_ndjson_bytes} bytes; use /load for files"
+        )
+
+      {:error, reason} ->
+        insert_error(conn, reason)
+    end
+  end
+
+  defp respond(conn, result) do
+    Json.send_json(conn, 200, %{
+      "insertedRows" => result.inserted,
+      "insertErrors" => errors_json(result.errors)
+    })
+  end
+
+  defp read_ndjson(conn, acc \\ []) do
+    case Plug.Conn.read_body(conn, length: @max_ndjson_bytes) do
+      {:ok, chunk, conn} ->
+        body = IO.iodata_to_binary(Enum.reverse([chunk | acc]))
+
+        if byte_size(body) > @max_ndjson_bytes,
+          do: {:error, :too_large},
+          else: {:ok, body, conn}
+
+      {:more, chunk, conn} ->
+        case Enum.reduce(acc, byte_size(chunk), &(byte_size(&1) + &2)) do
+          over when over > @max_ndjson_bytes -> {:error, :too_large}
+          _within -> read_ndjson(conn, [chunk | acc])
+        end
+    end
+  end
+
+  defp insert_ndjson(conn, table_ref, body, batch_id) do
+    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
+
+    IngestService.Client.insert_ndjson(runtime.ingest_name, table_ref, body, batch_id: batch_id)
   end
 
   @doc """

@@ -454,7 +454,7 @@ defmodule Bench.OtelLogs do
       :timer.tc(fn ->
         Req.post!(req,
           url: "/v1/datasets/#{dataset()}/tables/#{acc.table}/insert",
-          headers: [{"content-type", "application/json"}],
+          headers: [{"content-type", insert_content_type()}],
           body: body
         )
       end)

@@ -13,7 +13,9 @@ defmodule Smolquery.IngestService.Client do
   batch with no valid rows reports zero without touching the buffer.
   """
 
+  alias Explorer.DataFrame
   alias Smolquery.BufferService
+  alias Smolquery.IngestService.ColumnarValidator
   alias Smolquery.IngestService.Runtime
   alias Smolquery.IngestService.SchemaCache
   alias Smolquery.IngestService.Validator
@@ -55,6 +57,72 @@ defmodule Smolquery.IngestService.Client do
         {valid, errors} ->
           write(runtime, table_ref, schema, valid, errors, Keyword.get(opts, :batch_id))
       end
+    end
+  end
+
+  @doc """
+  Validates NDJSON `body` against the table's schema and writes the valid
+  rows — `insert/4`'s contract, entered from bytes instead of decoded terms.
+
+  The fast path never materializes rows: `ColumnarValidator` parses and
+  casts the whole body in one native pass and the resulting frame rides to
+  the buffer as a frame (T-139). Any batch the columnar pass cannot prove
+  entirely valid falls back to decoding the lines and running the per-row
+  validator, so `insertErrors` reporting is byte-for-byte what `insert/4`
+  answers — a line that is not a JSON object is rejected at its index like
+  any other invalid row.
+
+  Takes the same `:batch_id` option, with the same dedup semantics.
+  """
+  @spec insert_ndjson(atom(), Store.table_ref(), binary(), keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def insert_ndjson(name, table_ref, body, opts \\ []) when is_binary(body) do
+    with {:ok, runtime} <- runtime(name),
+         {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
+      case ColumnarValidator.validate(schema, body) do
+        {:ok, frame} -> write_frame(runtime, table_ref, schema, frame, byte_size(body), opts)
+        :fallback -> insert_decoded_lines(runtime, table_ref, schema, body, opts)
+      end
+    end
+  end
+
+  defp insert_decoded_lines(runtime, table_ref, schema, body, opts) do
+    case Validator.validate(schema, decode_lines(body)) do
+      {[], errors} ->
+        measure(0, errors)
+
+        {:ok, %{inserted: 0, errors: errors}}
+
+      {valid, errors} ->
+        write(runtime, table_ref, schema, valid, errors, Keyword.get(opts, :batch_id))
+    end
+  end
+
+  defp decode_lines(body) do
+    body
+    |> String.split("\n", trim: true)
+    |> Enum.map(fn line ->
+      case JSON.decode(line) do
+        {:ok, row} -> row
+        {:error, _reason} -> line
+      end
+    end)
+  end
+
+  defp write_frame(runtime, table_ref, schema, frame, byte_size, opts) do
+    batch = %{schema: schema, frame: frame, byte_size: byte_size}
+
+    batch =
+      case Keyword.get(opts, :batch_id) do
+        nil -> batch
+        batch_id -> Map.put(batch, :batch_id, batch_id)
+      end
+
+    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
+      inserted = DataFrame.n_rows(frame)
+      measure(inserted, [])
+
+      {:ok, %{inserted: inserted, errors: []}}
     end
   end
 

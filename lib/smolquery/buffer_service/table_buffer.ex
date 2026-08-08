@@ -99,6 +99,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   require Logger
 
+  alias Explorer.DataFrame
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -187,8 +188,37 @@ defmodule Smolquery.BufferService.TableBuffer do
   """
   @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
           {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
-  def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) do
+  def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) when is_list(rows) do
     GenServer.call(buffer, {:write, schema, rows, batch_id, :erlang.external_size(rows)}, timeout)
+  end
+
+  @doc """
+  Accumulates an already-columnar batch — same contract as `write/5`, with
+  the rows as an `Explorer.DataFrame` instead of a term list (T-139).
+
+  `byte_size` is the caller's estimate of what the batch costs this node —
+  the ingest edge passes the wire size it parsed the frame from.
+  `:erlang.external_size/1` would answer a few words here: the frame's data
+  lives behind a NIF resource, not on the BEAM heap, so the admission bound
+  has to be told what it cannot measure.
+  """
+  @spec write_frame(
+          GenServer.server(),
+          Schema.t(),
+          DataFrame.t(),
+          non_neg_integer(),
+          timeout(),
+          String.t() | nil
+        ) :: {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
+  def write_frame(
+        buffer,
+        %Schema{} = schema,
+        %DataFrame{} = frame,
+        byte_size,
+        timeout,
+        batch_id \\ nil
+      ) do
+    GenServer.call(buffer, {:write, schema, frame, batch_id, byte_size}, timeout)
   end
 
   @doc """
@@ -687,7 +717,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp write_new(state, schema, rows, batch_id, bytes, from) do
-    count = length(rows)
+    count = chunk_count(rows)
     state = flush_on_schema_change(state, schema)
 
     if full?(state, count, bytes) do
@@ -732,6 +762,9 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
+  defp chunk_count(rows) when is_list(rows), do: length(rows)
+  defp chunk_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
+
   defp handoff(%__MODULE__{chunks: []} = state), do: state
 
   defp handoff(state) do
@@ -739,7 +772,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     Committer.commit(state.committer, %{
       schema: state.schema,
-      rows: state.chunks |> Enum.reverse() |> Enum.concat(),
+      chunks: Enum.reverse(state.chunks),
       pending: Enum.reverse(state.pending),
       batch_ids: batch_ids,
       row_count: state.row_count,

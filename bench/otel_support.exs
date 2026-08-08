@@ -373,9 +373,33 @@ defmodule Bench.Otel do
   One `POST /insert` body: `batch` rows drawn from `pool`, stamped now.
 
   Timestamps are fresh on every call — a bench that measures staleness cannot
-  reuse a pre-encoded body.
+  reuse a pre-encoded body. `INSERT_FORMAT=ndjson` sends newline-delimited
+  rows instead of the `{"rows": [...]}` envelope, which is the columnar fast
+  path (PL-21); the rows inside are identical.
   """
-  def body(pool, batch, offset), do: JSON.encode!(%{"rows" => rows(pool, batch, offset)})
+  def body(pool, batch, offset) do
+    case insert_format() do
+      :json -> JSON.encode!(%{"rows" => rows(pool, batch, offset)})
+      :ndjson -> Enum.map_join(rows(pool, batch, offset), "\n", &JSON.encode!/1) <> "\n"
+    end
+  end
+
+  @doc "The insert body format the bench drives with, from `INSERT_FORMAT`."
+  def insert_format do
+    case System.get_env("INSERT_FORMAT", "json") do
+      "json" -> :json
+      "ndjson" -> :ndjson
+      other -> raise ArgumentError, "INSERT_FORMAT=#{other} — expected json or ndjson"
+    end
+  end
+
+  @doc "The content type `body/3`'s output must be posted as."
+  def insert_content_type do
+    case insert_format() do
+      :json -> "application/json"
+      :ndjson -> "application/x-ndjson"
+    end
+  end
 
   defp template(i) do
     {severity, text} = severity(rem(i * 7, 100))
