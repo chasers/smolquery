@@ -76,13 +76,24 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     syncers: []
   ]
 
+  @typedoc """
+  A group commit handed over by the buffer.
+
+  `opened_at` and `handed_off_at` are monotonic microseconds stamping when the
+  accumulator took its first chunk and when it cast — the two spans of the ack
+  that happen before this process sees the commit, and so the two no timer here
+  could measure (T-181). Both are optional: a commit built by hand carries
+  neither, and an unmeasured span is reported as 0.
+  """
   @type commit :: %{
-          schema: Smolquery.Schema.t(),
-          chunks: [[Writer.row()] | Explorer.DataFrame.t()],
-          pending: [{GenServer.from(), :new | :duplicate | :flush}],
-          batch_ids: [String.t()],
-          row_count: non_neg_integer(),
-          byte_size: non_neg_integer()
+          :schema => Smolquery.Schema.t(),
+          :chunks => [[Writer.row()] | Explorer.DataFrame.t()],
+          :pending => [{GenServer.from(), :new | :duplicate | :flush}],
+          :batch_ids => [String.t()],
+          :row_count => non_neg_integer(),
+          :byte_size => non_neg_integer(),
+          optional(:opened_at) => integer() | nil,
+          optional(:handed_off_at) => integer() | nil
         }
 
   @doc """
