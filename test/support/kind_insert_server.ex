@@ -5,10 +5,10 @@ defmodule Smolquery.Test.KindInsertServer do
 
   import Plug.Conn
 
-  @spec init(pid()) :: pid()
+  @impl Plug
   def init(agent), do: agent
 
-  @spec call(Plug.Conn.t(), pid()) :: Plug.Conn.t()
+  @impl Plug
   def call(conn, agent) do
     conn = fetch_query_params(conn)
     {:ok, body, conn} = read_body(conn)
