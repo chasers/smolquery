@@ -14,7 +14,7 @@ flowchart TB
     Clients["Clients — HTTP<br/>inserts · loads · queries · jobs"]
 
     subgraph Fleet["One release · a node starts only the roles it is given"]
-        API["api + ingest<br/>Bearer auth, schema validation,<br/>one request → one forward batch"]
+        API["api + ingest<br/>Bearer auth, schema lookup,<br/>one request → one forward batch"]
         B["buffer — the only stateful service<br/>group commit → Parquet micro-segments<br/>manifest log · HotServer over httpfs"]
         S["storage<br/>seal · compact · retention · GC"]
         Q["query<br/>one DuckDB engine per job,<br/>planned over catalog ∪ hot tier"]
@@ -37,9 +37,10 @@ flowchart TB
 
 Three rules shape everything below:
 
-- **Writes never touch DuckDB.** Elixir batches rows into immutable Parquet
-  segments — small in (a ~1 s group commit is what "durable and queryable"
-  means), large out (a few big files on object storage).
+- **The default write path is columnar.** The ingest edge forwards NDJSON bytes
+  to the buffer owner, and DuckDB's `COPY ... read_json` parses and writes
+  immutable Parquet at flush time — small in (a ~1 s group commit is what
+  "durable and queryable" means), large out (a few big files on object storage).
 - **DuckDB is a disposable, stateless read engine.** Storage of record is
   Parquet plus a DuckLake catalog (SQLite in dev, Postgres in a cluster). Any
   engine can be thrown away and restarted.
@@ -700,7 +701,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 | role | subtree |
 |---|---|
 | `api` | `SmolqueryApi` — the HTTP front door, a Phoenix endpoint on Bandit |
-| `ingest` | `Smolquery.IngestService` — schema validation and batching |
+| `ingest` | `Smolquery.IngestService` — schema lookup and batching; validation is deferred to flush/salvage |
 | `buffer` | `Smolquery.BufferService` — the hot tier and `HotServer` |
 | `storage` | `Smolquery.StorageService` — seal, compact, retention, GC |
 | `query` | `Smolquery.QueryService` — query jobs |
