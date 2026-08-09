@@ -39,7 +39,8 @@ defmodule Smolquery.IngestService.Runtime do
     :catalog_opts,
     buffer_name: Smolquery.BufferService,
     schema_cache_ttl_ms: 60_000,
-    write_partitions: 1
+    write_partitions: 1,
+    ndjson_passthrough: false
   ]
 
   @type t :: %__MODULE__{
@@ -48,7 +49,8 @@ defmodule Smolquery.IngestService.Runtime do
           catalog_opts: keyword() | nil,
           buffer_name: atom(),
           schema_cache_ttl_ms: pos_integer(),
-          write_partitions: pos_integer()
+          write_partitions: pos_integer(),
+          ndjson_passthrough: boolean()
         }
 
   @doc """
@@ -70,7 +72,14 @@ defmodule Smolquery.IngestService.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:buffer_name, :schema_cache_ttl_ms, :write_partitions]))
+    |> struct!(
+      Keyword.take(config, [
+        :buffer_name,
+        :schema_cache_ttl_ms,
+        :write_partitions,
+        :ndjson_passthrough
+      ])
+    )
   end
 
   use Smolquery.Runtime

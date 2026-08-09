@@ -97,7 +97,10 @@ defmodule Smolquery.BufferService.Client do
   like any other.
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
-          {:ok, TableBuffer.ack()} | {:error, term()}
+          {:ok, TableBuffer.ack()}
+          | {:ok, TableBuffer.ack(), [TableBuffer.row_errors()]}
+          | {:invalid, [TableBuffer.row_errors()]}
+          | {:error, term()}
   def write_batch(name, table_ref, batch) do
     routing = Routing.resolve(name)
     owner = Routing.owner(routing, table_ref)
@@ -136,6 +139,8 @@ defmodule Smolquery.BufferService.Client do
     |> Map.put(:frame_ipc, Explorer.DataFrame.dump_ipc!(frame))
   end
 
+  # NDJSON is already bytes, so a remote batch needs no conversion — which is the
+  # point of the passthrough path: no frame exists on this node to serialize.
   defp wire_batch(_remote, batch), do: batch
 
   @doc """
