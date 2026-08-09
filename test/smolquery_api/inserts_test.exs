@@ -56,12 +56,8 @@ defmodule SmolqueryApi.InsertControllerTest do
     %{name: name, buffer: buffer}
   end
 
-  defp post_rows(name, rows) do
-    conn(:post, @path, JSON.encode!(%{"rows" => rows}))
-    |> put_req_header("content-type", "application/json")
-    |> put_req_header("authorization", "Bearer #{@key}")
-    |> then(&ApiEndpoint.request(name, &1))
-  end
+  # /insert takes ndjson only; the array envelope is a 415 (T-190).
+  defp post_rows(name, rows), do: post_ndjson(name, ndjson(rows))
 
   test "acked rows answer 200 with no insertErrors", %{name: name, buffer: buffer} do
     response = post_rows(name, [%{"id" => 1}, %{"id" => 2}])
@@ -92,26 +88,25 @@ defmodule SmolqueryApi.InsertControllerTest do
 
   test "an unknown table is a 404", %{name: name} do
     response =
-      conn(:post, "/v1/datasets/analytics/tables/nope/insert", JSON.encode!(%{"rows" => [%{}]}))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{@key}")
-      |> then(&ApiEndpoint.request(name, &1))
+      post_ndjson(name, ndjson([%{"id" => 1}]), "/v1/datasets/analytics/tables/nope/insert")
 
     assert response.status == 404
   end
 
-  test "a body without rows is a 400", %{name: name} do
-    conn =
-      conn(:post, @path, JSON.encode!(%{"data" => []}))
+  test "a JSON array body is a 415 that names the header to send (T-190)", %{name: name} do
+    response =
+      conn(:post, @path, JSON.encode!(%{"rows" => [%{"id" => 1}]}))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{@key}")
+      |> then(&ApiEndpoint.request(name, &1))
 
-    response = ApiEndpoint.request(name, conn)
+    assert response.status == 415
 
-    assert response.status == 400
+    assert %{"error" => %{"status" => "UNSUPPORTED_MEDIA_TYPE", "message" => message}} =
+             JSON.decode!(response.resp_body)
 
-    assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
-    assert message =~ "rows"
+    assert message =~ "application/x-ndjson"
+    assert message =~ "/load"
   end
 
   test "an overloaded buffer is a 429 whose retry-after is the prediction", %{
@@ -234,11 +229,16 @@ defmodule SmolqueryApi.InsertControllerTest do
   end
 
   describe "insertId (T-41)" do
-    defp post_body(name, body) do
-      conn(:post, @path, JSON.encode!(body))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{@key}")
-      |> then(&ApiEndpoint.request(name, &1))
+    # insertId is a query parameter on the ndjson path: there is no envelope
+    # to carry it (T-190).
+    defp post_body(name, %{"rows" => rows} = body) do
+      path =
+        case Map.fetch(body, "insertId") do
+          {:ok, id} -> @path <> "?insertId=" <> URI.encode_www_form(to_string(id))
+          :error -> @path
+        end
+
+      post_ndjson(name, ndjson(rows), path)
     end
 
     defp hot_rows(buffer) do
@@ -268,8 +268,9 @@ defmodule SmolqueryApi.InsertControllerTest do
       assert hot_rows(buffer) == 2
     end
 
+    # A non-string insertId is no longer expressible: the id is a query
+    # parameter now, and everything in a query string is a string (T-190).
     test "a malformed insertId is a 400", %{name: name} do
-      assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => 42}).status == 400
       assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => ""}).status == 400
 
       oversized = String.duplicate("x", 129)

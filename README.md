@@ -54,10 +54,11 @@ curl -H "$auth" -H "$json" -d '{"id": "events", "schema": [
        {"name": "amount", "type": "NUMERIC(38,2)"}
      ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables
 
-# stream rows in — a 200 means they are durable and queryable
-curl -H "$auth" -H "$json" -d '{"rows": [
-       {"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"}
-     ]}' http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
+# stream rows in — NDJSON, one object per line. A 200 means they are durable
+# and queryable. (This is the only accepted insert body; see docs/api.md.)
+echo '{"id": 1, "ts": "2026-08-01T10:00:00Z", "amount": "12.50"}' \
+  | curl -H "$auth" -H 'content-type: application/x-ndjson' --data-binary @- \
+    http://127.0.0.1:4000/v1/datasets/analytics/tables/events/insert
 
 # query them back
 curl -H "$auth" -H "$json" \
