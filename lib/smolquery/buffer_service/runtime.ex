@@ -18,7 +18,7 @@ defmodule Smolquery.BufferService.Runtime do
         dir: "priv/data/buffer",
         flush_interval_ms: 1_000,
         flush_max_rows: 100_000,
-        flush_max_bytes: 8_000_000,
+        flush_max_bytes: 2_000_000,
         max_buffered_rows: 500_000,
         max_buffered_bytes: 64_000_000,
         ack_budget_ms: 5_000,
@@ -58,6 +58,22 @@ defmodule Smolquery.BufferService.Runtime do
   bound *memory* — the bench proved the queue that hurts is the mailbox,
   which the memory bounds never see.
 
+  `flush_writer` defaults to `:duckdb`, the path the ingest edge's NDJSON
+  passthrough is built around: the spooled bytes become Parquet in one `COPY`
+  without ever being Elixir terms. It used to default to `:polars`, which meant
+  a fresh deployment silently came up on the slower path *and* — because
+  `Smolquery.IngestService`'s `ndjson_passthrough` is derived from this value —
+  silently disabled the passthrough with it. Two defaults compounding into the
+  slow path is not a default anyone chooses on purpose.
+
+  `flush_max_bytes` defaults to 2 MB rather than 8 MB. Measured on the
+  comparison rig at 2,346-byte rows: 8 MB gave 24,067 rows/s at a 926 ms ack
+  and 2 MB gave 29,533 at 780 ms. There is a floor under it — 1 MB drops to
+  20,467 and 500 KB to 13,733 — because the encode has a fixed per-commit cost
+  that stops being worth paying once the accumulate wait is short enough. The
+  optimum is a function of how fast a partition fills, so re-measure it for a
+  very different row width.
+
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
   deleting one out from under an in-flight scan is exactly what it prevents.
@@ -84,7 +100,7 @@ defmodule Smolquery.BufferService.Runtime do
     :spool_dir,
     flush_interval_ms: 1_000,
     flush_max_rows: 100_000,
-    flush_max_bytes: 8_000_000,
+    flush_max_bytes: 2_000_000,
     max_buffered_rows: 500_000,
     max_buffered_bytes: 64_000_000,
     ack_budget_ms: 5_000,
@@ -99,7 +115,7 @@ defmodule Smolquery.BufferService.Runtime do
     seal_consumer: {Smolquery.BufferService.SealLog, []},
     compression: :zstd,
     encode_concurrency: 2,
-    flush_writer: :polars,
+    flush_writer: :duckdb,
     write_pool_size: 1,
     row_validator: nil,
     hot_server_ip: {127, 0, 0, 1},
