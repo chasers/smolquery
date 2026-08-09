@@ -32,6 +32,7 @@ defmodule Smolquery.BufferService.Runtime do
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
         compression: :lz4raw,
+        encode_concurrency: 2,
         ring: [:"buffer1@host"]
 
   `:dir` is the root: segments go to a `Store.Local` beneath `segments/`, manifest
@@ -96,6 +97,7 @@ defmodule Smolquery.BufferService.Runtime do
     maintenance_interval_ms: 5_000,
     seal_consumer: {Smolquery.BufferService.SealLog, []},
     compression: :zstd,
+    encode_concurrency: 2,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
   ]
@@ -122,6 +124,7 @@ defmodule Smolquery.BufferService.Runtime do
           maintenance_interval_ms: pos_integer(),
           seal_consumer: {module(), term()},
           compression: atom(),
+          encode_concurrency: pos_integer(),
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
         }
@@ -143,6 +146,7 @@ defmodule Smolquery.BufferService.Runtime do
     :maintenance_interval_ms,
     :seal_consumer,
     :compression,
+    :encode_concurrency,
     :hot_server_ip,
     :hot_server_port
   ]
