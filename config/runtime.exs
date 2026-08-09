@@ -103,6 +103,14 @@ if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
   config :smolquery, Smolquery.BufferService, encode_concurrency: String.to_integer(concurrency)
 end
 
+if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
+  config :smolquery, Smolquery.BufferService, flush_max_bytes: String.to_integer(bytes)
+end
+
+if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
+  config :smolquery, Smolquery.BufferService, max_buffered_bytes: String.to_integer(bytes)
+end
+
 if partitions = System.get_env("SMOLQUERY_WRITE_PARTITIONS") do
   count = String.to_integer(partitions)
 
