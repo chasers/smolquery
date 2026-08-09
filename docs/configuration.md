@@ -40,10 +40,10 @@ full set of dials behind them.
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
-| `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`8000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
+| `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`2000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch |
 | `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (`2`); the manifest append, replication round and replies stay serialized in the Committer regardless |
-| `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `polars` (default) or `duckdb`. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. **A weaker contract:** nothing validates per row, so `insertErrors` is always empty and a value the schema cannot take fails the whole commit rather than one row. The JSON envelope route is unaffected and keeps the promise in `docs/api.md` |
+| `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `duckdb` (default) or `polars`. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. The default path defers schema validation to flush, then salvages a failed batch row by row, preserving per-row `insertErrors`; a bad row does not always fail the whole commit, and successful rows are still written. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
 | `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (`1`). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection |
 | `SMOLQUERY_WRITE_PARTITIONS` | how many buffer identities one table's writes spread over, and so how many nodes ingest it (`1`). Reader and writer counts must match — set it identically on ingest and query roles |
 | `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` (`4001`), on every node — peers derive each other's hot-tier URLs from node name plus this port |
@@ -59,12 +59,31 @@ full set of dials behind them.
 | `SMOLQUERY_BUFFER_REPLICATION` | replication factor for the hot tier's unsealed tail (T-96). Set to `N >= 2` to enable `Replicator.SegmentShipping`: every group commit is on `N` disks before its ack, a ring smaller than `N` refuses writes, and readers tolerate `N - 1` absent buffer nodes. Set it on every role — buffer nodes ship, query nodes use it to size read tolerance. Unset: single-copy (`Replicator.None`). **Raising it on a fleet with data**: read tolerance comes from this setting, not from actual copy counts, and nothing backfills segments committed before the change — until that pre-existing unsealed tail seals, a rollout that takes a node down can silently drop it from reads. Force-seal first (drain each node, or wait out `seal_max_age_ms`) before rolling restarts under the new factor |
 | `SMOLQUERY_BUFFER_REPLICAS` | on Kubernetes, the buffer StatefulSet's replica count: `rel/env.sh.eex` expands it into `SMOLQUERY_BUFFER_NODES` using pod-DNS naming (`SMOLQUERY_BUFFER_STATEFULSET`, default `smolquery-buffer`), so the expected fleet carries no hardcoded namespace and scaling is one number. Ignored if `SMOLQUERY_BUFFER_NODES` is set explicitly |
 | `GEN_RPC_PORT` | inter-node transport port (`5369`) |
-| `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to mutual TLS. Verification is chain-only against the cluster CA (the emqx gen_rpc fork does no hostname/CN check), so the CA is the trust boundary: certificate files are per node (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the file) but any CA-signed certificate authenticates to any peer — a leaked node cert means rotating the CA, not just that node |
+| `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to mutual TLS (`false` by default). Verification is chain-only against the cluster CA (the emqx gen_rpc fork does no hostname/CN check), so the CA is the trust boundary: certificate files are per node (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the file) but any CA-signed certificate authenticates to any peer — a leaked node cert means rotating the CA, not just that node |
 | `GEN_RPC_SSL_PORT` | gen_rpc TLS port (`5870`) |
-| `DIST_TLS` | `true` to run Erlang distribution (cluster membership only) over TLS with the same certificates — set in `rel/env.sh.eex`, not `config/runtime.exs`, since distribution starts before the release's Elixir config does |
+| `DIST_TLS` | `true` to run Erlang distribution (cluster membership only) over TLS with the same certificates (`false` by default) — set in `rel/env.sh.eex`, not `config/runtime.exs`, since distribution starts before the release's Elixir config does |
 | `POD_NAME` / `POD_NAMESPACE` | when set (a Kubernetes Downward API convention), `rel/env.sh.eex` derives `RELEASE_NODE` from the pod's stable headless-service DNS name — the same name a peer needs to reach this node |
 | `HEADLESS_SERVICE` | the headless-service name in that derived node name (`smolquery-headless`) |
 | `RELEASE_NODE_HOST` | overrides the derived host part of `RELEASE_NODE` outright (non-StatefulSet deployments) |
+
+The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`.
+They still mount per-node development certificates so operators can opt into
+mutual TLS by changing both values to `true` before applying the overlay.
+
+## Releases and deployment artifacts
+
+A push to `main` runs the Kind workflow as well as the ordinary CI workflow.
+The release workflow listens for a successful main-push Kind run, checks that
+its exact commit changed the `version:` line in `mix.exs` to a stable `X.Y.Z`
+version strictly greater than its parent, and waits for successful CI on that same commit. It then publishes
+multi-architecture `ghcr.io/chasers/smolquery` tags for the version and commit.
+
+The release attaches `release-image.txt`, containing the immutable digest
+reference, and `release-manifest.yaml`, an image-pinned base manifest rendered
+from `deploy/base` with every smolquery image replaced by that digest-qualified
+reference. It is not a standalone production deployment: integrate it with and
+provide the `smolquery-env` Secret, Postgres catalog/discovery, and sealed-store
+dependencies before deploying.
 
 ## Application config
 
@@ -86,7 +105,7 @@ config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,
   flush_max_rows: 100_000,
-  flush_max_bytes: 8_000_000,
+  flush_max_bytes: 2_000_000,
   max_buffered_rows: 500_000,
   max_buffered_bytes: 64_000_000,
   write_timeout_ms: 15_000,

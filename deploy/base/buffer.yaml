@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: wait-for-postgres
-          image: postgres:17-alpine
+          image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
           command:
             - sh
             - -c
