@@ -1,0 +1,92 @@
+[tools]
+erlang = "29.0.2"
+elixir = "1.20.2-otp-29"
+
+[env]
+# Scope kubectl to this repo's single-context (kind) kubeconfig. Outside any repo
+# the global ~/.kube/config has no current-context, so bare kubectl fails rather
+# than hitting the wrong cluster.
+KUBECONFIG = "{{config_root}}/.kube/config"
+
+[tasks.setup]
+description = "Install Hex and rebar, fetch deps, set up the web asset toolchain"
+run = [
+  # A freshly installed toolchain carries neither, and every other task needs
+  # both — `mix deps.get` cannot even resolve a hex dependency without Hex.
+  "mix local.hex --force",
+  "mix local.rebar --force",
+  "mix deps.get",
+  "mix assets.setup",
+]
+
+[tasks.dev]
+description = "Run the node in iex — API :4000, hot tier :4001, web UI :4002"
+depends = ["dev_stop"]
+env = { MIX_ENV = "dev", ERL_AFLAGS = "-kernel shell_history enabled" }
+run = """
+epmd -daemon 2>/dev/null || true
+iex --name smolquery@127.0.0.1 --cookie smolquery -S mix
+"""
+
+[tasks.dev_stop]
+description = "Stop dev processes holding the API, hot tier, or web UI ports"
+run = """
+for port in 4000 4001 4002; do
+  for pid in $(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null); do
+    if ps -p "$pid" -o command= | grep -q smolquery; then
+      kill -15 "$pid" 2>/dev/null || true
+    else
+      echo "port $port is held by a non-smolquery process (pid $pid) — leaving it alone"
+    fi
+  done
+done
+"""
+
+[tasks.services]
+description = "Bring up what the integration suite needs: epmd, Postgres, MinIO"
+run = """
+epmd -daemon 2>/dev/null || true
+nc -z localhost 5432 2>/dev/null && echo "postgres: up" ||
+  echo "postgres: DOWN — start your local Postgres on :5432 (postgres/postgres)"
+nc -z localhost 9000 2>/dev/null && echo "minio: up" ||
+  docker run -d --rm --name smolquery-minio -p 9000:9000 \
+    -e MINIO_ROOT_USER=smolquery -e MINIO_ROOT_PASSWORD=smolquery-secret \
+    minio/minio server /data
+"""
+
+[tasks.services_stop]
+description = "Stop the MinIO container this repo started"
+run = "docker stop smolquery-minio 2>/dev/null || true"
+
+[tasks.test]
+description = "The fast suite"
+run = "mix test"
+
+[tasks.test_integration]
+description = "The fast suite plus DuckDB extensions, real HTTP, Postgres, and MinIO"
+depends = ["services"]
+run = "mix test --include integration"
+
+[tasks.test_cluster]
+description = "The kind-cluster suite — needs a running kind cluster (see kind_up)"
+run = "mix test --only cluster"
+
+[tasks.kind_up]
+description = "Boot the local kind cluster: certs, image build and load, apply, wait"
+run = "./scripts/kind-up.sh"
+
+[tasks.kind_down]
+description = "Delete the local kind cluster"
+run = "kind delete cluster --name smolquery"
+
+[tasks.precommit]
+description = "The mutating gate: compile, format, credo, ex_dna, test"
+run = "mix precommit"
+
+[tasks.ci]
+description = "The non-mutating superset CI runs"
+run = "mix ci"
+
+[tasks.clean]
+description = "Drop build artifacts and fetched deps"
+run = "rm -rf _build deps"
