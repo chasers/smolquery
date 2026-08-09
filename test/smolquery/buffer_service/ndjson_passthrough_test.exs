@@ -121,6 +121,33 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
     assert entry.row_count == 5
   end
 
+  # A whitespace-only body is not invalid — there is no row to refuse — it is
+  # empty. The commit must land nothing: no manifest entry (its bounds would all
+  # be null, which no pruner can exclude), no segment file, and an ack that says
+  # zero rather than echo the sender.
+  test "a commit of only blank lines lands no segment and says so", %{
+    name: name,
+    runtime: runtime
+  } do
+    body = " \n  \n"
+
+    assert {:ok, ack} =
+             Client.write_batch(name, @table, %{
+               schema: schema(),
+               ndjson: body,
+               row_count: 0,
+               byte_size: byte_size(body)
+             })
+
+    assert ack == %{segment_id: nil, row_count: 0}
+    assert HotManifest.entries(runtime.manifest, @table) == []
+
+    assert runtime.store.config.dir
+           |> Path.join("**")
+           |> Path.wildcard()
+           |> Enum.filter(&File.regular?/1) == []
+  end
+
   defp raw_batch(body) do
     %{schema: schema(), ndjson: body, row_count: 1, byte_size: byte_size(body)}
   end
