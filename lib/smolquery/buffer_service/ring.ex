@@ -24,6 +24,14 @@ defmodule Smolquery.BufferService.Ring do
   clockwise from its *parent* ref, which spreads a table exactly rather than
   probably, and reduces to the old behaviour at partition 0.
 
+  Dealing trades the `1/n` invariant for that exactness: the rotation is
+  positional over the live node count, so a membership change can move a
+  partition between two surviving nodes — more churn than an independent hash
+  would cost. Each move is fenced and drained like any ring change
+  (`Smolquery.BufferService.RingEpoch`, the adopter, the member-wide manifest
+  fan-out), and an `insertId` retry straddling one is at-least-once, exactly
+  as `Smolquery.Partitions` documents for a count change.
+
   The rotation lives in this module, not in `BufferService.Routing`, because
   `BufferService.RingEpoch` asks `owner/2` and `own?/2` directly whether this
   node owns a ref. Two placement rules would let one node accept a commit that

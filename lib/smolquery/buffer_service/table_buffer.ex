@@ -57,7 +57,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   A batch whose schema differs from the one accumulating forces a flush and starts
   a fresh accumulator. One segment always has one schema, and additive evolution
   therefore works at the file level for free — `read_parquet(union_by_name = true)`
-  handles the read side.
+  handles the read side. A payload-kind change forces the same flush: an NDJSON
+  passthrough body and a rows/frame batch cannot share a commit, because the
+  committer encodes a commit one way or the other.
 
   ## Sealing is signalled against a frozen set
 
@@ -234,9 +236,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   @doc """
   Accumulates an unparsed NDJSON body and returns once it is durable.
 
-  `row_count` is the sender's newline count, not a parse: this node does not
-  read the bytes, and the flush is what turns them into a segment. Otherwise
-  identical to `write_frame/6`, including the ack and the dedup semantics.
+  `row_count` is the sender's count of non-blank lines, not a parse: this node
+  does not read the bytes, and the flush is what turns them into a segment.
+  Otherwise identical to `write_frame/6`, including the ack and the dedup
+  semantics.
   """
   @spec write_ndjson(
           GenServer.server(),
@@ -766,7 +769,11 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp write_new(state, schema, rows, batch_id, bytes, from) do
     count = chunk_count(rows)
-    state = flush_on_schema_change(state, schema)
+
+    state =
+      state
+      |> flush_on_schema_change(schema)
+      |> flush_on_kind_change(rows)
 
     if full?(state, count, bytes) do
       {:reply, {:error, :buffer_full}, state}
@@ -784,6 +791,19 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_schema_change(%__MODULE__{chunks: []} = state, _schema), do: state
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
   defp flush_on_schema_change(state, _schema), do: handoff(state)
+
+  # An NDJSON passthrough chunk cannot share a commit with rows or a frame:
+  # the committer encodes a commit one way, decided by its chunks' kind. Mixing
+  # them would crash the encode for every caller in the commit, so a kind
+  # change flushes exactly as a schema change does.
+  defp flush_on_kind_change(%__MODULE__{chunks: []} = state, _chunk), do: state
+
+  defp flush_on_kind_change(%__MODULE__{chunks: [head | _rest]} = state, chunk) do
+    if chunk_kind(head) == chunk_kind(chunk), do: state, else: handoff(state)
+  end
+
+  defp chunk_kind({:ndjson, _body, _count}), do: :ndjson
+  defp chunk_kind(_rows_or_frame), do: :mergeable
 
   defp accumulate(state, schema, rows, count, bytes, batch_id, from) do
     %{
@@ -814,7 +834,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp chunk_count(rows) when is_list(rows), do: length(rows)
   defp chunk_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
 
-  # Counted by the sender, because counting newlines again here would be a second
+  # Counted by the sender, because counting lines again here would be a second
   # pass over bytes this node is deliberately not reading.
   defp chunk_count({:ndjson, _body, count}), do: count
 

@@ -35,7 +35,11 @@ defmodule Smolquery.Partitions do
       hashing it, so a table's partitions land on distinct nodes
 
   `__p<N>` is reserved at table creation so a user table can never collide
-  with another table's partition.
+  with another table's partition. The reservation guards new creates only: a
+  table that already existed with a matching name is read as a partition from
+  this release on — its owner rotates off its old node and the seal handoff
+  maps it to a parent it never had. Audit the catalog for `__p<N>` names and
+  rename them before deploying partitioned writes.
 
   ## The count is deployment-wide, and changing it has a window
 

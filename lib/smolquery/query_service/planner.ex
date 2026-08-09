@@ -263,15 +263,15 @@ defmodule Smolquery.QueryService.Planner do
     pairs =
       Enum.flat_map(refs, fn ref ->
         for partition <- Partitions.refs(ref, runtime.write_partitions), url <- urls do
-          {partition, url}
+          {ref, partition, url}
         end
       end)
 
     {gathered, failures} =
       pairs
       |> Task.async_stream(
-        fn {ref, url} ->
-          {ref, HotClient.manifest(url, ref, timeout_ms: runtime.buffer_timeout_ms)}
+        fn {parent, partition, url} ->
+          {parent, HotClient.manifest(url, partition, timeout_ms: runtime.buffer_timeout_ms)}
         end,
         ordered: true,
         on_timeout: :kill_task,
@@ -279,14 +279,14 @@ defmodule Smolquery.QueryService.Planner do
       )
       |> Enum.zip(pairs)
       |> Enum.reduce({Map.new(refs, &{&1, []}), %{}}, fn
-        {{:ok, {ref, {:ok, entries}}}, _pair}, {acc, failed} ->
-          {Map.update!(acc, Partitions.parent(ref), &[entries | &1]), failed}
+        {{:ok, {parent, {:ok, entries}}}, _pair}, {acc, failed} ->
+          {Map.update!(acc, parent, &[entries | &1]), failed}
 
-        {{:ok, {ref, {:error, reason}}}, {ref, url}}, {acc, failed} ->
-          {acc, Map.put_new(failed, url, {ref, reason})}
+        {{:ok, {_parent, {:error, reason}}}, {_parent2, partition, url}}, {acc, failed} ->
+          {acc, Map.put_new(failed, url, {partition, reason})}
 
-        {{:exit, reason}, {ref, url}}, {acc, failed} ->
-          {acc, Map.put_new(failed, url, {ref, reason})}
+        {{:exit, reason}, {_parent, partition, url}}, {acc, failed} ->
+          {acc, Map.put_new(failed, url, {partition, reason})}
       end)
 
     if map_size(failures) <= Client.absence_tolerance(runtime.buffer_name) do

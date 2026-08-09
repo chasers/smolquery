@@ -153,6 +153,36 @@ defmodule Smolquery.IngestService.ClientTest do
     end
   end
 
+  describe "NDJSON passthrough (T-180)" do
+    test "blank lines are not counted as inserted rows", context do
+      %{name: name, buffer: buffer} =
+        start_stack(context,
+          buffer: [flush_writer: :duckdb, write_pool_size: 1],
+          ingest: [ndjson_passthrough: true]
+        )
+
+      body = ~s({"id": 1}\n\n{"id": 2}\n)
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert_ndjson(name, @table, body)
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+
+      assert Enum.sum_by(entries, & &1.row_count) == 2
+    end
+
+    test "a buffer whose flush writer cannot flush bytes gets them parsed", context do
+      %{name: name, buffer: buffer} = start_stack(context, ingest: [ndjson_passthrough: true])
+
+      assert {:ok, %{inserted: 1, errors: []}} =
+               IngestService.Client.insert_ndjson(name, @table, ~s({"id": 1}\n))
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+
+      assert Enum.sum_by(entries, & &1.row_count) == 1
+    end
+  end
+
   describe "batch_id (T-41)" do
     test "an insert retried with the same batch id counts its rows once", context do
       %{name: name, buffer: buffer} = start_stack(context)

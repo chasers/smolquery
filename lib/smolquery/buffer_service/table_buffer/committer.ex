@@ -89,7 +89,9 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   """
   @type commit :: %{
           :schema => Smolquery.Schema.t(),
-          :chunks => [[Writer.row()] | Explorer.DataFrame.t()],
+          :chunks => [
+            [Writer.row()] | Explorer.DataFrame.t() | {:ndjson, binary(), non_neg_integer()}
+          ],
           :pending => [{GenServer.from(), :new | :duplicate | :flush}],
           :batch_ids => [String.t()],
           :row_count => non_neg_integer(),
@@ -515,6 +517,13 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp split_rejected({:ok, segment, rejected}), do: {{:ok, segment}, rejected}
   defp split_rejected({:rejected, rejected}), do: {{:rejected, rejected}, rejected}
   defp split_rejected(encoded), do: {encoded, %{}}
+
+  # `{:rejected, rejected}` is this module's internal shape for a salvage whose
+  # rewrite made nothing durable. Callers named in the map get `{:invalid, errors}`
+  # via `rejected_reply/2`; everyone else's rows were lost with the commit, and no
+  # caller speaks the internal shape, so they are answered with the commit error.
+  defp reply_for(kind, {:rejected, _rejected}),
+    do: reply_for(kind, {:error, :ndjson_commit_failed})
 
   defp reply_for(:new, result), do: result
   defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
