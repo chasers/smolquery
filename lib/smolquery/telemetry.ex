@@ -8,7 +8,12 @@ defmodule Smolquery.Telemetry do
   on purpose — a StatsD or OpenTelemetry exporter can attach to the same
   events later without touching a call site.
 
-  Counters only, deliberately. A counter answers rates and ratios under
+  Counters, with one deliberate exception: `put_info/2` records a service's
+  resolved shape as an `_info` gauge pinned at 1, because "which path did this
+  node come up on" is the question a throughput regression usually turns out to
+  be, and no counter answers it. See `Smolquery.DeployedShape`.
+
+  Counters otherwise, deliberately. A counter answers rates and ratios under
   `rate()` in whatever scrapes this, and paired totals answer averages
   (`_microseconds_total / _total` is a mean duration) — the shapes operators
   actually alert on — without this module growing histogram buckets to keep
@@ -92,6 +97,38 @@ defmodule Smolquery.Telemetry do
       "Time query jobs ran; divide by jobs for the mean."
   }
 
+  @info %{
+    "smolquery_buffer_shape_info" =>
+      "The buffer path this node resolved at boot; always 1, read the labels.",
+    "smolquery_ingest_shape_info" =>
+      "The ingest path this node resolved at boot; always 1, read the labels."
+  }
+
+  @doc """
+  Records a service's resolved configuration as an `_info` gauge.
+
+  The one exception to counters-only, and it is the Prometheus convention for
+  exactly this case: a series pinned at 1 whose *labels* are the payload. It
+  answers "what shape did this node come up in", which no counter can, and
+  which a throughput regression turns out to be most of the time.
+
+  Cardinality stays bounded the same way the rest of this file bounds it —
+  callers pass resolved configuration, a closed set per deployment, and
+  re-registering the same name replaces rather than accumulates. Written by
+  `Smolquery.DeployedShape` at boot; nothing else should call it.
+
+  A metrics write must never take down its caller, so a missing table (no
+  aggregator running, which is normal in unit tests) is `:ok`, not a raise.
+  """
+  @spec put_info(String.t(), keyword()) :: :ok
+  def put_info(name, labels) when is_binary(name) and is_list(labels) do
+    :ets.insert(@table, {{name, labels}, 1})
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   @doc """
   Starts the aggregator: the counter table, and the handlers feeding it.
   """
@@ -123,7 +160,9 @@ defmodule Smolquery.Telemetry do
     grouped
     |> Enum.sort()
     |> Enum.map_join(fn {name, rows} ->
-      header = "# HELP #{name} #{Map.get(@help, name, name)}\n# TYPE #{name} counter\n"
+      help = Map.get(@help, name) || Map.get(@info, name) || name
+      type = if Map.has_key?(@info, name), do: "gauge", else: "counter"
+      header = "# HELP #{name} #{help}\n# TYPE #{name} #{type}\n"
 
       lines =
         Enum.map_join(rows, fn {{_name, labels}, value} ->
