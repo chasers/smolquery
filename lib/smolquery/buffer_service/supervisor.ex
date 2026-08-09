@@ -42,6 +42,13 @@ defmodule Smolquery.BufferService.Supervisor do
   fail closed, which its published-but-stale state already guarantees even
   across its own restarts.
 
+  The `flush_writer: :duckdb` write pool starts *below* the buffers, in its own
+  `one_for_one` supervisor, and only for that writer. It is the one child this
+  subtree runs that a client can make crash on demand — a fatal DuckDB error
+  stops the connection (`Smolquery.Engine.Connection`) — so it must sit where
+  its restarts cannot reach a row. The comment on the pool's own child spec,
+  below, carries the whole argument.
+
   `ExpectedNodes` starts under the same condition (T-109) but *last*: the
   durable expected-fleet row lives in the same config store the epoch keeper
   CASes against, but unlike the epoch keeper nothing in this subtree
@@ -63,6 +70,20 @@ defmodule Smolquery.BufferService.Supervisor do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Cluster.PgGroup
 
+  # The write pool's own intensity, and it is deliberately far above a
+  # supervisor's usual three-in-five.
+  #
+  # A member terminates only after `Smolquery.Engine`'s own supervisor gives up,
+  # which takes at least four fatal DuckDB faults, and a fatal fault takes a
+  # query that reached DuckDB — so 100 member restarts inside 10 seconds means
+  # roughly 400 faulting `COPY` statements in ten seconds, a rate the flush path
+  # this pool serves cannot produce. What the ceiling still catches is the other
+  # shape: a member that cannot *start* (a `memory_limit` DuckDB rejects, an
+  # extension that will not load) fails in milliseconds, and this stops it
+  # spinning rather than letting it burn a scheduler until the node is restarted.
+  @write_pool_max_restarts 100
+  @write_pool_max_seconds 10
+
   @doc """
   Starts the buffer service.
 
@@ -82,11 +103,12 @@ defmodule Smolquery.BufferService.Supervisor do
     Runtime.put(runtime)
 
     children =
-      write_engines(runtime) ++
+      [
+        membership(runtime),
+        ring_epoch(runtime),
+        {HotManifest, name: Runtime.manifest(runtime.name)}
+      ] ++
         [
-          membership(runtime),
-          ring_epoch(runtime),
-          {HotManifest, name: Runtime.manifest(runtime.name)},
           {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
           Supervisor.child_spec(
             {Registry, keys: :unique, name: Runtime.committer_registry(runtime.name)},
@@ -103,23 +125,130 @@ defmodule Smolquery.BufferService.Supervisor do
              startup_log: false},
             id: Runtime.hot_server(runtime.name)
           ),
+          write_pool(runtime),
           expected_nodes(runtime)
         ]
 
     Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
   end
 
-  # The `:duckdb` flush writer needs its own DuckDB instances, and they start
-  # before everything else under `:rest_for_one` because a committer that cannot
-  # reach its engine cannot flush at all. `:polars` starts none, so the default
-  # deployment carries no extra process.
-  defp write_engines(%Runtime{flush_writer: :duckdb} = runtime) do
+  # Started only for `flush_writer: :duckdb`, so the default path pays nothing —
+  # not a database, not a connection, not the extension load its bootstrap runs,
+  # and not this child either: `write_pool/1` is `nil` for every other writer and
+  # `init/1` rejects it, so the default child list is the one it always was.
+  #
+  # ## Why the pool is its own supervisor, and why it is down here
+  #
+  # The pool used to be the *first* children of this list. Under `rest_for_one`
+  # that put it above every `TableBuffer` on the node, and a `Smolquery.Engine`
+  # subtree can terminate for a reason a client controls:
+  # `Smolquery.Engine.Connection` stops on a fatal DuckDB error (the whole
+  # database is invalidated, not the one query — `connection.ex:206`), and
+  # `Engine`'s own supervisor takes the emulator default of three restarts in
+  # five seconds (`engine.ex:108`). A retry loop that reproduces such a fault
+  # exhausts that quickly, and everything *after* the pool then restarted with
+  # it: the `PartitionSupervisor` holding every table's buffer, and with it every
+  # unacked caller in every `pending` list, including JSON-route callers on
+  # tables that never saw an NDJSON body.
+  #
+  # So the pool is two things now. It is **its own `one_for_one` supervisor**, so
+  # one member's restarts are one member's; and it is **below the buffers**, so
+  # its own termination restarts nothing that holds a row. Nothing between here
+  # and the top of the list depends on it: a flush resolves a pool member by name
+  # (`Runtime.engine_for/2`), and a missing or unanswering engine exits the
+  # encode task, which the committer turns into `{:error, {:encode_crashed, _}}`
+  # and reports to its waiters like any other failed encode
+  # (`table_buffer/committer.ex`, the `:DOWN` clause of `handle_info/2`). The
+  # buffers need the engines to answer or to fail, not to exist.
+  #
+  # It sits before `expected_nodes/1` rather than last so that child keeps the
+  # property its own comment claims — nothing restarts behind it. `ExpectedNodes`
+  # is the one thing this subtree can restart on the pool's account, and it
+  # consumes nothing from anybody.
+  #
+  # `restart: :transient` closes the last path back to the buffers. A supervisor
+  # that exceeds its own intensity exits `:shutdown`, and a `:transient` child
+  # that exits `:shutdown` is not restarted and is not counted against *this*
+  # supervisor's intensity — so a pool that keeps failing can never walk the top
+  # supervisor to its own ceiling and take the whole buffer service with it. A
+  # pool that gives up leaves the NDJSON route answering errors on a node whose
+  # JSON route, buffers and hot tier are untouched, which is the trade this
+  # module wants.
+  defp write_pool(%Runtime{flush_writer: :duckdb} = runtime) do
+    %{
+      id: Runtime.write_pool(runtime.name),
+      type: :supervisor,
+      restart: :transient,
+      shutdown: :infinity,
+      start:
+        {Supervisor, :start_link,
+         [
+           write_engines(runtime),
+           [
+             strategy: :one_for_one,
+             max_restarts: @write_pool_max_restarts,
+             max_seconds: @write_pool_max_seconds,
+             name: Runtime.write_pool(runtime.name)
+           ]
+         ]}
+    }
+  end
+
+  defp write_pool(%Runtime{}), do: nil
+
+  # The `:duckdb` flush writer needs its own DuckDB instances. Only reached
+  # through `write_pool/1`, which is `nil` for every other writer, so `:polars`
+  # deployments carry no extra process.
+  defp write_engines(%Runtime{} = runtime) do
     Enum.map(Runtime.engines(runtime), fn name ->
-      Supervisor.child_spec({Smolquery.Engine, name: name, extensions: []}, id: name)
+      Supervisor.child_spec(
+        {Smolquery.Engine, [name: name, extensions: []] ++ engine_budget(runtime)},
+        id: name
+      )
     end)
   end
 
-  defp write_engines(_runtime), do: []
+  # Each member is sized for the pool rather than left to inherit
+  # `Smolquery.Engine`'s application config whole, because that config describes
+  # *one* instance: a pool of eight inheriting `threads: System.schedulers_online()`
+  # declares eight times the node's schedulers, and `memory_limit: "2GB"` eight
+  # times over. Threads divide here, where the pool size is known. The memory
+  # limit cannot be divided without parsing DuckDB's size grammar, so it is a
+  # configured value instead — `:write_engine_memory_limit`, whose docstring on
+  # `Runtime` states the multiplication an operator is choosing when they leave
+  # it unset.
+  #
+  # The number divided is `Smolquery.Engine`'s *configured* thread count, not the
+  # scheduler count. Dividing the schedulers would ignore the setting this exists
+  # to respect: a node whose operator lowered `Smolquery.Engine`'s `:threads` to 4
+  # on a sixteen-scheduler host would hand a pool of one sixteen threads, and a
+  # change meant to narrow the declared budget would widen it. `config/test.exs`
+  # sets that value deliberately and is the case that shows it soonest.
+  #
+  # The division is worth more than tidiness. Measured on this laptop with the
+  # `bench/k6` harness, a pool of sixteen inheriting ten threads each held
+  # 468,717 rows/s over four runs with a 20.4% spread; the same pool divided to
+  # one thread each held 534,104 over five runs with a 9.9% spread. Declaring
+  # 160 threads on ten cores did not buy capacity, it bought context switching.
+  #
+  # `:write_engine_threads` replaces the division outright, because the division
+  # only describes a budget while the pool is smaller than the thread count.
+  # Above that it reaches its floor of one and an operator who wants a different
+  # shape has to say the number rather than infer it.
+  defp engine_budget(%Runtime{write_pool_size: size} = runtime) do
+    threads = [threads: runtime.write_engine_threads || max(div(engine_threads(), size), 1)]
+
+    case runtime.write_engine_memory_limit do
+      nil -> threads
+      limit -> [{:memory_limit, limit} | threads]
+    end
+  end
+
+  defp engine_threads do
+    :smolquery
+    |> Application.get_env(Smolquery.Engine, [])
+    |> Keyword.get(:threads, System.schedulers_online())
+  end
 
   defp membership(runtime) do
     unless Drain.draining?(runtime.name) do

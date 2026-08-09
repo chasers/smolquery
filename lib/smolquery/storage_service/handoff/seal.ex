@@ -125,12 +125,19 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   decides whether a micro-segment still counts. Exposed because the planner needs
   exactly this question answered (Milestone 5) and because it is what makes an
   attempt's reconciliation testable without staging a crash.
+
+  `table_ref` may be a partition ref, the way every caller in the hot tier
+  speaks: the catalog lookup maps to `Smolquery.Partitions.parent/1` exactly as
+  `commit/3` and `merge_and_register/3` above do. Asking the catalog about a
+  partition ref directly does not answer "no": the catalog holds no table by
+  that name at all.
   """
   @spec committed?(Runtime.t(), Store.table_ref(), SealConsumer.claim()) ::
           {:ok, boolean()} | {:error, term()}
   def committed?(%Runtime{} = runtime, table_ref, claim) do
     with {:ok, paths} <- sealed_paths(runtime, claim),
-         {:ok, registered} <- Catalog.segments(runtime.catalog, table_ref, :current) do
+         {:ok, registered} <-
+           Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       {:ok, committed?(paths, registered)}
     end
   end

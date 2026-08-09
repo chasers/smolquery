@@ -44,6 +44,23 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
+  `:write_pool_size` (default `1`) is how many DuckDB instances the `:duckdb`
+  flush spreads its encodes over — see `engine_for/2` for why it hashes on the
+  segment id, and `engines/1` for the pool itself. It must be a positive
+  integer no larger than `@max_write_pool_size`; `new/1` refuses anything else
+  at boot rather than let a node come up looking configured. Each
+  member is a whole `Smolquery.Engine` subtree carrying that module's own
+  `:memory_limit`, so the declared DuckDB memory budget is `write_pool_size ×`
+  it — `:write_engine_memory_limit` (default `nil`) narrows the pool's members
+  without touching the query engine's.
+
+  `:write_engine_threads` (default `nil`) does the same for threads. Left unset,
+  the pool divides `Smolquery.Engine`'s thread count by its own size, in
+  `Smolquery.BufferService.Supervisor`, where the size is known. That division
+  describes a budget only while the pool is smaller than the thread count; above
+  that it reaches its floor of one and stops dividing anything, which is where an
+  operator states the number instead.
+
   `:replicator` is what a group commit requires beyond this node's disk
   before it acks (`Smolquery.BufferService.Replicator`), defaulting to the
   single-copy `Smolquery.BufferService.Replicator.None`:
@@ -117,6 +134,8 @@ defmodule Smolquery.BufferService.Runtime do
     encode_concurrency: 2,
     flush_writer: :duckdb,
     write_pool_size: 1,
+    write_engine_memory_limit: nil,
+    write_engine_threads: nil,
     row_validator: nil,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
@@ -148,6 +167,8 @@ defmodule Smolquery.BufferService.Runtime do
           encode_concurrency: pos_integer(),
           flush_writer: :polars | :duckdb,
           write_pool_size: pos_integer(),
+          write_engine_memory_limit: String.t() | nil,
+          write_engine_threads: pos_integer() | nil,
           row_validator: {module(), atom()} | nil,
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
@@ -173,12 +194,22 @@ defmodule Smolquery.BufferService.Runtime do
     :encode_concurrency,
     :flush_writer,
     :write_pool_size,
+    :write_engine_memory_limit,
+    :write_engine_threads,
     :row_validator,
     :hot_server_ip,
     :hot_server_port
   ]
 
   @codecs [:lz4raw, :zstd, :snappy, :gzip, :uncompressed]
+
+  # A sanity ceiling, not a tuned one. Each pool member is a whole
+  # `Smolquery.Engine` subtree — an `Adbc.Database`, a connection, and that
+  # module's own `:memory_limit` and thread count — so the pool's declared budget
+  # scales linearly with this number. The ceiling is here so a fat-fingered extra
+  # digit is refused at boot rather than declaring tens of gigabytes of DuckDB
+  # memory limits and a thread per member per scheduler.
+  @max_write_pool_size 32
 
   @default_dir "priv/data/buffer"
 
@@ -196,11 +227,19 @@ defmodule Smolquery.BufferService.Runtime do
   commit's serial cost lives in its other legs, not the codec — and cheaper
   encode was the only reason to prefer lz4 for segments the sealer re-encodes
   within seconds anyway.
+
+  Raises for the same reason on a `write_pool_size` that is not a usable pool
+  size. `struct!/2` raises only on an *unknown* key, so a known key holding
+  nonsense would be written verbatim and detonate somewhere that cannot report
+  it: `0` names an engine `Engine-1` that was never started and then raises
+  inside `:erlang.phash2/2` on the first flush, taking the committer and every
+  unacked batch with it.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.BufferService, []), opts)
     validate_compression!(Keyword.get(config, :compression, :zstd))
+    validate_write_pool_size!(Keyword.get(config, :write_pool_size, 1))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -239,6 +278,16 @@ defmodule Smolquery.BufferService.Runtime do
   def engine(name, index), do: Module.concat(name, "Engine#{index}")
 
   @doc """
+  The supervisor the `:duckdb` write pool's instances run under.
+
+  Its own supervisor, below the buffers — see
+  `Smolquery.BufferService.Supervisor` for why a pool member's restarts must not
+  reach the process that holds a table's unacked rows.
+  """
+  @spec write_pool(atom()) :: atom()
+  def write_pool(name), do: Module.concat(name, "WritePool")
+
+  @doc """
   Which of the pool's DuckDB instances writes the segment named by `key`.
 
   Hashed on the segment id, not the table: a table has one buffer and one
@@ -251,10 +300,15 @@ defmodule Smolquery.BufferService.Runtime do
 
   @doc """
   Every DuckDB instance the write pool runs, in index order.
+
+  The step is explicit: `0..-1` defaults to a *descending* range in Elixir, so a
+  `write_pool_size` of `0` used to name an engine `Engine-1` rather than name
+  none. `new/1` refuses that value now, and this is what keeps the two from
+  disagreeing again.
   """
   @spec engines(t()) :: [atom()]
   def engines(%__MODULE__{name: name, write_pool_size: size}),
-    do: Enum.map(0..(size - 1), &engine(name, &1))
+    do: Enum.map(0..(size - 1)//1, &engine(name, &1))
 
   defp validate_compression!(compression) when compression in @codecs, do: :ok
 
@@ -262,6 +316,16 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unsupported hot-tier compression: #{inspect(compression)} " <>
             "(expected one of #{inspect(@codecs)})"
+  end
+
+  defp validate_write_pool_size!(size)
+       when is_integer(size) and size > 0 and size <= @max_write_pool_size,
+       do: :ok
+
+  defp validate_write_pool_size!(size) do
+    raise ArgumentError,
+          "unusable write pool size: #{inspect(size)} " <>
+            "(expected an integer in 1..#{@max_write_pool_size})"
   end
 
   use Smolquery.Runtime
