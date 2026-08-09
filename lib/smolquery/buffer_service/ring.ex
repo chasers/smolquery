@@ -9,13 +9,27 @@ defmodule Smolquery.BufferService.Ring do
   adding or losing a node should move a `1/n` share of keys, not reshuffle
   everything and hand every table's unsealed tail to a different node at once.
 
-  ## The key is opaque
+  ## The key is opaque, except for partitions
 
-  `owner/2` hashes whatever term it is given. Today callers pass a table ref,
-  `{dataset, table}`, so one table lives on one node. That caps a single table's
-  ingest at one node's throughput, and the fix when a real workload hits the cap
-  is to route on `{dataset, table, partition}` instead — a change at the call
-  site, with nothing here to rewrite. Keeping the key opaque is what buys that.
+  `owner/2` hashes whatever term it is given, so anything that is not a table
+  ref routes exactly as it always did.
+
+  A table ref naming a partition is the one exception, and it is here rather
+  than at the call site for a measured reason. Hashing each of a table's P
+  partitions independently splits its writes P ways but leaves their *placement*
+  to chance: at P partitions over N nodes only `N × (1 − ((N−1)/N)^P)` nodes own
+  anything on average, so three partitions over three nodes covered 2.11 of them
+  and the rig measured a 4-1-1 draw against a 3-2-1 draw as a 27% throughput
+  difference. Partition `i` therefore takes the `i mod N`-th distinct node
+  clockwise from its *parent* ref, which spreads a table exactly rather than
+  probably, and reduces to the old behaviour at partition 0.
+
+  The rotation lives in this module, not in `BufferService.Routing`, because
+  `BufferService.RingEpoch` asks `owner/2` and `own?/2` directly whether this
+  node owns a ref. Two placement rules would let one node accept a commit that
+  another believes it owns, which loses writes rather than slowing them.
+  `successors/3` rotates by the same offset, so a partition's replica set still
+  begins at that partition's own owner.
 
   ## Virtual nodes
 
@@ -35,6 +49,8 @@ defmodule Smolquery.BufferService.Ring do
       #=> :"buffer2@host"
 
   """
+
+  alias Smolquery.Partitions
 
   @enforce_keys [:nodes, :points]
   defstruct [:nodes, :points]
@@ -84,17 +100,7 @@ defmodule Smolquery.BufferService.Ring do
   The node owning `key`.
   """
   @spec owner(t(), routing_key()) :: node()
-  def owner(%__MODULE__{nodes: [node]}, _key), do: node
-
-  def owner(%__MODULE__{points: points}, key) do
-    hash = :erlang.phash2(key, @space)
-    size = tuple_size(points)
-    index = search(points, hash, 0, size)
-
-    {_hash, node} = elem(points, rem(index, size))
-
-    node
-  end
+  def owner(%__MODULE__{} = ring, key), do: ring |> successors(key, 1) |> hd()
 
   @doc """
   Whether this node owns `key`.
@@ -115,12 +121,28 @@ defmodule Smolquery.BufferService.Ring do
   @spec successors(t(), routing_key(), pos_integer()) :: [node()]
   def successors(%__MODULE__{nodes: [node]}, _key, _count), do: [node]
 
-  def successors(%__MODULE__{nodes: nodes, points: points}, key, count) do
+  def successors(%__MODULE__{nodes: nodes} = ring, key, count) do
+    total = length(nodes)
+    {anchor, index} = Partitions.split(key)
+    wanted = min(count, total)
+
+    case rem(index, total) do
+      0 ->
+        clockwise(ring, anchor, wanted)
+
+      rotation ->
+        ring |> clockwise(anchor, total) |> rotate(rotation) |> Enum.take(wanted)
+    end
+  end
+
+  defp clockwise(%__MODULE__{points: points}, key, count) do
     hash = :erlang.phash2(key, @space)
     size = tuple_size(points)
 
-    collect(points, size, search(points, hash, 0, size), min(count, length(nodes)), [])
+    collect(points, size, search(points, hash, 0, size), count, [])
   end
+
+  defp rotate(nodes, rotation), do: Enum.drop(nodes, rotation) ++ Enum.take(nodes, rotation)
 
   defp collect(_points, _size, _index, 0, acc), do: Enum.reverse(acc)
 

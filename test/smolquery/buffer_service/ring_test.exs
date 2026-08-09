@@ -2,6 +2,7 @@ defmodule Smolquery.BufferService.RingTest do
   use ExUnit.Case, async: true
 
   alias Smolquery.BufferService.Ring
+  alias Smolquery.Partitions
 
   @nodes [:buffer1@host, :buffer2@host, :buffer3@host, :buffer4@host]
 
@@ -95,6 +96,61 @@ defmodule Smolquery.BufferService.RingTest do
 
       for key <- keys(5_000), Ring.owner(ring, key) != lost do
         assert Ring.owner(shrunk, key) == Ring.owner(ring, key)
+      end
+    end
+  end
+
+  describe "owner/2 with partitions" do
+    test "a table's partitions land on distinct nodes while there are nodes left" do
+      ring = Ring.new!(@nodes)
+
+      for table <- ~w(events logs traces spans), count <- 1..length(@nodes) do
+        owners =
+          {"analytics", table}
+          |> Partitions.refs(count)
+          |> Enum.map(&Ring.owner(ring, &1))
+
+        assert length(Enum.uniq(owners)) == count
+      end
+    end
+
+    test "more partitions than nodes spread as evenly as the fleet allows" do
+      ring = Ring.new!(@nodes)
+      count = 3 * length(@nodes)
+
+      counts =
+        {"analytics", "events"}
+        |> Partitions.refs(count)
+        |> Enum.frequencies_by(&Ring.owner(ring, &1))
+
+      assert map_size(counts) == length(@nodes)
+      assert counts |> Map.values() |> Enum.uniq() == [3]
+    end
+
+    test "partition 0 is the parent, and routes where the parent always did" do
+      ring = Ring.new!(@nodes)
+      parent = {"analytics", "events"}
+
+      assert [^parent | _rest] = Partitions.refs(parent, 4)
+      assert Ring.owner(ring, parent) == Ring.owner(ring, parent)
+    end
+
+    test "a partition's replica set begins at that partition's own owner" do
+      ring = Ring.new!(@nodes)
+
+      for ref <- Partitions.refs({"analytics", "events"}, length(@nodes)) do
+        assert [owner | followers] = Ring.successors(ring, ref, 2)
+        assert owner == Ring.owner(ring, ref)
+        assert Enum.all?(followers, &(&1 != owner))
+      end
+    end
+
+    test "a table that merely looks partitioned is not one" do
+      ring = Ring.new!(@nodes)
+
+      for table <- ~w(events__p0 events__pants events_p1 events__p) do
+        assert Ring.owner(ring, {"analytics", table}) ==
+                 Ring.successors(ring, {"analytics", table}, 1) |> hd()
       end
     end
   end
