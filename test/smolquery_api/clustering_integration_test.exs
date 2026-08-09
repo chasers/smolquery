@@ -100,8 +100,14 @@ defmodule SmolqueryApi.ClusteringIntegrationTest do
     assert JSON.decode!(response.resp_body)["clustering"] == key
   end
 
+  # Table CRUD stays application/json; /insert takes ndjson only (T-190).
   defp insert(name, rows) do
-    response = api_request(name, :post, "#{@table_path}/insert", %{"rows" => rows})
+    response =
+      :post
+      |> conn("#{@table_path}/insert", Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n")
+      |> put_req_header("content-type", "application/x-ndjson")
+      |> put_req_header("authorization", "Bearer #{@key}")
+      |> then(&ApiEndpoint.request(name, &1))
 
     assert response.status == 200, response.resp_body
 

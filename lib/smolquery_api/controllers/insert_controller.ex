@@ -21,12 +21,23 @@ defmodule SmolqueryApi.InsertController do
   @doc """
   Inserts the body's rows into a table.
 
-  Two body shapes, one contract. `application/json` carries
-  `{"rows": [...]}`; `application/x-ndjson` carries one JSON object per
-  line — the same bytes ClickHouse's `JSONEachRow` takes — and rides the
-  columnar fast path (`Smolquery.IngestService.Client.insert_ndjson/4`),
-  which never materializes valid rows as Elixir terms. NDJSON requests pass
-  `insertId` as a query parameter, since there is no envelope to put it in.
+  One body shape: `application/x-ndjson`, one JSON object per line — the same
+  bytes ClickHouse's `JSONEachRow` takes. It rides the columnar fast path
+  (`Smolquery.IngestService.Client.insert_ndjson/4`), which never materializes
+  valid rows as Elixir terms, and `insertId` is a query parameter because there
+  is no envelope to put it in.
+
+  `application/json` used to be accepted here, carrying `{"rows": [...]}`, and
+  is now a 415. Two content types were two ingest paths, and the array one was
+  3-4x slower on the same fleet — 26,733 rows/s at a 901 ms ack against 105,733
+  at 189 ms. Worse, which one you got was invisible: the passthrough only
+  engages when the *caller* sends ndjson, so a deployment configured entirely
+  for the fast path still crawled if its client sent an array, with no warning
+  anywhere. A 415 naming the header is a better answer than a silent 3-4x, and
+  an array body is one line of client code away from ndjson.
+
+  Bulk files still take CSV and Parquet through `POST /load`, which parses to
+  rows and pushes chunks — that path is unchanged.
 
   An optional `insertId` makes the request idempotent: retrying it — after a
   timeout, a dropped connection, or a 5xx whose write may still have landed —
@@ -38,18 +49,17 @@ defmodule SmolqueryApi.InsertController do
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"dataset" => dataset, "table" => table}) do
     case List.first(Plug.Conn.get_req_header(conn, "content-type")) do
-      "application/x-ndjson" <> _params -> create_ndjson(conn, {dataset, table})
-      _json -> create_json(conn, {dataset, table})
-    end
-  end
+      "application/x-ndjson" <> _params ->
+        create_ndjson(conn, {dataset, table})
 
-  defp create_json(conn, table_ref) do
-    with {:ok, rows} <- rows(conn.body_params),
-         {:ok, batch_id} <- insert_id(conn.body_params),
-         {:ok, result} <- insert_rows(conn, table_ref, rows, batch_id) do
-      respond(conn, result)
-    else
-      {:error, reason} -> insert_error(conn, reason)
+      other ->
+        Errors.send_error(
+          conn,
+          415,
+          "UNSUPPORTED_MEDIA_TYPE",
+          "insert bodies must be application/x-ndjson (one JSON object per line); " <>
+            "got #{inspect(other)}. Use POST /load for CSV and Parquet files."
+        )
     end
   end
 
@@ -136,12 +146,6 @@ defmodule SmolqueryApi.InsertController do
 
   def insert_error(conn, reason), do: Errors.from_reason(conn, reason)
 
-  defp insert_rows(conn, table_ref, rows, batch_id) do
-    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
-
-    IngestService.Client.insert(runtime.ingest_name, table_ref, rows, batch_id: batch_id)
-  end
-
   defp insert_id(%{"insertId" => id}) when is_binary(id) and id != "" and byte_size(id) <= 128,
     do: {:ok, id}
 
@@ -157,7 +161,4 @@ defmodule SmolqueryApi.InsertController do
       %{"index" => index, "errors" => Enum.map(messages, &%{"message" => &1.message})}
     end)
   end
-
-  defp rows(%{"rows" => rows}) when is_list(rows), do: {:ok, rows}
-  defp rows(_body), do: {:error, {:missing_field, "rows"}}
 end
