@@ -22,7 +22,9 @@ defmodule Smolquery.DeployedShapeTest do
     dir = Path.join(System.tmp_dir!(), "deployed-shape-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(dir) end)
 
-    BufferRuntime.new([name: :"shape_#{System.unique_integer([:positive])}", dir: dir] ++ overrides)
+    BufferRuntime.new(
+      [name: :"shape_#{System.unique_integer([:positive])}", dir: dir] ++ overrides
+    )
   end
 
   describe "announce/1 for the buffer" do
@@ -91,18 +93,23 @@ defmodule Smolquery.DeployedShapeTest do
       assert rendered =~ "smolquery_buffer_shape_info{"
     end
 
-    test "re-registering replaces rather than accumulating series" do
-      capture_log(fn ->
-        DeployedShape.announce(buffer_runtime(flush_writer: :duckdb))
-        DeployedShape.announce(buffer_runtime(flush_writer: :duckdb))
-      end)
+    # Counts the whole family rather than asserting exactly one, because a
+    # running application announces its own shape into the same table.
+    test "re-registering the same shape does not accumulate series" do
+      runtime = buffer_runtime(flush_writer: :duckdb)
 
-      lines =
-        Smolquery.Telemetry.render()
-        |> String.split("\n")
-        |> Enum.count(&String.starts_with?(&1, "smolquery_buffer_shape_info{"))
+      capture_log(fn -> DeployedShape.announce(runtime) end)
+      before = shape_series()
 
-      assert lines == 1
+      capture_log(fn -> DeployedShape.announce(runtime) end)
+
+      assert shape_series() == before
+    end
+
+    defp shape_series do
+      Smolquery.Telemetry.render()
+      |> String.split("\n")
+      |> Enum.count(&String.starts_with?(&1, "smolquery_buffer_shape_info{"))
     end
   end
 
