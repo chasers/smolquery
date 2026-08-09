@@ -1,4 +1,4 @@
-FROM elixir:1.20-slim AS build
+FROM elixir:1.20-slim@sha256:e500da1777164f9be05f7ffc0fe06cdb692f453bf7d651755e72310ec8a92eed AS build
 
 ENV MIX_ENV=prod
 WORKDIR /app
@@ -24,7 +24,7 @@ RUN mix run --no-start -e 'Adbc.download_driver!(:duckdb)'
 COPY rel rel
 RUN mix release
 
-FROM elixir:1.20-slim
+FROM elixir:1.20-slim@sha256:e500da1777164f9be05f7ffc0fe06cdb692f453bf7d651755e72310ec8a92eed
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

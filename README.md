@@ -24,8 +24,8 @@ a DuckLake catalog.
 > sealing, query jobs, HTTP API, storage maintenance, and a Docker release.
 > The cluster layers are in: Postgres-backed membership and catalog, an S3
 > sealed tier, live ownership rings with drain, query fan-out, seal-work
-> distribution, and a kind-cluster test suite that runs on every merge to
-> `main`. Plans and milestones live in the project tracker — see
+> distribution, and a kind-cluster test suite that runs on pull requests and
+> pushes to `main`. Plans and milestones live in the project tracker — see
 > [`CONTRIBUTING.md`](CONTRIBUTING.md). Everything below is subject to change.
 
 ## Quick start
@@ -68,6 +68,14 @@ curl -H "$auth" -H "$json" \
 
 The full surface is in [`docs/api.md`](docs/api.md); a LiveView UI for the same
 thing is on [`localhost:4002`](http://localhost:4002).
+
+Releases are created automatically for a merged stable `mix.exs` version bump
+only after the successful main-push Kind workflow and the exact-SHA CI run. The
+release publishes a multi-architecture image to GHCR and attaches both a
+`ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
+manifest. `release-manifest.yaml` is not a standalone production deployment:
+integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
+discovery, and the sealed-store dependencies before deploying.
 
 ## Features
 
@@ -112,9 +120,10 @@ queries → QueryService ──────────────────�
           (DuckDB via ADBC: catalog ∪ hot tiers, one query plan)
 ```
 
-- **Writes never touch DuckDB.** Elixir batches rows into immutable Parquet
-  segments — small in (a ~1 s group commit is what "durable" means), large out
-  (a few big files on object storage).
+- **The write path is columnar.** The default DuckDB writer parses the forwarded
+  NDJSON body at flush time and writes immutable Parquet segments — small in (a
+  ~1 s group commit is what "durable" means), large out (a few big files on
+  object storage).
 - **DuckDB is a disposable, stateless read engine.** Each query job gets its own
   engine, its own memory limit, and its own views; cancelling a job kills the
   engine under it.
@@ -189,13 +198,18 @@ of a deployment:
 
 `deploy/` holds kustomize manifests: `base/` is the smolquery fleet itself,
 `overlays/kind/` adds what local dev needs around it (Postgres, MinIO,
-NodePorts, dev TLS certs). One command boots the whole stack — six nodes with
-split roles, clustered over TLS, sealing to object storage through a Postgres
-catalog:
+NodePorts, dev TLS certs). The Kind overlays intentionally use the mutable
+`smolquery:dev` image for local iteration; production uses the image-pinned base
+manifest attached to a release, integrated with its required Secret, Postgres
+catalog/discovery, and sealed-store dependencies. One command boots the whole stack — six nodes with
+split roles, clustered over plaintext inter-node transport by default, sealing
+to object storage through a Postgres catalog. The overlay mounts development TLS
+certificates and can opt into both TLS transports:
 
 ```sh
 ./scripts/kind-up.sh    # kind cluster + certs + image build/load + apply + wait
 mix test --only cluster # ingest, fan-out, seal, drain, kill
+# Set GEN_RPC_TLS=true and DIST_TLS=true in the overlay to exercise TLS.
 ```
 
 | workload | replicas | roles | state |
@@ -211,9 +225,10 @@ replicas, `SMOLQUERY_ROLES=all`, PVC each) — the ClickHouse-replica shape,
 where any stage's demand can use any node's CPU and there is no per-tier
 capacity split to get wrong.
 
-All StatefulSets, because every cluster member needs a stable pod name: the
-per-node TLS certificate is looked up by `POD_NAME`, and peers derive each
-other's URLs from node names. The API lands on `http://localhost:8080` (Bearer
+All StatefulSets, because every cluster member needs a stable pod name: peers
+derive each other's URLs from node names, and the mounted per-node certificates
+are used when `GEN_RPC_TLS` and `DIST_TLS` are enabled. The API lands on
+`http://localhost:8080` (Bearer
 `kind-only-api-key`), the web UI on `http://localhost:8082`.
 
 Draining a buffer node is the one operation with no HTTP surface — it
@@ -300,7 +315,7 @@ lib/smolquery/engine*          # DuckDB via ADBC — the disposable read engine
 lib/smolquery/schema*          # logical types ↔ Explorer dtypes ↔ DuckDB types
 lib/smolquery/segments*        # Parquet writer + swappable segment stores (Local, S3)
 lib/smolquery/catalog*         # DuckLake: datasets, tables, snapshots, registration
-lib/smolquery/ingest_service*  # schema validation, batching to the owning buffer
+lib/smolquery/ingest_service*  # schema lookup, batching; flush/salvage validation
 lib/smolquery/buffer_service*  # the hot tier: group commit, manifest log, HotServer, ring
 lib/smolquery/storage_service* # seal, compact, retention, GC
 lib/smolquery/query_service*   # query jobs and the two-tier planner

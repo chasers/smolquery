@@ -1,37 +1,386 @@
 name: Release
 
+# A release is considered only after the real-host Cluster workflow succeeds on
+# the main push. This prevents a version bump from publishing before the
+# cluster contract has run, while keeping release creation automatic.
 on:
-  push:
+  workflow_run:
+    workflows: [Cluster]
+    types: [completed]
     branches: [main]
-    paths: [mix.exs]
 
 permissions:
+  actions: read
   contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+env:
+  GHCR_IMAGE: ghcr.io/chasers/smolquery
 
 jobs:
-  release:
-    name: Release on version bump
+  prepare:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    name: Prepare release
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
 
-      - name: Read version from mix.exs
+      - name: Detect and validate version bump
         id: version
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
         run: |
-          version=$(grep -oE 'version: "[^"]+"' mix.exs | head -1 | cut -d'"' -f2)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          git show "${SHA}^:mix.exs" > /tmp/parent-mix.exs
 
-      - name: Create release if the tag does not exist
+          read_version() {
+            python3 - "$1" <<'PY'
+          import re
+          import sys
+
+          text = open(sys.argv[1], encoding="utf-8").read()
+          versions = re.findall(
+              r'(?m)^[ \t]*version:[ \t]*"([^"]+)"[ \t]*,?[ \t]*$', text
+          )
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one version line, found {len(versions)}")
+          print(versions[0])
+          PY
+          }
+
+          version=$(read_version mix.exs)
+          parent_version=$(read_version /tmp/parent-mix.exs)
+
+          if [[ "$version" == "$parent_version" ]]; then
+            echo "no version-line change ($version)"
+            {
+              echo "changed=false"
+              echo "version=$version"
+              echo "tag=v$version"
+              echo "sha=$SHA"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - "$parent_version" "$version" <<'PY'
+          import re
+          import sys
+
+          stable = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+          parent, current = sys.argv[1:]
+          if not stable.fullmatch(current):
+              raise SystemExit(f"release version must be stable X.Y.Z: {current}")
+          if not stable.fullmatch(parent):
+              raise SystemExit(f"parent version must be stable X.Y.Z: {parent}")
+          if tuple(map(int, current.split("."))) <= tuple(map(int, parent.split("."))):
+              raise SystemExit(f"release version must advance beyond {parent}: {current}")
+          PY
+
+          echo "version bump: $parent_version -> $version"
+          {
+            echo "changed=true"
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag is absent or points at this commit
+        if: steps.version.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.version.outputs.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+          if target=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha 2>/dev/null); then
+            if [[ "$target" != "$SHA" ]]; then
+              echo "$TAG already points at $target, expected $SHA" >&2
+              exit 1
+            fi
+            echo "$TAG already points at $SHA; rerun is safe"
+          else
+            echo "$TAG is not present"
+          fi
+
+  ci:
+    if: needs.prepare.outputs.changed == 'true'
+    needs: prepare
+    name: Wait for CI (mix ci, tests, integration, dialyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the exact push CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            runs=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --event push \
+              --commit "$SHA" \
+              --limit 20 \
+              --json databaseId,status,conclusion,headSha)
+
+            success=$(jq '[.[] | select(.headSha == env.SHA and .status == "completed" and .conclusion == "success")] | length' <<<"$runs")
+            active=$(jq '[.[] | select(.headSha == env.SHA and .status != "completed")] | length' <<<"$runs")
+            failed=$(jq '[.[] | select(.headSha == env.SHA and .status == "completed" and .conclusion != "success")] | length' <<<"$runs")
+
+            if [[ "$success" -gt 0 ]]; then
+              echo "CI succeeded for $SHA"
+              exit 0
+            fi
+
+            if [[ "$active" -eq 0 && "$failed" -gt 0 ]]; then
+              echo "all CI runs for $SHA completed unsuccessfully" >&2
+              jq . <<<"$runs"
+              exit 1
+            fi
+
+            echo "waiting for CI for $SHA (attempt $attempt/30)"
+            sleep 20
+          done
+
+          echo "timed out waiting for CI for $SHA" >&2
+          exit 1
+
+  promote:
+    if: needs.prepare.outputs.changed == 'true'
+    needs: [prepare, ci]
+    name: Publish immutable image and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Inspect existing immutable image tags
+        id: tags
+        env:
+          VERSION_TAG: ${{ needs.prepare.outputs.tag }}
+          SHA_TAG: sha-${{ needs.prepare.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          inspect_manifest_list() {
+            local ref="$1" output media_type digest
+            if ! output=$(docker buildx imagetools inspect "$ref" 2>&1); then
+              if grep -Eiq 'not found|manifest[_ ]unknown|name unknown|no such manifest' <<<"$output"; then
+                return 2
+              fi
+              echo "$output" >&2
+              return 1
+            fi
+
+            media_type=$(awk '$1 == "MediaType:" {print $2; exit}' <<<"$output")
+            digest=$(awk '$1 == "Digest:" {print $2; exit}' <<<"$output")
+            if [[ ! "$media_type" =~ ^application/(vnd\.oci\.image\.index|vnd\.docker\.distribution\.manifest\.list)\.v[12]\+json$ ]]; then
+              echo "$ref is not a manifest list (media type: ${media_type:-missing})" >&2
+              return 1
+            fi
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "could not read a manifest-list digest for $ref" >&2
+              return 1
+            fi
+            printf '%s' "$digest"
+          }
+
+          version_state=absent
+          sha_state=absent
+          if version_digest=$(inspect_manifest_list "${GHCR_IMAGE}:${VERSION_TAG}"); then
+            version_state=present
+          else
+            case "$?" in
+              2) version_digest="" ;;
+              *) exit 1 ;;
+            esac
+          fi
+          if sha_digest=$(inspect_manifest_list "${GHCR_IMAGE}:${SHA_TAG}"); then
+            sha_state=present
+          else
+            case "$?" in
+              2) sha_digest="" ;;
+              *) exit 1 ;;
+            esac
+          fi
+
+          missing_ref=""
+          case "$version_state:$sha_state" in
+            present:present)
+              if [[ "$version_digest" != "$sha_digest" ]]; then
+                echo "immutable tags have conflicting manifest-list digests" >&2
+                exit 1
+              fi
+              digest="$version_digest"
+              mode=reuse
+              echo "both tags already point at $digest; reusing without rebuild"
+              ;;
+            absent:absent)
+              digest=""
+              mode=build
+              echo "neither immutable tag exists; building and publishing"
+              ;;
+            present:absent)
+              digest="$version_digest"
+              mode=reuse
+              missing_ref="${GHCR_IMAGE}:${SHA_TAG}"
+              ;;
+            absent:present)
+              digest="$sha_digest"
+              mode=reuse
+              missing_ref="${GHCR_IMAGE}:${VERSION_TAG}"
+              ;;
+          esac
+
+          if [[ -n "$missing_ref" ]]; then
+            echo "repairing partial publication at $missing_ref from $digest"
+            docker buildx imagetools create --tag "$missing_ref" "${GHCR_IMAGE}@${digest}"
+            repaired_digest=$(inspect_manifest_list "$missing_ref")
+            if [[ "$repaired_digest" != "$digest" ]]; then
+              echo "repaired tag resolved to $repaired_digest, expected $digest" >&2
+              exit 1
+            fi
+            echo "partial publication repaired; both tags point at $digest"
+          fi
+
+          {
+            echo "mode=$mode"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=sha-${{ needs.prepare.outputs.sha }}
+
+      - name: Build and publish multi-arch image
+        if: steps.tags.outputs.mode == 'build'
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Resolve immutable image digest
+        id: digest
+        env:
+          BUILT_DIGEST: ${{ steps.image.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.tags.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="${BUILT_DIGEST:-$REUSED_DIGEST}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "missing immutable image digest" >&2
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Render immutable deployment manifest
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${GHCR_IMAGE}@${DIGEST}"
+          overlay_dir=$(mktemp -d deploy/.release-overlay.XXXXXX)
+          trap 'rm -rf "$overlay_dir"' EXIT
+          cat > "$overlay_dir/kustomization.yaml" <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - ../base
+          images:
+            - name: smolquery
+              newName: ${GHCR_IMAGE}
+              digest: ${DIGEST}
+          EOF
+          kubectl kustomize "$overlay_dir" > release-manifest.yaml
+          kubectl create --dry-run=client -f release-manifest.yaml -o name >/dev/null
+
+          mapfile -t smolquery_images < <(awk '/^[[:space:]]+image: .*smolquery/ {print $2}' release-manifest.yaml)
+          [[ "${#smolquery_images[@]}" -gt 0 ]] || {
+            echo "release manifest has no smolquery workload images" >&2
+            exit 1
+          }
+          for image in "${smolquery_images[@]}"; do
+            [[ "$image" == "$image_ref" ]] || {
+              echo "unexpected smolquery workload image: $image" >&2
+              exit 1
+            }
+          done
+          if grep -Eq '^[[:space:]]+image: .*smolquery(:|$)' release-manifest.yaml; then
+            echo "release manifest contains a mutable smolquery image" >&2
+            exit 1
+          fi
+          {
+            echo "image=${image_ref}"
+            echo "digest=${DIGEST}"
+            echo "commit=${{ needs.prepare.outputs.sha }}"
+            echo "version=${{ needs.prepare.outputs.version }}"
+          } > release-image.txt
+
+      - name: Create or reuse GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "$TAG already released; nothing to do"
+            echo "$TAG release already exists; updating immutable assets"
           else
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
+              --target "$SHA" \
+              --title "$TAG" \
               --generate-notes
-            echo "created $TAG at $GITHUB_SHA"
           fi
+          gh release upload "$TAG" release-image.txt release-manifest.yaml \
+            --repo "$GITHUB_REPOSITORY" --clobber

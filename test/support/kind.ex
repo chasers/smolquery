@@ -277,24 +277,32 @@ defmodule Smolquery.Test.Kind do
   @spec insert!(String.t(), String.t(), pos_integer(), non_neg_integer()) :: :ok
   def insert!(dataset, table, count, from \\ 0) do
     rows = for i <- from..(from + count - 1), do: %{"id" => i, "v" => "r#{i}"}
+    insert_id = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 
-    insert_with_retry(dataset, table, rows, 15)
+    insert_with_retry(dataset, table, rows, insert_id, 15)
   end
 
-  defp insert_with_retry(dataset, table, rows, attempts) do
-    case post!("/v1/datasets/#{dataset}/tables/#{table}/insert", %{"rows" => rows}) do
-      %{status: 200, body: body} ->
-        case Map.get(body, "insertErrors", []) do
-          [] -> :ok
-          errors -> raise "insert into #{dataset}.#{table} reported errors: #{inspect(errors)}"
-        end
+  defp insert_with_retry(dataset, table, rows, insert_id, attempts) do
+    body = Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
 
-      %{status: _refused} when attempts > 1 ->
+    path =
+      "/v1/datasets/#{dataset}/tables/#{table}/insert?insertId=#{URI.encode_www_form(insert_id)}"
+
+    expected_rows = length(rows)
+
+    case post_ndjson!(path, body) do
+      %{status: 200, body: %{"insertedRows" => ^expected_rows, "insertErrors" => []}} ->
+        :ok
+
+      %{status: status} when status in [408, 425, 429, 500, 502, 503, 504] and attempts > 1 ->
         Process.sleep(2_000)
-        insert_with_retry(dataset, table, rows, attempts - 1)
+        insert_with_retry(dataset, table, rows, insert_id, attempts - 1)
 
-      %{status: status} ->
-        raise "insert into #{dataset}.#{table} kept failing with HTTP #{status}"
+      %{status: 200, body: response} ->
+        raise "insert into #{dataset}.#{table} returned an unexpected response: #{inspect(response)}"
+
+      %{status: status, body: response} ->
+        raise "insert into #{dataset}.#{table} failed with HTTP #{status}: #{inspect(response)}"
     end
   end
 
@@ -347,6 +355,18 @@ defmodule Smolquery.Test.Kind do
     Req.post!(base_url() <> path,
       json: body,
       headers: [{"authorization", "Bearer #{api_key()}"}],
+      retry: false,
+      receive_timeout: 60_000
+    )
+  end
+
+  defp post_ndjson!(path, body) do
+    Req.post!(base_url() <> path,
+      body: body,
+      headers: [
+        {"authorization", "Bearer #{api_key()}"},
+        {"content-type", "application/x-ndjson"}
+      ],
       retry: false,
       receive_timeout: 60_000
     )
