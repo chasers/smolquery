@@ -125,6 +125,27 @@ if size = System.get_env("SMOLQUERY_WRITE_POOL_SIZE") do
   config :smolquery, Smolquery.BufferService, write_pool_size: String.to_integer(size)
 end
 
+# The two knobs that size one member of the `:duckdb` write pool. Both are
+# optional: without them the pool divides `Smolquery.Engine`'s thread count by
+# its own size and leaves the memory limit to the application config.
+#
+# `SMOLQUERY_WRITE_ENGINE_THREADS` replaces the division with a number the
+# operator chooses. The division is a sensible default only while the pool is
+# smaller than the thread count; above that it reaches its floor of one and
+# stops describing a budget, and an operator who wants a different shape needs
+# to say so rather than read the arithmetic.
+if threads = System.get_env("SMOLQUERY_WRITE_ENGINE_THREADS") do
+  config :smolquery, Smolquery.BufferService, write_engine_threads: String.to_integer(threads)
+end
+
+# `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` is the one that cannot be derived: a
+# DuckDB memory limit is a size string with its own grammar, so the pool cannot
+# divide it the way it divides threads. Left unset, every member inherits
+# `Smolquery.Engine`'s limit whole and a node declares `write_pool_size ×` it.
+if limit = System.get_env("SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.BufferService, write_engine_memory_limit: limit
+end
+
 if partitions = System.get_env("SMOLQUERY_WRITE_PARTITIONS") do
   count = String.to_integer(partitions)
 

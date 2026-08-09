@@ -63,6 +63,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Segments.Id
+  alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
@@ -441,16 +442,22 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # they are the two serialized steps, and T-181 exists because the encode —
   # the one step that already runs in parallel — turned out to be 5% of the ack.
   defp commit_durably(state, commit, {:ok, segment}, _encoded_at) do
-    added = add(state, segment, commit.batch_ids)
-    added_at = System.monotonic_time(:microsecond)
+    case populated(state, segment) do
+      {:ok, :rows} ->
+        added = add(state, segment, commit.batch_ids)
+        added_at = System.monotonic_time(:microsecond)
 
-    result =
-      with {:ok, entry} <- added,
-           :ok <- replicate(state, segment, entry) do
-        {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
-      end
+        result =
+          with {:ok, entry} <- added,
+               :ok <- replicate(state, segment, entry) do
+            {:ok, %{segment_id: entry.id, row_count: entry.row_count}}
+          end
 
-    {result, added_at}
+        {result, added_at}
+
+      {:ok, :empty} ->
+        {{:ok, %{segment_id: nil, row_count: 0}}, System.monotonic_time(:microsecond)}
+    end
   end
 
   defp commit_durably(_state, _commit, {:error, _reason} = error, encoded_at),
@@ -460,6 +467,32 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # rejected callers are answered from their own errors alone.
   defp commit_durably(_state, _commit, {:rejected, _rejected} = rejected, encoded_at),
     do: {rejected, encoded_at}
+
+  # A body that carries no row still produces a valid Parquet file, and taking it
+  # the rest of the way costs a manifest append, an fsync, a replication round,
+  # and a permanent entry whose bounds are all `nil` — one the pruner can never
+  # exclude, so every query over the table reads it forever. The spooled NDJSON
+  # route makes this reachable from outside: a whitespace-only body counts as
+  # lines at the edge, which is what admits it, and nothing before here parses
+  # enough to know better. So the segment is dropped instead of recorded, and the
+  # caller is told the truth: zero rows, no segment.
+  defp populated(_state, %Segment{row_count: count}) when count > 0, do: {:ok, :rows}
+
+  defp populated(state, %Segment{} = segment) do
+    case Store.delete(state.runtime.store, segment.key) do
+      :ok ->
+        {:ok, :empty}
+
+      {:error, reason} ->
+        # The file is unreferenced either way — no manifest entry names it — so
+        # `HotManifest.recover/2` deletes it as an orphan at the next recovery
+        # of this table. Losing the disk until then is not worth failing a
+        # request that asked for nothing.
+        Logger.warning("could not delete an empty segment #{segment.key}: #{inspect(reason)}")
+
+        {:ok, :empty}
+    end
+  end
 
   # A commit built before this instrumentation shipped, or one a test hands over
   # by hand, carries no stamps; an unmeasured span is 0 rather than a crash.

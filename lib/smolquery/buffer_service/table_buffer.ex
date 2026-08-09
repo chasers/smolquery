@@ -135,7 +135,10 @@ defmodule Smolquery.BufferService.TableBuffer do
     in_flight_ids: MapSet.new()
   ]
 
-  @type ack :: %{segment_id: String.t(), row_count: non_neg_integer()}
+  # `segment_id` is `nil` for a commit that produced no rows: the flush deletes
+  # that segment rather than naming it in the manifest, so there is no id to
+  # report and a `row_count` of zero is the whole answer.
+  @type ack :: %{segment_id: String.t() | nil, row_count: non_neg_integer()}
 
   @typedoc """
   Rows a flush refused, at their index in the caller's body.
