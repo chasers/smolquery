@@ -1,0 +1,9 @@
+# The dev dependencies both kind overlays stand up: Postgres (DuckLake
+# catalog + libcluster discovery) and MinIO (the sealed tier), neither of
+# which is part of smolquery itself.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - postgres.yaml
+  - minio.yaml

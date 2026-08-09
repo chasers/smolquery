@@ -1,0 +1,12 @@
+# What every topology shares: the namespace, the pod-ops RBAC, and the two
+# Services (headless for pod DNS, smolquery-api for the HTTP front door).
+# Workload shape is the overlay's business — deploy/base adds the
+# disaggregated api/buffer/storage fleets, overlays/kind-symmetric adds a
+# fleet of identical all-role servers.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - services.yaml

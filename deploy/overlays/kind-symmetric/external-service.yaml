@@ -1,0 +1,21 @@
+# NodePorts matched by kind-config.yaml's extraPortMappings: the API lands on
+# localhost:8080, the web UI on localhost:8082. Same doors as the kind
+# overlay, answered by the server fleet instead of a dedicated api pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: smolquery-external
+  namespace: smolquery
+spec:
+  type: NodePort
+  selector:
+    app: smolquery-server
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 30080
+    - name: web
+      port: 4002
+      targetPort: 4002
+      nodePort: 30082
