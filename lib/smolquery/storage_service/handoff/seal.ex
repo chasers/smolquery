@@ -68,6 +68,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Catalog
+  alias Smolquery.Partitions
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Handoff
   alias Smolquery.StorageService.Merge
@@ -80,9 +81,13 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     end
   end
 
+  # The hot tier speaks partition refs; the catalog knows only real tables
+  # (Smolquery.Partitions). Every catalog operation here maps to the parent,
+  # while the retire — buffer-facing — keeps the partition ref it came from.
   defp commit(runtime, table_ref, claim) do
     with {:ok, paths} <- sealed_paths(runtime, claim),
-         {:ok, registered} <- Catalog.segments(runtime.catalog, table_ref, :current) do
+         {:ok, registered} <-
+           Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       if committed?(paths, registered) do
         Catalog.current_snapshot(runtime.catalog)
       else
@@ -93,7 +98,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   defp merge_and_register(runtime, table_ref, claim) do
     with {:ok, segment} <- Merge.run(runtime, table_ref, claim) do
-      Catalog.register_segments(runtime.catalog, table_ref, [segment])
+      Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
     end
   end
 

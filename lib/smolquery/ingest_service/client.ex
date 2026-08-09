@@ -19,6 +19,7 @@ defmodule Smolquery.IngestService.Client do
   alias Smolquery.IngestService.Runtime
   alias Smolquery.IngestService.SchemaCache
   alias Smolquery.IngestService.Validator
+  alias Smolquery.Partitions
   alias Smolquery.Segments.Store
 
   @type result :: %{inserted: non_neg_integer(), errors: [Validator.row_errors()]}
@@ -111,14 +112,16 @@ defmodule Smolquery.IngestService.Client do
 
   defp write_frame(runtime, table_ref, schema, frame, byte_size, opts) do
     batch = %{schema: schema, frame: frame, byte_size: byte_size}
+    batch_id = Keyword.get(opts, :batch_id)
+    target = Partitions.write_ref(table_ref, runtime.write_partitions, batch_id)
 
     batch =
-      case Keyword.get(opts, :batch_id) do
+      case batch_id do
         nil -> batch
         batch_id -> Map.put(batch, :batch_id, batch_id)
       end
 
-    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
+    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
       inserted = DataFrame.n_rows(frame)
       measure(inserted, [])
 
@@ -143,8 +146,9 @@ defmodule Smolquery.IngestService.Client do
 
   defp write(runtime, table_ref, schema, valid, errors, batch_id) do
     batch = batch(schema, valid, batch_id)
+    target = Partitions.write_ref(table_ref, runtime.write_partitions, batch_id)
 
-    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, table_ref, batch) do
+    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
       measure(length(valid), errors)
 
       {:ok, %{inserted: length(valid), errors: errors}}

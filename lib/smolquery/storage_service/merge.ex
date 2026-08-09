@@ -174,7 +174,8 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp merge(runtime, table_ref, key, inputs) do
-    with {:ok, schema} <- Catalog.table_schema(runtime.catalog, table_ref),
+    with {:ok, schema} <-
+           Catalog.table_schema(runtime.catalog, Smolquery.Partitions.parent(table_ref)),
          {:ok, projection} <- projection(runtime, schema, inputs.urls),
          {:ok, put} <-
            Store.put(runtime.store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
