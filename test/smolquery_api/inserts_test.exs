@@ -160,6 +160,79 @@ defmodule SmolqueryApi.InsertControllerTest do
     assert %{"error" => %{"status" => "UNAVAILABLE"}} = JSON.decode!(response.resp_body)
   end
 
+  describe "NDJSON inserts (PL-21)" do
+    defp post_ndjson(name, body, path \\ @path) do
+      conn(:post, path, body)
+      |> put_req_header("content-type", "application/x-ndjson")
+      |> put_req_header("authorization", "Bearer #{@key}")
+      |> then(&ApiEndpoint.request(name, &1))
+    end
+
+    defp ndjson(rows), do: Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
+
+    test "a clean NDJSON body lands through the columnar path", %{name: name, buffer: buffer} do
+      response = post_ndjson(name, ndjson([%{"id" => 1}, %{"id" => 2}, %{"id" => 3}]))
+
+      assert response.status == 200
+
+      assert JSON.decode!(response.resp_body) == %{
+               "insertedRows" => 3,
+               "insertErrors" => []
+             }
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 3
+    end
+
+    test "a batch the columnar pass cannot prove valid reports per-index errors", %{name: name} do
+      response = post_ndjson(name, ndjson([%{"id" => 1}, %{"id" => "junk"}, %{"id" => 3}]))
+
+      assert response.status == 200
+
+      assert %{
+               "insertedRows" => 2,
+               "insertErrors" => [%{"index" => 1, "errors" => [%{"message" => message}]}]
+             } = JSON.decode!(response.resp_body)
+
+      assert message =~ "INT64"
+    end
+
+    test "a line that is not a JSON object is rejected at its index", %{name: name} do
+      body = JSON.encode!(%{"id" => 1}) <> "\nnot json\n" <> JSON.encode!(%{"id" => 2}) <> "\n"
+      response = post_ndjson(name, body)
+
+      assert response.status == 200
+
+      assert %{
+               "insertedRows" => 2,
+               "insertErrors" => [%{"index" => 1, "errors" => [%{"message" => message}]}]
+             } = JSON.decode!(response.resp_body)
+
+      assert message =~ "JSON object"
+    end
+
+    test "insertId arrives as a query parameter and dedups", %{name: name, buffer: buffer} do
+      body = ndjson([%{"id" => 1}, %{"id" => 2}])
+      path = @path <> "?insertId=nd-req-1"
+
+      assert post_ndjson(name, body, path).status == 200
+      retried = post_ndjson(name, body, path)
+
+      assert retried.status == 200
+      assert JSON.decode!(retried.resp_body)["insertedRows"] == 2
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+
+    test "an unknown table is still a 404", %{name: name} do
+      response =
+        post_ndjson(name, ndjson([%{"id" => 1}]), "/v1/datasets/analytics/tables/nope/insert")
+
+      assert response.status == 404
+    end
+  end
+
   describe "insertId (T-41)" do
     defp post_body(name, body) do
       conn(:post, @path, JSON.encode!(body))

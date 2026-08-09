@@ -99,8 +99,33 @@ defmodule Smolquery.BufferService.Client do
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
   def write_batch(name, table_ref, batch) do
-    route(name, :bulk, :write_batch, [name, table_ref, batch], table_ref, :write)
+    routing = Routing.resolve(name)
+    owner = Routing.owner(routing, table_ref)
+    transport = Routing.transport(routing, owner)
+    batch = wire_batch(transport, batch)
+
+    Transport.invoke(
+      transport,
+      owner,
+      :bulk,
+      :write_batch,
+      [name, table_ref, batch],
+      timeout(routing, :write)
+    )
   end
+
+  # A DataFrame is a NIF resource; its reference means nothing after another
+  # node's term decode, so a columnar batch crosses the wire as Arrow IPC
+  # bytes and stays a live frame only for the in-BEAM transport.
+  defp wire_batch(Transport.Local, batch), do: batch
+
+  defp wire_batch(_remote, %{frame: frame} = batch) do
+    batch
+    |> Map.delete(:frame)
+    |> Map.put(:frame_ipc, Explorer.DataFrame.dump_ipc!(frame))
+  end
+
+  defp wire_batch(_remote, batch), do: batch
 
   @doc """
   The table's hot manifest — every micro-segment its owner holds for it.

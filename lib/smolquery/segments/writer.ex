@@ -105,6 +105,66 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
+  @doc """
+  Merges a group commit's accumulated chunks — row lists and/or DataFrames,
+  oldest first — into the single `[row()] | DataFrame.t()` that `write/3`
+  takes.
+
+  All-list chunks stay a row list, exactly the shape the accumulator used to
+  concatenate itself. Once any chunk is a frame, every list chunk becomes one
+  (schema-ordered columns, so the frames agree) and the frames concatenate —
+  rows never materialize as terms on the commit path that was fed frames.
+  """
+  @spec merge_chunks([[row()] | DataFrame.t()], Schema.t()) ::
+          {:ok, [row()] | DataFrame.t()} | {:error, term()}
+  def merge_chunks([chunk], _schema), do: {:ok, chunk}
+
+  def merge_chunks(chunks, schema) when is_list(chunks) do
+    if Enum.all?(chunks, &is_list/1) do
+      {:ok, Enum.concat(chunks)}
+    else
+      with {:ok, frames} <- chunk_frames(chunks, schema) do
+        {:ok, DataFrame.concat_rows(frames)}
+      end
+    end
+  rescue
+    error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
+  end
+
+  defp chunk_frames(chunks, schema) do
+    Enum.reduce_while(chunks, {:ok, []}, fn
+      %DataFrame{} = frame, {:ok, frames} ->
+        {:cont, {:ok, [frame | frames]}}
+
+      rows, {:ok, frames} ->
+        case frame_from_rows(rows, schema) do
+          {:ok, frame} -> {:cont, {:ok, [frame | frames]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+    end)
+    |> case do
+      {:ok, frames} -> {:ok, Enum.reverse(frames)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Builds the unsorted frame for `rows` — the schema's columns, in order.
+  """
+  @spec frame_from_rows([row()], Schema.t()) :: {:ok, DataFrame.t()} | {:error, term()}
+  def frame_from_rows(rows, %Schema{} = schema) when is_list(rows) do
+    with {:ok, dtypes} <- Schema.explorer_dtypes(schema) do
+      columns =
+        Enum.map(dtypes, fn {name, dtype} ->
+          {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
+        end)
+
+      {:ok, DataFrame.new(columns)}
+    end
+  rescue
+    error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
+  end
+
   defp encode_parquet(frame, device, compression) do
     DataFrame.to_parquet(frame, device, compression: compression)
   end
@@ -114,16 +174,9 @@ defmodule Smolquery.Segments.Writer do
   defp build_frame([], _schema), do: {:error, :no_rows}
 
   defp build_frame(rows, schema) when is_list(rows) do
-    with {:ok, dtypes} <- Schema.explorer_dtypes(schema) do
-      columns =
-        Enum.map(dtypes, fn {name, dtype} ->
-          {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
-        end)
-
-      {:ok, sort_frame(DataFrame.new(columns), schema)}
+    with {:ok, frame} <- frame_from_rows(rows, schema) do
+      {:ok, sort_frame(frame, schema)}
     end
-  rescue
-    error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
   end
 
   defp sort_frame(frame, schema) do

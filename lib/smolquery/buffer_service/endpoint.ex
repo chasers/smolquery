@@ -17,6 +17,7 @@ defmodule Smolquery.BufferService.Endpoint do
   a caller try the next owner rather than crash.
   """
 
+  alias Explorer.DataFrame
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -28,9 +29,22 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
+  @typedoc """
+  A forward-batch: rows as a term list, or already columnar (T-139).
+
+  A columnar batch carries `:frame` in the same BEAM and `:frame_ipc` — the
+  frame as Arrow IPC bytes — across the wire, because a `DataFrame` is a NIF
+  resource whose reference does not survive another node's term decode.
+  `Smolquery.BufferService.Client.write_batch/3` picks per transport; both
+  carry `:byte_size`, the ingest edge's estimate of what the batch costs the
+  owner's accumulator, since the admission bound cannot measure a resource.
+  """
   @type batch :: %{
           required(:schema) => Schema.t(),
-          required(:rows) => [Writer.row()],
+          optional(:rows) => [Writer.row()],
+          optional(:frame) => DataFrame.t(),
+          optional(:frame_ipc) => binary(),
+          optional(:byte_size) => non_neg_integer(),
           optional(:batch_id) => String.t()
         }
 
@@ -60,29 +74,48 @@ defmodule Smolquery.BufferService.Endpoint do
   """
   @spec write_batch(atom(), Store.table_ref(), batch()) ::
           {:ok, TableBuffer.ack()} | {:error, term()}
-  def write_batch(name, table_ref, %{schema: %Schema{} = schema, rows: rows} = batch)
-      when is_list(rows) do
-    with {:ok, runtime} <- runtime(name) do
+  def write_batch(name, table_ref, %{schema: %Schema{} = schema} = batch) do
+    with {:ok, runtime} <- runtime(name),
+         {:ok, payload} <- payload(batch) do
       batch_id = Map.get(batch, :batch_id)
 
       case committed_ack(runtime, table_ref, batch_id) do
         {:ok, ack} ->
-          deduped(rows)
+          deduped(payload_count(payload))
 
           {:ok, ack}
 
         :error ->
-          admit(runtime, table_ref, schema, rows, batch_id)
+          admit(runtime, table_ref, schema, payload, Map.get(batch, :byte_size), batch_id)
       end
     end
   end
 
-  defp admit(runtime, table_ref, schema, rows, batch_id) do
+  defp payload(%{rows: rows}) when is_list(rows), do: {:ok, rows}
+
+  defp payload(%{frame: %DataFrame{} = frame, byte_size: bytes}) when is_integer(bytes),
+    do: {:ok, frame}
+
+  defp payload(%{frame_ipc: ipc, byte_size: bytes}) when is_binary(ipc) and is_integer(bytes) do
+    case DataFrame.load_ipc(ipc) do
+      {:ok, frame} -> {:ok, frame}
+      {:error, _reason} -> {:error, :invalid_frame}
+    end
+  rescue
+    _error in [ArgumentError, RuntimeError] -> {:error, :invalid_frame}
+  end
+
+  defp payload(_batch), do: {:error, :invalid_batch}
+
+  defp payload_count(rows) when is_list(rows), do: length(rows)
+  defp payload_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
+
+  defp admit(runtime, table_ref, schema, payload, byte_size, batch_id) do
     with :ok <- RingEpoch.check_write(runtime.name, table_ref) do
       if Drain.draining?(runtime.name) do
         {:error, :draining}
       else
-        deliver(runtime, table_ref, schema, rows, batch_id, @retries)
+        deliver(runtime, table_ref, schema, payload, byte_size, batch_id, @retries)
       end
     end
   end
@@ -220,31 +253,37 @@ defmodule Smolquery.BufferService.Endpoint do
     :exit, {:noproc, _call} -> :ok
   end
 
-  defp deliver(runtime, table_ref, schema, rows, batch_id, retries) do
+  defp deliver(runtime, table_ref, schema, payload, byte_size, batch_id, retries) do
     case buffer(runtime, table_ref) do
-      {:ok, buffer} -> admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id)
-      {:error, :noproc} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
-      {:error, reason} -> {:error, reason}
+      {:ok, buffer} ->
+        admit_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id)
+
+      {:error, :noproc} ->
+        retry(runtime, table_ref, schema, payload, byte_size, batch_id, retries)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   catch
-    :exit, {:noproc, _call} -> retry(runtime, table_ref, schema, rows, batch_id, retries)
+    :exit, {:noproc, _call} ->
+      retry(runtime, table_ref, schema, payload, byte_size, batch_id, retries)
   end
 
-  defp admit_and_write(runtime, table_ref, buffer, schema, rows, batch_id) do
+  defp admit_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id) do
     load = load(runtime, table_ref)
-    count = length(rows)
+    count = payload_count(payload)
 
     case Load.admit(load, count, runtime.ack_budget_ms) do
       :ok ->
         Load.enter(load, count)
 
-        case TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id) do
+        case buffer_write(buffer, runtime, schema, payload, byte_size, batch_id) do
           {:ok, ack} ->
             {:ok, ack}
 
           {:duplicate, ack} ->
             Load.leave(load, count)
-            deduped(rows)
+            deduped(count)
 
             {:ok, ack}
 
@@ -265,8 +304,16 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp deduped(rows) do
-    :telemetry.execute([:smolquery, :buffer, :dedup], %{rows: length(rows)}, %{})
+  defp buffer_write(buffer, runtime, schema, rows, _byte_size, batch_id) when is_list(rows) do
+    TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id)
+  end
+
+  defp buffer_write(buffer, runtime, schema, %DataFrame{} = frame, byte_size, batch_id) do
+    TableBuffer.write_frame(buffer, schema, frame, byte_size, runtime.write_timeout_ms, batch_id)
+  end
+
+  defp deduped(count) do
+    :telemetry.execute([:smolquery, :buffer, :dedup], %{rows: count}, %{})
   end
 
   defp load(runtime, table_ref) do
@@ -276,13 +323,13 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
-  defp retry(_runtime, _table_ref, _schema, _rows, _batch_id, 0),
+  defp retry(_runtime, _table_ref, _schema, _payload, _byte_size, _batch_id, 0),
     do: {:error, :buffer_unavailable}
 
-  defp retry(runtime, table_ref, schema, rows, batch_id, retries) do
+  defp retry(runtime, table_ref, schema, payload, byte_size, batch_id, retries) do
     Process.sleep(@retry_interval_ms)
 
-    deliver(runtime, table_ref, schema, rows, batch_id, retries - 1)
+    deliver(runtime, table_ref, schema, payload, byte_size, batch_id, retries - 1)
   end
 
   defp runtime(name) do
