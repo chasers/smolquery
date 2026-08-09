@@ -171,6 +171,41 @@ defmodule Smolquery.IngestService.ClientTest do
       assert Enum.sum_by(entries, & &1.row_count) == 2
     end
 
+    # `String.split(trim: true)` only drops the empty string, so a line of
+    # spaces — or the "\r" a CRLF body leaves on a blank line — used to count
+    # as a row the flush then never landed.
+    test "whitespace-only lines are not counted as inserted rows", context do
+      %{name: name, buffer: buffer} =
+        start_stack(context,
+          buffer: [flush_writer: :duckdb, write_pool_size: 1],
+          ingest: [ndjson_passthrough: true]
+        )
+
+      body = ~s({"id": 1}\n \r\n{"id": 2}\n)
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert_ndjson(name, @table, body)
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+
+      assert Enum.sum_by(entries, & &1.row_count) == 2
+    end
+
+    test "a body of only whitespace inserts nothing and lands nothing", context do
+      %{name: name, buffer: buffer} =
+        start_stack(context,
+          buffer: [flush_writer: :duckdb, write_pool_size: 1],
+          ingest: [ndjson_passthrough: true]
+        )
+
+      assert {:ok, %{inserted: 0, errors: []}} =
+               IngestService.Client.insert_ndjson(name, @table, " \n \n")
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+
+      assert entries == []
+    end
+
     test "a buffer whose flush writer cannot flush bytes gets them parsed", context do
       %{name: name, buffer: buffer} = start_stack(context, ingest: [ndjson_passthrough: true])
 

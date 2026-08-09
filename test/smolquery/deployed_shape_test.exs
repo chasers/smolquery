@@ -36,6 +36,38 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "transport_tls=false"
     end
 
+    # The two values an operator cannot read off their own configuration: the
+    # per-member thread count is a division nothing wrote down, and the
+    # per-member memory limit is inherited from `Smolquery.Engine` when the
+    # buffer config says nothing.
+    test "states the write pool's resolved per-member budget" do
+      log =
+        capture_log(fn ->
+          DeployedShape.announce(buffer_runtime(flush_writer: :duckdb, write_pool_size: 2))
+        end)
+
+      assert log =~ "write_pool_size=2"
+      assert log =~ "write_engine_threads=1"
+      assert log =~ "write_engine_memory_limit=512MB"
+    end
+
+    test "states an explicit member budget over the derived one" do
+      log =
+        capture_log(fn ->
+          DeployedShape.announce(
+            buffer_runtime(
+              flush_writer: :duckdb,
+              write_pool_size: 4,
+              write_engine_threads: 2,
+              write_engine_memory_limit: "256MB"
+            )
+          )
+        end)
+
+      assert log =~ "write_engine_threads=2"
+      assert log =~ "write_engine_memory_limit=256MB"
+    end
+
     test "warns when the slower writer is selected, because nothing else will" do
       log = capture_log(fn -> DeployedShape.announce(buffer_runtime(flush_writer: :polars)) end)
 

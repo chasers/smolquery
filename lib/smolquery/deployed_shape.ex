@@ -38,6 +38,14 @@ defmodule Smolquery.DeployedShape do
   """
   @spec announce(BufferRuntime.t() | IngestRuntime.t()) :: :ok
   def announce(%BufferRuntime{} = runtime) do
+    # The pool's per-member budget is stated resolved, not as configured: the
+    # thread count is usually a division nothing wrote down, and the memory
+    # limit is usually an inheritance from `Smolquery.Engine` that multiplies
+    # by the pool size. Those are exactly the two values an operator cannot
+    # read off their own configuration, which is this module's whole test for
+    # what belongs on the shape line.
+    budget = BufferRuntime.write_engine_budget(runtime)
+
     labels = [
       flush_writer: runtime.flush_writer,
       compression: runtime.compression,
@@ -45,6 +53,8 @@ defmodule Smolquery.DeployedShape do
       flush_interval_ms: runtime.flush_interval_ms,
       encode_concurrency: runtime.encode_concurrency,
       write_pool_size: runtime.write_pool_size,
+      write_engine_threads: budget[:threads],
+      write_engine_memory_limit: budget[:memory_limit] || engine_memory_limit(),
       transport_tls: transport_tls?()
     ]
 
@@ -96,6 +106,17 @@ defmodule Smolquery.DeployedShape do
   """
   @spec transport_tls?() :: boolean()
   def transport_tls?, do: Application.get_env(:gen_rpc, :default_client_driver) == :ssl
+
+  # What one pool member inherits when `:write_engine_memory_limit` is unset —
+  # `Smolquery.Engine`'s own limit, whole. Read from the application config the
+  # engine reads, so the line states what the member got, not what the buffer
+  # config said. A bare DuckDB default (no limit configured anywhere) is named
+  # rather than left blank.
+  defp engine_memory_limit do
+    :smolquery
+    |> Application.get_env(Smolquery.Engine, [])
+    |> Keyword.get(:memory_limit, :duckdb_default)
+  end
 
   defp warn_slow(false, _message), do: :ok
   defp warn_slow(true, message), do: Logger.warning("slow path: " <> message)

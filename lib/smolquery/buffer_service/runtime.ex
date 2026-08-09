@@ -310,6 +310,51 @@ defmodule Smolquery.BufferService.Runtime do
   def engines(%__MODULE__{name: name, write_pool_size: size}),
     do: Enum.map(0..(size - 1)//1, &engine(name, &1))
 
+  @doc """
+  The `Smolquery.Engine` options that size one member of the write pool.
+
+  Each member is sized for the pool rather than left to inherit
+  `Smolquery.Engine`'s application config whole, because that config describes
+  *one* instance: a pool of eight inheriting `threads: System.schedulers_online()`
+  declares eight times the node's schedulers, and `memory_limit: "2GB"` eight
+  times over. Threads divide here. The memory limit cannot be divided without
+  parsing DuckDB's size grammar, so it is a configured value instead —
+  `:write_engine_memory_limit`, whose docstring above states the multiplication
+  an operator is choosing when they leave it unset.
+
+  The number divided is `Smolquery.Engine`'s *configured* thread count, not the
+  scheduler count. Dividing the schedulers would ignore the setting this exists
+  to respect: a node whose operator lowered `Smolquery.Engine`'s `:threads` to 4
+  on a sixteen-scheduler host would hand a pool of one sixteen threads, and a
+  change meant to narrow the declared budget would widen it. `config/test.exs`
+  sets that value deliberately and is the case that shows it soonest.
+
+  `:write_engine_threads` replaces the division outright, because the division
+  only describes a budget while the pool is smaller than the thread count.
+  Above that it reaches its floor of one and an operator who wants a different
+  shape has to say the number rather than infer it.
+
+  Two callers, deliberately: `Smolquery.BufferService.Supervisor` starts each
+  pool member with exactly this, and `Smolquery.DeployedShape` announces it —
+  the resolved budget is part of the shape a node came up on, or the division
+  becomes one more derived value nothing states out loud.
+  """
+  @spec write_engine_budget(t()) :: keyword()
+  def write_engine_budget(%__MODULE__{write_pool_size: size} = runtime) do
+    threads = [threads: runtime.write_engine_threads || max(div(engine_threads(), size), 1)]
+
+    case runtime.write_engine_memory_limit do
+      nil -> threads
+      limit -> [{:memory_limit, limit} | threads]
+    end
+  end
+
+  defp engine_threads do
+    :smolquery
+    |> Application.get_env(Smolquery.Engine, [])
+    |> Keyword.get(:threads, System.schedulers_online())
+  end
+
   defp validate_compression!(compression) when compression in @codecs, do: :ok
 
   defp validate_compression!(compression) do

@@ -199,55 +199,27 @@ defmodule Smolquery.BufferService.Supervisor do
   # The `:duckdb` flush writer needs its own DuckDB instances. Only reached
   # through `write_pool/1`, which is `nil` for every other writer, so `:polars`
   # deployments carry no extra process.
-  defp write_engines(%Runtime{} = runtime) do
-    Enum.map(Runtime.engines(runtime), fn name ->
-      Supervisor.child_spec(
-        {Smolquery.Engine, [name: name, extensions: []] ++ engine_budget(runtime)},
-        id: name
-      )
-    end)
-  end
-
-  # Each member is sized for the pool rather than left to inherit
-  # `Smolquery.Engine`'s application config whole, because that config describes
-  # *one* instance: a pool of eight inheriting `threads: System.schedulers_online()`
-  # declares eight times the node's schedulers, and `memory_limit: "2GB"` eight
-  # times over. Threads divide here, where the pool size is known. The memory
-  # limit cannot be divided without parsing DuckDB's size grammar, so it is a
-  # configured value instead — `:write_engine_memory_limit`, whose docstring on
-  # `Runtime` states the multiplication an operator is choosing when they leave
-  # it unset.
   #
-  # The number divided is `Smolquery.Engine`'s *configured* thread count, not the
-  # scheduler count. Dividing the schedulers would ignore the setting this exists
-  # to respect: a node whose operator lowered `Smolquery.Engine`'s `:threads` to 4
-  # on a sixteen-scheduler host would hand a pool of one sixteen threads, and a
-  # change meant to narrow the declared budget would widen it. `config/test.exs`
-  # sets that value deliberately and is the case that shows it soonest.
+  # Each member is sized for the pool by `Runtime.write_engine_budget/1`, whose
+  # doc carries the whole argument — what multiplies when a member inherits
+  # `Smolquery.Engine`'s config, why the division reads the configured thread
+  # count rather than the schedulers, and where the division stops describing a
+  # budget.
   #
   # The division is worth more than tidiness. Measured on this laptop with the
   # `bench/k6` harness, a pool of sixteen inheriting ten threads each held
   # 468,717 rows/s over four runs with a 20.4% spread; the same pool divided to
   # one thread each held 534,104 over five runs with a 9.9% spread. Declaring
   # 160 threads on ten cores did not buy capacity, it bought context switching.
-  #
-  # `:write_engine_threads` replaces the division outright, because the division
-  # only describes a budget while the pool is smaller than the thread count.
-  # Above that it reaches its floor of one and an operator who wants a different
-  # shape has to say the number rather than infer it.
-  defp engine_budget(%Runtime{write_pool_size: size} = runtime) do
-    threads = [threads: runtime.write_engine_threads || max(div(engine_threads(), size), 1)]
+  defp write_engines(%Runtime{} = runtime) do
+    budget = Runtime.write_engine_budget(runtime)
 
-    case runtime.write_engine_memory_limit do
-      nil -> threads
-      limit -> [{:memory_limit, limit} | threads]
-    end
-  end
-
-  defp engine_threads do
-    :smolquery
-    |> Application.get_env(Smolquery.Engine, [])
-    |> Keyword.get(:threads, System.schedulers_online())
+    Enum.map(Runtime.engines(runtime), fn name ->
+      Supervisor.child_spec(
+        {Smolquery.Engine, [name: name, extensions: []] ++ budget},
+        id: name
+      )
+    end)
   end
 
   defp membership(runtime) do

@@ -113,6 +113,59 @@ defmodule Smolquery.BufferService.SupervisorTest do
     assert {:ok, _ack} = write(name)
   end
 
+  test "the :duckdb write pool runs under its own supervisor, with one child per member",
+       context do
+    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 2)
+
+    pool = Process.whereis(Runtime.write_pool(name))
+
+    assert is_pid(pool)
+    assert %{specs: 2, active: 2} = Supervisor.count_children(pool)
+  end
+
+  test "the :polars writer starts no write pool", context do
+    name = start_buffer_service(context, flush_writer: :polars)
+
+    assert Process.whereis(Runtime.write_pool(name)) == nil
+  end
+
+  # The claim the pool's child spec makes: a pool that exhausts its own restart
+  # intensity exits `:shutdown`, `:transient` turns that into a permanent
+  # absence, and nothing that holds a row moves. Killing the *member* over and
+  # over is how a real fault arrives — a fatal DuckDB error stops the engine,
+  # not the pool.
+  test "a write pool that gives up takes nothing with it", context do
+    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 1)
+
+    manifest = Process.whereis(Runtime.manifest(name))
+    buffers = Process.whereis(Runtime.buffers(name))
+
+    assert Eventually.until(fn -> kill_a_member(name) == :pool_gone end, 3_000, 1)
+
+    assert Process.whereis(Runtime.write_pool(name)) == nil
+    assert Process.whereis(Runtime.manifest(name)) == manifest
+    assert Process.whereis(Runtime.buffers(name)) == buffers
+  end
+
+  defp kill_a_member(name) do
+    case Process.whereis(Runtime.write_pool(name)) do
+      nil ->
+        :pool_gone
+
+      pool ->
+        try do
+          case Supervisor.which_children(pool) do
+            [{_id, member, _type, _mods}] when is_pid(member) -> Process.exit(member, :kill)
+            _between_restarts -> :ok
+          end
+
+          :pool_alive
+        catch
+          :exit, _reason -> :pool_gone
+        end
+    end
+  end
+
   test "keeps entries across a buffer crash, because the manifest outlives it", context do
     name = start_buffer_service(context)
 

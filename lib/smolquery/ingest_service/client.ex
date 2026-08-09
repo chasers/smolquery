@@ -157,8 +157,15 @@ defmodule Smolquery.IngestService.Client do
   # so counting it would ack a row that was never committed. Splitting keeps
   # this a pass over the bytes without a parse, and its indices are the ones
   # `decode_lines/1` and the salvage path report errors at.
+  # Only a line carrying non-whitespace is a row. The flush's reader skips a
+  # blank line rather than parse it, and since the zero-row guard a commit of
+  # nothing lands nothing — so counting `" "` (or the `"\r"` a CRLF body leaves
+  # on every line) would ack rows the table never gained. `String.trim/1`
+  # returns a sub-binary, so this stays one pass over the bytes with no copy.
   defp count_rows(body) do
-    body |> String.split("\n", trim: true) |> length()
+    body
+    |> String.split("\n", trim: true)
+    |> Enum.count(&(String.trim(&1) != ""))
   end
 
   defp parse_and_write(runtime, table_ref, schema, body, opts) do
