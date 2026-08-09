@@ -183,7 +183,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
          {:ok, segment} <-
            Writer.write(merged, commit.schema,
              store: state.runtime.store,
-             prefix: state.prefix
+             prefix: state.prefix,
+             compression: state.runtime.compression
            ),
          {:ok, entry} <- add(state, segment, commit.batch_ids),
          :ok <- replicate(state, segment, entry) do
