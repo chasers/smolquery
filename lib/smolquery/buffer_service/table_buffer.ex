@@ -123,6 +123,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :timer,
     :signaled_at,
     :load,
+    :opened_at,
     chunks: [],
     pending: [],
     batch_ids: [],
@@ -741,6 +742,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     %{
       state
       | schema: schema,
+        opened_at: state.opened_at || System.monotonic_time(:microsecond),
         chunks: [rows | state.chunks],
         pending: [{from, :new} | state.pending],
         batch_ids: track_batch(state.batch_ids, batch_id),
@@ -770,13 +772,19 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp handoff(state) do
     batch_ids = Enum.reverse(state.batch_ids)
 
+    # `opened_at` is when this accumulator took its first chunk, so the span it
+    # closes is how long the *oldest* caller in the group has been waiting before
+    # any commit work starts. That is a real term of the ack and the only one no
+    # commit-side timer can see (T-181).
     Committer.commit(state.committer, %{
       schema: state.schema,
       chunks: Enum.reverse(state.chunks),
       pending: Enum.reverse(state.pending),
       batch_ids: batch_ids,
       row_count: state.row_count,
-      byte_size: state.byte_size
+      byte_size: state.byte_size,
+      opened_at: state.opened_at,
+      handed_off_at: System.monotonic_time(:microsecond)
     })
 
     %{
@@ -786,6 +794,7 @@ defmodule Smolquery.BufferService.TableBuffer do
         batch_ids: [],
         row_count: 0,
         byte_size: 0,
+        opened_at: nil,
         timer: cancel(state.timer),
         in_flight: state.in_flight + 1,
         in_flight_ids: Enum.into(batch_ids, state.in_flight_ids)
