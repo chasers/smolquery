@@ -54,6 +54,30 @@ defmodule Smolquery.BufferService.RuntimeTest do
       assert Runtime.new(name: unique_name(), dir: dir, write_pool_size: 32).write_pool_size ==
                32
     end
+
+    test "application config still wins over the host-derived defaults", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+
+      assert runtime.write_pool_size == 1
+      assert runtime.encode_concurrency == 2
+
+      overridden = Runtime.new(name: unique_name(), dir: dir, write_pool_size: 4)
+      assert overridden.write_pool_size == 4
+    end
+  end
+
+  describe "default_write_pool_size/0 and default_encode_concurrency/0" do
+    test "size the write path from the host, not from a number frozen at build time" do
+      assert Runtime.default_write_pool_size() == min(System.schedulers_online(), 32)
+      assert Runtime.default_encode_concurrency() == System.schedulers_online()
+    end
+
+    test "the derived pool size is one boot would accept", %{tmp_dir: dir} do
+      size = Runtime.default_write_pool_size()
+
+      assert Runtime.new(name: unique_name(), dir: dir, write_pool_size: size).write_pool_size ==
+               size
+    end
   end
 
   describe "engines/1" do
