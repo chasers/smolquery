@@ -5,6 +5,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.BufferService.TableBuffer.Committer
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
@@ -324,9 +325,90 @@ defmodule Smolquery.BufferService.TableBufferTest do
     end
   end
 
+  describe "the adaptive wait" do
+    test "a lone insert skips the interval", context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_interval_ms: 60_000,
+          flush_idle_interval_ms: 10,
+          commit_siblings: 5,
+          write_timeout_ms: 2_000
+        )
+
+      assert {:ok, %{row_count: 1}} = Client.write_batch(name, @table, batch(1..1))
+    end
+
+    test "commit_siblings: 0 keeps the full interval", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context,
+          flush_interval_ms: 60_000,
+          flush_idle_interval_ms: 0,
+          commit_siblings: 0
+        )
+
+      writer = Task.async(fn -> Client.write_batch(name, @table, batch(1..1)) end)
+
+      assert Eventually.until(fn -> accumulated_rows(name) == 1 end)
+      Process.sleep(50)
+      assert HotManifest.entries(runtime.manifest, @table) == []
+
+      assert Client.flush(name, @table) == :ok
+      assert {:ok, %{row_count: 1}} = Task.await(writer)
+    end
+
+    test "a window that opens above commit_siblings holds the full interval", context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_interval_ms: 60_000,
+          flush_idle_interval_ms: 1,
+          commit_siblings: 1
+        )
+
+      {:ok, _boot} = Client.write_batch(name, @table, batch(1..1))
+
+      [{committer, _value}] = Registry.lookup(Runtime.committer_registry(name), @table)
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Committer.with_log(committer, fn _log ->
+            send(test_pid, :held)
+
+            receive do
+              :release -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :held
+
+      first = Task.async(fn -> Client.write_batch(name, @table, batch(2..2)) end)
+      assert Eventually.until(fn -> in_flight_inserts(name) == 1 end)
+
+      second = Task.async(fn -> Client.write_batch(name, @table, batch(3..3)) end)
+      assert Eventually.until(fn -> accumulated_rows(name) == 1 end)
+
+      send(committer, :release)
+      Task.await(holder)
+
+      assert {:ok, %{row_count: 1}} = Task.await(first)
+      assert accumulated_rows(name) == 1
+
+      assert Client.flush(name, @table) == :ok
+      assert {:ok, %{row_count: 1}} = Task.await(second)
+    end
+  end
+
   defp accumulated_rows(name) do
     case Registry.lookup(Runtime.registry(name), @table) do
       [{pid, _value}] -> :sys.get_state(pid).row_count
+      [] -> 0
+    end
+  end
+
+  defp in_flight_inserts(name) do
+    case Registry.lookup(Runtime.registry(name), @table) do
+      [{pid, _value}] -> :sys.get_state(pid).in_flight_inserts
       [] -> 0
     end
   end

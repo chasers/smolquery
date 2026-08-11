@@ -18,11 +18,14 @@ config :smolquery, SmolqueryWeb.Endpoint,
 # Pinned like `Smolquery.Engine` below: the real defaults derive from the
 # host's scheduler count, one DuckDB instance per scheduler per test. `1`/`1`
 # is the smallest shape that keeps the defaults' one-encode-per-member ratio.
+# `commit_siblings: 0` holds the adaptive wait off, so `flush_interval_ms`
+# keeps meaning what a test says; adaptive tests opt back in explicitly.
 config :smolquery, Smolquery.BufferService,
   hot_server_port: 0,
   seal_consumer: {Smolquery.BufferService.SealLog, []},
   write_pool_size: 1,
-  encode_concurrency: 1
+  encode_concurrency: 1,
+  commit_siblings: 0
 
 config :smolquery, Smolquery.StorageService, engine_extensions: []
 

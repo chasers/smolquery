@@ -73,6 +73,25 @@ defmodule Smolquery.BufferService.RuntimeTest do
         end
       end
     end
+
+    test "refuses unusable adaptive-wait settings at boot, not at first accumulation", %{
+      tmp_dir: dir
+    } do
+      for siblings <- [-1, "5", 2.5] do
+        assert_raise ArgumentError, ~r/unusable commit siblings/, fn ->
+          Runtime.new(name: unique_name(), dir: dir, commit_siblings: siblings)
+        end
+      end
+
+      for interval <- [-1, "5"] do
+        assert_raise ArgumentError, ~r/unusable idle flush interval/, fn ->
+          Runtime.new(name: unique_name(), dir: dir, flush_idle_interval_ms: interval)
+        end
+      end
+
+      off = Runtime.new(name: unique_name(), dir: dir, commit_siblings: 0)
+      assert off.commit_siblings == 0
+    end
   end
 
   describe "default_write_pool_size/0 and default_encode_concurrency/0" do

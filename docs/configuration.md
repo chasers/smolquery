@@ -40,6 +40,8 @@ full set of dials behind them.
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
+| `SMOLQUERY_COMMIT_SIBLINGS` | the in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window opening below it closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead — waiting only buys batching when other writers are active. `0` turns the short window off |
+| `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |
 | `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`2000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch |
 | `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (the node's scheduler count — a container held to one core encodes serially, which is what one core means); the manifest append, replication round and replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS quotas — set this and the pool size explicitly where quotas are the fence |
@@ -106,6 +108,8 @@ config :smolquery, Smolquery.Catalog.DuckLake,
 config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,
+  flush_idle_interval_ms: 5,
+  commit_siblings: 5,
   flush_max_rows: 100_000,
   flush_max_bytes: 2_000_000,
   max_buffered_rows: 500_000,
@@ -164,6 +168,12 @@ stays on the node that gave the ack. Point the segments elsewhere with
 
 `flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
 the current group commit, so lowering it trades throughput for latency.
+
+That trade only exists when there is something to group. `commit_siblings` and
+`flush_idle_interval_ms` make the wait adaptive: a window that opens with
+fewer than `commit_siblings` inserts already in flight closes after
+`flush_idle_interval_ms` instead. A lone writer acks at commit speed rather
+than the interval, and real concurrency keeps the configured cadence.
 
 It is only half the trigger, though, and under load usually not the half that
 fires. `flush_max_rows` and `flush_max_bytes` end a commit as soon as the
