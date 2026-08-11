@@ -44,6 +44,16 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+# Keep spills off `SMOLQUERY_DATA_DIR`, which may hold acknowledged buffer data.
+# Unset preserves DuckDB's `.tmp` filesystem.
+if dir = System.get_env("SMOLQUERY_SPILL_DIR") do
+  config :smolquery, :spill_dir, dir
+end
+
+if size = System.get_env("SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE") do
+  config :smolquery, :max_temp_directory_size, size
+end
+
 if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do
   ceiling =
     case max_rows do
