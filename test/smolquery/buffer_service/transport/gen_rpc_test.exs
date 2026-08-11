@@ -27,7 +27,7 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
       dir: Path.join(context.tmp_dir, "buffer"),
       flush_interval_ms: 25,
       write_pool_size: 1,
-      encode_concurrency: 2,
+      encode_concurrency: 1,
       ring: [node]
     ]
 

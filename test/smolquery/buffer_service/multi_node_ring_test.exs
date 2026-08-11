@@ -51,7 +51,7 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
       flush_interval_ms: 25,
       hot_server_port: 0,
       write_pool_size: 1,
-      encode_concurrency: 2,
+      encode_concurrency: 1,
       ring: [node()]
     ]
 
@@ -101,7 +101,7 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
       flush_interval_ms: 25,
       hot_server_port: 0,
       write_pool_size: 1,
-      encode_concurrency: 2,
+      encode_concurrency: 1,
       ring: [peer_node]
     ]
 
