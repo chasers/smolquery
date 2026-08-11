@@ -32,7 +32,6 @@ defmodule Smolquery.BufferService.Runtime do
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
         compression: :lz4raw,
-        encode_concurrency: 2,
         ring: [:"buffer1@host"]
 
   `:dir` is the root: segments go to a `Store.Local` beneath `segments/`, manifest
@@ -63,10 +62,9 @@ defmodule Smolquery.BufferService.Runtime do
   overlap two. That is the arithmetic saying what the node was told about its own
   CPU, and `2` was never a measurement.
 
-  Both resolve in `new/1` rather than in the struct, because a struct default is
-  evaluated when
-  this module compiles: a release built on an eight-scheduler builder would
-  carry that eight to every host it ran on, which is the trap
+  Both resolve in `new/1` rather than in the struct, because a struct default
+  is evaluated when this module compiles: a release built on an eight-scheduler
+  builder would carry that eight to every host it ran on, which is the trap
   `Smolquery.Engine`'s `:threads` already fell into in `config/config.exs`. The
   `1` and `2` still sitting in the struct are the floor a hand-built `%Runtime{}`
   gets, not what a node boots on.
@@ -75,8 +73,8 @@ defmodule Smolquery.BufferService.Runtime do
   the same factor, since nothing divides a size string — a sixteen-scheduler
   host inheriting a `2GB` engine limit declares 32 GB of write budget. Set
   `:write_engine_memory_limit` on a host where that matters;
-  `Smolquery.DeployedShape` prints the resolved number at boot so it is not a
-  multiplication an operator has to do in their head.
+  `Smolquery.DeployedShape` prints both factors on the `buffer shape:` line
+  at boot.
 
   `:write_engine_threads` (default `nil`) does the same for threads. Left unset,
   the pool divides `Smolquery.Engine`'s thread count by its own size, in
@@ -264,6 +262,9 @@ defmodule Smolquery.BufferService.Runtime do
   it: `0` names an engine `Engine-1` that was never started and then raises
   inside `:erlang.phash2/2` on the first flush, taking the committer and every
   unacked batch with it.
+
+  `:encode_concurrency` gets the same gate: a `0` reaching the committer
+  starts no encodes, and the table silently fills to `buffer_full`.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -276,6 +277,7 @@ defmodule Smolquery.BufferService.Runtime do
 
     validate_compression!(Keyword.get(config, :compression, :zstd))
     validate_write_pool_size!(Keyword.fetch!(config, :write_pool_size))
+    validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -319,10 +321,9 @@ defmodule Smolquery.BufferService.Runtime do
   @doc """
   The `:encode_concurrency` a node comes up on when nothing configures one.
 
-  The scheduler count, with no floor under it and no ceiling over it. It is one
-  encode per member of the pool `default_write_pool_size/0` sizes, which is what
-  the two knobs describe together: how many of a table's flushes may be in
-  DuckDB at once.
+  The scheduler count, with no floor and no ceiling. Up to
+  `default_write_pool_size/0`'s cap that is one encode per pool member; past
+  it the extra encodes queue on the members' connections.
 
   There is no special case for a single-scheduler host. Such a node is being
   told it has one core, and the honest reading of that is one encode — the
@@ -438,6 +439,16 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable write pool size: #{inspect(size)} " <>
             "(expected an integer in 1..#{@max_write_pool_size})"
+  end
+
+  defp validate_encode_concurrency!(concurrency)
+       when is_integer(concurrency) and concurrency > 0,
+       do: :ok
+
+  defp validate_encode_concurrency!(concurrency) do
+    raise ArgumentError,
+          "unusable encode concurrency: #{inspect(concurrency)} " <>
+            "(expected a positive integer)"
   end
 
   use Smolquery.Runtime

@@ -56,13 +56,22 @@ defmodule Smolquery.BufferService.RuntimeTest do
     end
 
     test "application config still wins over the host-derived defaults", %{tmp_dir: dir} do
+      pinned = Application.fetch_env!(:smolquery, Smolquery.BufferService)
       runtime = Runtime.new(name: unique_name(), dir: dir)
 
-      assert runtime.write_pool_size == 1
-      assert runtime.encode_concurrency == 2
+      assert runtime.write_pool_size == Keyword.fetch!(pinned, :write_pool_size)
+      assert runtime.encode_concurrency == Keyword.fetch!(pinned, :encode_concurrency)
 
       overridden = Runtime.new(name: unique_name(), dir: dir, write_pool_size: 4)
       assert overridden.write_pool_size == 4
+    end
+
+    test "refuses an unusable encode concurrency at boot, not at first flush", %{tmp_dir: dir} do
+      for concurrency <- [0, -1, "2"] do
+        assert_raise ArgumentError, ~r/unusable encode concurrency/, fn ->
+          Runtime.new(name: unique_name(), dir: dir, encode_concurrency: concurrency)
+        end
+      end
     end
   end
 
