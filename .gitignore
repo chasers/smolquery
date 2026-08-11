@@ -13,6 +13,10 @@
 # Temporary files, for example, from tests.
 /tmp/
 
+# DuckDB spill files (temp_directory). A query that exceeds memory_limit writes
+# duckdb_temp_storage_*.tmp here, and a bench run can leave tens of gigabytes.
+/.tmp/
+
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
 

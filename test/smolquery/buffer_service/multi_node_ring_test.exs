@@ -50,6 +50,8 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
       dir: Path.join(context.tmp_dir, "primary"),
       flush_interval_ms: 25,
       hot_server_port: 0,
+      write_pool_size: 1,
+      encode_concurrency: 1,
       ring: [node()]
     ]
 
@@ -76,6 +78,12 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
     {:ok, peer, peer_node} = start_peer()
 
     :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    # The primary's code path carries Mix's beams, and phoenix (1.8.10+) reads
+    # `Mix.Project.config()` at boot whenever those are loadable — without
+    # Mix's processes the peer's `:phoenix` dies in `Phoenix.CodeReloader`.
+    # Production peers run releases with no Mix at all; a peer that borrows a
+    # Mix node's path has to borrow the running app too.
+    {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
     :erpc.call(peer_node, Application, :put_env, [:smolquery, :roles, [:buffer]])
 
     :erpc.call(peer_node, Application, :put_env, [
@@ -98,6 +106,8 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
       dir: "#{System.tmp_dir!()}/smolquery_ring_peer_#{:erlang.unique_integer([:positive])}",
       flush_interval_ms: 25,
       hot_server_port: 0,
+      write_pool_size: 1,
+      encode_concurrency: 1,
       ring: [peer_node]
     ]
 

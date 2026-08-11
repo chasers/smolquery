@@ -15,9 +15,14 @@ config :smolquery, SmolqueryWeb.Endpoint,
   secret_key_base: "vN2tBnLkDhX4wG9pQmZrY7cJfA1sE6uHb3TgVjR8xWqK5yMdC0aPoUiSlF2hNzEe",
   server: false
 
+# Pinned like `Smolquery.Engine` below: the real defaults derive from the
+# host's scheduler count, one DuckDB instance per scheduler per test. `1`/`1`
+# is the smallest shape that keeps the defaults' one-encode-per-member ratio.
 config :smolquery, Smolquery.BufferService,
   hot_server_port: 0,
-  seal_consumer: {Smolquery.BufferService.SealLog, []}
+  seal_consumer: {Smolquery.BufferService.SealLog, []},
+  write_pool_size: 1,
+  encode_concurrency: 1
 
 config :smolquery, Smolquery.StorageService, engine_extensions: []
 

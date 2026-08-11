@@ -32,7 +32,6 @@ defmodule Smolquery.BufferService.Runtime do
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
         compression: :lz4raw,
-        encode_concurrency: 2,
         ring: [:"buffer1@host"]
 
   `:dir` is the root: segments go to a `Store.Local` beneath `segments/`, manifest
@@ -44,15 +43,38 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
-  `:write_pool_size` (default `1`) is how many DuckDB instances the `:duckdb`
-  flush spreads its encodes over — see `engine_for/2` for why it hashes on the
-  segment id, and `engines/1` for the pool itself. It must be a positive
-  integer no larger than `@max_write_pool_size`; `new/1` refuses anything else
-  at boot rather than let a node come up looking configured. Each
-  member is a whole `Smolquery.Engine` subtree carrying that module's own
-  `:memory_limit`, so the declared DuckDB memory budget is `write_pool_size ×`
-  it — `:write_engine_memory_limit` (default `nil`) narrows the pool's members
+  `:write_pool_size` is how many DuckDB instances the `:duckdb` flush spreads
+  its encodes over — see `engine_for/2` for why it hashes on the segment id,
+  and `engines/1` for the pool itself. It must be a positive integer no larger
+  than `@max_write_pool_size`; `new/1` refuses anything else at boot rather
+  than let a node come up looking configured. Each member is a whole
+  `Smolquery.Engine` subtree carrying that module's own `:memory_limit`, so the
+  declared DuckDB memory budget is `write_pool_size ×` it —
+  `:write_engine_memory_limit` (default `nil`) narrows the pool's members
   without touching the query engine's.
+
+  Unset, it is `default_write_pool_size/0` — the node's scheduler count, capped
+  at `@max_write_pool_size`. It used to be `1`, a quarter of the load rig's
+  reference tuning and an eighth of what that rig measured fastest; a stock
+  install was the one shape nobody benched. `:encode_concurrency` had the same
+  problem at `2` and is now `default_encode_concurrency/0`, one encode per
+  scheduler — so a single-scheduler container encodes serially, where it used to
+  overlap two. That is the arithmetic saying what the node was told about its own
+  CPU, and `2` was never a measurement.
+
+  Both resolve in `new/1` rather than in the struct, because a struct default
+  is evaluated when this module compiles: a release built on an eight-scheduler
+  builder would carry that eight to every host it ran on, which is the trap
+  `Smolquery.Engine`'s `:threads` already fell into in `config/config.exs`. The
+  `1` and `2` still sitting in the struct are the floor a hand-built `%Runtime{}`
+  gets, not what a node boots on.
+
+  Deriving the pool from the schedulers multiplies the declared DuckDB memory by
+  the same factor, since nothing divides a size string — a sixteen-scheduler
+  host inheriting a `2GB` engine limit declares 32 GB of write budget. Set
+  `:write_engine_memory_limit` on a host where that matters;
+  `Smolquery.DeployedShape` prints both factors on the `buffer shape:` line
+  at boot.
 
   `:write_engine_threads` (default `nil`) does the same for threads. Left unset,
   the pool divides `Smolquery.Engine`'s thread count by its own size, in
@@ -219,6 +241,12 @@ defmodule Smolquery.BufferService.Runtime do
   Application config for `Smolquery.BufferService` supplies the defaults; `opts`
   overrides them, so a test passes what it needs and inherits the rest.
 
+  `:write_pool_size` and `:encode_concurrency` are the two whose default is a
+  measurement of the host rather than a number in this file — see
+  `default_write_pool_size/0` and `default_encode_concurrency/0`. They are
+  resolved here, at boot, for the reason the moduledoc gives: a struct default
+  would freeze the *builder's* scheduler count into the release.
+
   Raises on a `compression` outside #{inspect(@codecs)}, for the same reason
   `Smolquery.StorageService.Runtime` does: a codec discovered bad per group
   commit would fail every flush rather than once, here, at boot. The default
@@ -234,12 +262,22 @@ defmodule Smolquery.BufferService.Runtime do
   it: `0` names an engine `Engine-1` that was never started and then raises
   inside `:erlang.phash2/2` on the first flush, taking the committer and every
   unacked batch with it.
+
+  `:encode_concurrency` gets the same gate: a `0` reaching the committer
+  starts no encodes, and the table silently fills to `buffer_full`.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    config = Keyword.merge(Application.get_env(:smolquery, Smolquery.BufferService, []), opts)
+    config =
+      :smolquery
+      |> Application.get_env(Smolquery.BufferService, [])
+      |> Keyword.merge(opts)
+      |> Keyword.put_new_lazy(:write_pool_size, &default_write_pool_size/0)
+      |> Keyword.put_new_lazy(:encode_concurrency, &default_encode_concurrency/0)
+
     validate_compression!(Keyword.get(config, :compression, :zstd))
-    validate_write_pool_size!(Keyword.get(config, :write_pool_size, 1))
+    validate_write_pool_size!(Keyword.fetch!(config, :write_pool_size))
+    validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -264,6 +302,36 @@ defmodule Smolquery.BufferService.Runtime do
       Keyword.take(config, @limits)
     )
   end
+
+  @doc """
+  The `:write_pool_size` a node comes up on when nothing configures one.
+
+  One DuckDB instance per scheduler, capped at #{@max_write_pool_size}. The
+  pool exists to stop a table's flushes queueing behind one connection, so the
+  count that bounds it is the node's own parallelism — the same number
+  `write_engine_budget/1` then divides among the members.
+
+  The cap is the reason this is `min/2` and not the raw scheduler count: a
+  64-core host would otherwise declare 64 DuckDB instances, each with
+  `Smolquery.Engine`'s whole memory limit.
+  """
+  @spec default_write_pool_size() :: pos_integer()
+  def default_write_pool_size, do: min(System.schedulers_online(), @max_write_pool_size)
+
+  @doc """
+  The `:encode_concurrency` a node comes up on when nothing configures one.
+
+  The scheduler count, with no floor and no ceiling. Up to
+  `default_write_pool_size/0`'s cap that is one encode per pool member; past
+  it the extra encodes queue on the members' connections.
+
+  There is no special case for a single-scheduler host. Such a node is being
+  told it has one core, and the honest reading of that is one encode — the
+  standing `2` it replaces was never a measurement, only a number that had
+  always been there.
+  """
+  @spec default_encode_concurrency() :: pos_integer()
+  def default_encode_concurrency, do: System.schedulers_online()
 
   @doc """
   The DuckDB instance a `:duckdb` flush writes its segment with.
@@ -371,6 +439,16 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable write pool size: #{inspect(size)} " <>
             "(expected an integer in 1..#{@max_write_pool_size})"
+  end
+
+  defp validate_encode_concurrency!(concurrency)
+       when is_integer(concurrency) and concurrency > 0,
+       do: :ok
+
+  defp validate_encode_concurrency!(concurrency) do
+    raise ArgumentError,
+          "unusable encode concurrency: #{inspect(concurrency)} " <>
+            "(expected a positive integer)"
   end
 
   use Smolquery.Runtime

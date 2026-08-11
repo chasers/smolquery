@@ -54,6 +54,9 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
     on_exit(fn -> safely_stop_supervisor(primary_sup) end)
 
     :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    # Mix must run wherever its beams are loadable: phoenix (1.8.10+) reads
+    # `Mix.Project.config()` at boot and dies on a Mix-less peer otherwise.
+    {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
 
     peer_dir =
       "#{System.tmp_dir!()}/smolquery_seal_ownership_peer_#{:erlang.unique_integer([:positive])}"

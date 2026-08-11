@@ -43,6 +43,9 @@ defmodule Smolquery.Cluster.PostgresDiscoveryTest do
     {:ok, peer, node} = start_peer()
 
     :erpc.call(node, :code, :add_paths, [:code.get_path()])
+    # Mix must run wherever its beams are loadable: phoenix (1.8.10+) reads
+    # `Mix.Project.config()` at boot and dies on a Mix-less peer otherwise.
+    {:ok, _mix} = :erpc.call(node, Application, :ensure_all_started, [:mix])
     :erpc.call(node, Application, :put_env, [:smolquery, :roles, []])
 
     :erpc.call(node, Application, :put_env, [
