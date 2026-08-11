@@ -17,6 +17,8 @@ defmodule Smolquery.BufferService.Runtime do
       config :smolquery, Smolquery.BufferService,
         dir: "priv/data/buffer",
         flush_interval_ms: 1_000,
+        flush_idle_interval_ms: 5,
+        commit_siblings: 5,
         flush_max_rows: 100_000,
         flush_max_bytes: 2_000_000,
         max_buffered_rows: 500_000,
@@ -113,6 +115,15 @@ defmodule Smolquery.BufferService.Runtime do
   optimum is a function of how fast a partition fills, so re-measure it for a
   very different row width.
 
+  `commit_siblings` and `flush_idle_interval_ms` make the group-commit wait
+  adaptive, after Postgres's `commit_delay`/`commit_siblings` (T-202). An
+  accumulation window that opens with fewer than `commit_siblings` inserts
+  already in flight closes after `flush_idle_interval_ms` instead of
+  `flush_interval_ms`. The wait only buys batching when other writers are
+  active; at one writer it is pure ack latency. `commit_siblings: 0` turns
+  the short window off. See `Smolquery.BufferService.TableBuffer` for what
+  counts as in flight and when the choice is made.
+
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
   deleting one out from under an in-flight scan is exactly what it prevents.
@@ -138,6 +149,8 @@ defmodule Smolquery.BufferService.Runtime do
     :replicator,
     :spool_dir,
     flush_interval_ms: 1_000,
+    flush_idle_interval_ms: 5,
+    commit_siblings: 5,
     flush_max_rows: 100_000,
     flush_max_bytes: 2_000_000,
     max_buffered_rows: 500_000,
@@ -171,6 +184,8 @@ defmodule Smolquery.BufferService.Runtime do
           replicator: Replicator.t(),
           spool_dir: Path.t(),
           flush_interval_ms: pos_integer(),
+          flush_idle_interval_ms: non_neg_integer(),
+          commit_siblings: non_neg_integer(),
           flush_max_rows: pos_integer(),
           flush_max_bytes: pos_integer(),
           max_buffered_rows: pos_integer(),
@@ -198,6 +213,8 @@ defmodule Smolquery.BufferService.Runtime do
 
   @limits [
     :flush_interval_ms,
+    :flush_idle_interval_ms,
+    :commit_siblings,
     :flush_max_rows,
     :flush_max_bytes,
     :max_buffered_rows,
@@ -265,6 +282,10 @@ defmodule Smolquery.BufferService.Runtime do
 
   `:encode_concurrency` gets the same gate: a `0` reaching the committer
   starts no encodes, and the table silently fills to `buffer_full`.
+
+  `:commit_siblings` and `:flush_idle_interval_ms` are gated too: a negative
+  idle interval detonates in `Process.send_after/3` at a table's first
+  accumulation, far from the config that set it.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -278,6 +299,8 @@ defmodule Smolquery.BufferService.Runtime do
     validate_compression!(Keyword.get(config, :compression, :zstd))
     validate_write_pool_size!(Keyword.fetch!(config, :write_pool_size))
     validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
+    validate_commit_siblings!(Keyword.get(config, :commit_siblings, 5))
+    validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -449,6 +472,23 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable encode concurrency: #{inspect(concurrency)} " <>
             "(expected a positive integer)"
+  end
+
+  defp validate_commit_siblings!(count) when is_integer(count) and count >= 0, do: :ok
+
+  defp validate_commit_siblings!(count) do
+    raise ArgumentError,
+          "unusable commit siblings: #{inspect(count)} " <>
+            "(expected a non-negative integer)"
+  end
+
+  defp validate_flush_idle_interval!(interval) when is_integer(interval) and interval >= 0,
+    do: :ok
+
+  defp validate_flush_idle_interval!(interval) do
+    raise ArgumentError,
+          "unusable idle flush interval: #{inspect(interval)} " <>
+            "(expected a non-negative integer of milliseconds)"
   end
 
   use Smolquery.Runtime

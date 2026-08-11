@@ -44,6 +44,25 @@ defmodule Smolquery.BufferService.TableBuffer do
   process's mailbox now waits in the committer's queue, the same rows one
   hop later.
 
+  ## The wait is adaptive
+
+  An accumulation window that opens with fewer than `commit_siblings` inserts
+  already in flight closes after `flush_idle_interval_ms` rather than
+  `flush_interval_ms` — Postgres's `commit_delay`/`commit_siblings`, at the
+  file level (T-202). The interval only buys batching when other writers are
+  active: at one writer the wait is pure ack latency, and it was most of the
+  benchmark's low-VU ack. In flight means handed off and not yet settled —
+  callers whose rows are committing now, the writers who come back the moment
+  they are acked. Callers are counted rather than commits, because one queued
+  commit can hold a hundred of them.
+
+  The idle window is a few milliseconds rather than zero so a burst's
+  simultaneous first inserts still coalesce into one commit. The choice is
+  made once, when the window's first chunk arms the timer: a window armed
+  long just before load vanishes waits the full interval once, and the next
+  window adapts. Real concurrency keeps today's behavior — the window opens
+  above the threshold and the interval and byte caps rule unchanged.
+
   ## Backpressure is immediate
 
   A batch that would push the accumulator past `max_buffered_rows` or
@@ -132,6 +151,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     row_count: 0,
     byte_size: 0,
     in_flight: 0,
+    in_flight_inserts: 0,
     in_flight_ids: MapSet.new()
   ]
 
@@ -479,8 +499,8 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   def handle_info({:flush, _stale}, state), do: {:noreply, state}
 
-  def handle_info({:commit_done, batch_ids}, state) do
-    {:noreply, state |> settle(batch_ids) |> run_maintenance()}
+  def handle_info({:commit_done, batch_ids, inserts}, state) do
+    {:noreply, state |> settle(batch_ids, inserts) |> run_maintenance()}
   end
 
   def handle_info(:maintain, state) do
@@ -509,10 +529,11 @@ defmodule Smolquery.BufferService.TableBuffer do
     :exit, _reason -> state
   end
 
-  defp settle(state, batch_ids) do
+  defp settle(state, batch_ids, inserts) do
     %{
       state
       | in_flight: state.in_flight - 1,
+        in_flight_inserts: state.in_flight_inserts - inserts,
         in_flight_ids: Enum.reduce(batch_ids, state.in_flight_ids, &MapSet.delete(&2, &1))
     }
   end
@@ -529,7 +550,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp drain_commit_done(state) do
     receive do
-      {:commit_done, batch_ids} -> drain_commit_done(settle(state, batch_ids))
+      {:commit_done, batch_ids, inserts} -> drain_commit_done(settle(state, batch_ids, inserts))
     after
       0 -> state
     end
@@ -845,6 +866,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp handoff(state) do
     batch_ids = Enum.reverse(state.batch_ids)
+    inserts = Enum.count(state.pending, fn {_from, kind} -> kind != :flush end)
 
     # `opened_at` is when this accumulator took its first chunk, so the span it
     # closes is how long the *oldest* caller in the group has been waiting before
@@ -871,6 +893,7 @@ defmodule Smolquery.BufferService.TableBuffer do
         opened_at: nil,
         timer: cancel(state.timer),
         in_flight: state.in_flight + 1,
+        in_flight_inserts: state.in_flight_inserts + inserts,
         in_flight_ids: Enum.into(batch_ids, state.in_flight_ids)
     }
   end
@@ -882,12 +905,20 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp schedule(%__MODULE__{timer: nil} = state) do
     tag = make_ref()
-    timer = Process.send_after(self(), {:flush, tag}, state.runtime.flush_interval_ms)
+    timer = Process.send_after(self(), {:flush, tag}, flush_after(state))
 
     %{state | timer: {timer, tag}}
   end
 
   defp schedule(state), do: state
+
+  defp flush_after(state) do
+    if state.in_flight_inserts < state.runtime.commit_siblings do
+      state.runtime.flush_idle_interval_ms
+    else
+      state.runtime.flush_interval_ms
+    end
+  end
 
   defp cancel(nil), do: nil
 

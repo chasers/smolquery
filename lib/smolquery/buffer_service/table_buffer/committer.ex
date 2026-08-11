@@ -121,8 +121,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   @doc """
   Enqueues a frozen batch. The committer replies to every pending caller
-  once the batch is durable, then reports `{:commit_done, batch_ids}` to
-  the buffer.
+  once the batch is durable, then reports `{:commit_done, batch_ids,
+  insert_count}` to the buffer — the count is the commit's `:new` and
+  `:duplicate` callers, which the buffer's adaptive wait settles against
+  its in-flight total.
   """
   @spec commit(GenServer.server(), commit()) :: :ok
   def commit(committer, commit), do: GenServer.cast(committer, {:commit, commit})
@@ -433,10 +435,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     reply_to_pending(commit.pending, result, rejected)
 
-    send(state.buffer, {:commit_done, commit.batch_ids})
+    send(state.buffer, {:commit_done, commit.batch_ids, inserts(commit.pending)})
 
     state
   end
+
+  defp inserts(pending), do: Enum.count(pending, fn {_from, kind} -> kind != :flush end)
 
   # Split so the manifest append and the replication round can be timed apart:
   # they are the two serialized steps, and T-181 exists because the encode —

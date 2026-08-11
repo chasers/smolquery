@@ -65,6 +65,8 @@ config :smolquery, Smolquery.IngestService, schema_cache_ttl_ms: 60_000
 config :smolquery, Smolquery.BufferService,
   dir: "priv/data/buffer",
   flush_interval_ms: 1_000,
+  flush_idle_interval_ms: 5,
+  commit_siblings: 5,
   flush_max_rows: 100_000,
   flush_max_bytes: 2_000_000,
   max_buffered_rows: 500_000,

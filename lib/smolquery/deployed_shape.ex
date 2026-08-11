@@ -51,6 +51,8 @@ defmodule Smolquery.DeployedShape do
       compression: runtime.compression,
       flush_max_bytes: runtime.flush_max_bytes,
       flush_interval_ms: runtime.flush_interval_ms,
+      flush_idle_interval_ms: runtime.flush_idle_interval_ms,
+      commit_siblings: runtime.commit_siblings,
       encode_concurrency: runtime.encode_concurrency,
       write_pool_size: runtime.write_pool_size,
       write_engine_threads: budget[:threads],

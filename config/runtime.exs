@@ -99,6 +99,14 @@ if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
   config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
 end
 
+if interval = System.get_env("SMOLQUERY_FLUSH_IDLE_INTERVAL_MS") do
+  config :smolquery, Smolquery.BufferService, flush_idle_interval_ms: String.to_integer(interval)
+end
+
+if siblings = System.get_env("SMOLQUERY_COMMIT_SIBLINGS") do
+  config :smolquery, Smolquery.BufferService, commit_siblings: String.to_integer(siblings)
+end
+
 if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
   config :smolquery, Smolquery.BufferService, encode_concurrency: String.to_integer(concurrency)
 end

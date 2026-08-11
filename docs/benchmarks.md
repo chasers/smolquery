@@ -74,7 +74,9 @@ how many get through.
 
 The number to design against is ack latency, and it has two regimes. Below
 saturation, `p50 = flush_interval_ms + ~5 ms` regardless of load — group
-commit's whole promise. At saturation, `p50 = outstanding rows ÷ throughput`
+commit's whole promise. Measured before the adaptive wait (T-202): below
+`commit_siblings` in-flight inserts the window is now `flush_idle_interval_ms`,
+so a lone writer's p50 is the commit itself, not the interval. At saturation, `p50 = outstanding rows ÷ throughput`
 (Little's Law) and **`flush_interval_ms` drops out entirely**. So at the default
 config a 20-column table returns a **2.01 second p50 ack**. Eight independent
 buffers reach 6.68M rows/s — 3.11× light, 4.09× huge, ordered by how

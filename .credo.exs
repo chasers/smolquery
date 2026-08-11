@@ -150,7 +150,11 @@
           {Credo.Check.Warning.OperationWithConstantResult, []},
           {Credo.Check.Warning.RaiseInsideRescue, []},
           {Credo.Check.Warning.SpecWithStruct, []},
-          {Credo.Check.Warning.StructFieldAmount, []},
+          # `BufferService.Runtime` is a resolved-configuration record: one
+          # field per operator-facing setting is its whole design, and the
+          # 31-field ceiling exists to catch data clumps, not config records.
+          {Credo.Check.Warning.StructFieldAmount,
+           files: %{excluded: ["lib/smolquery/buffer_service/runtime.ex"]}},
           {Credo.Check.Warning.UnsafeExec, []},
           {Credo.Check.Warning.UnusedEnumOperation, []},
           {Credo.Check.Warning.UnusedFileOperation, []},

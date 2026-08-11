@@ -33,6 +33,8 @@ defmodule Smolquery.DeployedShapeTest do
 
       assert log =~ "buffer shape:"
       assert log =~ "flush_writer=duckdb"
+      assert log =~ "flush_idle_interval_ms=5"
+      assert log =~ "commit_siblings=0"
       assert log =~ "transport_tls=false"
     end
 
