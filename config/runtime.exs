@@ -13,21 +13,23 @@ if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
 end
 
 if api_port = System.get_env("SMOLQUERY_API_PORT") do
-  config :smolquery, SmolqueryApi.Endpoint, http: [port: String.to_integer(api_port)]
+  config :smolquery, SmolqueryApi.Endpoint,
+    http: [port: Smolquery.RuntimeConfig.port!("SMOLQUERY_API_PORT", api_port)]
 end
 
 if api_ip = System.get_env("SMOLQUERY_API_IP") do
-  {:ok, ip} = api_ip |> String.to_charlist() |> :inet.parse_address()
+  ip = Smolquery.RuntimeConfig.ip!("SMOLQUERY_API_IP", api_ip)
 
   config :smolquery, SmolqueryApi.Endpoint, http: [ip: ip]
 end
 
 if web_port = System.get_env("SMOLQUERY_WEB_PORT") do
-  config :smolquery, SmolqueryWeb.Endpoint, http: [port: String.to_integer(web_port)]
+  config :smolquery, SmolqueryWeb.Endpoint,
+    http: [port: Smolquery.RuntimeConfig.port!("SMOLQUERY_WEB_PORT", web_port)]
 end
 
 if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
-  {:ok, ip} = web_ip |> String.to_charlist() |> :inet.parse_address()
+  ip = Smolquery.RuntimeConfig.ip!("SMOLQUERY_WEB_IP", web_ip)
 
   config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
 end
@@ -46,10 +48,7 @@ end
 
 if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do
   ceiling =
-    case max_rows do
-      "infinity" -> :infinity
-      rows -> String.to_integer(rows)
-    end
+    Smolquery.RuntimeConfig.positive_integer_or_infinity!("SMOLQUERY_MAX_RESULT_ROWS", max_rows)
 
   config :smolquery, Smolquery.Engine, max_result_rows: ceiling
 end
@@ -80,57 +79,76 @@ if base_url = System.get_env("SMOLQUERY_BUFFER_BASE_URL") do
 end
 
 if buffer_nodes = System.get_env("SMOLQUERY_BUFFER_NODES") do
-  config :smolquery,
-         Smolquery.BufferService,
-         expected_nodes:
-           buffer_nodes
-           |> String.split(",", trim: true)
-           |> Enum.map(&(&1 |> String.trim() |> String.to_atom()))
+  config :smolquery, Smolquery.BufferService,
+    expected_node_names:
+      Smolquery.RuntimeConfig.node_names!("SMOLQUERY_BUFFER_NODES", buffer_nodes)
 end
 
 if replication = System.get_env("SMOLQUERY_BUFFER_REPLICATION") do
   config :smolquery, Smolquery.BufferService,
     replicator:
       {Smolquery.BufferService.Replicator.SegmentShipping,
-       replication_factor: String.to_integer(replication)}
+       replication_factor:
+         Smolquery.RuntimeConfig.integer_at_least!(
+           "SMOLQUERY_BUFFER_REPLICATION",
+           replication,
+           2
+         )}
 end
 
 if interval = System.get_env("SMOLQUERY_FLUSH_INTERVAL_MS") do
-  config :smolquery, Smolquery.BufferService, flush_interval_ms: String.to_integer(interval)
+  config :smolquery, Smolquery.BufferService,
+    flush_interval_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_INTERVAL_MS", interval)
 end
 
 if interval = System.get_env("SMOLQUERY_FLUSH_IDLE_INTERVAL_MS") do
-  config :smolquery, Smolquery.BufferService, flush_idle_interval_ms: String.to_integer(interval)
+  config :smolquery, Smolquery.BufferService,
+    flush_idle_interval_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_IDLE_INTERVAL_MS", interval)
 end
 
 if siblings = System.get_env("SMOLQUERY_COMMIT_SIBLINGS") do
-  config :smolquery, Smolquery.BufferService, commit_siblings: String.to_integer(siblings)
+  config :smolquery, Smolquery.BufferService,
+    commit_siblings:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMMIT_SIBLINGS", siblings)
 end
 
 if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
-  config :smolquery, Smolquery.BufferService, encode_concurrency: String.to_integer(concurrency)
+  config :smolquery, Smolquery.BufferService,
+    encode_concurrency:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_ENCODE_CONCURRENCY", concurrency)
 end
 
 if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
-  config :smolquery, Smolquery.BufferService, flush_max_bytes: String.to_integer(bytes)
+  config :smolquery, Smolquery.BufferService,
+    flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)
 end
 
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
-  config :smolquery, Smolquery.BufferService, max_buffered_bytes: String.to_integer(bytes)
+  config :smolquery, Smolquery.BufferService,
+    max_buffered_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_BUFFERED_BYTES", bytes)
 end
 
 # One variable sets both halves, because they are one decision: the ingest edge
 # only stops parsing if the buffer it forwards to can write the bytes, and a
 # buffer that starts DuckDB instances for flushes nothing sends is waste.
 if writer = System.get_env("SMOLQUERY_FLUSH_WRITER") do
-  flush_writer = String.to_existing_atom(writer)
+  flush_writer =
+    Smolquery.RuntimeConfig.enum!("SMOLQUERY_FLUSH_WRITER", writer, [
+      {"polars", :polars},
+      {"duckdb", :duckdb}
+    ])
 
   config :smolquery, Smolquery.BufferService, flush_writer: flush_writer
   config :smolquery, Smolquery.IngestService, ndjson_passthrough: flush_writer == :duckdb
 end
 
 if size = System.get_env("SMOLQUERY_WRITE_POOL_SIZE") do
-  config :smolquery, Smolquery.BufferService, write_pool_size: String.to_integer(size)
+  config :smolquery, Smolquery.BufferService,
+    write_pool_size:
+      Smolquery.RuntimeConfig.integer_in_range!("SMOLQUERY_WRITE_POOL_SIZE", size, 1, 32)
 end
 
 # The two knobs that size one member of the `:duckdb` write pool. Both are
@@ -143,7 +161,9 @@ end
 # stops describing a budget, and an operator who wants a different shape needs
 # to say so rather than read the arithmetic.
 if threads = System.get_env("SMOLQUERY_WRITE_ENGINE_THREADS") do
-  config :smolquery, Smolquery.BufferService, write_engine_threads: String.to_integer(threads)
+  config :smolquery, Smolquery.BufferService,
+    write_engine_threads:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_WRITE_ENGINE_THREADS", threads)
 end
 
 # `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` is the one that cannot be derived: a
@@ -155,14 +175,14 @@ if limit = System.get_env("SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT") do
 end
 
 if partitions = System.get_env("SMOLQUERY_WRITE_PARTITIONS") do
-  count = String.to_integer(partitions)
+  count = Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_WRITE_PARTITIONS", partitions)
 
   config :smolquery, Smolquery.IngestService, write_partitions: count
   config :smolquery, Smolquery.QueryService, write_partitions: count
 end
 
 if hot_server_port = System.get_env("SMOLQUERY_HOT_SERVER_PORT") do
-  port = String.to_integer(hot_server_port)
+  port = Smolquery.RuntimeConfig.port!("SMOLQUERY_HOT_SERVER_PORT", hot_server_port)
 
   config :smolquery, Smolquery.BufferService, hot_server_port: port
   config :smolquery, Smolquery.QueryService, buffer_hot_port: port
@@ -170,7 +190,7 @@ if hot_server_port = System.get_env("SMOLQUERY_HOT_SERVER_PORT") do
 end
 
 if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
-  port = String.to_integer(gen_rpc_port)
+  port = Smolquery.RuntimeConfig.port!("GEN_RPC_PORT", gen_rpc_port)
 
   config :gen_rpc, tcp_server_port: port, tcp_client_port: port
 end
@@ -195,7 +215,7 @@ if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
 end
 
 if hot_server_ip = System.get_env("SMOLQUERY_HOT_SERVER_IP") do
-  {:ok, ip} = hot_server_ip |> String.to_charlist() |> :inet.parse_address()
+  ip = Smolquery.RuntimeConfig.ip!("SMOLQUERY_HOT_SERVER_IP", hot_server_ip)
 
   config :smolquery, Smolquery.BufferService, hot_server_ip: ip
 end
@@ -219,28 +239,34 @@ if s3_bucket = System.get_env("SMOLQUERY_S3_BUCKET") do
   config :smolquery, Smolquery.QueryService, store: {Smolquery.Segments.Store.S3, s3_options}
 end
 
-if System.get_env("GEN_RPC_TLS") in ~w(true 1) do
-  tls_dir = System.get_env("GEN_RPC_TLS_DIR") || "/etc/smolquery/gen-rpc-tls"
+if tls = System.get_env("GEN_RPC_TLS") do
+  if Smolquery.RuntimeConfig.boolean!("GEN_RPC_TLS", tls) do
+    tls_dir = System.get_env("GEN_RPC_TLS_DIR") || "/etc/smolquery/gen-rpc-tls"
 
-  pod_name =
-    System.get_env("POD_NAME") || System.get_env("HOSTNAME") ||
-      raise "GEN_RPC_TLS requires POD_NAME"
+    pod_name =
+      System.get_env("POD_NAME") || System.get_env("HOSTNAME") ||
+        raise "GEN_RPC_TLS requires POD_NAME"
 
-  ssl_options = [
-    certfile: Path.join(tls_dir, pod_name <> ".pem"),
-    keyfile: Path.join(tls_dir, pod_name <> ".key"),
-    cacertfile: Path.join(tls_dir, "ca.pem")
-  ]
+    ssl_options = [
+      certfile: Path.join(tls_dir, pod_name <> ".pem"),
+      keyfile: Path.join(tls_dir, pod_name <> ".key"),
+      cacertfile: Path.join(tls_dir, "ca.pem")
+    ]
 
-  ssl_port = String.to_integer(System.get_env("GEN_RPC_SSL_PORT") || "5870")
+    ssl_port =
+      Smolquery.RuntimeConfig.port!(
+        "GEN_RPC_SSL_PORT",
+        System.get_env("GEN_RPC_SSL_PORT") || "5870"
+      )
 
-  config :gen_rpc,
-    default_client_driver: :ssl,
-    tcp_server_port: false,
-    ssl_server_port: ssl_port,
-    ssl_client_port: ssl_port,
-    ssl_client_options: ssl_options,
-    ssl_server_options: ssl_options
+    config :gen_rpc,
+      default_client_driver: :ssl,
+      tcp_server_port: false,
+      ssl_server_port: ssl_port,
+      ssl_client_port: ssl_port,
+      ssl_client_options: ssl_options,
+      ssl_server_options: ssl_options
+  end
 end
 
 if metadata = System.get_env("SMOLQUERY_CATALOG") do
@@ -248,5 +274,7 @@ if metadata = System.get_env("SMOLQUERY_CATALOG") do
 end
 
 if keep = System.get_env("SMOLQUERY_SNAPSHOT_KEEP_MS") do
-  config :smolquery, Smolquery.StorageService, snapshot_keep_ms: String.to_integer(keep)
+  config :smolquery, Smolquery.StorageService,
+    snapshot_keep_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SNAPSHOT_KEEP_MS", keep)
 end
