@@ -49,10 +49,15 @@ defmodule Smolquery.InternalSecret do
         secret
 
       _absent ->
-        secret = 32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-        Application.put_env(:smolquery, :internal_secret, secret)
+        if Smolquery.Cluster.enabled?() do
+          raise ArgumentError,
+                "clustered nodes require SMOLQUERY_INTERNAL_SECRET to be set to a non-empty shared value"
+        else
+          secret = 32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+          Application.put_env(:smolquery, :internal_secret, secret)
 
-        secret
+          secret
+        end
     end
   end
 

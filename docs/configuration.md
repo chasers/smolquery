@@ -16,7 +16,7 @@ full set of dials behind them.
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind (`127.0.0.1` — exposing the unauthenticated UI is a deliberate act / `4002`) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs web UI sessions; generated per boot when unset (sessions reset on restart) |
-| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicitly in a cluster or reads fail with 401s |
+| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 
 ### Storage and the catalog
 
