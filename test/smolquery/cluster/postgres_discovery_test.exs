@@ -47,6 +47,7 @@ defmodule Smolquery.Cluster.PostgresDiscoveryTest do
     # `Mix.Project.config()` at boot and dies on a Mix-less peer otherwise.
     {:ok, _mix} = :erpc.call(node, Application, :ensure_all_started, [:mix])
     :erpc.call(node, Application, :put_env, [:smolquery, :roles, []])
+    configure_internal_secret(node)
 
     :erpc.call(node, Application, :put_env, [
       :smolquery,
@@ -63,6 +64,14 @@ defmodule Smolquery.Cluster.PostgresDiscoveryTest do
 
     assert_receive {:cluster_membership, members}, 15_000
     refute node in members
+  end
+
+  defp configure_internal_secret(node) do
+    :erpc.call(node, Application, :put_env, [
+      :smolquery,
+      :internal_secret,
+      Smolquery.InternalSecret.value()
+    ])
   end
 
   defp postgres_config do

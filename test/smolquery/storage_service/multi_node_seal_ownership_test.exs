@@ -57,6 +57,7 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
     # Mix must run wherever its beams are loadable: phoenix (1.8.10+) reads
     # `Mix.Project.config()` at boot and dies on a Mix-less peer otherwise.
     {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
+    configure_internal_secret(peer_node)
 
     peer_dir =
       "#{System.tmp_dir!()}/smolquery_seal_ownership_peer_#{:erlang.unique_integer([:positive])}"
@@ -109,6 +110,14 @@ defmodule Smolquery.StorageService.MultiNodeSealOwnershipTest do
 
     refute_receive {:sealing, ^primary_table, _claim, _attempt}, 200
     refute_receive {:sealing, ^peer_table, _claim, _attempt}, 200
+  end
+
+  defp configure_internal_secret(peer_node) do
+    :erpc.call(peer_node, Application, :put_env, [
+      :smolquery,
+      :internal_secret,
+      Smolquery.InternalSecret.value()
+    ])
   end
 
   defp find_table_owned_by(ring, target_node) do

@@ -85,6 +85,7 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
     # Mix node's path has to borrow the running app too.
     {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
     :erpc.call(peer_node, Application, :put_env, [:smolquery, :roles, [:buffer]])
+    configure_internal_secret(peer_node)
 
     :erpc.call(peer_node, Application, :put_env, [
       :smolquery,
@@ -169,6 +170,14 @@ defmodule Smolquery.BufferService.MultiNodeRingTest do
     assert Routing.resolve(name) |> Routing.owner(peer_table) == node()
 
     assert {:ok, _ack} = Client.write_batch(name, peer_table, batch(4..6))
+  end
+
+  defp configure_internal_secret(peer_node) do
+    :erpc.call(peer_node, Application, :put_env, [
+      :smolquery,
+      :internal_secret,
+      Smolquery.InternalSecret.value()
+    ])
   end
 
   defp find_table_owned_by(ring, target_node) do
