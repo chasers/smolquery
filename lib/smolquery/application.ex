@@ -18,6 +18,7 @@ defmodule Smolquery.Application do
   @impl true
   def start(_type, _args) do
     Smolquery.InternalSecret.ensure()
+    Smolquery.StartupValidation.validate!()
 
     children =
       [Smolquery.Telemetry, Smolquery.Cluster.RingCache] ++
