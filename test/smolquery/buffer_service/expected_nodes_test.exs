@@ -1,5 +1,5 @@
 defmodule Smolquery.BufferService.ExpectedNodesTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Smolquery.BufferService.ExpectedNodes
   alias Smolquery.BufferService.Routing
@@ -30,6 +30,20 @@ defmodule Smolquery.BufferService.ExpectedNodesTest do
 
   test "a node with no keeper answers the static configuration" do
     assert ExpectedNodes.list(unique_name(:never_started)) == []
+  end
+
+  test "bounded release node-name strings become atoms only when consumed" do
+    previous = Application.fetch_env(:smolquery, Smolquery.BufferService)
+
+    Application.put_env(
+      :smolquery,
+      Smolquery.BufferService,
+      expected_node_names: ["buffer2@nonexistent.invalid"]
+    )
+
+    on_exit(fn -> restore_buffer_config(previous) end)
+
+    assert ExpectedNodes.list(unique_name(:never_started)) == [@joiner]
   end
 
   test "the first refresh seeds the row from the static configuration" do
@@ -124,4 +138,10 @@ defmodule Smolquery.BufferService.ExpectedNodesTest do
     assert {:ok, _config} = ExpectedNodes.resize(name, 1, [node()])
     refute @joiner in Routing.manifest_nodes(name)
   end
+
+  defp restore_buffer_config({:ok, config}),
+    do: Application.put_env(:smolquery, Smolquery.BufferService, config)
+
+  defp restore_buffer_config(:error),
+    do: Application.delete_env(:smolquery, Smolquery.BufferService)
 end

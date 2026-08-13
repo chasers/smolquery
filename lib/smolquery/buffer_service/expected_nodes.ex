@@ -239,9 +239,12 @@ defmodule Smolquery.BufferService.ExpectedNodes do
   defp published(config), do: %{epoch: config.epoch, members: config.members}
 
   defp static do
-    :smolquery
-    |> Application.get_env(Smolquery.BufferService, [])
-    |> Keyword.get(:expected_nodes, [])
+    config = Application.get_env(:smolquery, Smolquery.BufferService, [])
+
+    case Keyword.fetch(config, :expected_node_names) do
+      {:ok, names} -> Enum.map(names, &String.to_atom/1)
+      :error -> Keyword.get(config, :expected_nodes, [])
+    end
   end
 
   defp schedule(state) do
