@@ -17,10 +17,19 @@ duckdb_driver_url =
       "https://github.com/duckdb/duckdb/releases/download/v#{duckdb_driver_version}/libduckdb-linux-amd64.zip"
 
     true ->
-      raise "unsupported DuckDB build target #{inspect(duckdb_target)}; expected macOS or Linux GNU aarch64/x86_64"
+      nil
   end
 
-config :adbc, :drivers, [{:duckdb, version: duckdb_driver_version, url: duckdb_driver_url}]
+# An unrecognized target falls back to adbc's own driver matrix so every Mix
+# task still runs there; the engine then refuses to start until the pinned
+# version's driver exists for that target.
+duckdb_drivers =
+  case duckdb_driver_url do
+    nil -> [:duckdb]
+    url -> [{:duckdb, version: duckdb_driver_version, url: url}]
+  end
+
+config :adbc, :drivers, duckdb_drivers
 config :smolquery, :duckdb_driver_version, duckdb_driver_version
 
 config :smolquery, Smolquery.Cluster, enabled: false

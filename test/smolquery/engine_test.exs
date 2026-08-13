@@ -30,7 +30,7 @@ defmodule Smolquery.EngineTest do
 
   describe "version/1" do
     test "reports the linked DuckDB version" do
-      assert Engine.version(@engine) == "v1.5.3"
+      assert Engine.version(@engine) == "v" <> Smolquery.DuckDB.version()
     end
   end
 

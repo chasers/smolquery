@@ -282,12 +282,37 @@ defmodule Smolquery.Engine.Connection do
   end
 
   defp apply_settings(adbc, settings) do
-    bootstrap(settings, fn {key, value} ->
-      case Adbc.Connection.query(adbc, "SET #{key} = #{quote_setting(value)}") do
-        {:ok, _result} -> :ok
-        {:error, reason} -> {:error, {:setting_failed, key, reason}}
-      end
-    end)
+    bootstrap(settings, fn {key, value} -> apply_setting(adbc, key, value) end)
+  end
+
+  # DuckDB refuses to switch temp_directory once the current one has been
+  # used, even to the same value — and a connection-only restart re-runs
+  # settings against the surviving database. Skip the SET when it would
+  # change nothing.
+  defp apply_setting(adbc, :temp_directory = key, value) do
+    if current_setting(adbc, key) == to_string(value) do
+      :ok
+    else
+      set_setting(adbc, key, value)
+    end
+  end
+
+  defp apply_setting(adbc, key, value), do: set_setting(adbc, key, value)
+
+  defp set_setting(adbc, key, value) do
+    case Adbc.Connection.query(adbc, "SET #{key} = #{quote_setting(value)}") do
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, {:setting_failed, key, reason}}
+    end
+  end
+
+  defp current_setting(adbc, key) do
+    with {:ok, raw} <- Adbc.Connection.query(adbc, "SELECT current_setting('#{key}')"),
+         {:ok, result} <- Result.from_adbc(raw, :infinity) do
+      Result.one!(result)
+    else
+      _unreadable -> nil
+    end
   end
 
   defp run_statements(adbc, statements) do
@@ -333,19 +358,22 @@ defmodule Smolquery.Engine.Connection do
   defp quote_setting(value) when is_integer(value), do: Integer.to_string(value)
   defp quote_setting(value), do: value |> to_string() |> Identifier.sql_string()
 
-  # Caller settings run later and may override these defaults.
+  # Caller settings run later and may override these defaults. The mkdir is
+  # best-effort on purpose: a bad spill root should fail the first spill, at
+  # query time, not every boot of an engine that may never spill.
   defp spill_settings(opts) do
     directory = Keyword.get_lazy(opts, :temp_directory, &default_temp_directory/0)
 
-    File.mkdir_p!(Path.dirname(directory))
+    File.mkdir_p(Path.dirname(directory))
 
     [temp_directory: directory] ++ temp_directory_size(opts)
   end
 
   defp temp_directory_size(opts) do
     opts
-    |> Keyword.get(:max_temp_directory_size)
-    |> Kernel.||(Application.get_env(:smolquery, :max_temp_directory_size))
+    |> Keyword.get_lazy(:max_temp_directory_size, fn ->
+      Application.get_env(:smolquery, :max_temp_directory_size)
+    end)
     |> case do
       nil -> []
       size -> [max_temp_directory_size: size]
@@ -356,29 +384,19 @@ defmodule Smolquery.Engine.Connection do
     Path.join(Application.get_env(:smolquery, :spill_dir, @default_spill_root), instance_token())
   end
 
-  # Named engines reuse their leaf after a supervised restart.
+  # Named engines reuse their leaf after a supervised restart. The OS pid
+  # keeps two VMs sharing one spill root out of each other's directories;
+  # DuckDB temp-file names are not instance-specific.
   defp instance_token do
     case Process.info(self(), :registered_name) do
       {:registered_name, name} when is_atom(name) -> registered_instance_token(name)
-      _unregistered -> "connection-#{System.unique_integer([:positive])}"
+      _unregistered -> "connection-#{System.unique_integer([:positive])}-os#{System.pid()}"
     end
   end
 
   defp registered_instance_token(name) do
-    original = Atom.to_string(name)
+    encoded = name |> Atom.to_string() |> URI.encode(&URI.char_unreserved?/1)
 
-    readable =
-      original
-      |> String.replace_prefix("Elixir.", "")
-      |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
-      |> String.slice(0, 80)
-
-    digest =
-      :sha256
-      |> :crypto.hash(original)
-      |> binary_part(0, 12)
-      |> Base.url_encode64(padding: false)
-
-    "#{readable}-#{digest}"
+    "#{encoded}-os#{System.pid()}"
   end
 end
