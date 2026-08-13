@@ -752,6 +752,23 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d") =~
                "DATA_INLINING_ROW_LIMIT 0"
     end
+
+    test "leaves automatic migration off by default" do
+      refute DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d") =~
+               "AUTOMATIC_MIGRATION"
+
+      refute DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d",
+               automatic_migration: false
+             ) =~ "AUTOMATIC_MIGRATION"
+    end
+
+    test "opts into automatic migration inside the option list" do
+      statement =
+        DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d", automatic_migration: true)
+
+      assert statement =~
+               "(DATA_PATH '/d', DATA_INLINING_ROW_LIMIT 0, AUTOMATIC_MIGRATION TRUE)"
+    end
   end
 
   defp eventually(fun, attempts \\ 100) do

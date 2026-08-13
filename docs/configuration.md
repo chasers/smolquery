@@ -34,6 +34,7 @@ error.
 | `SMOLQUERY_DATA_DIR` | the one directory everything durable lives under (`/data` in the image) |
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | split a tier onto its own disk (under the data dir) |
 | `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
+| `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | S3 credentials (required with `SMOLQUERY_S3_BUCKET`) |
@@ -93,26 +94,8 @@ The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`.
 They still mount per-node development certificates so operators can opt into
 mutual TLS by changing both values to `true` before applying the overlay.
 
-## Releases and deployment artifacts
-
-A push to `main` runs the Kind workflow as well as the ordinary CI workflow.
-The release workflow listens for a successful main-push Kind run, checks that
-its exact commit changed the `version:` line in `mix.exs` to a stable `X.Y.Z`
-version strictly greater than its parent, and waits for successful CI on that same commit. It then publishes
-multi-architecture `ghcr.io/chasers/smolquery` tags for the version and commit.
-
-The release attaches `release-image.txt`, containing the immutable digest
-reference, and `release-manifest.yaml`, an image-pinned base manifest rendered
-from `deploy/base` with every smolquery image replaced by that digest-qualified
-reference. It is not a standalone production deployment: integrate it with and
-provide the `smolquery-env` Secret, Postgres catalog/discovery, and sealed-store
-dependencies before deploying.
-
-An upgrade note for existing deployments: the `smolquery-env` Secret must now
-also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
-`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`. A pod
-without them refuses to boot. That boot failure stops the pod's other roles
-too.
+Releases, artifacts, and upgrade procedures live in
+[deployment.md](deployment.md).
 
 ## Application config
 

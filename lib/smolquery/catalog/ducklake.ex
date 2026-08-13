@@ -130,6 +130,7 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:metadata, String.t()}
           | {:data_path, String.t()}
           | {:catalog, String.t()}
+          | {:automatic_migration, boolean()}
 
   @default_catalog "lake"
   @commit_attempts 5
@@ -163,6 +164,7 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:data_path` (required) — where DuckLake writes files it owns. smolquery
       registers segments from outside this directory, but DuckLake requires it.
     * `:catalog` — attached catalog name. Defaults to `#{inspect(@default_catalog)}`.
+    * `:automatic_migration` — passed to `attach_statement/4`
     * any `Smolquery.Engine` option — `:extensions` is extended with
       `:ducklake` rather than replaced
 
@@ -173,6 +175,7 @@ defmodule Smolquery.Catalog.DuckLake do
     {catalog, config} = Keyword.pop(config, :catalog, @default_catalog)
     {metadata, config} = Keyword.pop!(config, :metadata)
     {data_path, config} = Keyword.pop!(config, :data_path)
+    {automatic_migration, config} = Keyword.pop(config, :automatic_migration, false)
 
     :ok = ensure_metadata_dir(metadata)
 
@@ -181,7 +184,7 @@ defmodule Smolquery.Catalog.DuckLake do
     required = if postgres_metadata?(metadata), do: [:postgres, :ducklake], else: [:ducklake]
 
     bootstrap = [
-      attach_statement(catalog, metadata, data_path),
+      attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
       create_clustering_statement(catalog)
     ]
 
@@ -260,12 +263,28 @@ defmodule Smolquery.Catalog.DuckLake do
   spike measured exactly that at 10 rows per file, and correct retirement at
   5_000. With inlining off, a segment is always a file and a whole-segment
   delete always retires it.
+
+  ## Options
+
+    * `:automatic_migration` — when `true`, adds `AUTOMATIC_MIGRATION TRUE`,
+      so an extension carrying a newer DuckLake catalog version migrates the
+      metadata database on attach instead of refusing to boot. Off by
+      default: a migration rewrites the shared catalog one way, and a node
+      still running the old extension cannot read the result, so the
+      operator picks the moment (`SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`).
   """
-  @spec attach_statement(String.t(), String.t(), String.t()) :: String.t()
-  def attach_statement(catalog, metadata, data_path) do
+  @spec attach_statement(String.t(), String.t(), String.t(), keyword()) :: String.t()
+  def attach_statement(catalog, metadata, data_path, opts \\ []) do
+    migration =
+      if Keyword.get(opts, :automatic_migration, false) do
+        ", AUTOMATIC_MIGRATION TRUE"
+      else
+        ""
+      end
+
     "ATTACH IF NOT EXISTS #{Identifier.sql_string("ducklake:" <> metadata)} " <>
       "AS #{Identifier.quote_name!(catalog)} " <>
-      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0)"
+      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0#{migration})"
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))

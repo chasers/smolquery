@@ -344,6 +344,9 @@ skills/                        # Claude Code skills (./skills/install.sh; see sk
   posture.
 - [**Configuration**](docs/configuration.md) — every environment variable and
   application-config key.
+- [**Deployment**](docs/deployment.md) — how a release is published, the
+  release artifacts, and the upgrade procedures, catalog format migrations
+  included.
 - [**HTTP API**](docs/api.md) — the `/v1` surface, schema types, and the error
   envelope.
 - [**Benchmarks**](docs/benchmarks.md) — the measurements the design decisions

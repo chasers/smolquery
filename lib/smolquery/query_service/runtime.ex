@@ -235,8 +235,13 @@ defmodule Smolquery.QueryService.Runtime do
     with {:ok, metadata} <- Keyword.fetch(merged, :metadata),
          {:ok, data_path} <- Keyword.fetch(merged, :data_path) do
       lake = Keyword.get(merged, :catalog, Catalog.DuckLake.default_catalog())
+      automatic_migration = Keyword.get(merged, :automatic_migration, false)
 
-      [Catalog.DuckLake.attach_statement(lake, metadata, data_path)]
+      [
+        Catalog.DuckLake.attach_statement(lake, metadata, data_path,
+          automatic_migration: automatic_migration
+        )
+      ]
     else
       :error -> []
     end
