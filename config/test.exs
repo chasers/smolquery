@@ -16,8 +16,8 @@ config :smolquery, SmolqueryWeb.Endpoint,
   server: false
 
 # Explicitly pinned so the suite does not derive its shape from the host's
-# scheduler count. `1`/`1`
-# is the smallest shape that keeps the defaults' one-encode-per-member ratio.
+# scheduler count. `1`/`1` (`write_pool_size`/`encode_concurrency`) is the
+# smallest shape that keeps the defaults' one-encode-per-member ratio.
 # `commit_siblings: 0` holds the adaptive wait off, so `flush_interval_ms`
 # keeps meaning what a test says; adaptive tests opt back in explicitly.
 config :smolquery, Smolquery.BufferService,

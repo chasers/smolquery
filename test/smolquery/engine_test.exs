@@ -39,10 +39,20 @@ defmodule Smolquery.EngineTest do
       assert Engine.thread_count([]) == System.schedulers_online()
     end
 
-    test "preserves an explicit application thread count" do
-      config = Application.fetch_env!(:smolquery, Engine)
+    test "preserves an explicit thread count" do
+      assert Engine.thread_count(threads: 4) == 4
+    end
 
-      assert Engine.thread_count(config) == Keyword.fetch!(config, :threads)
+    test "treats an explicit nil as absent" do
+      assert Engine.thread_count(threads: nil) == System.schedulers_online()
+    end
+
+    test "rejects a thread count DuckDB would reject" do
+      for bad <- [0, -1, "4"] do
+        assert_raise ArgumentError, ~r/threads: must be a positive integer/, fn ->
+          Engine.thread_count(threads: bad)
+        end
+      end
     end
 
     test "applies the runtime fallback when application config omits threads" do

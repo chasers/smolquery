@@ -38,6 +38,7 @@ full set of dials behind them.
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
+| `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
 | `SMOLQUERY_COMMIT_SIBLINGS` | the in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window opening below it closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead — waiting only buys batching when other writers are active. `0` turns the short window off |
@@ -158,7 +159,8 @@ Engine options can also be passed per instance to `Smolquery.Engine.start_link/1
 which overrides the application config. `:threads` is intentionally absent from
 the defaults above: unless configured explicitly, each engine resolves it from
 `System.schedulers_online()` when it starts on the deployment host, not when the
-release is built.
+release is built. In a release, `SMOLQUERY_ENGINE_THREADS` sets it explicitly —
+the lever for a container whose CPU quota the scheduler count does not see.
 
 ### The buffer service
 
