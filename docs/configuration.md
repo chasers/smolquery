@@ -19,7 +19,7 @@ full set of dials behind them.
 | `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
-| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicitly in a cluster or reads fail with 401s |
+| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 
 ### Storage and the catalog
 

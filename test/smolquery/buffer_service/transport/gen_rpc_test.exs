@@ -36,6 +36,7 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
     # `Mix.Project.config()` at boot and dies on a Mix-less peer otherwise.
     {:ok, _mix} = :erpc.call(node, Application, :ensure_all_started, [:mix])
     :erpc.call(node, Application, :put_env, [:smolquery, :roles, [:buffer]])
+    configure_internal_secret(node)
     :erpc.call(node, Application, :put_env, [:smolquery, Smolquery.BufferService, options])
 
     peer_gen_rpc = [
@@ -115,6 +116,14 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
 
     assert {:error, {kind, _reason}} = Client.write_batch(name, @table, batch(1..1))
     assert kind in [:badrpc, :badtcp]
+  end
+
+  defp configure_internal_secret(node) do
+    :erpc.call(node, Application, :put_env, [
+      :smolquery,
+      :internal_secret,
+      Smolquery.InternalSecret.value()
+    ])
   end
 
   defp ensure_distributed do
