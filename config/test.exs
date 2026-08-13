@@ -8,6 +8,8 @@ config :smolquery, roles: []
 
 config :smolquery, SmolqueryApi.Endpoint, http: [ip: {127, 0, 0, 1}, port: 0], server: false
 
+config :smolquery, SmolqueryWeb, username: "smolquery", password: "smolquery"
+
 config :smolquery, SmolqueryWeb.ClusterLive.Index, pod_actions: false
 
 config :smolquery, SmolqueryWeb.Endpoint,
@@ -15,9 +17,9 @@ config :smolquery, SmolqueryWeb.Endpoint,
   secret_key_base: "vN2tBnLkDhX4wG9pQmZrY7cJfA1sE6uHb3TgVjR8xWqK5yMdC0aPoUiSlF2hNzEe",
   server: false
 
-# Pinned like `Smolquery.Engine` below: the real defaults derive from the
-# host's scheduler count, one DuckDB instance per scheduler per test. `1`/`1`
-# is the smallest shape that keeps the defaults' one-encode-per-member ratio.
+# Explicitly pinned so the suite does not derive its shape from the host's
+# scheduler count. `1`/`1` (`write_pool_size`/`encode_concurrency`) is the
+# smallest shape that keeps the defaults' one-encode-per-member ratio.
 # `commit_siblings: 0` holds the adaptive wait off, so `flush_interval_ms`
 # keeps meaning what a test says; adaptive tests opt back in explicitly.
 config :smolquery, Smolquery.BufferService,

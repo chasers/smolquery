@@ -42,7 +42,6 @@ config :gen_rpc,
 
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
-  threads: System.schedulers_online(),
   extensions: [:httpfs, :json],
   max_result_rows: 100_000
 

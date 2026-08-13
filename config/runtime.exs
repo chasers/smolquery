@@ -32,16 +32,33 @@ if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
   config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
 end
 
-if config_env() == :prod do
-  secret_key_base =
-    System.get_env("SMOLQUERY_SECRET_KEY_BASE") ||
-      Base.encode64(:crypto.strong_rand_bytes(48))
+if username = System.get_env("SMOLQUERY_WEB_USERNAME") do
+  config :smolquery, SmolqueryWeb, username: username
+end
 
+if password = System.get_env("SMOLQUERY_WEB_PASSWORD") do
+  config :smolquery, SmolqueryWeb, password: password
+end
+
+if web_host = System.get_env("SMOLQUERY_WEB_HOST") do
+  config :smolquery, SmolqueryWeb.Endpoint, url: [host: web_host]
+end
+
+if check_origin = System.get_env("SMOLQUERY_WEB_CHECK_ORIGIN") do
+  config :smolquery, SmolqueryWeb.Endpoint,
+    check_origin: SmolqueryWeb.CheckOrigin.parse!(check_origin)
+end
+
+if secret_key_base = System.get_env("SMOLQUERY_SECRET_KEY_BASE") do
   config :smolquery, SmolqueryWeb.Endpoint, secret_key_base: secret_key_base
 end
 
 if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
+end
+
+if threads = System.get_env("SMOLQUERY_ENGINE_THREADS") do
+  config :smolquery, Smolquery.Engine, threads: String.to_integer(threads)
 end
 
 # Keep spills off `SMOLQUERY_DATA_DIR`, which may hold acknowledged buffer data.

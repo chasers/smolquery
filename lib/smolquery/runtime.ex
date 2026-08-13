@@ -59,6 +59,29 @@ defmodule Smolquery.Runtime do
   end
 
   @doc """
+  The value of a required configuration key.
+
+  A service boot-gates a secret through this in its `new/1`. A missing or
+  empty value raises an error that names the environment variable, the
+  application-config path, and the role that requires the value. `context`
+  takes `:service`, `:missing`, `:env_var`, `:scope`, and `:role`.
+  """
+  @spec fetch_required!(keyword(), atom(), keyword()) :: String.t()
+  def fetch_required!(config, key, context) do
+    case Keyword.get(config, key) do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _absent ->
+        raise ArgumentError,
+              "#{Keyword.fetch!(context, :service)} refuses to boot without " <>
+                "#{Keyword.fetch!(context, :missing)}: set #{Keyword.fetch!(context, :env_var)} " <>
+                "(or config :smolquery, #{inspect(Keyword.fetch!(context, :scope))}, #{key}: ...) " <>
+                "on every node running the #{inspect(Keyword.fetch!(context, :role))} role"
+    end
+  end
+
+  @doc """
   Publishes `runtime` for `scope` and `name`.
   """
   @spec put(module(), atom(), term()) :: :ok

@@ -5,6 +5,8 @@ defmodule Smolquery.BufferService.SupervisorTest do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.Engine
+  alias Smolquery.Engine.Result
   alias Smolquery.Schema
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.MemoryStore
@@ -121,6 +123,16 @@ defmodule Smolquery.BufferService.SupervisorTest do
 
     assert is_pid(pool)
     assert %{specs: 2, active: 2} = Supervisor.count_children(pool)
+  end
+
+  test "write-pool members use the resolved thread budget", context do
+    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 2)
+    {:ok, runtime} = Runtime.fetch(name)
+    expected = max(div(Engine.thread_count(), 2), 1)
+
+    assert Enum.map(Runtime.engines(runtime), fn engine ->
+             Engine.query!(engine, "SELECT current_setting('threads')") |> Result.one!()
+           end) == [expected, expected]
   end
 
   test "the :polars writer starts no write pool", context do
