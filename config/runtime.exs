@@ -57,6 +57,10 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+if threads = System.get_env("SMOLQUERY_ENGINE_THREADS") do
+  config :smolquery, Smolquery.Engine, threads: String.to_integer(threads)
+end
+
 # Keep spills off `SMOLQUERY_DATA_DIR`, which may hold acknowledged buffer data.
 # Unset preserves DuckDB's `.tmp` filesystem.
 if dir = System.get_env("SMOLQUERY_SPILL_DIR") do
