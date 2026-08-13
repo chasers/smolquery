@@ -34,6 +34,7 @@ error.
 | `SMOLQUERY_DATA_DIR` | the one directory everything durable lives under (`/data` in the image) |
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | split a tier onto its own disk (under the data dir) |
 | `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
+| `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [Catalog format upgrades](#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | S3 credentials (required with `SMOLQUERY_S3_BUCKET`) |
@@ -113,6 +114,64 @@ also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
 `SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`. A pod
 without them refuses to boot. That boot failure stops the pod's other roles
 too.
+
+## Catalog format upgrades
+
+Two versions have to agree for a node to run. The **catalog format** lives in
+the shared metadata database — the DuckLake tables themselves, at a format
+version DuckLake stamps into them. The **extension version** ships in the
+image, inside the pinned DuckDB driver. A node can only attach a catalog whose
+format its extension speaks. Most DuckDB pin bumps leave the format alone;
+the ones that raise it (0.4 → 1.0 arrived with the DuckDB 1.5.3 pin) create a
+hard barrier that no rolling upgrade can straddle.
+
+What each mismatch does:
+
+- **New extension, old catalog** — the attach is refused, and the node
+  crash-loops at boot. Nothing is changed. This is the default behavior, and
+  it is an interlock, not a bug: the rollout halts loudly *before* anything
+  irreversible happens, old pods keep serving, and rolling back is just
+  redeploying the old image.
+- **Old extension, migrated catalog** — every catalog operation fails.
+  There is no path back except restoring the metadata database from a
+  snapshot. The old extension reads the new format's tables as garbage it
+  refuses, not as data.
+
+`SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION=true` turns the refusal into a
+migration: the first new-extension node to attach rewrites the shared catalog
+to its format, in place, one way. From that instant every still-running
+old-extension pod starts failing its catalog operations — queries, seals,
+commits — until the rollout replaces it. That window is an availability gap,
+not corruption: the old pods' statements fail against tables they no longer
+understand, and DuckLake's metadata operations stay transactional throughout.
+
+The flag is off by default because the two failure modes are not symmetric.
+With it off, an *accidental* format-bumping upgrade stops at a crash-loop and
+costs a redeploy. With it on, the same accident silently cuts every old pod
+off from a catalog they can never use again, mid-rollout, with the only
+rollback being a database restore.
+
+The upgrade procedure for a deployment with data:
+
+1. **Snapshot the metadata database.** The snapshot plus the old image is the
+   entire rollback story; without it there is none.
+2. Set `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION=true` in the environment the
+   pods read (and make sure it has actually synced to them).
+3. Roll the new image. The first pod to attach migrates the catalog; expect
+   old pods to error until the rollout finishes.
+4. Verify — a write, a query, a seal.
+5. Unset the flag. Leaving it on permanently is a deliberate trade some
+   deployments make (a dev or sandbox cluster that prefers self-healing
+   rollouts over the interlock); a deployment whose catalog it would hurt to
+   restore should keep the interlock.
+
+One boundary worth knowing: when several stale-catalog pods attach at the
+same moment (parallel StatefulSet rollouts do this), they all request the
+migration concurrently. DuckLake runs the migration inside the attach's own
+transaction against the metadata database, but concurrent migration of one
+catalog is not something this codebase has pinned with a test — a deployment
+that cannot tolerate a failed first boot should roll one pod first and let it
+migrate alone.
 
 ## Application config
 
