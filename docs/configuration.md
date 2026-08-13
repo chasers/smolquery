@@ -18,7 +18,7 @@ full set of dials behind them.
 | `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires; a node with the `:web` role and no credential refuses to boot |
 | `SMOLQUERY_WEB_HOST` | the host the UI is served on, and `check_origin`'s default source (`localhost`) |
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list (the `SMOLQUERY_WEB_HOST` value) |
-| `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that fences the LiveView socket; **required in prod** with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), and the same value on every such node |
+| `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that fences the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), and the same value on every such node |
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicitly in a cluster or reads fail with 401s |
 
 ### Storage and the catalog
