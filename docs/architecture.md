@@ -751,7 +751,11 @@ Three layers, each fail-closed:
 Single-tenant remains the model — auth says *whether* you may query, not *which
 tables*. Inter-node traffic can be switched to mutual TLS (`GEN_RPC_TLS`,
 `DIST_TLS`); verification is chain-only against the cluster CA, so the CA is the
-trust boundary. The web UI has no auth story yet and binds loopback by default.
+trust boundary. The web UI requires its own basic-auth credential
+(`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The credential is not
+the API key, so a UI rotation does not break an ingest client. A rotation also
+revokes existing UI sessions. The UI binds loopback by default. A node with
+the `:web` role refuses to boot without the credential.
 
 ## See also
 
