@@ -1,6 +1,7 @@
 defmodule Smolquery.BufferService.RuntimeTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Segments.Store
@@ -198,6 +199,72 @@ defmodule Smolquery.BufferService.RuntimeTest do
 
       assert Runtime.via(runtime, {"analytics", "events"}) ==
                {:via, Registry, {Runtime.registry(name), {"analytics", "events"}}}
+    end
+  end
+
+  describe "capacity and replication gates" do
+    test "warns on a byte ceiling at or below the flush trigger", %{tmp_dir: dir} do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Runtime.new(
+            name: unique_name(),
+            dir: dir,
+            flush_max_bytes: 100,
+            max_buffered_bytes: 100
+          )
+        end)
+
+      assert log =~ "max_buffered_bytes (100) is not above flush_max_bytes (100)"
+    end
+
+    test "warns on a row ceiling at or below the flush trigger", %{tmp_dir: dir} do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Runtime.new(
+            name: unique_name(),
+            dir: dir,
+            flush_max_rows: 10,
+            max_buffered_rows: 9
+          )
+        end)
+
+      assert log =~ "max_buffered_rows (9) is not above flush_max_rows (10)"
+    end
+
+    test "a pair with headroom logs nothing", %{tmp_dir: dir} do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Runtime.new(name: unique_name(), dir: dir)
+        end)
+
+      refute log =~ "is not above"
+    end
+
+    test "refuses SegmentShipping below a factor of 2, in either shape", %{tmp_dir: dir} do
+      assert_raise ArgumentError, ~r/replication factor of at least 2/, fn ->
+        Runtime.new(
+          name: unique_name(),
+          dir: dir,
+          replicator: {Replicator.SegmentShipping, replication_factor: 1}
+        )
+      end
+
+      prebuilt = Replicator.new({Replicator.SegmentShipping, replication_factor: 1})
+
+      assert_raise ArgumentError, ~r/replication factor of at least 2/, fn ->
+        Runtime.new(name: unique_name(), dir: dir, replicator: prebuilt)
+      end
+    end
+
+    test "accepts SegmentShipping at a factor of 2", %{tmp_dir: dir} do
+      runtime =
+        Runtime.new(
+          name: unique_name(),
+          dir: dir,
+          replicator: {Replicator.SegmentShipping, replication_factor: 2}
+        )
+
+      assert Replicator.redundancy(runtime.replicator) == 1
     end
   end
 end
