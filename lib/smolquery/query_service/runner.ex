@@ -25,6 +25,7 @@ defmodule Smolquery.QueryService.Runner do
   use GenServer, restart: :temporary
 
   alias Explorer.DataFrame
+  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.QueryService.History
@@ -171,7 +172,7 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp start_engine(runtime) do
-    with {:ok, database} <- Adbc.Database.start_link(driver: :duckdb) do
+    with {:ok, database} <- DuckDB.start_link() do
       connection =
         Connection.start_link(
           database: database,

@@ -14,8 +14,11 @@ full set of dials behind them.
 | `SMOLQUERY_ROLES` | which service subtrees start — `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web` (all). An unknown name fails the boot |
 | `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires; a node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
-| `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind (`127.0.0.1` — exposing the unauthenticated UI is a deliberate act / `4002`) |
-| `SMOLQUERY_SECRET_KEY_BASE` | signs web UI sessions; generated per boot when unset (sessions reset on restart) |
+| `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
+| `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires; a node with the `:web` role and no credential refuses to boot |
+| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
+| `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
+| `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 
 ### Storage and the catalog
@@ -35,10 +38,20 @@ full set of dials behind them.
 
 ### Engine and the write path
 
+The build packages DuckDB 1.5.3 through ADBC 0.12.1 and every database process
+uses that same driver version. The compile-time asset is selected from the build
+target: macOS uses the universal asset, while Linux GNU uses the matching
+`aarch64` or `x86_64` asset. An unsupported target falls back to ADBC's own
+driver matrix, so Mix tasks still run there; the engine then refuses to start
+until the pinned version's driver exists for that target.
+
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
+| `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
+| `SMOLQUERY_SPILL_DIR` | root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage; it is intentionally separate from `SMOLQUERY_DATA_DIR` |
+| `SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE` | per-instance spill limit (e.g. `10GiB`). DuckDB otherwise permits up to 90% of free space per instance. The limit multiplies: `N` concurrent instances may spill `N ×` this value, so it is not a disk budget |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
 | `SMOLQUERY_COMMIT_SIBLINGS` | the in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window opening below it closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead — waiting only buys batching when other writers are active. `0` turns the short window off |
 | `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |
@@ -46,7 +59,7 @@ full set of dials behind them.
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch |
 | `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (the node's scheduler count — a container held to one core encodes serially, which is what one core means); the manifest append, replication round and replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS quotas — set this and the pool size explicitly where quotas are the fence |
 | `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `duckdb` (default) or `polars`. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. The default path defers schema validation to flush, then salvages a failed batch row by row, preserving per-row `insertErrors`; a bad row does not always fail the whole commit, and successful rows are still written. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
-| `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
+| `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. When no explicit engine thread count is configured, both the engine and the pool resolve `System.schedulers_online()` on the deployment host at boot, not on the release builder. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
 | `SMOLQUERY_WRITE_ENGINE_THREADS` | DuckDB threads for one write-pool member, replacing the division. The division describes a budget only while the pool is smaller than the thread count — past that it sits at its floor of one, and an operator who wants a different shape states the number |
 | `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` | DuckDB memory limit for one write-pool member (e.g. `512MB`). Unset, every member inherits `SMOLQUERY_MEMORY_LIMIT` whole, so the node's declared DuckDB write budget is `write_pool_size ×` that — a size string has its own grammar, and nothing divides it for you |
 | `SMOLQUERY_WRITE_PARTITIONS` | how many buffer identities one table's writes spread over, and so how many nodes ingest it (`1`). Reader and writer counts must match — set it identically on ingest and query roles |
@@ -89,6 +102,12 @@ reference. It is not a standalone production deployment: integrate it with and
 provide the `smolquery-env` Secret, Postgres catalog/discovery, and sealed-store
 dependencies before deploying.
 
+An upgrade note for existing deployments: the `smolquery-env` Secret must now
+also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
+`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`. A pod
+without them refuses to boot. That boot failure stops the pod's other roles
+too.
+
 ## Application config
 
 The defaults, as a Mix project sees them:
@@ -96,7 +115,6 @@ The defaults, as a Mix project sees them:
 ```elixir
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
-  threads: System.schedulers_online(),
   extensions: [:httpfs, :json]
 
 config :smolquery, :data_dir, "priv/data"
@@ -156,7 +174,11 @@ config :smolquery, Smolquery.QueryService,
 ```
 
 Engine options can also be passed per instance to `Smolquery.Engine.start_link/1`,
-which overrides the application config.
+which overrides the application config. `:threads` is intentionally absent from
+the defaults above: unless configured explicitly, each engine resolves it from
+`System.schedulers_online()` when it starts on the deployment host, not when the
+release is built. In a release, `SMOLQUERY_ENGINE_THREADS` sets it explicitly —
+the lever for a container whose CPU quota the scheduler count does not see.
 
 ### The buffer service
 

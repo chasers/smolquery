@@ -19,7 +19,6 @@ defmodule Smolquery.Engine do
 
       config :smolquery, Smolquery.Engine,
         memory_limit: "2GB",
-        threads: System.schedulers_online(),
         extensions: [:httpfs, :json],
         max_result_rows: 100_000
 
@@ -51,6 +50,7 @@ defmodule Smolquery.Engine do
 
   use Supervisor
 
+  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
@@ -64,6 +64,36 @@ defmodule Smolquery.Engine do
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}
           | {:max_result_rows, pos_integer() | :infinity}
+          | {:temp_directory, Path.t()}
+          | {:max_temp_directory_size, String.t()}
+
+  @doc """
+  Resolves the DuckDB thread count for an engine configuration.
+
+  An explicit positive `:threads` value wins; a missing or `nil` value
+  resolves to the deployment host's scheduler count. Anything else raises
+  here, at the misconfiguration, rather than as arithmetic in a caller.
+  Keeping this fallback here lets write-pool members divide the same budget
+  as standalone engines without freezing the build host's count.
+  """
+  @spec thread_count() :: pos_integer()
+  def thread_count, do: thread_count(Application.get_env(:smolquery, __MODULE__, []))
+
+  @spec thread_count(keyword()) :: pos_integer()
+  def thread_count(config) when is_list(config) do
+    case Keyword.get(config, :threads) do
+      nil ->
+        System.schedulers_online()
+
+      threads when is_integer(threads) and threads > 0 ->
+        threads
+
+      other ->
+        raise ArgumentError,
+              "config :smolquery, Smolquery.Engine, threads: must be a positive " <>
+                "integer or nil, got: #{inspect(other)}"
+    end
+  end
 
   @doc """
   Starts an engine subtree.
@@ -82,6 +112,8 @@ defmodule Smolquery.Engine do
       caller that means it.
     * `:extensions`, `:memory_limit`, `:threads` — override the application
       configuration for this instance.
+    * `:temp_directory`, `:max_temp_directory_size` — override the spill
+      directory and its per-instance limit.
 
   """
   @spec start_link([option()]) :: Supervisor.on_start()
@@ -93,16 +125,19 @@ defmodule Smolquery.Engine do
   @impl true
   def init({name, opts}) do
     config = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
+    config = Keyword.put(config, :threads, thread_count(config))
 
     children = [
-      {Adbc.Database, database_opts(name, config)},
+      {DuckDB, database_opts(name, config)},
       {Connection,
-       database: database_name(name),
-       name: connection_name(name),
-       extensions: Keyword.get(config, :extensions, []),
-       settings: settings(config),
-       statements: Keyword.get(config, :statements, []),
-       max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)}
+       [
+         database: database_name(name),
+         name: connection_name(name),
+         extensions: Keyword.get(config, :extensions, []),
+         settings: settings(config),
+         statements: Keyword.get(config, :statements, []),
+         max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)
+       ] ++ Keyword.take(config, [:temp_directory, :max_temp_directory_size])}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)
@@ -203,7 +238,7 @@ defmodule Smolquery.Engine do
   def supervisor_name(name), do: Module.concat(name, "Supervisor")
 
   defp database_opts(name, config) do
-    base = [driver: :duckdb, process_options: [name: database_name(name)]]
+    base = [process_options: [name: database_name(name)]]
 
     case Keyword.get(config, :path) do
       nil -> base

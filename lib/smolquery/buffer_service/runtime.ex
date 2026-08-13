@@ -66,9 +66,10 @@ defmodule Smolquery.BufferService.Runtime do
 
   Both resolve in `new/1` rather than in the struct, because a struct default
   is evaluated when this module compiles: a release built on an eight-scheduler
-  builder would carry that eight to every host it ran on, which is the trap
-  `Smolquery.Engine`'s `:threads` already fell into in `config/config.exs`. The
-  `1` and `2` still sitting in the struct are the floor a hand-built `%Runtime{}`
+  builder would carry that eight to every host it ran on. `Smolquery.Engine`
+  resolves its absent thread setting at the same deployment-host boundary, so
+  write-pool members and standalone engines see the same CPU budget. The `1`
+  and `2` still sitting in the struct are the floor a hand-built `%Runtime{}`
   gets, not what a node boots on.
 
   Deriving the pool from the schedulers multiplies the declared DuckDB memory by
@@ -138,6 +139,7 @@ defmodule Smolquery.BufferService.Runtime do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
+  alias Smolquery.Engine
   alias Smolquery.Segments.Store
 
   @enforce_keys [:name, :manifest, :store, :ring, :replicator]
@@ -406,19 +408,21 @@ defmodule Smolquery.BufferService.Runtime do
 
   Each member is sized for the pool rather than left to inherit
   `Smolquery.Engine`'s application config whole, because that config describes
-  *one* instance: a pool of eight inheriting `threads: System.schedulers_online()`
+  *one* instance: a pool of eight inheriting the engine's default thread budget
   declares eight times the node's schedulers, and `memory_limit: "2GB"` eight
   times over. Threads divide here. The memory limit cannot be divided without
   parsing DuckDB's size grammar, so it is a configured value instead —
   `:write_engine_memory_limit`, whose docstring above states the multiplication
   an operator is choosing when they leave it unset.
 
-  The number divided is `Smolquery.Engine`'s *configured* thread count, not the
-  scheduler count. Dividing the schedulers would ignore the setting this exists
-  to respect: a node whose operator lowered `Smolquery.Engine`'s `:threads` to 4
-  on a sixteen-scheduler host would hand a pool of one sixteen threads, and a
-  change meant to narrow the declared budget would widen it. `config/test.exs`
-  sets that value deliberately and is the case that shows it soonest.
+  The number divided is the same runtime-resolved budget used by
+  `Smolquery.Engine`, including an explicit application setting when present and
+  the deployment host's scheduler count otherwise. A node whose operator lowers
+  `Smolquery.Engine`'s `:threads` to 4 on a sixteen-scheduler host gives a pool of
+  one four threads; the shared resolver keeps the pool and standalone engines
+  consistent.
+  `config/test.exs` sets that value deliberately and is the case that shows it
+  soonest.
 
   `:write_engine_threads` replaces the division outright, because the division
   only describes a budget while the pool is smaller than the thread count.
@@ -432,18 +436,12 @@ defmodule Smolquery.BufferService.Runtime do
   """
   @spec write_engine_budget(t()) :: keyword()
   def write_engine_budget(%__MODULE__{write_pool_size: size} = runtime) do
-    threads = [threads: runtime.write_engine_threads || max(div(engine_threads(), size), 1)]
+    threads = [threads: runtime.write_engine_threads || max(div(Engine.thread_count(), size), 1)]
 
     case runtime.write_engine_memory_limit do
       nil -> threads
       limit -> [{:memory_limit, limit} | threads]
     end
-  end
-
-  defp engine_threads do
-    :smolquery
-    |> Application.get_env(Smolquery.Engine, [])
-    |> Keyword.get(:threads, System.schedulers_online())
   end
 
   defp validate_compression!(compression) when compression in @codecs, do: :ok
