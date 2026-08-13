@@ -19,7 +19,6 @@ defmodule Smolquery.Engine do
 
       config :smolquery, Smolquery.Engine,
         memory_limit: "2GB",
-        threads: System.schedulers_online(),
         extensions: [:httpfs, :json],
         max_result_rows: 100_000
 
@@ -66,6 +65,24 @@ defmodule Smolquery.Engine do
           | {:max_result_rows, pos_integer() | :infinity}
 
   @doc """
+  Resolves the DuckDB thread count for an engine configuration.
+
+  An explicit `:threads` value wins; otherwise the deployment host's scheduler
+  count is used. Keeping this fallback here lets write-pool members divide the
+  same budget as standalone engines without freezing the build host's count.
+  """
+  @spec thread_count() :: pos_integer() | nil
+  def thread_count, do: thread_count(Application.get_env(:smolquery, __MODULE__, []))
+
+  @spec thread_count(keyword()) :: pos_integer() | nil
+  def thread_count(config) when is_list(config) do
+    case Keyword.fetch(config, :threads) do
+      {:ok, threads} -> threads
+      :error -> System.schedulers_online()
+    end
+  end
+
+  @doc """
   Starts an engine subtree.
 
   ## Options
@@ -93,6 +110,7 @@ defmodule Smolquery.Engine do
   @impl true
   def init({name, opts}) do
     config = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
+    config = Keyword.put(config, :threads, thread_count(config))
 
     children = [
       {Adbc.Database, database_opts(name, config)},

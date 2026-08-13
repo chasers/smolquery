@@ -125,12 +125,8 @@ defmodule Smolquery.BufferService.RuntimeTest do
   end
 
   describe "write_engine_budget/1" do
-    test "divides the engine's configured thread count by the pool size", %{tmp_dir: dir} do
-      configured =
-        :smolquery
-        |> Application.get_env(Smolquery.Engine, [])
-        |> Keyword.get(:threads, System.schedulers_online())
-
+    test "divides the engine's resolved thread count by the pool size", %{tmp_dir: dir} do
+      configured = Smolquery.Engine.thread_count()
       runtime = Runtime.new(name: unique_name(), dir: dir, write_pool_size: 2)
 
       assert Runtime.write_engine_budget(runtime) == [threads: max(div(configured, 2), 1)]

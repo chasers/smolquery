@@ -34,6 +34,30 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "thread_count/1" do
+    test "uses the deployment host scheduler count when no thread is configured" do
+      assert Engine.thread_count([]) == System.schedulers_online()
+    end
+
+    test "preserves an explicit application thread count" do
+      config = Application.fetch_env!(:smolquery, Engine)
+
+      assert Engine.thread_count(config) == Keyword.fetch!(config, :threads)
+    end
+
+    test "applies the runtime fallback when application config omits threads" do
+      config = Application.fetch_env!(:smolquery, Engine)
+      Application.put_env(:smolquery, Engine, Keyword.delete(config, :threads))
+
+      on_exit(fn -> Application.put_env(:smolquery, Engine, config) end)
+
+      start_supervised!({Engine, name: __MODULE__.RuntimeDefault}, id: :runtime_default)
+
+      assert Engine.query!(__MODULE__.RuntimeDefault, "SELECT current_setting('threads')")
+             |> Result.one!() == System.schedulers_online()
+    end
+  end
+
   describe "query/3" do
     test "returns the neutral result shape" do
       assert {:ok, %Result{columns: ["n"], rows: [[1]], num_rows: 1}} =
