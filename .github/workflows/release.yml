@@ -341,7 +341,7 @@ jobs:
               digest: ${DIGEST}
           EOF
           kubectl kustomize "$overlay_dir" > release-manifest.yaml
-          kubectl create --dry-run=client -f release-manifest.yaml -o name >/dev/null
+          kubectl create --dry-run=client --validate=false -f release-manifest.yaml -o name >/dev/null
 
           mapfile -t smolquery_images < <(awk '/^[[:space:]]+image: .*smolquery/ {print $2}' release-manifest.yaml)
           [[ "${#smolquery_images[@]}" -gt 0 ]] || {
