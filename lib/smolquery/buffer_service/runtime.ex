@@ -136,6 +136,8 @@ defmodule Smolquery.BufferService.Runtime do
   or an OS-assigned one (`0`, what tests use to run many instances side by side).
   """
 
+  require Logger
+
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
@@ -288,6 +290,17 @@ defmodule Smolquery.BufferService.Runtime do
   `:commit_siblings` and `:flush_idle_interval_ms` are gated too: a negative
   idle interval detonates in `Process.send_after/3` at a table's first
   accumulation, far from the config that set it.
+
+  `:max_buffered_bytes` and `:max_buffered_rows` are checked against their
+  flush triggers. An inverted pair parks the accumulator below the trigger
+  and refuses writes with `buffer_full` until a timed flush drains it, so
+  `new/1` logs a warning that names the pair. It stays a warning rather than
+  a raise: a small ceiling under a large trigger is also the deliberate
+  shed-first shape the backpressure tests boot.
+
+  `Replicator.SegmentShipping` needs a replication factor of at least 2, in
+  either configuration shape — a factor below that acks replicated durability
+  with zero read tolerance.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -307,25 +320,31 @@ defmodule Smolquery.BufferService.Runtime do
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
 
-    struct!(
-      %__MODULE__{
-        name: name,
-        store: store,
-        spool_dir: Keyword.get(config, :spool_dir, Path.join(dir, "spool")),
-        manifest:
-          HotManifest.new(
-            name: manifest(name),
-            log_dir: Keyword.get(config, :log_dir, Path.join(dir, "manifests")),
-            store: store
-          ),
-        ring: Ring.new!(Keyword.get(config, :ring, [node()])),
-        replicator:
-          Replicator.new(
-            Keyword.get(config, :replicator, {Smolquery.BufferService.Replicator.None, []})
-          )
-      },
-      Keyword.take(config, @limits)
-    )
+    runtime =
+      struct!(
+        %__MODULE__{
+          name: name,
+          store: store,
+          spool_dir: Keyword.get(config, :spool_dir, Path.join(dir, "spool")),
+          manifest:
+            HotManifest.new(
+              name: manifest(name),
+              log_dir: Keyword.get(config, :log_dir, Path.join(dir, "manifests")),
+              store: store
+            ),
+          ring: Ring.new!(Keyword.get(config, :ring, [node()])),
+          replicator:
+            Replicator.new(
+              Keyword.get(config, :replicator, {Smolquery.BufferService.Replicator.None, []})
+            )
+        },
+        Keyword.take(config, @limits)
+      )
+
+    warn_inverted_capacity(runtime)
+    validate_replicator!(runtime.replicator)
+
+    runtime
   end
 
   @doc """
@@ -488,6 +507,44 @@ defmodule Smolquery.BufferService.Runtime do
           "unusable idle flush interval: #{inspect(interval)} " <>
             "(expected a non-negative integer of milliseconds)"
   end
+
+  defp warn_inverted_capacity(%__MODULE__{} = runtime) do
+    warn_inverted(
+      {:max_buffered_bytes, runtime.max_buffered_bytes},
+      {:flush_max_bytes, runtime.flush_max_bytes}
+    )
+
+    warn_inverted(
+      {:max_buffered_rows, runtime.max_buffered_rows},
+      {:flush_max_rows, runtime.flush_max_rows}
+    )
+  end
+
+  defp warn_inverted({_ceiling_key, ceiling}, {_trigger_key, trigger}) when ceiling > trigger,
+    do: :ok
+
+  defp warn_inverted({ceiling_key, ceiling}, {trigger_key, trigger}) do
+    Logger.warning(
+      "#{ceiling_key} (#{ceiling}) is not above #{trigger_key} (#{trigger}): " <>
+        "the accumulator parks below the flush trigger and refuses writes with " <>
+        "buffer_full until a timed flush drains it"
+    )
+  end
+
+  defp validate_replicator!(
+         %Replicator{impl: Smolquery.BufferService.Replicator.SegmentShipping} = replicator
+       ) do
+    if Replicator.redundancy(replicator) < 1 do
+      raise ArgumentError,
+            "SegmentShipping needs a replication factor of at least 2 " <>
+              "(SMOLQUERY_BUFFER_REPLICATION): a factor below that acks replicated " <>
+              "durability with zero read tolerance"
+    end
+
+    :ok
+  end
+
+  defp validate_replicator!(%Replicator{} = _replicator), do: :ok
 
   use Smolquery.Runtime
 
