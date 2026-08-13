@@ -52,7 +52,7 @@ defmodule SmolqueryWeb.AuthTest do
       assert conn.status == 200
     end
 
-    test "every route is behind the fence" do
+    test "every route requires the credential" do
       for path <- [~p"/", ~p"/tables", ~p"/query", ~p"/cluster"] do
         assert get(unauthenticated(), path).status == 401, "#{path} answered without a credential"
       end
@@ -66,7 +66,7 @@ defmodule SmolqueryWeb.AuthTest do
   end
 
   describe "when the web role is not published here" do
-    test "the answer is a challenge, never an open door", %{conn: conn} do
+    test "the request is challenged, not served", %{conn: conn} do
       start_web!()
       Runtime.delete(SmolqueryWeb)
 
@@ -75,7 +75,7 @@ defmodule SmolqueryWeb.AuthTest do
   end
 
   describe "the LiveView socket" do
-    test "mounts through the fence when the request was authenticated", %{conn: conn} do
+    test "mounts when the request was authenticated", %{conn: conn} do
       start_web!()
 
       assert {:ok, _lv, _html} = live(conn, ~p"/tables")

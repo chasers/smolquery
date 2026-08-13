@@ -13,12 +13,11 @@ defmodule SmolqueryWeb.Runtime do
         password: "...",
         catalog: [metadata: "sqlite:...", data_path: "..."]
 
-  `username` and `password` are the one static basic-auth credential every UI
-  route requires (`SmolqueryWeb.Auth`). There is no default and no fallback: a
-  node holding the `:web` role with no credential refuses to boot rather than
-  serve an open UI. It is deliberately not the API key — UI access rotates
-  without breaking every ingest client. Multi-credential and rotation are
-  explicitly later, as they are for the API.
+  `username` and `password` are the one static basic-auth credential that
+  every UI route requires (`SmolqueryWeb.Auth`). There is no default and no
+  fallback: a node with the `:web` role and no credential refuses to boot. The
+  credential is not the API key, so a UI rotation does not break an ingest
+  client. Multiple credentials and rotation come later, as for the API.
 
   `catalog` is where the UI resolves datasets, tables, and schemas — the same
   seam `SmolqueryApi` uses. Given options (or nothing), the UI starts its own
@@ -56,8 +55,8 @@ defmodule SmolqueryWeb.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
-  overrides them. Raises unless both a non-empty `username` and a non-empty
-  `password` are present in either.
+  overrides them. Raises unless the merged options hold a non-empty `username`
+  and a non-empty `password`.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do

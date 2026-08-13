@@ -1,30 +1,31 @@
 defmodule SmolqueryWeb.Auth do
   @moduledoc """
-  Basic authentication for every UI route, and for the socket behind them.
+  Basic authentication for every UI route and for the LiveView socket.
 
-  The peer of `SmolqueryApi.Auth`: one static credential, compared in constant
-  time, resolved from the published runtime rather than from compile-time
-  options. A node holding the `:web` role with no credential refuses to boot
-  (`SmolqueryWeb.Runtime`), so there is no configuration that serves an open
-  UI.
+  This module is the web peer of `SmolqueryApi.Auth`. It holds one static
+  credential. It compares the credential in constant time. It reads the
+  credential from the published runtime, not from compile-time options. A node
+  with the `:web` role and no credential refuses to boot
+  (`SmolqueryWeb.Runtime`), so no configuration serves an open UI.
 
-  The UI needs this more than the API does, not less. `/query` runs SQL through
-  `Smolquery.QueryService`, and `/cluster` kills, drains, and restarts nodes.
+  The UI needs authentication at least as much as the API. `/query` runs SQL
+  through `Smolquery.QueryService`. `/cluster` kills, drains, and restarts
+  nodes.
 
-  ## Two layers, because there are two doors
+  ## Two layers
 
   `call/2` guards the HTTP request from the `:browser` pipeline. It runs after
-  `:fetch_session`, because a success writes the session marker the second
-  layer reads.
+  `:fetch_session`, because a success writes the session marker that the
+  second layer reads.
 
   `on_mount/4` guards the LiveView socket. The endpoint's `socket "/live"`
-  declaration never runs the router's pipelines, so the plug alone does not
-  cover the upgrade. A browser usually resends cached credentials on a
-  same-origin upgrade, but "usually" is not a fence — the hook requires the
-  marker instead, which only an authenticated request could have written.
+  declaration does not run the router's pipelines, so the plug does not see
+  the websocket upgrade. A browser usually resends cached credentials on a
+  same-origin upgrade, but the hook does not rely on that. The hook requires
+  the session marker. Only an authenticated request can write the marker.
 
-  Static assets sit ahead of the router in the endpoint and stay public.
-  `priv/static` holds no data.
+  The endpoint serves static assets before the router runs, so they stay
+  public. `priv/static` holds no data.
   """
 
   @behaviour Plug
@@ -68,10 +69,10 @@ defmodule SmolqueryWeb.Auth do
   end
 
   @doc """
-  Requires the marker `call/2` writes before a LiveView mounts.
+  Requires the session marker that `call/2` writes before a LiveView mounts.
 
-  An absent marker sends the caller back to `/`, where the plug asks for the
-  credential again.
+  If the marker is absent, the hook redirects the caller to `/`. There the
+  plug asks for the credential again.
   """
   @spec on_mount(:require_authenticated, LiveView.unsigned_params(), map(), LiveView.Socket.t()) ::
           {:cont | :halt, LiveView.Socket.t()}

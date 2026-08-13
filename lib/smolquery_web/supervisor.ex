@@ -7,13 +7,14 @@ defmodule SmolqueryWeb.Supervisor do
   resolves tables through it; a catalog engine that dies takes the endpoint
   down with it rather than leaving pages rendering through a dead handle.
 
-  Two things must hold before the endpoint listens, and both are checked here
-  rather than at config-evaluation time — `config/runtime.exs` is also
-  evaluated during an image build, where no secret exists yet:
+  This module checks two requirements before the endpoint listens:
 
     * a basic-auth credential (`SmolqueryWeb.Runtime`)
-    * a session secret long enough for the cookie store, which signs the
-      marker that fences the LiveView socket
+    * a session secret of at least 64 bytes, which signs the marker that
+      guards the LiveView socket
+
+  The checks live here, not in `config/runtime.exs`. The image build also
+  evaluates that file, and no secret exists at build time.
   """
 
   use Supervisor
@@ -47,10 +48,9 @@ defmodule SmolqueryWeb.Supervisor do
       raise ArgumentError,
             "the web UI refuses to boot without a session secret of at least " <>
               "#{@min_secret_bytes} bytes (got #{byte_size(secret || "")}): set " <>
-              "SMOLQUERY_SECRET_KEY_BASE to the same value on every node running " <>
-              "the :web role. It signs the session that fences the LiveView " <>
-              "socket, so a per-node or per-boot value leaves the UI unable to " <>
-              "connect. Generate one with `mix phx.gen.secret`."
+              "SMOLQUERY_SECRET_KEY_BASE on every node running the :web role. " <>
+              "Every :web node needs the same value, or the LiveView socket " <>
+              "cannot connect. Generate one with `mix phx.gen.secret`."
     end
   end
 

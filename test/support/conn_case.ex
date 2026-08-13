@@ -8,9 +8,9 @@ defmodule SmolqueryWeb.ConnCase do
   `Smolquery.Test.MapCatalog`) and tears the published runtime down with the
   test.
 
-  Every route sits behind `SmolqueryWeb.Auth`, so the `conn` this case hands a
-  test already carries the configured credential. A test that wants to prove
-  the fence holds builds its own unauthenticated conn.
+  `SmolqueryWeb.Auth` guards every route, so the `conn` from this case
+  already carries the configured credential. A test that checks the guard
+  itself builds its own unauthenticated conn.
   """
 
   use ExUnit.CaseTemplate

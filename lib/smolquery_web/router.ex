@@ -1,12 +1,12 @@
 defmodule SmolqueryWeb.Router do
   @moduledoc """
-  The UI's routes, all of them behind `SmolqueryWeb.Auth`.
+  The UI's routes. `SmolqueryWeb.Auth` guards all of them.
 
-  The pipeline's order is the contract: `:fetch_session` runs before the auth
-  plug, because a successful check writes the session marker that
-  `live_session` then requires of the socket. Both layers are needed — the
-  plug guards the request, the `on_mount` hook guards the upgrade the plug
-  never sees.
+  The pipeline's order matters. `:fetch_session` runs before the auth plug,
+  because a successful check writes the session marker. `live_session` then
+  requires that marker on the socket. Both layers are needed. The plug guards
+  the HTTP request. The plug does not see the websocket upgrade, so the
+  `on_mount` hook guards that.
   """
 
   use SmolqueryWeb, :router
