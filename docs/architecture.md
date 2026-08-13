@@ -49,9 +49,11 @@ Three rules shape everything below:
 
 ## The read engine
 
-`Smolquery.Engine` is a supervised `Adbc.Database` → `Adbc.Connection` subtree
-with extensions and session settings applied before the connection is
-reachable:
+`Smolquery.Engine` is a supervised `Smolquery.DuckDB` → `Adbc.Connection`
+subtree — `Smolquery.DuckDB` wraps `Adbc.Database` and pins the packaged
+driver version — with extensions and session settings applied before the
+connection is reachable. Every instance spills to its own directory under
+`SMOLQUERY_SPILL_DIR`, so two concurrent spills never share temp files:
 
 ```elixir
 {:ok, _pid} = Smolquery.Engine.start_link(name: MyEngine)
@@ -751,7 +753,11 @@ Three layers, each fail-closed:
 Single-tenant remains the model — auth says *whether* you may query, not *which
 tables*. Inter-node traffic can be switched to mutual TLS (`GEN_RPC_TLS`,
 `DIST_TLS`); verification is chain-only against the cluster CA, so the CA is the
-trust boundary. The web UI has no auth story yet and binds loopback by default.
+trust boundary. The web UI requires its own basic-auth credential
+(`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The credential is not
+the API key, so a UI rotation does not break an ingest client. A rotation also
+revokes existing UI sessions. The UI binds loopback by default. A node with
+the `:web` role refuses to boot without the credential.
 
 ## See also
 

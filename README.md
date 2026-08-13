@@ -38,6 +38,9 @@ docker run -d --name smolquery \
   -v smolquery-data:/data \
   -e SMOLQUERY_API_KEY=change-me \
   -e SMOLQUERY_WEB_IP=0.0.0.0 \
+  -e SMOLQUERY_WEB_USERNAME=smolquery \
+  -e SMOLQUERY_WEB_PASSWORD=change-me-too \
+  -e SMOLQUERY_SECRET_KEY_BASE="$(openssl rand -base64 48)" \
   smolquery
 ```
 
@@ -67,7 +70,8 @@ curl -H "$auth" -H "$json" \
 ```
 
 The full surface is in [`docs/api.md`](docs/api.md); a LiveView UI for the same
-thing is on [`localhost:4002`](http://localhost:4002).
+thing is on [`localhost:4002`](http://localhost:4002), behind the basic-auth
+credential you just set.
 
 Releases are created automatically for a merged stable `mix.exs` version bump
 only after the successful main-push Kind workflow and the exact-SHA CI run. The
@@ -75,7 +79,10 @@ release publishes a multi-architecture image to GHCR and attaches both a
 `ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
-discovery, and the sealed-store dependencies before deploying.
+discovery, and the sealed-store dependencies before deploying. The Secret must
+also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
+`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`; a pod
+without them refuses to boot.
 
 ## Features
 
@@ -156,7 +163,8 @@ iex -S mix
 
 The API is on [`localhost:4000`](http://localhost:4000) (dev Bearer key:
 `smolquery-dev`) and the LiveView UI on
-[`localhost:4002`](http://localhost:4002) — browse datasets and tables, create
+[`localhost:4002`](http://localhost:4002) (dev credential: `smolquery` /
+`smolquery`) — browse datasets and tables, create
 both, edit a table's retention policy, preview rows, run SQL through the query
 service's job lifecycle (submit, live state, paged results, cancel), and watch
 the fleet on `/cluster` — every node's alive/ring-epoch/drain state, live, with
@@ -167,9 +175,9 @@ graceful ring exit over distributed Erlang, no pod involved). Kill/restart
 work against a local `kind` cluster (below) via `kubectl`, or against a real
 deployment via the in-cluster ServiceAccount `deploy/base/rbac.yaml` grants —
 same `Smolquery.Cluster.Pods` module either way. The UI calls service client
-modules directly, never loopback HTTP, and binds
-`127.0.0.1` because it has no auth story yet; exposing it
-(`SMOLQUERY_WEB_IP=0.0.0.0`) is a deliberate act.
+modules directly, never loopback HTTP. Every route requires the basic-auth
+credential (`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The bind
+defaults to `127.0.0.1`; set `SMOLQUERY_WEB_IP=0.0.0.0` to expose it.
 
 ## Deploying
 
@@ -229,7 +237,8 @@ All StatefulSets, because every cluster member needs a stable pod name: peers
 derive each other's URLs from node names, and the mounted per-node certificates
 are used when `GEN_RPC_TLS` and `DIST_TLS` are enabled. The API lands on
 `http://localhost:8080` (Bearer
-`kind-only-api-key`), the web UI on `http://localhost:8082`.
+`kind-only-api-key`), the web UI on `http://localhost:8082` (`smolquery` /
+`kind-only-web-password`).
 
 Draining a buffer node is the one operation with no HTTP surface — it
 force-seals everything the node owns and waits for the seal to land before the
