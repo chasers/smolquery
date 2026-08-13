@@ -51,6 +51,39 @@ defmodule Smolquery.EngineSecretsTest do
     end
   end
 
+  describe "sealed_tier_extensions/2" do
+    test "a credential-chain store adds aws, which supplies the provider" do
+      store = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      assert EngineSecrets.sealed_tier_extensions(store, [:httpfs]) == [:httpfs, :aws]
+    end
+
+    test "a static-key store needs nothing beyond the service's own list" do
+      store =
+        Store.S3.new(
+          bucket: "sealed",
+          access_key_id: "id",
+          secret_access_key: "secret",
+          staging_dir: "/tmp/staging"
+        )
+
+      assert EngineSecrets.sealed_tier_extensions(store, [:httpfs]) == [:httpfs]
+    end
+
+    test "does not duplicate aws when the service already loads it" do
+      store = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      assert EngineSecrets.sealed_tier_extensions(store, [:httpfs, :aws]) == [:httpfs, :aws]
+    end
+
+    test "a local store and no store both pass the list through" do
+      assert EngineSecrets.sealed_tier_extensions(Store.Local.new(dir: "/tmp/s"), [:httpfs]) ==
+               [:httpfs]
+
+      assert EngineSecrets.sealed_tier_extensions(nil, [:httpfs]) == [:httpfs]
+    end
+  end
+
   defp restore({:ok, value}), do: Application.put_env(:smolquery, Cluster, value)
   defp restore(:error), do: Application.delete_env(:smolquery, Cluster)
 end

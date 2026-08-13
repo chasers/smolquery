@@ -37,7 +37,7 @@ error.
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
-| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | S3 credentials (required with `SMOLQUERY_S3_BUCKET`) |
+| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
 | `SMOLQUERY_S3_REGION` | S3 region (`us-east-1`) |
 | `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (`path` when an endpoint is set) |
@@ -231,6 +231,29 @@ rather than a config snippet: `config/config.exs` is evaluated at *build* time,
 so `System.get_env/1` there bakes the builder's credentials (or `nil`) into the
 artifact. The env wiring configures the query service's `store:` with the same
 values, which every job engine needs to read the sealed tier back.
+
+#### S3 credentials
+
+Leave `:access_key_id` and `:secret_access_key` out and the sealed tier
+authenticates through the AWS default credential chain instead — environment,
+profile, ECS, EKS Pod Identity, web identity, then EC2 instance metadata. That
+is how a deployment runs with no static S3 secrets at all, which some AWS
+organizations require: an SCP that denies `s3:*` to IAM users cannot be
+overridden by any IAM policy, and static keys can only ever be an IAM user.
+
+Set both keys or neither. One alone is a half-written configuration, not a
+chain, so `Store.S3.new/1` rejects it at startup.
+
+Both halves of the sealed tier follow the same rule. Elixir signs its own
+uploads and listings through `Smolquery.AwsCredentials`, which resolves fresh
+credentials per request so rotation needs no restart. DuckDB engines get a
+`CREATE SECRET ... PROVIDER credential_chain, REFRESH auto` instead of static
+keys, and load the `aws` extension that provider comes from. `REFRESH auto`
+is what keeps the long-lived storage-service engine working past the expiry of
+the temporary credentials it started with.
+
+MinIO and other non-AWS stores keep using static keys — they have no credential
+chain to consult.
 
 `buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and
 segment bytes — honest for a single node. Clustered, each seal signal carries

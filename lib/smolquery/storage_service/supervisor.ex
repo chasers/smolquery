@@ -75,7 +75,7 @@ defmodule Smolquery.StorageService.Supervisor do
         [
           {Engine,
            name: Runtime.engine(runtime.name),
-           extensions: runtime.engine_extensions,
+           extensions: engine_extensions(runtime),
            statements: engine_secrets(runtime)},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
@@ -92,12 +92,21 @@ defmodule Smolquery.StorageService.Supervisor do
       EngineSecrets.sealed_tier(runtime.store)
   end
 
+  defp engine_extensions(%Runtime{} = runtime) do
+    EngineSecrets.sealed_tier_extensions(runtime.store, runtime.engine_extensions)
+  end
+
   defp catalog_opts(%Runtime{catalog_opts: nil}), do: nil
 
   defp catalog_opts(%Runtime{catalog_opts: opts} = runtime) do
     case EngineSecrets.sealed_tier(runtime.store) do
-      [] -> opts
-      secrets -> Keyword.update(opts, :statements, secrets, &(&1 ++ secrets))
+      [] ->
+        opts
+
+      secrets ->
+        opts
+        |> Keyword.update(:statements, secrets, &(&1 ++ secrets))
+        |> Keyword.put(:store, runtime.store)
     end
   end
 end

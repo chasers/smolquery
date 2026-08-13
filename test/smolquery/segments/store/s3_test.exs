@@ -111,5 +111,58 @@ defmodule Smolquery.Segments.Store.S3Test do
 
       assert statement =~ "URL_STYLE 'vhost'"
     end
+
+    test "delegates to DuckDB's credential chain when no static keys are configured" do
+      %Store{config: config} =
+        S3.new(bucket: "sealed", staging_dir: "/tmp/staging", region: "us-west-2")
+
+      statement = S3.create_secret_statement(config)
+
+      assert statement =~ "CREATE SECRET IF NOT EXISTS smolquery_sealed_tier"
+      assert statement =~ "TYPE S3"
+      assert statement =~ "PROVIDER credential_chain"
+      assert statement =~ "REGION 'us-west-2'"
+      assert statement =~ "SCOPE 's3://sealed'"
+      refute statement =~ "KEY_ID"
+      refute statement =~ "SECRET '"
+    end
+
+    test "refreshes chain credentials, so a long-lived engine outlives their expiry" do
+      %Store{config: config} = S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      assert S3.create_secret_statement(config) =~ "REFRESH auto"
+    end
+  end
+
+  describe "credential mode" do
+    test "static keys need no extra extension, the chain needs aws" do
+      %Store{config: static} =
+        S3.new(
+          bucket: "sealed",
+          access_key_id: "id",
+          secret_access_key: "secret",
+          staging_dir: "/tmp/staging"
+        )
+
+      %Store{config: chain} = S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      refute S3.credential_chain?(static)
+      assert S3.required_extensions(static) == []
+
+      assert S3.credential_chain?(chain)
+      assert S3.required_extensions(chain) == [:aws]
+    end
+
+    test "rejects an access key without its secret" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_S3_SECRET_ACCESS_KEY/, fn ->
+        S3.new(bucket: "sealed", access_key_id: "id", staging_dir: "/tmp/staging")
+      end
+    end
+
+    test "rejects a secret without its access key" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_S3_ACCESS_KEY_ID/, fn ->
+        S3.new(bucket: "sealed", secret_access_key: "secret", staging_dir: "/tmp/staging")
+      end
+    end
   end
 end

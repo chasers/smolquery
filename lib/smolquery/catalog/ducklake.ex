@@ -116,6 +116,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
@@ -179,9 +180,14 @@ defmodule Smolquery.Catalog.DuckLake do
 
     :ok = ensure_metadata_dir(metadata)
 
-    extensions = Keyword.get(config, :extensions, engine_extensions())
+    {store, config} = Keyword.pop(config, :store)
     statements = Keyword.get(config, :statements, [])
     required = if postgres_metadata?(metadata), do: [:postgres, :ducklake], else: [:ducklake]
+
+    extensions =
+      config
+      |> Keyword.get(:extensions, engine_extensions())
+      |> then(&EngineSecrets.sealed_tier_extensions(store, &1))
 
     bootstrap = [
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
