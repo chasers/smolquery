@@ -7,6 +7,10 @@ defmodule SmolqueryWeb.ConnCase do
   `SmolqueryWeb.Supervisor` (catalog defaulting to a fresh
   `Smolquery.Test.MapCatalog`) and tears the published runtime down with the
   test.
+
+  `SmolqueryWeb.Auth` guards every route, so the `conn` from this case
+  already carries the configured credential. A test that checks the guard
+  itself builds its own unauthenticated conn.
   """
 
   use ExUnit.CaseTemplate
@@ -27,7 +31,24 @@ defmodule SmolqueryWeb.ConnCase do
   end
 
   setup _tags do
-    {:ok, conn: Phoenix.ConnTest.build_conn()}
+    {:ok, conn: authenticate(Phoenix.ConnTest.build_conn())}
+  end
+
+  @doc """
+  Puts the configured basic-auth credential on `conn`.
+  """
+  @spec authenticate(Plug.Conn.t()) :: Plug.Conn.t()
+  def authenticate(conn) do
+    config = Application.get_env(:smolquery, SmolqueryWeb, [])
+
+    Plug.Conn.put_req_header(
+      conn,
+      "authorization",
+      Plug.BasicAuth.encode_basic_auth(
+        Keyword.fetch!(config, :username),
+        Keyword.fetch!(config, :password)
+      )
+    )
   end
 
   @doc """
