@@ -38,6 +38,10 @@ secretGenerator:
       - SMOLQUERY_API_KEY=kind-only-api-key
       - SMOLQUERY_INTERNAL_SECRET=kind-only-internal-secret
       - SMOLQUERY_WEB_IP=0.0.0.0
+      - SMOLQUERY_WEB_USERNAME=smolquery
+      - SMOLQUERY_WEB_PASSWORD=kind-only-web-password
+      - SMOLQUERY_WEB_CHECK_ORIGIN=false
+      - SMOLQUERY_SECRET_KEY_BASE=kind-only-secret-key-base-never-use-this-outside-a-local-kind-cluster
       - RELEASE_COOKIE=kind-only-cookie
       - SMOLQUERY_S3_BUCKET=smolquery-sealed
       - SMOLQUERY_S3_ACCESS_KEY_ID=smolquery

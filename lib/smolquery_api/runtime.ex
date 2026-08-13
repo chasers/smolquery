@@ -32,6 +32,7 @@ defmodule SmolqueryApi.Runtime do
   alias Smolquery.Catalog
 
   @enforce_keys [:name, :api_key, :catalog]
+  @derive {Inspect, except: [:api_key]}
   defstruct [
     :name,
     :api_key,
@@ -68,7 +69,14 @@ defmodule SmolqueryApi.Runtime do
 
     %__MODULE__{
       name: name,
-      api_key: fetch_api_key!(config),
+      api_key:
+        Smolquery.Runtime.fetch_required!(config, :api_key,
+          service: "the API",
+          missing: "an API key",
+          env_var: "SMOLQUERY_API_KEY",
+          scope: SmolqueryApi,
+          role: :api
+        ),
       catalog: catalog,
       catalog_opts: catalog_opts
     }
@@ -88,17 +96,4 @@ defmodule SmolqueryApi.Runtime do
   """
   @spec catalog_engine(atom()) :: atom()
   def catalog_engine(name), do: Module.concat(name, "Catalog")
-
-  defp fetch_api_key!(config) do
-    case Keyword.get(config, :api_key) do
-      key when is_binary(key) and key != "" ->
-        key
-
-      _absent ->
-        raise ArgumentError,
-              "the API refuses to boot without an API key: set SMOLQUERY_API_KEY " <>
-                "(or config :smolquery, SmolqueryApi, api_key: ...) on every node " <>
-                "running the :api role"
-    end
-  end
 end
