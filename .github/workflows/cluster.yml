@@ -1,13 +1,12 @@
 name: Cluster
 
 # The :cluster suite runs against real kind hosts because :peer cannot reproduce
-# distinct pod DNS names and shared service ports. It runs for pull requests as
-# well as pushes to main; the main push is the promotion gate for releases.
+# distinct pod DNS names and shared service ports. It runs for every pull
+# request, so the merge gate already saw it; the release gate on main pushes
+# is the CI workflow (see release.yml).
 on:
   workflow_dispatch:
   pull_request:
-  push:
-    branches: [main]
 
 env:
   MIX_ENV: test

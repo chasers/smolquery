@@ -1,11 +1,11 @@
 name: Release
 
-# A release is considered only after the real-host Cluster workflow succeeds on
-# the main push. This prevents a version bump from publishing before the
-# cluster contract has run, while keeping release creation automatic.
+# A release is considered only after the CI workflow succeeds on the main
+# push. The real-host Cluster suite runs on every pull request, so the merge
+# gate already saw it; release creation stays automatic.
 on:
   workflow_run:
-    workflows: [Cluster]
+    workflows: [CI]
     types: [completed]
     branches: [main]
 
