@@ -300,6 +300,12 @@ if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end
 
+if migrate = System.get_env("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION") do
+  config :smolquery, Smolquery.Catalog.DuckLake,
+    automatic_migration:
+      Smolquery.RuntimeConfig.boolean!("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION", migrate)
+end
+
 if keep = System.get_env("SMOLQUERY_SNAPSHOT_KEEP_MS") do
   config :smolquery, Smolquery.StorageService,
     snapshot_keep_ms:
