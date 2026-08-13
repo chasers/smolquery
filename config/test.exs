@@ -8,6 +8,8 @@ config :smolquery, roles: []
 
 config :smolquery, SmolqueryApi.Endpoint, http: [ip: {127, 0, 0, 1}, port: 0], server: false
 
+config :smolquery, SmolqueryWeb, username: "smolquery", password: "smolquery"
+
 config :smolquery, SmolqueryWeb.ClusterLive.Index, pod_actions: false
 
 config :smolquery, SmolqueryWeb.Endpoint,
