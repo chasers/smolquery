@@ -20,7 +20,7 @@ RUN mix compile
 COPY assets assets
 COPY priv/static priv/static
 RUN mix assets.deploy
-RUN mix run --no-start -e 'Adbc.download_driver!(:duckdb)'
+RUN mix run --no-start -e 'name = Smolquery.DockerSmoke; {:ok, _pid} = Smolquery.Engine.start_link(name: name, extensions: []); version = Smolquery.Engine.version(name); expected = "v" <> Smolquery.DuckDB.version(); if version != expected, do: raise("expected DuckDB #{expected}, got #{version}"); IO.puts("DuckDB #{version}")'
 COPY rel rel
 RUN mix release
 

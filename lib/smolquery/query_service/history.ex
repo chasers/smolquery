@@ -30,6 +30,7 @@ defmodule Smolquery.QueryService.History do
 
   require Logger
 
+  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Job
@@ -157,7 +158,7 @@ defmodule Smolquery.QueryService.History do
   end
 
   defp connect(%Runtime{history_metadata: "sqlite:" <> path}) do
-    with {:ok, database} <- Adbc.Database.start_link(driver: :duckdb) do
+    with {:ok, database} <- DuckDB.start_link() do
       Connection.start_link(
         database: database,
         extensions: [:sqlite],

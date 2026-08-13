@@ -50,6 +50,7 @@ defmodule Smolquery.Engine do
 
   use Supervisor
 
+  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
@@ -127,7 +128,7 @@ defmodule Smolquery.Engine do
     config = Keyword.put(config, :threads, thread_count(config))
 
     children = [
-      {Adbc.Database, database_opts(name, config)},
+      {DuckDB, database_opts(name, config)},
       {Connection,
        [
          database: database_name(name),
@@ -237,7 +238,7 @@ defmodule Smolquery.Engine do
   def supervisor_name(name), do: Module.concat(name, "Supervisor")
 
   defp database_opts(name, config) do
-    base = [driver: :duckdb, process_options: [name: database_name(name)]]
+    base = [process_options: [name: database_name(name)]]
 
     case Keyword.get(config, :path) do
       nil -> base

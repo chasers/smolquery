@@ -38,6 +38,12 @@ full set of dials behind them.
 
 ### Engine and the write path
 
+The build packages DuckDB 1.5.3 through ADBC 0.12.1 and every database process
+uses that same driver version. The compile-time asset is selected from the build
+target: macOS uses the universal asset, while Linux GNU uses the matching
+`aarch64` or `x86_64` asset. Unsupported targets fail during configuration
+rather than falling back to ADBC's generated DuckDB 1.5.1 default.
+
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
