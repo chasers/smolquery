@@ -9,7 +9,16 @@ defmodule SmolqueryWeb.Runtime do
   ## Configuration
 
       config :smolquery, SmolqueryWeb,
+        username: "...",
+        password: "...",
         catalog: [metadata: "sqlite:...", data_path: "..."]
+
+  `username` and `password` are the one static basic-auth credential every UI
+  route requires (`SmolqueryWeb.Auth`). There is no default and no fallback: a
+  node holding the `:web` role with no credential refuses to boot rather than
+  serve an open UI. It is deliberately not the API key — UI access rotates
+  without breaking every ingest client. Multi-credential and rotation are
+  explicitly later, as they are for the API.
 
   `catalog` is where the UI resolves datasets, tables, and schemas — the same
   seam `SmolqueryApi` uses. Given options (or nothing), the UI starts its own
@@ -22,9 +31,11 @@ defmodule SmolqueryWeb.Runtime do
 
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :catalog]
+  @enforce_keys [:name, :username, :password, :catalog]
   defstruct [
     :name,
+    :username,
+    :password,
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
@@ -33,6 +44,8 @@ defmodule SmolqueryWeb.Runtime do
 
   @type t :: %__MODULE__{
           name: atom(),
+          username: String.t(),
+          password: String.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
@@ -43,7 +56,8 @@ defmodule SmolqueryWeb.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
-  overrides them.
+  overrides them. Raises unless both a non-empty `username` and a non-empty
+  `password` are present in either.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -53,9 +67,31 @@ defmodule SmolqueryWeb.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
-    %__MODULE__{name: name, catalog: catalog, catalog_opts: catalog_opts}
+    %__MODULE__{
+      name: name,
+      username: fetch_credential!(config, :username),
+      password: fetch_credential!(config, :password),
+      catalog: catalog,
+      catalog_opts: catalog_opts
+    }
     |> struct!(Keyword.take(config, [:ingest_name, :query_name]))
   end
+
+  defp fetch_credential!(config, key) do
+    case Keyword.get(config, key) do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _absent ->
+        raise ArgumentError,
+              "the web UI refuses to boot without a credential: set " <>
+                "#{env_var(key)} (or config :smolquery, SmolqueryWeb, #{key}: ...) " <>
+                "on every node running the :web role"
+    end
+  end
+
+  defp env_var(:username), do: "SMOLQUERY_WEB_USERNAME"
+  defp env_var(:password), do: "SMOLQUERY_WEB_PASSWORD"
 
   use Smolquery.Runtime
 

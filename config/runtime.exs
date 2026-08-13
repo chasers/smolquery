@@ -32,12 +32,56 @@ if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
   config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
 end
 
-if config_env() == :prod do
-  secret_key_base =
-    System.get_env("SMOLQUERY_SECRET_KEY_BASE") ||
-      Base.encode64(:crypto.strong_rand_bytes(48))
+if username = System.get_env("SMOLQUERY_WEB_USERNAME") do
+  config :smolquery, SmolqueryWeb, username: username
+end
 
-  config :smolquery, SmolqueryWeb.Endpoint, secret_key_base: secret_key_base
+if password = System.get_env("SMOLQUERY_WEB_PASSWORD") do
+  config :smolquery, SmolqueryWeb, password: password
+end
+
+if web_host = System.get_env("SMOLQUERY_WEB_HOST") do
+  config :smolquery, SmolqueryWeb.Endpoint, url: [host: web_host]
+end
+
+if check_origin = System.get_env("SMOLQUERY_WEB_CHECK_ORIGIN") do
+  origins =
+    case String.trim(check_origin) do
+      "false" -> false
+      "true" -> true
+      list -> list |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+    end
+
+  config :smolquery, SmolqueryWeb.Endpoint, check_origin: origins
+end
+
+if config_env() == :prod do
+  web_role? =
+    case System.get_env("SMOLQUERY_ROLES") do
+      nil -> true
+      roles -> :web in Smolquery.Roles.parse!(roles)
+    end
+
+  secret_key_base = System.get_env("SMOLQUERY_SECRET_KEY_BASE")
+
+  if web_role? and byte_size(secret_key_base || "") < 64 do
+    raise """
+    the :web role requires SMOLQUERY_SECRET_KEY_BASE in prod, at least 64 bytes
+    long (got #{byte_size(secret_key_base || "")}).
+
+    It signs the session cookie that fences the LiveView socket. A generated
+    per-boot value cannot work: sessions die on every restart, and no two nodes
+    in a fleet sign the same cookie, so the UI loads and never connects. The
+    cookie store rejects anything shorter than 64 bytes outright.
+
+    Generate one with `mix phx.gen.secret`, then set the same value on every
+    node running the :web role.
+    """
+  end
+
+  if secret_key_base do
+    config :smolquery, SmolqueryWeb.Endpoint, secret_key_base: secret_key_base
+  end
 end
 
 if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
