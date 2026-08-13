@@ -70,5 +70,5 @@ for sts in $smolquery_sts; do
   kubectl -n smolquery rollout status "$sts" --timeout=300s
 done
 
-echo "==> done — API at http://localhost:8080 (Bearer kind-only-api-key), web UI at http://localhost:8082"
+echo "==> done — API at http://localhost:8080 (Bearer kind-only-api-key), web UI at http://localhost:8082 (smolquery / kind-only-web-password)"
 kubectl -n smolquery get pods

@@ -1,13 +1,14 @@
 defmodule Smolquery.Engine.ConnectionTest do
   use ExUnit.Case, async: false
 
+  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
   @database __MODULE__.Database
 
   setup do
-    start_supervised!({Adbc.Database, driver: :duckdb, process_options: [name: @database]})
+    start_supervised!({DuckDB, process_options: [name: @database]})
     :ok
   end
 

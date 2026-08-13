@@ -134,7 +134,7 @@ defmodule Bench.Query do
   end
 
   defp start_and_stop_engine(extensions, statements) do
-    {:ok, database} = Adbc.Database.start_link(driver: :duckdb)
+    {:ok, database} = Smolquery.DuckDB.start_link()
 
     {:ok, connection} =
       Connection.start_link(
