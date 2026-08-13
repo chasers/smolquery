@@ -291,6 +291,97 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "spill isolation (T-201)" do
+    test "two defaulted instances use distinct spill directories" do
+      start_supervised!({Engine, name: __MODULE__.SpillA}, id: :spill_a)
+      start_supervised!({Engine, name: __MODULE__.SpillB}, id: :spill_b)
+
+      assert temp_directory(__MODULE__.SpillA) != temp_directory(__MODULE__.SpillB)
+    end
+
+    test "filesystem-safe tokens do not collapse distinct registered names" do
+      name_a = :"spill/a"
+      name_b = :"spill?a"
+
+      start_supervised!({Engine, name: name_a}, id: :spill_encoded_a)
+      start_supervised!({Engine, name: name_b}, id: :spill_encoded_b)
+
+      assert temp_directory(name_a) != temp_directory(name_b)
+    end
+
+    test "the directory is named for the instance, so a restart reuses its own" do
+      directory = temp_directory(@engine)
+
+      assert Path.basename(directory) =~ "EngineTest.Instance"
+
+      stop_supervised!(Engine)
+      start_supervised!({Engine, name: @engine})
+
+      assert temp_directory(@engine) == directory
+    end
+
+    test "an explicit directory wins over the derived one" do
+      directory =
+        Path.join(System.tmp_dir!(), "smolquery-spill-#{System.unique_integer([:positive])}")
+
+      start_supervised!({Engine, name: __MODULE__.SpillStated, temp_directory: directory},
+        id: :spill_stated
+      )
+
+      assert temp_directory(__MODULE__.SpillStated) == directory
+    end
+
+    test "a stated ceiling reaches DuckDB" do
+      start_supervised!(
+        {Engine, name: __MODULE__.SpillBounded, max_temp_directory_size: "1GiB"},
+        id: :spill_bounded
+      )
+
+      assert Engine.query!(
+               __MODULE__.SpillBounded,
+               "SELECT current_setting('max_temp_directory_size')"
+             )
+             |> Result.one!() == "1.0 GiB"
+    end
+
+    test "concurrent spilling instances do not corrupt each other's temp files" do
+      # The low memory limit forces DuckDB to spill.
+      engines =
+        for i <- 1..4 do
+          name = Module.concat(__MODULE__, "SpillRace#{i}")
+
+          start_supervised!(
+            {Engine, name: name, memory_limit: "32MB", threads: 1, max_result_rows: :infinity},
+            id: {:spill_race, i}
+          )
+
+          name
+        end
+
+      results =
+        engines
+        |> Task.async_stream(
+          fn engine ->
+            Engine.query(
+              engine,
+              "SELECT count(*) AS n FROM (SELECT i, hash(i) AS h FROM range(2000000) t(i) ORDER BY h)"
+            )
+          end,
+          max_concurrency: length(engines),
+          timeout: 120_000
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      for result <- results do
+        assert {:ok, %Result{rows: [[2_000_000]]}} = result
+      end
+    end
+  end
+
+  defp temp_directory(engine) do
+    Engine.query!(engine, "SELECT current_setting('temp_directory')") |> Result.one!()
+  end
+
   describe "bootstrap statements" do
     test "re-run on every connection, so session state survives a restart" do
       start_supervised!(

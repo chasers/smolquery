@@ -26,6 +26,16 @@ defmodule Smolquery.Engine.Connection do
   connection process outright instead of returning an error. That path needs no
   policy: this wrapper is linked to it, so both die and the supervisor rebuilds
   the subtree the same way.
+
+  ## Spill isolation
+
+  Connections default to distinct children of the application `:spill_dir`
+  (`.tmp` unless configured). DuckDB temp-file names are not instance-specific,
+  so live instances sharing a directory can corrupt each other's spilled sorts.
+  `:temp_directory` overrides the default.
+
+  Isolation lives here because `Smolquery.QueryService.Runner` creates
+  connections directly rather than through `Smolquery.Engine`.
   """
 
   use GenServer
@@ -35,6 +45,9 @@ defmodule Smolquery.Engine.Connection do
   alias Smolquery.Engine.Params
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
+  alias Smolquery.Identifier
+
+  @default_spill_root ".tmp"
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
 
@@ -45,6 +58,8 @@ defmodule Smolquery.Engine.Connection do
           | {:settings, keyword()}
           | {:statements, [String.t()]}
           | {:max_rows, pos_integer() | :infinity}
+          | {:temp_directory, Path.t()}
+          | {:max_temp_directory_size, String.t()}
 
   @doc """
   Starts a bootstrapped connection to the ADBC database in `:database`.
@@ -59,6 +74,11 @@ defmodule Smolquery.Engine.Connection do
     * `:max_rows` — most rows `query/4` will convert to Elixir terms before
       refusing with `Smolquery.Engine.ResultTooLarge`. `:infinity` disables the
       ceiling.
+    * `:temp_directory` — spill directory. Defaults to a distinct child of the
+      application `:spill_dir` (`.tmp` unless configured).
+    * `:max_temp_directory_size` — per-instance spill limit (e.g. `"10GiB"`).
+      Defaults to the application key of the same name; unset uses DuckDB's
+      default of 90% of free space.
 
   """
   @spec start_link([option()]) :: GenServer.on_start()
@@ -154,7 +174,7 @@ defmodule Smolquery.Engine.Connection do
   def init(opts) do
     database = Keyword.fetch!(opts, :database)
     extensions = Keyword.get(opts, :extensions, [])
-    settings = Keyword.get(opts, :settings, [])
+    settings = spill_settings(opts) ++ Keyword.get(opts, :settings, [])
     statements = Keyword.get(opts, :statements, [])
     max_rows = Keyword.get(opts, :max_rows, :infinity)
 
@@ -311,5 +331,54 @@ defmodule Smolquery.Engine.Connection do
   end
 
   defp quote_setting(value) when is_integer(value), do: Integer.to_string(value)
-  defp quote_setting(value), do: "'#{value}'"
+  defp quote_setting(value), do: value |> to_string() |> Identifier.sql_string()
+
+  # Caller settings run later and may override these defaults.
+  defp spill_settings(opts) do
+    directory = Keyword.get_lazy(opts, :temp_directory, &default_temp_directory/0)
+
+    File.mkdir_p!(Path.dirname(directory))
+
+    [temp_directory: directory] ++ temp_directory_size(opts)
+  end
+
+  defp temp_directory_size(opts) do
+    opts
+    |> Keyword.get(:max_temp_directory_size)
+    |> Kernel.||(Application.get_env(:smolquery, :max_temp_directory_size))
+    |> case do
+      nil -> []
+      size -> [max_temp_directory_size: size]
+    end
+  end
+
+  defp default_temp_directory do
+    Path.join(Application.get_env(:smolquery, :spill_dir, @default_spill_root), instance_token())
+  end
+
+  # Named engines reuse their leaf after a supervised restart.
+  defp instance_token do
+    case Process.info(self(), :registered_name) do
+      {:registered_name, name} when is_atom(name) -> registered_instance_token(name)
+      _unregistered -> "connection-#{System.unique_integer([:positive])}"
+    end
+  end
+
+  defp registered_instance_token(name) do
+    original = Atom.to_string(name)
+
+    readable =
+      original
+      |> String.replace_prefix("Elixir.", "")
+      |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
+      |> String.slice(0, 80)
+
+    digest =
+      :sha256
+      |> :crypto.hash(original)
+      |> binary_part(0, 12)
+      |> Base.url_encode64(padding: false)
+
+    "#{readable}-#{digest}"
+  end
 end

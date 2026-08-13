@@ -63,6 +63,8 @@ defmodule Smolquery.Engine do
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}
           | {:max_result_rows, pos_integer() | :infinity}
+          | {:temp_directory, Path.t()}
+          | {:max_temp_directory_size, String.t()}
 
   @doc """
   Resolves the DuckDB thread count for an engine configuration.
@@ -109,6 +111,8 @@ defmodule Smolquery.Engine do
       caller that means it.
     * `:extensions`, `:memory_limit`, `:threads` — override the application
       configuration for this instance.
+    * `:temp_directory`, `:max_temp_directory_size` — override the spill
+      directory and its per-instance limit.
 
   """
   @spec start_link([option()]) :: Supervisor.on_start()
@@ -125,12 +129,14 @@ defmodule Smolquery.Engine do
     children = [
       {Adbc.Database, database_opts(name, config)},
       {Connection,
-       database: database_name(name),
-       name: connection_name(name),
-       extensions: Keyword.get(config, :extensions, []),
-       settings: settings(config),
-       statements: Keyword.get(config, :statements, []),
-       max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)}
+       [
+         database: database_name(name),
+         name: connection_name(name),
+         extensions: Keyword.get(config, :extensions, []),
+         settings: settings(config),
+         statements: Keyword.get(config, :statements, []),
+         max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)
+       ] ++ Keyword.take(config, [:temp_directory, :max_temp_directory_size])}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

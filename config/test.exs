@@ -37,3 +37,9 @@ config :smolquery, Smolquery.Engine,
   memory_limit: "512MB",
   threads: 2,
   extensions: []
+
+# Keep spill artifacts from failed tests outside the checkout and isolate
+# concurrent test VMs from one another.
+config :smolquery,
+       :spill_dir,
+       Path.join(System.tmp_dir!(), "smolquery-test-spill-#{System.pid()}")
