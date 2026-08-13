@@ -3,6 +3,8 @@ defmodule SmolqueryWeb.RuntimeTest do
 
   alias SmolqueryWeb.Runtime
 
+  @secret String.duplicate("s", 64)
+
   describe "new/1" do
     test "resolves options over application config" do
       runtime = Runtime.new(name: :web_runtime_test, username: "u", password: "p")
@@ -32,6 +34,55 @@ defmodule SmolqueryWeb.RuntimeTest do
       assert_raise ArgumentError, fn ->
         Runtime.new(name: :web_runtime_test, password: "")
       end
+    end
+
+    test "refuses to resolve without a session secret" do
+      assert_raise ArgumentError, ~r/at least 64 bytes \(got 0\)/, fn ->
+        Runtime.new(name: :web_runtime_test, secret_key_base: nil)
+      end
+    end
+
+    test "refuses a session secret the cookie store would reject" do
+      assert_raise ArgumentError, ~r/at least 64 bytes \(got 63\)/, fn ->
+        Runtime.new(name: :web_runtime_test, secret_key_base: String.duplicate("a", 63))
+      end
+    end
+  end
+
+  describe "session_marker" do
+    test "changes when the password rotates" do
+      runtime = Runtime.new(name: :web_runtime_test, password: "p", secret_key_base: @secret)
+      rotated = Runtime.new(name: :web_runtime_test, password: "q", secret_key_base: @secret)
+
+      assert runtime.session_marker != rotated.session_marker
+    end
+
+    test "changes when the session secret rotates" do
+      runtime = Runtime.new(name: :web_runtime_test, secret_key_base: @secret)
+      rotated = Runtime.new(name: :web_runtime_test, secret_key_base: String.duplicate("t", 64))
+
+      assert runtime.session_marker != rotated.session_marker
+    end
+
+    test "is stable for the same credential and secret" do
+      runtime = Runtime.new(name: :web_runtime_test, secret_key_base: @secret)
+      same = Runtime.new(name: :web_runtime_test, secret_key_base: @secret)
+
+      assert runtime.session_marker == same.session_marker
+    end
+  end
+
+  describe "inspect" do
+    test "redacts the credential" do
+      runtime =
+        Runtime.new(
+          name: :web_runtime_test,
+          username: "operator-name-7739",
+          password: "operator-secret-7739"
+        )
+
+      refute inspect(runtime) =~ "operator-name-7739"
+      refute inspect(runtime) =~ "operator-secret-7739"
     end
   end
 

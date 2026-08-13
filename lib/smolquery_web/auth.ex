@@ -22,7 +22,9 @@ defmodule SmolqueryWeb.Auth do
   declaration does not run the router's pipelines, so the plug does not see
   the websocket upgrade. A browser usually resends cached credentials on a
   same-origin upgrade, but the hook does not rely on that. The hook requires
-  the session marker. Only an authenticated request can write the marker.
+  the session marker. Only an authenticated request can write the marker. The
+  marker value is bound to the live credential and the session secret
+  (`SmolqueryWeb.Runtime`), so a credential rotation revokes old sessions.
 
   The endpoint serves static assets before the router runs, so they stay
   public. `priv/static` holds no data.
@@ -56,11 +58,18 @@ defmodule SmolqueryWeb.Auth do
       password: runtime.password,
       realm: @realm
     )
-    |> mark()
+    |> mark(runtime)
   end
 
-  defp mark(%Plug.Conn{halted: true} = conn), do: conn
-  defp mark(conn), do: put_session(conn, @marker, true)
+  defp mark(%Plug.Conn{halted: true} = conn, _runtime), do: conn
+
+  defp mark(conn, runtime) do
+    if get_session(conn, @marker) == runtime.session_marker do
+      conn
+    else
+      put_session(conn, @marker, runtime.session_marker)
+    end
+  end
 
   defp challenge(conn) do
     conn
@@ -71,16 +80,19 @@ defmodule SmolqueryWeb.Auth do
   @doc """
   Requires the session marker that `call/2` writes before a LiveView mounts.
 
-  If the marker is absent, the hook redirects the caller to `/`. There the
-  plug asks for the credential again.
+  The marker is bound to the live credential, so a rotated credential revokes
+  every session written under the old one. If the marker is absent or stale,
+  the hook redirects the caller to `/`. There the plug asks for the credential
+  again.
   """
   @spec on_mount(:require_authenticated, LiveView.unsigned_params(), map(), LiveView.Socket.t()) ::
           {:cont | :halt, LiveView.Socket.t()}
   def on_mount(:require_authenticated, _params, session, socket) do
-    if session[Atom.to_string(@marker)] do
+    with {:ok, runtime} <- Runtime.fetch(SmolqueryWeb),
+         marker when marker == runtime.session_marker <- session[Atom.to_string(@marker)] do
       {:cont, socket}
     else
-      {:halt, LiveView.redirect(socket, to: "/")}
+      _unauthenticated -> {:halt, LiveView.redirect(socket, to: "/")}
     end
   end
 end

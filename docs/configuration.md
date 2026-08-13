@@ -17,7 +17,7 @@ full set of dials behind them.
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
 | `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires; a node with the `:web` role and no credential refuses to boot |
 | `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
-| `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list (the `SMOLQUERY_WEB_HOST` value) |
+| `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required explicitly in a cluster or reads fail with 401s |
 
@@ -91,6 +91,12 @@ from `deploy/base` with every smolquery image replaced by that digest-qualified
 reference. It is not a standalone production deployment: integrate it with and
 provide the `smolquery-env` Secret, Postgres catalog/discovery, and sealed-store
 dependencies before deploying.
+
+An upgrade note for existing deployments: the `smolquery-env` Secret must now
+also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
+`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`. A pod
+without them refuses to boot. That boot failure stops the pod's other roles
+too.
 
 ## Application config
 

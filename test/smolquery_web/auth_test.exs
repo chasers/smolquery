@@ -2,6 +2,7 @@ defmodule SmolqueryWeb.AuthTest do
   use SmolqueryWeb.ConnCase, async: false
 
   alias Phoenix.LiveView
+  alias Smolquery.Test.MapCatalog
   alias SmolqueryWeb.Auth
   alias SmolqueryWeb.Runtime
 
@@ -18,8 +19,7 @@ defmodule SmolqueryWeb.AuthTest do
 
   describe "the HTTP request" do
     setup do
-      start_web!()
-      :ok
+      {:ok, runtime: start_web!()}
     end
 
     test "a request with no credential is challenged, not served" do
@@ -58,10 +58,22 @@ defmodule SmolqueryWeb.AuthTest do
       end
     end
 
-    test "a served request writes the marker the socket requires", %{conn: conn} do
+    test "a served request writes the marker the socket requires", %{
+      conn: conn,
+      runtime: runtime
+    } do
       conn = get(conn, ~p"/")
 
-      assert get_session(conn, :authenticated) == true
+      assert get_session(conn, :authenticated) == runtime.session_marker
+    end
+
+    test "a request whose marker is current does not rewrite the session", %{conn: conn} do
+      first = get(conn, ~p"/")
+      assert get_resp_header(first, "set-cookie") != []
+
+      second = first |> recycle() |> authenticate() |> get(~p"/")
+
+      assert get_resp_header(second, "set-cookie") == []
     end
   end
 
@@ -82,18 +94,64 @@ defmodule SmolqueryWeb.AuthTest do
     end
 
     test "the hook redirects a mount whose session carries no marker" do
+      start_web!()
+
       assert {:halt, socket} =
                Auth.on_mount(:require_authenticated, %{}, %{}, %LiveView.Socket{})
 
       assert {:redirect, %{to: "/"}} = socket.redirected
     end
 
+    test "the hook redirects a mount whose marker is stale" do
+      runtime = start_web!()
+
+      assert {:halt, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => "stale-" <> runtime.session_marker},
+                 %LiveView.Socket{}
+               )
+
+      assert {:redirect, %{to: "/"}} = socket.redirected
+    end
+
+    test "the hook redirects when no runtime is published" do
+      assert {:halt, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => "any-marker"},
+                 %LiveView.Socket{}
+               )
+
+      assert {:redirect, %{to: "/"}} = socket.redirected
+    end
+
+    test "a rotated password revokes the marker old sessions carry" do
+      runtime = start_web!()
+
+      Runtime.put(Runtime.new(catalog: MapCatalog.new(), password: "rotated-password"))
+
+      assert {:halt, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => runtime.session_marker},
+                 %LiveView.Socket{}
+               )
+
+      assert {:redirect, %{to: "/"}} = socket.redirected
+    end
+
     test "the hook admits a mount whose session carries the marker" do
+      runtime = start_web!()
+
       assert {:cont, socket} =
                Auth.on_mount(
                  :require_authenticated,
                  %{},
-                 %{"authenticated" => true},
+                 %{"authenticated" => runtime.session_marker},
                  %LiveView.Socket{}
                )
 

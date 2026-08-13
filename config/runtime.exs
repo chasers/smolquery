@@ -45,14 +45,8 @@ if web_host = System.get_env("SMOLQUERY_WEB_HOST") do
 end
 
 if check_origin = System.get_env("SMOLQUERY_WEB_CHECK_ORIGIN") do
-  origins =
-    case String.trim(check_origin) do
-      "false" -> false
-      "true" -> true
-      list -> list |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
-    end
-
-  config :smolquery, SmolqueryWeb.Endpoint, check_origin: origins
+  config :smolquery, SmolqueryWeb.Endpoint,
+    check_origin: SmolqueryWeb.CheckOrigin.parse!(check_origin)
 end
 
 if secret_key_base = System.get_env("SMOLQUERY_SECRET_KEY_BASE") do

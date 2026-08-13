@@ -40,6 +40,7 @@ docker run -d --name smolquery \
   -e SMOLQUERY_WEB_IP=0.0.0.0 \
   -e SMOLQUERY_WEB_USERNAME=smolquery \
   -e SMOLQUERY_WEB_PASSWORD=change-me-too \
+  -e SMOLQUERY_SECRET_KEY_BASE="$(openssl rand -base64 48)" \
   smolquery
 ```
 
@@ -78,7 +79,10 @@ release publishes a multi-architecture image to GHCR and attaches both a
 `ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
-discovery, and the sealed-store dependencies before deploying.
+discovery, and the sealed-store dependencies before deploying. The Secret must
+also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
+`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`; a pod
+without them refuses to boot.
 
 ## Features
 
@@ -171,9 +175,9 @@ graceful ring exit over distributed Erlang, no pod involved). Kill/restart
 work against a local `kind` cluster (below) via `kubectl`, or against a real
 deployment via the in-cluster ServiceAccount `deploy/base/rbac.yaml` grants —
 same `Smolquery.Cluster.Pods` module either way. The UI calls service client
-modules directly, never loopback HTTP, and binds
-`127.0.0.1` because it has no auth story yet; exposing it
-(`SMOLQUERY_WEB_IP=0.0.0.0`) is a deliberate act.
+modules directly, never loopback HTTP. Every route requires the basic-auth
+credential (`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The bind
+defaults to `127.0.0.1`; set `SMOLQUERY_WEB_IP=0.0.0.0` to expose it.
 
 ## Deploying
 

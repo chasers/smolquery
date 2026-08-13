@@ -24,17 +24,25 @@ defmodule SmolqueryWeb.Runtime do
   `Smolquery.Catalog.DuckLake` engine; given a `%Smolquery.Catalog{}` outright,
   it reads through that and starts nothing.
 
-  The endpoint's listener (ip, port, secret) is Phoenix's own concern and lives
-  under `config :smolquery, SmolqueryWeb.Endpoint`.
+  The endpoint's listener (ip, port) is Phoenix's own concern and lives under
+  `config :smolquery, SmolqueryWeb.Endpoint`. The session secret lives there
+  too, but `new/1` reads and validates it: the cookie store needs at least 64
+  bytes. `new/1` also derives `session_marker` from the secret and the
+  credential. `SmolqueryWeb.Auth` writes that marker into the session and
+  requires it on the LiveView socket, so a credential rotation revokes every
+  old session. A `:secret_key_base` option overrides the endpoint config in a
+  test.
   """
 
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :username, :password, :catalog]
+  @enforce_keys [:name, :username, :password, :session_marker, :catalog]
+  @derive {Inspect, except: [:username, :password]}
   defstruct [
     :name,
     :username,
     :password,
+    :session_marker,
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
@@ -45,18 +53,23 @@ defmodule SmolqueryWeb.Runtime do
           name: atom(),
           username: String.t(),
           password: String.t(),
+          session_marker: String.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom()
         }
 
+  @session_secret_min_bytes 64
+
   @doc """
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
   overrides them. Raises unless the merged options hold a non-empty `username`
-  and a non-empty `password`.
+  and a non-empty `password`. Also raises unless a session secret of at least
+  64 bytes is present — the `:secret_key_base` option, or the endpoint's own
+  `secret_key_base` config.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -66,10 +79,15 @@ defmodule SmolqueryWeb.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
+    username = fetch_credential!(config, :username)
+    password = fetch_credential!(config, :password)
+    secret_key_base = validate_session_secret!(resolve_session_secret(config))
+
     %__MODULE__{
       name: name,
-      username: fetch_credential!(config, :username),
-      password: fetch_credential!(config, :password),
+      username: username,
+      password: password,
+      session_marker: session_marker(secret_key_base, username, password),
       catalog: catalog,
       catalog_opts: catalog_opts
     }
@@ -77,20 +95,46 @@ defmodule SmolqueryWeb.Runtime do
   end
 
   defp fetch_credential!(config, key) do
-    case Keyword.get(config, key) do
-      value when is_binary(value) and value != "" ->
-        value
-
-      _absent ->
-        raise ArgumentError,
-              "the web UI refuses to boot without a credential: set " <>
-                "#{env_var(key)} (or config :smolquery, SmolqueryWeb, #{key}: ...) " <>
-                "on every node running the :web role"
-    end
+    Smolquery.Runtime.fetch_required!(config, key,
+      service: "the web UI",
+      missing: "a credential",
+      env_var: env_var(key),
+      scope: SmolqueryWeb,
+      role: :web
+    )
   end
 
   defp env_var(:username), do: "SMOLQUERY_WEB_USERNAME"
   defp env_var(:password), do: "SMOLQUERY_WEB_PASSWORD"
+
+  defp resolve_session_secret(config) do
+    case Keyword.fetch(config, :secret_key_base) do
+      {:ok, secret} ->
+        secret
+
+      :error ->
+        :smolquery
+        |> Application.get_env(SmolqueryWeb.Endpoint, [])
+        |> Keyword.get(:secret_key_base)
+    end
+  end
+
+  defp validate_session_secret!(secret)
+       when is_binary(secret) and byte_size(secret) >= @session_secret_min_bytes,
+       do: secret
+
+  defp validate_session_secret!(secret) do
+    raise ArgumentError,
+          "the web UI refuses to boot without a session secret of at least " <>
+            "#{@session_secret_min_bytes} bytes (got #{byte_size(secret || "")}): set " <>
+            "SMOLQUERY_SECRET_KEY_BASE on every node running the :web role. " <>
+            "Every :web node needs the same value, or the LiveView socket " <>
+            "cannot connect. Generate one with `mix phx.gen.secret`."
+  end
+
+  defp session_marker(secret_key_base, username, password) do
+    Base.encode64(:crypto.mac(:hmac, :sha256, secret_key_base, [username, 0, password]))
+  end
 
   use Smolquery.Runtime
 
