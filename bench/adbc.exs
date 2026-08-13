@@ -51,9 +51,9 @@ defmodule Bench.Adbc do
     IO.puts("(extensions already installed on disk, so this is the steady-state cost)\n")
 
     {db_us, {:ok, database}} =
-      :timer.tc(fn -> Adbc.Database.start_link(driver: :duckdb) end)
+      :timer.tc(fn -> Smolquery.DuckDB.start_link() end)
 
-    IO.puts("  Adbc.Database.start_link          #{pad(ms(db_us), 7)} ms")
+    IO.puts("  Smolquery.DuckDB.start_link       #{pad(ms(db_us), 7)} ms")
 
     {conn_us, {:ok, conn}} = :timer.tc(fn -> Adbc.Connection.start_link(database: database) end)
     IO.puts("  Adbc.Connection.start_link (bare) #{pad(ms(conn_us), 7)} ms")

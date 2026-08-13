@@ -4,6 +4,10 @@ config :logger, level: :debug
 
 config :smolquery, SmolqueryApi, api_key: "smolquery-dev"
 
+config :smolquery, SmolqueryWeb,
+  username: "smolquery",
+  password: "smolquery"
+
 config :smolquery, SmolqueryWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
