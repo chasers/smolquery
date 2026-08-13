@@ -17,12 +17,6 @@ defmodule Smolquery.DuckDB do
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
-    %{
-      id: __MODULE__,
-      start: {__MODULE__, :start_link, [opts]},
-      type: :worker,
-      restart: :permanent,
-      shutdown: 5_000
-    }
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
   end
 end

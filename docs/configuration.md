@@ -41,8 +41,9 @@ full set of dials behind them.
 The build packages DuckDB 1.5.3 through ADBC 0.12.1 and every database process
 uses that same driver version. The compile-time asset is selected from the build
 target: macOS uses the universal asset, while Linux GNU uses the matching
-`aarch64` or `x86_64` asset. Unsupported targets fail during configuration
-rather than falling back to ADBC's generated DuckDB 1.5.1 default.
+`aarch64` or `x86_64` asset. An unsupported target falls back to ADBC's own
+driver matrix, so Mix tasks still run there; the engine then refuses to start
+until the pinned version's driver exists for that target.
 
 | variable | effect (default) |
 |---|---|
@@ -50,7 +51,7 @@ rather than falling back to ADBC's generated DuckDB 1.5.1 default.
 | `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_SPILL_DIR` | root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage; it is intentionally separate from `SMOLQUERY_DATA_DIR` |
-| `SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE` | per-instance spill limit (e.g. `10GiB`). DuckDB otherwise permits up to 90% of free space per instance |
+| `SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE` | per-instance spill limit (e.g. `10GiB`). DuckDB otherwise permits up to 90% of free space per instance. The limit multiplies: `N` concurrent instances may spill `N ×` this value, so it is not a disk budget |
 | `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
 | `SMOLQUERY_COMMIT_SIBLINGS` | the in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window opening below it closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead — waiting only buys batching when other writers are active. `0` turns the short window off |
 | `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |

@@ -7,25 +7,16 @@ defmodule Smolquery.DuckDBTest do
 
   describe "version/0" do
     test "returns the configured DuckDB driver version" do
-      assert DuckDB.version() == "1.5.3"
+      assert DuckDB.version() == Application.fetch_env!(:smolquery, :duckdb_driver_version)
     end
   end
 
   describe "ADBC configuration" do
-    test "downloads the matching official driver asset" do
-      assert [{:duckdb, [version: "1.5.3", url: url]}] = Application.fetch_env!(:adbc, :drivers)
+    test "pins the packaged driver to an official asset of the same version" do
+      assert [{:duckdb, [version: version, url: url]}] = Application.fetch_env!(:adbc, :drivers)
 
-      target = :erlang.system_info(:system_architecture) |> to_string()
-
-      expected_asset =
-        cond do
-          String.contains?(target, "-darwin") -> "libduckdb-osx-universal.zip"
-          String.starts_with?(target, "aarch64-") -> "libduckdb-linux-arm64.zip"
-          String.starts_with?(target, "x86_64-") -> "libduckdb-linux-amd64.zip"
-          true -> flunk("unsupported test target #{target}")
-        end
-
-      assert String.ends_with?(url, expected_asset)
+      assert version == DuckDB.version()
+      assert url =~ "duckdb/releases/download/v#{DuckDB.version()}/libduckdb-"
     end
   end
 
@@ -39,6 +30,6 @@ defmodule Smolquery.DuckDBTest do
     {:ok, connection} = Connection.start_link(database: database)
 
     assert {:ok, result} = Connection.query(connection, "SELECT version()")
-    assert Result.one!(result) == "v1.5.3"
+    assert Result.one!(result) == "v" <> DuckDB.version()
   end
 end

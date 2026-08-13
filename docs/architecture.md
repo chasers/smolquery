@@ -49,9 +49,11 @@ Three rules shape everything below:
 
 ## The read engine
 
-`Smolquery.Engine` is a supervised `Adbc.Database` → `Adbc.Connection` subtree
-with extensions and session settings applied before the connection is
-reachable:
+`Smolquery.Engine` is a supervised `Smolquery.DuckDB` → `Adbc.Connection`
+subtree — `Smolquery.DuckDB` wraps `Adbc.Database` and pins the packaged
+driver version — with extensions and session settings applied before the
+connection is reachable. Every instance spills to its own directory under
+`SMOLQUERY_SPILL_DIR`, so two concurrent spills never share temp files:
 
 ```elixir
 {:ok, _pid} = Smolquery.Engine.start_link(name: MyEngine)
