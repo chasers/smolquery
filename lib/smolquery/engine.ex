@@ -67,18 +67,28 @@ defmodule Smolquery.Engine do
   @doc """
   Resolves the DuckDB thread count for an engine configuration.
 
-  An explicit `:threads` value wins; otherwise the deployment host's scheduler
-  count is used. Keeping this fallback here lets write-pool members divide the
-  same budget as standalone engines without freezing the build host's count.
+  An explicit positive `:threads` value wins; a missing or `nil` value
+  resolves to the deployment host's scheduler count. Anything else raises
+  here, at the misconfiguration, rather than as arithmetic in a caller.
+  Keeping this fallback here lets write-pool members divide the same budget
+  as standalone engines without freezing the build host's count.
   """
-  @spec thread_count() :: pos_integer() | nil
+  @spec thread_count() :: pos_integer()
   def thread_count, do: thread_count(Application.get_env(:smolquery, __MODULE__, []))
 
-  @spec thread_count(keyword()) :: pos_integer() | nil
+  @spec thread_count(keyword()) :: pos_integer()
   def thread_count(config) when is_list(config) do
-    case Keyword.fetch(config, :threads) do
-      {:ok, threads} -> threads
-      :error -> System.schedulers_online()
+    case Keyword.get(config, :threads) do
+      nil ->
+        System.schedulers_online()
+
+      threads when is_integer(threads) and threads > 0 ->
+        threads
+
+      other ->
+        raise ArgumentError,
+              "config :smolquery, Smolquery.Engine, threads: must be a positive " <>
+                "integer or nil, got: #{inspect(other)}"
     end
   end
 

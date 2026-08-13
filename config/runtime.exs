@@ -57,6 +57,10 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+if threads = System.get_env("SMOLQUERY_ENGINE_THREADS") do
+  config :smolquery, Smolquery.Engine, threads: String.to_integer(threads)
+end
+
 if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do
   ceiling =
     case max_rows do

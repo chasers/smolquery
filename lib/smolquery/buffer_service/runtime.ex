@@ -436,15 +436,13 @@ defmodule Smolquery.BufferService.Runtime do
   """
   @spec write_engine_budget(t()) :: keyword()
   def write_engine_budget(%__MODULE__{write_pool_size: size} = runtime) do
-    threads = [threads: runtime.write_engine_threads || max(div(engine_threads(), size), 1)]
+    threads = [threads: runtime.write_engine_threads || max(div(Engine.thread_count(), size), 1)]
 
     case runtime.write_engine_memory_limit do
       nil -> threads
       limit -> [{:memory_limit, limit} | threads]
     end
   end
-
-  defp engine_threads, do: Engine.thread_count()
 
   defp validate_compression!(compression) when compression in @codecs, do: :ok
 
