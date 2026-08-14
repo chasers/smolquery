@@ -58,10 +58,13 @@ defmodule Smolquery.AwsCredentials do
   @doc """
   Signing options for `Req`'s `:aws_sigv4`, resolved fresh on every call.
 
-  `Req` accepts an `{module, function, args}` tuple here and evaluates it per
-  request, which is what keeps rotating credentials working without this
-  module caching anything: `:aws_credentials` refreshes in the background
-  ahead of expiry, and each request reads whatever it currently holds.
+  The options must be a resolved list, not a lazy `{module, function, args}`
+  tuple: `ReqS3.handle_s3_url/1` reads them eagerly with `Access.get/3` when
+  it rewrites an `s3://` URL, before `Req`'s own sigv4 step would evaluate
+  an MFA. Rotation still needs no restart, because callers build a request
+  per operation and call this at build time — `:aws_credentials` refreshes
+  in the background ahead of expiry, and each call reads whatever it
+  currently holds.
 
   `region` comes from the store rather than the chain, because the providers
   that serve Pod Identity return no region at all.
