@@ -43,7 +43,7 @@ defmodule Smolquery.AwsCredentialsTest do
       assert options[:access_key_id] == "AKIAEXAMPLE"
     end
 
-    test "drops credential_provider, which Req would reject as an unknown option" do
+    test "hands Req only sigv4 keys, leaving the provider's bookkeeping behind" do
       keys =
         pod_identity_credentials()
         |> AwsCredentials.options_from("us-east-1")

@@ -120,6 +120,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Segments.Store
 
   @enforce_keys [:engine, :catalog]
   defstruct [:engine, :catalog]
@@ -132,6 +133,7 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:data_path, String.t()}
           | {:catalog, String.t()}
           | {:automatic_migration, boolean()}
+          | {:store, Store.t()}
 
   @default_catalog "lake"
   @commit_attempts 5
@@ -166,6 +168,8 @@ defmodule Smolquery.Catalog.DuckLake do
       registers segments from outside this directory, but DuckLake requires it.
     * `:catalog` — attached catalog name. Defaults to `#{inspect(@default_catalog)}`.
     * `:automatic_migration` — passed to `attach_statement/4`
+    * `:store` — the sealed-tier store; a credential-chain S3 store adds
+      the extensions its `CREATE SECRET` statement needs
     * any `Smolquery.Engine` option — `:extensions` is extended with
       `:ducklake` rather than replaced
 

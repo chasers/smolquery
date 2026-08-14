@@ -25,8 +25,9 @@ defmodule Smolquery.AwsCredentials do
   Identity, web identity, EC2 — both pod-scoped identities ahead of instance
   metadata. That ordering is what this module depends on: a node whose IMDS
   answers pods would otherwise hand back the *node's* role and silently
-  authenticate as the wrong principal. Version 0.3 ordered EC2 first and
-  needed an override; do not pin back to it.
+  authenticate as the wrong principal. The 0.3 line has no Pod Identity and
+  no web-identity provider at all, so on it a pod falls through to instance
+  metadata; do not pin back to it.
   """
 
   @doc """
@@ -75,9 +76,10 @@ defmodule Smolquery.AwsCredentials do
   The signing options for one already-resolved credentials map.
 
   Split out from `sigv4_options/1` so the mapping is reachable without a
-  running credential chain. `Req` validates the keys it is handed and rejects
-  unknown ones, so this drops `:credential_provider` — which every provider
-  sets — rather than passing the map through.
+  running credential chain. It builds the options explicitly rather than
+  passing the map through: some providers resolve a `:region` of their own,
+  and requests must be signed for the store's region — the bucket's — not
+  the credential source's.
   """
   @spec options_from(:undefined | map(), String.t()) :: keyword()
   def options_from(:undefined, _region) do
