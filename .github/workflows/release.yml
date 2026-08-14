@@ -1,8 +1,10 @@
 name: Release
 
-# A release runs on the main push itself. CI and the Cluster suite gate every
-# pull request, and branch protection keeps PRs current with main, so the
-# merged tree is one CI already saw — no main-push CI run to wait for.
+# Every main push publishes an immutable image at sha-<commit>. CI and the
+# Cluster suite gate every pull request, and branch protection keeps PRs
+# current with main, so the merged tree is one CI already saw — no main-push
+# CI run to wait for. When the push also bumps the mix.exs version, the run
+# aliases the image as vX.Y.Z and creates the GitHub release.
 #
 # workflow_dispatch is the recovery path: it releases the version at `sha`
 # (default: the branch head) when that version's tag is absent or already
@@ -55,7 +57,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 2
@@ -150,33 +152,31 @@ jobs:
           fi
 
   promote:
-    if: needs.prepare.outputs.changed == 'true'
     needs: prepare
     name: Publish immutable image and release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 1
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
-      - name: Inspect existing immutable image tags
+      - name: Inspect the immutable commit image tag
         id: tags
         env:
-          VERSION_TAG: ${{ needs.prepare.outputs.tag }}
           SHA_TAG: sha-${{ needs.prepare.outputs.sha }}
         shell: bash
         run: |
@@ -205,62 +205,18 @@ jobs:
             printf '%s' "$digest"
           }
 
-          version_state=absent
-          sha_state=absent
-          if version_digest=$(inspect_manifest_list "${GHCR_IMAGE}:${VERSION_TAG}"); then
-            version_state=present
+          if digest=$(inspect_manifest_list "${GHCR_IMAGE}:${SHA_TAG}"); then
+            mode=reuse
+            echo "${SHA_TAG} already points at $digest; reusing without rebuild"
           else
             case "$?" in
-              2) version_digest="" ;;
+              2)
+                digest=""
+                mode=build
+                echo "${SHA_TAG} does not exist; building and publishing"
+                ;;
               *) exit 1 ;;
             esac
-          fi
-          if sha_digest=$(inspect_manifest_list "${GHCR_IMAGE}:${SHA_TAG}"); then
-            sha_state=present
-          else
-            case "$?" in
-              2) sha_digest="" ;;
-              *) exit 1 ;;
-            esac
-          fi
-
-          missing_ref=""
-          case "$version_state:$sha_state" in
-            present:present)
-              if [[ "$version_digest" != "$sha_digest" ]]; then
-                echo "immutable tags have conflicting manifest-list digests" >&2
-                exit 1
-              fi
-              digest="$version_digest"
-              mode=reuse
-              echo "both tags already point at $digest; reusing without rebuild"
-              ;;
-            absent:absent)
-              digest=""
-              mode=build
-              echo "neither immutable tag exists; building and publishing"
-              ;;
-            present:absent)
-              digest="$version_digest"
-              mode=reuse
-              missing_ref="${GHCR_IMAGE}:${SHA_TAG}"
-              ;;
-            absent:present)
-              digest="$sha_digest"
-              mode=reuse
-              missing_ref="${GHCR_IMAGE}:${VERSION_TAG}"
-              ;;
-          esac
-
-          if [[ -n "$missing_ref" ]]; then
-            echo "repairing partial publication at $missing_ref from $digest"
-            docker buildx imagetools create --tag "$missing_ref" "${GHCR_IMAGE}@${digest}"
-            repaired_digest=$(inspect_manifest_list "$missing_ref")
-            if [[ "$repaired_digest" != "$digest" ]]; then
-              echo "repaired tag resolved to $repaired_digest, expected $digest" >&2
-              exit 1
-            fi
-            echo "partial publication repaired; both tags point at $digest"
           fi
 
           {
@@ -270,17 +226,16 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            type=raw,value=${{ needs.prepare.outputs.tag }}
             type=raw,value=sha-${{ needs.prepare.outputs.sha }}
 
       - name: Build and publish multi-arch image
         if: steps.tags.outputs.mode == 'build'
         id: image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -306,6 +261,31 @@ jobs:
             exit 1
           }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Alias the version image tag
+        if: needs.prepare.outputs.changed == 'true'
+        env:
+          VERSION_TAG: ${{ needs.prepare.outputs.tag }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GHCR_IMAGE}:${VERSION_TAG}"
+          if output=$(docker buildx imagetools inspect "$ref" 2>&1); then
+            existing=$(awk '$1 == "Digest:" {print $2; exit}' <<<"$output")
+            if [[ "$existing" != "$DIGEST" ]]; then
+              echo "$ref already points at $existing, expected $DIGEST" >&2
+              exit 1
+            fi
+            echo "$ref already points at $DIGEST"
+          else
+            if ! grep -Eiq 'not found|manifest[_ ]unknown|name unknown|no such manifest' <<<"$output"; then
+              echo "$output" >&2
+              exit 1
+            fi
+            docker buildx imagetools create --tag "$ref" "${GHCR_IMAGE}@${DIGEST}"
+            echo "$ref now points at $DIGEST"
+          fi
 
       - name: Render immutable deployment manifest
         env:
@@ -374,6 +354,7 @@ jobs:
           } > release-image.txt
 
       - name: Create or reuse GitHub release
+        if: needs.prepare.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
