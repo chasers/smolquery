@@ -195,10 +195,11 @@ defmodule Smolquery.QueryService.Runner do
     {:error, reason}
   end
 
-  defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions}), do: extensions
+  defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
+    do: EngineSecrets.sealed_tier_extensions(runtime.store, extensions)
 
-  defp extensions(%Runtime{engine_extensions: extensions}),
-    do: Enum.uniq([:ducklake | extensions])
+  defp extensions(%Runtime{engine_extensions: extensions} = runtime),
+    do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
 
   defp execute(runtime, connection, sql) do
     started = System.monotonic_time(:millisecond)

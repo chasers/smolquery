@@ -4,7 +4,7 @@ defmodule Smolquery.MixProject do
   def project do
     [
       app: :smolquery,
-      version: "0.7.2",
+      version: "0.7.3",
       elixir: "~> 1.20",
       package: [licenses: ["Apache-2.0"]],
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -16,7 +16,7 @@ defmodule Smolquery.MixProject do
       dialyzer: [
         plt_local_path: "priv/plts",
         plt_core_path: "priv/plts",
-        plt_add_apps: [:ex_unit]
+        plt_add_apps: [:ex_unit, :aws_credentials]
       ],
       releases: releases()
     ]
@@ -26,7 +26,7 @@ defmodule Smolquery.MixProject do
     [
       smolquery: [
         include_executables_for: [:unix],
-        applications: [runtime_tools: :permanent]
+        applications: [runtime_tools: :permanent, aws_credentials: :load]
       ]
     ]
   end
@@ -53,6 +53,7 @@ defmodule Smolquery.MixProject do
       {:plug, "~> 1.20"},
       {:req, "~> 0.7"},
       {:req_s3, "~> 0.2"},
+      {:aws_credentials, "~> 1.1", runtime: false},
       {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},
       {:libcluster_postgres, "~> 0.2"},
       {:postgrex, "~> 0.22"},

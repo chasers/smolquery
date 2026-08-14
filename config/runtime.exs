@@ -251,8 +251,8 @@ if s3_bucket = System.get_env("SMOLQUERY_S3_BUCKET") do
   s3_options =
     [
       bucket: s3_bucket,
-      access_key_id: System.fetch_env!("SMOLQUERY_S3_ACCESS_KEY_ID"),
-      secret_access_key: System.fetch_env!("SMOLQUERY_S3_SECRET_ACCESS_KEY"),
+      access_key_id: System.get_env("SMOLQUERY_S3_ACCESS_KEY_ID"),
+      secret_access_key: System.get_env("SMOLQUERY_S3_SECRET_ACCESS_KEY"),
       staging_dir:
         System.get_env("SMOLQUERY_S3_STAGING_DIR") ||
           Path.join(System.get_env("SMOLQUERY_DATA_DIR", "priv/data"), "sealed-staging"),
