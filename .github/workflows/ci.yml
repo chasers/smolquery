@@ -1,8 +1,9 @@
 name: CI
 
+# Pull requests are the only gate: branch protection keeps every PR current
+# with main, so a merge lands a tree CI has already seen. Releases run from
+# the Release workflow on the main push itself.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 env:
