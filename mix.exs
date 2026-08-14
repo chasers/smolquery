@@ -4,7 +4,7 @@ defmodule Smolquery.MixProject do
   def project do
     [
       app: :smolquery,
-      version: "0.7.2",
+      version: "0.7.3",
       elixir: "~> 1.20",
       package: [licenses: ["Apache-2.0"]],
       elixirc_paths: elixirc_paths(Mix.env()),
