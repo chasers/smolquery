@@ -1,13 +1,20 @@
 name: Release
 
-# A release is considered only after the CI workflow succeeds on the main
-# push. The real-host Cluster suite runs on every pull request, so the merge
-# gate already saw it; release creation stays automatic.
+# A release runs on the main push itself. CI and the Cluster suite gate every
+# pull request, and branch protection keeps PRs current with main, so the
+# merged tree is one CI already saw — no main-push CI run to wait for.
+#
+# workflow_dispatch is the recovery path: it releases the version at `sha`
+# (default: the branch head) when that version's tag is absent or already
+# points there. Use it to finish a release whose run failed after merge.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to release (must be on main; default branch head)
+        required: false
 
 permissions:
   actions: read
@@ -15,7 +22,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_sha }}
+  group: release-${{ inputs.sha || github.sha }}
   cancel-in-progress: false
 
 env:
@@ -23,10 +30,6 @@ env:
 
 jobs:
   prepare:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
     name: Prepare release
     runs-on: ubuntu-latest
     outputs:
@@ -35,15 +38,32 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       sha: ${{ steps.version.outputs.sha }}
     steps:
+      - name: Verify a dispatched commit is on main
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${SHA}" --jq .status)
+          case "$status" in
+            identical|behind) echo "$SHA is on main ($status)" ;;
+            *)
+              echo "$SHA is not on main (compare status: $status)" >&2
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 2
 
       - name: Detect and validate version bump
         id: version
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
+          SHA: ${{ inputs.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -67,7 +87,7 @@ jobs:
           version=$(read_version mix.exs)
           parent_version=$(read_version /tmp/parent-mix.exs)
 
-          if [[ "$version" == "$parent_version" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$version" == "$parent_version" ]]; then
             echo "no version-line change ($version)"
             {
               echo "changed=false"
@@ -78,21 +98,31 @@ jobs:
             exit 0
           fi
 
-          python3 - "$parent_version" "$version" <<'PY'
+          require_advance=0
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            require_advance=1
+          fi
+
+          python3 - "$parent_version" "$version" "$require_advance" <<'PY'
           import re
           import sys
 
           stable = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-          parent, current = sys.argv[1:]
+          parent, current, require_advance = sys.argv[1:]
           if not stable.fullmatch(current):
               raise SystemExit(f"release version must be stable X.Y.Z: {current}")
-          if not stable.fullmatch(parent):
-              raise SystemExit(f"parent version must be stable X.Y.Z: {parent}")
-          if tuple(map(int, current.split("."))) <= tuple(map(int, parent.split("."))):
-              raise SystemExit(f"release version must advance beyond {parent}: {current}")
+          if require_advance == "1":
+              if not stable.fullmatch(parent):
+                  raise SystemExit(f"parent version must be stable X.Y.Z: {parent}")
+              if tuple(map(int, current.split("."))) <= tuple(map(int, parent.split("."))):
+                  raise SystemExit(f"release version must advance beyond {parent}: {current}")
           PY
 
-          echo "version bump: $parent_version -> $version"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            echo "version bump: $parent_version -> $version"
+          else
+            echo "dispatch release of $version at $SHA"
+          fi
           {
             echo "changed=true"
             echo "version=$version"
@@ -119,53 +149,9 @@ jobs:
             echo "$TAG is not present"
           fi
 
-  ci:
-    if: needs.prepare.outputs.changed == 'true'
-    needs: prepare
-    name: Wait for CI (mix ci, tests, integration, dialyzer)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for the exact push CI run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ needs.prepare.outputs.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            runs=$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow ci.yml \
-              --event push \
-              --commit "$SHA" \
-              --limit 20 \
-              --json databaseId,status,conclusion,headSha)
-
-            success=$(jq '[.[] | select(.headSha == env.SHA and .status == "completed" and .conclusion == "success")] | length' <<<"$runs")
-            active=$(jq '[.[] | select(.headSha == env.SHA and .status != "completed")] | length' <<<"$runs")
-            failed=$(jq '[.[] | select(.headSha == env.SHA and .status == "completed" and .conclusion != "success")] | length' <<<"$runs")
-
-            if [[ "$success" -gt 0 ]]; then
-              echo "CI succeeded for $SHA"
-              exit 0
-            fi
-
-            if [[ "$active" -eq 0 && "$failed" -gt 0 ]]; then
-              echo "all CI runs for $SHA completed unsuccessfully" >&2
-              jq . <<<"$runs"
-              exit 1
-            fi
-
-            echo "waiting for CI for $SHA (attempt $attempt/30)"
-            sleep 20
-          done
-
-          echo "timed out waiting for CI for $SHA" >&2
-          exit 1
-
   promote:
     if: needs.prepare.outputs.changed == 'true'
-    needs: [prepare, ci]
+    needs: prepare
     name: Publish immutable image and release
     runs-on: ubuntu-latest
     steps:
@@ -341,7 +327,29 @@ jobs:
               digest: ${DIGEST}
           EOF
           kubectl kustomize "$overlay_dir" > release-manifest.yaml
-          kubectl create --dry-run=client --validate=false -f release-manifest.yaml -o name >/dev/null
+
+          # kubectl's client dry-run still asks a live API server for
+          # discovery, and the runner has none; parse the manifest offline.
+          python3 - release-manifest.yaml <<'PY'
+          import sys
+
+          import yaml
+
+          documents = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+          if not documents:
+              raise SystemExit("release manifest rendered no objects")
+          for document in documents:
+              missing = [
+                  field
+                  for field in ("apiVersion", "kind")
+                  if not isinstance(document.get(field), str)
+              ]
+              if not isinstance(document.get("metadata", {}).get("name"), str):
+                  missing.append("metadata.name")
+              if missing:
+                  raise SystemExit(f"manifest object is missing {missing}: {document}")
+          print(f"release manifest parsed: {len(documents)} objects")
+          PY
 
           mapfile -t smolquery_images < <(awk '/^[[:space:]]+image: .*smolquery/ {print $2}' release-manifest.yaml)
           [[ "${#smolquery_images[@]}" -gt 0 ]] || {

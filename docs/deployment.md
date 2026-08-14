@@ -13,12 +13,17 @@ stable `X.Y.Z` value.
 The pipeline runs in this order:
 
 1. A pull request runs the CI workflow and the Cluster workflow. The Cluster
-   suite runs against real kind hosts. Both gate the merge.
-2. A merge to `main` runs the CI workflow again.
-3. The Release workflow starts after that CI run succeeds. It checks that the
+   suite runs against real kind hosts. Both gate the merge. Branch protection
+   keeps the pull request current with `main`, so the merged tree is one CI
+   already saw.
+2. The Release workflow runs on the merge push to `main`. It checks that the
    exact commit bumped the version.
-4. It publishes multi-architecture `ghcr.io/chasers/smolquery` tags for the
+3. It publishes multi-architecture `ghcr.io/chasers/smolquery` tags for the
    version (`vX.Y.Z`) and the commit (`sha-<commit>`).
+
+A release run that fails after the merge does not need a new version bump.
+Dispatch the Release workflow with the bump commit as `sha`; the run reuses
+the image tags it already published and finishes the tag and the release.
 
 A commit that does not bump the version skips the publish step. The image
 digest is the durable reference; pin deployments to it, not to a tag.
