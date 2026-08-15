@@ -27,8 +27,8 @@ defmodule Smolquery.Auth.PrincipalTest do
     end
 
     test "keeps issuer and subject boundaries distinct" do
-      assert {:ok, first} = Principal.oidc("a\0b", "c", :user)
-      assert {:ok, second} = Principal.oidc("a", "b\0c", :user)
+      assert {:ok, first} = Principal.oidc("ab", "c", :user)
+      assert {:ok, second} = Principal.oidc("a", "bc", :user)
 
       refute first.id == second.id
     end

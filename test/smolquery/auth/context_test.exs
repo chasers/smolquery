@@ -9,6 +9,11 @@ defmodule Smolquery.Auth.ContextTest do
     principal
   end
 
+  defp oidc_principal do
+    {:ok, principal} = Principal.oidc("https://idp.example", "user-1", :user)
+    principal
+  end
+
   test "uses an explicit single-tenant sentinel and optional expiry" do
     assert {:ok, context} =
              Context.single_tenant(principal(), [:query, :query, :ingest], expires_at: 100)
@@ -29,6 +34,21 @@ defmodule Smolquery.Auth.ContextTest do
     assert many.capabilities == MapSet.new([:query])
     assert Context.granted?(one, :query)
     refute Context.granted?(one, :ingest)
+  end
+
+  test "requires expiry for OIDC contexts" do
+    assert {:error, :oidc_requires_expiry} =
+             Context.single_tenant(oidc_principal(), :query)
+
+    assert {:error, :oidc_requires_expiry} =
+             Context.single_tenant(oidc_principal(), :query, expires_at: nil)
+
+    assert {:ok, context} =
+             Context.single_tenant(oidc_principal(), :query, expires_at: 100)
+
+    assert Context.well_formed?(context)
+    refute Context.well_formed?(%{context | expires_at: nil})
+    refute Context.active?(%{context | expires_at: nil}, 0)
   end
 
   test "identifies known capabilities without converting input" do

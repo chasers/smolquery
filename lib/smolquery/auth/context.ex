@@ -1,6 +1,6 @@
 defmodule Smolquery.Auth.Context do
   @moduledoc """
-  The authenticated principal, capabilities, scope, and optional expiry for
+  The authenticated principal, capabilities, scope, and expiry contract for
   one request.
 
   `:single_tenant` is an explicit scope sentinel for the current deployment.
@@ -8,10 +8,11 @@ defmodule Smolquery.Auth.Context do
   group, or other identity-provider claim; a future tenant membership lookup
   can replace it without changing the principal contract.
 
-  `expires_at` is an optional Unix epoch timestamp in integer seconds. A
-  context is active only while `now < expires_at`; the context is expired at
-  exactly the boundary. Authenticator clock-skew handling occurs before this
-  context is constructed.
+  `expires_at` is a Unix epoch timestamp in integer seconds. It is required
+  for OIDC principals and optional for local static principals. A context is
+  active only while `now < expires_at`; the context is expired at exactly the
+  boundary. Authenticator clock-skew handling occurs before this context is
+  constructed.
 
   Structural checks prove shape only, not authentication provenance. Only
   trusted authenticators and mappers may construct contexts; client input must
@@ -39,8 +40,8 @@ defmodule Smolquery.Auth.Context do
   @doc """
   Builds a context with the explicit single-tenant scope.
 
-  The optional `:expires_at` option is an integer Unix epoch timestamp in
-  seconds and defaults to `nil` for no expiry.
+  The `:expires_at` option is an integer Unix epoch timestamp in seconds. It
+  is required for OIDC principals and defaults to `nil` for local principals.
   """
   @spec single_tenant(Principal.t(), capability() | [capability()] | MapSet.t()) ::
           {:ok, t()} | {:error, term()}
@@ -51,7 +52,8 @@ defmodule Smolquery.Auth.Context do
   def single_tenant(%Principal{} = principal, capabilities, opts) do
     if Principal.well_formed?(principal) do
       with {:ok, capabilities} <- normalize_capabilities(capabilities),
-           {:ok, expires_at} <- options(opts) do
+           {:ok, expires_at} <- options(opts),
+           :ok <- validate_context_expiry(principal, expires_at) do
         {:ok,
          %__MODULE__{
            principal: principal,
@@ -95,7 +97,7 @@ defmodule Smolquery.Auth.Context do
         expires_at: expires_at
       }) do
     Principal.well_formed?(principal) and valid_capability_set?(capabilities) and
-      valid_expiry?(expires_at)
+      validate_context_expiry(principal, expires_at) == :ok
   end
 
   def well_formed?(_term), do: false
@@ -177,6 +179,15 @@ defmodule Smolquery.Auth.Context do
   defp duplicate_keys?(opts) do
     keys = Keyword.keys(opts)
     length(keys) != length(Enum.uniq(keys))
+  end
+
+  defp validate_context_expiry(%Principal{authn: :oidc}, nil),
+    do: {:error, :oidc_requires_expiry}
+
+  defp validate_context_expiry(_principal, expires_at) do
+    if valid_expiry?(expires_at),
+      do: :ok,
+      else: {:error, {:invalid_option, :expires_at}}
   end
 
   defp valid_expiry?(nil), do: true
