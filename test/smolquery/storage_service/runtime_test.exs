@@ -103,6 +103,22 @@ defmodule Smolquery.StorageService.RuntimeTest do
         end
       end
     end
+
+    test "refuses a non-string compact_engine_memory_limit at boot" do
+      for limit <- [512, :"1GiB"] do
+        assert_raise ArgumentError, ~r/unsupported compact_engine_memory_limit/, fn ->
+          Runtime.new(name: __MODULE__.BadCompactMemoryLimit, compact_engine_memory_limit: limit)
+        end
+      end
+    end
+
+    test "refuses an unusable compact_max_rows at boot, not at first sweep" do
+      for rows <- [0, -1, "4194304", nil] do
+        assert_raise ArgumentError, ~r/unsupported compact_max_rows/, fn ->
+          Runtime.new(name: __MODULE__.BadRowCap, compact_max_rows: rows)
+        end
+      end
+    end
   end
 
   describe "engine_memory_limit/2" do
@@ -131,6 +147,44 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
+  describe "compact_engine_memory_limit/2" do
+    test "an explicit limit wins over the cgroup" do
+      runtime =
+        Runtime.new(name: __MODULE__.ExplicitCompactLimit, compact_engine_memory_limit: "1GiB")
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "1GiB"
+    end
+
+    test "derives a quarter of the cgroup limit" do
+      runtime = Runtime.new(name: __MODULE__.DerivedCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "1024MiB"
+    end
+
+    test "a cgroup limit under four mebibytes still yields a size DuckDB accepts" do
+      runtime = Runtime.new(name: __MODULE__.TinyCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 1}) == "1MiB"
+    end
+
+    test "without a cgroup limit the engine inherits its application config" do
+      runtime = Runtime.new(name: __MODULE__.InheritedCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, :none) == nil
+    end
+  end
+
+  describe "merge_engine/1" do
+    test "resolves to the seal merge engine unless overridden" do
+      runtime = Runtime.new(name: Storage)
+
+      assert Runtime.merge_engine(runtime) == Storage.Engine
+
+      assert Runtime.merge_engine(%{runtime | merge_engine: Storage.CompactEngine}) ==
+               Storage.CompactEngine
+    end
+  end
+
   describe "put/1, fetch/1 and delete/1" do
     test "round-trips a runtime through persistent_term" do
       runtime = Runtime.new(name: __MODULE__.Published, dir: "/tmp/published")
@@ -151,6 +205,7 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.supervisor(Storage) == Storage.Supervisor
       assert Runtime.sealer(Storage) == Storage.Sealer
       assert Runtime.engine(Storage) == Storage.Engine
+      assert Runtime.compact_engine(Storage) == Storage.CompactEngine
       assert Runtime.seals(Storage) == Storage.Seals
       assert Runtime.catalog_engine(Storage) == Storage.Catalog
     end

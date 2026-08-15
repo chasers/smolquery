@@ -9,12 +9,16 @@ defmodule Smolquery.StorageService.Supervisor do
   sweeper that drops segments past their table's TTL and expires old snapshots,
   and the GC that deletes uploads whose commit never followed.
 
-  The catalog and the merge run on separate engines deliberately. An
-  `Adbc.Connection` serializes the queries it is given, so sharing one would put
-  every catalog commit behind whatever multi-gigabyte `COPY` happened to be in
-  flight. Both engines need the sealed tier's `CREATE SECRET` when the store is
-  S3: the merge engine writes and re-reads segments, and the catalog engine
-  reads each just-uploaded segment back when a commit registers it (DuckLake's
+  The catalog, the merge, and compaction run on separate engines deliberately.
+  An `Adbc.Connection` serializes the queries it is given, so sharing one would
+  put every catalog commit behind whatever multi-gigabyte `COPY` happened to be
+  in flight — and a timed-out compaction merge, whose statement keeps running
+  after the caller gave up, would starve every seal and sizing call behind it
+  (T-259). On its own engine, the compactor can also recycle the connection
+  after a timeout without aborting a healthy in-flight seal. All three engines
+  need the sealed tier's `CREATE SECRET` when the store is S3: the merge and
+  compaction engines write and re-read segments, and the catalog engine reads
+  each just-uploaded segment back when a commit registers it (DuckLake's
   add-data-files collects the file's footer stats).
 
   The merge engine is sized to the pod it runs in: its memory limit resolves
@@ -22,7 +26,10 @@ defmodule Smolquery.StorageService.Supervisor do
   knob, else half the cgroup memory limit, else `Smolquery.Engine`'s
   application config — and the resolved value is logged at boot, because it
   is exactly the number an operator cannot read off their own configuration
-  (T-250). Merge sessions also set `preserve_insertion_order = false`,
+  (T-250). The compaction engine resolves the same way one rung down —
+  explicit knob, else a quarter of the cgroup limit — per
+  `Smolquery.StorageService.Runtime.compact_engine_memory_limit/2`. Merge
+  and compaction sessions also set `preserve_insertion_order = false`,
   DuckDB's named mitigation for out-of-memory `COPY`: rows nobody asked to
   order may come out reordered, which no reader of a segment depends on,
   while the clustering sort is an explicit `ORDER BY` the setting leaves
@@ -87,6 +94,9 @@ defmodule Smolquery.StorageService.Supervisor do
         DuckLake.children(catalog_opts(runtime), Runtime.catalog_engine(runtime.name)) ++
         [
           {Engine, engine_opts(runtime)},
+          Supervisor.child_spec({Engine, compact_engine_opts(runtime)},
+            id: Runtime.compact_engine(runtime.name)
+          ),
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
           {Compactor, runtime},
@@ -98,24 +108,44 @@ defmodule Smolquery.StorageService.Supervisor do
   end
 
   defp engine_opts(%Runtime{} = runtime) do
-    [
-      name: Runtime.engine(runtime.name),
-      extensions: engine_extensions(runtime),
-      statements: ["SET preserve_insertion_order = false" | engine_secrets(runtime)]
-    ] ++ engine_memory_limit(runtime)
+    merge_limit =
+      memory_limit(
+        "storage merge engine",
+        Runtime.engine_memory_limit(runtime),
+        runtime.engine_memory_limit,
+        "half the cgroup memory limit"
+      )
+
+    [{:name, Runtime.engine(runtime.name)} | shared_engine_opts(runtime)] ++ merge_limit
   end
 
-  defp engine_memory_limit(%Runtime{engine_memory_limit: configured} = runtime) do
-    case Runtime.engine_memory_limit(runtime) do
-      nil ->
-        []
+  defp compact_engine_opts(%Runtime{} = runtime) do
+    compact_limit =
+      memory_limit(
+        "storage compaction engine",
+        Runtime.compact_engine_memory_limit(runtime),
+        runtime.compact_engine_memory_limit,
+        "a quarter of the cgroup memory limit"
+      )
 
-      limit ->
-        source = if configured, do: "configured", else: "half the cgroup memory limit"
-        Logger.info("storage merge engine memory_limit=#{limit} (#{source})")
+    [{:name, Runtime.compact_engine(runtime.name)} | shared_engine_opts(runtime)] ++
+      compact_limit
+  end
 
-        [memory_limit: limit]
-    end
+  defp shared_engine_opts(%Runtime{} = runtime) do
+    [
+      extensions: engine_extensions(runtime),
+      statements: ["SET preserve_insertion_order = false" | engine_secrets(runtime)]
+    ]
+  end
+
+  defp memory_limit(_label, nil, _configured, _derivation), do: []
+
+  defp memory_limit(label, limit, configured, derivation) do
+    source = if configured, do: "configured", else: derivation
+    Logger.info("#{label} memory_limit=#{limit} (#{source})")
+
+    [memory_limit: limit]
   end
 
   defp engine_secrets(%Runtime{} = runtime) do

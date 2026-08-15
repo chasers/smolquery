@@ -55,6 +55,14 @@ defmodule Smolquery.StorageService.Merge do
   blew through the `after` block and killed the Compactor mid-sweep, once per
   sweep, starving every table behind the failing group.
 
+  A failure carries the exception itself, `{:merge_failed, exception}`, not
+  its rendered message: the compactor recycles its engine when the exception
+  is a `Smolquery.Engine.CallExited` (T-259), and that decision has to be a
+  pattern match, not a string match. Calls run on
+  `Smolquery.StorageService.Runtime.merge_engine/1` — the seal merge engine
+  unless the caller overrode it, which is how the compactor keeps its merges
+  off the connection the sealer is using.
+
   ## The union of the inputs is not the schema the catalog declares
 
   Unioning the inputs is necessary and not sufficient. A claim whose inputs *all*
@@ -447,9 +455,9 @@ defmodule Smolquery.StorageService.Merge do
   defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
 
   defp query(runtime, sql, params, timeout \\ 30_000) do
-    case Engine.try_query(Runtime.engine(runtime.name), sql, params, timeout) do
+    case Engine.try_query(Runtime.merge_engine(runtime), sql, params, timeout) do
       {:ok, result} -> {:ok, result}
-      {:error, error} -> {:error, {:merge_failed, Exception.message(error)}}
+      {:error, error} -> {:error, {:merge_failed, error}}
     end
   end
 

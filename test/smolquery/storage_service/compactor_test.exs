@@ -13,6 +13,7 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
@@ -40,6 +41,10 @@ defmodule Smolquery.StorageService.CompactorTest do
     )
 
     start_supervised!({Engine, name: Runtime.engine(storage)}, id: Runtime.engine(storage))
+
+    start_supervised!({Engine, name: Runtime.compact_engine(storage)},
+      id: Runtime.compact_engine(storage)
+    )
 
     catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
     :ok = Catalog.create_dataset(catalog, "analytics")
@@ -212,12 +217,46 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    stop_supervised!(Runtime.engine(context.storage))
+    stop_supervised!(Runtime.compact_engine(context.storage))
 
     assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
-    assert %{table: @table, reason: {:sizing_failed, message}} = failure
-    assert message =~ "exited before replying"
+    assert %{table: @table, reason: {:sizing_failed, %CallExited{} = error}} = failure
+    assert Exception.message(error) =~ "exited before replying"
     assert is_pid(Process.whereis(Runtime.compactor(context.storage)))
+  end
+
+  test "a sweep recycles the compaction engine after a call exit (T-259)", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    compact_engine = Runtime.compact_engine(context.storage)
+    database = Process.whereis(Engine.database_name(compact_engine))
+    Process.unregister(Engine.connection_name(compact_engine))
+
+    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert %{table: @table, reason: {:sizing_failed, %CallExited{reason: :noproc}}} = failure
+
+    refute Process.whereis(Engine.database_name(compact_engine)) == database
+    assert is_pid(Process.whereis(Engine.connection_name(compact_engine)))
+
+    assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(context.storage)
+  end
+
+  test "rows cap a group the byte ceiling would admit (T-260)", context do
+    runtime = start_compactor(context, compact_max_rows: 20)
+    a = seal(runtime, context.catalog, 1, 1..10)
+    b = seal(runtime, context.catalog, 2, 11..20)
+    c = seal(runtime, context.catalog, 3, 21..30)
+
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Compactor.sweep(context.storage)
+
+    merged = Store.location(runtime.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([merged, c.path])
+    refute a.path in current
+    refute b.path in current
+    assert lake_rows(context.storage) == 30
   end
 
   test "an empty catalog sweeps nothing", context do

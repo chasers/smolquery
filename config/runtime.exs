@@ -180,6 +180,21 @@ if inputs = System.get_env("SMOLQUERY_MERGE_INPUTS_PER_CALL") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_INPUTS_PER_CALL", inputs)
 end
 
+# T-260: bytes alone do not bound a compaction group's merge cost — on
+# highly compressible data the decompressed row count diverges from the
+# compressed bytes by ~100x, and merge cost scales with rows.
+if rows = System.get_env("SMOLQUERY_COMPACT_MAX_ROWS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_max_rows:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_ROWS", rows)
+end
+
+# T-259: compaction runs on its own engine so a timed-out merge cannot starve
+# seals. Unset, the limit derives as a quarter of the cgroup memory limit.
+if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.StorageService, compact_engine_memory_limit: limit
+end
+
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
   config :smolquery, Smolquery.BufferService,
     max_buffered_bytes:
