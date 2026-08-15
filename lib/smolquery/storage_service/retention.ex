@@ -16,7 +16,7 @@ defmodule Smolquery.StorageService.Retention do
   are missing, unparseable, or absent (a segment written before the column
   existed) is kept, never dropped. Retention that guesses is deletion.
 
-  The stats query is chunked by `compact_max_inputs` (T-244), so no engine
+  The stats query is chunked by `merge_inputs_per_call` (T-244), so no engine
   call carries an unbounded `parquet_metadata` input list no matter how many
   current segments a table holds.
 
@@ -148,7 +148,7 @@ defmodule Smolquery.StorageService.Retention do
 
   defp footer_stats(runtime, paths, column) do
     paths
-    |> Enum.chunk_every(runtime.compact_max_inputs)
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
     |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
       case footer_stats_chunk(runtime, chunk, column) do
         {:ok, stats} -> {:cont, {:ok, Map.merge(acc, stats)}}
@@ -164,7 +164,7 @@ defmodule Smolquery.StorageService.Retention do
         "FROM parquet_metadata([#{placeholders(paths)}]) " <>
         "WHERE path_in_schema = $#{length(paths) + 1} GROUP BY file_name"
 
-    case Engine.query(Runtime.engine(runtime.name), sql, paths ++ [column]) do
+    case Engine.try_query(Runtime.engine(runtime.name), sql, paths ++ [column]) do
       {:ok, result} ->
         {:ok,
          Map.new(result.rows, fn [path, max, unknown] -> {path, %{max: max, unknown: unknown}} end)}

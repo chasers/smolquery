@@ -26,8 +26,8 @@ defmodule Smolquery.StorageService.Runtime do
         compact_interval_ms: 300_000,
         compact_below_bytes: 33_554_432,
         compact_min_inputs: 2,
-        compact_max_inputs: 12,
         compact_max_bytes: 134_217_728,
+        merge_inputs_per_call: 12,
         retention_interval_ms: 3_600_000,
         snapshot_keep_ms: 86_400_000,
         handoff: {Smolquery.StorageService.Handoff.Seal, []},
@@ -81,18 +81,39 @@ defmodule Smolquery.StorageService.Runtime do
   on purpose — compaction exists to clean up eager and age-cap seals, not to
   re-merge segments the sealer already sized well.
 
-  `compact_max_inputs` caps how many segments one merge reads (T-244). The
-  byte ceiling alone does not bound the file count — 128 MiB of small sealed
-  segments is over a hundred inputs — and the merge runs in one DuckDB call,
-  so an unbounded input list outruns the engine's 30 s call timeout the same
-  way an unbounded seal batch does. The default of 12 shares the buffer's
-  derivation — see `seal_batch_max_files` in `Smolquery.BufferService.Runtime`.
-  It must be at least `compact_min_inputs`, validated at boot; a run larger
-  than the cap compacts across sweeps, one group at a time. The same cap
-  chunks the sweep's footer-sizing query, oldest first, and sizing stops
-  once a full group of undersized candidates is found — no engine call is
-  unbounded, and a mostly-small backlog needs one sizing call rather than
-  one per chunk. Retention's footer-stats query is chunked by the same cap.
+  `compact_max_rows` bounds the same group by decompressed rows (T-260),
+  because bytes alone do not: on ~100x-compressible data a 47 MiB group held
+  ~25M rows, and merge cost — the staging inserts and the clustered `ORDER
+  BY` on the final `COPY` — scales with rows, so the byte-bounded group blew
+  the merge's five-minute `COPY` budget and re-planned identically every
+  sweep. The default of 4Mi rows keeps a group of that shape near a minute.
+  Normal ~3x-compressible data hits the byte cap first, so the row cap only
+  bites the pathological case it exists for. Sizing already reads each
+  footer's `num_rows`, so the cap costs no new I/O.
+
+  Compaction runs on its own engine, `compact_engine/1` (T-259).
+  `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
+  the merge engine, one rung down: explicit knob, else a quarter of the
+  cgroup limit, else `Smolquery.Engine`'s application config; see
+  `compact_engine_memory_limit/2`.
+
+  `merge_inputs_per_call` bounds how many `read_parquet` inputs any one of the
+  merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
+  the engine's 30 s call timeout: the eu-central-1 sandbox measured ≥ ~830 ms
+  per input over `httpfs`, so a 36-input read already exceeded it. The default
+  of 12 comes from that measurement. The merge engine serializes up to three
+  calls (two seals plus a compaction), so each gets ~10 s, and
+  10 s / 830 ms ≈ 12. An input list over the cap does not shrink the merge.
+  `Smolquery.StorageService.Merge` reads it in capped chunks into a session
+  temp table and writes one output, so a claim of any size seals and no
+  engine call is unbounded.
+
+  The same cap chunks every other footer read on this engine: the compactor's
+  sizing query and retention's footer-stats query. A compaction group itself
+  has no input-count cap (T-248). A group cap made a small-segment backlog
+  re-ingest its own output sweep after sweep, and the chunked merge is what
+  removed the need for one. Sizing stops once the undersized bytes found
+  reach `compact_max_bytes`, because the group cannot grow past it.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -126,6 +147,14 @@ defmodule Smolquery.StorageService.Runtime do
   object-store tier would need it too — so it is the default rather than something
   a deployment has to remember. Tests that never merge set it to `[]` and skip the
   extension download.
+
+  `engine_memory_limit` (default `nil`) is the merge engine's own DuckDB
+  memory limit — a size string like `"2GiB"`, validated at boot as present
+  and stringly, with DuckDB judging the grammar on the engine's first `SET`.
+  Left `nil`, the limit derives from the container's cgroup memory limit,
+  and without one of those the engine inherits `Smolquery.Engine`'s
+  application config; see `engine_memory_limit/2` for the order and the
+  reasoning (T-250).
   """
 
   alias Smolquery.BufferService.Ring
@@ -144,6 +173,7 @@ defmodule Smolquery.StorageService.Runtime do
     buffer_hot_port: 4001,
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
+    engine_memory_limit: nil,
     compression: :zstd,
     seal_row_group_size: 16_384,
     target_segment_bytes: 268_435_456,
@@ -153,8 +183,11 @@ defmodule Smolquery.StorageService.Runtime do
     compact_interval_ms: 300_000,
     compact_below_bytes: 33_554_432,
     compact_min_inputs: 2,
-    compact_max_inputs: 12,
     compact_max_bytes: 134_217_728,
+    compact_max_rows: 4_194_304,
+    compact_engine_memory_limit: nil,
+    merge_engine: nil,
+    merge_inputs_per_call: 12,
     retention_interval_ms: 3_600_000,
     snapshot_keep_ms: 86_400_000,
     handoff: {Smolquery.StorageService.Handoff.Seal, []}
@@ -171,6 +204,7 @@ defmodule Smolquery.StorageService.Runtime do
           buffer_hot_port: :inet.port_number(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
+          engine_memory_limit: String.t() | nil,
           compression: atom(),
           seal_row_group_size: pos_integer(),
           target_segment_bytes: pos_integer(),
@@ -180,8 +214,11 @@ defmodule Smolquery.StorageService.Runtime do
           compact_interval_ms: pos_integer(),
           compact_below_bytes: pos_integer(),
           compact_min_inputs: pos_integer(),
-          compact_max_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
+          compact_max_rows: pos_integer(),
+          compact_engine_memory_limit: String.t() | nil,
+          merge_engine: atom() | nil,
+          merge_inputs_per_call: pos_integer(),
           retention_interval_ms: pos_integer(),
           snapshot_keep_ms: pos_integer(),
           handoff: {module(), term()}
@@ -193,6 +230,7 @@ defmodule Smolquery.StorageService.Runtime do
     :buffer_hot_port,
     :buffer_timeout_ms,
     :engine_extensions,
+    :engine_memory_limit,
     :compression,
     :seal_row_group_size,
     :target_segment_bytes,
@@ -202,8 +240,10 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_interval_ms,
     :compact_below_bytes,
     :compact_min_inputs,
-    :compact_max_inputs,
     :compact_max_bytes,
+    :compact_max_rows,
+    :compact_engine_memory_limit,
+    :merge_inputs_per_call,
     :retention_interval_ms,
     :snapshot_keep_ms,
     :handoff
@@ -239,12 +279,78 @@ defmodule Smolquery.StorageService.Runtime do
       ring: Ring.new!(Keyword.get(config, :ring, [node()]))
     }
     |> struct!(Keyword.take(config, @limits))
+    |> validate_engine_memory_limit()
+    |> validate_compact_engine_memory_limit()
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_inputs()
+    |> validate_compact_max_rows()
+    |> validate_merge_inputs_per_call()
   end
 
   use Smolquery.Runtime
+
+  @doc """
+  The DuckDB memory limit the merge engine starts with.
+
+  Resolution order (T-250):
+
+  1. An explicit `engine_memory_limit` — the operator's word, taken whole.
+  2. Half the container's cgroup memory limit, when one exists. The merge
+     engine is the only engine on a storage node that moves data volume, so
+     it gets the largest share; the other half covers the BEAM, the catalog
+     engine, and allocations DuckDB's limit does not account for.
+  3. `nil` — no cgroup limit either (bare metal, dev, pods without a memory
+     limit), so the engine inherits `Smolquery.Engine`'s application config
+     unchanged.
+
+  The derivation is what turns a bigger pod into a bigger merge without the
+  deploy restating the number. The global `SMOLQUERY_MEMORY_LIMIT` is one
+  size for every engine on every role, and sizing the storage merge from it
+  is what left a 4 Gi pod OOMing at 954 MiB, on the same group, every sweep.
+  """
+  @spec engine_memory_limit(t(), {:ok, pos_integer()} | :none) :: String.t() | nil
+  def engine_memory_limit(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
+
+  def engine_memory_limit(%__MODULE__{engine_memory_limit: limit}, cgroup),
+    do: derived_memory_limit(limit, cgroup, 2)
+
+  @doc """
+  The DuckDB memory limit the compaction engine starts with.
+
+  The same resolution as `engine_memory_limit/2`, one rung down: an explicit
+  `compact_engine_memory_limit` wins, else a **quarter** of the container's
+  cgroup memory limit, else `nil` and the engine inherits `Smolquery.Engine`'s
+  application config. The merge engine keeps T-250's half — seals are the
+  volume this node exists to move — so the transient worst case of a seal and
+  a compaction copying at once budgets three quarters, and both engines spill
+  past their limits rather than balloon (T-259).
+  """
+  @spec compact_engine_memory_limit(t(), {:ok, pos_integer()} | :none) :: String.t() | nil
+  def compact_engine_memory_limit(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
+
+  def compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}, cgroup),
+    do: derived_memory_limit(limit, cgroup, 4)
+
+  defp derived_memory_limit(limit, _cgroup, _divisor) when is_binary(limit), do: limit
+
+  defp derived_memory_limit(nil, {:ok, bytes}, divisor),
+    do: "#{max(div(bytes, divisor * 1024 * 1024), 1)}MiB"
+
+  defp derived_memory_limit(nil, :none, _divisor), do: nil
+
+  @doc """
+  The engine a merge's calls run on.
+
+  `nil` — every caller but the compactor — resolves to `engine/1`, the seal
+  merge engine. The compactor overrides the field on the runtime it hands
+  `Smolquery.StorageService.Merge.compact/5`, so its merges run on
+  `compact_engine/1` and a timed-out compaction statement cannot starve a
+  seal (T-259).
+  """
+  @spec merge_engine(t()) :: atom()
+  def merge_engine(%__MODULE__{merge_engine: nil, name: name}), do: engine(name)
+  def merge_engine(%__MODULE__{merge_engine: engine}) when is_atom(engine), do: engine
 
   @doc """
   The top-level supervisor for an instance, as `Supervisor.start_link/1` names it.
@@ -263,6 +369,18 @@ defmodule Smolquery.StorageService.Runtime do
   """
   @spec engine(atom()) :: atom()
   def engine(name), do: Module.concat(name, "Engine")
+
+  @doc """
+  The engine instance compaction sizes and merges through.
+
+  Separate from the merge engine because an `Adbc.Connection` serializes its
+  queries and a timed-out statement keeps running: one abandoned compaction
+  merge starved every seal and every sizing call behind it (T-259). On its
+  own engine, the compactor can also recycle the connection after a timeout
+  without aborting a healthy in-flight seal.
+  """
+  @spec compact_engine(atom()) :: atom()
+  def compact_engine(name), do: Module.concat(name, "CompactEngine")
 
   @doc """
   The engine instance catalog commits go through.
@@ -298,6 +416,16 @@ defmodule Smolquery.StorageService.Runtime do
   @spec retention(atom()) :: atom()
   def retention(name), do: Module.concat(name, "Retention")
 
+  defp validate_engine_memory_limit(%__MODULE__{engine_memory_limit: limit} = runtime)
+       when is_binary(limit) or is_nil(limit),
+       do: runtime
+
+  defp validate_engine_memory_limit(%__MODULE__{engine_memory_limit: limit}) do
+    raise ArgumentError,
+          "unsupported engine_memory_limit: #{inspect(limit)} " <>
+            "(expected a DuckDB size string like \"2GiB\", or nil)"
+  end
+
   defp validate_compression(%__MODULE__{compression: compression} = runtime)
        when compression in @codecs,
        do: runtime
@@ -318,21 +446,44 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)
-       when not (is_integer(min) and min > 0) do
+       when is_integer(min) and min > 0,
+       do: runtime
+
+  defp validate_compact_inputs(%__MODULE__{} = runtime) do
     raise ArgumentError,
           "unsupported compact_min_inputs: #{inspect(runtime.compact_min_inputs)} " <>
             "(expected a positive integer)"
   end
 
-  defp validate_compact_inputs(%__MODULE__{compact_max_inputs: max} = runtime)
-       when is_integer(max) and max >= runtime.compact_min_inputs,
+  defp validate_compact_max_rows(%__MODULE__{compact_max_rows: rows} = runtime)
+       when is_integer(rows) and rows > 0,
        do: runtime
 
-  defp validate_compact_inputs(%__MODULE__{} = runtime) do
+  defp validate_compact_max_rows(%__MODULE__{compact_max_rows: rows}) do
     raise ArgumentError,
-          "unsupported compact_max_inputs: #{inspect(runtime.compact_max_inputs)} " <>
-            "(expected an integer >= compact_min_inputs, " <>
-            "which is #{inspect(runtime.compact_min_inputs)})"
+          "unsupported compact_max_rows: #{inspect(rows)} (expected a positive integer)"
+  end
+
+  defp validate_compact_engine_memory_limit(
+         %__MODULE__{compact_engine_memory_limit: limit} = runtime
+       )
+       when is_binary(limit) or is_nil(limit),
+       do: runtime
+
+  defp validate_compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}) do
+    raise ArgumentError,
+          "unsupported compact_engine_memory_limit: #{inspect(limit)} " <>
+            "(expected a DuckDB size string like \"1GiB\", or nil)"
+  end
+
+  defp validate_merge_inputs_per_call(%__MODULE__{merge_inputs_per_call: per_call} = runtime)
+       when is_integer(per_call) and per_call > 0,
+       do: runtime
+
+  defp validate_merge_inputs_per_call(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported merge_inputs_per_call: #{inspect(runtime.merge_inputs_per_call)} " <>
+            "(expected a positive integer)"
   end
 
   defp build_store(config) do

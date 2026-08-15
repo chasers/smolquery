@@ -52,6 +52,13 @@ defmodule Smolquery.BufferService.HotServerTest do
 
   defp segment_path(id), do: "/v1/datasets/analytics/tables/events/segments/#{id}.parquet"
 
+  defp parse_rfc7231(value) do
+    case :httpd_util.convert_request_date(String.to_charlist(value)) do
+      {{_year, _month, _day}, {_hour, _minute, _second}} = datetime -> {:ok, datetime}
+      :bad_date -> :error
+    end
+  end
+
   describe "manifest" do
     test "lists entries with a url built from the request's own host and port", context do
       name = start_buffer_service(context)
@@ -131,6 +138,19 @@ defmodule Smolquery.BufferService.HotServerTest do
       assert response.status == 200
       assert {"cache-control", "public, max-age=31536000, immutable"} in response.resp_headers
       assert byte_size(response.resp_body) > 0
+    end
+
+    test "serves a parseable last-modified, so httpfs cache validation never overflows",
+         context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..2))
+
+      response = get(name, segment_path(ack.segment_id))
+
+      assert [last_modified] =
+               for({"last-modified", value} <- response.resp_headers, do: value)
+
+      assert {:ok, _datetime} = parse_rfc7231(last_modified)
     end
 
     test "404s an id the manifest does not hold", context do

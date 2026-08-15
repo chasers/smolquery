@@ -148,17 +148,18 @@ defmodule Smolquery.BufferService.HotServer do
   end
 
   defp serve_segment(conn, path) do
-    case File.stat(path) do
-      {:ok, %File.Stat{size: size}} -> serve_bytes(conn, path, size)
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{size: size, mtime: mtime}} -> serve_bytes(conn, path, size, mtime)
       {:error, _reason} -> send_resp(conn, 404, "not found")
     end
   end
 
-  defp serve_bytes(conn, path, size) do
+  defp serve_bytes(conn, path, size, mtime) do
     conn =
       conn
       |> put_resp_header("cache-control", "public, max-age=31536000, immutable")
       |> put_resp_header("accept-ranges", "bytes")
+      |> put_resp_header("last-modified", rfc7231(mtime))
 
     case requested_range(conn, size) do
       :whole ->
@@ -180,6 +181,12 @@ defmodule Smolquery.BufferService.HotServer do
     send_file(conn, status, path, offset, length)
   rescue
     File.Error -> send_resp(conn, 404, "not found")
+  end
+
+  defp rfc7231(posix_seconds) do
+    posix_seconds
+    |> DateTime.from_unix!()
+    |> Calendar.strftime("%a, %d %b %Y %H:%M:%S GMT")
   end
 
   defp requested_range(conn, size) do

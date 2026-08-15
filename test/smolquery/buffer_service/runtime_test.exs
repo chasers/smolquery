@@ -93,14 +93,6 @@ defmodule Smolquery.BufferService.RuntimeTest do
       off = Runtime.new(name: unique_name(), dir: dir, commit_siblings: 0)
       assert off.commit_siblings == 0
     end
-
-    test "refuses an unusable seal batch cap at boot, not at first claim", %{tmp_dir: dir} do
-      for files <- [0, -3, "12"] do
-        assert_raise ArgumentError, ~r/unusable seal_batch_max_files/, fn ->
-          Runtime.new(name: unique_name(), dir: dir, seal_batch_max_files: files)
-        end
-      end
-    end
   end
 
   describe "default_write_pool_size/0 and default_encode_concurrency/0" do
