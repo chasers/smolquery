@@ -80,6 +80,14 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
+    test "refuses a malformed compact_min_inputs at boot, naming the right key" do
+      for min <- [nil, 0, "2"] do
+        assert_raise ArgumentError, ~r/unsupported compact_min_inputs/, fn ->
+          Runtime.new(name: __MODULE__.BadCompactMin, compact_min_inputs: min)
+        end
+      end
+    end
+
     test "refuses a compact_max_inputs below compact_min_inputs at boot, not per sweep" do
       assert_raise ArgumentError, ~r/unsupported compact_max_inputs/, fn ->
         Runtime.new(

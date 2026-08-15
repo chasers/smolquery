@@ -92,7 +92,7 @@ defmodule Smolquery.StorageService.Runtime do
   chunks the sweep's footer-sizing query, oldest first, and sizing stops
   once a full group of undersized candidates is found — no engine call is
   unbounded, and a mostly-small backlog needs one sizing call rather than
-  one per chunk.
+  one per chunk. Retention's footer-stats query is chunked by the same cap.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -241,7 +241,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> struct!(Keyword.take(config, @limits))
     |> validate_compression()
     |> validate_seal_row_group_size()
-    |> validate_compact_max_inputs()
+    |> validate_compact_inputs()
   end
 
   use Smolquery.Runtime
@@ -317,11 +317,18 @@ defmodule Smolquery.StorageService.Runtime do
           "unsupported seal_row_group_size: #{inspect(size)} (expected a positive integer)"
   end
 
-  defp validate_compact_max_inputs(%__MODULE__{compact_max_inputs: max} = runtime)
+  defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)
+       when not (is_integer(min) and min > 0) do
+    raise ArgumentError,
+          "unsupported compact_min_inputs: #{inspect(runtime.compact_min_inputs)} " <>
+            "(expected a positive integer)"
+  end
+
+  defp validate_compact_inputs(%__MODULE__{compact_max_inputs: max} = runtime)
        when is_integer(max) and max >= runtime.compact_min_inputs,
        do: runtime
 
-  defp validate_compact_max_inputs(%__MODULE__{} = runtime) do
+  defp validate_compact_inputs(%__MODULE__{} = runtime) do
     raise ArgumentError,
           "unsupported compact_max_inputs: #{inspect(runtime.compact_max_inputs)} " <>
             "(expected an integer >= compact_min_inputs, " <>
