@@ -138,6 +138,18 @@ defmodule Smolquery.BufferService.SealingTest do
       refute third.segment_id in repeat.ids
     end
 
+    test "a claim stops at the byte valve, oldest first", context do
+      %{name: name} = start_buffer_service(context, seal_max_files: 100, seal_max_bytes: 1)
+
+      {:ok, first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _second} = Client.write_batch(name, @table, batch(2..2))
+
+      :ok = TableBuffer.force_seal(buffer(name))
+
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert claim.ids == [first.segment_id]
+    end
+
     test "a claim freezes the entire unsealed backlog", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 100)
 

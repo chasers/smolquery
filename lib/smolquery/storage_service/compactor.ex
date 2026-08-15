@@ -45,18 +45,28 @@ defmodule Smolquery.StorageService.Compactor do
   `compact_min_inputs` made the cut. One group per table per sweep; a table
   with more work keeps its place in line rather than monopolizing the sweep.
 
-  The group is bounded by bytes alone (T-248). An input-count cap would make
-  a small-segment backlog converge across sweeps, each group re-ingesting the
-  previous sweep's still-undersized output — quadratic write amplification
-  for the exact case compaction exists to clean up. A group of any file count
-  is safe because the merge bounds its own engine calls: `Merge.compact/4`
-  reads inputs in chunks of `merge_inputs_per_call`, so no `read_parquet`
-  list is unbounded. The footer-sizing query is chunked the same way, oldest
-  first, and sizing stops once the undersized bytes found reach
-  `compact_max_bytes` — the group cannot grow past it, so segments beyond
-  that are next sweep's business. An output still under `compact_below_bytes`
-  stays a candidate and merges with future arrivals, never alone —
-  `compact_min_inputs` is what stops it re-merging by itself.
+  Bytes bound the group (T-248), with one safety valve. A small input-count
+  cap made a small-segment backlog converge across sweeps, with each group
+  re-ingesting the previous sweep's still-undersized output. That is
+  quadratic write amplification for the exact case compaction exists to
+  clean up. A large group is safe because the merge bounds its own engine
+  calls: `Merge.compact/5` reads inputs in chunks of `merge_inputs_per_call`.
+  The valve protects the sweep's time, not the engine: a group also stops at
+  64 staging chunks of files (768 at the default cap), so one table of very
+  small files cannot hold the sweep for hours. Re-ingestion at that width is
+  negligible — a backlog past the valve converges hundreds of files per
+  sweep, not twelve.
+
+  The sizing query chunks the same way, oldest first, and reads each file's
+  `num_rows` in the same call. Sizing stops once the undersized bytes found
+  reach `compact_max_bytes` or the file count reaches the valve. That halt is
+  only a work bound — `group/2`'s fold owns both caps, and it alone decides
+  the group. The sweep passes the group's summed row count to the merge,
+  which then skips its own footer pass, and it narrows the merge's staging
+  chunk when the group's average input is large, so one chunk never moves an
+  unbounded number of bytes. An output still under `compact_below_bytes`
+  stays a candidate and merges with future arrivals. It never re-merges
+  alone; `compact_min_inputs` gates that.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -89,6 +99,9 @@ defmodule Smolquery.StorageService.Compactor do
 
   @enforce_keys [:runtime]
   defstruct [:runtime]
+
+  @group_max_staging_chunks 64
+  @stage_chunk_target_bytes 67_108_864
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -150,67 +163,82 @@ defmodule Smolquery.StorageService.Compactor do
   defp undersized(runtime, paths) do
     paths
     |> Enum.chunk_every(runtime.merge_inputs_per_call)
-    |> Enum.reduce_while({[], 0}, &size_chunk(runtime, &1, &2))
+    |> Enum.reduce_while({[], 0, 0}, &size_chunk(runtime, &1, &2))
     |> case do
       {:error, reason} -> {:error, reason}
-      {chunks, _bytes} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+      {chunks, _bytes, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
 
-  defp size_chunk(runtime, chunk, {acc, bytes}) do
+  defp size_chunk(runtime, chunk, {acc, bytes, count}) do
     case sizes_chunk(runtime, chunk) do
       {:ok, sizes} ->
         found =
-          Enum.filter(sizes, fn {_path, size} -> size < runtime.compact_below_bytes end)
+          Enum.filter(sizes, fn {_path, size, _rows} -> size < runtime.compact_below_bytes end)
 
-        found_bytes = Enum.sum_by(found, fn {_path, size} -> size end)
+        found_bytes = Enum.sum_by(found, fn {_path, size, _rows} -> size end)
 
-        group_filled({[found | acc], bytes + found_bytes}, runtime)
+        group_filled({[found | acc], bytes + found_bytes, count + length(found)}, runtime)
 
       {:error, reason} ->
         {:halt, {:error, reason}}
     end
   end
 
-  defp group_filled({_chunks, bytes} = acc, runtime)
-       when bytes >= runtime.compact_max_bytes,
+  defp group_filled({_chunks, bytes, count} = acc, runtime)
+       when bytes >= runtime.compact_max_bytes or
+              count >= @group_max_staging_chunks * runtime.merge_inputs_per_call,
        do: {:halt, acc}
 
   defp group_filled(acc, _runtime), do: {:cont, acc}
 
   defp sizes_chunk(runtime, paths) do
-    sql =
-      "SELECT file_name, sum(total_compressed_size)::BIGINT " <>
-        "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name"
+    count = length(paths)
 
-    case Engine.query(Runtime.engine(runtime.name), sql, paths) do
-      {:ok, result} -> {:ok, Enum.map(result.rows, fn [path, bytes] -> {path, bytes} end)}
-      {:error, error} -> {:error, {:sizing_failed, Exception.message(error)}}
+    sql =
+      "SELECT sizes.file_name, sizes.bytes, files.num_rows::BIGINT " <>
+        "FROM (SELECT file_name, sum(total_compressed_size)::BIGINT AS bytes " <>
+        "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name) sizes " <>
+        "JOIN parquet_file_metadata([#{placeholders(paths, count)}]) files USING (file_name)"
+
+    case Engine.query(Runtime.engine(runtime.name), sql, paths ++ paths) do
+      {:ok, result} ->
+        {:ok, Enum.map(result.rows, fn [path, bytes, rows] -> {path, bytes, rows} end)}
+
+      {:error, error} ->
+        {:error, {:sizing_failed, Exception.message(error)}}
     end
   end
 
   defp group(runtime, undersized) do
-    {group, _total} =
+    ceiling = @group_max_staging_chunks * runtime.merge_inputs_per_call
+
+    {group, total, row_count} =
       undersized
-      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
-      |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
+      |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
+      |> Enum.take(ceiling)
+      |> Enum.reduce_while({[], 0, 0}, fn {path, bytes, rows}, {group, total, group_rows} ->
         if total + bytes > runtime.compact_max_bytes and group != [] do
-          {:halt, {group, total}}
+          {:halt, {group, total, group_rows}}
         else
-          {:cont, {[path | group], total + bytes}}
+          {:cont, {[path | group], total + bytes, group_rows + rows}}
         end
       end)
 
     if length(group) >= runtime.compact_min_inputs do
-      {:ok, Enum.reverse(group)}
+      {:ok, %{paths: Enum.reverse(group), row_count: row_count, bytes: total}}
     else
       :skip
     end
   end
 
-  defp swap(runtime, table_ref, paths, started_at) do
+  defp swap(runtime, table_ref, %{paths: paths, row_count: row_count} = group, started_at) do
     with {:ok, key} <- output_key(table_ref, paths),
-         {:ok, segment} <- Merge.compact(runtime, table_ref, key, paths),
+         {:ok, segment} <-
+           Merge.compact(runtime, table_ref, key, paths,
+             row_count: row_count,
+             inputs_per_call: staging_per_call(runtime, group)
+           ),
          {:ok, snapshot} <-
            Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
          :ok <- verify_retired(runtime, table_ref, paths) do
@@ -276,7 +304,16 @@ defmodule Smolquery.StorageService.Compactor do
     {:failed, %{table: table_ref, reason: reason}}
   end
 
+  defp staging_per_call(runtime, %{paths: paths, bytes: bytes}) do
+    average = max(div(bytes, length(paths)), 1)
+
+    runtime.merge_inputs_per_call
+    |> min(div(@stage_chunk_target_bytes, average))
+    |> max(1)
+  end
+
   defp elapsed_us(started_at), do: System.monotonic_time(:microsecond) - started_at
 
-  defp placeholders(paths), do: Enum.map_join(1..length(paths), ", ", &"$#{&1}")
+  defp placeholders(paths, offset \\ 0),
+    do: Enum.map_join(1..length(paths), ", ", &"$#{&1 + offset}")
 end

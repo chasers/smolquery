@@ -85,20 +85,19 @@ defmodule Smolquery.StorageService.Runtime do
   merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
   the engine's 30 s call timeout: the eu-central-1 sandbox measured ≥ ~830 ms
   per input over `httpfs`, so a 36-input read already exceeded it. The default
-  of 12 comes from that measurement — the merge engine serializes up to three
+  of 12 comes from that measurement. The merge engine serializes up to three
   calls (two seals plus a compaction), so each gets ~10 s, and
-  10 s / 830 ms ≈ 12. An input list over the cap does not shrink the merge:
+  10 s / 830 ms ≈ 12. An input list over the cap does not shrink the merge.
   `Smolquery.StorageService.Merge` reads it in capped chunks into a session
   temp table and writes one output, so a claim of any size seals and no
   engine call is unbounded.
 
   The same cap chunks every other footer read on this engine: the compactor's
-  sizing query (oldest first, stopping once the undersized bytes found reach
-  `compact_max_bytes` — the group cannot grow past it) and retention's
-  footer-stats query. A compaction group itself has no input-count cap
-  (T-248): bounding the group made a small-segment backlog re-ingest its own
-  output sweep after sweep, and the chunked merge is what makes an
-  unbounded-count group safe.
+  sizing query and retention's footer-stats query. A compaction group itself
+  has no input-count cap (T-248). A group cap made a small-segment backlog
+  re-ingest its own output sweep after sweep, and the chunked merge is what
+  removed the need for one. Sizing stops once the undersized bytes found
+  reach `compact_max_bytes`, because the group cannot grow past it.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.

@@ -56,30 +56,32 @@ not on file count, wherever there is a choice.
 
 ## Chunked merge (T-246/T-247)
 
-Run 2026-08-15 on `1c313c3` (same machine), 10,000 rows per input,
-`merge_inputs_per_call: 12`. `direct` forces the whole list into one
-`read_parquet` call; `chunked` is the staging path a claim over the cap takes.
+Run 2026-08-15 on `chasers/t246-248-review-fixes` (same machine), 10,000 rows
+per input, `merge_inputs_per_call: 12`. `direct` forces the whole list into
+one `read_parquet` call. `chunked` is the staging path a claim over the cap
+takes.
 
 ```
   inputs    path     calls    merge ms      rows/s   sealed KiB
-      12  direct       2        47.8   1256360.3        282.3
-      12  chunked      2        27.3   2194907.8        282.3
-      36  direct       2        82.7   2175647.3        805.6
-      36  chunked      8        69.3   2599165.4        805.5
-     128  direct       2       175.9   3638079.3       2861.2
-     128  chunked     24       184.4   3470791.1       2865.5
+      12  direct       2        47.9   1252269.7        282.3
+      12  chunked      2        27.4   2187306.3        282.3
+      36  direct       2        70.7   2545104.9        805.6
+      36  chunked      8        73.2   2457941.9        805.5
+     128  direct       2       196.0   3265922.6       2861.2
+     128  chunked     24       238.1   2687393.2       2865.5
 ```
 
-The staging hop is free at this latency: chunked is within noise of direct at
-every input count (faster at 12 and 36, 5% slower at 128), and the sealed
+The staging hop is cheap at local latency. Chunked is within noise of direct
+at 12 and 36 inputs, and 5–21% slower at 128 across two runs. The sealed
 output is byte-identical to within row-order variance. At 12 inputs the
-chunked row shows 2 calls because the list fits one call — the direct path is
-taken, which is the intended behavior. The value of chunking is not local
-speed; it is that each engine call carries at most 12 `read_parquet` inputs,
-so per-input httpfs latency (~830 ms on the eu-central-1 sandbox) can no
-longer push a single call past the 30 s timeout no matter how large the claim
-grows. An unbounded claim is therefore safe to seal, which is what lets the
-buffer freeze a whole backlog in one claim again.
+chunked row shows 2 calls because the list fits one call — the merge takes
+the direct path, which is the intended behavior.
+
+The value of chunking is not local speed. Each engine call carries at most 12
+`read_parquet` inputs, so per-input httpfs latency (~830 ms on the
+eu-central-1 sandbox) can no longer push a single call past the 30 s timeout,
+no matter how large the claim grows. An unbounded claim is therefore safe to
+seal, and the buffer can freeze a whole backlog in one claim again.
 
 ## Seal lag
 

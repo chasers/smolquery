@@ -18,21 +18,34 @@ defmodule Smolquery.StorageService.Merge do
 
   ## Every engine call is bounded, so no claim is too large to seal
 
-  Per-input cost is what kills a merge, not total bytes: each `read_parquet`
-  input costs footer round trips over `httpfs`, and enough of them outrun the
-  engine's 30 s call timeout (T-244 measured ≥ ~830 ms per input on the
-  sandbox). An input list within `merge_inputs_per_call` merges in the single
-  `COPY` above. A larger one is read in capped chunks into a session temp
-  table — one `DESCRIBE` and one `CREATE`/`INSERT ... SELECT` per chunk, each
-  projecting onto the catalog's declared schema so every chunk emits identical
-  columns — and one final `COPY` writes the segment from local data, then
-  drops the table (T-246, T-247). The temp table's name derives from the
-  output key's id, so concurrent merges on the shared connection cannot
-  collide, and a retry's `CREATE OR REPLACE` clears a crashed predecessor's
-  leftover. The cost of the staging hop is the claim's rows living in engine
-  memory (spilling to the connection's `temp_directory` past its limit) until
-  the final `COPY` — the price of retiring a backlog in one claim instead of
-  never.
+  Per-input cost is what kills a merge, not total bytes. Each `read_parquet`
+  input costs footer round trips over `httpfs`, and enough inputs outrun the
+  engine's 30 s call timeout — T-244 measured ≥ ~830 ms per input on the
+  sandbox. An input list within `merge_inputs_per_call` merges in the single
+  `COPY` above. The merge reads a larger list in capped chunks into a session
+  temp table: one `DESCRIBE` and one `CREATE`/`INSERT ... SELECT` per chunk
+  (T-246, T-247). Each chunk projects onto the catalog's declared schema, so
+  every chunk emits identical columns. One final `COPY` writes the segment
+  from local data, and the merge then drops the table.
+
+  The temp table's name derives from the output key's id. Concurrent merges
+  on the shared connection therefore cannot collide, and a retry's
+  `CREATE OR REPLACE` clears a crashed predecessor's leftover. A retry
+  re-stages the whole claim — there is no partial-stage resume — and the
+  buffer's claim byte valve is what bounds that cost. The staging
+  hop's cost is memory: the claim's rows live in the engine, spilling to the
+  connection's `temp_directory` past its limit, until the final `COPY`.
+
+  The final `COPY` gets five minutes rather than the engine's 30 s default.
+  It reads local data, so its duration scales with the backlog's bytes, not
+  with per-input `httpfs` latency. A 30 s ceiling here would decide how large
+  a backlog may seal — the T-244 trap with the bound moved. A staging chunk
+  gets two minutes for a similar reason: the count cap bounds its inputs, not
+  its bytes, and twelve compaction inputs near `compact_below_bytes` move
+  hundreds of megabytes on a slow link. An `after` block drops the staging
+  table, so an error or an exit on the way out does not strand the staged
+  rows on the shared connection. A drop that itself fails logs a warning,
+  and a seal retry's `CREATE OR REPLACE` clears what the drop could not.
 
   ## The union of the inputs is not the schema the catalog declares
 
@@ -129,6 +142,8 @@ defmodule Smolquery.StorageService.Merge do
   would mean the merge silently dropped rows — which `COPY` cannot do.
   """
 
+  require Logger
+
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Catalog
   alias Smolquery.Engine
@@ -138,6 +153,9 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Runtime
+
+  @staged_copy_timeout_ms 300_000
+  @stage_chunk_timeout_ms 120_000
 
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
@@ -179,17 +197,42 @@ defmodule Smolquery.StorageService.Merge do
   An empty `urls` is `{:error, :no_inputs}` for the same reason an emptied
   claim is: registering emptiness as though it were data is the one thing a
   merge must never do.
-  """
-  @spec compact(Runtime.t(), Store.table_ref(), Store.key(), [String.t()]) ::
-          {:ok, Segment.t()} | {:error, term()}
-  def compact(%Runtime{} = _runtime, _table_ref, _key, []), do: {:error, :no_inputs}
 
-  def compact(%Runtime{} = runtime, table_ref, key, urls) when is_list(urls) do
+  A caller that already read the inputs' footers passes `row_count:` and
+  skips the metadata pass here — the compactor's sizing query reads
+  `num_rows` in the same call as the sizes, so re-reading every footer for a
+  number the sweep already holds would triple the group's metadata I/O.
+
+  `inputs_per_call:` narrows the staging chunk below the runtime's cap — it
+  never widens it. The count cap prices footer round trips, not data volume,
+  and the compactor knows its inputs' sizes, so it shrinks the chunk when the
+  inputs are large and one full-width chunk would move too many bytes in one
+  call.
+  """
+  @spec compact(Runtime.t(), Store.table_ref(), Store.key(), [String.t()], keyword()) ::
+          {:ok, Segment.t()} | {:error, term()}
+  def compact(runtime, table_ref, key, urls, opts \\ [])
+
+  def compact(%Runtime{} = _runtime, _table_ref, _key, [], _opts), do: {:error, :no_inputs}
+
+  def compact(%Runtime{} = runtime, table_ref, key, urls, opts) when is_list(urls) do
+    runtime = narrow_per_call(runtime, Keyword.get(opts, :inputs_per_call))
+
     with {:ok, key} <- valid_key(key),
-         {:ok, row_count} <- footer_row_count(runtime, urls) do
+         {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)) do
       merge(runtime, table_ref, key, %{urls: urls, row_count: row_count})
     end
   end
+
+  defp narrow_per_call(runtime, nil), do: runtime
+
+  defp narrow_per_call(runtime, per_call) when is_integer(per_call) and per_call > 0,
+    do: %{runtime | merge_inputs_per_call: min(per_call, runtime.merge_inputs_per_call)}
+
+  defp compact_row_count(_runtime, _urls, count) when is_integer(count) and count >= 0,
+    do: {:ok, count}
+
+  defp compact_row_count(runtime, urls, nil), do: footer_row_count(runtime, urls)
 
   defp merge(runtime, table_ref, key, inputs) do
     with {:ok, schema} <-
@@ -214,16 +257,15 @@ defmodule Smolquery.StorageService.Merge do
     table = staging_table(key)
     chunks = Enum.chunk_every(inputs.urls, runtime.merge_inputs_per_call)
 
-    result =
+    try do
       with :ok <- stage_chunks(runtime, schema, table, chunks),
            {:ok, put} <-
              Store.put(runtime.store, key, &copy_staged(runtime, schema, table, &1)) do
         {:ok, segment(key, put, inputs.row_count)}
       end
-
-    drop_staging(runtime, table)
-
-    result
+    after
+      drop_staging(runtime, table)
+    end
   end
 
   defp stage_chunks(runtime, schema, table, chunks) do
@@ -249,7 +291,7 @@ defmodule Smolquery.StorageService.Merge do
             "INSERT INTO #{table} SELECT #{projection} FROM #{scan(urls)}"
         end
 
-      with {:ok, _result} <- query(runtime, sql, urls), do: :ok
+      with {:ok, _result} <- query(runtime, sql, urls, @stage_chunk_timeout_ms), do: :ok
     end
   end
 
@@ -259,13 +301,19 @@ defmodule Smolquery.StorageService.Merge do
     TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
     """
 
-    with {:ok, _result} <- query(runtime, sql, [staged]), do: :ok
+    with {:ok, _result} <- query(runtime, sql, [staged], @staged_copy_timeout_ms), do: :ok
   end
 
   defp drop_staging(runtime, table) do
-    query(runtime, "DROP TABLE IF EXISTS #{table}", [])
+    case query(runtime, "DROP TABLE IF EXISTS #{table}", []) do
+      {:ok, _result} ->
+        :ok
 
-    :ok
+      {:error, reason} ->
+        Logger.warning("dropping merge staging table #{table} failed: #{inspect(reason)}")
+
+        :ok
+    end
   end
 
   defp staging_table(key) do
@@ -390,8 +438,8 @@ defmodule Smolquery.StorageService.Merge do
 
   defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
 
-  defp query(runtime, sql, params) do
-    case Engine.query(Runtime.engine(runtime.name), sql, params) do
+  defp query(runtime, sql, params, timeout \\ 30_000) do
+    case Engine.query(Runtime.engine(runtime.name), sql, params, timeout) do
       {:ok, result} -> {:ok, result}
       {:error, error} -> {:error, {:merge_failed, Exception.message(error)}}
     end

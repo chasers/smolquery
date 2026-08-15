@@ -55,12 +55,12 @@ defmodule Bench.Sealer do
     inputs took ~6.6 ms (~0.6M rows/s). The floor is per-input HTTP and Parquet
     footer work, so small inputs are what waste a merge — an argument for letting
     `seal_max_files` grow rather than sealing eagerly on file count.
-  - **The chunked merge costs nothing at local latency.** 128 inputs staged
-    through a temp table in 24 bounded calls merged within 5% of the single
-    unbounded call, with byte-identical output; at 12 and 36 inputs it was
-    faster. The staging hop's price shows up only where per-input latency is
-    real (httpfs to object storage), which is exactly where the bounded calls
-    are the point (T-246/T-247).
+  - **The chunked merge is cheap at local latency.** 128 inputs staged
+    through a temp table in 24 bounded calls merged within 5–21% of the
+    single unbounded call across runs, with byte-identical output; at 12 and
+    36 inputs it matched or beat it. The staging hop costs only where
+    per-input latency is real (httpfs to object storage), and that is exactly
+    where the bounded calls matter (T-246/T-247).
   - **Seal lag is the threshold, not the seal.** The handoff itself — manifest pull,
     merge, catalog commit, retire — ran 37-51 ms regardless of claim size. So the
     age of the oldest unsealed row, and therefore the single-copy loss window, is
@@ -113,7 +113,7 @@ defmodule Bench.Sealer do
     input_counts = Enum.filter([12, 36, 128], &(&1 <= env("MAX_INPUTS", 128)))
 
     IO.puts("\n  per-call cap #{per_call}; direct forces the whole list into one call\n")
-    IO.puts("  inputs    path     calls    merge ms      rows/s   sealed KiB")
+    IO.puts("  inputs    path     est calls    merge ms      rows/s   sealed KiB")
 
     for count <- input_counts do
       stack = start_stack(dir, "chunk-#{count}")
@@ -129,7 +129,7 @@ defmodule Bench.Sealer do
         calls = if cap >= count, do: 2, else: 2 * ceil(count / cap) + 2
 
         IO.puts(
-          "  #{pad(count, 6)}  #{label(label, 7)}  #{pad(calls, 5)}  #{pad(ms(us), 10)}  " <>
+          "  #{pad(count, 6)}  #{label(label, 7)}  #{pad(calls, 9)}  #{pad(ms(us), 10)}  " <>
             "#{pad(rows_per_second(count * rows, us), 10)}  #{pad(kib(segment.byte_size), 11)}"
         )
       end
@@ -138,8 +138,9 @@ defmodule Bench.Sealer do
     end
 
     IO.puts("\n  chunked reads land in a session temp table and the final COPY writes from")
-    IO.puts("  local data, so per-input httpfs cost is bounded per engine call; the calls")
-    IO.puts("  column counts DESCRIBE + CREATE/INSERT per chunk, plus the COPY and DROP.")
+    IO.puts("  local data, so per-input httpfs cost is bounded per engine call. est calls")
+    IO.puts("  is the expected shape, not a measurement: DESCRIBE + CREATE/INSERT per")
+    IO.puts("  chunk, plus the COPY and DROP. Re-derive it if Merge's call plan changes.")
   end
 
   defp merge_implementations(dir) do

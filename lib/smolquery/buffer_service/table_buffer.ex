@@ -92,14 +92,17 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   The claim also names its output, derived from its inputs, so a table's sealed
   segment has a stable identity before any bytes exist. One key per claim, and
-  the claim takes *everything* unsealed: a backlog retires in one claim, which
-  is what keeps a table self-correcting under sustained ingest (T-246). A claim
-  of any size is safe to seal because the merge bounds its own engine calls —
-  `Smolquery.StorageService.Merge` reads inputs in chunks of
-  `merge_inputs_per_call`, so no call carries an unbounded `read_parquet` list.
-  How large a sealed segment gets is `seal_max_bytes`'s business, since it
-  decides when a claim is signalled, and splitting an oversized output across
-  files is the compactor's problem rather than the buffer's.
+  the claim takes the oldest unsealed entries up to a byte valve of
+  16 × `seal_max_bytes`. The valve bounds two things at once: how large one
+  sealed segment can get, and how many bytes the merge stages in its temp
+  table — engine memory and spill are finite, and a claim past them would
+  fail the same way on every retry. A backlog past the valve retires in
+  valve-sized claims. The remainder still crosses `seal_max_bytes`, so the
+  next maintenance tick claims it as soon as this claim retires — a table
+  under sustained ingest self-corrects (T-246). Within a claim, calls are
+  bounded too: `Smolquery.StorageService.Merge` reads inputs in chunks of
+  `merge_inputs_per_call`, so no call carries an unbounded `read_parquet`
+  list.
 
   ## Recovery, and what a crash costs
 
@@ -139,6 +142,8 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
+
+  @claim_max_bytes_factor 16
 
   defstruct [
     :runtime,
@@ -646,7 +651,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp claim_and_signal(state, unsealed) do
-    ids = Enum.map(unsealed, & &1.id)
+    ids =
+      unsealed
+      |> claim_batch(state.runtime.seal_max_bytes * @claim_max_bytes_factor)
+      |> Enum.map(& &1.id)
 
     result =
       with {:ok, keys} <- sealed_keys(state, ids) do
@@ -662,6 +670,19 @@ defmodule Smolquery.BufferService.TableBuffer do
 
         state
     end
+  end
+
+  defp claim_batch([first | rest], valve) do
+    {batch, _total} =
+      Enum.reduce_while(rest, {[first], first.byte_size}, fn entry, {batch, total} ->
+        if total + entry.byte_size > valve do
+          {:halt, {batch, total}}
+        else
+          {:cont, {[entry | batch], total + entry.byte_size}}
+        end
+      end)
+
+    Enum.reverse(batch)
   end
 
   defp claim_with_log(state, ids, keys, log) do
