@@ -6,22 +6,28 @@ full environment-variable reference, see [configuration.md](configuration.md).
 
 ## How a release is published
 
-A release starts with a **version bump**. The release workflow publishes an
-image only when a `main` commit raises the `version:` line in `mix.exs` to a
-stable `X.Y.Z` value.
+Every merge to `main` publishes an image. A **version bump** additionally
+creates a versioned release: a `main` commit that raises the `version:` line
+in `mix.exs` to a stable `X.Y.Z` value.
 
 The pipeline runs in this order:
 
 1. A pull request runs the CI workflow and the Cluster workflow. The Cluster
-   suite runs against real kind hosts. Both gate the merge.
-2. A merge to `main` runs the CI workflow again.
-3. The Release workflow starts after that CI run succeeds. It checks that the
-   exact commit bumped the version.
-4. It publishes multi-architecture `ghcr.io/chasers/smolquery` tags for the
-   version (`vX.Y.Z`) and the commit (`sha-<commit>`).
+   suite runs against real kind hosts. Both gate the merge. Branch protection
+   keeps the pull request current with `main`, so the merged tree is one CI
+   already saw.
+2. The Release workflow runs on the merge push to `main`. It publishes a
+   multi-architecture `ghcr.io/chasers/smolquery` image tagged with the
+   commit (`sha-<commit>`).
+3. When the commit bumped the version, the run aliases that image as
+   `vX.Y.Z` and creates the GitHub release.
 
-A commit that does not bump the version skips the publish step. The image
-digest is the durable reference; pin deployments to it, not to a tag.
+A release run that fails after the merge does not need a new version bump.
+Dispatch the Release workflow with the bump commit as `sha`; the run reuses
+the image it already published and finishes the tag and the release.
+
+The image digest is the durable reference; pin deployments to it, not to a
+tag.
 
 ## Release artifacts
 

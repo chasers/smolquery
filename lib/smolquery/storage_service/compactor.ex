@@ -41,9 +41,21 @@ defmodule Smolquery.StorageService.Compactor do
   Per table, per sweep: segments under `compact_below_bytes` (sizes summed
   from the Parquet footers, never a data read), oldest first — segment ids are
   ULIDs, so name order is time order — greedily grouped until adding the next
-  would pass `compact_max_bytes`, compacted only if at least
-  `compact_min_inputs` made the cut. One group per table per sweep; a table
-  with more work keeps its place in line rather than monopolizing the sweep.
+  would pass `compact_max_bytes` or `compact_max_inputs`, compacted only if at
+  least `compact_min_inputs` made the cut. One group per table per sweep; a
+  table with more work keeps its place in line rather than monopolizing the
+  sweep.
+
+  The input-count cap exists because the merge is one DuckDB call (T-244): the
+  byte ceiling bounds the output, but 128 MiB of small segments is over a
+  hundred `read_parquet` inputs, and per-input cost is what outran the
+  engine's call timeout on the sandbox. The footer-sizing query is chunked by
+  the same cap, oldest first, and stops at the first full group of undersized
+  candidates — a large backlog costs one sizing call, not one per chunk, and
+  no call holds the shared engine with an unbounded list. A merge output
+  still under `compact_below_bytes` stays a candidate: a backlog converges
+  across sweeps, each group re-ingesting the previous output until one
+  crosses the threshold.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -111,14 +123,16 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp compact_table(runtime, table_ref) do
+    started_at = System.monotonic_time(:microsecond)
+
     with true <- runtime.name |> Routing.resolve() |> Routing.own?(table_ref),
          {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          {:ok, group} <- plan(runtime, paths) do
-      swap(runtime, table_ref, group)
+      swap(runtime, table_ref, group, started_at)
     else
       false -> :skip
       :skip -> :skip
-      {:error, reason} -> failed(table_ref, reason)
+      {:error, reason} -> failed(table_ref, reason, started_at)
     end
   end
 
@@ -126,13 +140,42 @@ defmodule Smolquery.StorageService.Compactor do
     if length(paths) < runtime.compact_min_inputs do
       :skip
     else
-      with {:ok, sizes} <- sizes(runtime, paths) do
-        group(runtime, sizes)
+      with {:ok, undersized} <- undersized(runtime, Enum.sort_by(paths, &Path.basename/1)) do
+        group(runtime, undersized)
       end
     end
   end
 
-  defp sizes(runtime, paths) do
+  defp undersized(runtime, paths) do
+    paths
+    |> Enum.chunk_every(runtime.compact_max_inputs)
+    |> Enum.reduce_while({[], 0}, &size_chunk(runtime, &1, &2))
+    |> case do
+      {:error, reason} -> {:error, reason}
+      {chunks, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+    end
+  end
+
+  defp size_chunk(runtime, chunk, {acc, count}) do
+    case sizes_chunk(runtime, chunk) do
+      {:ok, sizes} ->
+        found =
+          Enum.filter(sizes, fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
+
+        group_filled({[found | acc], count + length(found)}, runtime)
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp group_filled({_chunks, count} = acc, runtime)
+       when count >= runtime.compact_max_inputs,
+       do: {:halt, acc}
+
+  defp group_filled(acc, _runtime), do: {:cont, acc}
+
+  defp sizes_chunk(runtime, paths) do
     sql =
       "SELECT file_name, sum(total_compressed_size)::BIGINT " <>
         "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name"
@@ -143,14 +186,12 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp group(runtime, sizes) do
-    undersized =
-      sizes
-      |> Enum.filter(fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
-      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
-
+  defp group(runtime, undersized) do
     {group, _total} =
-      Enum.reduce_while(undersized, {[], 0}, fn {path, bytes}, {group, total} ->
+      undersized
+      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
+      |> Enum.take(runtime.compact_max_inputs)
+      |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
         if total + bytes > runtime.compact_max_bytes and group != [] do
           {:halt, {group, total}}
         else
@@ -165,7 +206,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp swap(runtime, table_ref, paths) do
+  defp swap(runtime, table_ref, paths, started_at) do
     with {:ok, key} <- output_key(table_ref, paths),
          {:ok, segment} <- Merge.compact(runtime, table_ref, key, paths),
          {:ok, snapshot} <-
@@ -178,13 +219,13 @@ defmodule Smolquery.StorageService.Compactor do
 
       :telemetry.execute(
         [:smolquery, :compact, :swap],
-        %{replaced: length(paths)},
+        %{replaced: length(paths), duration_us: elapsed_us(started_at)},
         %{result: :ok}
       )
 
       {:ok, %{table: table_ref, key: key, replaced: length(paths), snapshot: snapshot}}
     else
-      {:error, reason} -> failed(table_ref, reason)
+      {:error, reason} -> failed(table_ref, reason, started_at)
     end
   end
 
@@ -221,13 +262,19 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp failed(table_ref, reason) do
+  defp failed(table_ref, reason, started_at) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
-    :telemetry.execute([:smolquery, :compact, :swap], %{replaced: 0}, %{result: :error})
+    :telemetry.execute(
+      [:smolquery, :compact, :swap],
+      %{replaced: 0, duration_us: elapsed_us(started_at)},
+      %{result: :error}
+    )
 
     {:failed, %{table: table_ref, reason: reason}}
   end
+
+  defp elapsed_us(started_at), do: System.monotonic_time(:microsecond) - started_at
 
   defp placeholders(paths), do: Enum.map_join(1..length(paths), ", ", &"$#{&1}")
 end

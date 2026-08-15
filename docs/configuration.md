@@ -36,8 +36,9 @@ error.
 | `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
+| `SMOLQUERY_COMPACT_MAX_INPUTS` | cap on segments one compaction merge reads (`12`, T-244). The byte ceiling bounds the output, not the file count; the cap keeps the one-call merge inside the engine's 30 s timeout. Must be at least `compact_min_inputs`; a larger run compacts across sweeps. The default's derivation is in `Smolquery.BufferService.Runtime`'s docs |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
-| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | S3 credentials (required with `SMOLQUERY_S3_BUCKET`) |
+| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
 | `SMOLQUERY_S3_REGION` | S3 region (`us-east-1`) |
 | `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (`path` when an endpoint is set) |
@@ -64,6 +65,7 @@ until the pinned version's driver exists for that target.
 | `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |
 | `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`2000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch. A pair that is not strictly greater logs a warning at the buffer boot, and the row-side pair (`flush_max_rows`/`max_buffered_rows`) gets the same check |
+| `SMOLQUERY_SEAL_BATCH_MAX_FILES` | cap on micro-segments one seal claim freezes (`12`, T-244). The seal merges a claim in one DuckDB call; the cap keeps that call inside the engine's 30 s timeout, and a frozen claim would retry an oversized merge forever. A backlog larger than the cap seals in several claims, oldest first. The default's derivation is in `Smolquery.BufferService.Runtime`'s docs |
 | `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (the node's scheduler count — a container held to one core encodes serially, which is what one core means); the manifest append, replication round and replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS quotas — set this and the pool size explicitly where quotas are the fence |
 | `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `duckdb` (default) or `polars`; any other value fails boot. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. The default path defers schema validation to flush, then salvages a failed batch row by row, preserving per-row `insertErrors`; a bad row does not always fail the whole commit, and successful rows are still written. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
 | `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. When no explicit engine thread count is configured, both the engine and the pool resolve `System.schedulers_online()` on the deployment host at boot, not on the release builder. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
@@ -125,6 +127,7 @@ config :smolquery, Smolquery.BufferService,
   seal_max_bytes: 67_108_864,
   seal_max_files: 64,
   seal_max_age_ms: 60_000,
+  seal_batch_max_files: 12,
   seal_retry_ms: 30_000,
   retire_grace_ms: 600_000,
   maintenance_interval_ms: 5_000,
@@ -147,6 +150,7 @@ config :smolquery, Smolquery.StorageService,
   compact_interval_ms: 300_000,
   compact_below_bytes: 33_554_432,
   compact_min_inputs: 2,
+  compact_max_inputs: 12,
   compact_max_bytes: 134_217_728,
   retention_interval_ms: 3_600_000,
   snapshot_keep_ms: 86_400_000,
@@ -231,6 +235,29 @@ rather than a config snippet: `config/config.exs` is evaluated at *build* time,
 so `System.get_env/1` there bakes the builder's credentials (or `nil`) into the
 artifact. The env wiring configures the query service's `store:` with the same
 values, which every job engine needs to read the sealed tier back.
+
+#### S3 credentials
+
+Leave `:access_key_id` and `:secret_access_key` out and the sealed tier
+authenticates through the AWS default credential chain instead — environment,
+profile, ECS, EKS Pod Identity, web identity, then EC2 instance metadata. That
+is how a deployment runs with no static S3 secrets at all, which some AWS
+organizations require: an SCP that denies `s3:*` to IAM users cannot be
+overridden by any IAM policy, and static keys can only ever be an IAM user.
+
+Set both keys or neither. One alone is a half-written configuration, not a
+chain, so `Store.S3.new/1` rejects it at startup.
+
+Both halves of the sealed tier follow the same rule. Elixir signs its own
+uploads and listings through `Smolquery.AwsCredentials`, which resolves fresh
+credentials per request so rotation needs no restart. DuckDB engines get a
+`CREATE SECRET ... PROVIDER credential_chain, REFRESH auto` instead of static
+keys, and load the `aws` extension that provider comes from. `REFRESH auto`
+is what keeps the long-lived storage-service engine working past the expiry of
+the temporary credentials it started with.
+
+MinIO and other non-AWS stores keep using static keys — they have no credential
+chain to consult.
 
 `buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and
 segment bytes — honest for a single node. Clustered, each seal signal carries

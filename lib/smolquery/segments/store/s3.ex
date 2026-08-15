@@ -31,6 +31,18 @@ defmodule Smolquery.Segments.Store.S3 do
   `Smolquery.InternalSecret.create_secret_statement/1` bootstraps the hot
   tier's header.
 
+  ## Two credential modes, one rule
+
+  Configure `:access_key_id` and `:secret_access_key` and both paths use those
+  static keys. Configure neither and both paths use the AWS default credential
+  chain — Elixir through `Smolquery.AwsCredentials`, DuckDB through `PROVIDER
+  credential_chain`. That mode exists because an organization SCP denying
+  `s3:*` to IAM users cannot be overridden by any IAM policy, and static keys
+  are only ever an IAM user; EKS Pod Identity is the way in (T-240).
+
+  The two resolvers are independent, but they read the same environment and
+  refresh themselves, so neither side goes stale while the other rotates.
+
   ## Usage
 
       store = Smolquery.Segments.Store.S3.new(
@@ -40,14 +52,21 @@ defmodule Smolquery.Segments.Store.S3 do
         endpoint: "http://minio:9000",
         staging_dir: "/var/lib/smolquery/sealed-staging"
       )
+
+      store = Smolquery.Segments.Store.S3.new(
+        bucket: "smolquery-sealed",
+        region: "us-east-2",
+        staging_dir: "/var/lib/smolquery/sealed-staging"
+      )
   """
 
   @behaviour Smolquery.Segments.Store
 
+  alias Smolquery.AwsCredentials
   alias Smolquery.Identifier
   alias Smolquery.Segments.Store
 
-  @enforce_keys [:bucket, :access_key_id, :secret_access_key, :staging_dir]
+  @enforce_keys [:bucket, :staging_dir]
   defstruct [
     :bucket,
     :access_key_id,
@@ -61,8 +80,8 @@ defmodule Smolquery.Segments.Store.S3 do
 
   @type t :: %__MODULE__{
           bucket: String.t(),
-          access_key_id: String.t(),
-          secret_access_key: String.t(),
+          access_key_id: String.t() | nil,
+          secret_access_key: String.t() | nil,
           staging_dir: String.t(),
           endpoint: String.t() | nil,
           region: String.t(),
@@ -90,7 +109,11 @@ defmodule Smolquery.Segments.Store.S3 do
   ## Options
 
     * `:bucket` (required)
-    * `:access_key_id`, `:secret_access_key` (required)
+    * `:access_key_id`, `:secret_access_key` — static keys. Set both, or
+      neither: leaving both out puts the store in credential-chain mode
+      (`Smolquery.AwsCredentials`), which is how a deployment runs with no
+      static S3 secrets at all. Only one of the pair is a configuration
+      error, not a half-specified chain.
     * `:staging_dir` (required) — local scratch directory the encoder writes
       to before the upload; must be on a filesystem with room for the
       largest sealed segment
@@ -110,8 +133,8 @@ defmodule Smolquery.Segments.Store.S3 do
   def new(opts) do
     config = %__MODULE__{
       bucket: Keyword.fetch!(opts, :bucket),
-      access_key_id: Keyword.fetch!(opts, :access_key_id),
-      secret_access_key: Keyword.fetch!(opts, :secret_access_key),
+      access_key_id: Keyword.get(opts, :access_key_id),
+      secret_access_key: Keyword.get(opts, :secret_access_key),
       staging_dir: Keyword.fetch!(opts, :staging_dir),
       endpoint: Keyword.get(opts, :endpoint),
       region: Keyword.get(opts, :region, "us-east-1"),
@@ -119,8 +142,40 @@ defmodule Smolquery.Segments.Store.S3 do
       list_max_keys: Keyword.get(opts, :list_max_keys)
     }
 
+    validate_credentials!(config)
+
+    if credential_chain?(config), do: AwsCredentials.ensure_started()
+
     %Store{impl: __MODULE__, config: config}
   end
+
+  defp validate_credentials!(%__MODULE__{access_key_id: nil, secret_access_key: nil}), do: :ok
+
+  defp validate_credentials!(%__MODULE__{access_key_id: id, secret_access_key: secret})
+       when is_binary(id) and is_binary(secret),
+       do: :ok
+
+  defp validate_credentials!(%__MODULE__{access_key_id: nil}) do
+    raise ArgumentError,
+          "the sealed tier has SMOLQUERY_S3_SECRET_ACCESS_KEY without " <>
+            "SMOLQUERY_S3_ACCESS_KEY_ID: set both to use static keys, or neither " <>
+            "to use the AWS credential chain"
+  end
+
+  defp validate_credentials!(%__MODULE__{}) do
+    raise ArgumentError,
+          "the sealed tier has SMOLQUERY_S3_ACCESS_KEY_ID without " <>
+            "SMOLQUERY_S3_SECRET_ACCESS_KEY: set both to use static keys, or neither " <>
+            "to use the AWS credential chain"
+  end
+
+  @doc """
+  Whether this store authenticates through the AWS credential chain rather
+  than static keys — true when no `:access_key_id` is configured.
+  """
+  @spec credential_chain?(t()) :: boolean()
+  def credential_chain?(%__MODULE__{access_key_id: nil}), do: true
+  def credential_chain?(%__MODULE__{}), do: false
 
   @impl Store
   def put(%__MODULE__{} = config, key, encoder) do
@@ -213,20 +268,46 @@ defmodule Smolquery.Segments.Store.S3 do
   The bootstrap `CREATE SECRET` that lets a DuckDB engine read `s3://`
   locations under `:bucket` — engines only ever read through it; every write
   goes through this module's own `put/3`.
+
+  Without static keys the secret delegates to DuckDB's own credential chain,
+  which resolves EKS Pod Identity from the container credentials endpoint.
+  `REFRESH auto` matters for the long-lived storage-service engine, whose
+  temporary credentials would otherwise expire under it; per-job query
+  engines are short-lived enough that they only ever use the first
+  resolution. That branch needs the `aws` extension — see
+  `required_extensions/1`.
   """
   @spec create_secret_statement(t()) :: String.t()
   def create_secret_statement(%__MODULE__{} = config) do
     options =
-      [
-        "TYPE S3",
-        "KEY_ID #{Identifier.sql_string(config.access_key_id)}",
-        "SECRET #{Identifier.sql_string(config.secret_access_key)}",
-        "REGION #{Identifier.sql_string(config.region)}",
-        "SCOPE #{Identifier.sql_string("s3://" <> config.bucket)}"
-      ] ++ endpoint_options(config)
+      ["TYPE S3"] ++
+        credential_options(config) ++
+        [
+          "REGION #{Identifier.sql_string(config.region)}",
+          "SCOPE #{Identifier.sql_string("s3://" <> config.bucket)}"
+        ] ++ endpoint_options(config)
 
     "CREATE SECRET IF NOT EXISTS #{@secret_name} (#{Enum.join(options, ", ")})"
   end
+
+  defp credential_options(%__MODULE__{access_key_id: nil}),
+    do: ["PROVIDER credential_chain", "REFRESH auto"]
+
+  defp credential_options(%__MODULE__{} = config) do
+    [
+      "KEY_ID #{Identifier.sql_string(config.access_key_id)}",
+      "SECRET #{Identifier.sql_string(config.secret_access_key)}"
+    ]
+  end
+
+  @doc """
+  DuckDB extensions an engine must load before `create_secret_statement/1`
+  will run — `aws` supplies the `credential_chain` provider, and only the
+  chain branch needs it. A static-key secret is plain `httpfs`.
+  """
+  @spec required_extensions(t()) :: [atom()]
+  def required_extensions(%__MODULE__{access_key_id: nil}), do: [:aws]
+  def required_extensions(%__MODULE__{}), do: []
 
   defp endpoint_options(%__MODULE__{endpoint: nil}), do: []
 
@@ -293,12 +374,19 @@ defmodule Smolquery.Segments.Store.S3 do
   defp request(%__MODULE__{} = config) do
     Req.new()
     |> ReqS3.attach(
-      aws_sigv4: [
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        region: config.region
-      ],
+      aws_sigv4: sigv4(config),
       aws_endpoint_url_s3: config.endpoint
     )
+  end
+
+  defp sigv4(%__MODULE__{access_key_id: nil, region: region}),
+    do: AwsCredentials.sigv4_options(region)
+
+  defp sigv4(%__MODULE__{} = config) do
+    [
+      access_key_id: config.access_key_id,
+      secret_access_key: config.secret_access_key,
+      region: config.region
+    ]
   end
 end

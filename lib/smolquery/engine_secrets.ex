@@ -52,4 +52,18 @@ defmodule Smolquery.EngineSecrets do
     do: [Store.S3.create_secret_statement(config)]
 
   def sealed_tier(_store), do: []
+
+  @doc """
+  Extensions an engine must load before `sealed_tier/1`'s statement will run,
+  merged into whatever the service already loads.
+
+  A sealed tier authenticating through the AWS credential chain needs the
+  `aws` extension for the `credential_chain` provider; static keys and local
+  stores need nothing beyond the service's own list.
+  """
+  @spec sealed_tier_extensions(Store.t() | nil, [atom() | String.t()]) :: [atom() | String.t()]
+  def sealed_tier_extensions(%Store{impl: Store.S3, config: config}, extensions),
+    do: Enum.uniq(extensions ++ Store.S3.required_extensions(config))
+
+  def sealed_tier_extensions(_store, extensions), do: extensions
 end

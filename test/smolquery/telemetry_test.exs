@@ -64,6 +64,38 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_compaction_segments_replaced_total") == before_replaced + 4
   end
 
+  test "counts a seal attempt's duration and batch size by result" do
+    before_attempts = value("smolquery_seal_attempts_total", ~s({result="crashed"}))
+    before_us = value("smolquery_seal_microseconds_total", ~s({result="crashed"}))
+    before_segments = value("smolquery_seal_segments_total", ~s({result="crashed"}))
+
+    :telemetry.execute(
+      [:smolquery, :seal, :attempt],
+      %{duration_us: 30_000_000, segments: 36},
+      %{result: :crashed}
+    )
+
+    assert value("smolquery_seal_attempts_total", ~s({result="crashed"})) == before_attempts + 1
+
+    assert value("smolquery_seal_microseconds_total", ~s({result="crashed"})) ==
+             before_us + 30_000_000
+
+    assert value("smolquery_seal_segments_total", ~s({result="crashed"})) == before_segments + 36
+  end
+
+  test "counts a compaction's duration by result" do
+    before_us = value("smolquery_compaction_microseconds_total", ~s({result="ok"}))
+
+    :telemetry.execute(
+      [:smolquery, :compact, :swap],
+      %{replaced: 2, duration_us: 4_200},
+      %{result: :ok}
+    )
+
+    assert value("smolquery_compaction_microseconds_total", ~s({result="ok"})) ==
+             before_us + 4_200
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

@@ -38,6 +38,12 @@ config :smolquery, Smolquery.Engine,
   threads: 2,
   extensions: []
 
+# A credential-chain store starts :aws_credentials, whose default chain ends
+# at EC2 instance metadata — a link-local address no test host answers, so
+# every such test would stall on a connect timeout. The environment provider
+# alone fails immediately and keeps the resolution offline.
+config :aws_credentials, credential_providers: [:aws_credentials_env]
+
 # Keep spill artifacts from failed tests outside the checkout and isolate
 # concurrent test VMs from one another.
 config :smolquery,

@@ -56,7 +56,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
   alias Smolquery.Cluster.Topology
 
   @refresh_ms 2_000
-  @drain_timeout_ms 30_000
+  @drain_timeout_ms 120_000
 
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
