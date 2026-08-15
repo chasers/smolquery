@@ -2,6 +2,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
   use SmolqueryWeb.ConnCase, async: false
 
   alias Smolquery.Auth.OIDC.Provider
+  alias Smolquery.{Catalog, Schema}
   alias Smolquery.Test.MapCatalog
   alias SmolqueryWeb.{OIDC, Runtime, Session}
 
@@ -44,6 +45,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
           claim_capabilities: %{
             "roles" => %{
               "operator" => @all_capabilities,
+              "analyst" => [:web_access, :query],
               "reader" => [:web_access]
             }
           }
@@ -65,6 +67,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
        end}
     )
 
+    start_supervised!({Phoenix.PubSub, name: Smolquery.PubSub})
     start_supervised!(SmolqueryWeb.Endpoint)
 
     %{runtime: runtime, token_response: token_response}
@@ -128,7 +131,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
     refute_received {:token_request, _url, _options}
   end
 
-  test "callback denies a valid identity missing the temporary coarse capabilities", %{
+  test "callback admits a valid web_access-only identity", %{
     token_response: token_response
   } do
     login = get(build_conn(), ~p"/auth/login")
@@ -140,19 +143,138 @@ defmodule SmolqueryWeb.AuthControllerTest do
       |> recycle()
       |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
 
-    assert callback.status == 400
-    assert callback.resp_body == "authentication failed"
-    assert get_session(callback, Session.key()) == nil
+    assert callback.status == 302
+    assert get_resp_header(callback, "location") == ["/cluster"]
+    assert get_session(callback, Session.key())["capabilities"] == ["web_access"]
+    assert {:ok, cluster_live, html} = live(recycle(callback), ~p"/cluster")
+    assert html =~ "Cluster"
+    refute has_element?(cluster_live, "button", "Kill")
+
+    assert {:error, {:redirect, %{to: "/cluster"}}} = live(recycle(callback), ~p"/query")
+  end
+
+  test "an active socket expires in place and the stale cookie cannot reconnect", %{
+    token_response: token_response
+  } do
+    login = get(build_conn(), ~p"/auth/login")
+    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    expires_at = System.system_time(:second) + 2
+
+    Agent.update(token_response, fn _ ->
+      token_response(transaction.nonce, "reader", expires_at)
+    end)
+
+    callback =
+      login
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
+
+    assert {:ok, cluster_live, _html} = live(recycle(callback), ~p"/cluster")
+    assert_redirect(cluster_live, "/auth/login", 3_000)
+
+    assert {:error, {:redirect, %{to: "/auth/login"}}} =
+             live(recycle(callback), ~p"/cluster")
+  end
+
+  test "query-only browser sessions mount read routes but cannot forge mutations or fleet actions",
+       %{
+         runtime: runtime,
+         token_response: token_response
+       } do
+    :ok = Catalog.create_dataset(runtime.catalog, "analytics")
+
+    :ok =
+      Catalog.create_table(
+        runtime.catalog,
+        {"analytics", "events"},
+        Schema.new!([{"ts", :timestamp}])
+      )
+
+    callback = callback_as(token_response, "analyst")
+
+    assert {:ok, query_live, _html} = live(recycle(callback), ~p"/query")
+    assert render(query_live) =~ "Query"
+
+    assert {:ok, tables_live, tables_html} = live(recycle(callback), ~p"/tables")
+    assert tables_html =~ "analytics"
+    refute has_element?(tables_live, "#create-dataset")
+    refute has_element?(tables_live, "#create-table")
+
+    render_submit(tables_live, "create_dataset", %{"dataset" => %{"name" => "forged"}})
+    assert_redirect(tables_live, "/cluster")
+    assert Catalog.list_datasets(runtime.catalog) == {:ok, ["analytics"]}
+
+    assert {:ok, tables_live, _html} = live(recycle(callback), ~p"/tables")
+
+    render_submit(tables_live, "create_table", %{
+      "table" => %{
+        "dataset" => "analytics",
+        "name" => "forged",
+        "fields" => %{"0" => %{"name" => "id", "type" => "INT64", "nullable" => "false"}}
+      }
+    })
+
+    assert_redirect(tables_live, "/cluster")
+    assert {:error, _reason} = Catalog.table_schema(runtime.catalog, {"analytics", "forged"})
+
+    assert {:ok, show_live, _html} = live(recycle(callback), ~p"/tables/analytics/events")
+    refute has_element?(show_live, "#retention")
+
+    render_submit(show_live, "save_retention", %{
+      "retention" => %{"column" => "ts", "ttl_ms" => "1000"}
+    })
+
+    assert_redirect(show_live, "/cluster")
+    assert Catalog.retention(runtime.catalog, {"analytics", "events"}) == {:ok, nil}
+
+    :ok =
+      Catalog.put_retention(runtime.catalog, {"analytics", "events"}, %{
+        column: "ts",
+        ttl_ms: 1_000
+      })
+
+    assert {:ok, show_live, _html} = live(recycle(callback), ~p"/tables/analytics/events")
+    render_click(show_live, "clear_retention")
+    assert_redirect(show_live, "/cluster")
+
+    assert Catalog.retention(runtime.catalog, {"analytics", "events"}) ==
+             {:ok, %{column: "ts", ttl_ms: 1_000}}
+
+    for event <- ["kill", "restart", "drain"] do
+      assert {:ok, cluster_live, _html} = live(recycle(callback), ~p"/cluster")
+      refute has_element?(cluster_live, "button", "Kill")
+      refute has_element?(cluster_live, "button", "Restart")
+      refute has_element?(cluster_live, "button", "Drain")
+
+      params = if event == "drain", do: %{"node" => "forged@node"}, else: %{"pod" => "forged-pod"}
+      render_click(cluster_live, event, params)
+      assert_redirect(cluster_live, "/cluster")
+    end
+  end
+
+  defp callback_as(token_response, role) do
+    login = get(build_conn(), ~p"/auth/login")
+    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    Agent.update(token_response, fn _ -> token_response(transaction.nonce, role) end)
+
+    login
+    |> recycle()
+    |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
   end
 
   defp token_response(nonce, role) do
+    now = System.system_time(:second)
+    token_response(nonce, role, now + 300)
+  end
+
+  defp token_response(nonce, role, expires_at) do
     now = System.system_time(:second)
 
     claims = %{
       "iss" => "https://issuer.example",
       "aud" => "web-client",
       "sub" => "subject-1",
-      "exp" => now + 300,
+      "exp" => expires_at,
       "iat" => now,
       "nonce" => nonce,
       "roles" => [role]

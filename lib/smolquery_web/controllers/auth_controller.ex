@@ -3,6 +3,7 @@ defmodule SmolqueryWeb.AuthController do
 
   use SmolqueryWeb, :controller
 
+  alias Smolquery.Auth.Policy
   alias SmolqueryWeb.{Auth, OIDC, Runtime}
 
   def login(conn, _params) do
@@ -32,9 +33,10 @@ defmodule SmolqueryWeb.AuthController do
          {:ok, cookie} <- transaction_cookie,
          {:ok, transaction} <- OIDC.consume(cookie, state),
          {:ok, context} <- OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
-         true <- Auth.coarse_web_access?(context),
+         :ok <- Policy.authorize(context, :web_access),
          {:ok, conn} <- Auth.assign_identity(conn, context) do
-      conn |> no_store() |> redirect(to: "/")
+      target = if Policy.authorize(context, :query) == :ok, do: "/", else: "/cluster"
+      conn |> no_store() |> redirect(to: target)
     else
       _ -> error(conn)
     end

@@ -41,12 +41,19 @@ defmodule SmolqueryWeb.Router do
   scope "/", SmolqueryWeb do
     pipe_through :browser
 
-    live_session :authenticated, on_mount: {SmolqueryWeb.Auth, :require_authenticated} do
+    live_session :web, on_mount: {SmolqueryWeb.Auth, :require_authenticated} do
+      live "/cluster", ClusterLive.Index, :index
+    end
+
+    live_session :query,
+      on_mount: [
+        {SmolqueryWeb.Auth, :require_authenticated},
+        {SmolqueryWeb.Authorization, :query}
+      ] do
       live "/", TableLive.Index, :index
       live "/tables", TableLive.Index, :index
       live "/tables/:dataset/:table", TableLive.Show, :show
       live "/query", QueryLive.Index, :index
-      live "/cluster", ClusterLive.Index, :index
     end
   end
 end

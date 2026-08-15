@@ -13,8 +13,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   alias Smolquery.Catalog
   alias Smolquery.QueryService
   alias Smolquery.Schema
-  alias SmolqueryWeb.DataTable
-  alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.{Authorization, DataTable, Runtime}
 
   @preview_rows 50
 
@@ -31,6 +30,7 @@ defmodule SmolqueryWeb.TableLive.Show do
           |> assign(:dataset, dataset)
           |> assign(:table, table)
           |> assign(:schema, schema)
+          |> assign(:can_catalog_manage, can?(socket, :catalog_manage))
           |> assign(:preview, :loading)
           |> load_retention()
           |> start_preview()
@@ -46,20 +46,35 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("save_retention", %{"retention" => params}, socket) do
-    with {:ok, retention} <- parse_retention(params),
+  def handle_event("save_retention", params, socket) do
+    with :ok <- Authorization.event(socket, :catalog_manage),
+         %{"retention" => retention_params} when is_map(retention_params) <- params,
+         {:ok, retention} <- parse_retention(retention_params),
          :ok <- put_retention(socket, retention) do
       {:noreply,
        socket
        |> put_flash(:info, "Retention saved")
        |> load_retention()}
     else
+      {:error, _reason, denied} ->
+        {:noreply, denied}
+
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not save retention: #{inspect(reason)}")}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Could not save retention")}
     end
   end
 
   def handle_event("clear_retention", _params, socket) do
+    case Authorization.event(socket, :catalog_manage) do
+      {:error, _reason, denied} -> {:noreply, denied}
+      :ok -> clear_retention(socket)
+    end
+  end
+
+  defp clear_retention(socket) do
     case put_retention(socket, nil) do
       :ok ->
         {:noreply,
@@ -82,27 +97,31 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp start_preview(socket) do
-    if connected?(socket) do
-      runtime = socket.assigns.runtime
-      sql = preview_sql(socket.assigns.dataset, socket.assigns.table)
+    if connected?(socket), do: start_connected_preview(socket), else: socket
+  end
 
-      start_async(socket, :preview, fn -> fetch_preview(runtime, sql) end)
-    else
-      socket
+  defp start_connected_preview(socket) do
+    runtime = socket.assigns.runtime
+    sql = preview_sql(socket.assigns.dataset, socket.assigns.table)
+
+    case Smolquery.Auth.fetch_context(socket) do
+      {:ok, context} ->
+        start_async(socket, :preview, fn -> fetch_preview(runtime, sql, context) end)
+
+      :error ->
+        assign(socket, :preview, {:error, :unauthenticated})
     end
   end
 
-  defp fetch_preview(runtime, sql) do
-    case QueryService.Client.query(runtime.query_name, sql, timeout_ms: 15_000) do
-      {:ok, %QueryService.Job{state: :done}, frame} ->
-        {columns, rows} = DataTable.frame_page(frame, 0, @preview_rows)
-        {:ok, columns, rows}
-
-      {:ok, job, _frame} ->
-        {:error, job.error || job.state}
-
-      {:error, reason} ->
-        {:error, reason}
+  defp fetch_preview(runtime, sql, context) do
+    with :ok <- Authorization.authorize_context(context, :query),
+         {:ok, %QueryService.Job{state: :done}, frame} <-
+           QueryService.Client.query(runtime.query_name, sql, timeout_ms: 15_000) do
+      {columns, rows} = DataTable.frame_page(frame, 0, @preview_rows)
+      {:ok, columns, rows}
+    else
+      {:ok, job, _frame} -> {:error, job.error || job.state}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -112,12 +131,19 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp quote_ident(name), do: ~s(") <> String.replace(name, ~s("), ~s("")) <> ~s(")
 
+  defp can?(socket, capability),
+    do: Authorization.authorize(socket, capability) == :ok
+
   defp load_retention(socket) do
     runtime = socket.assigns.runtime
 
-    case Catalog.retention(runtime.catalog, {socket.assigns.dataset, socket.assigns.table}) do
-      {:ok, retention} -> assign(socket, :retention, retention)
-      {:error, _reason} -> assign(socket, :retention, nil)
+    if Authorization.authorize(socket, :query) == :ok do
+      case Catalog.retention(runtime.catalog, {socket.assigns.dataset, socket.assigns.table}) do
+        {:ok, retention} -> assign(socket, :retention, retention)
+        {:error, _reason} -> assign(socket, :retention, nil)
+      end
+    else
+      assign(socket, :retention, nil)
     end
   end
 
@@ -201,7 +227,7 @@ defmodule SmolqueryWeb.TableLive.Show do
           </div>
           <div :if={@retention == nil} class="text-sm opacity-70">No retention policy.</div>
           <form
-            :if={time_columns(@schema) != []}
+            :if={time_columns(@schema) != [] and @can_catalog_manage}
             id="retention"
             phx-submit="save_retention"
             class="flex gap-2 items-center"

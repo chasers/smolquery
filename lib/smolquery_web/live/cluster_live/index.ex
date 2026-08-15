@@ -54,6 +54,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
   alias Smolquery.Cluster.Membership
   alias Smolquery.Cluster.Pods
   alias Smolquery.Cluster.Topology
+  alias SmolqueryWeb.Authorization
 
   @refresh_ms 2_000
   @drain_timeout_ms 120_000
@@ -69,6 +70,8 @@ defmodule SmolqueryWeb.ClusterLive.Index do
       socket
       |> assign(:page_title, "Cluster")
       |> assign(:kill_available, pod_actions_enabled?() and Pods.available?())
+      |> assign(:can_platform_operate, can?(socket, :platform_operate))
+      |> assign(:can_query, can?(socket, :query))
       |> assign(:draining, MapSet.new())
       |> load_fleet()
 
@@ -77,44 +80,88 @@ defmodule SmolqueryWeb.ClusterLive.Index do
 
   @impl Phoenix.LiveView
   def handle_info({:cluster_membership, _members}, socket) do
-    {:noreply, load_fleet(socket)}
+    case Authorization.event(socket, :web_access) do
+      :ok -> {:noreply, load_fleet(socket)}
+      {:error, _reason, denied} -> {:noreply, denied}
+    end
   end
 
   def handle_info(:refresh, socket) do
-    Process.send_after(self(), :refresh, @refresh_ms)
+    case Authorization.event(socket, :web_access) do
+      :ok ->
+        Process.send_after(self(), :refresh, @refresh_ms)
+        {:noreply, load_fleet(socket)}
 
-    {:noreply, load_fleet(socket)}
+      {:error, _reason, denied} ->
+        {:noreply, denied}
+    end
   end
 
   @impl Phoenix.LiveView
   def handle_async({:drain, node}, {:ok, result}, socket) do
-    {:noreply,
-     socket
-     |> assign(:draining, MapSet.delete(socket.assigns.draining, node))
-     |> put_flash(drain_flash_kind(result), drain_flash_message(node, result))
-     |> load_fleet()}
+    if Authorization.authorize(socket, :platform_operate) == :ok do
+      {:noreply,
+       socket
+       |> assign(:draining, MapSet.delete(socket.assigns.draining, node))
+       |> put_flash(drain_flash_kind(result), drain_flash_message(node, result))
+       |> load_fleet()}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_async({:drain, node}, {:exit, reason}, socket) do
-    {:noreply,
-     socket
-     |> assign(:draining, MapSet.delete(socket.assigns.draining, node))
-     |> put_flash(:error, "Drain of #{node} crashed: #{inspect(reason)}")}
+    if Authorization.authorize(socket, :platform_operate) == :ok do
+      {:noreply,
+       socket
+       |> assign(:draining, MapSet.delete(socket.assigns.draining, node))
+       |> put_flash(:error, "Drain of #{node} crashed: #{inspect(reason)}")}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl Phoenix.LiveView
-  def handle_event("kill", %{"pod" => pod}, socket) do
-    pod_action(socket, "kill", pod, fn -> Pods.kill!(pod) end, "Killed #{pod}")
+  def handle_event("kill", params, socket) do
+    with :ok <- Authorization.event(socket, :platform_operate),
+         pod when is_binary(pod) <- Map.get(params, "pod") do
+      pod_action(socket, "kill", pod, fn -> Pods.kill!(pod) end, "Killed #{pod}")
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_event("restart", %{"pod" => pod}, socket) do
-    pod_action(socket, "restart", pod, fn -> Pods.restart!(pod) end, "Restarting #{pod}")
+  def handle_event("restart", params, socket) do
+    with :ok <- Authorization.event(socket, :platform_operate),
+         pod when is_binary(pod) <- Map.get(params, "pod") do
+      pod_action(socket, "restart", pod, fn -> Pods.restart!(pod) end, "Restarting #{pod}")
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_event("drain", %{"node" => node_str}, socket) do
+  def handle_event("drain", params, socket) do
+    with :ok <- Authorization.event(socket, :platform_operate),
+         node_str when is_binary(node_str) <- Map.get(params, "node") do
+      drain_node(socket, node_str)
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  defp drain_node(socket, node_str) do
     case Enum.find(socket.assigns.fleet, &(to_string(&1.node) == node_str)) do
       nil ->
         {:noreply, put_flash(socket, :error, "#{node_str} is not part of the fleet")}
+
+      %{alive: false} ->
+        {:noreply, put_flash(socket, :error, "#{node_str} is not an active fleet member")}
+
+      %{buffer_member: false} ->
+        {:noreply, put_flash(socket, :error, "#{node_str} is not a buffer member")}
 
       row ->
         {:noreply,
@@ -125,24 +172,29 @@ defmodule SmolqueryWeb.ClusterLive.Index do
   end
 
   defp pod_action(socket, verb, pod, action, success_message) do
-    cond do
-      Enum.all?(socket.assigns.fleet, &(&1.pod != pod)) ->
+    case Enum.find(socket.assigns.fleet, &(&1.pod == pod)) do
+      nil ->
         {:noreply, put_flash(socket, :error, "#{pod} is not part of the fleet")}
 
-      !socket.assigns.kill_available ->
+      %{alive: false} ->
+        {:noreply, put_flash(socket, :error, "#{pod} is not an active fleet member")}
+
+      _row when not socket.assigns.kill_available ->
         {:noreply, put_flash(socket, :error, "No kind cluster detected — nothing to #{verb}")}
 
-      true ->
-        try do
-          action.()
-
-          {:noreply, put_flash(socket, :info, "#{success_message} — watching the ring recover…")}
-        rescue
-          error in [RuntimeError, Req.TransportError] ->
-            {:noreply,
-             put_flash(socket, :error, "#{verb} of #{pod} failed: #{Exception.message(error)}")}
-        end
+      _row ->
+        run_pod_action(socket, verb, pod, action, success_message)
     end
+  end
+
+  defp run_pod_action(socket, verb, pod, action, success_message) do
+    action.()
+
+    {:noreply, put_flash(socket, :info, "#{success_message} — watching the ring recover…")}
+  rescue
+    error in [RuntimeError, Req.TransportError] ->
+      {:noreply,
+       put_flash(socket, :error, "#{verb} of #{pod} failed: #{Exception.message(error)}")}
   end
 
   defp pod_actions_enabled? do
@@ -174,12 +226,15 @@ defmodule SmolqueryWeb.ClusterLive.Index do
 
   defp load_fleet(socket), do: assign(socket, :fleet, Topology.fleet())
 
+  defp can?(socket, capability),
+    do: Authorization.authorize(socket, capability) == :ok
+
   defp draining?(draining, node), do: MapSet.member?(draining, node)
 
   @impl Phoenix.LiveView
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
+    <Layouts.app flash={@flash} can_query={@can_query}>
       <div class="flex items-center justify-between">
         <h1 class="text-xl font-semibold">Cluster</h1>
       </div>
@@ -220,7 +275,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
               <td>{boolean_badge(row.draining or draining?(@draining, row.node))}</td>
               <td class="whitespace-nowrap">
                 <button
-                  :if={row.buffer_member}
+                  :if={row.buffer_member and @can_platform_operate}
                   type="button"
                   phx-click="drain"
                   phx-value-node={row.node}
@@ -231,6 +286,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
                   Drain
                 </button>
                 <button
+                  :if={@can_platform_operate}
                   type="button"
                   phx-click="restart"
                   phx-value-pod={row.pod}
@@ -241,6 +297,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
                   Restart
                 </button>
                 <button
+                  :if={@can_platform_operate}
                   type="button"
                   phx-click="kill"
                   phx-value-pod={row.pod}

@@ -153,12 +153,12 @@ defmodule SmolqueryWeb.AuthTest do
     test "HTTP and LiveView reject incomplete or wrong-issuer OIDC sessions", %{runtime: runtime} do
       {:ok, principal} = Principal.oidc(runtime.oidc.issuer, "subject", :user)
 
-      {:ok, incomplete} =
+      {:ok, expired} =
         Context.single_tenant(principal, [:web_access],
-          expires_at: System.system_time(:second) + 60
+          expires_at: System.system_time(:second) - 1
         )
 
-      assert {:ok, identity} = Session.encode(incomplete)
+      assert {:ok, identity} = Session.encode(expired)
 
       conn =
         :get

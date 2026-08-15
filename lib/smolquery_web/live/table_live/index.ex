@@ -13,7 +13,7 @@ defmodule SmolqueryWeb.TableLive.Index do
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
-  alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.{Authorization, Runtime}
 
   @types ["STRING", "INT64", "FLOAT64", "BOOL", "TIMESTAMP", "DATE", "NUMERIC(38,9)"]
 
@@ -25,6 +25,7 @@ defmodule SmolqueryWeb.TableLive.Index do
       socket
       |> assign(:page_title, "Tables")
       |> assign(:runtime, runtime)
+      |> assign(:can_catalog_manage, can?(socket, :catalog_manage))
       |> assign(:types, @types)
       |> assign(:table_params, blank_table_params())
       |> load_listing()
@@ -33,68 +34,96 @@ defmodule SmolqueryWeb.TableLive.Index do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("create_dataset", %{"dataset" => %{"name" => name}}, socket) do
-    case String.trim(name) do
-      "" ->
-        {:noreply, put_flash(socket, :error, "Dataset name is required")}
+  def handle_event("create_dataset", params, socket) do
+    with :ok <- Authorization.event(socket, :catalog_manage),
+         {:ok, name} <- fetch_dataset_name(params),
+         dataset when dataset != "" <- String.trim(name) do
+      case Catalog.create_dataset(socket.assigns.runtime.catalog, dataset) do
+        :ok ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Dataset #{dataset} created")
+           |> load_listing()}
 
-      dataset ->
-        case Catalog.create_dataset(socket.assigns.runtime.catalog, dataset) do
-          :ok ->
-            {:noreply,
-             socket
-             |> put_flash(:info, "Dataset #{dataset} created")
-             |> load_listing()}
-
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Could not create dataset: #{inspect(reason)}")}
-        end
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Could not create dataset: #{inspect(reason)}")}
+      end
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, put_flash(socket, :error, "Dataset name is required")}
     end
   end
 
-  def handle_event("table_changed", %{"table" => params}, socket) do
-    {:noreply, assign(socket, :table_params, params)}
+  def handle_event("table_changed", params, socket) do
+    with :ok <- Authorization.event(socket, :catalog_manage),
+         %{"table" => table_params} when is_map(table_params) <- params do
+      {:noreply, assign(socket, :table_params, table_params)}
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event("add_field", _params, socket) do
-    params = socket.assigns.table_params
-    fields = Map.get(params, "fields", %{})
-    next = fields |> Map.keys() |> Enum.map(&String.to_integer/1) |> Enum.max(fn -> -1 end)
+    case Authorization.event(socket, :catalog_manage) do
+      :ok ->
+        params = socket.assigns.table_params
+        fields = Map.get(params, "fields", %{})
+        next = fields |> Map.keys() |> Enum.map(&String.to_integer/1) |> Enum.max(fn -> -1 end)
 
-    fields = Map.put(fields, Integer.to_string(next + 1), blank_field())
+        fields = Map.put(fields, Integer.to_string(next + 1), blank_field())
+        {:noreply, assign(socket, :table_params, Map.put(params, "fields", fields))}
 
-    {:noreply, assign(socket, :table_params, Map.put(params, "fields", fields))}
+      {:error, _reason, denied} ->
+        {:noreply, denied}
+    end
   end
 
-  def handle_event("remove_field", %{"index" => index}, socket) do
-    params = socket.assigns.table_params
-    fields = params |> Map.get("fields", %{}) |> Map.delete(index)
+  def handle_event("remove_field", params, socket) do
+    with :ok <- Authorization.event(socket, :catalog_manage),
+         index when is_binary(index) <- Map.get(params, "index") do
+      fields = socket.assigns.table_params |> Map.get("fields", %{}) |> Map.delete(index)
 
-    {:noreply, assign(socket, :table_params, Map.put(params, "fields", fields))}
+      {:noreply,
+       assign(socket, :table_params, Map.put(socket.assigns.table_params, "fields", fields))}
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_event("create_table", %{"table" => params}, socket) do
-    runtime = socket.assigns.runtime
-
-    with {:ok, dataset, table} <- table_ref(params),
-         {:ok, schema} <- build_schema(params),
-         :ok <- Catalog.create_table(runtime.catalog, {dataset, table}, schema) do
-      IngestService.Client.invalidate(runtime.ingest_name, {dataset, table})
+  def handle_event("create_table", params, socket) do
+    with :ok <- Authorization.event(socket, :catalog_manage),
+         %{"table" => table_params} when is_map(table_params) <- params,
+         {:ok, dataset, table} <- table_ref(table_params),
+         {:ok, schema} <- build_schema(table_params),
+         :ok <- Catalog.create_table(socket.assigns.runtime.catalog, {dataset, table}, schema) do
+      IngestService.Client.invalidate(socket.assigns.runtime.ingest_name, {dataset, table})
 
       {:noreply,
        socket
        |> put_flash(:info, "Table #{dataset}.#{table} created")
        |> push_navigate(to: ~p"/tables/#{dataset}/#{table}")}
     else
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, create_table_error(reason))}
+      {:error, _reason, denied} -> {:noreply, denied}
+      {:error, reason} -> {:noreply, put_flash(socket, :error, create_table_error(reason))}
+      _ -> {:noreply, put_flash(socket, :error, "Could not create table")}
     end
   end
+
+  defp fetch_dataset_name(%{"dataset" => %{"name" => name}}) when is_binary(name),
+    do: {:ok, name}
+
+  defp fetch_dataset_name(_params), do: {:error, :invalid_dataset}
+
+  defp can?(socket, capability),
+    do: Authorization.authorize(socket, capability) == :ok
 
   defp load_listing(socket) do
     catalog = socket.assigns.runtime.catalog
 
-    with {:ok, datasets} <- Catalog.list_datasets(catalog),
+    with :ok <- Authorization.authorize(socket, :query),
+         {:ok, datasets} <- Catalog.list_datasets(catalog),
          {:ok, refs} <- Catalog.tables(catalog) do
       assign(socket, :listing, listing(datasets, refs))
     else
@@ -198,7 +227,7 @@ defmodule SmolqueryWeb.TableLive.Index do
         </div>
       </div>
 
-      <div class="grid gap-6 md:grid-cols-2">
+      <div :if={@can_catalog_manage} class="grid gap-6 md:grid-cols-2">
         <div class="card bg-base-200 border border-base-300">
           <div class="card-body py-4">
             <h2 class="card-title text-base">New dataset</h2>
