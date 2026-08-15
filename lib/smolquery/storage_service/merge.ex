@@ -47,6 +47,14 @@ defmodule Smolquery.StorageService.Merge do
   rows on the shared connection. A drop that itself fails logs a warning,
   and a seal retry's `CREATE OR REPLACE` clears what the drop could not.
 
+  Every engine call here goes through `Smolquery.Engine.try_query/4`, so a
+  call that exits — timed out against a connection wedged by an OOM, or busy
+  behind another merge's `COPY` — is a merge failure, not a caller crash
+  (T-251). The distinction matters most for the compactor, which merges every
+  table in one sweep process: before this, the cleanup drop's timeout exit
+  blew through the `after` block and killed the Compactor mid-sweep, once per
+  sweep, starving every table behind the failing group.
+
   ## The union of the inputs is not the schema the catalog declares
 
   Unioning the inputs is necessary and not sufficient. A claim whose inputs *all*
@@ -439,7 +447,7 @@ defmodule Smolquery.StorageService.Merge do
   defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
 
   defp query(runtime, sql, params, timeout \\ 30_000) do
-    case Engine.query(Runtime.engine(runtime.name), sql, params, timeout) do
+    case Engine.try_query(Runtime.engine(runtime.name), sql, params, timeout) do
       {:ok, result} -> {:ok, result}
       {:error, error} -> {:error, {:merge_failed, Exception.message(error)}}
     end

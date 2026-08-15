@@ -51,6 +51,7 @@ defmodule Smolquery.Engine do
   use Supervisor
 
   alias Smolquery.DuckDB
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
@@ -158,6 +159,29 @@ defmodule Smolquery.Engine do
           {:ok, Result.t()} | {:error, Exception.t()}
   def query(name, sql, params \\ [], timeout \\ 30_000) do
     Connection.query(connection_name(name), sql, params, timeout)
+  end
+
+  @doc """
+  Same as `query/4`, but an exit from the call comes back as an error.
+
+  A call can exit rather than reply: the timeout fires on a wedged or merely
+  busy connection — queries are serialized, so one caller's long statement is
+  every other caller's wait — or the connection dies mid-call. Most callers
+  should let that exit propagate and lean on their supervisor. The storage
+  sweeps must not: they visit every table in one process, so one wedged
+  connection would kill the sweep on every pass and starve every table
+  behind the failing one (T-251). Here the exit becomes
+  `{:error, %Smolquery.Engine.CallExited{}}` instead.
+
+  A timed-out statement is still running when this returns — the engine will
+  finish or fail it on its own time, and OTP drops the late reply.
+  """
+  @spec try_query(atom(), String.t(), [term()], timeout()) ::
+          {:ok, Result.t()} | {:error, Exception.t()}
+  def try_query(name, sql, params \\ [], timeout \\ 30_000) do
+    query(name, sql, params, timeout)
+  catch
+    :exit, reason -> {:error, CallExited.new(reason)}
   end
 
   @doc """
