@@ -37,8 +37,9 @@ defmodule Smolquery.Telemetry do
                                             replicate_us}, meta %{result: :ok | :error}
       [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused}
       [:smolquery, :buffer, :dedup]       %{rows}
-      [:smolquery, :seal, :attempt]       %{}, meta %{result: :ok | :error | :crashed}
-      [:smolquery, :compact, :swap]       %{replaced}, meta %{result: :ok | :error}
+      [:smolquery, :seal, :attempt]       %{duration_us, segments},
+                                          meta %{result: :ok | :error | :crashed}
+      [:smolquery, :compact, :swap]       %{replaced, duration_us}, meta %{result: :ok | :error}
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
@@ -85,7 +86,13 @@ defmodule Smolquery.Telemetry do
     "smolquery_buffer_dedup_rows_total" =>
       "Rows answered from the batch-id dedup index instead of rewritten (T-41).",
     "smolquery_seal_attempts_total" => "Seal attempts, by result.",
+    "smolquery_seal_microseconds_total" =>
+      "Time seal attempts ran, by result; divide by attempts for the mean (T-244).",
+    "smolquery_seal_segments_total" =>
+      "Micro-segments in seal attempts, by result; divide by attempts for the mean batch size (T-244).",
     "smolquery_compactions_total" => "Compaction swaps, by result.",
+    "smolquery_compaction_microseconds_total" =>
+      "Time compaction attempts ran, by result; divide by compactions for the mean (T-244).",
     "smolquery_compaction_segments_replaced_total" =>
       "Sealed segments replaced by compaction merges.",
     "smolquery_retention_segments_dropped_total" => "Sealed segments dropped past their TTL.",
@@ -231,12 +238,27 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_buffer_dedup_rows_total", []}, Map.get(measurements, :rows, 0))
   end
 
-  def handle_event([:smolquery, :seal, :attempt], _measurements, meta, nil) do
+  def handle_event([:smolquery, :seal, :attempt], measurements, meta, nil) do
     bump({"smolquery_seal_attempts_total", [result: result(meta)]}, 1)
+
+    bump(
+      {"smolquery_seal_microseconds_total", [result: result(meta)]},
+      Map.get(measurements, :duration_us, 0)
+    )
+
+    bump(
+      {"smolquery_seal_segments_total", [result: result(meta)]},
+      Map.get(measurements, :segments, 0)
+    )
   end
 
   def handle_event([:smolquery, :compact, :swap], measurements, meta, nil) do
     bump({"smolquery_compactions_total", [result: result(meta)]}, 1)
+
+    bump(
+      {"smolquery_compaction_microseconds_total", [result: result(meta)]},
+      Map.get(measurements, :duration_us, 0)
+    )
 
     bump(
       {"smolquery_compaction_segments_replaced_total", []},

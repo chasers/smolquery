@@ -190,6 +190,23 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert lake_rows(context.storage) == 30
   end
 
+  test "the input-count cap bounds one merge, and the next sweep takes the rest", context do
+    runtime = start_compactor(context, compact_max_inputs: 2)
+    a = seal(runtime, context.catalog, 1, 1..10)
+    b = seal(runtime, context.catalog, 2, 11..20)
+    c = seal(runtime, context.catalog, 3, 21..30)
+
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Compactor.sweep(context.storage)
+
+    merged = Store.location(runtime.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([merged, c.path])
+    assert Enum.all?([a, b], &File.exists?(&1.path))
+
+    assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
+    assert lake_rows(context.storage) == 30
+  end
+
   test "an empty catalog sweeps nothing", context do
     start_compactor(context, [])
 

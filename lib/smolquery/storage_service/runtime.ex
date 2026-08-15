@@ -26,6 +26,7 @@ defmodule Smolquery.StorageService.Runtime do
         compact_interval_ms: 300_000,
         compact_below_bytes: 33_554_432,
         compact_min_inputs: 2,
+        compact_max_inputs: 12,
         compact_max_bytes: 134_217_728,
         retention_interval_ms: 3_600_000,
         snapshot_keep_ms: 86_400_000,
@@ -79,6 +80,19 @@ defmodule Smolquery.StorageService.Runtime do
   defaults (32 MiB floor, 128 MiB ceiling) sit under `target_segment_bytes`
   on purpose — compaction exists to clean up eager and age-cap seals, not to
   re-merge segments the sealer already sized well.
+
+  `compact_max_inputs` caps how many segments one merge reads (T-244). The
+  byte ceiling alone does not bound the file count — 128 MiB of small sealed
+  segments is over a hundred inputs — and the merge runs in one DuckDB call,
+  so an unbounded input list outruns the engine's 30 s call timeout the same
+  way an unbounded seal batch does. The default of 12 shares the buffer's
+  derivation — see `seal_batch_max_files` in `Smolquery.BufferService.Runtime`.
+  It must be at least `compact_min_inputs`, validated at boot; a run larger
+  than the cap compacts across sweeps, one group at a time. The same cap
+  chunks the sweep's footer-sizing query, oldest first, and sizing stops
+  once a full group of undersized candidates is found — no engine call is
+  unbounded, and a mostly-small backlog needs one sizing call rather than
+  one per chunk. Retention's footer-stats query is chunked by the same cap.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -139,6 +153,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_interval_ms: 300_000,
     compact_below_bytes: 33_554_432,
     compact_min_inputs: 2,
+    compact_max_inputs: 12,
     compact_max_bytes: 134_217_728,
     retention_interval_ms: 3_600_000,
     snapshot_keep_ms: 86_400_000,
@@ -165,6 +180,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_interval_ms: pos_integer(),
           compact_below_bytes: pos_integer(),
           compact_min_inputs: pos_integer(),
+          compact_max_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
           retention_interval_ms: pos_integer(),
           snapshot_keep_ms: pos_integer(),
@@ -186,6 +202,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_interval_ms,
     :compact_below_bytes,
     :compact_min_inputs,
+    :compact_max_inputs,
     :compact_max_bytes,
     :retention_interval_ms,
     :snapshot_keep_ms,
@@ -224,6 +241,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> struct!(Keyword.take(config, @limits))
     |> validate_compression()
     |> validate_seal_row_group_size()
+    |> validate_compact_inputs()
   end
 
   use Smolquery.Runtime
@@ -297,6 +315,24 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_seal_row_group_size(%__MODULE__{seal_row_group_size: size}) do
     raise ArgumentError,
           "unsupported seal_row_group_size: #{inspect(size)} (expected a positive integer)"
+  end
+
+  defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)
+       when not (is_integer(min) and min > 0) do
+    raise ArgumentError,
+          "unsupported compact_min_inputs: #{inspect(runtime.compact_min_inputs)} " <>
+            "(expected a positive integer)"
+  end
+
+  defp validate_compact_inputs(%__MODULE__{compact_max_inputs: max} = runtime)
+       when is_integer(max) and max >= runtime.compact_min_inputs,
+       do: runtime
+
+  defp validate_compact_inputs(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported compact_max_inputs: #{inspect(runtime.compact_max_inputs)} " <>
+            "(expected an integer >= compact_min_inputs, " <>
+            "which is #{inspect(runtime.compact_min_inputs)})"
   end
 
   defp build_store(config) do

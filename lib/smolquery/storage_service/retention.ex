@@ -16,6 +16,10 @@ defmodule Smolquery.StorageService.Retention do
   are missing, unparseable, or absent (a segment written before the column
   existed) is kept, never dropped. Retention that guesses is deletion.
 
+  The stats query is chunked by `compact_max_inputs` (T-244), so no engine
+  call carries an unbounded `parquet_metadata` input list no matter how many
+  current segments a table holds.
+
   ## Expiry is the second half, and it runs here for every drop, not just ours
 
   A dropped segment is invisible to new queries and still referenced by every
@@ -143,6 +147,17 @@ defmodule Smolquery.StorageService.Retention do
   end
 
   defp footer_stats(runtime, paths, column) do
+    paths
+    |> Enum.chunk_every(runtime.compact_max_inputs)
+    |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
+      case footer_stats_chunk(runtime, chunk, column) do
+        {:ok, stats} -> {:cont, {:ok, Map.merge(acc, stats)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp footer_stats_chunk(runtime, paths, column) do
     sql =
       "SELECT file_name, max(TRY_CAST(stats_max_value AS TIMESTAMP)), " <>
         "bool_or(stats_max_value IS NULL OR TRY_CAST(stats_max_value AS TIMESTAMP) IS NULL) " <>

@@ -323,6 +323,11 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   for the next claim. A sealer therefore merges the same inputs into the same
   output no matter how many times it is told or which side crashed, which is
   what makes retrying safe instead of duplicating rows.
+- **A claim holds at most `seal_batch_max_files` inputs** (T-244). The sealer
+  merges a claim in one DuckDB call, so an uncapped claim grows with ingest
+  throughput until the merge outruns the engine's call timeout — and a frozen
+  claim retries that same oversized merge forever. A backlog larger than the
+  cap seals in several claims, oldest entries first.
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's
@@ -493,7 +498,10 @@ residue of eager and age-cap seals — so a quiet table stops accreting files. I
 sweeps every `compact_interval_ms`, needs no signals (the catalog itself says
 which segments are small; sizes come from Parquet footers), and per table per
 sweep replaces one oldest-first run of segments under `compact_below_bytes` with
-a single merged segment, capped at `compact_max_bytes`:
+a single merged segment, capped at `compact_max_bytes` and at
+`compact_max_inputs` files per merge (T-244). A backlog larger than the input
+cap converges across sweeps: an output still under `compact_below_bytes` stays
+a candidate and re-merges until one crosses the threshold.
 
 - **The swap is atomic.** `Catalog.replace_segments/4` registers the merged
   segment and drops its inputs in one DuckLake transaction, so a single snapshot
