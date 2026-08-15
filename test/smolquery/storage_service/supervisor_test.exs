@@ -2,6 +2,7 @@ defmodule Smolquery.StorageService.SupervisorTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.Engine
+  alias Smolquery.Engine.Result
   alias Smolquery.StorageService
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Sealer
@@ -41,6 +42,33 @@ defmodule Smolquery.StorageService.SupervisorTest do
   @tag :tmp_dir
   test "the engine is ready to merge through", %{name: name} do
     assert {:ok, _result} = Engine.query(Runtime.engine(name), "SELECT 1")
+  end
+
+  @tag :tmp_dir
+  test "the merge engine does not preserve insertion order (T-250)", %{name: name} do
+    assert Runtime.engine(name)
+           |> Engine.query!("SELECT current_setting('preserve_insertion_order')")
+           |> Result.one!() == false
+  end
+
+  @tag :tmp_dir
+  test "an explicit engine_memory_limit reaches the merge engine (T-250)", context do
+    name = :"storage_sup_mem_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {StorageService.Supervisor,
+       name: name,
+       dir: Path.join(context.tmp_dir, "sealed-mem"),
+       engine_memory_limit: "123MiB",
+       handoff: {HandoffProbe, {self(), :ok}}},
+      id: name
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    assert Runtime.engine(name)
+           |> Engine.query!("SELECT current_setting('memory_limit')")
+           |> Result.one!() =~ "123"
   end
 
   @tag :tmp_dir
