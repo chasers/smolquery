@@ -254,12 +254,16 @@ defmodule Smolquery.StorageService.Sealer do
 
     attempt = %{
       table_ref: table_ref,
-      segments: claim |> Map.get(:ids, []) |> length(),
+      segments: claim_segments(claim),
       started_at: System.monotonic_time(:microsecond)
     }
 
     %{state | attempts: Map.put(state.attempts, task.ref, attempt)}
   end
+
+  defp claim_segments(%{ids: ids}) when is_list(ids), do: length(ids)
+
+  defp claim_segments(_claim), do: 0
 
   defp finish(state, ref), do: %{state | attempts: Map.delete(state.attempts, ref)}
 end

@@ -135,8 +135,8 @@ defmodule Smolquery.BufferService.Runtime do
   that measurement: the merge engine serializes up to three bounded calls (two
   seals plus a compaction), so each call gets ~10 s, and 10 s / 830 ms ≈ 12
   inputs. A backlog larger than the cap seals in several claims — the claim
-  takes the oldest entries, and the remainder re-crosses a threshold or ages
-  into `seal_max_age_ms`, so it is claimed next.
+  takes the oldest entries and marks the backlog, and the remainder is
+  claimed as each claim retires, without waiting to re-cross a threshold.
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
@@ -332,6 +332,7 @@ defmodule Smolquery.BufferService.Runtime do
     validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
     validate_commit_siblings!(Keyword.get(config, :commit_siblings, 5))
     validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
+    validate_seal_batch_max_files!(Keyword.get(config, :seal_batch_max_files, 12))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -522,6 +523,14 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable idle flush interval: #{inspect(interval)} " <>
             "(expected a non-negative integer of milliseconds)"
+  end
+
+  defp validate_seal_batch_max_files!(files) when is_integer(files) and files > 0, do: :ok
+
+  defp validate_seal_batch_max_files!(files) do
+    raise ArgumentError,
+          "unusable seal_batch_max_files: #{inspect(files)} " <>
+            "(expected a positive integer)"
   end
 
   defp warn_inverted_capacity(%__MODULE__{} = runtime) do

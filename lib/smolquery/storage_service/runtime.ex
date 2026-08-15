@@ -85,14 +85,14 @@ defmodule Smolquery.StorageService.Runtime do
   byte ceiling alone does not bound the file count — 128 MiB of small sealed
   segments is over a hundred inputs — and the merge runs in one DuckDB call,
   so an unbounded input list outruns the engine's 30 s call timeout the same
-  way an unbounded seal batch does. The default of 12 comes from the same
-  sandbox measurement as the buffer's `seal_batch_max_files` (≥ ~830 ms per
-  input over `httpfs`, up to three serialized calls on the merge engine, so
-  ~10 s per call). It must be at least `compact_min_inputs`, validated at
-  boot; a run larger than the cap compacts across sweeps, one group at a
-  time. The same cap bounds the sweep's footer-sizing query, which is chunked
-  rather than truncated — every segment is still sized, just never in one
-  unbounded call.
+  way an unbounded seal batch does. The default of 12 shares the buffer's
+  derivation — see `seal_batch_max_files` in `Smolquery.BufferService.Runtime`.
+  It must be at least `compact_min_inputs`, validated at boot; a run larger
+  than the cap compacts across sweeps, one group at a time. The same cap
+  chunks the sweep's footer-sizing query, oldest first, and sizing stops
+  once a full group of undersized candidates is found — no engine call is
+  unbounded, and a mostly-small backlog needs one sizing call rather than
+  one per chunk.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.

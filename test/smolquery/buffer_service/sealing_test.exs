@@ -175,6 +175,30 @@ defmodule Smolquery.BufferService.SealingTest do
       refute next.keys == claim.keys
     end
 
+    test "a capped backlog's remainder is claimed on retirement, under every threshold",
+         context do
+      %{name: name} =
+        start_buffer_service(context,
+          seal_max_files: 3,
+          seal_batch_max_files: 2,
+          seal_retry_ms: 1
+        )
+
+      {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _second} = Client.write_batch(name, @table, batch(2..2))
+      {:ok, third} = Client.write_batch(name, @table, batch(3..3))
+
+      assert_receive {:seal_ready, @table, claim}, 500
+
+      :ok = Client.retire(name, @table, claim.ids, 3)
+      flush_messages()
+
+      :ok = TableBuffer.maintain(buffer(name))
+
+      assert_receive {:seal_ready, @table, next}, 500
+      assert next.ids == [third.segment_id]
+    end
+
     test "the next claim covers only what arrived after the last one retired", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 2, seal_retry_ms: 1)
 

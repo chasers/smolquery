@@ -49,8 +49,13 @@ defmodule Smolquery.StorageService.Compactor do
   The input-count cap exists because the merge is one DuckDB call (T-244): the
   byte ceiling bounds the output, but 128 MiB of small segments is over a
   hundred `read_parquet` inputs, and per-input cost is what outran the
-  engine's call timeout on the sandbox. The footer-sizing query is bounded by
-  the same cap — chunked, not truncated, so every segment is still sized.
+  engine's call timeout on the sandbox. The footer-sizing query is chunked by
+  the same cap, oldest first, and stops at the first full group of undersized
+  candidates — a large backlog costs one sizing call, not one per chunk, and
+  no call holds the shared engine with an unbounded list. A merge output
+  still under `compact_below_bytes` stays a candidate: a backlog converges
+  across sweeps, each group re-ingesting the previous output until one
+  crosses the threshold.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -135,26 +140,40 @@ defmodule Smolquery.StorageService.Compactor do
     if length(paths) < runtime.compact_min_inputs do
       :skip
     else
-      with {:ok, sizes} <- sizes(runtime, paths) do
-        group(runtime, sizes)
+      with {:ok, undersized} <- undersized(runtime, Enum.sort_by(paths, &Path.basename/1)) do
+        group(runtime, undersized)
       end
     end
   end
 
-  defp sizes(runtime, paths) do
+  defp undersized(runtime, paths) do
     paths
     |> Enum.chunk_every(runtime.compact_max_inputs)
-    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
-      case sizes_chunk(runtime, chunk) do
-        {:ok, sizes} -> {:cont, {:ok, [sizes | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    |> Enum.reduce_while({[], 0}, &size_chunk(runtime, &1, &2))
     |> case do
-      {:ok, chunks} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
       {:error, reason} -> {:error, reason}
+      {chunks, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
+
+  defp size_chunk(runtime, chunk, {acc, count}) do
+    case sizes_chunk(runtime, chunk) do
+      {:ok, sizes} ->
+        found =
+          Enum.filter(sizes, fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
+
+        group_filled({[found | acc], count + length(found)}, runtime)
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp group_filled({_chunks, count} = acc, runtime)
+       when count >= runtime.compact_max_inputs,
+       do: {:halt, acc}
+
+  defp group_filled(acc, _runtime), do: {:cont, acc}
 
   defp sizes_chunk(runtime, paths) do
     sql =
@@ -167,14 +186,10 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp group(runtime, sizes) do
-    undersized =
-      sizes
-      |> Enum.filter(fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
-      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
-
+  defp group(runtime, undersized) do
     {group, _total} =
       undersized
+      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
       |> Enum.take(runtime.compact_max_inputs)
       |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
         if total + bytes > runtime.compact_max_bytes and group != [] do

@@ -54,7 +54,7 @@ defmodule Smolquery.BufferService.Drain do
   alias Smolquery.Cluster.PgGroup
 
   @default_poll_ms 200
-  @default_timeout_ms 30_000
+  @default_timeout_ms 120_000
 
   @doc """
   Drains `name`'s buffer instance on this node.
@@ -62,7 +62,10 @@ defmodule Smolquery.BufferService.Drain do
   ## Options
 
     * `:timeout_ms` — how long to wait for every forced seal to retire
-      before giving up (default #{@default_timeout_ms})
+      before giving up (default #{@default_timeout_ms}). The default covers
+      the seal batch cap (T-244): a tail larger than `seal_batch_max_files`
+      retires in `ceil(n / cap)` serialized claim round trips per table, not
+      one, so a drain needs several seal cycles of headroom
     * `:poll_ms` — how often the retirement check runs (default
       #{@default_poll_ms})
 
