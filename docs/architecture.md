@@ -323,11 +323,12 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   for the next claim. A sealer therefore merges the same inputs into the same
   output no matter how many times it is told or which side crashed, which is
   what makes retrying safe instead of duplicating rows.
-- **A claim holds at most `seal_batch_max_files` inputs** (T-244). The sealer
-  merges a claim in one DuckDB call, so an uncapped claim grows with ingest
-  throughput until the merge outruns the engine's call timeout — and a frozen
-  claim retries that same oversized merge forever. A backlog larger than the
-  cap seals in several claims, oldest entries first.
+- **A claim holds everything unsealed, and any size is safe to seal**
+  (T-246, T-247). The merge bounds its own engine calls: an input list over
+  `merge_inputs_per_call` is read in capped chunks into a temp table before
+  one `COPY` writes the segment, so no `read_parquet` call is unbounded. A
+  backlog therefore retires in one claim, which is what keeps a table
+  self-correcting under sustained ingest.
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's

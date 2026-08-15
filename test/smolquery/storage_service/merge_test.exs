@@ -488,4 +488,93 @@ defmodule Smolquery.StorageService.MergeTest do
     assert segment.key == key
     assert rows_in(runtime, segment) == [1, 2, 3]
   end
+
+  describe "a claim over merge_inputs_per_call merges in chunks" do
+    test "seals every input, in bounded engine calls", %{buffer: buffer, runtime: runtime} do
+      runtime = %{runtime | merge_inputs_per_call: 2}
+      ids = seal_many(buffer, @table, [1..2, 3..4, 5..6, 7..8, 9..10])
+
+      assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+      assert segment.row_count == 10
+      assert rows_in(runtime, segment) == Enum.to_list(1..10)
+    end
+
+    test "a retry overwrites the same key, and the staging table with it", %{
+      buffer: buffer,
+      runtime: runtime
+    } do
+      runtime = %{runtime | merge_inputs_per_call: 1}
+      ids = seal_many(buffer, @table, [1..1, 2..2, 3..3])
+
+      assert {:ok, first} = Merge.run(runtime, @table, claim(ids))
+      assert {:ok, again} = Merge.run(runtime, @table, claim(ids))
+
+      assert again.key == first.key
+      assert rows_in(runtime, again) == [1, 2, 3]
+      assert {:ok, [_only_one]} = Store.list(runtime.store, "analytics/events")
+    end
+
+    @tag declares: Schema.new!([{"id", :int64}, {"name", :string}])
+    test "every chunk projects onto the catalog's schema, so chunks with differing columns align",
+         %{buffer: buffer, runtime: runtime} do
+      runtime = %{runtime | merge_inputs_per_call: 1}
+      narrow = %{schema: Schema.new!([{"id", :int64}]), rows: [%{"id" => 1}]}
+
+      wide = %{
+        schema: Schema.new!([{"id", :int64}, {"name", :string}]),
+        rows: [%{"id" => 2, "name" => "two"}]
+      }
+
+      {:ok, first} = Client.write_batch(buffer, @table, narrow)
+      {:ok, second} = Client.write_batch(buffer, @table, wide)
+
+      assert {:ok, segment} =
+               Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+
+      assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, "two"]]
+    end
+
+    test "an undeclared column in a later chunk is refused", %{buffer: buffer, runtime: runtime} do
+      runtime = %{runtime | merge_inputs_per_call: 1}
+      declared = %{schema: Schema.new!([{"id", :int64}]), rows: [%{"id" => 1}]}
+
+      undeclared = %{
+        schema: Schema.new!([{"id", :int64}, {"name", :string}]),
+        rows: [%{"id" => 2, "name" => "two"}]
+      }
+
+      {:ok, first} = Client.write_batch(buffer, @table, declared)
+      {:ok, second} = Client.write_batch(buffer, @table, undeclared)
+
+      assert Merge.run(runtime, @table, claim([first.segment_id, second.segment_id])) ==
+               {:error, {:undeclared_columns, ["name"]}}
+
+      assert {:ok, []} = Store.list(runtime.store, "analytics/events")
+    end
+
+    test "compaction over the cap chunks the same way", %{buffer: buffer, runtime: runtime} do
+      {:ok, prefix} = Store.prefix(@table)
+
+      sealed =
+        for {range, id} <- [
+              {1..2, "01KYWPEEGAM8FQVQS5S2QF26S1"},
+              {3..4, "01KYWPEEGAM8FQVQS5S2QF26S2"},
+              {5..6, "01KYWPEEGAM8FQVQS5S2QF26S3"}
+            ] do
+          ids = seal_many(buffer, @table, [range])
+          {:ok, key} = Store.key(prefix, id)
+          {:ok, segment} = Merge.run(runtime, @table, claim(ids, [key]))
+          segment
+        end
+
+      runtime = %{runtime | merge_inputs_per_call: 1}
+      {:ok, key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26S4")
+
+      assert {:ok, merged} =
+               Merge.compact(runtime, @table, key, Enum.map(sealed, & &1.path))
+
+      assert merged.row_count == 6
+      assert rows_in(runtime, merged) == Enum.to_list(1..6)
+    end
+  end
 end

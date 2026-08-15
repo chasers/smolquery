@@ -97,6 +97,14 @@ defmodule Smolquery.StorageService.RuntimeTest do
         )
       end
     end
+
+    test "refuses an unusable merge_inputs_per_call at boot, not at first merge" do
+      for per_call <- [0, -1, "12", nil] do
+        assert_raise ArgumentError, ~r/unsupported merge_inputs_per_call/, fn ->
+          Runtime.new(name: __MODULE__.BadMergeCap, merge_inputs_per_call: per_call)
+        end
+      end
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do
