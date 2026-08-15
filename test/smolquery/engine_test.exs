@@ -3,6 +3,7 @@ defmodule Smolquery.EngineTest do
 
   alias Explorer.DataFrame
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
   alias Smolquery.Test.Eventually
@@ -128,6 +129,29 @@ defmodule Smolquery.EngineTest do
 
     test "raises on error" do
       assert_raise Adbc.Error, fn -> Engine.query!(@engine, "NOT SQL") end
+    end
+  end
+
+  describe "try_query/4" do
+    test "returns results and error tuples like query/4" do
+      assert {:ok, %Result{rows: [[1]]}} = Engine.try_query(@engine, "SELECT 1 AS n")
+      assert {:error, %Adbc.Error{}} = Engine.try_query(@engine, "SELECT * FROM no_such_table")
+    end
+
+    test "returns CallExited instead of exiting when the call times out" do
+      name = __MODULE__.Wedged
+      wedged = spawn_link(fn -> Process.sleep(:infinity) end)
+      Process.register(wedged, Engine.connection_name(name))
+
+      assert {:error, %CallExited{reason: :timeout} = error} =
+               Engine.try_query(name, "SELECT 1", [], 50)
+
+      assert Exception.message(error) =~ "timeout"
+    end
+
+    test "returns CallExited instead of exiting when the connection is down" do
+      assert {:error, %CallExited{reason: :noproc}} =
+               Engine.try_query(__MODULE__.Missing, "SELECT 1")
     end
   end
 

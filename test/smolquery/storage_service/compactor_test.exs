@@ -13,6 +13,7 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
@@ -39,7 +40,9 @@ defmodule Smolquery.StorageService.CompactorTest do
       id: Runtime.catalog_engine(storage)
     )
 
-    start_supervised!({Engine, name: Runtime.engine(storage)}, id: Runtime.engine(storage))
+    for engine <- [Runtime.engine(storage), Runtime.compact_engine(storage)] do
+      start_supervised!({Engine, name: engine}, id: engine)
+    end
 
     catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
     :ok = Catalog.create_dataset(catalog, "analytics")
@@ -190,8 +193,56 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert lake_rows(context.storage) == 30
   end
 
-  test "the input-count cap bounds one merge, and the next sweep takes the rest", context do
-    runtime = start_compactor(context, compact_max_inputs: 2)
+  test "a backlog past merge_inputs_per_call merges in one sweep, not across sweeps", context do
+    runtime = start_compactor(context, merge_inputs_per_call: 2)
+
+    for n <- 1..5 do
+      seal(runtime, context.catalog, n, (n * 10 - 9)..(n * 10))
+    end
+
+    assert {:ok, %{compacted: [%{replaced: 5, key: key}]}} = Compactor.sweep(context.storage)
+
+    merged = Store.location(runtime.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert current == [merged]
+    assert lake_rows(context.storage) == 50
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+  end
+
+  test "a sweep survives an engine that cannot answer its calls (T-251)", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    stop_supervised!(Runtime.compact_engine(context.storage))
+
+    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert %{table: @table, reason: {:sizing_failed, %CallExited{} = error}} = failure
+    assert Exception.message(error) =~ "exited before replying"
+    assert is_pid(Process.whereis(Runtime.compactor(context.storage)))
+  end
+
+  test "a sweep recycles the compaction engine after a call exit (T-259)", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    compact_engine = Runtime.compact_engine(context.storage)
+    database = Process.whereis(Engine.database_name(compact_engine))
+    Process.unregister(Engine.connection_name(compact_engine))
+
+    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert %{table: @table, reason: {:sizing_failed, %CallExited{reason: :noproc}}} = failure
+
+    refute Process.whereis(Engine.database_name(compact_engine)) == database
+    assert is_pid(Process.whereis(Engine.connection_name(compact_engine)))
+
+    assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(context.storage)
+  end
+
+  test "rows cap a group the byte ceiling would admit (T-260)", context do
+    runtime = start_compactor(context, compact_max_rows: 20)
     a = seal(runtime, context.catalog, 1, 1..10)
     b = seal(runtime, context.catalog, 2, 11..20)
     c = seal(runtime, context.catalog, 3, 21..30)
@@ -201,10 +252,26 @@ defmodule Smolquery.StorageService.CompactorTest do
     merged = Store.location(runtime.store, key)
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
     assert Enum.sort(current) == Enum.sort([merged, c.path])
-    assert Enum.all?([a, b], &File.exists?(&1.path))
-
-    assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
+    refute a.path in current
+    refute b.path in current
     assert lake_rows(context.storage) == 30
+  end
+
+  test "a row-heavy head no neighbor fits beside cannot wedge the table (T-260)", context do
+    runtime = start_compactor(context, compact_max_rows: 25)
+    a = seal(runtime, context.catalog, 1, 1..20)
+    b = seal(runtime, context.catalog, 2, 21..30)
+    c = seal(runtime, context.catalog, 3, 31..40)
+
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}], failed: []}} =
+             Compactor.sweep(context.storage)
+
+    merged = Store.location(runtime.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([a.path, merged])
+    refute b.path in current
+    refute c.path in current
+    assert lake_rows(context.storage) == 40
   end
 
   test "an empty catalog sweeps nothing", context do
