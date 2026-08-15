@@ -30,7 +30,9 @@ defmodule Smolquery.StorageService.Merge do
 
   The temp table's name derives from the output key's id. Concurrent merges
   on the shared connection therefore cannot collide, and a retry's
-  `CREATE OR REPLACE` clears a crashed predecessor's leftover. The staging
+  `CREATE OR REPLACE` clears a crashed predecessor's leftover. A retry
+  re-stages the whole claim — there is no partial-stage resume — and the
+  buffer's claim byte valve is what bounds that cost. The staging
   hop's cost is memory: the claim's rows live in the engine, spilling to the
   connection's `temp_directory` past its limit, until the final `COPY`.
 
@@ -200,6 +202,12 @@ defmodule Smolquery.StorageService.Merge do
   skips the metadata pass here — the compactor's sizing query reads
   `num_rows` in the same call as the sizes, so re-reading every footer for a
   number the sweep already holds would triple the group's metadata I/O.
+
+  `inputs_per_call:` narrows the staging chunk below the runtime's cap — it
+  never widens it. The count cap prices footer round trips, not data volume,
+  and the compactor knows its inputs' sizes, so it shrinks the chunk when the
+  inputs are large and one full-width chunk would move too many bytes in one
+  call.
   """
   @spec compact(Runtime.t(), Store.table_ref(), Store.key(), [String.t()], keyword()) ::
           {:ok, Segment.t()} | {:error, term()}
@@ -208,11 +216,18 @@ defmodule Smolquery.StorageService.Merge do
   def compact(%Runtime{} = _runtime, _table_ref, _key, [], _opts), do: {:error, :no_inputs}
 
   def compact(%Runtime{} = runtime, table_ref, key, urls, opts) when is_list(urls) do
+    runtime = narrow_per_call(runtime, Keyword.get(opts, :inputs_per_call))
+
     with {:ok, key} <- valid_key(key),
          {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)) do
       merge(runtime, table_ref, key, %{urls: urls, row_count: row_count})
     end
   end
+
+  defp narrow_per_call(runtime, nil), do: runtime
+
+  defp narrow_per_call(runtime, per_call) when is_integer(per_call) and per_call > 0,
+    do: %{runtime | merge_inputs_per_call: min(per_call, runtime.merge_inputs_per_call)}
 
   defp compact_row_count(_runtime, _urls, count) when is_integer(count) and count >= 0,
     do: {:ok, count}

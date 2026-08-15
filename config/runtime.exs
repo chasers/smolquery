@@ -155,7 +155,17 @@ end
 # T-246/T-247/T-248: `merge_inputs_per_call` bounds every `read_parquet` list
 # one engine call carries — per-input cost over httpfs is what outruns the
 # call timeout — so a seal claim or a compaction group of any size merges in
-# bounded chunks.
+# bounded chunks. The two variables it replaced never shipped in a release,
+# but a deployment that set one from main should hear that it went silent.
+for removed <- ["SMOLQUERY_SEAL_BATCH_MAX_FILES", "SMOLQUERY_COMPACT_MAX_INPUTS"] do
+  if System.get_env(removed) do
+    IO.warn(
+      "#{removed} is removed and ignored: the merge bounds its own engine calls — " <>
+        "set SMOLQUERY_MERGE_INPUTS_PER_CALL instead"
+    )
+  end
+end
+
 if inputs = System.get_env("SMOLQUERY_MERGE_INPUTS_PER_CALL") do
   config :smolquery, Smolquery.StorageService,
     merge_inputs_per_call:

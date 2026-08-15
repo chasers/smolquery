@@ -113,7 +113,7 @@ defmodule Bench.Sealer do
     input_counts = Enum.filter([12, 36, 128], &(&1 <= env("MAX_INPUTS", 128)))
 
     IO.puts("\n  per-call cap #{per_call}; direct forces the whole list into one call\n")
-    IO.puts("  inputs    path     calls    merge ms      rows/s   sealed KiB")
+    IO.puts("  inputs    path     est calls    merge ms      rows/s   sealed KiB")
 
     for count <- input_counts do
       stack = start_stack(dir, "chunk-#{count}")
@@ -129,7 +129,7 @@ defmodule Bench.Sealer do
         calls = if cap >= count, do: 2, else: 2 * ceil(count / cap) + 2
 
         IO.puts(
-          "  #{pad(count, 6)}  #{label(label, 7)}  #{pad(calls, 5)}  #{pad(ms(us), 10)}  " <>
+          "  #{pad(count, 6)}  #{label(label, 7)}  #{pad(calls, 9)}  #{pad(ms(us), 10)}  " <>
             "#{pad(rows_per_second(count * rows, us), 10)}  #{pad(kib(segment.byte_size), 11)}"
         )
       end
@@ -138,8 +138,9 @@ defmodule Bench.Sealer do
     end
 
     IO.puts("\n  chunked reads land in a session temp table and the final COPY writes from")
-    IO.puts("  local data, so per-input httpfs cost is bounded per engine call. The calls")
-    IO.puts("  column counts DESCRIBE + CREATE/INSERT per chunk, plus the COPY and DROP.")
+    IO.puts("  local data, so per-input httpfs cost is bounded per engine call. est calls")
+    IO.puts("  is the expected shape, not a measurement: DESCRIBE + CREATE/INSERT per")
+    IO.puts("  chunk, plus the COPY and DROP. Re-derive it if Merge's call plan changes.")
   end
 
   defp merge_implementations(dir) do

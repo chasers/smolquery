@@ -59,11 +59,14 @@ defmodule Smolquery.StorageService.Compactor do
 
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
-  reach `compact_max_bytes` or the file count reaches the valve — the group
-  cannot grow past either. The sweep passes the group's summed row count to
-  the merge, which then skips its own footer pass. An output still under
-  `compact_below_bytes` stays a candidate and merges with future arrivals.
-  It never re-merges alone; `compact_min_inputs` gates that.
+  reach `compact_max_bytes` or the file count reaches the valve. That halt is
+  only a work bound — `group/2`'s fold owns both caps, and it alone decides
+  the group. The sweep passes the group's summed row count to the merge,
+  which then skips its own footer pass, and it narrows the merge's staging
+  chunk when the group's average input is large, so one chunk never moves an
+  unbounded number of bytes. An output still under `compact_below_bytes`
+  stays a candidate and merges with future arrivals. It never re-merges
+  alone; `compact_min_inputs` gates that.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -98,6 +101,7 @@ defmodule Smolquery.StorageService.Compactor do
   defstruct [:runtime]
 
   @group_max_staging_chunks 64
+  @stage_chunk_target_bytes 67_108_864
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -209,7 +213,7 @@ defmodule Smolquery.StorageService.Compactor do
   defp group(runtime, undersized) do
     ceiling = @group_max_staging_chunks * runtime.merge_inputs_per_call
 
-    {group, _total, row_count} =
+    {group, total, row_count} =
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.take(ceiling)
@@ -222,15 +226,19 @@ defmodule Smolquery.StorageService.Compactor do
       end)
 
     if length(group) >= runtime.compact_min_inputs do
-      {:ok, %{paths: Enum.reverse(group), row_count: row_count}}
+      {:ok, %{paths: Enum.reverse(group), row_count: row_count, bytes: total}}
     else
       :skip
     end
   end
 
-  defp swap(runtime, table_ref, %{paths: paths, row_count: row_count}, started_at) do
+  defp swap(runtime, table_ref, %{paths: paths, row_count: row_count} = group, started_at) do
     with {:ok, key} <- output_key(table_ref, paths),
-         {:ok, segment} <- Merge.compact(runtime, table_ref, key, paths, row_count: row_count),
+         {:ok, segment} <-
+           Merge.compact(runtime, table_ref, key, paths,
+             row_count: row_count,
+             inputs_per_call: staging_per_call(runtime, group)
+           ),
          {:ok, snapshot} <-
            Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
          :ok <- verify_retired(runtime, table_ref, paths) do
@@ -294,6 +302,14 @@ defmodule Smolquery.StorageService.Compactor do
     )
 
     {:failed, %{table: table_ref, reason: reason}}
+  end
+
+  defp staging_per_call(runtime, %{paths: paths, bytes: bytes}) do
+    average = max(div(bytes, length(paths)), 1)
+
+    runtime.merge_inputs_per_call
+    |> min(div(@stage_chunk_target_bytes, average))
+    |> max(1)
   end
 
   defp elapsed_us(started_at), do: System.monotonic_time(:microsecond) - started_at

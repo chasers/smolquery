@@ -323,12 +323,15 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   for the next claim. A sealer therefore merges the same inputs into the same
   output no matter how many times it is told or which side crashed, which is
   what makes retrying safe instead of duplicating rows.
-- **A claim holds everything unsealed, and any size is safe to seal**
-  (T-246, T-247). The merge bounds its own engine calls. It reads an input
-  list over `merge_inputs_per_call` in capped chunks into a temp table, then
-  one `COPY` writes the segment. No `read_parquet` call is unbounded. A
-  backlog retires in one claim, so a table under sustained ingest
-  self-corrects.
+- **A claim holds the oldest unsealed entries up to 16 × `seal_max_bytes`**
+  (T-246, T-247). The byte valve bounds one sealed segment and the bytes the
+  merge stages. Within a claim, the merge bounds its own engine calls: it
+  reads an input list over `merge_inputs_per_call` in capped chunks into a
+  temp table, then one `COPY` writes the segment. No `read_parquet` call is
+  unbounded. A backlog past the valve retires in valve-sized claims, back to
+  back, so a table under sustained ingest self-corrects. A custom
+  `seal_consumer` receives claims up to the valve and must bound its own
+  engine calls the same way.
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's
