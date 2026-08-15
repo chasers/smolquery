@@ -59,9 +59,11 @@ defmodule Smolquery.Auth.PrincipalTest do
     test "derives stable authn-specific opaque IDs without retaining the source key" do
       assert {:ok, first} = Principal.local("stable-source", :api_key, :service)
       assert {:ok, second} = Principal.local("stable-source", :api_key, :service)
+      assert {:ok, basic} = Principal.local("stable-source", :basic, :service)
 
       assert first.id == second.id
       assert first.id == "api_key:v1:YYMKF704-BVc8TMLshzdSjww0wilh6UT20EHWm27Q20"
+      assert basic.id == "basic:v1:WwzWc2-Vju_Dsy7TNFUrFyXBToNxLan-lXElQkwzypA"
       assert first.authn == :api_key
       assert first.issuer == nil
       assert first.subject == nil
@@ -125,6 +127,9 @@ defmodule Smolquery.Auth.PrincipalTest do
                kind: :service,
                issuer: "unexpected"
              })
+
+      refute Principal.well_formed?(%{__struct__: Principal})
+      refute Principal.well_formed?(%{__struct__: Principal, id: "partial"})
 
       assert {:ok, oidc} = Principal.oidc("issuer", "subject", :user)
       refute Principal.well_formed?(%{oidc | id: "oidc:v1:forged"})

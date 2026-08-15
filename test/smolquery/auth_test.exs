@@ -42,14 +42,20 @@ defmodule Smolquery.AuthTest do
   end
 
   test "rejects malformed context internals without raising" do
-    forged = %{context() | capabilities: %MapSet{map: :forged}}
-    conn = Plug.Conn.assign(conn(:get, "/"), Auth.assign_key(), forged)
-    socket = Phoenix.Component.assign(%Socket{}, Auth.assign_key(), forged)
+    malformed_contexts = [
+      %{context() | capabilities: %MapSet{map: :forged}},
+      %{context() | principal: %{__struct__: Principal}}
+    ]
 
-    assert :error = Auth.fetch_context(conn)
-    assert :error = Auth.fetch_context(socket)
-    assert_raise ArgumentError, fn -> Auth.assign_context(conn, forged) end
-    assert_raise ArgumentError, fn -> Auth.assign_context(socket, forged) end
+    for malformed <- malformed_contexts do
+      conn = Plug.Conn.assign(conn(:get, "/"), Auth.assign_key(), malformed)
+      socket = Phoenix.Component.assign(%Socket{}, Auth.assign_key(), malformed)
+
+      assert :error = Auth.fetch_context(conn)
+      assert :error = Auth.fetch_context(socket)
+      assert_raise ArgumentError, fn -> Auth.assign_context(conn, malformed) end
+      assert_raise ArgumentError, fn -> Auth.assign_context(socket, malformed) end
+    end
   end
 
   test "rejects unsupported targets" do

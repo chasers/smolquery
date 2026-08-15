@@ -108,27 +108,34 @@ defmodule Smolquery.Auth.Principal do
   module. This does not prove authentication provenance.
   """
   @spec well_formed?(term()) :: boolean()
-  def well_formed?(%__MODULE__{} = principal) do
-    valid_string?(principal.id) and
-      principal.authn in @authn and
-      principal.kind in @kinds and
-      valid_identity?(principal) and
-      valid_optional_string?(principal.display_name) and
-      valid_optional_string?(principal.client_id)
+  def well_formed?(%__MODULE__{
+        id: id,
+        authn: authn,
+        kind: kind,
+        issuer: issuer,
+        subject: subject,
+        display_name: display_name,
+        client_id: client_id
+      }) do
+    valid_string?(id) and
+      authn in @authn and
+      kind in @kinds and
+      valid_identity?(id, authn, issuer, subject) and
+      valid_optional_string?(display_name) and
+      valid_optional_string?(client_id)
   end
 
   def well_formed?(_term), do: false
 
-  defp valid_identity?(%__MODULE__{id: id, authn: :oidc, issuer: issuer, subject: subject}) do
+  defp valid_identity?(id, :oidc, issuer, subject) do
     valid_string?(issuer) and valid_string?(subject) and id == oidc_id(issuer, subject)
   end
 
-  defp valid_identity?(%__MODULE__{id: id, authn: authn, issuer: nil, subject: nil})
-       when authn in @local_authn do
+  defp valid_identity?(id, authn, nil, nil) when authn in @local_authn do
     local_id_shape?(id, authn)
   end
 
-  defp valid_identity?(_principal), do: false
+  defp valid_identity?(_id, _authn, _issuer, _subject), do: false
 
   defp options(opts) when is_list(opts) do
     cond do
