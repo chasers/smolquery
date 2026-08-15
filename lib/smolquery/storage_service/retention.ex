@@ -164,7 +164,7 @@ defmodule Smolquery.StorageService.Retention do
         "FROM parquet_metadata([#{placeholders(paths)}]) " <>
         "WHERE path_in_schema = $#{length(paths) + 1} GROUP BY file_name"
 
-    case Engine.query(Runtime.engine(runtime.name), sql, paths ++ [column]) do
+    case Engine.try_query(Runtime.engine(runtime.name), sql, paths ++ [column]) do
       {:ok, result} ->
         {:ok,
          Map.new(result.rows, fn [path, max, unknown] -> {path, %{max: max, unknown: unknown}} end)}

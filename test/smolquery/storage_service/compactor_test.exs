@@ -207,6 +207,19 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
   end
 
+  test "a sweep survives an engine that cannot answer its calls (T-251)", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    stop_supervised!(Runtime.engine(context.storage))
+
+    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert %{table: @table, reason: {:sizing_failed, message}} = failure
+    assert message =~ "exited before replying"
+    assert is_pid(Process.whereis(Runtime.compactor(context.storage)))
+  end
+
   test "an empty catalog sweeps nothing", context do
     start_compactor(context, [])
 

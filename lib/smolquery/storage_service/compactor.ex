@@ -201,7 +201,7 @@ defmodule Smolquery.StorageService.Compactor do
         "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name) sizes " <>
         "JOIN parquet_file_metadata([#{placeholders(paths, count)}]) files USING (file_name)"
 
-    case Engine.query(Runtime.engine(runtime.name), sql, paths ++ paths) do
+    case Engine.try_query(Runtime.engine(runtime.name), sql, paths ++ paths) do
       {:ok, result} ->
         {:ok, Enum.map(result.rows, fn [path, bytes, rows] -> {path, bytes, rows} end)}
 
