@@ -26,7 +26,6 @@ defmodule Smolquery.StorageService.Runtime do
         compact_interval_ms: 300_000,
         compact_below_bytes: 33_554_432,
         compact_min_inputs: 2,
-        compact_max_inputs: 12,
         compact_max_bytes: 134_217_728,
         merge_inputs_per_call: 12,
         retention_interval_ms: 3_600_000,
@@ -93,17 +92,13 @@ defmodule Smolquery.StorageService.Runtime do
   temp table and writes one output, so a claim of any size seals and no
   engine call is unbounded.
 
-  `compact_max_inputs` caps how many segments one compaction *group* holds
-  (T-244) — a planning bound, distinct from the call bound above. The byte
-  ceiling alone does not bound the file count — 128 MiB of small sealed
-  segments is over a hundred inputs — and a bounded group keeps a sweep's
-  merge short so seal attempts on the shared engine are not starved. It must
-  be at least `compact_min_inputs`, validated at boot; a run larger than the
-  cap compacts across sweeps, one group at a time. The same cap chunks the
-  sweep's footer-sizing query, oldest first, and sizing stops once a full
-  group of undersized candidates is found — a mostly-small backlog needs one
-  sizing call rather than one per chunk. Retention's footer-stats query is
-  chunked by the same cap.
+  The same cap chunks every other footer read on this engine: the compactor's
+  sizing query (oldest first, stopping once the undersized bytes found reach
+  `compact_max_bytes` — the group cannot grow past it) and retention's
+  footer-stats query. A compaction group itself has no input-count cap
+  (T-248): bounding the group made a small-segment backlog re-ingest its own
+  output sweep after sweep, and the chunked merge is what makes an
+  unbounded-count group safe.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -164,7 +159,6 @@ defmodule Smolquery.StorageService.Runtime do
     compact_interval_ms: 300_000,
     compact_below_bytes: 33_554_432,
     compact_min_inputs: 2,
-    compact_max_inputs: 12,
     compact_max_bytes: 134_217_728,
     merge_inputs_per_call: 12,
     retention_interval_ms: 3_600_000,
@@ -192,7 +186,6 @@ defmodule Smolquery.StorageService.Runtime do
           compact_interval_ms: pos_integer(),
           compact_below_bytes: pos_integer(),
           compact_min_inputs: pos_integer(),
-          compact_max_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
           merge_inputs_per_call: pos_integer(),
           retention_interval_ms: pos_integer(),
@@ -215,7 +208,6 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_interval_ms,
     :compact_below_bytes,
     :compact_min_inputs,
-    :compact_max_inputs,
     :compact_max_bytes,
     :merge_inputs_per_call,
     :retention_interval_ms,
@@ -333,21 +325,13 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)
-       when not (is_integer(min) and min > 0) do
-    raise ArgumentError,
-          "unsupported compact_min_inputs: #{inspect(runtime.compact_min_inputs)} " <>
-            "(expected a positive integer)"
-  end
-
-  defp validate_compact_inputs(%__MODULE__{compact_max_inputs: max} = runtime)
-       when is_integer(max) and max >= runtime.compact_min_inputs,
+       when is_integer(min) and min > 0,
        do: runtime
 
   defp validate_compact_inputs(%__MODULE__{} = runtime) do
     raise ArgumentError,
-          "unsupported compact_max_inputs: #{inspect(runtime.compact_max_inputs)} " <>
-            "(expected an integer >= compact_min_inputs, " <>
-            "which is #{inspect(runtime.compact_min_inputs)})"
+          "unsupported compact_min_inputs: #{inspect(runtime.compact_min_inputs)} " <>
+            "(expected a positive integer)"
   end
 
   defp validate_merge_inputs_per_call(%__MODULE__{merge_inputs_per_call: per_call} = runtime)

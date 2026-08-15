@@ -499,10 +499,10 @@ residue of eager and age-cap seals — so a quiet table stops accreting files. I
 sweeps every `compact_interval_ms`, needs no signals (the catalog itself says
 which segments are small; sizes come from Parquet footers), and per table per
 sweep replaces one oldest-first run of segments under `compact_below_bytes` with
-a single merged segment, capped at `compact_max_bytes` and at
-`compact_max_inputs` files per merge (T-244). A backlog larger than the input
-cap converges across sweeps: an output still under `compact_below_bytes` stays
-a candidate and re-merges until one crosses the threshold.
+a single merged segment, capped at `compact_max_bytes`. The group has no
+input-count cap (T-248): the merge reads its inputs in chunks of
+`merge_inputs_per_call`, so a backlog of any file count merges in one sweep
+instead of re-ingesting its own still-undersized output sweep after sweep.
 
 - **The swap is atomic.** `Catalog.replace_segments/4` registers the merged
   segment and drops its inputs in one DuckLake transaction, so a single snapshot
