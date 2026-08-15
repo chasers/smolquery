@@ -37,7 +37,10 @@ error.
 | `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
-| `SMOLQUERY_COMPACT_MAX_INPUTS` | cap on segments one compaction merge reads (`12`, T-244). The byte ceiling bounds the output, not the file count; the cap keeps the one-call merge inside the engine's 30 s timeout. Must be at least `compact_min_inputs`; a larger run compacts across sweeps. The default's derivation is in `Smolquery.BufferService.Runtime`'s docs |
+| `SMOLQUERY_MERGE_INPUTS_PER_CALL` | cap on `read_parquet` inputs any one of the merge's engine calls carries (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout. The merge reads a larger input list in capped chunks into a temp table, so a seal claim of any size merges. The default's derivation is in `Smolquery.StorageService.Runtime`'s docs |
+| `SMOLQUERY_STORAGE_MEMORY_LIMIT` | DuckDB memory limit for the storage merge engine (T-250). Unset, the limit is **half the container's cgroup memory limit**, so the merge scales with the pod; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT` — one size for every engine on every role, which is what left a 4 Gi pod merging inside 954 MiB. The resolved value and its source are logged at boot |
+| `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` | DuckDB memory limit for the compaction engine (T-259). Compaction runs on its own engine so a timed-out merge cannot starve seals, and the compactor recycles it after a call exit. Unset, the limit is **a quarter of the container's cgroup memory limit**; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT`. The resolved value and its source are logged at boot |
+| `SMOLQUERY_COMPACT_MAX_ROWS` | cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes, and on ~100x-compressible data a 47 MiB group held ~25M rows — merge cost scales with rows, so the group blew the merge's five-minute budget and re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O. A head file no neighbor fits beside under the cap is skipped, so a row-heavy file cannot wedge the table's backlog |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
@@ -56,7 +59,7 @@ until the pinned version's driver exists for that target.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
+| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`). The storage merge engine resolves its own instead — see `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
 | `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_SPILL_DIR` | root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage; it is intentionally separate from `SMOLQUERY_DATA_DIR` |
@@ -66,7 +69,6 @@ until the pinned version's driver exists for that target.
 | `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |
 | `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`2000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch. A pair that is not strictly greater logs a warning at the buffer boot, and the row-side pair (`flush_max_rows`/`max_buffered_rows`) gets the same check |
-| `SMOLQUERY_SEAL_BATCH_MAX_FILES` | cap on micro-segments one seal claim freezes (`12`, T-244). The seal merges a claim in one DuckDB call; the cap keeps that call inside the engine's 30 s timeout, and a frozen claim would retry an oversized merge forever. A backlog larger than the cap seals in several claims, oldest first. The default's derivation is in `Smolquery.BufferService.Runtime`'s docs |
 | `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (the node's scheduler count — a container held to one core encodes serially, which is what one core means); the manifest append, replication round and replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS quotas — set this and the pool size explicitly where quotas are the fence |
 | `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `duckdb` (default) or `polars`; any other value fails boot. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. The default path defers schema validation to flush, then salvages a failed batch row by row, preserving per-row `insertErrors`; a bad row does not always fail the whole commit, and successful rows are still written. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
 | `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. When no explicit engine thread count is configured, both the engine and the pool resolve `System.schedulers_online()` on the deployment host at boot, not on the release builder. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
@@ -128,7 +130,6 @@ config :smolquery, Smolquery.BufferService,
   seal_max_bytes: 67_108_864,
   seal_max_files: 64,
   seal_max_age_ms: 60_000,
-  seal_batch_max_files: 12,
   seal_retry_ms: 30_000,
   retire_grace_ms: 600_000,
   maintenance_interval_ms: 5_000,
@@ -151,8 +152,8 @@ config :smolquery, Smolquery.StorageService,
   compact_interval_ms: 300_000,
   compact_below_bytes: 33_554_432,
   compact_min_inputs: 2,
-  compact_max_inputs: 12,
   compact_max_bytes: 134_217_728,
+  merge_inputs_per_call: 12,
   retention_interval_ms: 3_600_000,
   snapshot_keep_ms: 86_400_000,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}

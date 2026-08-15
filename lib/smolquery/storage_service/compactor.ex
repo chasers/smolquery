@@ -41,21 +41,63 @@ defmodule Smolquery.StorageService.Compactor do
   Per table, per sweep: segments under `compact_below_bytes` (sizes summed
   from the Parquet footers, never a data read), oldest first — segment ids are
   ULIDs, so name order is time order — greedily grouped until adding the next
-  would pass `compact_max_bytes` or `compact_max_inputs`, compacted only if at
-  least `compact_min_inputs` made the cut. One group per table per sweep; a
-  table with more work keeps its place in line rather than monopolizing the
-  sweep.
+  would pass `compact_max_bytes`, compacted only if at least
+  `compact_min_inputs` made the cut. One group per table per sweep; a table
+  with more work keeps its place in line rather than monopolizing the sweep.
 
-  The input-count cap exists because the merge is one DuckDB call (T-244): the
-  byte ceiling bounds the output, but 128 MiB of small segments is over a
-  hundred `read_parquet` inputs, and per-input cost is what outran the
-  engine's call timeout on the sandbox. The footer-sizing query is chunked by
-  the same cap, oldest first, and stops at the first full group of undersized
-  candidates — a large backlog costs one sizing call, not one per chunk, and
-  no call holds the shared engine with an unbounded list. A merge output
-  still under `compact_below_bytes` stays a candidate: a backlog converges
-  across sweeps, each group re-ingesting the previous output until one
-  crosses the threshold.
+  Bytes bound the group (T-248), with one safety valve. A small input-count
+  cap made a small-segment backlog converge across sweeps, with each group
+  re-ingesting the previous sweep's still-undersized output. That is
+  quadratic write amplification for the exact case compaction exists to
+  clean up. A large group is safe because the merge bounds its own engine
+  calls: `Merge.compact/5` reads inputs in chunks of `merge_inputs_per_call`.
+  The valve protects the sweep's time, not the engine: a group also stops at
+  64 staging chunks of files (768 at the default cap), so one table of very
+  small files cannot hold the sweep for hours. Re-ingestion at that width is
+  negligible — a backlog past the valve converges hundreds of files per
+  sweep, not twelve.
+
+  Rows bound the group too (T-260). Compressed bytes alone do not predict
+  merge cost: on ~100x-compressible data a byte-bounded group held ~25M rows,
+  and the staging inserts plus the clustered `ORDER BY` on the final `COPY`
+  scale with rows, so the group blew the merge's five-minute budget and
+  re-planned identically every sweep. `compact_max_rows` caps the group by
+  the footers' summed `num_rows`, which sizing already reads. A head file no
+  neighbor fits beside under the row cap cannot wedge the table: a group
+  smaller than `compact_min_inputs` drops its head and regroups from the next
+  candidate, so the small files behind a row-heavy head still merge. The byte
+  cap never needs this — two files under `compact_below_bytes` always fit —
+  but a single small file can carry more rows than the cap admits twice.
+
+  The sizing query chunks the same way, oldest first, and reads each file's
+  `num_rows` in the same call. Sizing stops once the undersized bytes found
+  reach `compact_max_bytes`, the rows found reach `compact_max_rows`, or the
+  file count reaches the valve. That halt is
+  only a work bound — `group/2`'s fold owns the caps, and it alone decides
+  the group. The sweep passes the group's summed row count to the merge,
+  which then skips its own footer pass, and it narrows the merge's staging
+  chunk when the group's average input is large, so one chunk never moves an
+  unbounded number of bytes. An output still under `compact_below_bytes`
+  stays a candidate and merges with future arrivals. It never re-merges
+  alone; `compact_min_inputs` gates that.
+
+  ## Compaction runs on its own engine, and recycles it after a call exit
+
+  Sizing and merging go through `Runtime.compact_engine/1`, never the seal
+  merge engine (T-259). An `Adbc.Connection` serializes its queries and a
+  timed-out statement keeps running — adbc exposes no cancel — so one
+  abandoned compaction merge on the shared connection starved every seal and
+  every later sizing call, and each sweep stacked another abandoned query on
+  top. T-251 rightly refused to kill that connection: healthy in-flight seals
+  run there. A dedicated engine removes the conflict, so when a failure
+  carries a `Smolquery.Engine.CallExited`, this module kills the engine's
+  database process — `rest_for_one` rebuilds database and connection — waits
+  briefly for a replacement connection to register (the old registration is
+  not the signal: the supervisor tears it down asynchronously, so only a new
+  pid proves the rebuild), and moves to the next table. The
+  abandoned statement's DuckDB instance burns until it completes, but nothing
+  queues behind it anymore, and a killed merge is free to retry: the output
+  key is derived, so next sweep's attempt overwrites its orphan.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -80,6 +122,7 @@ defmodule Smolquery.StorageService.Compactor do
 
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Merge
@@ -88,6 +131,10 @@ defmodule Smolquery.StorageService.Compactor do
 
   @enforce_keys [:runtime]
   defstruct [:runtime]
+
+  @group_max_staging_chunks 64
+  @stage_chunk_target_bytes 67_108_864
+  @engine_recycle_wait_ms 5_000
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -132,7 +179,7 @@ defmodule Smolquery.StorageService.Compactor do
     else
       false -> :skip
       :skip -> :skip
-      {:error, reason} -> failed(table_ref, reason, started_at)
+      {:error, reason} -> failed(runtime, table_ref, reason, started_at)
     end
   end
 
@@ -148,67 +195,101 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp undersized(runtime, paths) do
     paths
-    |> Enum.chunk_every(runtime.compact_max_inputs)
-    |> Enum.reduce_while({[], 0}, &size_chunk(runtime, &1, &2))
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
+    |> Enum.reduce_while(%{chunks: [], bytes: 0, rows: 0, count: 0}, &size_chunk(runtime, &1, &2))
     |> case do
       {:error, reason} -> {:error, reason}
-      {chunks, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+      %{chunks: chunks} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
 
-  defp size_chunk(runtime, chunk, {acc, count}) do
+  defp size_chunk(runtime, chunk, acc) do
     case sizes_chunk(runtime, chunk) do
       {:ok, sizes} ->
         found =
-          Enum.filter(sizes, fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
+          Enum.filter(sizes, fn {_path, size, _rows} -> size < runtime.compact_below_bytes end)
 
-        group_filled({[found | acc], count + length(found)}, runtime)
+        group_filled(
+          %{
+            chunks: [found | acc.chunks],
+            bytes: acc.bytes + Enum.sum_by(found, fn {_path, size, _rows} -> size end),
+            rows: acc.rows + Enum.sum_by(found, fn {_path, _size, rows} -> rows end),
+            count: acc.count + length(found)
+          },
+          runtime
+        )
 
       {:error, reason} ->
         {:halt, {:error, reason}}
     end
   end
 
-  defp group_filled({_chunks, count} = acc, runtime)
-       when count >= runtime.compact_max_inputs,
+  defp group_filled(%{bytes: bytes, rows: rows, count: count} = acc, runtime)
+       when bytes >= runtime.compact_max_bytes or rows >= runtime.compact_max_rows or
+              count >= @group_max_staging_chunks * runtime.merge_inputs_per_call,
        do: {:halt, acc}
 
   defp group_filled(acc, _runtime), do: {:cont, acc}
 
   defp sizes_chunk(runtime, paths) do
-    sql =
-      "SELECT file_name, sum(total_compressed_size)::BIGINT " <>
-        "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name"
+    count = length(paths)
 
-    case Engine.query(Runtime.engine(runtime.name), sql, paths) do
-      {:ok, result} -> {:ok, Enum.map(result.rows, fn [path, bytes] -> {path, bytes} end)}
-      {:error, error} -> {:error, {:sizing_failed, Exception.message(error)}}
+    sql =
+      "SELECT sizes.file_name, sizes.bytes, files.num_rows::BIGINT " <>
+        "FROM (SELECT file_name, sum(total_compressed_size)::BIGINT AS bytes " <>
+        "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name) sizes " <>
+        "JOIN parquet_file_metadata([#{placeholders(paths, count)}]) files USING (file_name)"
+
+    case Engine.try_query(Runtime.compact_engine(runtime.name), sql, paths ++ paths) do
+      {:ok, result} ->
+        {:ok, Enum.map(result.rows, fn [path, bytes, rows] -> {path, bytes, rows} end)}
+
+      {:error, error} ->
+        {:error, {:sizing_failed, error}}
     end
   end
 
   defp group(runtime, undersized) do
-    {group, _total} =
-      undersized
-      |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
-      |> Enum.take(runtime.compact_max_inputs)
-      |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
-        if total + bytes > runtime.compact_max_bytes and group != [] do
-          {:halt, {group, total}}
+    ceiling = @group_max_staging_chunks * runtime.merge_inputs_per_call
+
+    undersized
+    |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
+    |> Enum.take(ceiling)
+    |> grouped(runtime)
+  end
+
+  defp grouped([], _runtime), do: :skip
+
+  defp grouped([_head | rest] = candidates, runtime) do
+    {group, total, row_count} =
+      Enum.reduce_while(candidates, {[], 0, 0}, fn {path, bytes, rows},
+                                                   {group, total, group_rows} ->
+        if (total + bytes > runtime.compact_max_bytes or
+              group_rows + rows > runtime.compact_max_rows) and group != [] do
+          {:halt, {group, total, group_rows}}
         else
-          {:cont, {[path | group], total + bytes}}
+          {:cont, {[path | group], total + bytes, group_rows + rows}}
         end
       end)
 
     if length(group) >= runtime.compact_min_inputs do
-      {:ok, Enum.reverse(group)}
+      {:ok, %{paths: Enum.reverse(group), row_count: row_count, bytes: total}}
     else
-      :skip
+      grouped(rest, runtime)
     end
   end
 
-  defp swap(runtime, table_ref, paths, started_at) do
+  defp swap(runtime, table_ref, %{paths: paths, row_count: row_count} = group, started_at) do
     with {:ok, key} <- output_key(table_ref, paths),
-         {:ok, segment} <- Merge.compact(runtime, table_ref, key, paths),
+         {:ok, segment} <-
+           Merge.compact(
+             %{runtime | merge_engine: Runtime.compact_engine(runtime.name)},
+             table_ref,
+             key,
+             paths,
+             row_count: row_count,
+             inputs_per_call: staging_per_call(runtime, group)
+           ),
          {:ok, snapshot} <-
            Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
          :ok <- verify_retired(runtime, table_ref, paths) do
@@ -225,7 +306,7 @@ defmodule Smolquery.StorageService.Compactor do
 
       {:ok, %{table: table_ref, key: key, replaced: length(paths), snapshot: snapshot}}
     else
-      {:error, reason} -> failed(table_ref, reason, started_at)
+      {:error, reason} -> failed(runtime, table_ref, reason, started_at)
     end
   end
 
@@ -262,7 +343,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp failed(table_ref, reason, started_at) do
+  defp failed(runtime, table_ref, reason, started_at) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
     :telemetry.execute(
@@ -271,10 +352,52 @@ defmodule Smolquery.StorageService.Compactor do
       %{result: :error}
     )
 
+    recycle_on_exit(runtime, reason)
+
     {:failed, %{table: table_ref, reason: reason}}
+  end
+
+  defp recycle_on_exit(runtime, {step, %CallExited{}})
+       when step in [:sizing_failed, :merge_failed] do
+    engine = Runtime.compact_engine(runtime.name)
+    stale_connection = Process.whereis(Engine.connection_name(engine))
+
+    case Process.whereis(Engine.database_name(engine)) do
+      nil ->
+        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+
+      database ->
+        Logger.warning("recycling the compaction engine after an engine call exit")
+        Process.exit(database, :kill)
+        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+    end
+  end
+
+  defp recycle_on_exit(_runtime, _reason), do: :ok
+
+  defp await_engine(_engine, _stale_connection, remaining_ms) when remaining_ms <= 0, do: :ok
+
+  defp await_engine(engine, stale_connection, remaining_ms) do
+    connection = Process.whereis(Engine.connection_name(engine))
+
+    if is_pid(connection) and connection != stale_connection do
+      :ok
+    else
+      Process.sleep(100)
+      await_engine(engine, stale_connection, remaining_ms - 100)
+    end
+  end
+
+  defp staging_per_call(runtime, %{paths: paths, bytes: bytes}) do
+    average = max(div(bytes, length(paths)), 1)
+
+    runtime.merge_inputs_per_call
+    |> min(div(@stage_chunk_target_bytes, average))
+    |> max(1)
   end
 
   defp elapsed_us(started_at), do: System.monotonic_time(:microsecond) - started_at
 
-  defp placeholders(paths), do: Enum.map_join(1..length(paths), ", ", &"$#{&1}")
+  defp placeholders(paths, offset \\ 0),
+    do: Enum.map_join(1..length(paths), ", ", &"$#{&1 + offset}")
 end

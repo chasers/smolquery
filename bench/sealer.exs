@@ -15,6 +15,10 @@ defmodule Bench.Sealer do
     * **Merge throughput and peak memory** — across input count and rows per
       input, to see what the merge scales with and whether it stays off the BEAM
       heap.
+    * **Chunked against direct merge** — the T-246/T-247 staging path (capped
+      `read_parquet` chunks into a temp table, one `COPY` out) against the
+      single-call merge, at input counts past `merge_inputs_per_call`, to price
+      the staging hop that makes any claim size safe.
     * **Sealed segment size distribution** — what `seal_max_bytes` and
       `seal_max_age_ms` actually produce. The compactor's input, so Milestone 7
       starts with numbers instead of a guess.
@@ -51,6 +55,12 @@ defmodule Bench.Sealer do
     inputs took ~6.6 ms (~0.6M rows/s). The floor is per-input HTTP and Parquet
     footer work, so small inputs are what waste a merge — an argument for letting
     `seal_max_files` grow rather than sealing eagerly on file count.
+  - **The chunked merge is cheap at local latency.** 128 inputs staged
+    through a temp table in 24 bounded calls merged within 5–21% of the
+    single unbounded call across runs, with byte-identical output; at 12 and
+    36 inputs it matched or beat it. The staging hop costs only where
+    per-input latency is real (httpfs to object storage), and that is exactly
+    where the bounded calls matter (T-246/T-247).
   - **Seal lag is the threshold, not the seal.** The handoff itself — manifest pull,
     merge, catalog commit, retire — ran 37-51 ms regardless of claim size. So the
     age of the oldest unsealed row, and therefore the single-copy loss window, is
@@ -89,9 +99,48 @@ defmodule Bench.Sealer do
     with_tmp_dir("sealer", fn dir ->
       merge_implementations(dir)
       merge_scaling(dir)
+      chunked_merge(dir)
       seal_lag(dir)
       segment_sizes(dir)
     end)
+  end
+
+  defp chunked_merge(dir) do
+    heading("chunked merge: bounded engine calls against one unbounded call (T-246/T-247)")
+
+    rows = env("ROWS", 5_000)
+    per_call = env("PER_CALL", 12)
+    input_counts = Enum.filter([12, 36, 128], &(&1 <= env("MAX_INPUTS", 128)))
+
+    IO.puts("\n  per-call cap #{per_call}; direct forces the whole list into one call\n")
+    IO.puts("  inputs    path     est calls    merge ms      rows/s   sealed KiB")
+
+    for count <- input_counts do
+      stack = start_stack(dir, "chunk-#{count}")
+      ids = fill(stack, count, rows)
+      warm(stack)
+      claim = freeze(stack, ids)
+
+      for {label, cap} <- [{"direct", count}, {"chunked", per_call}] do
+        runtime = %{stack.runtime | merge_inputs_per_call: cap}
+
+        {us, {:ok, segment}} = :timer.tc(fn -> Merge.run(runtime, @table, claim) end)
+
+        calls = if cap >= count, do: 2, else: 2 * ceil(count / cap) + 2
+
+        IO.puts(
+          "  #{pad(count, 6)}  #{label(label, 7)}  #{pad(calls, 9)}  #{pad(ms(us), 10)}  " <>
+            "#{pad(rows_per_second(count * rows, us), 10)}  #{pad(kib(segment.byte_size), 11)}"
+        )
+      end
+
+      stop_stack(stack)
+    end
+
+    IO.puts("\n  chunked reads land in a session temp table and the final COPY writes from")
+    IO.puts("  local data, so per-input httpfs cost is bounded per engine call. est calls")
+    IO.puts("  is the expected shape, not a measurement: DESCRIBE + CREATE/INSERT per")
+    IO.puts("  chunk, plus the COPY and DROP. Re-derive it if Merge's call plan changes.")
   end
 
   defp merge_implementations(dir) do
