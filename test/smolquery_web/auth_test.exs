@@ -2,6 +2,7 @@ defmodule SmolqueryWeb.AuthTest do
   use SmolqueryWeb.ConnCase, async: false
 
   alias Phoenix.LiveView
+  alias Smolquery.Auth, as: AuthContext
   alias Smolquery.Test.MapCatalog
   alias SmolqueryWeb.Auth
   alias SmolqueryWeb.Runtime
@@ -46,10 +47,22 @@ defmodule SmolqueryWeb.AuthTest do
       assert conn.status == 401
     end
 
-    test "the correct credential is served", %{conn: conn} do
+    test "the correct credential is served with a normalized operator context", %{conn: conn} do
       conn = get(conn, ~p"/")
 
       assert conn.status == 200
+      assert {:ok, context} = AuthContext.fetch_context(conn)
+      assert context.principal.authn == :basic
+      assert context.principal.kind == :user
+
+      assert MapSet.equal?(
+               context.capabilities,
+               MapSet.new([:web_access, :query, :catalog_manage, :platform_operate])
+             )
+
+      {username, password} = credential()
+      refute inspect(context) =~ username
+      refute inspect(context) =~ password
     end
 
     test "every route requires the credential" do
@@ -128,10 +141,13 @@ defmodule SmolqueryWeb.AuthTest do
       assert {:redirect, %{to: "/"}} = socket.redirected
     end
 
-    test "a rotated password revokes the marker old sessions carry" do
+    test "a rotated password revokes the marker old sessions carry and preserves identity" do
       runtime = start_web!()
+      first_id = runtime.context.principal.id
 
       Runtime.put(Runtime.new(catalog: MapCatalog.new(), password: "rotated-password"))
+      {:ok, rotated} = Runtime.fetch(SmolqueryWeb)
+      assert rotated.context.principal.id == first_id
 
       assert {:halt, socket} =
                Auth.on_mount(
@@ -144,7 +160,26 @@ defmodule SmolqueryWeb.AuthTest do
       assert {:redirect, %{to: "/"}} = socket.redirected
     end
 
-    test "the hook admits a mount whose session carries the marker" do
+    test "a rotated username revokes the marker while preserving identity" do
+      runtime = start_web!()
+      rotated = Runtime.new(catalog: MapCatalog.new(), username: "rotated-user")
+
+      assert rotated.context.principal.id == runtime.context.principal.id
+      refute rotated.session_marker == runtime.session_marker
+      Runtime.put(rotated)
+
+      assert {:halt, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => runtime.session_marker},
+                 %LiveView.Socket{}
+               )
+
+      assert {:redirect, %{to: "/"}} = socket.redirected
+    end
+
+    test "the hook admits a mount whose session carries the marker and assigns context" do
       runtime = start_web!()
 
       assert {:cont, socket} =
@@ -155,6 +190,8 @@ defmodule SmolqueryWeb.AuthTest do
                  %LiveView.Socket{}
                )
 
+      assert {:ok, context} = AuthContext.fetch_context(socket)
+      assert context.principal.id == runtime.context.principal.id
       refute socket.redirected
     end
   end

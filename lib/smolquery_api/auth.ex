@@ -20,6 +20,7 @@ defmodule SmolqueryApi.Auth do
 
   import Plug.Conn
 
+  alias Smolquery.Auth
   alias Smolquery.InternalSecret
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Runtime
@@ -41,12 +42,14 @@ defmodule SmolqueryApi.Auth do
   end
 
   def call(conn, _opts) do
-    if authenticated?(conn) do
-      conn
-    else
-      conn
-      |> Errors.send_error(401, "UNAUTHENTICATED", "missing or invalid API key")
-      |> halt()
+    case authenticated_context(conn) do
+      {:ok, context} ->
+        Auth.assign_context(conn, context)
+
+      :error ->
+        conn
+        |> Errors.send_error(401, "UNAUTHENTICATED", "missing or invalid API key")
+        |> halt()
     end
   end
 
@@ -57,12 +60,13 @@ defmodule SmolqueryApi.Auth do
     end
   end
 
-  defp authenticated?(conn) do
+  defp authenticated_context(conn) do
     with ["Bearer " <> key] <- get_req_header(conn, "authorization"),
-         {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api) do
-      Plug.Crypto.secure_compare(key, runtime.api_key)
+         {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api),
+         true <- Plug.Crypto.secure_compare(key, runtime.api_key) do
+      {:ok, runtime.context}
     else
-      _unauthenticated -> false
+      _unauthenticated -> :error
     end
   end
 end
