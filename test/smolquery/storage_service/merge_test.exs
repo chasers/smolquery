@@ -412,10 +412,10 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, buffer_runtime} = BufferService.Runtime.fetch(buffer)
     :ok = File.rm!(Store.location(buffer_runtime.store, entry.key))
 
-    assert {:error, {:merge_failed, message}} =
+    assert {:error, {:merge_failed, error}} =
              Merge.run(runtime, @table, claim([ack.segment_id]))
 
-    assert message =~ "404"
+    assert Exception.message(error) =~ "404"
     assert {:ok, []} = Store.list(runtime.store, "analytics/events")
   end
 

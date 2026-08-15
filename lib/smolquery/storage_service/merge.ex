@@ -44,8 +44,13 @@ defmodule Smolquery.StorageService.Merge do
   its bytes, and twelve compaction inputs near `compact_below_bytes` move
   hundreds of megabytes on a slow link. An `after` block drops the staging
   table, so an error or an exit on the way out does not strand the staged
-  rows on the shared connection. A drop that itself fails logs a warning,
-  and a seal retry's `CREATE OR REPLACE` clears what the drop could not.
+  rows on the shared connection. The drop's own call gets five seconds, not
+  the 30 s default: on a wedged connection the drop queues behind the
+  abandoned statement anyway — waiting longer only delays the failure
+  reaching the compactor's engine recycle — and the statement still executes
+  once the connection drains, so the cleanup is not lost with the wait. A
+  drop that itself fails logs a warning, and a seal retry's
+  `CREATE OR REPLACE` clears what the drop could not.
 
   Every engine call here goes through `Smolquery.Engine.try_query/4`, so a
   call that exits — timed out against a connection wedged by an OOM, or busy
@@ -54,6 +59,14 @@ defmodule Smolquery.StorageService.Merge do
   table in one sweep process: before this, the cleanup drop's timeout exit
   blew through the `after` block and killed the Compactor mid-sweep, once per
   sweep, starving every table behind the failing group.
+
+  A failure carries the exception itself, `{:merge_failed, exception}`, not
+  its rendered message: the compactor recycles its engine when the exception
+  is a `Smolquery.Engine.CallExited` (T-259), and that decision has to be a
+  pattern match, not a string match. Calls run on
+  `Smolquery.StorageService.Runtime.merge_engine/1` — the seal merge engine
+  unless the caller overrode it, which is how the compactor keeps its merges
+  off the connection the sealer is using.
 
   ## The union of the inputs is not the schema the catalog declares
 
@@ -164,6 +177,7 @@ defmodule Smolquery.StorageService.Merge do
 
   @staged_copy_timeout_ms 300_000
   @stage_chunk_timeout_ms 120_000
+  @drop_staging_timeout_ms 5_000
 
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
@@ -313,7 +327,7 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp drop_staging(runtime, table) do
-    case query(runtime, "DROP TABLE IF EXISTS #{table}", []) do
+    case query(runtime, "DROP TABLE IF EXISTS #{table}", [], @drop_staging_timeout_ms) do
       {:ok, _result} ->
         :ok
 
@@ -447,9 +461,9 @@ defmodule Smolquery.StorageService.Merge do
   defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
 
   defp query(runtime, sql, params, timeout \\ 30_000) do
-    case Engine.try_query(Runtime.engine(runtime.name), sql, params, timeout) do
+    case Engine.try_query(Runtime.merge_engine(runtime), sql, params, timeout) do
       {:ok, result} -> {:ok, result}
-      {:error, error} -> {:error, {:merge_failed, Exception.message(error)}}
+      {:error, error} -> {:error, {:merge_failed, error}}
     end
   end
 
