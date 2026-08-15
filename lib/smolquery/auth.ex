@@ -2,7 +2,7 @@ defmodule Smolquery.Auth do
   @moduledoc """
   Attachment seam for an authenticated `Smolquery.Auth.Context`.
 
-  The same private assign key is used by Plug connections and LiveView sockets.
+  The same stable assign key is used by Plug connections and LiveView sockets.
   Assigning a value that is not a context raises `ArgumentError`; fetching a
   missing or malformed assign returns `:error`. Assignment and fetching prove
   structure only; trusted adapters establish authentication provenance before
