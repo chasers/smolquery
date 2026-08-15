@@ -14,14 +14,16 @@ defmodule Smolquery.Auth.PrincipalTest do
       assert first.id != "user-1"
       assert first.issuer == "https://idp.example"
       assert first.subject == "user-1"
-      assert Principal.valid?(first)
+      assert Principal.well_formed?(first)
     end
 
-    test "distinguishes the same subject at different issuers" do
+    test "distinguishes exact issuer and subject pairs" do
       assert {:ok, first} = Principal.oidc("https://one.example", "same", :user)
       assert {:ok, second} = Principal.oidc("https://two.example", "same", :user)
+      assert {:ok, pairwise} = Principal.oidc("https://one.example", "same-client-subject", :user)
 
       refute first.id == second.id
+      refute first.id == pairwise.id
     end
 
     test "keeps issuer and subject boundaries distinct" do
@@ -37,14 +39,12 @@ defmodule Smolquery.Auth.PrincipalTest do
       assert {:ok, with_metadata} =
                Principal.oidc("issuer", "subject", :user,
                  display_name: "Alice",
-                 client_id: "web",
-                 expires_at: 42
+                 client_id: "web"
                )
 
       assert with_metadata.id == without_metadata.id
       assert with_metadata.display_name == "Alice"
       assert with_metadata.client_id == "web"
-      assert with_metadata.expires_at == 42
     end
 
     test "requires exact non-empty issuer and subject strings" do
@@ -56,26 +56,50 @@ defmodule Smolquery.Auth.PrincipalTest do
   end
 
   describe "local/4" do
-    test "builds local API-key and Basic principals" do
-      assert {:ok, api_key} = Principal.local("static:api", :api_key, :service)
-      assert {:ok, basic} = Principal.local("static:web", :basic, :user)
+    test "derives stable authn-specific opaque IDs without retaining the source key" do
+      assert {:ok, first} = Principal.local("stable-source", :api_key, :service)
+      assert {:ok, second} = Principal.local("stable-source", :api_key, :service)
 
-      assert api_key.authn == :api_key
-      assert basic.authn == :basic
-      assert api_key.issuer == nil
-      assert api_key.subject == nil
-      assert Principal.valid?(api_key)
-      assert Principal.valid?(basic)
+      assert first.id == second.id
+      assert first.id == "api_key:v1:YYMKF704-BVc8TMLshzdSjww0wilh6UT20EHWm27Q20"
+      assert first.authn == :api_key
+      assert first.issuer == nil
+      assert first.subject == nil
+      refute first.id =~ "stable-source"
+      refute Map.has_key?(first, :source_key)
+      assert Principal.well_formed?(first)
     end
 
-    test "does not allow local OIDC identities" do
+    test "separates local authn namespaces and OIDC" do
+      assert {:ok, api_key} = Principal.local("same-source", :api_key, :service)
+      assert {:ok, basic} = Principal.local("same-source", :basic, :service)
+      assert {:ok, oidc} = Principal.oidc("same-source", "same-source", :service)
+
+      refute api_key.id == basic.id
+      refute api_key.id == oidc.id
+      refute basic.id == oidc.id
+    end
+
+    test "rejects non-canonical or repeated local ID encodings" do
+      assert {:ok, principal} = Principal.local("stable-source", :api_key, :service)
+      prefix = "api_key:v1:"
+      body_size = byte_size(principal.id) - 1
+      <<body::binary-size(^body_size), _last>> = principal.id
+
+      refute Principal.well_formed?(%{principal | id: body <> "1"})
+      refute Principal.well_formed?(%{principal | id: prefix <> principal.id})
+    end
+
+    test "does not allow local OIDC identities or empty source keys" do
       assert {:error, :oidc_requires_oidc_constructor} =
                Principal.local("id", :oidc, :user)
+
+      assert {:error, {:invalid, :source_key}} = Principal.local("", :api_key, :service)
     end
   end
 
   describe "validation" do
-    test "rejects invalid kinds, options, metadata, and expiry" do
+    test "rejects invalid kinds, options, and metadata" do
       assert {:error, :invalid_kind} = Principal.oidc("issuer", "subject", :admin)
 
       assert {:error, {:unknown_option, :groups}} =
@@ -84,21 +108,18 @@ defmodule Smolquery.Auth.PrincipalTest do
       assert {:error, {:invalid_option, :display_name}} =
                Principal.local("id", :api_key, :service, display_name: "")
 
-      assert {:error, {:invalid_option, :expires_at}} =
-               Principal.local("id", :api_key, :service, expires_at: -1)
+      assert {:error, :invalid_options} =
+               Principal.local("id", :api_key, :service, %{display_name: "name"})
 
       assert {:error, :invalid_options} =
-               Principal.local("id", :api_key, :service, %{expires_at: 1})
-
-      assert {:error, :invalid_options} =
-               Principal.local("id", :api_key, :service, expires_at: 1, expires_at: 2)
+               Principal.local("id", :api_key, :service, display_name: "one", display_name: "two")
     end
 
     test "rejects invalid authentication values and malformed principals" do
       assert {:error, :invalid_authn} = Principal.local("id", :password, :service)
       assert {:error, :invalid_kind} = Principal.local("id", :api_key, :admin)
 
-      refute Principal.valid?(%Principal{
+      refute Principal.well_formed?(%Principal{
                id: "id",
                authn: :api_key,
                kind: :service,
@@ -106,7 +127,7 @@ defmodule Smolquery.Auth.PrincipalTest do
              })
 
       assert {:ok, oidc} = Principal.oidc("issuer", "subject", :user)
-      refute Principal.valid?(%{oidc | id: "oidc:v1:forged"})
+      refute Principal.well_formed?(%{oidc | id: "oidc:v1:forged"})
     end
   end
 end

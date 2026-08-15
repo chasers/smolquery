@@ -14,6 +14,10 @@ defmodule Smolquery.AuthTest do
     context
   end
 
+  test "uses the stable direct assign key" do
+    assert Auth.assign_key() == :smolquery_auth_context
+  end
+
   test "round-trips a context on a Plug connection" do
     conn = Auth.assign_context(conn(:get, "/"), context())
 

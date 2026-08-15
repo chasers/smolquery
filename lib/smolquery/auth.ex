@@ -4,8 +4,9 @@ defmodule Smolquery.Auth do
 
   The same private assign key is used by Plug connections and LiveView sockets.
   Assigning a value that is not a context raises `ArgumentError`; fetching a
-  missing or malformed assign returns `:error` and never exposes it as an
-  authenticated context.
+  missing or malformed assign returns `:error`. Assignment and fetching prove
+  structure only; trusted adapters establish authentication provenance before
+  assignment, and policy authorization checks expiry and capability access.
   """
 
   alias Phoenix.LiveView.Socket
@@ -35,6 +36,9 @@ defmodule Smolquery.Auth do
 
   @doc """
   Fetches an assigned context from a Plug connection or LiveView socket.
+
+  Assignment checks are structural only; policy authorization checks expiry and
+  capability access.
   """
   @spec fetch_context(Plug.Conn.t() | Socket.t()) :: {:ok, Context.t()} | :error
   def fetch_context(%Plug.Conn{assigns: assigns}), do: fetch_assign(assigns)
@@ -42,16 +46,16 @@ defmodule Smolquery.Auth do
   def fetch_context(_target), do: :error
 
   defp fetch_assign(%{@assign_key => %Context{} = context}) do
-    if Context.valid?(context), do: {:ok, context}, else: :error
+    if Context.well_formed?(context), do: {:ok, context}, else: :error
   end
 
   defp fetch_assign(_assigns), do: :error
 
   defp assign_valid_context(target, context) do
-    if Context.valid?(context) do
+    if Context.well_formed?(context) do
       do_assign(target, context)
     else
-      raise ArgumentError, "expected a valid Smolquery.Auth.Context"
+      raise ArgumentError, "expected a well-formed Smolquery.Auth.Context"
     end
   end
 
