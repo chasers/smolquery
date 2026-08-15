@@ -141,7 +141,8 @@ defmodule Smolquery.StorageService.Sealer do
   end
 
   @impl GenServer
-  def handle_call(:sealing, _from, state), do: {:reply, Map.values(state.attempts), state}
+  def handle_call(:sealing, _from, state),
+    do: {:reply, state.attempts |> Map.values() |> Enum.map(& &1.table_ref), state}
 
   @impl GenServer
   def handle_call(:failures, _from, state), do: {:reply, state.failures, state}
@@ -151,8 +152,8 @@ defmodule Smolquery.StorageService.Sealer do
     Process.demonitor(ref, [:flush])
 
     case Map.fetch(state.attempts, ref) do
-      {:ok, table_ref} ->
-        {:noreply, state |> record(table_ref, result) |> finish(ref)}
+      {:ok, attempt} ->
+        {:noreply, state |> record(attempt, result) |> finish(ref)}
 
       :error ->
         {:noreply, state}
@@ -162,10 +163,11 @@ defmodule Smolquery.StorageService.Sealer do
   @impl GenServer
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.fetch(state.attempts, ref) do
-      {:ok, table_ref} ->
-        attempt(:crashed)
+      {:ok, attempt} ->
+        record_attempt(:crashed, attempt)
 
-        {:noreply, state |> failed(table_ref, "crashed: #{inspect(reason)}") |> finish(ref)}
+        {:noreply,
+         state |> failed(attempt.table_ref, "crashed: #{inspect(reason)}") |> finish(ref)}
 
       :error ->
         {:noreply, state}
@@ -175,20 +177,28 @@ defmodule Smolquery.StorageService.Sealer do
   @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp record(state, table_ref, {:error, reason}) do
-    attempt(:error)
+  defp record(state, attempt, {:error, reason}) do
+    record_attempt(:error, attempt)
 
-    failed(state, table_ref, "failed: #{inspect(reason)}")
+    failed(state, attempt.table_ref, "failed: #{inspect(reason)}")
   end
 
-  defp record(state, table_ref, _result) do
-    attempt(:ok)
+  defp record(state, attempt, _result) do
+    record_attempt(:ok, attempt)
 
-    %{state | failures: Map.delete(state.failures, table_ref)}
+    %{state | failures: Map.delete(state.failures, attempt.table_ref)}
   end
 
-  defp attempt(result),
-    do: :telemetry.execute([:smolquery, :seal, :attempt], %{}, %{result: result})
+  defp record_attempt(result, attempt) do
+    :telemetry.execute(
+      [:smolquery, :seal, :attempt],
+      %{
+        duration_us: System.monotonic_time(:microsecond) - attempt.started_at,
+        segments: attempt.segments
+      },
+      %{result: result}
+    )
+  end
 
   defp failed(state, table_ref, description) do
     consecutive = Map.get(state.failures, table_ref, 0) + 1
@@ -220,7 +230,8 @@ defmodule Smolquery.StorageService.Sealer do
     state
   end
 
-  defp sealing?(state, table_ref), do: table_ref in Map.values(state.attempts)
+  defp sealing?(state, table_ref),
+    do: Enum.any?(state.attempts, fn {_ref, attempt} -> attempt.table_ref == table_ref end)
 
   defp at_capacity?(state),
     do: map_size(state.attempts) >= state.runtime.max_concurrent_seals
@@ -241,7 +252,13 @@ defmodule Smolquery.StorageService.Sealer do
         Handoff.seal(runtime.handoff, runtime, table_ref, claim)
       end)
 
-    %{state | attempts: Map.put(state.attempts, task.ref, table_ref)}
+    attempt = %{
+      table_ref: table_ref,
+      segments: claim |> Map.get(:ids, []) |> length(),
+      started_at: System.monotonic_time(:microsecond)
+    }
+
+    %{state | attempts: Map.put(state.attempts, task.ref, attempt)}
   end
 
   defp finish(state, ref), do: %{state | attempts: Map.delete(state.attempts, ref)}

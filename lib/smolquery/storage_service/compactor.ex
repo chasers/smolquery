@@ -118,14 +118,16 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp compact_table(runtime, table_ref) do
+    started_at = System.monotonic_time(:microsecond)
+
     with true <- runtime.name |> Routing.resolve() |> Routing.own?(table_ref),
          {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          {:ok, group} <- plan(runtime, paths) do
-      swap(runtime, table_ref, group)
+      swap(runtime, table_ref, group, started_at)
     else
       false -> :skip
       :skip -> :skip
-      {:error, reason} -> failed(table_ref, reason)
+      {:error, reason} -> failed(table_ref, reason, started_at)
     end
   end
 
@@ -189,7 +191,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp swap(runtime, table_ref, paths) do
+  defp swap(runtime, table_ref, paths, started_at) do
     with {:ok, key} <- output_key(table_ref, paths),
          {:ok, segment} <- Merge.compact(runtime, table_ref, key, paths),
          {:ok, snapshot} <-
@@ -202,13 +204,13 @@ defmodule Smolquery.StorageService.Compactor do
 
       :telemetry.execute(
         [:smolquery, :compact, :swap],
-        %{replaced: length(paths)},
+        %{replaced: length(paths), duration_us: elapsed_us(started_at)},
         %{result: :ok}
       )
 
       {:ok, %{table: table_ref, key: key, replaced: length(paths), snapshot: snapshot}}
     else
-      {:error, reason} -> failed(table_ref, reason)
+      {:error, reason} -> failed(table_ref, reason, started_at)
     end
   end
 
@@ -245,13 +247,19 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp failed(table_ref, reason) do
+  defp failed(table_ref, reason, started_at) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
-    :telemetry.execute([:smolquery, :compact, :swap], %{replaced: 0}, %{result: :error})
+    :telemetry.execute(
+      [:smolquery, :compact, :swap],
+      %{replaced: 0, duration_us: elapsed_us(started_at)},
+      %{result: :error}
+    )
 
     {:failed, %{table: table_ref, reason: reason}}
   end
+
+  defp elapsed_us(started_at), do: System.monotonic_time(:microsecond) - started_at
 
   defp placeholders(paths), do: Enum.map_join(1..length(paths), ", ", &"$#{&1}")
 end
