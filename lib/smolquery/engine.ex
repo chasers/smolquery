@@ -148,10 +148,16 @@ defmodule Smolquery.Engine do
 
   The engine name is always explicit: a leading default would make
   `query(sql, params)` and `query(name, sql)` indistinguishable.
+
+  `timeout` bounds the call, defaulting to `Smolquery.Engine.Connection`'s
+  30 s. A caller whose statement legitimately runs long — the merge's final
+  `COPY` over a whole staged backlog — says so here, instead of the timeout
+  deciding how much data a statement may touch.
   """
-  @spec query(atom(), String.t(), [term()]) :: {:ok, Result.t()} | {:error, Exception.t()}
-  def query(name, sql, params \\ []) do
-    Connection.query(connection_name(name), sql, params)
+  @spec query(atom(), String.t(), [term()], timeout()) ::
+          {:ok, Result.t()} | {:error, Exception.t()}
+  def query(name, sql, params \\ [], timeout \\ 30_000) do
+    Connection.query(connection_name(name), sql, params, timeout)
   end
 
   @doc """

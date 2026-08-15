@@ -92,14 +92,14 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   The claim also names its output, derived from its inputs, so a table's sealed
   segment has a stable identity before any bytes exist. One key per claim, and
-  the claim takes *everything* unsealed: a backlog retires in one claim, which
-  is what keeps a table self-correcting under sustained ingest (T-246). A claim
-  of any size is safe to seal because the merge bounds its own engine calls —
+  the claim takes *everything* unsealed. A backlog retires in one claim, so a
+  table under sustained ingest self-corrects (T-246). A claim of any size is
+  safe to seal because the merge bounds its own engine calls —
   `Smolquery.StorageService.Merge` reads inputs in chunks of
   `merge_inputs_per_call`, so no call carries an unbounded `read_parquet` list.
   How large a sealed segment gets is `seal_max_bytes`'s business, since it
-  decides when a claim is signalled, and splitting an oversized output across
-  files is the compactor's problem rather than the buffer's.
+  decides when the buffer signals a claim. Splitting an oversized output
+  across files is the compactor's problem rather than the buffer's.
 
   ## Recovery, and what a crash costs
 

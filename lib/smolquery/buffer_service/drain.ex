@@ -63,9 +63,11 @@ defmodule Smolquery.BufferService.Drain do
 
     * `:timeout_ms` — how long to wait for every forced seal to retire
       before giving up (default #{@default_timeout_ms}). A forced claim holds
-      a table's whole unsealed tail, and a large tail merges in several
-      bounded engine calls (`merge_inputs_per_call`), so the default gives a
-      backlogged table's one big seal room to finish
+      a table's whole unsealed tail. A large tail merges in several bounded
+      engine calls (`merge_inputs_per_call`), so the default gives that one
+      big seal room to finish. Merge time grows with the tail, so no fixed
+      default covers every backlog — pass a larger `:timeout_ms` to drain a
+      node that has been failing to seal for a long time
     * `:poll_ms` — how often the retirement check runs (default
       #{@default_poll_ms})
 
