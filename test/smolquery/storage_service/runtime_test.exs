@@ -88,16 +88,6 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
-    test "refuses a compact_max_inputs below compact_min_inputs at boot, not per sweep" do
-      assert_raise ArgumentError, ~r/unsupported compact_max_inputs/, fn ->
-        Runtime.new(
-          name: __MODULE__.BadCompactCap,
-          compact_min_inputs: 4,
-          compact_max_inputs: 3
-        )
-      end
-    end
-
     test "refuses an unusable merge_inputs_per_call at boot, not at first merge" do
       for per_call <- [0, -1, "12", nil] do
         assert_raise ArgumentError, ~r/unsupported merge_inputs_per_call/, fn ->

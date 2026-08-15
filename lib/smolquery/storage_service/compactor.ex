@@ -41,21 +41,22 @@ defmodule Smolquery.StorageService.Compactor do
   Per table, per sweep: segments under `compact_below_bytes` (sizes summed
   from the Parquet footers, never a data read), oldest first — segment ids are
   ULIDs, so name order is time order — greedily grouped until adding the next
-  would pass `compact_max_bytes` or `compact_max_inputs`, compacted only if at
-  least `compact_min_inputs` made the cut. One group per table per sweep; a
-  table with more work keeps its place in line rather than monopolizing the
-  sweep.
+  would pass `compact_max_bytes`, compacted only if at least
+  `compact_min_inputs` made the cut. One group per table per sweep; a table
+  with more work keeps its place in line rather than monopolizing the sweep.
 
-  The input-count cap exists because the merge is one DuckDB call (T-244): the
-  byte ceiling bounds the output, but 128 MiB of small segments is over a
-  hundred `read_parquet` inputs, and per-input cost is what outran the
-  engine's call timeout on the sandbox. The footer-sizing query is chunked by
-  the same cap, oldest first, and stops at the first full group of undersized
-  candidates — a large backlog costs one sizing call, not one per chunk, and
-  no call holds the shared engine with an unbounded list. A merge output
-  still under `compact_below_bytes` stays a candidate: a backlog converges
-  across sweeps, each group re-ingesting the previous output until one
-  crosses the threshold.
+  The group is bounded by bytes alone (T-248). An input-count cap would make
+  a small-segment backlog converge across sweeps, each group re-ingesting the
+  previous sweep's still-undersized output — quadratic write amplification
+  for the exact case compaction exists to clean up. A group of any file count
+  is safe because the merge bounds its own engine calls: `Merge.compact/4`
+  reads inputs in chunks of `merge_inputs_per_call`, so no `read_parquet`
+  list is unbounded. The footer-sizing query is chunked the same way, oldest
+  first, and sizing stops once the undersized bytes found reach
+  `compact_max_bytes` — the group cannot grow past it, so segments beyond
+  that are next sweep's business. An output still under `compact_below_bytes`
+  stays a candidate and merges with future arrivals, never alone —
+  `compact_min_inputs` is what stops it re-merging by itself.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -148,29 +149,31 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp undersized(runtime, paths) do
     paths
-    |> Enum.chunk_every(runtime.compact_max_inputs)
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
     |> Enum.reduce_while({[], 0}, &size_chunk(runtime, &1, &2))
     |> case do
       {:error, reason} -> {:error, reason}
-      {chunks, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+      {chunks, _bytes} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
 
-  defp size_chunk(runtime, chunk, {acc, count}) do
+  defp size_chunk(runtime, chunk, {acc, bytes}) do
     case sizes_chunk(runtime, chunk) do
       {:ok, sizes} ->
         found =
-          Enum.filter(sizes, fn {_path, bytes} -> bytes < runtime.compact_below_bytes end)
+          Enum.filter(sizes, fn {_path, size} -> size < runtime.compact_below_bytes end)
 
-        group_filled({[found | acc], count + length(found)}, runtime)
+        found_bytes = Enum.sum_by(found, fn {_path, size} -> size end)
+
+        group_filled({[found | acc], bytes + found_bytes}, runtime)
 
       {:error, reason} ->
         {:halt, {:error, reason}}
     end
   end
 
-  defp group_filled({_chunks, count} = acc, runtime)
-       when count >= runtime.compact_max_inputs,
+  defp group_filled({_chunks, bytes} = acc, runtime)
+       when bytes >= runtime.compact_max_bytes,
        do: {:halt, acc}
 
   defp group_filled(acc, _runtime), do: {:cont, acc}
@@ -190,7 +193,6 @@ defmodule Smolquery.StorageService.Compactor do
     {group, _total} =
       undersized
       |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
-      |> Enum.take(runtime.compact_max_inputs)
       |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
         if total + bytes > runtime.compact_max_bytes and group != [] do
           {:halt, {group, total}}

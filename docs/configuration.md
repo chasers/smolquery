@@ -37,7 +37,6 @@ error.
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
 | `SMOLQUERY_MERGE_INPUTS_PER_CALL` | cap on `read_parquet` inputs any one of the merge's engine calls carries (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout; a larger input list is read in capped chunks into a temp table, so a seal claim of any size merges. The default's derivation is in `Smolquery.StorageService.Runtime`'s docs |
-| `SMOLQUERY_COMPACT_MAX_INPUTS` | cap on segments one compaction *group* holds (`12`, T-244). The byte ceiling bounds the output, not the file count; a bounded group keeps a sweep's merge short on the shared engine. Must be at least `compact_min_inputs`; a larger run compacts across sweeps |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
@@ -149,7 +148,6 @@ config :smolquery, Smolquery.StorageService,
   compact_interval_ms: 300_000,
   compact_below_bytes: 33_554_432,
   compact_min_inputs: 2,
-  compact_max_inputs: 12,
   compact_max_bytes: 134_217_728,
   merge_inputs_per_call: 12,
   retention_interval_ms: 3_600_000,

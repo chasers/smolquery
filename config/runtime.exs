@@ -152,21 +152,14 @@ if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
     flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)
 end
 
-# T-244/T-246/T-247: `merge_inputs_per_call` bounds every `read_parquet` list
+# T-246/T-247/T-248: `merge_inputs_per_call` bounds every `read_parquet` list
 # one engine call carries — per-input cost over httpfs is what outruns the
-# call timeout — so a seal claim of any size merges in bounded chunks.
-# `compact_max_inputs` bounds one compaction *group*, keeping a sweep's merge
-# short on the shared engine.
+# call timeout — so a seal claim or a compaction group of any size merges in
+# bounded chunks.
 if inputs = System.get_env("SMOLQUERY_MERGE_INPUTS_PER_CALL") do
   config :smolquery, Smolquery.StorageService,
     merge_inputs_per_call:
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_INPUTS_PER_CALL", inputs)
-end
-
-if inputs = System.get_env("SMOLQUERY_COMPACT_MAX_INPUTS") do
-  config :smolquery, Smolquery.StorageService,
-    compact_max_inputs:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_INPUTS", inputs)
 end
 
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
