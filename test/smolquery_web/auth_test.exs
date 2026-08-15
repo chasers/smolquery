@@ -3,9 +3,9 @@ defmodule SmolqueryWeb.AuthTest do
 
   alias Phoenix.LiveView
   alias Smolquery.Auth, as: AuthContext
+  alias Smolquery.Auth.{Context, Principal}
   alias Smolquery.Test.MapCatalog
-  alias SmolqueryWeb.Auth
-  alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.{Auth, Runtime, Session}
 
   defp unauthenticated, do: Phoenix.ConnTest.build_conn()
 
@@ -65,6 +65,13 @@ defmodule SmolqueryWeb.AuthTest do
       refute inspect(context) =~ password
     end
 
+    test "the OIDC login route fails closed in static mode" do
+      conn = get(unauthenticated(), ~p"/auth/login")
+
+      assert conn.status == 400
+      assert conn.resp_body == "authentication failed"
+    end
+
     test "every route requires the credential" do
       for path <- [~p"/", ~p"/tables", ~p"/query", ~p"/cluster"] do
         assert get(unauthenticated(), path).status == 401, "#{path} answered without a credential"
@@ -87,6 +94,92 @@ defmodule SmolqueryWeb.AuthTest do
       second = first |> recycle() |> authenticate() |> get(~p"/")
 
       assert get_resp_header(second, "set-cookie") == []
+    end
+  end
+
+  describe "OIDC browser sessions" do
+    setup do
+      runtime =
+        Runtime.new(
+          catalog: MapCatalog.new(),
+          auth_mode: :oidc,
+          secret_key_base: String.duplicate("s", 64),
+          oidc: [
+            issuer: "https://issuer.example/",
+            web_client_id: "web",
+            web_client_auth_method: :none,
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        )
+
+      Runtime.put(runtime)
+      on_exit(fn -> Runtime.delete(SmolqueryWeb) end)
+      %{runtime: runtime}
+    end
+
+    test "HTTP and LiveView reconstruct the same active normalized context", %{runtime: runtime} do
+      {:ok, principal} = Principal.oidc(runtime.oidc.issuer, "subject", :user)
+
+      {:ok, context} =
+        Context.single_tenant(principal, Context.capabilities(),
+          expires_at: System.system_time(:second) + 60
+        )
+
+      assert {:ok, identity} = Session.encode(context)
+
+      conn =
+        :get
+        |> Plug.Test.conn("/")
+        |> Plug.Test.init_test_session(%{Session.key() => identity})
+        |> Auth.call(Auth.init([]))
+
+      refute conn.halted
+      assert {:ok, assigned} = AuthContext.fetch_context(conn)
+      assert assigned.principal.id == context.principal.id
+
+      assert {:cont, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{Session.key() => identity},
+                 %LiveView.Socket{}
+               )
+
+      assert {:ok, mounted} = AuthContext.fetch_context(socket)
+      assert mounted.principal.id == context.principal.id
+    end
+
+    test "HTTP and LiveView reject incomplete or wrong-issuer OIDC sessions", %{runtime: runtime} do
+      {:ok, principal} = Principal.oidc(runtime.oidc.issuer, "subject", :user)
+
+      {:ok, incomplete} =
+        Context.single_tenant(principal, [:web_access],
+          expires_at: System.system_time(:second) + 60
+        )
+
+      assert {:ok, identity} = Session.encode(incomplete)
+
+      conn =
+        :get
+        |> Plug.Test.conn("/")
+        |> Plug.Test.init_test_session(%{Session.key() => identity})
+        |> Auth.call(Auth.init([]))
+
+      assert conn.halted
+      assert get_resp_header(conn, "location") == ["/auth/login"]
+
+      wrong_issuer = %{identity | "iss" => "https://other.example/"}
+
+      assert {:halt, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{Session.key() => wrong_issuer},
+                 %LiveView.Socket{}
+               )
+
+      assert {:redirect, %{to: "/auth/login"}} = socket.redirected
     end
   end
 
@@ -141,7 +234,7 @@ defmodule SmolqueryWeb.AuthTest do
       assert {:redirect, %{to: "/"}} = socket.redirected
     end
 
-    test "the hook redirects cleanly while OIDC browser login is not implemented" do
+    test "the hook redirects cleanly while OIDC browser login has no session" do
       runtime =
         Runtime.new(
           catalog: MapCatalog.new(),
@@ -160,7 +253,7 @@ defmodule SmolqueryWeb.AuthTest do
       on_exit(fn -> Runtime.delete(SmolqueryWeb) end)
 
       assert {:halt, socket} = Auth.on_mount(:require_authenticated, %{}, %{}, %LiveView.Socket{})
-      assert {:redirect, %{to: "/"}} = socket.redirected
+      assert {:redirect, %{to: "/auth/login"}} = socket.redirected
     end
 
     test "a rotated password revokes the marker old sessions carry and preserves identity" do

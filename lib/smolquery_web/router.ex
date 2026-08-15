@@ -21,6 +21,23 @@ defmodule SmolqueryWeb.Router do
     plug :put_secure_browser_headers
   end
 
+  pipeline :auth_public do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug :fetch_live_flash
+    plug :put_root_layout, html: {SmolqueryWeb.Layouts, :root}
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+  end
+
+  scope "/auth", SmolqueryWeb do
+    pipe_through :auth_public
+
+    get "/login", AuthController, :login
+    get "/callback", AuthController, :callback
+    post "/logout", AuthController, :logout
+  end
+
   scope "/", SmolqueryWeb do
     pipe_through :browser
 

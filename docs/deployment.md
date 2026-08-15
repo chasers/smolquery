@@ -56,8 +56,9 @@ image.
 The current release requires an explicit `SMOLQUERY_AUTH_MODE` on every pod
 whose roles include `api` or `web`. `static` selects the existing credentials;
 `oidc` enables the validated, fail-closed provider foundation from T-231, while
-API token verification and browser login remain denied until later layers. A
-missing or unsupported mode refuses to boot. Static pods need the credentials
+API token verification and browser authorization-code login use the validated,
+fail-closed OIDC provider cache. A missing or unsupported mode refuses to boot.
+Static pods need the credentials
 and web pods always need the session secret described above; OIDC pods need the
 corresponding `SMOLQUERY_OIDC_*` settings in `docs/configuration.md`.
 

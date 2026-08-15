@@ -1,33 +1,11 @@
 defmodule SmolqueryWeb.Auth do
   @moduledoc """
-  Basic authentication for every UI route and for the LiveView socket.
+  Authentication for the UI and its LiveView socket.
 
-  This module is the web peer of `SmolqueryApi.Auth`. It holds one static
-  credential. It compares the credential in constant time. It reads the
-  credential from the published runtime, not from compile-time options. A node
-  with the `:web` role and no credential refuses to boot
-  (`SmolqueryWeb.Runtime`), so no configuration serves an open UI.
-
-  The UI needs authentication at least as much as the API. `/query` runs SQL
-  through `Smolquery.QueryService`. `/cluster` kills, drains, and restarts
-  nodes.
-
-  ## Two layers
-
-  `call/2` guards the HTTP request from the `:browser` pipeline. It runs after
-  `:fetch_session`, because a success writes the session marker that the
-  second layer reads.
-
-  `on_mount/4` guards the LiveView socket. The endpoint's `socket "/live"`
-  declaration does not run the router's pipelines, so the plug does not see
-  the websocket upgrade. A browser usually resends cached credentials on a
-  same-origin upgrade, but the hook does not rely on that. The hook requires
-  the session marker. Only an authenticated request can write the marker. The
-  marker value is bound to the live credential and the session secret
-  (`SmolqueryWeb.Runtime`), so a credential rotation revokes old sessions.
-
-  The endpoint serves static assets before the router runs, so they stay
-  public. `priv/static` holds no data.
+  Static mode retains Basic authentication and its marker rotation semantics.
+  OIDC mode reconstructs a minimal encrypted session identity on every request
+  and mount. The temporary T-234 gate requires every currently powerful web
+  capability, including `platform_operate`, until the web policy layer lands.
   """
 
   @behaviour Plug
@@ -36,10 +14,13 @@ defmodule SmolqueryWeb.Auth do
 
   alias Phoenix.LiveView
   alias Smolquery.Auth
-  alias SmolqueryWeb.Runtime
+  alias Smolquery.Auth.Context
+  alias Smolquery.Auth.Policy
+  alias SmolqueryWeb.{Runtime, Session}
 
   @realm "smolquery"
   @marker :authenticated
+  @required_web_capabilities [:web_access, :query, :ingest, :catalog_manage, :platform_operate]
 
   @impl Plug
   def init(opts), do: Keyword.get(opts, :name, SmolqueryWeb)
@@ -47,60 +28,114 @@ defmodule SmolqueryWeb.Auth do
   @impl Plug
   def call(conn, name) do
     case Runtime.fetch(name) do
-      {:ok, runtime} -> authenticate(conn, runtime)
+      {:ok, %{auth_mode: :static} = runtime} -> static(conn, runtime)
+      {:ok, %{auth_mode: :oidc} = runtime} -> oidc(conn, runtime)
       :error -> challenge(conn)
     end
   end
 
-  defp authenticate(conn, %{auth_mode: :static} = runtime) do
+  defp static(conn, runtime) do
     conn
     |> Plug.BasicAuth.basic_auth(
       username: runtime.username,
       password: runtime.password,
       realm: @realm
     )
-    |> mark(runtime)
+    |> mark_static(runtime)
   end
 
-  defp authenticate(conn, %{auth_mode: :oidc}), do: challenge(conn)
+  defp mark_static(%Plug.Conn{halted: true} = conn, _runtime), do: conn
 
-  defp mark(%Plug.Conn{halted: true} = conn, _runtime), do: conn
-
-  defp mark(conn, runtime) do
+  defp mark_static(conn, runtime) do
     conn =
-      if get_session(conn, @marker) == runtime.session_marker do
-        conn
-      else
-        put_session(conn, @marker, runtime.session_marker)
-      end
+      if get_session(conn, @marker) == runtime.session_marker,
+        do: conn,
+        else: put_session(conn, @marker, runtime.session_marker)
 
     Auth.assign_context(conn, runtime.context)
   end
 
-  defp challenge(conn) do
-    conn
-    |> Plug.BasicAuth.request_basic_auth(realm: @realm)
-    |> halt()
+  defp oidc(conn, runtime) do
+    case Session.decode(get_session(conn, Session.key())) do
+      {:ok, context} ->
+        with true <- context.principal.issuer == runtime.oidc.issuer,
+             :ok <- Policy.authorize(context, :web_access),
+             true <- coarse_web_access?(context),
+             {:ok, identity} <- Session.encode(context) do
+          conn
+          |> configure_session(renew: true)
+          |> put_session(Session.key(), identity)
+          |> Auth.assign_context(context)
+        else
+          _failure -> redirect_login(conn)
+        end
+
+      :error ->
+        redirect_login(conn)
+    end
   end
 
-  @doc """
-  Requires the session marker that `call/2` writes before a LiveView mounts.
+  defp redirect_login(conn) do
+    conn |> put_resp_header("location", "/auth/login") |> send_resp(302, "") |> halt()
+  end
 
-  The marker is bound to the live credential, so a rotated credential revokes
-  every session written under the old one. If the marker is absent or stale,
-  the hook redirects the caller to `/`. There the plug asks for the credential
-  again.
-  """
+  defp challenge(conn) do
+    conn |> Plug.BasicAuth.request_basic_auth(realm: @realm) |> halt()
+  end
+
+  @doc "Requires a valid static marker or reconstructed OIDC session."
   @spec on_mount(:require_authenticated, LiveView.unsigned_params(), map(), LiveView.Socket.t()) ::
           {:cont | :halt, LiveView.Socket.t()}
   def on_mount(:require_authenticated, _params, session, socket) do
-    with {:ok, %{auth_mode: :static} = runtime} <- Runtime.fetch(SmolqueryWeb),
-         marker when is_binary(marker) and marker == runtime.session_marker <-
-           session[Atom.to_string(@marker)],
-         %Smolquery.Auth.Context{} = context <- runtime.context do
-      {:cont, Auth.assign_context(socket, context)}
-    else
-      _unauthenticated -> {:halt, LiveView.redirect(socket, to: "/")}
+    case Runtime.fetch(SmolqueryWeb) do
+      {:ok, %{auth_mode: :static} = runtime} -> mount_static(runtime, session, socket)
+      {:ok, %{auth_mode: :oidc} = runtime} -> mount_oidc(runtime, session, socket)
+      :error -> {:halt, LiveView.redirect(socket, to: "/")}
     end
   end
+
+  defp mount_static(runtime, session, socket) do
+    with marker when is_binary(marker) <- session[Atom.to_string(@marker)],
+         true <- marker == runtime.session_marker,
+         %Context{} = context <- runtime.context do
+      {:cont, Auth.assign_context(socket, context)}
+    else
+      _ -> {:halt, LiveView.redirect(socket, to: "/")}
+    end
+  end
+
+  defp mount_oidc(runtime, session, socket) do
+    with {:ok, context} <- Session.decode(session[Session.key()]),
+         true <- context.principal.issuer == runtime.oidc.issuer,
+         :ok <- Policy.authorize(context, :web_access),
+         true <- coarse_web_access?(context) do
+      {:cont, Auth.assign_context(socket, context)}
+    else
+      _ -> {:halt, LiveView.redirect(socket, to: "/auth/login")}
+    end
+  end
+
+  def coarse_web_access?(%Context{} = context),
+    do: Enum.all?(@required_web_capabilities, &Context.granted?(context, &1))
+
+  def coarse_web_access?(_), do: false
+
+  defp put_identity(conn, context) do
+    case Session.encode(context) do
+      {:ok, identity} ->
+        conn =
+          conn
+          |> configure_session(renew: true)
+          |> put_session(Session.key(), identity)
+          |> Auth.assign_context(context)
+
+        {:ok, conn}
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc false
+  def assign_identity(conn, context), do: put_identity(conn, context)
 end

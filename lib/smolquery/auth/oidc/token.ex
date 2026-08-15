@@ -35,6 +35,28 @@ defmodule Smolquery.Auth.OIDC.Token do
     end
   end
 
+  @doc "Verifies a browser ID token against the web client and one-time nonce."
+  @spec authenticate_web(String.t(), Config.t(), pid() | atom(), String.t(), keyword()) ::
+          result()
+  def authenticate_web(token, config, provider, nonce, opts \\ []) do
+    now = Keyword.get(opts, :now, System.system_time(:second))
+    access_token = Keyword.get(opts, :access_token)
+    code = Keyword.get(opts, :code)
+
+    with {:ok, header} <- parse_header(token, config),
+         :ok <- validate_header(header, config),
+         {:ok, jwks} <- provider_jwks(provider),
+         {:ok, jwk} <- select_or_refresh(header, jwks, provider, config),
+         {:ok, claims} <- verify_signature(token, jwk, config),
+         {:ok, claims} <- validate_web_claims(claims, config, nonce, now),
+         :ok <- validate_hash_claims(claims, header, access_token, code),
+         {:ok, context} <- normalize(claims, config) do
+      {:ok, context}
+    else
+      _failure -> :error
+    end
+  end
+
   @doc "Verifies a token against supplied JWKS, primarily for deterministic tests."
   @spec verify(String.t(), Config.t(), map(), map(), keyword()) :: result()
   def verify(token, config, jwks, refreshed_jwks, opts \\ []) do
@@ -191,14 +213,112 @@ defmodule Smolquery.Auth.OIDC.Token do
   end
 
   defp verify_claims(token, jwk, config, now) do
-    case JOSE.JWT.verify_strict(jwk, config.algorithms, token) do
-      {true, %JOSE.JWT{fields: claims}, _jws} when is_map(claims) ->
-        validate_claims(claims, config, now)
+    case verify_signature(token, jwk, config) do
+      {:ok, claims} -> validate_claims(claims, config, now)
+      :error -> :error
+    end
+  end
 
-      _failure ->
+  defp verify_signature(token, jwk, config) do
+    case JOSE.JWT.verify_strict(jwk, config.algorithms, token) do
+      {true, %JOSE.JWT{fields: claims}, _jws} when is_map(claims) -> {:ok, claims}
+      _failure -> :error
+    end
+  end
+
+  defp validate_web_claims(claims, config, nonce, now) do
+    with :ok <-
+           required_claims(claims, %{"iss" => [config.issuer], "sub" => [Map.get(claims, "sub")]}),
+         :ok <- required_claims(claims, config.required_claims),
+         :ok <- exact_issuer(claims, config.issuer),
+         :ok <- valid_web_audience(claims, config.web_client_id),
+         {:ok, _subject} <- required_string(claims, "sub"),
+         {:ok, _expires_at} <- valid_expiry(claims, config.clock_skew, now),
+         :ok <- valid_not_before(claims, config.clock_skew, now),
+         :ok <- valid_web_issued_at(claims, config.iat_future_seconds, now),
+         :ok <- valid_nonce(claims, nonce) do
+      {:ok,
+       Map.put(claims, "__expires_at", Map.fetch!(claims, "exp"))
+       |> Map.put("__subject", Map.fetch!(claims, "sub"))}
+    else
+      _failure -> :error
+    end
+  end
+
+  defp valid_web_audience(%{"aud" => audience} = claims, expected) when is_binary(audience) do
+    if audience == expected and azp_valid?(claims, expected), do: :ok, else: :error
+  end
+
+  defp valid_web_audience(%{"aud" => audience} = claims, expected) when is_list(audience) do
+    valid =
+      audience != [] and Enum.all?(audience, &(is_binary(&1) and &1 != "")) and
+        expected in audience
+
+    authorized_party_valid? =
+      case audience do
+        [_single] -> azp_valid?(claims, expected)
+        [_first, _second | _rest] -> Map.get(claims, "azp") == expected
+      end
+
+    if valid and authorized_party_valid?, do: :ok, else: :error
+  end
+
+  defp valid_web_audience(_claims, _expected), do: :error
+
+  defp azp_valid?(claims, expected),
+    do: is_nil(Map.get(claims, "azp")) or Map.get(claims, "azp") == expected
+
+  defp valid_web_issued_at(%{"iat" => iat}, future, now)
+       when is_integer(iat) and iat >= 0,
+       do: if(iat <= now + future, do: :ok, else: :error)
+
+  defp valid_web_issued_at(_claims, _future, _now), do: :error
+
+  defp valid_nonce(%{"nonce" => nonce}, expected) when is_binary(nonce) and is_binary(expected) do
+    if byte_size(nonce) == byte_size(expected) and :crypto.hash_equals(nonce, expected),
+      do: :ok,
+      else: :error
+  end
+
+  defp valid_nonce(_claims, _expected), do: :error
+
+  defp validate_hash_claims(claims, header, access_token, code) do
+    case validate_one_hash(claims, "at_hash", access_token, header) do
+      :ok -> validate_one_hash(claims, "c_hash", code, header)
+      :error -> :error
+    end
+  end
+
+  defp validate_one_hash(claims, claim, value, header) do
+    case Map.fetch(claims, claim) do
+      :error ->
+        :ok
+
+      {:ok, expected} when is_binary(expected) and is_binary(value) ->
+        verify_hash(expected, value, header["alg"])
+
+      _ ->
         :error
     end
   end
+
+  defp verify_hash(expected, value, alg) do
+    with {:ok, algorithm} <- hash_algorithm(alg),
+         digest <- :crypto.hash(algorithm, value),
+         half <- binary_part(digest, 0, div(byte_size(digest), 2)),
+         actual <- Base.url_encode64(half, padding: false),
+         true <- byte_size(actual) == byte_size(expected),
+         true <- :crypto.hash_equals(actual, expected) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp hash_algorithm(alg) when alg in ["RS256", "PS256", "ES256"], do: {:ok, :sha256}
+  defp hash_algorithm(alg) when alg in ["RS384", "PS384", "ES384"], do: {:ok, :sha384}
+  defp hash_algorithm(alg) when alg in ["RS512", "PS512", "ES512"], do: {:ok, :sha512}
+  defp hash_algorithm(_alg), do: :error
 
   defp validate_claims(claims, config, now) do
     with :ok <- required_claims(claims, config.required_claims),
