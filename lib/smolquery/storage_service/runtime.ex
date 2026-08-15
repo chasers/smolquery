@@ -131,6 +131,14 @@ defmodule Smolquery.StorageService.Runtime do
   object-store tier would need it too — so it is the default rather than something
   a deployment has to remember. Tests that never merge set it to `[]` and skip the
   extension download.
+
+  `engine_memory_limit` (default `nil`) is the merge engine's own DuckDB
+  memory limit — a size string like `"2GiB"`, validated at boot as present
+  and stringly, with DuckDB judging the grammar on the engine's first `SET`.
+  Left `nil`, the limit derives from the container's cgroup memory limit,
+  and without one of those the engine inherits `Smolquery.Engine`'s
+  application config; see `engine_memory_limit/2` for the order and the
+  reasoning (T-250).
   """
 
   alias Smolquery.BufferService.Ring
@@ -149,6 +157,7 @@ defmodule Smolquery.StorageService.Runtime do
     buffer_hot_port: 4001,
     buffer_timeout_ms: 30_000,
     engine_extensions: [:httpfs],
+    engine_memory_limit: nil,
     compression: :zstd,
     seal_row_group_size: 16_384,
     target_segment_bytes: 268_435_456,
@@ -176,6 +185,7 @@ defmodule Smolquery.StorageService.Runtime do
           buffer_hot_port: :inet.port_number(),
           buffer_timeout_ms: timeout(),
           engine_extensions: [atom() | String.t()],
+          engine_memory_limit: String.t() | nil,
           compression: atom(),
           seal_row_group_size: pos_integer(),
           target_segment_bytes: pos_integer(),
@@ -198,6 +208,7 @@ defmodule Smolquery.StorageService.Runtime do
     :buffer_hot_port,
     :buffer_timeout_ms,
     :engine_extensions,
+    :engine_memory_limit,
     :compression,
     :seal_row_group_size,
     :target_segment_bytes,
@@ -244,6 +255,7 @@ defmodule Smolquery.StorageService.Runtime do
       ring: Ring.new!(Keyword.get(config, :ring, [node()]))
     }
     |> struct!(Keyword.take(config, @limits))
+    |> validate_engine_memory_limit()
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_inputs()
@@ -251,6 +263,37 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   use Smolquery.Runtime
+
+  @doc """
+  The DuckDB memory limit the merge engine starts with.
+
+  Resolution order (T-250):
+
+  1. An explicit `engine_memory_limit` — the operator's word, taken whole.
+  2. Half the container's cgroup memory limit, when one exists. The merge
+     engine is the only engine on a storage node that moves data volume, so
+     it gets the largest share; the other half covers the BEAM, the catalog
+     engine, and allocations DuckDB's limit does not account for.
+  3. `nil` — no cgroup limit either (bare metal, dev, pods without a memory
+     limit), so the engine inherits `Smolquery.Engine`'s application config
+     unchanged.
+
+  The derivation is what turns a bigger pod into a bigger merge without the
+  deploy restating the number. The global `SMOLQUERY_MEMORY_LIMIT` is one
+  size for every engine on every role, and sizing the storage merge from it
+  is what left a 4 Gi pod OOMing at 954 MiB, on the same group, every sweep.
+  """
+  @spec engine_memory_limit(t(), {:ok, pos_integer()} | :none) :: String.t() | nil
+  def engine_memory_limit(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
+
+  def engine_memory_limit(%__MODULE__{engine_memory_limit: limit}, _cgroup)
+      when is_binary(limit),
+      do: limit
+
+  def engine_memory_limit(%__MODULE__{}, {:ok, bytes}),
+    do: "#{max(div(bytes, 2 * 1024 * 1024), 1)}MiB"
+
+  def engine_memory_limit(%__MODULE__{}, :none), do: nil
 
   @doc """
   The top-level supervisor for an instance, as `Supervisor.start_link/1` names it.
@@ -303,6 +346,16 @@ defmodule Smolquery.StorageService.Runtime do
   """
   @spec retention(atom()) :: atom()
   def retention(name), do: Module.concat(name, "Retention")
+
+  defp validate_engine_memory_limit(%__MODULE__{engine_memory_limit: limit} = runtime)
+       when is_binary(limit) or is_nil(limit),
+       do: runtime
+
+  defp validate_engine_memory_limit(%__MODULE__{engine_memory_limit: limit}) do
+    raise ArgumentError,
+          "unsupported engine_memory_limit: #{inspect(limit)} " <>
+            "(expected a DuckDB size string like \"2GiB\", or nil)"
+  end
 
   defp validate_compression(%__MODULE__{compression: compression} = runtime)
        when compression in @codecs,

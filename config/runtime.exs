@@ -59,6 +59,14 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+# The storage merge engine's own limit (T-250). Unset, it derives from the
+# container's cgroup memory limit, and only without one of those does it
+# inherit SMOLQUERY_MEMORY_LIMIT — one size for every engine on every role,
+# which is what left a 4 Gi storage pod merging inside 954 MiB.
+if limit = System.get_env("SMOLQUERY_STORAGE_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.StorageService, engine_memory_limit: limit
+end
+
 if threads = System.get_env("SMOLQUERY_ENGINE_THREADS") do
   config :smolquery, Smolquery.Engine, threads: String.to_integer(threads)
 end

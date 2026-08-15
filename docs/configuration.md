@@ -37,6 +37,7 @@ error.
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
 | `SMOLQUERY_MERGE_INPUTS_PER_CALL` | cap on `read_parquet` inputs any one of the merge's engine calls carries (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout. The merge reads a larger input list in capped chunks into a temp table, so a seal claim of any size merges. The default's derivation is in `Smolquery.StorageService.Runtime`'s docs |
+| `SMOLQUERY_STORAGE_MEMORY_LIMIT` | DuckDB memory limit for the storage merge engine (T-250). Unset, the limit is **half the container's cgroup memory limit**, so the merge scales with the pod; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT` — one size for every engine on every role, which is what left a 4 Gi pod merging inside 954 MiB. The resolved value and its source are logged at boot |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
@@ -55,7 +56,7 @@ until the pinned version's driver exists for that target.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`) |
+| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`). The storage merge engine resolves its own instead — see `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
 | `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
 | `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_SPILL_DIR` | root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage; it is intentionally separate from `SMOLQUERY_DATA_DIR` |
