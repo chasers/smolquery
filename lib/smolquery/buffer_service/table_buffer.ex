@@ -91,10 +91,14 @@ defmodule Smolquery.BufferService.TableBuffer do
   exactly-once.
 
   The claim also names its output, derived from its inputs, so a table's sealed
-  segment has a stable identity before any bytes exist. One key per claim: how
-  large a sealed segment gets is `seal_max_bytes`'s business, since it bounds what
-  a claim can hold, and splitting a merge across files is the compactor's problem
-  rather than the buffer's.
+  segment has a stable identity before any bytes exist. One key per claim, and at
+  most `seal_batch_max_files` inputs per claim (T-244): the sealer merges a claim
+  in one DuckDB call, so a claim that froze an entire backlog would grow with
+  ingest throughput until the merge outran the engine's call timeout — and a
+  frozen claim retries the same oversized merge forever. The claim takes the
+  oldest unsealed entries up to the cap; the remainder is the next claim's, once
+  this one retires. The seal thresholds still decide *when* to seal, measured
+  against everything unsealed, so a capped claim never delays the signal.
 
   ## Recovery, and what a crash costs
 
@@ -343,9 +347,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   def maintain(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :maintain, timeout)
 
   @doc """
-  Flushes, then signals a seal for every unsealed micro-segment this table
-  holds — regardless of `seal_max_bytes`/`seal_max_files`/`seal_max_age_ms`
-  or how recently a claim last signalled (Milestone 8 L4's drain).
+  Flushes, then signals a seal for this table's unsealed micro-segments —
+  regardless of `seal_max_bytes`/`seal_max_files`/`seal_max_age_ms` or how
+  recently a claim last signalled (Milestone 8 L4's drain).
+
+  The claim it signals is still capped at `seal_batch_max_files` (T-244): a
+  drain must not be the one caller allowed to build the oversized merge the
+  cap exists to prevent. A backlog larger than the cap drains in several
+  claims — `Smolquery.BufferService.Drain` re-invokes this on every poll of
+  its retirement wait, so each retired claim frees the next.
 
   A no-op, returning `:ok`, when there is nothing unsealed: draining a table
   that already has none is not an error.
@@ -641,7 +651,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp claim_and_signal(state, unsealed) do
-    ids = Enum.map(unsealed, & &1.id)
+    ids =
+      unsealed
+      |> Enum.take(state.runtime.seal_batch_max_files)
+      |> Enum.map(& &1.id)
 
     result =
       with {:ok, keys} <- sealed_keys(state, ids) do

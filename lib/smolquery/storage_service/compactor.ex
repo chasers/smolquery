@@ -41,9 +41,16 @@ defmodule Smolquery.StorageService.Compactor do
   Per table, per sweep: segments under `compact_below_bytes` (sizes summed
   from the Parquet footers, never a data read), oldest first — segment ids are
   ULIDs, so name order is time order — greedily grouped until adding the next
-  would pass `compact_max_bytes`, compacted only if at least
-  `compact_min_inputs` made the cut. One group per table per sweep; a table
-  with more work keeps its place in line rather than monopolizing the sweep.
+  would pass `compact_max_bytes` or `compact_max_inputs`, compacted only if at
+  least `compact_min_inputs` made the cut. One group per table per sweep; a
+  table with more work keeps its place in line rather than monopolizing the
+  sweep.
+
+  The input-count cap exists because the merge is one DuckDB call (T-244): the
+  byte ceiling bounds the output, but 128 MiB of small segments is over a
+  hundred `read_parquet` inputs, and per-input cost is what outran the
+  engine's call timeout on the sandbox. The footer-sizing query is bounded by
+  the same cap — chunked, not truncated, so every segment is still sized.
 
   ## The output key is derived, so a retry overwrites instead of duplicating
 
@@ -133,6 +140,21 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp sizes(runtime, paths) do
+    paths
+    |> Enum.chunk_every(runtime.compact_max_inputs)
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
+      case sizes_chunk(runtime, chunk) do
+        {:ok, sizes} -> {:cont, {:ok, [sizes | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, chunks} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp sizes_chunk(runtime, paths) do
     sql =
       "SELECT file_name, sum(total_compressed_size)::BIGINT " <>
         "FROM parquet_metadata([#{placeholders(paths)}]) GROUP BY file_name"
@@ -150,7 +172,9 @@ defmodule Smolquery.StorageService.Compactor do
       |> Enum.sort_by(fn {path, _bytes} -> Path.basename(path) end)
 
     {group, _total} =
-      Enum.reduce_while(undersized, {[], 0}, fn {path, bytes}, {group, total} ->
+      undersized
+      |> Enum.take(runtime.compact_max_inputs)
+      |> Enum.reduce_while({[], 0}, fn {path, bytes}, {group, total} ->
         if total + bytes > runtime.compact_max_bytes and group != [] do
           {:halt, {group, total}}
         else

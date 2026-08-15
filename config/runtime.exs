@@ -152,6 +152,22 @@ if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
     flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)
 end
 
+# T-244: both caps bound one DuckDB call's `read_parquet` input list. The seal
+# batch grows with ingest throughput and the compaction group with backlog, so
+# without a cap either can outrun the engine's call timeout — and a frozen seal
+# claim then retries the same oversized merge forever.
+if files = System.get_env("SMOLQUERY_SEAL_BATCH_MAX_FILES") do
+  config :smolquery, Smolquery.BufferService,
+    seal_batch_max_files:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_BATCH_MAX_FILES", files)
+end
+
+if inputs = System.get_env("SMOLQUERY_COMPACT_MAX_INPUTS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_max_inputs:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_INPUTS", inputs)
+end
+
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
   config :smolquery, Smolquery.BufferService,
     max_buffered_bytes:
