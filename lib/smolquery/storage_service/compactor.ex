@@ -62,7 +62,12 @@ defmodule Smolquery.StorageService.Compactor do
   and the staging inserts plus the clustered `ORDER BY` on the final `COPY`
   scale with rows, so the group blew the merge's five-minute budget and
   re-planned identically every sweep. `compact_max_rows` caps the group by
-  the footers' summed `num_rows`, which sizing already reads.
+  the footers' summed `num_rows`, which sizing already reads. A head file no
+  neighbor fits beside under the row cap cannot wedge the table: a group
+  smaller than `compact_min_inputs` drops its head and regroups from the next
+  candidate, so the small files behind a row-heavy head still merge. The byte
+  cap never needs this — two files under `compact_below_bytes` always fit —
+  but a single small file can carry more rows than the cap admits twice.
 
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
@@ -87,7 +92,9 @@ defmodule Smolquery.StorageService.Compactor do
   run there. A dedicated engine removes the conflict, so when a failure
   carries a `Smolquery.Engine.CallExited`, this module kills the engine's
   database process — `rest_for_one` rebuilds database and connection — waits
-  briefly for the connection to re-register, and moves to the next table. The
+  briefly for a replacement connection to register (the old registration is
+  not the signal: the supervisor tears it down asynchronously, so only a new
+  pid proves the rebuild), and moves to the next table. The
   abandoned statement's DuckDB instance burns until it completes, but nothing
   queues behind it anymore, and a killed merge is free to retry: the output
   key is derived, so next sweep's attempt overwrites its orphan.
@@ -189,24 +196,26 @@ defmodule Smolquery.StorageService.Compactor do
   defp undersized(runtime, paths) do
     paths
     |> Enum.chunk_every(runtime.merge_inputs_per_call)
-    |> Enum.reduce_while({[], 0, 0, 0}, &size_chunk(runtime, &1, &2))
+    |> Enum.reduce_while(%{chunks: [], bytes: 0, rows: 0, count: 0}, &size_chunk(runtime, &1, &2))
     |> case do
       {:error, reason} -> {:error, reason}
-      {chunks, _bytes, _rows, _count} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
+      %{chunks: chunks} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
 
-  defp size_chunk(runtime, chunk, {acc, bytes, rows, count}) do
+  defp size_chunk(runtime, chunk, acc) do
     case sizes_chunk(runtime, chunk) do
       {:ok, sizes} ->
         found =
           Enum.filter(sizes, fn {_path, size, _rows} -> size < runtime.compact_below_bytes end)
 
-        found_bytes = Enum.sum_by(found, fn {_path, size, _rows} -> size end)
-        found_rows = Enum.sum_by(found, fn {_path, _size, rows} -> rows end)
-
         group_filled(
-          {[found | acc], bytes + found_bytes, rows + found_rows, count + length(found)},
+          %{
+            chunks: [found | acc.chunks],
+            bytes: acc.bytes + Enum.sum_by(found, fn {_path, size, _rows} -> size end),
+            rows: acc.rows + Enum.sum_by(found, fn {_path, _size, rows} -> rows end),
+            count: acc.count + length(found)
+          },
           runtime
         )
 
@@ -215,7 +224,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp group_filled({_chunks, bytes, rows, count} = acc, runtime)
+  defp group_filled(%{bytes: bytes, rows: rows, count: count} = acc, runtime)
        when bytes >= runtime.compact_max_bytes or rows >= runtime.compact_max_rows or
               count >= @group_max_staging_chunks * runtime.merge_inputs_per_call,
        do: {:halt, acc}
@@ -243,11 +252,18 @@ defmodule Smolquery.StorageService.Compactor do
   defp group(runtime, undersized) do
     ceiling = @group_max_staging_chunks * runtime.merge_inputs_per_call
 
+    undersized
+    |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
+    |> Enum.take(ceiling)
+    |> grouped(runtime)
+  end
+
+  defp grouped([], _runtime), do: :skip
+
+  defp grouped([_head | rest] = candidates, runtime) do
     {group, total, row_count} =
-      undersized
-      |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
-      |> Enum.take(ceiling)
-      |> Enum.reduce_while({[], 0, 0}, fn {path, bytes, rows}, {group, total, group_rows} ->
+      Enum.reduce_while(candidates, {[], 0, 0}, fn {path, bytes, rows},
+                                                   {group, total, group_rows} ->
         if (total + bytes > runtime.compact_max_bytes or
               group_rows + rows > runtime.compact_max_rows) and group != [] do
           {:halt, {group, total, group_rows}}
@@ -259,7 +275,7 @@ defmodule Smolquery.StorageService.Compactor do
     if length(group) >= runtime.compact_min_inputs do
       {:ok, %{paths: Enum.reverse(group), row_count: row_count, bytes: total}}
     else
-      :skip
+      grouped(rest, runtime)
     end
   end
 
@@ -330,13 +346,13 @@ defmodule Smolquery.StorageService.Compactor do
   defp failed(runtime, table_ref, reason, started_at) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
-    recycle_on_exit(runtime, reason)
-
     :telemetry.execute(
       [:smolquery, :compact, :swap],
       %{replaced: 0, duration_us: elapsed_us(started_at)},
       %{result: :error}
     )
+
+    recycle_on_exit(runtime, reason)
 
     {:failed, %{table: table_ref, reason: reason}}
   end
@@ -344,28 +360,31 @@ defmodule Smolquery.StorageService.Compactor do
   defp recycle_on_exit(runtime, {step, %CallExited{}})
        when step in [:sizing_failed, :merge_failed] do
     engine = Runtime.compact_engine(runtime.name)
+    stale_connection = Process.whereis(Engine.connection_name(engine))
 
     case Process.whereis(Engine.database_name(engine)) do
       nil ->
-        :ok
+        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
 
       database ->
         Logger.warning("recycling the compaction engine after an engine call exit")
         Process.exit(database, :kill)
-        await_engine(engine, @engine_recycle_wait_ms)
+        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
     end
   end
 
   defp recycle_on_exit(_runtime, _reason), do: :ok
 
-  defp await_engine(_engine, remaining_ms) when remaining_ms <= 0, do: :ok
+  defp await_engine(_engine, _stale_connection, remaining_ms) when remaining_ms <= 0, do: :ok
 
-  defp await_engine(engine, remaining_ms) do
-    if Process.whereis(Engine.connection_name(engine)) do
+  defp await_engine(engine, stale_connection, remaining_ms) do
+    connection = Process.whereis(Engine.connection_name(engine))
+
+    if is_pid(connection) and connection != stale_connection do
       :ok
     else
       Process.sleep(100)
-      await_engine(engine, remaining_ms - 100)
+      await_engine(engine, stale_connection, remaining_ms - 100)
     end
   end
 

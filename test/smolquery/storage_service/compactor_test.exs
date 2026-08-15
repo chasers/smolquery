@@ -40,11 +40,9 @@ defmodule Smolquery.StorageService.CompactorTest do
       id: Runtime.catalog_engine(storage)
     )
 
-    start_supervised!({Engine, name: Runtime.engine(storage)}, id: Runtime.engine(storage))
-
-    start_supervised!({Engine, name: Runtime.compact_engine(storage)},
-      id: Runtime.compact_engine(storage)
-    )
+    for engine <- [Runtime.engine(storage), Runtime.compact_engine(storage)] do
+      start_supervised!({Engine, name: engine}, id: engine)
+    end
 
     catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
     :ok = Catalog.create_dataset(catalog, "analytics")
@@ -257,6 +255,23 @@ defmodule Smolquery.StorageService.CompactorTest do
     refute a.path in current
     refute b.path in current
     assert lake_rows(context.storage) == 30
+  end
+
+  test "a row-heavy head no neighbor fits beside cannot wedge the table (T-260)", context do
+    runtime = start_compactor(context, compact_max_rows: 25)
+    a = seal(runtime, context.catalog, 1, 1..20)
+    b = seal(runtime, context.catalog, 2, 21..30)
+    c = seal(runtime, context.catalog, 3, 31..40)
+
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}], failed: []}} =
+             Compactor.sweep(context.storage)
+
+    merged = Store.location(runtime.store, key)
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([a.path, merged])
+    refute b.path in current
+    refute c.path in current
+    assert lake_rows(context.storage) == 40
   end
 
   test "an empty catalog sweeps nothing", context do

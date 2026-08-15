@@ -94,20 +94,15 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
         compact_max_bytes: 16_777_216
       )
 
-    start_supervised!(
-      {Engine,
-       name: StorageRuntime.engine(storage),
-       extensions: [:httpfs],
-       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]}
-    )
-
-    start_supervised!(
-      {Engine,
-       name: StorageRuntime.compact_engine(storage),
-       extensions: [:httpfs],
-       statements: [Smolquery.InternalSecret.create_secret_statement("http://")]},
-      id: StorageRuntime.compact_engine(storage)
-    )
+    for engine <- [StorageRuntime.engine(storage), StorageRuntime.compact_engine(storage)] do
+      start_supervised!(
+        {Engine,
+         name: engine,
+         extensions: [:httpfs],
+         statements: [Smolquery.InternalSecret.create_secret_statement("http://")]},
+        id: engine
+      )
+    end
 
     start_supervised!({Compactor, storage_runtime}, id: {:compactor, storage})
     start_supervised!({GC, storage_runtime}, id: {:gc, storage})

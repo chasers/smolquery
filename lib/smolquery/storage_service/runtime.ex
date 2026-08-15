@@ -312,14 +312,8 @@ defmodule Smolquery.StorageService.Runtime do
   @spec engine_memory_limit(t(), {:ok, pos_integer()} | :none) :: String.t() | nil
   def engine_memory_limit(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
 
-  def engine_memory_limit(%__MODULE__{engine_memory_limit: limit}, _cgroup)
-      when is_binary(limit),
-      do: limit
-
-  def engine_memory_limit(%__MODULE__{}, {:ok, bytes}),
-    do: "#{max(div(bytes, 2 * 1024 * 1024), 1)}MiB"
-
-  def engine_memory_limit(%__MODULE__{}, :none), do: nil
+  def engine_memory_limit(%__MODULE__{engine_memory_limit: limit}, cgroup),
+    do: derived_memory_limit(limit, cgroup, 2)
 
   @doc """
   The DuckDB memory limit the compaction engine starts with.
@@ -335,14 +329,15 @@ defmodule Smolquery.StorageService.Runtime do
   @spec compact_engine_memory_limit(t(), {:ok, pos_integer()} | :none) :: String.t() | nil
   def compact_engine_memory_limit(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
 
-  def compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}, _cgroup)
-      when is_binary(limit),
-      do: limit
+  def compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}, cgroup),
+    do: derived_memory_limit(limit, cgroup, 4)
 
-  def compact_engine_memory_limit(%__MODULE__{}, {:ok, bytes}),
-    do: "#{max(div(bytes, 4 * 1024 * 1024), 1)}MiB"
+  defp derived_memory_limit(limit, _cgroup, _divisor) when is_binary(limit), do: limit
 
-  def compact_engine_memory_limit(%__MODULE__{}, :none), do: nil
+  defp derived_memory_limit(nil, {:ok, bytes}, divisor),
+    do: "#{max(div(bytes, divisor * 1024 * 1024), 1)}MiB"
+
+  defp derived_memory_limit(nil, :none, _divisor), do: nil
 
   @doc """
   The engine a merge's calls run on.

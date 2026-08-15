@@ -41,7 +41,10 @@ defmodule Smolquery.StorageService.Supervisor do
   sealer crashing disturbs none of them. Losing the catalog restarts everything
   above it, which is what abandons in-flight attempts — safe, because a
   level-triggered re-signal brings every unsealed table back and a claim fixes the
-  input set.
+  input set. The compaction engine sits after the sealer for the same one-way
+  rule: only the compactor uses it, so its death — including a recycle storm
+  exceeding its restart intensity — restarts the compactor and the sweepers,
+  never the sealer or an in-flight seal (T-259).
 
   A deployment that commits through a catalog it manages elsewhere passes a
   `%Smolquery.Catalog{}` in configuration, and then this subtree starts none.
@@ -94,11 +97,11 @@ defmodule Smolquery.StorageService.Supervisor do
         DuckLake.children(catalog_opts(runtime), Runtime.catalog_engine(runtime.name)) ++
         [
           {Engine, engine_opts(runtime)},
+          {Task.Supervisor, name: Runtime.seals(runtime.name)},
+          {Sealer, runtime},
           Supervisor.child_spec({Engine, compact_engine_opts(runtime)},
             id: Runtime.compact_engine(runtime.name)
           ),
-          {Task.Supervisor, name: Runtime.seals(runtime.name)},
-          {Sealer, runtime},
           {Compactor, runtime},
           {Retention, runtime},
           {GC, runtime}
