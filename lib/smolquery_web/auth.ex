@@ -96,7 +96,8 @@ defmodule SmolqueryWeb.Auth do
     with marker when is_binary(marker) <- session[Atom.to_string(@marker)],
          true <- marker == runtime.session_marker,
          %Context{} = context <- runtime.context do
-      {:cont, Auth.assign_context(socket, context)}
+      socket = socket |> Auth.assign_context(context) |> Authorization.attach_static(marker)
+      {:cont, socket}
     else
       _ -> {:halt, LiveView.redirect(socket, to: "/")}
     end

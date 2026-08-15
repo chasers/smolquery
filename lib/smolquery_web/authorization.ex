@@ -10,9 +10,11 @@ defmodule SmolqueryWeb.Authorization do
   alias Phoenix.LiveView
   alias Smolquery.Auth
   alias Smolquery.Auth.Policy
+  alias SmolqueryWeb.Runtime
 
   @capabilities [:web_access, :query, :catalog_manage, :platform_operate]
   @max_expiry_timer_ms 86_400_000
+  @static_check_ms 1_000
 
   @doc "Validates a compile-time LiveView capability requirement."
   def init(capability) when capability in @capabilities, do: capability
@@ -73,6 +75,31 @@ defmodule SmolqueryWeb.Authorization do
 
   def attach(socket, _capability), do: socket
 
+  @doc "Revokes connected static sockets when the credential-derived marker rotates."
+  def attach_static(socket, marker) when is_binary(marker) do
+    if lifecycle_socket?(socket) do
+      socket
+      |> LiveView.attach_hook({__MODULE__, :static, :event}, :handle_event, fn _event,
+                                                                               _params,
+                                                                               socket ->
+        static_lifecycle_result(socket, marker)
+      end)
+      |> LiveView.attach_hook({__MODULE__, :static, :info}, :handle_info, fn message, socket ->
+        static_info_result(message, socket, marker)
+      end)
+      |> LiveView.attach_hook({__MODULE__, :static, :async}, :handle_async, fn _key,
+                                                                               _result,
+                                                                               socket ->
+        static_lifecycle_result(socket, marker)
+      end)
+      |> schedule_static_check()
+    else
+      socket
+    end
+  end
+
+  def attach_static(socket, _marker), do: socket
+
   @doc "Returns a generic socket denial without exposing claims or roles."
   def deny_event(socket, capability) do
     case authorize(socket, capability) do
@@ -111,6 +138,30 @@ defmodule SmolqueryWeb.Authorization do
       _ ->
         socket
     end
+  end
+
+  defp static_info_result(:smolquery_static_auth_check, socket, marker) do
+    case static_marker_current?(marker) do
+      true -> {:halt, schedule_static_check(socket)}
+      false -> {:halt, LiveView.redirect(socket, to: "/")}
+    end
+  end
+
+  defp static_info_result(_message, socket, marker),
+    do: static_lifecycle_result(socket, marker)
+
+  defp static_lifecycle_result(socket, marker) do
+    if static_marker_current?(marker),
+      do: {:cont, socket},
+      else: {:halt, LiveView.redirect(socket, to: "/")}
+  end
+
+  defp static_marker_current?(marker),
+    do: match?({:ok, %{auth_mode: :static, session_marker: ^marker}}, Runtime.fetch(SmolqueryWeb))
+
+  defp schedule_static_check(socket) do
+    Process.send_after(self(), :smolquery_static_auth_check, @static_check_ms)
+    socket
   end
 
   defp redirect(socket, :unauthenticated),

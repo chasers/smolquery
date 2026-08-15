@@ -256,6 +256,30 @@ defmodule SmolqueryWeb.AuthTest do
       assert {:redirect, %{to: "/auth/login"}} = socket.redirected
     end
 
+    test "a credential rotation revokes an already-connected static socket" do
+      runtime = start_web!()
+      socket = %LiveView.Socket{private: %{lifecycle: %LiveView.Lifecycle{}}}
+
+      assert {:cont, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => runtime.session_marker},
+                 socket
+               )
+
+      Runtime.put(Runtime.new(catalog: MapCatalog.new(), password: "rotated-password"))
+
+      assert {:halt, denied} = LiveView.Lifecycle.handle_event("kill", %{}, socket)
+      assert {:redirect, %{to: "/"}} = denied.redirected
+      assert_receive :smolquery_static_auth_check, 1_100
+
+      assert {:halt, denied} =
+               LiveView.Lifecycle.handle_info(:smolquery_static_auth_check, socket)
+
+      assert {:redirect, %{to: "/"}} = denied.redirected
+    end
+
     test "a rotated password revokes the marker old sessions carry and preserves identity" do
       runtime = start_web!()
       first_id = runtime.context.principal.id
