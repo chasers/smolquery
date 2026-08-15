@@ -95,6 +95,40 @@ defmodule Smolquery.StorageService.RuntimeTest do
         end
       end
     end
+
+    test "refuses a non-string engine_memory_limit at boot, not at engine start" do
+      for limit <- [512, :"2GiB"] do
+        assert_raise ArgumentError, ~r/unsupported engine_memory_limit/, fn ->
+          Runtime.new(name: __MODULE__.BadMemoryLimit, engine_memory_limit: limit)
+        end
+      end
+    end
+  end
+
+  describe "engine_memory_limit/2" do
+    test "an explicit limit wins over the cgroup" do
+      runtime = Runtime.new(name: __MODULE__.ExplicitLimit, engine_memory_limit: "3GiB")
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "3GiB"
+    end
+
+    test "derives half the cgroup limit" do
+      runtime = Runtime.new(name: __MODULE__.DerivedLimit)
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "2048MiB"
+    end
+
+    test "a cgroup limit under two mebibytes still yields a size DuckDB accepts" do
+      runtime = Runtime.new(name: __MODULE__.TinyLimit)
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 1}) == "1MiB"
+    end
+
+    test "without a cgroup limit the engine inherits its application config" do
+      runtime = Runtime.new(name: __MODULE__.InheritedLimit)
+
+      assert Runtime.engine_memory_limit(runtime, :none) == nil
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do

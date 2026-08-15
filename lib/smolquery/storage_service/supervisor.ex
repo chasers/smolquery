@@ -17,6 +17,17 @@ defmodule Smolquery.StorageService.Supervisor do
   reads each just-uploaded segment back when a commit registers it (DuckLake's
   add-data-files collects the file's footer stats).
 
+  The merge engine is sized to the pod it runs in: its memory limit resolves
+  per `Smolquery.StorageService.Runtime.engine_memory_limit/2` — an explicit
+  knob, else half the cgroup memory limit, else `Smolquery.Engine`'s
+  application config — and the resolved value is logged at boot, because it
+  is exactly the number an operator cannot read off their own configuration
+  (T-250). Merge sessions also set `preserve_insertion_order = false`,
+  DuckDB's named mitigation for out-of-memory `COPY`: rows nobody asked to
+  order may come out reordered, which no reader of a segment depends on,
+  while the clustering sort is an explicit `ORDER BY` the setting leaves
+  alone.
+
   The strategy is `rest_for_one`, in that order, because the dependency runs one
   way. A seal attempt commits through the catalog and merges through the engine and
   runs as a task, so all three must be up before the sealer accepts a signal; the
@@ -41,6 +52,8 @@ defmodule Smolquery.StorageService.Supervisor do
   """
 
   use Supervisor
+
+  require Logger
 
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster.PgGroup
@@ -73,10 +86,7 @@ defmodule Smolquery.StorageService.Supervisor do
       [{PgGroup.Member, {Smolquery.StorageService, runtime.name}}] ++
         DuckLake.children(catalog_opts(runtime), Runtime.catalog_engine(runtime.name)) ++
         [
-          {Engine,
-           name: Runtime.engine(runtime.name),
-           extensions: engine_extensions(runtime),
-           statements: engine_secrets(runtime)},
+          {Engine, engine_opts(runtime)},
           {Task.Supervisor, name: Runtime.seals(runtime.name)},
           {Sealer, runtime},
           {Compactor, runtime},
@@ -85,6 +95,27 @@ defmodule Smolquery.StorageService.Supervisor do
         ]
 
     Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  defp engine_opts(%Runtime{} = runtime) do
+    [
+      name: Runtime.engine(runtime.name),
+      extensions: engine_extensions(runtime),
+      statements: ["SET preserve_insertion_order = false" | engine_secrets(runtime)]
+    ] ++ engine_memory_limit(runtime)
+  end
+
+  defp engine_memory_limit(%Runtime{engine_memory_limit: configured} = runtime) do
+    case Runtime.engine_memory_limit(runtime) do
+      nil ->
+        []
+
+      limit ->
+        source = if configured, do: "configured", else: "half the cgroup memory limit"
+        Logger.info("storage merge engine memory_limit=#{limit} (#{source})")
+
+        [memory_limit: limit]
+    end
   end
 
   defp engine_secrets(%Runtime{} = runtime) do
