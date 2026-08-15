@@ -91,16 +91,18 @@ defmodule Smolquery.BufferService.TableBuffer do
   exactly-once.
 
   The claim also names its output, derived from its inputs, so a table's sealed
-  segment has a stable identity before any bytes exist. One key per claim, and at
-  most `seal_batch_max_files` inputs per claim (T-244): the sealer merges a claim
-  in one DuckDB call, so a claim that froze an entire backlog would grow with
-  ingest throughput until the merge outran the engine's call timeout — and a
-  frozen claim retries the same oversized merge forever. The claim takes the
-  oldest unsealed entries up to the cap and marks the backlog; once the claim
-  retires, the remainder is claimed on the next maintenance tick, without
-  waiting to re-cross a threshold or age out. The seal thresholds still decide
-  *when* a backlog starts sealing, measured against everything unsealed; the
-  cap only decides how much each claim takes.
+  segment has a stable identity before any bytes exist. One key per claim, and
+  the claim takes the oldest unsealed entries up to a byte valve of
+  16 × `seal_max_bytes`. The valve bounds two things at once: how large one
+  sealed segment can get, and how many bytes the merge stages in its temp
+  table — engine memory and spill are finite, and a claim past them would
+  fail the same way on every retry. A backlog past the valve retires in
+  valve-sized claims. The remainder still crosses `seal_max_bytes`, so the
+  next maintenance tick claims it as soon as this claim retires — a table
+  under sustained ingest self-corrects (T-246). Within a claim, calls are
+  bounded too: `Smolquery.StorageService.Merge` reads inputs in chunks of
+  `merge_inputs_per_call`, so no call carries an unbounded `read_parquet`
+  list.
 
   ## Recovery, and what a crash costs
 
@@ -141,6 +143,8 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
+  @claim_max_bytes_factor 16
+
   defstruct [
     :runtime,
     :table_ref,
@@ -151,7 +155,6 @@ defmodule Smolquery.BufferService.TableBuffer do
     :signaled_at,
     :load,
     :opened_at,
-    seal_backlog: false,
     chunks: [],
     pending: [],
     batch_ids: [],
@@ -350,15 +353,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   def maintain(buffer, timeout \\ 5_000), do: GenServer.call(buffer, :maintain, timeout)
 
   @doc """
-  Flushes, then signals a seal for this table's unsealed micro-segments —
-  regardless of `seal_max_bytes`/`seal_max_files`/`seal_max_age_ms` or how
-  recently a claim last signalled (Milestone 8 L4's drain).
-
-  The claim it signals is still capped at `seal_batch_max_files` (T-244): a
-  drain must not be the one caller allowed to build the oversized merge the
-  cap exists to prevent. A backlog larger than the cap drains in several
-  claims — `Smolquery.BufferService.Drain` re-invokes this on every poll of
-  its retirement wait, so each retired claim frees the next.
+  Flushes, then signals a seal for every unsealed micro-segment this table
+  holds — regardless of `seal_max_bytes`/`seal_max_files`/`seal_max_age_ms`
+  or how recently a claim last signalled (Milestone 8 L4's drain).
 
   A no-op, returning `:ok`, when there is nothing unsealed: draining a table
   that already has none is not an error.
@@ -627,8 +624,8 @@ defmodule Smolquery.BufferService.TableBuffer do
       |> Enum.reject(&Entry.sealed?/1)
 
     cond do
-      unsealed == [] -> %{state | signaled_at: nil, seal_backlog: false}
-      not (state.seal_backlog or sealable?(state, unsealed)) -> state
+      unsealed == [] -> %{state | signaled_at: nil}
+      not sealable?(state, unsealed) -> state
       true -> claim_and_signal(state, unsealed)
     end
   end
@@ -654,11 +651,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp claim_and_signal(state, unsealed) do
-    state = %{state | seal_backlog: length(unsealed) > state.runtime.seal_batch_max_files}
-
     ids =
       unsealed
-      |> Enum.take(state.runtime.seal_batch_max_files)
+      |> claim_batch(state.runtime.seal_max_bytes * @claim_max_bytes_factor)
       |> Enum.map(& &1.id)
 
     result =
@@ -675,6 +670,19 @@ defmodule Smolquery.BufferService.TableBuffer do
 
         state
     end
+  end
+
+  defp claim_batch([first | rest], valve) do
+    {batch, _total} =
+      Enum.reduce_while(rest, {[first], first.byte_size}, fn entry, {batch, total} ->
+        if total + entry.byte_size > valve do
+          {:halt, {batch, total}}
+        else
+          {:cont, {[entry | batch], total + entry.byte_size}}
+        end
+      end)
+
+    Enum.reverse(batch)
   end
 
   defp claim_with_log(state, ids, keys, log) do
@@ -710,26 +718,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp due?(state), do: now() - state.signaled_at >= state.runtime.seal_retry_ms
 
   defp signal(state, claim) do
-    warn_over_cap(state, claim)
-
     SealConsumer.seal_ready(state.runtime.seal_consumer, state.table_ref, claim)
 
     %{state | signaled_at: now()}
   end
-
-  defp warn_over_cap(state, %{ids: ids}) when is_list(ids) do
-    if length(ids) > state.runtime.seal_batch_max_files do
-      Logger.warning(
-        "seal claim for #{inspect(state.table_ref)} holds #{length(ids)} inputs, " <>
-          "over seal_batch_max_files #{state.runtime.seal_batch_max_files}; " <>
-          "a pre-cap claim merges whole — raise the engine timeout if it cannot finish"
-      )
-    end
-
-    :ok
-  end
-
-  defp warn_over_cap(_state, _claim), do: :ok
 
   defp schedule_maintenance(state) do
     Process.send_after(self(), :maintain, state.runtime.maintenance_interval_ms)
