@@ -18,7 +18,7 @@ error.
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_ROLES` | which service subtrees start — `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web` (all). An unknown name fails the boot |
-| `SMOLQUERY_AUTH_MODE` | authentication mode (`static` or `oidc`); required on `:api` and `:web` nodes, with `oidc` rejected until OIDC runtime support exists |
+| `SMOLQUERY_AUTH_MODE` | authentication mode (`static` or `oidc`); required on `:api` and `:web` nodes; OIDC starts only with the validated `SMOLQUERY_OIDC_*` settings |
 | `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires in static mode; a node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
@@ -26,6 +26,36 @@ error.
 | `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
+
+### OIDC foundation (T-231)
+
+OIDC mode is explicit and fail-closed. The API and web roles validate their
+own required settings before their listeners start. T-231 only starts and
+validates the discovery/JWKS cache; request authentication and browser login
+are added by later stack layers. Provider outage or malformed discovery/JWKS
+never opens either listener.
+
+| variable | effect |
+|---|---|
+| `SMOLQUERY_OIDC_ISSUER` | exact HTTPS issuer string; trailing slash is retained, while query, fragment, and userinfo are rejected |
+| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles |
+| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles |
+| `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
+| `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
+| `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin |
+| `SMOLQUERY_OIDC_WEB_REDIRECT_URI` | exact HTTPS authorization callback URI |
+| `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
+| `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
+| `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}` |
+| `SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS` / `SMOLQUERY_OIDC_JWKS_MAX_AGE_MS` | bounded cache freshness windows (defaults `3600000`) |
+| `SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS` / `SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS` / `SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS` | bounded Req connection, per-chunk receive, and complete-response timeouts (defaults `2000` / `5000` / `10000`) |
+| `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS response size (default `1048576`) |
+
+The discovery client requires JSON responses, byte-for-byte issuer equality, HTTPS
+authorization/token/JWKS endpoints, and an algorithm overlap with the local
+asymmetric allowlist. It refuses redirects and bounds response bodies. It does not trust `jku`, token headers, claims, or provider groups
+as tenant identifiers.
+
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 
 ### Storage and the catalog

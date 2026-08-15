@@ -13,10 +13,11 @@ defmodule SmolqueryApi.Runtime do
         auth_mode: :static,
         api_key: "..."
 
-  `auth_mode: :static` explicitly selects the static Bearer-key adapter. There
-  is no default or fallback: a node holding the `:api` role with a missing or
-  unsupported mode, or without a key, refuses to boot rather than serve an open
-  API. Multi-key and rotation are explicitly later.
+  `auth_mode: :static` explicitly selects the static Bearer-key adapter, while
+  `:oidc` validates and starts the OIDC provider cache. There is no default or
+  fallback: a node holding the `:api` role with missing mode or OIDC settings
+  refuses to boot rather than serve an open API. Request token verification is
+  added by T-232.
 
   The listener (ip, port) is Phoenix's own concern and lives under
   `config :smolquery, SmolqueryApi.Endpoint` — the same split
@@ -31,11 +32,13 @@ defmodule SmolqueryApi.Runtime do
   """
 
   alias Smolquery.Auth.Context
+  alias Smolquery.Auth.Mode
+  alias Smolquery.Auth.OIDC.Config, as: OIDCConfig
   alias Smolquery.Auth.Static
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :auth_mode, :api_key, :context, :catalog]
-  @derive {Inspect, except: [:api_key]}
+  @enforce_keys [:name, :auth_mode, :api_key, :context, :catalog, :oidc]
+  @derive {Inspect, except: [:api_key, :oidc]}
   defstruct [
     :name,
     :auth_mode,
@@ -43,6 +46,7 @@ defmodule SmolqueryApi.Runtime do
     :context,
     :catalog,
     :catalog_opts,
+    :oidc,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
     load_max_bytes: 268_435_456
@@ -50,10 +54,11 @@ defmodule SmolqueryApi.Runtime do
 
   @type t :: %__MODULE__{
           name: atom(),
-          auth_mode: :static,
-          api_key: String.t(),
-          context: Context.t(),
+          auth_mode: :static | :oidc,
+          api_key: String.t() | nil,
+          context: Context.t() | nil,
           catalog: Catalog.t(),
+          oidc: OIDCConfig.t() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
@@ -64,8 +69,9 @@ defmodule SmolqueryApi.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryApi` supplies the defaults; `opts`
-  overrides them. Raises if the authentication mode is missing or unsupported,
-  or if no non-empty `api_key` is present in either.
+  overrides them. Raises if the authentication mode is missing, or if static
+  mode has no non-empty `api_key`. OIDC mode validates its provider foundation;
+  request token verification remains denied until T-232.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -75,20 +81,32 @@ defmodule SmolqueryApi.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
-    auth_mode = Static.mode!(config, "the API", :api)
+    auth_mode = Mode.runtime_mode!(config, "the API", :api)
+
+    {api_key, context, oidc} =
+      case auth_mode do
+        :static ->
+          key =
+            Smolquery.Runtime.fetch_required!(config, :api_key,
+              service: "the API",
+              missing: "an API key",
+              env_var: "SMOLQUERY_API_KEY",
+              scope: SmolqueryApi,
+              role: :api
+            )
+
+          {key, Static.api_context(), nil}
+
+        :oidc ->
+          {nil, nil, OIDCConfig.new(config, :api)}
+      end
 
     %__MODULE__{
       name: name,
       auth_mode: auth_mode,
-      api_key:
-        Smolquery.Runtime.fetch_required!(config, :api_key,
-          service: "the API",
-          missing: "an API key",
-          env_var: "SMOLQUERY_API_KEY",
-          scope: SmolqueryApi,
-          role: :api
-        ),
-      context: Static.api_context(),
+      api_key: api_key,
+      context: context,
+      oidc: oidc,
       catalog: catalog,
       catalog_opts: catalog_opts
     }

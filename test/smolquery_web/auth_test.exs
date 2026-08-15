@@ -141,6 +141,28 @@ defmodule SmolqueryWeb.AuthTest do
       assert {:redirect, %{to: "/"}} = socket.redirected
     end
 
+    test "the hook redirects cleanly while OIDC browser login is not implemented" do
+      runtime =
+        Runtime.new(
+          catalog: MapCatalog.new(),
+          auth_mode: :oidc,
+          secret_key_base: String.duplicate("s", 64),
+          oidc: [
+            issuer: "https://issuer.example/",
+            web_client_id: "web",
+            web_client_auth_method: :none,
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        )
+
+      Runtime.put(runtime)
+      on_exit(fn -> Runtime.delete(SmolqueryWeb) end)
+
+      assert {:halt, socket} = Auth.on_mount(:require_authenticated, %{}, %{}, %LiveView.Socket{})
+      assert {:redirect, %{to: "/"}} = socket.redirected
+    end
+
     test "a rotated password revokes the marker old sessions carry and preserves identity" do
       runtime = start_web!()
       first_id = runtime.context.principal.id

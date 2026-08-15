@@ -1,7 +1,15 @@
 defmodule Smolquery.Auth.StaticTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Auth.Mode
   alias Smolquery.Auth.Static
+
+  describe "runtime_mode!/3" do
+    test "accepts explicit static and OIDC modes" do
+      assert Mode.runtime_mode!([auth_mode: :static], "the API", :api) == :static
+      assert Mode.runtime_mode!([auth_mode: :oidc], "the API", :api) == :oidc
+    end
+  end
 
   describe "mode!/3" do
     test "accepts explicit static mode" do

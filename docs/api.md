@@ -3,10 +3,11 @@
 `SmolqueryApi` is the front door — a Phoenix endpoint served by Bandit (the
 same stack as the web UI's `SmolqueryWeb`), started by the `:api` role, routing
 only to service client modules and the catalog (the same boundary rule the
-services hold each other to). Set `SMOLQUERY_AUTH_MODE=static` while OIDC
-runtime support is unavailable. Every `/v1` route then requires the static
-Bearer key (`SMOLQUERY_API_KEY`); a node with the `:api` role and no mode or key
-configured fails the boot rather than serve an open API. Successful static
+services hold each other to). Set `SMOLQUERY_AUTH_MODE=static` for the static
+Bearer-key adapter, or `oidc` for the validated OIDC foundation. T-231 keeps
+OIDC API requests denied until T-232 adds token verification. Every static
+`/v1` request requires `SMOLQUERY_API_KEY`; a node with no mode or required
+credentials fails the boot rather than serve an open API. Successful static
 requests carry a normalized service principal and context. `/healthz` is the
 one unauthenticated route.
 

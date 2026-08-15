@@ -89,6 +89,26 @@ defmodule Smolquery.RuntimeConfigTest do
     end
   end
 
+  test "parses OIDC bounded values and claim mappings" do
+    assert RuntimeConfig.csv!("ALGORITHMS", "RS256, ES256") == ["RS256", "ES256"]
+    assert RuntimeConfig.bounded_non_negative_integer!("SKEW", "30", 300) == 30
+
+    assert RuntimeConfig.capability_mapping!(
+             "CLAIMS",
+             ~s({"roles":{"reader":["query"],"operator":["web_access","platform_operate"]}})
+           ) == %{
+             "roles" => %{"reader" => [:query], "operator" => [:web_access, :platform_operate]}
+           }
+
+    for {function, value} <- [
+          {&RuntimeConfig.csv!("ALGORITHMS", &1), ""},
+          {&RuntimeConfig.capability_mapping!("CLAIMS", &1), ""},
+          {&RuntimeConfig.capability_mapping!("CLAIMS", &1), "roles=unknown"}
+        ] do
+      assert_raise ArgumentError, ~r/ALGORITHMS|CLAIMS/, fn -> function.(value) end
+    end
+  end
+
   test "maps supported enum values without creating atoms" do
     choices = [{"polars", :polars}, {"duckdb", :duckdb}]
 
@@ -108,6 +128,30 @@ defmodule Smolquery.RuntimeConfigTest do
     assert_raise ArgumentError, ~r/NODES.*name@host/, fn ->
       RuntimeConfig.node_names!("NODES", "not-a-node")
     end
+  end
+
+  test "runtime config parses OIDC settings under the OIDC config namespace" do
+    with_env(
+      %{
+        "SMOLQUERY_OIDC_ISSUER" => "https://issuer.example/",
+        "SMOLQUERY_OIDC_API_AUDIENCE" => "api",
+        "SMOLQUERY_OIDC_ALGORITHMS" => "RS256,PS256",
+        "SMOLQUERY_OIDC_CLOCK_SKEW" => "30",
+        "SMOLQUERY_OIDC_CLAIM_CAPABILITIES" =>
+          ~s({"roles":{"reader":["query"],"operator":["web_access"]}})
+      },
+      fn ->
+        runtime = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+        oidc = Keyword.fetch!(Keyword.fetch!(runtime, :smolquery), Smolquery.Auth.OIDC.Config)
+
+        assert oidc[:issuer] == "https://issuer.example/"
+        assert oidc[:algorithms] == ["RS256", "PS256"]
+
+        assert oidc[:claim_capabilities] == %{
+                 "roles" => %{"reader" => [:query], "operator" => [:web_access]}
+               }
+      end
+    )
   end
 
   test "runtime config applies parsed values without creating node atoms" do

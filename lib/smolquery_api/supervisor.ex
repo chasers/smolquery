@@ -3,9 +3,9 @@ defmodule SmolqueryApi.Supervisor do
   Top-level subtree for the `:api` role.
 
   Started only on nodes whose roles include `:api` (see `Smolquery.Roles`).
-  Resolving the runtime happens in `start_link/1`, so a node missing its API
-  key fails the boot right here — fail closed — rather than starting a
-  listener that would wave requests through.
+  Resolving the runtime happens in `start_link/1`, so a node missing its
+  static API key or OIDC provider foundation fails the boot right here — fail
+  closed — rather than starting a listener that would wave requests through.
 
   The strategy is `rest_for_one`, catalog engine first, because the endpoint
   answers CRUD through it; a catalog engine that dies takes the endpoint down
@@ -16,6 +16,7 @@ defmodule SmolqueryApi.Supervisor do
 
   use Supervisor
 
+  alias Smolquery.Auth.OIDC
   alias Smolquery.Catalog.DuckLake
   alias SmolqueryApi.Runtime
 
@@ -38,6 +39,7 @@ defmodule SmolqueryApi.Supervisor do
 
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
+        OIDC.children(runtime.auth_mode, runtime.oidc, runtime.name) ++
         [SmolqueryApi.Endpoint]
 
     Supervisor.init(children, strategy: :rest_for_one)
