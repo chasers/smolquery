@@ -23,7 +23,6 @@ defmodule SmolqueryApi.Auth do
   import Plug.Conn
 
   alias Smolquery.Auth
-  alias Smolquery.Auth.Context
   alias Smolquery.Auth.OIDC.Token
   alias Smolquery.InternalSecret
   alias SmolqueryApi.Errors
@@ -81,18 +80,8 @@ defmodule SmolqueryApi.Auth do
   defp authenticate(%{auth_mode: :oidc, oidc: config, name: name}, token) do
     provider = Module.concat(name, "OIDCProvider")
 
-    case Token.authenticate(token, config, provider) do
-      {:ok, context} ->
-        if coarse_api_access?(context), do: {:ok, context}, else: :error
-
-      :error ->
-        :error
-    end
+    Token.authenticate(token, config, provider)
   end
 
   defp authenticate(_runtime, _token), do: :error
-
-  defp coarse_api_access?(context) do
-    Enum.all?([:query, :ingest, :catalog_manage], &Context.granted?(context, &1))
-  end
 end

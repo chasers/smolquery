@@ -58,13 +58,21 @@ outage or malformed discovery/JWKS never opens either listener.
 
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
 algorithm, a compatible public signing key, exact issuer and audience, and
-integer NumericDate claims. Unknown keys trigger one supervised JWKS refresh, subject to the global forced-refresh cooldown;
-concurrent or repeated unknown keys within that cooldown reuse the current cache and reject
-without another network fetch. All other failures reject without revealing the verification reason. The
-context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the accepted
-expiration-skew boundary. Before T-233, an OIDC API token must map to all three
-current API capabilities (`query`, `ingest`, and `catalog_manage`), so this layer
-cannot accidentally grant a query-only token write or catalog access.
+integer NumericDate claims. Unknown keys trigger one supervised JWKS refresh,
+subject to the global forced-refresh cooldown; concurrent or repeated unknown
+keys within that cooldown reuse the current cache and reject without another
+network fetch. All other failures reject without revealing the verification
+reason. The context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the
+accepted expiration-skew boundary.
+
+API authorization is a closed route matrix applied after authentication and
+before body parsing. `query` permits dataset/table reads, sync and async query
+submission, job status/results/cancel; `ingest` permits insert and load; and
+`catalog_manage` permits dataset/table creation and table policy PATCH. Missing,
+malformed, or expired contexts return a generic 401; authenticated contexts
+without the route capability return a generic 403. Static credentials carry all
+three API capabilities. The route capability is selected only by the compiled
+router map, never from request claims or path input.
 
 The discovery client requires JSON responses, byte-for-byte issuer equality, HTTPS
 authorization/token/JWKS endpoints, and an algorithm overlap with the local

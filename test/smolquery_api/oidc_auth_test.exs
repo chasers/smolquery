@@ -6,7 +6,10 @@ defmodule SmolqueryApi.OIDCAuthTest do
 
   alias Smolquery.Auth
   alias Smolquery.Auth.OIDC.Provider
+  alias Smolquery.QueryService
   alias Smolquery.Test.ApiEndpoint
+  alias Smolquery.Test.FixedCatalog
+  alias Smolquery.Test.MapCatalog
   alias SmolqueryApi.Runtime
 
   @private_key JOSE.JWK.generate_key({:rsa, 2048})
@@ -27,26 +30,110 @@ defmodule SmolqueryApi.OIDCAuthTest do
     refute inspect(context) =~ token
   end
 
-  test "rejects query-only OIDC tokens and obscures route existence without parsing bodies" do
+  test "rejects query-only OIDC tokens before parsing catalog writes" do
     name = start_api()
     token = token(%{"scope" => "query"})
 
-    real = request(name, conn(:post, "/v1/datasets", "not-json") |> bearer(token))
-    absent = request(name, conn(:post, "/v1/no/such/route", "not-json") |> bearer(token))
+    response =
+      request(
+        name,
+        conn(:post, "/v1/datasets", "not-json")
+        |> put_req_header("content-type", "application/json")
+        |> bearer(token)
+      )
 
-    assert real.status == 401
-    assert real.resp_body == absent.resp_body
-    assert %Plug.Conn.Unfetched{aspect: :body_params} = real.body_params
-    assert %Plug.Conn.Unfetched{aspect: :body_params} = absent.body_params
+    assert response.status == 403
+    assert JSON.decode!(response.resp_body)["error"]["status"] == "PERMISSION_DENIED"
+    assert %Plug.Conn.Unfetched{aspect: :body_params} = response.body_params
+
+    oversized =
+      request(
+        name,
+        conn(:post, "/v1/datasets", String.duplicate("x", 2_000_000))
+        |> put_req_header("content-type", "application/json")
+        |> bearer(token)
+      )
+
+    assert oversized.status == 403
+    assert %Plug.Conn.Unfetched{aspect: :body_params} = oversized.body_params
+  end
+
+  test "applies the closed capability matrix before parsers" do
+    routes = %{
+      query: [
+        {:get, "/v1/datasets"},
+        {:get, "/v1/datasets/missing/tables"},
+        {:get, "/v1/datasets/missing/tables/missing"},
+        {:post, "/v1/queries"},
+        {:post, "/v1/jobs"},
+        {:get, "/v1/jobs/missing"},
+        {:get, "/v1/jobs/missing/results"},
+        {:delete, "/v1/jobs/missing"}
+      ],
+      ingest: [
+        {:post, "/v1/datasets/missing/tables/missing/insert"},
+        {:post, "/v1/datasets/missing/tables/missing/load"}
+      ],
+      catalog_manage: [
+        {:post, "/v1/datasets"},
+        {:post, "/v1/datasets/missing/tables"},
+        {:patch, "/v1/datasets/missing/tables/missing"}
+      ]
+    }
+
+    matrix =
+      for {route_capability, route_list} <- routes,
+          {method, path} <- route_list,
+          do: {route_capability, method, path}
+
+    for {capability, _routes} <- routes do
+      name = start_api()
+
+      for {route_capability, method, path} <- matrix do
+        response =
+          request(
+            name,
+            route_request(method, path, token(%{"scope" => scope_value(capability)}))
+          )
+
+        if capability == route_capability do
+          assert response.status not in [401, 403],
+                 "#{capability} token denied #{method} #{path}: #{response.status}"
+        else
+          assert response.status == 403
+          assert %Plug.Conn.Unfetched{aspect: :body_params} = response.body_params
+        end
+      end
+    end
+  end
+
+  defp scope_value(:catalog_manage), do: "catalog"
+  defp scope_value(capability), do: Atom.to_string(capability)
+
+  defp route_request(method, path, token) do
+    body = if method == :get or method == :delete, do: "", else: "not-json"
+
+    conn(method, path, body)
+    |> put_req_header("content-type", "application/json")
+    |> bearer(token)
   end
 
   defp start_api do
     name = :"api_oidc_#{System.unique_integer([:positive])}"
+    query_name = :"api_oidc_query_#{System.unique_integer([:positive])}"
+
+    {:ok, _query} =
+      QueryService.Supervisor.start_link(
+        name: query_name,
+        catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}})
+      )
 
     runtime =
       Runtime.new(
         name: name,
         auth_mode: :oidc,
+        catalog: MapCatalog.new(),
+        query_name: query_name,
         oidc: [
           issuer: "https://issuer.example",
           api_audience: "smolquery-api",
@@ -71,6 +158,7 @@ defmodule SmolqueryApi.OIDCAuthTest do
     on_exit(fn ->
       Runtime.delete(name)
       if Process.alive?(provider), do: GenServer.stop(provider)
+      QueryService.Runtime.delete(query_name)
     end)
 
     name
