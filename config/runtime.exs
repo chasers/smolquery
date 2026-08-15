@@ -149,6 +149,14 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+# The storage merge engine's own limit (T-250). Unset, it derives from the
+# container's cgroup memory limit, and only without one of those does it
+# inherit SMOLQUERY_MEMORY_LIMIT — one size for every engine on every role,
+# which is what left a 4 Gi storage pod merging inside 954 MiB.
+if limit = System.get_env("SMOLQUERY_STORAGE_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.StorageService, engine_memory_limit: limit
+end
+
 if threads = System.get_env("SMOLQUERY_ENGINE_THREADS") do
   config :smolquery, Smolquery.Engine, threads: String.to_integer(threads)
 end
@@ -242,20 +250,39 @@ if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
     flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)
 end
 
-# T-244: both caps bound one DuckDB call's `read_parquet` input list. The seal
-# batch grows with ingest throughput and the compaction group with backlog, so
-# without a cap either can outrun the engine's call timeout — and a frozen seal
-# claim then retries the same oversized merge forever.
-if files = System.get_env("SMOLQUERY_SEAL_BATCH_MAX_FILES") do
-  config :smolquery, Smolquery.BufferService,
-    seal_batch_max_files:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_BATCH_MAX_FILES", files)
+# T-246/T-247/T-248: `merge_inputs_per_call` bounds every `read_parquet` list
+# one engine call carries — per-input cost over httpfs is what outruns the
+# call timeout — so a seal claim or a compaction group of any size merges in
+# bounded chunks. The two variables it replaced never shipped in a release,
+# but a deployment that set one from main should hear that it went silent.
+for removed <- ["SMOLQUERY_SEAL_BATCH_MAX_FILES", "SMOLQUERY_COMPACT_MAX_INPUTS"] do
+  if System.get_env(removed) do
+    IO.warn(
+      "#{removed} is removed and ignored: the merge bounds its own engine calls — " <>
+        "set SMOLQUERY_MERGE_INPUTS_PER_CALL instead"
+    )
+  end
 end
 
-if inputs = System.get_env("SMOLQUERY_COMPACT_MAX_INPUTS") do
+if inputs = System.get_env("SMOLQUERY_MERGE_INPUTS_PER_CALL") do
   config :smolquery, Smolquery.StorageService,
-    compact_max_inputs:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_INPUTS", inputs)
+    merge_inputs_per_call:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_INPUTS_PER_CALL", inputs)
+end
+
+# T-260: bytes alone do not bound a compaction group's merge cost — on
+# highly compressible data the decompressed row count diverges from the
+# compressed bytes by ~100x, and merge cost scales with rows.
+if rows = System.get_env("SMOLQUERY_COMPACT_MAX_ROWS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_max_rows:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_ROWS", rows)
+end
+
+# T-259: compaction runs on its own engine so a timed-out merge cannot starve
+# seals. Unset, the limit derives as a quarter of the cgroup memory limit.
+if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.StorageService, compact_engine_memory_limit: limit
 end
 
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do

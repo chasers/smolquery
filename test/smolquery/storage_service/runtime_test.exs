@@ -88,14 +88,100 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
-    test "refuses a compact_max_inputs below compact_min_inputs at boot, not per sweep" do
-      assert_raise ArgumentError, ~r/unsupported compact_max_inputs/, fn ->
-        Runtime.new(
-          name: __MODULE__.BadCompactCap,
-          compact_min_inputs: 4,
-          compact_max_inputs: 3
-        )
+    test "refuses an unusable merge_inputs_per_call at boot, not at first merge" do
+      for per_call <- [0, -1, "12", nil] do
+        assert_raise ArgumentError, ~r/unsupported merge_inputs_per_call/, fn ->
+          Runtime.new(name: __MODULE__.BadMergeCap, merge_inputs_per_call: per_call)
+        end
       end
+    end
+
+    test "refuses a non-string engine_memory_limit at boot, not at engine start" do
+      for limit <- [512, :"2GiB"] do
+        assert_raise ArgumentError, ~r/unsupported engine_memory_limit/, fn ->
+          Runtime.new(name: __MODULE__.BadMemoryLimit, engine_memory_limit: limit)
+        end
+      end
+    end
+
+    test "refuses a non-string compact_engine_memory_limit at boot" do
+      for limit <- [512, :"1GiB"] do
+        assert_raise ArgumentError, ~r/unsupported compact_engine_memory_limit/, fn ->
+          Runtime.new(name: __MODULE__.BadCompactMemoryLimit, compact_engine_memory_limit: limit)
+        end
+      end
+    end
+
+    test "refuses an unusable compact_max_rows at boot, not at first sweep" do
+      for rows <- [0, -1, "4194304", nil] do
+        assert_raise ArgumentError, ~r/unsupported compact_max_rows/, fn ->
+          Runtime.new(name: __MODULE__.BadRowCap, compact_max_rows: rows)
+        end
+      end
+    end
+  end
+
+  describe "engine_memory_limit/2" do
+    test "an explicit limit wins over the cgroup" do
+      runtime = Runtime.new(name: __MODULE__.ExplicitLimit, engine_memory_limit: "3GiB")
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "3GiB"
+    end
+
+    test "derives half the cgroup limit" do
+      runtime = Runtime.new(name: __MODULE__.DerivedLimit)
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "2048MiB"
+    end
+
+    test "a cgroup limit under two mebibytes still yields a size DuckDB accepts" do
+      runtime = Runtime.new(name: __MODULE__.TinyLimit)
+
+      assert Runtime.engine_memory_limit(runtime, {:ok, 1}) == "1MiB"
+    end
+
+    test "without a cgroup limit the engine inherits its application config" do
+      runtime = Runtime.new(name: __MODULE__.InheritedLimit)
+
+      assert Runtime.engine_memory_limit(runtime, :none) == nil
+    end
+  end
+
+  describe "compact_engine_memory_limit/2" do
+    test "an explicit limit wins over the cgroup" do
+      runtime =
+        Runtime.new(name: __MODULE__.ExplicitCompactLimit, compact_engine_memory_limit: "1GiB")
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "1GiB"
+    end
+
+    test "derives a quarter of the cgroup limit" do
+      runtime = Runtime.new(name: __MODULE__.DerivedCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 4_294_967_296}) == "1024MiB"
+    end
+
+    test "a cgroup limit under four mebibytes still yields a size DuckDB accepts" do
+      runtime = Runtime.new(name: __MODULE__.TinyCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, {:ok, 1}) == "1MiB"
+    end
+
+    test "without a cgroup limit the engine inherits its application config" do
+      runtime = Runtime.new(name: __MODULE__.InheritedCompactLimit)
+
+      assert Runtime.compact_engine_memory_limit(runtime, :none) == nil
+    end
+  end
+
+  describe "merge_engine/1" do
+    test "resolves to the seal merge engine unless overridden" do
+      runtime = Runtime.new(name: Storage)
+
+      assert Runtime.merge_engine(runtime) == Storage.Engine
+
+      assert Runtime.merge_engine(%{runtime | merge_engine: Storage.CompactEngine}) ==
+               Storage.CompactEngine
     end
   end
 
@@ -119,6 +205,7 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.supervisor(Storage) == Storage.Supervisor
       assert Runtime.sealer(Storage) == Storage.Sealer
       assert Runtime.engine(Storage) == Storage.Engine
+      assert Runtime.compact_engine(Storage) == Storage.CompactEngine
       assert Runtime.seals(Storage) == Storage.Seals
       assert Runtime.catalog_engine(Storage) == Storage.Catalog
     end
