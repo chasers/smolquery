@@ -29,7 +29,6 @@ defmodule Smolquery.BufferService.Runtime do
         seal_max_bytes: 67_108_864,
         seal_max_files: 64,
         seal_max_age_ms: 60_000,
-        seal_batch_max_files: 12,
         seal_retry_ms: 30_000,
         retire_grace_ms: 600_000,
         maintenance_interval_ms: 5_000,
@@ -126,17 +125,10 @@ defmodule Smolquery.BufferService.Runtime do
   the short window off. See `Smolquery.BufferService.TableBuffer` for what
   counts as in flight and when the choice is made.
 
-  `seal_batch_max_files` caps how many micro-segments one claim freezes (T-244).
-  The seal thresholds above say *when* a table seals; this says *how much* one
-  seal takes. The sealer merges a claim in one DuckDB call, so an uncapped claim
-  grows with ingest throughput until the merge outruns the engine's 30 s call
-  timeout — measured on the eu-central-1 sandbox, where a 36-input batch already
-  exceeded it (≥ ~830 ms per input over `httpfs`). The default of 12 comes from
-  that measurement: the merge engine serializes up to three bounded calls (two
-  seals plus a compaction), so each call gets ~10 s, and 10 s / 830 ms ≈ 12
-  inputs. A backlog larger than the cap seals in several claims — the claim
-  takes the oldest entries and marks the backlog, and the remainder is
-  claimed as each claim retires, without waiting to re-cross a threshold.
+  A claim freezes *everything* unsealed, however large: the storage side's
+  merge bounds its own engine calls (`merge_inputs_per_call` on
+  `Smolquery.StorageService.Runtime`), so a backlog retires in one claim and
+  a table under sustained ingest self-corrects (T-246, T-247).
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
@@ -178,7 +170,6 @@ defmodule Smolquery.BufferService.Runtime do
     seal_max_bytes: 67_108_864,
     seal_max_files: 64,
     seal_max_age_ms: 60_000,
-    seal_batch_max_files: 12,
     seal_retry_ms: 30_000,
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
@@ -214,7 +205,6 @@ defmodule Smolquery.BufferService.Runtime do
           seal_max_bytes: pos_integer(),
           seal_max_files: pos_integer(),
           seal_max_age_ms: pos_integer(),
-          seal_batch_max_files: pos_integer(),
           seal_retry_ms: pos_integer(),
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
@@ -244,7 +234,6 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_max_bytes,
     :seal_max_files,
     :seal_max_age_ms,
-    :seal_batch_max_files,
     :seal_retry_ms,
     :retire_grace_ms,
     :maintenance_interval_ms,
@@ -332,7 +321,6 @@ defmodule Smolquery.BufferService.Runtime do
     validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
     validate_commit_siblings!(Keyword.get(config, :commit_siblings, 5))
     validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
-    validate_seal_batch_max_files!(Keyword.get(config, :seal_batch_max_files, 12))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -523,14 +511,6 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable idle flush interval: #{inspect(interval)} " <>
             "(expected a non-negative integer of milliseconds)"
-  end
-
-  defp validate_seal_batch_max_files!(files) when is_integer(files) and files > 0, do: :ok
-
-  defp validate_seal_batch_max_files!(files) do
-    raise ArgumentError,
-          "unusable seal_batch_max_files: #{inspect(files)} " <>
-            "(expected a positive integer)"
   end
 
   defp warn_inverted_capacity(%__MODULE__{} = runtime) do

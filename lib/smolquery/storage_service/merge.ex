@@ -16,6 +16,24 @@ defmodule Smolquery.StorageService.Merge do
   carrying the union, which is what the buffer's flush-on-schema-change already set
   up.
 
+  ## Every engine call is bounded, so no claim is too large to seal
+
+  Per-input cost is what kills a merge, not total bytes: each `read_parquet`
+  input costs footer round trips over `httpfs`, and enough of them outrun the
+  engine's 30 s call timeout (T-244 measured ≥ ~830 ms per input on the
+  sandbox). An input list within `merge_inputs_per_call` merges in the single
+  `COPY` above. A larger one is read in capped chunks into a session temp
+  table — one `DESCRIBE` and one `CREATE`/`INSERT ... SELECT` per chunk, each
+  projecting onto the catalog's declared schema so every chunk emits identical
+  columns — and one final `COPY` writes the segment from local data, then
+  drops the table (T-246, T-247). The temp table's name derives from the
+  output key's id, so concurrent merges on the shared connection cannot
+  collide, and a retry's `CREATE OR REPLACE` clears a crashed predecessor's
+  leftover. The cost of the staging hop is the claim's rows living in engine
+  memory (spilling to the connection's `temp_directory` past its limit) until
+  the final `COPY` — the price of retiring a backlog in one claim instead of
+  never.
+
   ## The union of the inputs is not the schema the catalog declares
 
   Unioning the inputs is necessary and not sufficient. A claim whose inputs *all*
@@ -175,12 +193,85 @@ defmodule Smolquery.StorageService.Merge do
 
   defp merge(runtime, table_ref, key, inputs) do
     with {:ok, schema} <-
-           Catalog.table_schema(runtime.catalog, Smolquery.Partitions.parent(table_ref)),
-         {:ok, projection} <- projection(runtime, schema, inputs.urls),
+           Catalog.table_schema(runtime.catalog, Smolquery.Partitions.parent(table_ref)) do
+      if length(inputs.urls) <= runtime.merge_inputs_per_call do
+        merge_direct(runtime, key, schema, inputs)
+      else
+        merge_chunked(runtime, key, schema, inputs)
+      end
+    end
+  end
+
+  defp merge_direct(runtime, key, schema, inputs) do
+    with {:ok, projection} <- projection(runtime, schema, inputs.urls),
          {:ok, put} <-
            Store.put(runtime.store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
       {:ok, segment(key, put, inputs.row_count)}
     end
+  end
+
+  defp merge_chunked(runtime, key, schema, inputs) do
+    table = staging_table(key)
+    chunks = Enum.chunk_every(inputs.urls, runtime.merge_inputs_per_call)
+
+    result =
+      with :ok <- stage_chunks(runtime, schema, table, chunks),
+           {:ok, put} <-
+             Store.put(runtime.store, key, &copy_staged(runtime, schema, table, &1)) do
+        {:ok, segment(key, put, inputs.row_count)}
+      end
+
+    drop_staging(runtime, table)
+
+    result
+  end
+
+  defp stage_chunks(runtime, schema, table, chunks) do
+    chunks
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {chunk, index}, :ok ->
+      case stage_chunk(runtime, schema, table, chunk, index) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp stage_chunk(runtime, schema, table, urls, index) do
+    with {:ok, projection} <- projection(runtime, schema, urls) do
+      sql =
+        case index do
+          0 ->
+            "CREATE OR REPLACE TEMPORARY TABLE #{table} AS " <>
+              "SELECT #{projection} FROM #{scan(urls)}"
+
+          _ ->
+            "INSERT INTO #{table} SELECT #{projection} FROM #{scan(urls)}"
+        end
+
+      with {:ok, _result} <- query(runtime, sql, urls), do: :ok
+    end
+  end
+
+  defp copy_staged(runtime, schema, table, staged) do
+    sql = """
+    COPY (SELECT * FROM #{table}#{order_by(schema)})
+    TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
+    """
+
+    with {:ok, _result} <- query(runtime, sql, [staged]), do: :ok
+  end
+
+  defp drop_staging(runtime, table) do
+    query(runtime, "DROP TABLE IF EXISTS #{table}", [])
+
+    :ok
+  end
+
+  defp staging_table(key) do
+    {:ok, id} = Store.id(key)
+
+    Identifier.quote_name!("merge_#{id}")
   end
 
   defp output_key(%{keys: [key]}) do
@@ -201,6 +292,17 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp footer_row_count(runtime, urls) do
+    urls
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
+    |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, total} ->
+      case footer_row_count_chunk(runtime, chunk) do
+        {:ok, count} -> {:cont, {:ok, total + count}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp footer_row_count_chunk(runtime, urls) do
     sql = "SELECT sum(num_rows)::BIGINT FROM parquet_file_metadata([#{placeholders(urls)}])"
 
     with {:ok, result} <- query(runtime, sql, urls) do

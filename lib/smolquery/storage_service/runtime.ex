@@ -28,6 +28,7 @@ defmodule Smolquery.StorageService.Runtime do
         compact_min_inputs: 2,
         compact_max_inputs: 12,
         compact_max_bytes: 134_217_728,
+        merge_inputs_per_call: 12,
         retention_interval_ms: 3_600_000,
         snapshot_keep_ms: 86_400_000,
         handoff: {Smolquery.StorageService.Handoff.Seal, []},
@@ -81,18 +82,28 @@ defmodule Smolquery.StorageService.Runtime do
   on purpose — compaction exists to clean up eager and age-cap seals, not to
   re-merge segments the sealer already sized well.
 
-  `compact_max_inputs` caps how many segments one merge reads (T-244). The
-  byte ceiling alone does not bound the file count — 128 MiB of small sealed
-  segments is over a hundred inputs — and the merge runs in one DuckDB call,
-  so an unbounded input list outruns the engine's 30 s call timeout the same
-  way an unbounded seal batch does. The default of 12 shares the buffer's
-  derivation — see `seal_batch_max_files` in `Smolquery.BufferService.Runtime`.
-  It must be at least `compact_min_inputs`, validated at boot; a run larger
-  than the cap compacts across sweeps, one group at a time. The same cap
-  chunks the sweep's footer-sizing query, oldest first, and sizing stops
-  once a full group of undersized candidates is found — no engine call is
-  unbounded, and a mostly-small backlog needs one sizing call rather than
-  one per chunk. Retention's footer-stats query is chunked by the same cap.
+  `merge_inputs_per_call` bounds how many `read_parquet` inputs any one of the
+  merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
+  the engine's 30 s call timeout: the eu-central-1 sandbox measured ≥ ~830 ms
+  per input over `httpfs`, so a 36-input read already exceeded it. The default
+  of 12 comes from that measurement — the merge engine serializes up to three
+  calls (two seals plus a compaction), so each gets ~10 s, and
+  10 s / 830 ms ≈ 12. An input list over the cap does not shrink the merge:
+  `Smolquery.StorageService.Merge` reads it in capped chunks into a session
+  temp table and writes one output, so a claim of any size seals and no
+  engine call is unbounded.
+
+  `compact_max_inputs` caps how many segments one compaction *group* holds
+  (T-244) — a planning bound, distinct from the call bound above. The byte
+  ceiling alone does not bound the file count — 128 MiB of small sealed
+  segments is over a hundred inputs — and a bounded group keeps a sweep's
+  merge short so seal attempts on the shared engine are not starved. It must
+  be at least `compact_min_inputs`, validated at boot; a run larger than the
+  cap compacts across sweeps, one group at a time. The same cap chunks the
+  sweep's footer-sizing query, oldest first, and sizing stops once a full
+  group of undersized candidates is found — a mostly-small backlog needs one
+  sizing call rather than one per chunk. Retention's footer-stats query is
+  chunked by the same cap.
 
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
@@ -155,6 +166,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_min_inputs: 2,
     compact_max_inputs: 12,
     compact_max_bytes: 134_217_728,
+    merge_inputs_per_call: 12,
     retention_interval_ms: 3_600_000,
     snapshot_keep_ms: 86_400_000,
     handoff: {Smolquery.StorageService.Handoff.Seal, []}
@@ -182,6 +194,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_min_inputs: pos_integer(),
           compact_max_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
+          merge_inputs_per_call: pos_integer(),
           retention_interval_ms: pos_integer(),
           snapshot_keep_ms: pos_integer(),
           handoff: {module(), term()}
@@ -204,6 +217,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_min_inputs,
     :compact_max_inputs,
     :compact_max_bytes,
+    :merge_inputs_per_call,
     :retention_interval_ms,
     :snapshot_keep_ms,
     :handoff
@@ -242,6 +256,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_inputs()
+    |> validate_merge_inputs_per_call()
   end
 
   use Smolquery.Runtime
@@ -333,6 +348,16 @@ defmodule Smolquery.StorageService.Runtime do
           "unsupported compact_max_inputs: #{inspect(runtime.compact_max_inputs)} " <>
             "(expected an integer >= compact_min_inputs, " <>
             "which is #{inspect(runtime.compact_min_inputs)})"
+  end
+
+  defp validate_merge_inputs_per_call(%__MODULE__{merge_inputs_per_call: per_call} = runtime)
+       when is_integer(per_call) and per_call > 0,
+       do: runtime
+
+  defp validate_merge_inputs_per_call(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported merge_inputs_per_call: #{inspect(runtime.merge_inputs_per_call)} " <>
+            "(expected a positive integer)"
   end
 
   defp build_store(config) do

@@ -62,10 +62,10 @@ defmodule Smolquery.BufferService.Drain do
   ## Options
 
     * `:timeout_ms` — how long to wait for every forced seal to retire
-      before giving up (default #{@default_timeout_ms}). The default covers
-      the seal batch cap (T-244): a tail larger than `seal_batch_max_files`
-      retires in `ceil(n / cap)` serialized claim round trips per table, not
-      one, so a drain needs several seal cycles of headroom
+      before giving up (default #{@default_timeout_ms}). A forced claim holds
+      a table's whole unsealed tail, and a large tail merges in several
+      bounded engine calls (`merge_inputs_per_call`), so the default gives a
+      backlogged table's one big seal room to finish
     * `:poll_ms` — how often the retirement check runs (default
       #{@default_poll_ms})
 
