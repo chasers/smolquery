@@ -21,6 +21,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
           metadata_at: integer(),
           jwks: map(),
           jwks_at: integer(),
+          forced_refresh_at: integer() | nil,
           http_client: Discovery.http_client()
         }
 
@@ -39,7 +40,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
   @spec jwks(pid() | atom()) :: {:ok, map()} | {:error, term()}
   def jwks(server), do: GenServer.call(server, :jwks, @operation_timeout_ms)
 
-  @doc "Forces one bounded JWKS refresh, used later for an unknown key id."
+  @doc "Refreshes JWKS for an unknown key id, subject to the global cooldown."
   @spec refresh_jwks(pid() | atom()) :: {:ok, map()} | {:error, term()}
   def refresh_jwks(server), do: GenServer.call(server, :refresh_jwks, @operation_timeout_ms)
 
@@ -59,6 +60,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
          metadata_at: now,
          jwks: jwks,
          jwks_at: now,
+         forced_refresh_at: nil,
          http_client: client
        }}
     else
@@ -121,7 +123,26 @@ defmodule Smolquery.Auth.OIDC.Provider do
     end
   end
 
-  defp fetch_jwks_if_needed(:refresh_jwks, state), do: fetch_jwks(state)
+  defp fetch_jwks_if_needed(:refresh_jwks, state) do
+    if forced_refresh_allowed?(state) do
+      fetch_forced_jwks(state)
+    else
+      {:ok, {:ok, state.jwks}, state}
+    end
+  end
+
+  defp fetch_forced_jwks(state) do
+    attempted_at = now_ms()
+
+    case Discovery.fetch_jwks(state.config, state.metadata, state.http_client) do
+      {:ok, jwks} ->
+        {:ok, {:ok, jwks},
+         %{state | jwks: jwks, jwks_at: attempted_at, forced_refresh_at: attempted_at}}
+
+      {:error, reason} ->
+        {:error, {:jwks_unavailable, reason}, %{state | forced_refresh_at: attempted_at}}
+    end
+  end
 
   defp fetch_jwks(state) do
     case Discovery.fetch_jwks(state.config, state.metadata, state.http_client) do
@@ -129,6 +150,11 @@ defmodule Smolquery.Auth.OIDC.Provider do
       {:error, reason} -> {:error, {:jwks_unavailable, reason}, state}
     end
   end
+
+  defp forced_refresh_allowed?(%{forced_refresh_at: nil}), do: true
+
+  defp forced_refresh_allowed?(state),
+    do: now_ms() - state.forced_refresh_at >= state.config.forced_refresh_cooldown_ms
 
   defp fresh?(_fetched_at, 0), do: false
   defp fresh?(fetched_at, max_age), do: now_ms() - fetched_at <= max_age

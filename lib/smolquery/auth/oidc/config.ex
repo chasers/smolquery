@@ -23,8 +23,14 @@ defmodule Smolquery.Auth.OIDC.Config do
     :algorithms,
     :clock_skew,
     :claim_capabilities,
+    :typ_allowlist,
+    :required_claims,
+    :max_token_bytes,
+    :max_segment_bytes,
+    :iat_future_seconds,
     :discovery_max_age_ms,
     :jwks_max_age_ms,
+    :forced_refresh_cooldown_ms,
     :connect_timeout_ms,
     :receive_timeout_ms,
     :request_timeout_ms,
@@ -34,6 +40,7 @@ defmodule Smolquery.Auth.OIDC.Config do
   @type claim_capabilities :: %{
           optional(String.t()) => %{optional(String.t()) => [Context.capability()]}
         }
+  @type required_claims :: %{optional(String.t()) => [String.t()]}
   @type t :: %__MODULE__{
           issuer: String.t(),
           api_audience: String.t() | nil,
@@ -45,8 +52,14 @@ defmodule Smolquery.Auth.OIDC.Config do
           algorithms: [String.t()],
           clock_skew: non_neg_integer(),
           claim_capabilities: claim_capabilities(),
+          typ_allowlist: [String.t()],
+          required_claims: required_claims(),
+          max_token_bytes: pos_integer(),
+          max_segment_bytes: pos_integer(),
+          iat_future_seconds: non_neg_integer(),
           discovery_max_age_ms: non_neg_integer(),
           jwks_max_age_ms: non_neg_integer(),
+          forced_refresh_cooldown_ms: non_neg_integer(),
           connect_timeout_ms: pos_integer(),
           receive_timeout_ms: pos_integer(),
           request_timeout_ms: pos_integer(),
@@ -58,10 +71,16 @@ defmodule Smolquery.Auth.OIDC.Config do
     clock_skew: 30,
     discovery_max_age_ms: 3_600_000,
     jwks_max_age_ms: 3_600_000,
+    forced_refresh_cooldown_ms: 1_000,
     connect_timeout_ms: 2_000,
     receive_timeout_ms: 5_000,
     request_timeout_ms: 10_000,
     max_body_bytes: 1_048_576,
+    typ_allowlist: [],
+    required_claims: %{},
+    max_token_bytes: 65_536,
+    max_segment_bytes: 32_768,
+    iat_future_seconds: 300,
     web_client_auth_method: :client_secret_basic,
     claim_capabilities: %{}
   ]
@@ -88,6 +107,11 @@ defmodule Smolquery.Auth.OIDC.Config do
     algorithms = algorithms!(Keyword.fetch!(config, :algorithms))
     claim_capabilities = claim_capabilities!(Keyword.fetch!(config, :claim_capabilities))
 
+    typ_allowlist =
+      string_allowlist!(Keyword.fetch!(config, :typ_allowlist), "SMOLQUERY_OIDC_TOKEN_TYPES")
+
+    required_claims = required_claims!(Keyword.fetch!(config, :required_claims))
+
     %__MODULE__{
       issuer: issuer,
       api_audience: api_audience,
@@ -99,6 +123,29 @@ defmodule Smolquery.Auth.OIDC.Config do
       algorithms: algorithms,
       clock_skew: bounded_integer!(config, :clock_skew, "SMOLQUERY_OIDC_CLOCK_SKEW", 300),
       claim_capabilities: claim_capabilities,
+      typ_allowlist: typ_allowlist,
+      required_claims: required_claims,
+      max_token_bytes:
+        positive_bounded_integer!(
+          config,
+          :max_token_bytes,
+          "SMOLQUERY_OIDC_MAX_TOKEN_BYTES",
+          1_048_576
+        ),
+      max_segment_bytes:
+        positive_bounded_integer!(
+          config,
+          :max_segment_bytes,
+          "SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES",
+          524_288
+        ),
+      iat_future_seconds:
+        bounded_integer!(
+          config,
+          :iat_future_seconds,
+          "SMOLQUERY_OIDC_IAT_FUTURE_SECONDS",
+          86_400
+        ),
       discovery_max_age_ms:
         bounded_integer!(
           config,
@@ -108,6 +155,13 @@ defmodule Smolquery.Auth.OIDC.Config do
         ),
       jwks_max_age_ms:
         bounded_integer!(config, :jwks_max_age_ms, "SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", 86_400_000),
+      forced_refresh_cooldown_ms:
+        bounded_integer!(
+          config,
+          :forced_refresh_cooldown_ms,
+          "SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS",
+          86_400_000
+        ),
       connect_timeout_ms:
         positive_bounded_integer!(
           config,
@@ -171,6 +225,35 @@ defmodule Smolquery.Auth.OIDC.Config do
   end
 
   def algorithms, do: @algorithms
+
+  @doc "Returns the closed set of configured protected-header token types."
+  @spec string_allowlist!(term(), String.t()) :: [String.t()]
+  def string_allowlist!([], _env), do: []
+
+  def string_allowlist!(values, env) when is_list(values) do
+    if Enum.all?(values, &nonempty_string?/1) and length(values) == length(Enum.uniq(values)),
+      do: values,
+      else: invalid!(env, values, "a unique non-empty string list")
+  end
+
+  def string_allowlist!(value, env), do: invalid!(env, value, "a string list")
+
+  @doc "Validates exact required payload claim values."
+  @spec required_claims!(term()) :: required_claims()
+  def required_claims!(claims) when is_map(claims) do
+    Enum.reduce(claims, %{}, fn {claim, values}, acc ->
+      if nonempty_string?(claim) and is_list(values) and values != [] and
+           Enum.all?(values, &nonempty_string?/1) and
+           length(values) == length(Enum.uniq(values)) do
+        Map.put(acc, claim, values)
+      else
+        invalid!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", claims, "a map of claim names to string lists")
+      end
+    end)
+  end
+
+  def required_claims!(value),
+    do: invalid!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", value, "a map of claim names to string lists")
 
   @spec raise_invalid_claim_mapping(term()) :: no_return()
   defp raise_invalid_claim_mapping(mapping),

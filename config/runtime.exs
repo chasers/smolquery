@@ -64,9 +64,24 @@ if mappings = System.get_env("SMOLQUERY_OIDC_CLAIM_CAPABILITIES") do
       Smolquery.RuntimeConfig.capability_mapping!("SMOLQUERY_OIDC_CLAIM_CAPABILITIES", mappings)
 end
 
+if token_types = System.get_env("SMOLQUERY_OIDC_TOKEN_TYPES") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    typ_allowlist: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_TOKEN_TYPES", token_types)
+end
+
+if required_claims = System.get_env("SMOLQUERY_OIDC_REQUIRED_CLAIMS") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    required_claims:
+      Smolquery.RuntimeConfig.string_lists!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", required_claims)
+end
+
 for {env, key, max} <- [
+      {"SMOLQUERY_OIDC_MAX_TOKEN_BYTES", :max_token_bytes, 1_048_576},
+      {"SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES", :max_segment_bytes, 524_288},
+      {"SMOLQUERY_OIDC_IAT_FUTURE_SECONDS", :iat_future_seconds, 86_400},
       {"SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS", :discovery_max_age_ms, 86_400_000},
       {"SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", :jwks_max_age_ms, 86_400_000},
+      {"SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS", :forced_refresh_cooldown_ms, 86_400_000},
       {"SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS", :connect_timeout_ms, 30_000},
       {"SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS", :receive_timeout_ms, 60_000},
       {"SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS", :request_timeout_ms, 120_000},

@@ -113,6 +113,44 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     end
   end
 
+  test "validates token type and required payload claim settings" do
+    config =
+      Config.new(
+        [
+          oidc:
+            Keyword.merge(@base,
+              typ_allowlist: ["at+jwt"],
+              required_claims: %{"token_use" => ["access"]},
+              max_token_bytes: 1024,
+              max_segment_bytes: 512,
+              iat_future_seconds: 60,
+              forced_refresh_cooldown_ms: 250
+            )
+        ],
+        :api
+      )
+
+    assert config.typ_allowlist == ["at+jwt"]
+    assert config.required_claims == %{"token_use" => ["access"]}
+    assert config.max_token_bytes == 1024
+    assert config.max_segment_bytes == 512
+    assert config.iat_future_seconds == 60
+    assert config.forced_refresh_cooldown_ms == 250
+
+    for {key, value, env} <- [
+          {:typ_allowlist, ["at+jwt", "at+jwt"], "SMOLQUERY_OIDC_TOKEN_TYPES"},
+          {:required_claims, %{"token_use" => []}, "SMOLQUERY_OIDC_REQUIRED_CLAIMS"},
+          {:max_token_bytes, 0, "SMOLQUERY_OIDC_MAX_TOKEN_BYTES"},
+          {:max_segment_bytes, 0, "SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES"},
+          {:iat_future_seconds, -1, "SMOLQUERY_OIDC_IAT_FUTURE_SECONDS"},
+          {:forced_refresh_cooldown_ms, -1, "SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS"}
+        ] do
+      assert_raise ArgumentError, ~r/#{env}/, fn ->
+        Config.new([oidc: Keyword.put(@base, key, value)], :api)
+      end
+    end
+  end
+
   test "redacts the client secret" do
     config = Config.new([oidc: @base], :web)
     refute inspect(config) =~ "\"secret\""

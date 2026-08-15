@@ -70,6 +70,28 @@ defmodule Smolquery.RuntimeConfig do
       else: invalid!(name, value, "a non-empty comma-separated list")
   end
 
+  @doc "Parses a JSON object of non-empty string lists."
+  @spec string_lists!(String.t(), String.t()) :: %{String.t() => [String.t()]}
+  def string_lists!(name, value) do
+    case JSON.decode(value) do
+      {:ok, map} when is_map(map) ->
+        Enum.reduce(map, %{}, &parse_string_list(name, value, &1, &2))
+
+      _ ->
+        invalid!(name, value, "a JSON object of non-empty string lists")
+    end
+  end
+
+  defp parse_string_list(name, original, {claim, values}, acc) do
+    if is_binary(claim) and claim != "" and is_list(values) and values != [] and
+         Enum.all?(values, &(is_binary(&1) and &1 != "")) and
+         length(values) == length(Enum.uniq(values)) do
+      Map.put(acc, claim, values)
+    else
+      invalid!(name, original, "a JSON object of non-empty string lists")
+    end
+  end
+
   @doc "Parses a bounded non-negative integer."
   @spec bounded_non_negative_integer!(String.t(), String.t(), pos_integer()) :: non_neg_integer()
   def bounded_non_negative_integer!(name, value, maximum) do

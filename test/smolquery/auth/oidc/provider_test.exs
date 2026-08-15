@@ -10,7 +10,18 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     "jwks_uri" => "https://keys.example/keys",
     "id_token_signing_alg_values_supported" => ["RS256"]
   }
-  @jwks %{"keys" => [%{"kid" => "one", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}]}
+  @public_key JOSE.JWK.generate_key({:rsa, 2048})
+              |> JOSE.JWK.to_public()
+              |> JOSE.JWK.to_map()
+              |> elem(1)
+              |> Map.put("kid", "one")
+  @rotated_public_key JOSE.JWK.generate_key({:rsa, 2048})
+                      |> JOSE.JWK.to_public()
+                      |> JOSE.JWK.to_map()
+                      |> elem(1)
+                      |> Map.put("kid", "two")
+  @jwks %{"keys" => [@public_key]}
+  @rotated_jwks %{"keys" => [@rotated_public_key]}
 
   test "loads discovery and JWKS before becoming available" do
     test_pid = self()
@@ -58,7 +69,7 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
 
   test "metadata refresh atomically replaces keys when the JWKS URI changes" do
     metadata = Map.put(@metadata, "jwks_uri", "https://keys.example/rotated")
-    rotated = %{"keys" => [%{"kid" => "two", "kty" => "RSA", "n" => "Ag", "e" => "AQAB"}]}
+    rotated = @rotated_jwks
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     client = fn url, _options ->
@@ -91,7 +102,7 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
   end
 
   test "metadata refresh observes key rotation even when the JWKS URI is unchanged" do
-    rotated = %{"keys" => [%{"kid" => "two", "kty" => "RSA", "n" => "Ag", "e" => "AQAB"}]}
+    rotated = @rotated_jwks
     {:ok, key_counter} = Agent.start_link(fn -> 0 end)
 
     client = fn url, _options ->
@@ -118,7 +129,81 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     Process.exit(pid, :normal)
   end
 
-  test "forced refresh returns unavailable errors and never accepts unknown keys" do
+  test "forced refresh accepts rotation once and then reuses the cache during cooldown" do
+    rotated = @rotated_jwks
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client = fn url, _options ->
+      case url do
+        "https://issuer.example/.well-known/openid-configuration" ->
+          {:ok, response(@metadata)}
+
+        "https://keys.example/keys" ->
+          count = Agent.get_and_update(counter, fn value -> {value, value + 1} end)
+          {:ok, response(if(count == 0, do: @jwks, else: rotated))}
+      end
+    end
+
+    config =
+      Config.new(
+        [
+          oidc: [
+            issuer: "https://issuer.example/",
+            api_audience: "api",
+            forced_refresh_cooldown_ms: 100_000
+          ]
+        ],
+        :api
+      )
+
+    {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
+
+    assert {:ok, ^rotated} = Provider.refresh_jwks(pid)
+    assert {:ok, ^rotated} = Provider.refresh_jwks(pid)
+    assert Agent.get(counter, & &1) == 2
+    Process.exit(pid, :normal)
+  end
+
+  test "concurrent forced refreshes perform at most one network fetch per cooldown" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client = fn url, _options ->
+      case url do
+        "https://issuer.example/.well-known/openid-configuration" ->
+          {:ok, response(@metadata)}
+
+        "https://keys.example/keys" ->
+          Agent.update(counter, &(&1 + 1))
+          Process.sleep(10)
+          {:ok, response(@jwks)}
+      end
+    end
+
+    config =
+      Config.new(
+        [
+          oidc: [
+            issuer: "https://issuer.example/",
+            api_audience: "api",
+            forced_refresh_cooldown_ms: 100_000
+          ]
+        ],
+        :api
+      )
+
+    {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
+
+    results =
+      1..8
+      |> Enum.map(fn _ -> Task.async(fn -> Provider.refresh_jwks(pid) end) end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.all?(results, &match?({:ok, @jwks}, &1))
+    assert Agent.get(counter, & &1) == 2
+    Process.exit(pid, :normal)
+  end
+
+  test "failed forced refresh starts cooldown and returns stale cache without retrying" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     client = fn url, _options ->
