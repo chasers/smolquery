@@ -104,8 +104,7 @@ defmodule Smolquery.Auth.OIDC.Config do
 
     api_audience = required_for_role(config, :api_audience, role, "SMOLQUERY_OIDC_API_AUDIENCE")
 
-    web_client_id =
-      required_for_role(config, :web_client_id, role, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
+    web_client_id = web_client_id(config, role)
 
     :ok = distinct_audiences(config)
     {web_origin, web_redirect_uri} = web_urls(config, role)
@@ -239,6 +238,29 @@ defmodule Smolquery.Auth.OIDC.Config do
 
   def algorithms, do: @algorithms
 
+  @doc "Reports whether configuration separates API access tokens from browser ID tokens."
+  @spec api_token_boundary?(t()) :: boolean()
+  def api_token_boundary?(%__MODULE__{
+        web_client_id: web_client_id,
+        typ_allowlist: typ_allowlist,
+        required_claims: required_claims
+      }) do
+    nonempty_string?(web_client_id) or typ_allowlist != [] or map_size(required_claims) > 0
+  end
+
+  @doc "Requires an explicit boundary between API access tokens and browser ID tokens."
+  @spec validate_api_token_boundary!(t()) :: t()
+  def validate_api_token_boundary!(%__MODULE__{} = config) do
+    if api_token_boundary?(config) do
+      config
+    else
+      raise ArgumentError,
+            "API OIDC authentication requires SMOLQUERY_OIDC_WEB_CLIENT_ID, " <>
+              "SMOLQUERY_OIDC_API_TOKEN_TYPES, or SMOLQUERY_OIDC_API_REQUIRED_CLAIMS " <>
+              "to distinguish access tokens from browser ID tokens"
+    end
+  end
+
   @doc "Returns the closed set of configured protected-header token types."
   @spec string_allowlist!(term(), String.t()) :: [String.t()]
   def string_allowlist!([], _env), do: []
@@ -277,9 +299,6 @@ defmodule Smolquery.Auth.OIDC.Config do
 
   defp required_for_role(config, :api_audience, :api, env),
     do: nonempty!(Keyword.get(config, :api_audience), env)
-
-  defp required_for_role(config, :web_client_id, :web, env),
-    do: nonempty!(Keyword.get(config, :web_client_id), env)
 
   defp required_for_role(_config, _key, _role, _env), do: nil
 
@@ -335,6 +354,16 @@ defmodule Smolquery.Auth.OIDC.Config do
     case Keyword.fetch(config, role_key) do
       {:ok, value} -> {value, role_env}
       :error -> {Keyword.fetch!(config, global_key), global_env}
+    end
+  end
+
+  defp web_client_id(config, :web),
+    do: nonempty!(Keyword.get(config, :web_client_id), "SMOLQUERY_OIDC_WEB_CLIENT_ID")
+
+  defp web_client_id(config, :api) do
+    case Keyword.get(config, :web_client_id) do
+      nil -> nil
+      client_id -> nonempty!(client_id, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
     end
   end
 

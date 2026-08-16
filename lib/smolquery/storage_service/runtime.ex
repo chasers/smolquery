@@ -86,10 +86,19 @@ defmodule Smolquery.StorageService.Runtime do
   ~25M rows, and merge cost — the staging inserts and the clustered `ORDER
   BY` on the final `COPY` — scales with rows, so the byte-bounded group blew
   the merge's five-minute `COPY` budget and re-planned identically every
-  sweep. The default of 4Mi rows keeps a group of that shape near a minute.
-  Normal ~3x-compressible data hits the byte cap first, so the row cap only
-  bites the pathological case it exists for. Sizing already reads each
-  footer's `num_rows`, so the cap costs no new I/O.
+  sweep. Left `nil`, the cap starts at 4Mi rows, resolved by
+  `with_compact_max_rows/1` once when the compactor starts. The start
+  assumes no bytes-per-row pin rate on purpose: the sandbox did measure a
+  4Mi-row group pinning ~1 GiB during a merge — the whole of a 1 GiB budget
+  — but those were very large rows, and a cap derived from their pin rate
+  would starve typical workloads. The compactor fits the cap to the
+  workload instead: a merge OOM halves a table's cap and sustained evidence
+  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  T-262), so a workload that pins more per row converges on its own cap
+  after one bad merge, and every other workload keeps the full cap. Normal
+  ~3x-compressible data hits the byte cap first, so the row cap only bites
+  the pathological case it exists for. Sizing already reads each footer's
+  `num_rows`, so the cap costs no new I/O.
 
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
@@ -184,7 +193,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_below_bytes: 33_554_432,
     compact_min_inputs: 2,
     compact_max_bytes: 134_217_728,
-    compact_max_rows: 4_194_304,
+    compact_max_rows: nil,
     compact_engine_memory_limit: nil,
     merge_engine: nil,
     merge_inputs_per_call: 12,
@@ -215,7 +224,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_below_bytes: pos_integer(),
           compact_min_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
-          compact_max_rows: pos_integer(),
+          compact_max_rows: pos_integer() | nil,
           compact_engine_memory_limit: String.t() | nil,
           merge_engine: atom() | nil,
           merge_inputs_per_call: pos_integer(),
@@ -339,6 +348,28 @@ defmodule Smolquery.StorageService.Runtime do
 
   defp derived_memory_limit(nil, :none, _divisor), do: nil
 
+  @compact_max_rows_default 4_194_304
+
+  @doc """
+  The runtime with `compact_max_rows` resolved to an integer.
+
+  An explicit cap survives untouched. A `nil` cap starts at
+  #{@compact_max_rows_default} rows. The start deliberately assumes no
+  bytes-per-row pin rate: the one figure the sandbox measured came from a
+  bench with very large rows, and deriving every deployment's cap from it
+  would starve typical workloads. The compactor owns fitting the cap to the
+  workload instead — a merge OOM halves a table's cap and sustained evidence
+  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  T-262).
+  """
+  @spec with_compact_max_rows(t()) :: t()
+  def with_compact_max_rows(%__MODULE__{compact_max_rows: rows} = runtime)
+      when is_integer(rows),
+      do: runtime
+
+  def with_compact_max_rows(%__MODULE__{} = runtime),
+    do: %{runtime | compact_max_rows: @compact_max_rows_default}
+
   @doc """
   The engine a merge's calls run on.
 
@@ -456,12 +487,13 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp validate_compact_max_rows(%__MODULE__{compact_max_rows: rows} = runtime)
-       when is_integer(rows) and rows > 0,
+       when (is_integer(rows) and rows > 0) or is_nil(rows),
        do: runtime
 
   defp validate_compact_max_rows(%__MODULE__{compact_max_rows: rows}) do
     raise ArgumentError,
-          "unsupported compact_max_rows: #{inspect(rows)} (expected a positive integer)"
+          "unsupported compact_max_rows: #{inspect(rows)} " <>
+            "(expected a positive integer, or nil for the default)"
   end
 
   defp validate_compact_engine_memory_limit(

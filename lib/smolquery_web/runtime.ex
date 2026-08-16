@@ -37,6 +37,7 @@ defmodule SmolqueryWeb.Runtime do
 
   alias Smolquery.Auth.Context
   alias Smolquery.Auth.Mode
+  alias Smolquery.Auth.OIDC
   alias Smolquery.Auth.OIDC.Config, as: OIDCConfig
   alias Smolquery.Auth.Static
   alias Smolquery.Catalog
@@ -63,6 +64,7 @@ defmodule SmolqueryWeb.Runtime do
     :catalog_opts,
     :oidc,
     :oidc_http_client,
+    :oidc_provider_http_client,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService
   ]
@@ -78,6 +80,7 @@ defmodule SmolqueryWeb.Runtime do
           oidc: OIDCConfig.t() | nil,
           oidc_http_client:
             (String.t(), keyword() -> {:ok, Req.Response.t()} | {:error, term()}) | nil,
+          oidc_provider_http_client: Smolquery.Auth.OIDC.Discovery.http_client() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom()
@@ -105,17 +108,18 @@ defmodule SmolqueryWeb.Runtime do
     auth_mode = Mode.runtime_mode!(config, "the web UI", :web)
     secret_key_base = validate_session_secret!(resolve_session_secret(config))
 
-    {username, password, marker, context, oidc} =
+    {username, password, marker, context, oidc, oidc_provider_http_client} =
       case auth_mode do
         :static ->
           username = fetch_credential!(config, :username)
           password = fetch_credential!(config, :password)
 
           {username, password, session_marker(secret_key_base, username, password),
-           Static.web_context(), nil}
+           Static.web_context(), nil, nil}
 
         :oidc ->
-          {nil, nil, nil, nil, OIDCConfig.new(oidc_config(config), :web)}
+          {nil, nil, nil, nil, OIDCConfig.new(oidc_config(config), :web),
+           OIDC.provider_http_client!(config)}
       end
 
     %__MODULE__{
@@ -126,6 +130,7 @@ defmodule SmolqueryWeb.Runtime do
       session_marker: marker,
       context: context,
       oidc: oidc,
+      oidc_provider_http_client: oidc_provider_http_client,
       catalog: catalog,
       catalog_opts: catalog_opts
     }
