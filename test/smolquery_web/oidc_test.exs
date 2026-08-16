@@ -28,6 +28,7 @@ defmodule SmolqueryWeb.OIDCTest do
         catalog: MapCatalog.new(),
         auth_mode: :oidc,
         secret_key_base: String.duplicate("s", 64),
+        web_host: "ui.example",
         oidc: [
           issuer: "https://issuer.example",
           web_client_id: "web-client",
@@ -63,9 +64,10 @@ defmodule SmolqueryWeb.OIDCTest do
     %{runtime: runtime, token_response: token_response, http_client: http_client}
   end
 
-  test "builds an explicit URL-safe state, nonce, and S256 PKCE authorization request", %{
+  test "builds an explicit URL-safe state, nonce, scopes, and S256 PKCE request", %{
     runtime: runtime
   } do
+    runtime = put_in(runtime.oidc.web_scopes, ["openid", "profile", "groups"])
     assert {:ok, url, transaction} = OIDC.begin(runtime)
     uri = URI.parse(url)
     params = URI.decode_query(uri.query)
@@ -76,7 +78,7 @@ defmodule SmolqueryWeb.OIDCTest do
     assert params["client_id"] == "web-client"
     assert params["redirect_uri"] == "https://ui.example/auth/callback"
     assert params["response_type"] == "code"
-    assert params["scope"] == "openid"
+    assert params["scope"] == "openid profile groups"
     assert params["state"] == transaction.state
     assert params["nonce"] == transaction.nonce
     assert params["code_challenge_method"] == "S256"
@@ -105,62 +107,44 @@ defmodule SmolqueryWeb.OIDCTest do
     assert {:error, :invalid_transaction} = OIDC.consume(%{}, transaction.state)
   end
 
-  test "stores a bounded set and consumes only the matching transaction" do
-    transactions =
-      Enum.map(1..5, fn index ->
-        %{
-          state: "state-#{index}",
-          nonce: "nonce-#{index}",
-          verifier: String.duplicate(Integer.to_string(index), 43),
-          created_at: 1_000
-        }
-      end)
+  test "concurrent logins use independent encrypted cookies and consume only their match" do
+    now = System.system_time(:second)
 
-    cookie =
-      Enum.reduce(transactions, nil, fn transaction, cookie ->
-        assert {:ok, next_cookie} = OIDC.add_transaction(cookie, transaction, now: 1_000)
-        next_cookie
-      end)
-
-    assert {:error, :invalid_transaction, cookie} =
-             OIDC.take_transaction(cookie, "state-1", now: 1_000)
-
-    assert {:ok, second, cookie} = OIDC.take_transaction(cookie, "state-2", now: 1_000)
-    assert second.nonce == "nonce-2"
-
-    assert {:error, :invalid_transaction, ^cookie} =
-             OIDC.take_transaction(cookie, "unknown", now: 1_000)
-
-    remaining = Enum.drop(transactions, 2)
-
-    assert nil ==
-             Enum.reduce(remaining, cookie, fn transaction, cookie ->
-               assert {:ok, ^transaction, remaining_cookie} =
-                        OIDC.take_transaction(cookie, transaction.state, now: 1_000)
-
-               remaining_cookie
-             end)
-  end
-
-  test "accepts a legacy single transaction while adding a concurrent login" do
     first = %{
       state: "first",
       nonce: "first-nonce",
       verifier: String.duplicate("a", 43),
-      created_at: 1_000
+      created_at: now
     }
 
     second = %{
       state: "second",
       nonce: "second-nonce",
       verifier: String.duplicate("b", 43),
-      created_at: 1_000
+      created_at: now
     }
 
-    legacy = OIDC.encode_transaction(first)
-    assert {:ok, cookie} = OIDC.add_transaction(legacy, second, now: 1_000)
-    assert {:ok, ^first, remaining} = OIDC.take_transaction(cookie, "first", now: 1_000)
-    assert {:ok, ^second, nil} = OIDC.take_transaction(remaining, "second", now: 1_000)
+    base = Plug.Test.conn(:get, "/auth/login")
+    assert {:ok, first_response} = OIDC.put_transaction(base, first)
+    assert {:ok, second_response} = OIDC.put_transaction(base, second)
+
+    [{first_name, first_cookie}] = Map.to_list(first_response.resp_cookies)
+    [{second_name, second_cookie}] = Map.to_list(second_response.resp_cookies)
+    refute first_name == second_name
+    refute first_cookie.value =~ first.state
+    refute second_cookie.value =~ second.nonce
+
+    callback =
+      Plug.Test.conn(:get, "/auth/callback")
+      |> Plug.Test.put_req_cookie(first_name, first_cookie.value)
+      |> Plug.Test.put_req_cookie(second_name, second_cookie.value)
+
+    assert {:ok, ^first, first_callback} = OIDC.take_transaction(callback, first.state)
+    assert first_callback.resp_cookies[first_name].max_age == 0
+    refute Map.has_key?(first_callback.resp_cookies, second_name)
+
+    assert {:ok, ^second, second_callback} = OIDC.take_transaction(callback, second.state)
+    assert second_callback.resp_cookies[second_name].max_age == 0
   end
 
   test "form-encodes confidential client credentials before HTTP Basic", %{

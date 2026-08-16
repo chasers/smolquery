@@ -9,14 +9,9 @@ defmodule SmolqueryWeb.AuthController do
     case Runtime.fetch(SmolqueryWeb) do
       {:ok, %{auth_mode: :oidc} = runtime} ->
         with {:ok, url, transaction} <- OIDC.begin(runtime),
-             {:ok, transactions} <-
-               OIDC.add_transaction(
-                 get_session(conn, OIDC.transaction_key()),
-                 transaction
-               ) do
+             {:ok, conn} <- OIDC.put_transaction(conn, transaction) do
           conn
           |> no_store()
-          |> put_session(OIDC.transaction_key(), transactions)
           |> redirect(external: url)
         else
           _failure -> error(conn)
@@ -28,10 +23,8 @@ defmodule SmolqueryWeb.AuthController do
   end
 
   def callback(conn, %{"state" => state, "code" => code}) do
-    case OIDC.take_transaction(get_session(conn, OIDC.transaction_key()), state) do
-      {:ok, transaction, remaining} ->
-        conn = put_transactions(conn, remaining)
-
+    case OIDC.take_transaction(conn, state) do
+      {:ok, transaction, conn} ->
         with {:ok, runtime} <- oidc_runtime(),
              {:ok, context} <-
                OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
@@ -42,19 +35,19 @@ defmodule SmolqueryWeb.AuthController do
           _failure -> error(conn)
         end
 
-      {:error, :invalid_transaction, remaining} ->
-        conn |> put_transactions(remaining) |> error()
+      {:error, :invalid_transaction, conn} ->
+        error(conn)
     end
   end
 
   def callback(conn, %{"state" => state}) do
-    remaining =
-      case OIDC.take_transaction(get_session(conn, OIDC.transaction_key()), state) do
-        {:ok, _transaction, remaining} -> remaining
-        {:error, :invalid_transaction, remaining} -> remaining
+    conn =
+      case OIDC.take_transaction(conn, state) do
+        {:ok, _transaction, conn} -> conn
+        {:error, :invalid_transaction, conn} -> conn
       end
 
-    conn |> put_transactions(remaining) |> error()
+    error(conn)
   end
 
   def callback(conn, _params), do: error(conn)
@@ -62,6 +55,7 @@ defmodule SmolqueryWeb.AuthController do
   def logout(conn, _params) do
     conn
     |> no_store()
+    |> OIDC.clear_transactions()
     |> configure_session(drop: true)
     |> redirect(to: "/")
   end
@@ -77,11 +71,6 @@ defmodule SmolqueryWeb.AuthController do
       _ -> :error
     end
   end
-
-  defp put_transactions(conn, nil), do: delete_session(conn, OIDC.transaction_key())
-
-  defp put_transactions(conn, transactions),
-    do: put_session(conn, OIDC.transaction_key(), transactions)
 
   defp error(conn) do
     conn

@@ -1,13 +1,13 @@
 defmodule SmolqueryWeb.OIDC do
   @moduledoc """
-  Bounded authorization-code transactions for the browser OIDC flow.
+  Authorization-code transactions for the browser OIDC flow.
 
-  The encrypted browser session carries a small set of short-lived transactions
-  so concurrent tabs and callbacks may land on different web nodes. A callback
-  removes only its matching state before exchange; unrelated transactions remain
-  available and the authorization code is single-use at the provider. Provider
-  metadata and signing keys come only from the supervised provider cache; this
-  module never runs discovery itself.
+  Each login uses an independently named, short-lived encrypted cookie. Concurrent
+  login and callback responses therefore update different browser cookie slots
+  instead of racing over one session value. A callback removes only its matching
+  cookie before exchange, and the authorization code is single-use at the provider.
+  Provider metadata and signing keys come only from the supervised provider cache;
+  this module never runs discovery itself.
   """
 
   alias Assent.Strategy.OIDC
@@ -16,8 +16,17 @@ defmodule SmolqueryWeb.OIDC do
 
   @transaction_ttl 300
   @max_transactions 4
+  @transaction_cookie_prefix "_smolquery_oidc_"
+  @transaction_cookie_salt "smolquery oidc transaction"
+  @transaction_cookie_path "/auth"
+  @transaction_cookie_options [
+    http_only: true,
+    same_site: "Lax",
+    secure: Mix.env() == :prod,
+    max_age: @transaction_ttl,
+    path: @transaction_cookie_path
+  ]
   @request_options [retry: false, redirect: false, raw: true, decode_body: false]
-  @transaction_key "oidc_transaction"
 
   @type transaction :: %{
           state: binary(),
@@ -26,58 +35,71 @@ defmodule SmolqueryWeb.OIDC do
           created_at: integer()
         }
 
-  @doc "Returns the encrypted-session key for authorization transactions."
-  def transaction_key, do: @transaction_key
-
-  @doc "Adds one transaction to the bounded encrypted-session value."
-  def add_transaction(value, transaction, opts \\ []) do
-    now = Keyword.get(opts, :now, System.system_time(:second))
-
+  @doc "Stores a login transaction in its own encrypted callback cookie."
+  def put_transaction(%Plug.Conn{} = conn, transaction) do
     with encoded when is_map(encoded) <- encode_transaction(transaction),
          {:ok, transaction} <- decode_transaction(encoded) do
-      transactions =
-        value
-        |> decode_or_empty()
-        |> Enum.filter(&active_transaction?(&1, now))
-        |> Enum.reject(&secure_equal?(&1.state, transaction.state))
-        |> Kernel.++([transaction])
-        |> Enum.take(-@max_transactions)
+      token =
+        Phoenix.Token.encrypt(
+          token_context(),
+          @transaction_cookie_salt,
+          encoded,
+          max_age: @transaction_ttl
+        )
 
-      {:ok, encode_transactions(transactions)}
+      conn =
+        conn
+        |> Plug.Conn.fetch_cookies()
+        |> prune_transaction_cookies(transaction.state)
+        |> Plug.Conn.put_resp_cookie(
+          transaction_cookie_name(transaction.state),
+          token,
+          @transaction_cookie_options
+        )
+
+      {:ok, conn}
     else
       _failure -> {:error, :invalid_transaction}
     end
   end
 
-  @doc "Removes and returns only the active transaction matching callback state."
-  def take_transaction(value, provided, opts \\ [])
+  def put_transaction(_conn, _transaction), do: {:error, :invalid_transaction}
 
-  def take_transaction(value, provided, opts)
+  @doc "Removes and returns only the transaction cookie matching callback state."
+  def take_transaction(%Plug.Conn{} = conn, provided)
       when is_binary(provided) and byte_size(provided) <= 256 do
-    now = Keyword.get(opts, :now, System.system_time(:second))
+    conn = Plug.Conn.fetch_cookies(conn)
+    name = transaction_cookie_name(provided)
+    token = Map.get(conn.req_cookies, name)
+    conn = Plug.Conn.delete_resp_cookie(conn, name, path: @transaction_cookie_path)
 
-    case decode_transactions(value) do
-      {:ok, transactions} ->
-        transactions = Enum.filter(transactions, &active_transaction?(&1, now))
-
-        case Enum.find_index(transactions, &secure_equal?(&1.state, provided)) do
-          nil ->
-            {:error, :invalid_transaction, encode_transactions(transactions)}
-
-          index ->
-            {transaction, remaining} = List.pop_at(transactions, index)
-            {:ok, transaction, encode_transactions(remaining)}
-        end
-
-      {:error, :invalid_transaction} ->
-        {:error, :invalid_transaction, nil}
+    with {:ok, transaction} <- decrypt_transaction(token),
+         {:ok, transaction} <- consume(transaction, provided) do
+      {:ok, transaction, conn}
+    else
+      _failure -> {:error, :invalid_transaction, conn}
     end
   end
 
-  def take_transaction(_value, _provided, _opts),
-    do: {:error, :invalid_transaction, nil}
+  def take_transaction(%Plug.Conn{} = conn, _provided),
+    do: {:error, :invalid_transaction, conn}
 
-  @doc "Serializes a bounded authorization transaction for the encrypted session."
+  def take_transaction(conn, _provided), do: {:error, :invalid_transaction, conn}
+
+  @doc "Expires every outstanding browser authorization transaction cookie."
+  def clear_transactions(%Plug.Conn{} = conn) do
+    conn = Plug.Conn.fetch_cookies(conn)
+
+    Enum.reduce(conn.req_cookies, conn, fn {name, _token}, conn ->
+      if String.starts_with?(name, @transaction_cookie_prefix),
+        do: Plug.Conn.delete_resp_cookie(conn, name, path: @transaction_cookie_path),
+        else: conn
+    end)
+  end
+
+  def clear_transactions(conn), do: conn
+
+  @doc "Serializes a bounded authorization transaction for an encrypted cookie."
   def encode_transaction(%{
         state: state,
         nonce: nonce,
@@ -186,6 +208,7 @@ defmodule SmolqueryWeb.OIDC do
              client_id: config.web_client_id,
              redirect_uri: config.web_redirect_uri,
              openid_configuration: metadata,
+             authorization_params: [scope: authorization_scopes(config.web_scopes)],
              state: random_value(),
              nonce: nonce,
              code_verifier: true
@@ -341,40 +364,72 @@ defmodule SmolqueryWeb.OIDC do
 
   defp provider(%Runtime{name: name}), do: Module.concat(name, "OIDCProvider")
 
-  defp decode_or_empty(value) do
-    case decode_transactions(value) do
-      {:ok, transactions} -> transactions
-      {:error, :invalid_transaction} -> []
-    end
-  end
+  defp prune_transaction_cookies(conn, new_state) do
+    new_name = transaction_cookie_name(new_state)
 
-  defp decode_transactions(nil), do: {:ok, []}
+    candidates =
+      conn.req_cookies
+      |> Enum.filter(fn {name, _token} ->
+        String.starts_with?(name, @transaction_cookie_prefix) and name != new_name
+      end)
 
-  defp decode_transactions(%{"v" => 2, "transactions" => values})
-       when is_list(values) and length(values) <= @max_transactions do
-    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, transactions} ->
-      case decode_transaction(value) do
-        {:ok, transaction} -> {:cont, {:ok, [transaction | transactions]}}
-        {:error, :invalid_transaction} -> {:halt, {:error, :invalid_transaction}}
-      end
+    keep =
+      candidates
+      |> Enum.flat_map(fn {name, token} ->
+        case decrypt_transaction(token) do
+          {:ok, transaction} -> [{name, transaction.created_at}]
+          {:error, :invalid_transaction} -> []
+        end
+      end)
+      |> Enum.sort_by(&elem(&1, 1), :desc)
+      |> Enum.take(@max_transactions - 1)
+      |> MapSet.new(&elem(&1, 0))
+
+    Enum.reduce(candidates, conn, fn {name, _token}, conn ->
+      if MapSet.member?(keep, name),
+        do: conn,
+        else: Plug.Conn.delete_resp_cookie(conn, name, path: @transaction_cookie_path)
     end)
-    |> case do
-      {:ok, transactions} -> {:ok, Enum.reverse(transactions)}
-      error -> error
+  end
+
+  defp decrypt_transaction(nil), do: {:error, :invalid_transaction}
+
+  defp decrypt_transaction(token) when is_binary(token) do
+    with {:ok, encoded} <-
+           Phoenix.Token.decrypt(
+             token_context(),
+             @transaction_cookie_salt,
+             token,
+             max_age: @transaction_ttl
+           ),
+         {:ok, transaction} <- decode_transaction(encoded),
+         true <- active_transaction?(transaction, System.system_time(:second)) do
+      {:ok, transaction}
+    else
+      _failure -> {:error, :invalid_transaction}
     end
   end
 
-  defp decode_transactions(value) do
-    case decode_transaction(value) do
-      {:ok, transaction} -> {:ok, [transaction]}
-      {:error, :invalid_transaction} -> {:error, :invalid_transaction}
-    end
+  defp decrypt_transaction(_token), do: {:error, :invalid_transaction}
+
+  defp authorization_scopes(scopes) do
+    scopes |> Enum.reject(&(&1 == "openid")) |> Enum.join(" ")
   end
 
-  defp encode_transactions([]), do: nil
+  defp token_context do
+    :smolquery
+    |> Application.fetch_env!(SmolqueryWeb.Endpoint)
+    |> Keyword.fetch!(:secret_key_base)
+  end
 
-  defp encode_transactions(transactions),
-    do: %{"v" => 2, "transactions" => Enum.map(transactions, &encode_transaction/1)}
+  @doc false
+  def decode_transaction_cookie(token), do: decrypt_transaction(token)
+
+  @doc false
+  def transaction_cookie_name(state) do
+    digest = :crypto.hash(:sha256, state) |> Base.url_encode64(padding: false)
+    @transaction_cookie_prefix <> digest
+  end
 
   defp active_transaction?(transaction, now) do
     age = now - transaction.created_at

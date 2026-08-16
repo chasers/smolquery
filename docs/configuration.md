@@ -60,12 +60,13 @@ Provider outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS/token response size (default `1048576`) |
 
 The browser flow generates fresh URL-safe state, nonce, and S256 PKCE verifier
-values for every login. Up to four bounded transactions live only in the
-encrypted, HTTP-only browser session, so concurrent tabs and callbacks may land
-on different web nodes. A callback removes only its matching state before token
-exchange; unrelated transactions remain available. Missing, mismatched,
-future-dated, and more-than-five-minute-old values are rejected, and the
-provider's authorization code is single-use. Token exchange uses the validated HTTPS
+values for every login. Each transaction lives in its own five-minute encrypted,
+HTTP-only callback cookie, so concurrent login and callback responses update
+different cookie slots and may land on different web nodes. A callback expires
+only its matching cookie before token exchange; unrelated transactions remain
+available. Sequential logins prune stale cookies and retain at most four active
+transactions. Missing, mismatched, future-dated, and expired values are rejected,
+and the provider's authorization code is single-use. Token exchange uses the validated HTTPS
 endpoint with redirects disabled and the configured client authentication
 method. Returned ID tokens
 are strictly verified for issuer, browser audience, subject, timestamps, nonce,
