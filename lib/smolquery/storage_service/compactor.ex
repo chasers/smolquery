@@ -158,8 +158,10 @@ defmodule Smolquery.StorageService.Compactor do
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
 
   defp run(state) do
-    with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
-      outcomes = Enum.map(tables, &compact_table(state.runtime, &1))
+    runtime = Runtime.with_compact_max_rows(state.runtime)
+
+    with {:ok, tables} <- Catalog.tables(runtime.catalog) do
+      outcomes = Enum.map(tables, &compact_table(runtime, &1))
 
       {:ok,
        %{
