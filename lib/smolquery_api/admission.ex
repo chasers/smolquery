@@ -99,12 +99,7 @@ defmodule SmolqueryApi.Admission do
 
       {:error, :admission_full} ->
         conn
-        |> Plug.Conn.put_resp_header("retry-after", "1")
-        |> Errors.send_error(
-          429,
-          "RESOURCE_EXHAUSTED",
-          "too many ingest bytes in flight, retry later"
-        )
+        |> Errors.send_resource_exhausted(1, "too many ingest bytes in flight, retry later")
         |> Plug.Conn.halt()
     end
   end
