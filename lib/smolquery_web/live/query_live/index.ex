@@ -9,9 +9,10 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   A finished job's scan statistics render under the editor. Explain and
   Analyze submit the same SQL with the `explain` option and render the
-  engine's plan text instead of rows; the Trace toggle submits with
+  engine's plan text instead of rows. The Trace toggle submits with
   `trace: true` and renders the job's phase spans as a
-  `SmolqueryWeb.Waterfall`.
+  `SmolqueryWeb.Waterfall`; it starts enabled — the waterfall is what the
+  page is for — while the API keeps tracing opt-in.
   """
 
   use SmolqueryWeb, :live_view
@@ -34,7 +35,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:page_title, "Query")
       |> assign(:runtime, runtime)
       |> assign(:sql, "")
-      |> assign(:trace, false)
+      |> assign(:trace, true)
       |> assign(:job, nil)
       |> assign(:frame, nil)
       |> assign(:page, 0)

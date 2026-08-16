@@ -112,7 +112,16 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert render_click(lv, "explain", %{"mode" => "plan"}) =~ "Write some SQL first"
     end
 
-    test "the trace toggle renders a waterfall", %{conn: conn, query: query} do
+    test "the trace toggle starts enabled", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/query")
+
+      assert html =~ ~s|name="query[trace]"|
+      assert html =~ "checked"
+    end
+
+    test "a traced run renders a waterfall", %{conn: conn, query: query} do
       start_web!(query_name: query)
 
       {:ok, lv, _html} = live(conn, ~p"/query")
@@ -127,7 +136,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert html =~ "execute"
     end
 
-    test "without the toggle no waterfall renders", %{conn: conn, query: query} do
+    test "unchecking the toggle skips the trace", %{conn: conn, query: query} do
       start_web!(query_name: query)
 
       {:ok, lv, _html} = live(conn, ~p"/query")
