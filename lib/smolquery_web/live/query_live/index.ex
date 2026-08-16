@@ -195,10 +195,24 @@ defmodule SmolqueryWeb.QueryLive.Index do
       <h1 class="text-xl font-semibold">Query</h1>
 
       <form id="editor" phx-change="sql_changed" phx-submit="run" class="space-y-2">
+        <script :type={Phoenix.LiveView.ColocatedHook} name=".SubmitOnMetaEnter">
+          export default {
+            mounted() {
+              this.el.addEventListener("keydown", (event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault()
+                  this.el.form.requestSubmit()
+                }
+              })
+            }
+          }
+        </script>
         <textarea
+          id="sql-editor"
           name="query[sql]"
           rows="6"
-          placeholder="SELECT ..."
+          placeholder="SELECT ... (⌘⏎ runs)"
+          phx-hook=".SubmitOnMetaEnter"
           class="textarea textarea-bordered w-full font-mono"
         >{@sql}</textarea>
         <div class="flex gap-2 items-center">
