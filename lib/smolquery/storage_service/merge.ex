@@ -36,10 +36,17 @@ defmodule Smolquery.StorageService.Merge do
   hop's cost is memory: the claim's rows live in the engine, spilling to the
   connection's `temp_directory` past its limit, until the final `COPY`.
 
-  The final `COPY` gets five minutes rather than the engine's 30 s default.
-  It reads local data, so its duration scales with the backlog's bytes, not
-  with per-input `httpfs` latency. A 30 s ceiling here would decide how large
-  a backlog may seal — the T-244 trap with the bound moved. A staging chunk
+  The final `COPY` gets five minutes rather than the engine's 30 s default —
+  on both paths (T-261). The staged variant reads local data, so its duration
+  scales with the backlog's bytes, not with per-input `httpfs` latency; a
+  30 s ceiling would decide how large a backlog may seal — the T-244 trap
+  with the bound moved. The direct variant earns the same budget the other
+  way around: its inputs are count-capped, not byte- or row-capped, and a
+  row-capped compaction group of twelve inputs sorts millions of rows in one
+  read-sort-write `COPY`. On the default budget those groups died at ~30 s
+  and re-planned identically every sweep — while a larger group of the same
+  data succeeded, purely because its input count pushed it onto the chunked
+  path whose budgets were real. A staging chunk
   gets two minutes for a similar reason: the count cap bounds its inputs, not
   its bytes, and twelve compaction inputs near `compact_below_bytes` move
   hundreds of megabytes on a slow link. An `after` block drops the staging
@@ -433,7 +440,8 @@ defmodule Smolquery.StorageService.Merge do
     TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
     """
 
-    with {:ok, _result} <- query(runtime, sql, urls ++ [staged]), do: :ok
+    with {:ok, _result} <- query(runtime, sql, urls ++ [staged], @staged_copy_timeout_ms),
+         do: :ok
   end
 
   defp row_group_option(%Schema{} = schema, %Runtime{} = runtime) do

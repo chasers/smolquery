@@ -52,7 +52,8 @@ outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_MAX_TOKEN_BYTES` / `SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES` | bounds compact token and individual encoded segments before JOSE decoding (defaults `65536` / `32768`) |
 | `SMOLQUERY_OIDC_IAT_FUTURE_SECONDS` | maximum future `iat` allowance (default `300`); `exp` contexts remain active through the configured clock-skew boundary |
 | `SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS` / `SMOLQUERY_OIDC_JWKS_MAX_AGE_MS` | bounded cache freshness windows (defaults `3600000`) |
-| `SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS` | minimum interval between unknown-`kid` forced JWKS fetch attempts across all requests (default `1000`); concurrent/repeated attempts within the interval reuse the current cache and fail closed if the key is still unknown |
+| `SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS` | positive minimum interval between unknown-`kid` forced JWKS fetches (default `1000`); concurrent/repeated attempts reuse the current cache and fail closed if the key remains unknown |
+| `SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS` | positive interval suppressing repeated discovery/JWKS network attempts after a failed refresh (default `1000`) |
 | `SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS` / `SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS` / `SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS` | bounded Req connection, per-chunk receive, and complete-response timeouts (defaults `2000` / `5000` / `10000`) |
 | `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS response size (default `1048576`) |
 
@@ -66,14 +67,16 @@ expiration-skew boundary. Before T-233, an OIDC API token must map to all three
 current API capabilities (`query`, `ingest`, and `catalog_manage`), so this layer
 cannot accidentally grant a query-only token write or catalog access.
 
-The discovery client requires JSON responses, byte-for-byte issuer equality, HTTPS
-authorization/token/JWKS endpoints, and an algorithm overlap with the local
-asymmetric allowlist. It refuses redirects and bounds response bodies. Unknown `kid`
-refreshes use a global cooldown, so concurrent or repeated misses cannot create one
-outbound fetch per request; failed attempts also start the cooldown and subsequent
-misses fail against the current cache. Protected `jku`, `jwk`, `x5u`, `crit`, and
-`b64` headers are rejected. It does not trust token claims or provider groups as
-tenant identifiers.
+The discovery client requires JSON responses, byte-for-byte issuer equality,
+HTTPS authorization/token/JWKS endpoints, an algorithm overlap with the local
+asymmetric allowlist, and at least one public signing key compatible with that
+allowlist. It refuses redirects and bounds response bodies. Refresh I/O runs
+outside the cache process, so fresh reads continue while a key fetch is in
+flight; expired data still fails closed. Unknown-`kid` refreshes use a global
+cooldown measured from fetch completion, and failed discovery/JWKS attempts
+start a separate retry backoff. Protected `jku`, `jwk`, `x5u`, `crit`, and `b64`
+headers are rejected. The client does not trust token claims or provider groups
+as tenant identifiers.
 
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 
