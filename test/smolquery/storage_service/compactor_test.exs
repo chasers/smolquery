@@ -288,4 +288,126 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
+
+  describe "adjusted_row_caps/3 (T-262)" do
+    @resolved 4_194_304
+
+    defp oom_failure(table) do
+      {:failed,
+       %{
+         table: table,
+         reason:
+           {:put_failed, "analytics/events/x.parquet",
+            {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}}}
+       }}
+    end
+
+    defp staging_oom_failure(table) do
+      {:failed,
+       %{
+         table: table,
+         reason: {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}}
+       }}
+    end
+
+    defp compacted(table, rows) do
+      {:ok, %{table: table, key: "k", replaced: 2, rows: rows, snapshot: 1}}
+    end
+
+    test "a merge OOM halves the table's cap" do
+      caps = Compactor.adjusted_row_caps(%{}, [oom_failure(@table)], @resolved)
+
+      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+    end
+
+    test "a staging-phase OOM tightens the cap the same way" do
+      caps = Compactor.adjusted_row_caps(%{}, [staging_oom_failure(@table)], @resolved)
+
+      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+    end
+
+    test "repeated OOMs keep halving, never below the floor, and grow the patience" do
+      caps =
+        Enum.reduce(1..30, %{}, fn _sweep, caps ->
+          Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved)
+        end)
+
+      assert caps == %{@table => %{cap: 65_536, streak: 0, patience: 64}}
+    end
+
+    test "cap-filling successes raise the cap after the patience and shed at the resolved cap" do
+      caps = %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 2}}
+      quarter = compacted(@table, div(@resolved, 4))
+      half = compacted(@table, div(@resolved, 2))
+
+      counted = Compactor.adjusted_row_caps(caps, [quarter], @resolved)
+      assert counted == %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2}}
+
+      doubled = Compactor.adjusted_row_caps(counted, [quarter], @resolved)
+      assert doubled == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+
+      counted = Compactor.adjusted_row_caps(doubled, [half], @resolved)
+      assert Compactor.adjusted_row_caps(counted, [half], @resolved) == %{}
+    end
+
+    test "a small group's success is not evidence for a raise" do
+      caps = %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2}}
+
+      assert Compactor.adjusted_row_caps(caps, [compacted(@table, 100)], @resolved) == caps
+    end
+
+    test "a cap that makes every plan skip still earns its raise, so the floor unwedges" do
+      caps = %{@table => %{cap: 65_536, streak: 0, patience: 2}}
+
+      counted = Compactor.adjusted_row_caps(caps, [{:skip, @table}], @resolved)
+      doubled = Compactor.adjusted_row_caps(counted, [{:skip, @table}], @resolved)
+
+      assert doubled == %{@table => %{cap: 131_072, streak: 0, patience: 2}}
+    end
+
+    test "a success or skip without an override changes nothing" do
+      assert Compactor.adjusted_row_caps(%{}, [compacted(@table, 100)], @resolved) == %{}
+      assert Compactor.adjusted_row_caps(%{}, [{:skip, @table}], @resolved) == %{}
+    end
+
+    test "a failure that is not a merge OOM changes nothing" do
+      timeout =
+        {:failed,
+         %{
+           table: @table,
+           reason:
+             {:put_failed, "analytics/events/x.parquet",
+              {:merge_failed, %Smolquery.Engine.CallExited{reason: :timeout}}}
+         }}
+
+      sizing = {:failed, %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "x"}}}}
+
+      assert Compactor.adjusted_row_caps(%{}, [timeout, sizing, :skip], @resolved) == %{}
+    end
+  end
+
+  describe "engine_call_exited?/1" do
+    test "matches bare sizing and merge exits" do
+      exit = %CallExited{reason: :timeout}
+
+      assert Compactor.engine_call_exited?({:sizing_failed, exit})
+      assert Compactor.engine_call_exited?({:merge_failed, exit})
+    end
+
+    test "matches a final COPY's exit, which the store wraps" do
+      wrapped =
+        {:put_failed, "analytics/events/x.parquet",
+         {:merge_failed, %CallExited{reason: :timeout}}}
+
+      assert Compactor.engine_call_exited?(wrapped)
+    end
+
+    test "does not match plain errors" do
+      refute Compactor.engine_call_exited?({:merge_failed, %Adbc.Error{message: "x"}})
+
+      refute Compactor.engine_call_exited?(
+               {:put_failed, "x.parquet", {:merge_failed, %Adbc.Error{message: "x"}}}
+             )
+    end
+  end
 end
