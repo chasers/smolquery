@@ -38,7 +38,7 @@ defmodule SmolqueryApi.Supervisor do
 
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
-        [SmolqueryApi.Endpoint]
+        [{SmolqueryApi.Admission, runtime}, SmolqueryApi.Endpoint]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

@@ -7,9 +7,11 @@ defmodule SmolqueryApi.Router do
   client modules and `Smolquery.Catalog`, never into a service's internals, so
   the split-out rules hold by construction. Started by the `:api` role.
 
-  One pipeline, and its order is the contract: instance → auth → parsers.
-  `SmolqueryApi.Auth` runs before `SmolqueryApi.Parsers`, so an
-  unauthenticated body is never read; the catch-all route at the bottom runs
+  One pipeline, and its order is the contract: instance → auth → admission →
+  parsers. `SmolqueryApi.Auth` runs before `SmolqueryApi.Parsers`, so an
+  unauthenticated body is never read; `SmolqueryApi.Admission` sits between
+  them, so an ingest body is counted against the in-flight limit before its
+  first byte is read (T-245); the catch-all route at the bottom runs
   *inside* the authed pipeline, so an unauthenticated request is answered 401
   whether its path exists or not — 404 never reveals which routes are real.
 
@@ -45,6 +47,7 @@ defmodule SmolqueryApi.Router do
   pipeline :api do
     plug :put_instance
     plug SmolqueryApi.Auth
+    plug :admit_ingest
     plug SmolqueryApi.Parsers
   end
 
@@ -77,4 +80,6 @@ defmodule SmolqueryApi.Router do
       _absent -> put_private(conn, :smolquery_api, SmolqueryApi)
     end
   end
+
+  defp admit_ingest(conn, _opts), do: SmolqueryApi.Admission.admit_conn(conn)
 end
