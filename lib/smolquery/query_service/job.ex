@@ -11,6 +11,7 @@ defmodule Smolquery.QueryService.Job do
   """
 
   alias Smolquery.Catalog
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.Segments.Id
 
   @enforce_keys [:id, :sql, :state, :submitted_at]
@@ -23,6 +24,7 @@ defmodule Smolquery.QueryService.Job do
     :snapshot,
     :row_count,
     :duration_ms,
+    :statistics,
     :error
   ]
 
@@ -37,6 +39,7 @@ defmodule Smolquery.QueryService.Job do
           snapshot: Catalog.snapshot() | nil,
           row_count: non_neg_integer() | nil,
           duration_ms: non_neg_integer() | nil,
+          statistics: Statistics.t() | nil,
           error: term()
         }
 
@@ -60,16 +63,22 @@ defmodule Smolquery.QueryService.Job do
   def running(%__MODULE__{state: :pending} = job), do: %{job | state: :running}
 
   @doc """
-  The job, finished with a result: done, stamped, and sized.
+  The job, finished with a result: done, stamped, sized, and costed.
+
+  `statistics` is what the plan read to serve it
+  (`Smolquery.QueryService.Statistics`); `nil` for a job restored from
+  history, which does not persist it.
   """
-  @spec done(t(), Catalog.snapshot(), non_neg_integer(), non_neg_integer()) :: t()
-  def done(%__MODULE__{} = job, snapshot, row_count, duration_ms) do
+  @spec done(t(), Catalog.snapshot(), non_neg_integer(), non_neg_integer(), Statistics.t() | nil) ::
+          t()
+  def done(%__MODULE__{} = job, snapshot, row_count, duration_ms, statistics) do
     %{
       job
       | state: :done,
         snapshot: snapshot,
         row_count: row_count,
         duration_ms: duration_ms,
+        statistics: statistics,
         finished_at: System.system_time(:millisecond)
     }
   end

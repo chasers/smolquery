@@ -9,21 +9,25 @@ defmodule Smolquery.QueryService.Plan do
   the user's query, runs unmodified against them.
 
   `hot` carries the micro-segment entries that survived the membership rule
-  (and, once pruning lands, the pruner), keyed by table: their row counts and
-  stats are what query statistics and pruning decisions are made of.
+  and the pruner, keyed by table: their row counts and stats are what query
+  statistics and pruning decisions are made of. `statistics` is those
+  decisions counted (`Smolquery.QueryService.Statistics`) — what the plan
+  reads, per tier, reported out with the finished job.
   """
 
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
+  alias Smolquery.QueryService.Statistics
 
   @enforce_keys [:sql, :snapshot]
-  defstruct [:sql, :snapshot, tables: [], statements: [], hot: %{}]
+  defstruct [:sql, :snapshot, :statistics, tables: [], statements: [], hot: %{}]
 
   @type t :: %__MODULE__{
           sql: String.t(),
           snapshot: Catalog.snapshot(),
           tables: [Catalog.table_ref()],
           statements: [String.t()],
-          hot: %{Catalog.table_ref() => [HotClient.entry()]}
+          hot: %{Catalog.table_ref() => [HotClient.entry()]},
+          statistics: Statistics.t() | nil
         }
 end

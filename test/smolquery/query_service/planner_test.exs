@@ -5,6 +5,7 @@ defmodule Smolquery.QueryService.PlannerTest do
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.Schema
   alias Smolquery.Test.FixedCatalog
   alias Smolquery.Test.ManifestServer
@@ -273,6 +274,64 @@ defmodule Smolquery.QueryService.PlannerTest do
                Planner.plan(runtime, @conn, "SELECT * FROM analytics.events WHERE id > 100")
 
       assert [%{"id" => "01A"}] = plan.hot[@table]
+    end
+
+    test "statistics count both tiers, with pruning reflected in the hot tier" do
+      stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
+
+      runtime =
+        runtime(
+          [
+            entry("01A", %{"stats" => stats, "row_count" => 5, "byte_size" => 50}),
+            entry("01B", %{"row_count" => 7, "byte_size" => 70})
+          ],
+          answers: [stats: %{{@table, @snapshot} => %{files: 3, rows: 1_000, bytes: 4_096}}]
+        )
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events WHERE id > 100")
+
+      assert plan.statistics.hot == %{
+               files_total: 2,
+               files_scanned: 1,
+               rows_scanned: 7,
+               bytes_scanned: 70
+             }
+
+      assert plan.statistics.sealed == %{
+               files_total: 3,
+               files_scanned: 3,
+               rows_scanned: 1_000,
+               bytes_scanned: 4_096
+             }
+    end
+
+    test "a membership-excluded entry is not counted as considered" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+
+      runtime =
+        runtime(
+          [entry("01A", %{"claim_keys" => ["analytics/events/01SEALED.parquet"]})],
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
+        )
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      assert plan.statistics.hot == %{
+               files_total: 0,
+               files_scanned: 0,
+               rows_scanned: 0,
+               bytes_scanned: 0
+             }
+    end
+
+    test "a query touching no tables weighs nothing" do
+      runtime = runtime([])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT 1 + 1")
+
+      assert Statistics.files_total(plan.statistics) == 0
+      assert Statistics.bytes_scanned(plan.statistics) == 0
     end
 
     test "an unreachable hot tier fails the plan, not the sealed half of an answer" do

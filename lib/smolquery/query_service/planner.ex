@@ -125,6 +125,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Statistics
 
   @doc """
   Plans `sql` against the catalog and the hot tier, as one consistent read.
@@ -241,10 +242,11 @@ defmodule Smolquery.QueryService.Planner do
   defp resolve(runtime, refs, snapshot) do
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
       with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot) do
+           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot),
+           {:ok, stats} <- Catalog.segment_stats(runtime.catalog, ref, snapshot) do
         sealed = MapSet.new(paths, &Path.basename/1)
 
-        {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed})}}
+        {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed, stats: stats})}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -347,20 +349,52 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
   defp build(sql, snapshot, refs, tables, manifests, conjuncts) do
-    hot =
+    members =
       Map.new(refs, fn ref ->
-        surviving =
-          Enum.filter(
-            manifests[ref],
-            &(include?(&1, tables[ref].sealed) and Pruner.keep?(&1, conjuncts[ref] || []))
-          )
+        {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
+      end)
 
-        {ref, surviving}
+    hot =
+      Map.new(members, fn {ref, entries} ->
+        {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || []))}
       end)
 
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
 
-    %Plan{sql: sql, snapshot: snapshot, tables: refs, statements: statements, hot: hot}
+    %Plan{
+      sql: sql,
+      snapshot: snapshot,
+      tables: refs,
+      statements: statements,
+      hot: hot,
+      statistics: statistics(members, hot, tables)
+    }
+  end
+
+  defp statistics(members, hot, tables) do
+    surviving = hot |> Map.values() |> List.flatten()
+
+    hot_tier =
+      Statistics.tier(
+        members |> Map.values() |> List.flatten() |> length(),
+        length(surviving),
+        Enum.sum_by(surviving, & &1["row_count"]),
+        Enum.sum_by(surviving, & &1["byte_size"])
+      )
+
+    sealed = tables |> Map.values() |> Enum.map(& &1.stats)
+
+    sealed_files = Enum.sum_by(sealed, & &1.files)
+
+    sealed_tier =
+      Statistics.tier(
+        sealed_files,
+        sealed_files,
+        Enum.sum_by(sealed, & &1.rows),
+        Enum.sum_by(sealed, & &1.bytes)
+      )
+
+    Statistics.new(hot_tier, sealed_tier)
   end
 
   defp include?(entry, sealed) do

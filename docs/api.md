@@ -68,6 +68,30 @@ Query results page from the frame the runner holds until `result_ttl_ms`;
 temporal and decimal values arrive as ISO 8601 / decimal strings, mirroring what
 inserts accept.
 
+## Query statistics
+
+A finished job carries a `statistics` object — on the `job` in a
+`POST /v1/queries` response and on `GET /v1/jobs/:id` while the runner holds
+the job (history does not persist it, so an expired job answers
+`"statistics": null`):
+
+```json
+{
+  "filesTotal": 12, "filesScanned": 4,
+  "rowsScanned": 100000, "bytesScanned": 52428800, "mibScanned": 50.0,
+  "hot":    {"filesTotal": 9, "filesScanned": 1, "rowsScanned": 1000, "bytesScanned": 4096},
+  "sealed": {"filesTotal": 3, "filesScanned": 3, "rowsScanned": 99000, "bytesScanned": 52424704}
+}
+```
+
+The numbers are plan-derived: which files the planner decided the query needs,
+and those files' catalog/manifest sizes — not engine-measured I/O. The tiers
+prune by different mechanisms, so they are reported separately. For the hot
+tier, `filesTotal` counts micro-segments that passed the membership rule and
+`filesScanned` what survived min-max pruning — the pruner's effect, counted.
+For the sealed tier both fields count the segments listed at the pinned
+snapshot; DuckDB may prune further at scan time, which the planner cannot see.
+
 ## Errors
 
 Failures answer one JSON envelope everywhere:

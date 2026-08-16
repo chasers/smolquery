@@ -65,6 +65,16 @@ defmodule Smolquery.Catalog do
   @type clustering :: [String.t()]
 
   @typedoc """
+  Aggregate size of a table's sealed tier at a snapshot: how many segment
+  files a read at that snapshot lists, and their total rows and bytes.
+  """
+  @type segment_stats :: %{
+          files: non_neg_integer(),
+          rows: non_neg_integer(),
+          bytes: non_neg_integer()
+        }
+
+  @typedoc """
   The mutable table settings a `PATCH` can carry, keyed by which were present.
 
   A key that is absent is left untouched; `retention: nil` and `clustering: []`
@@ -87,6 +97,8 @@ defmodule Smolquery.Catalog do
               {:ok, [String.t()]} | {:error, term()}
   @callback registered_through(config :: term(), table_ref(), snapshot()) ::
               {:ok, [String.t()]} | {:error, term()}
+  @callback segment_stats(config :: term(), table_ref(), snapshot()) ::
+              {:ok, segment_stats()} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
@@ -199,6 +211,20 @@ defmodule Smolquery.Catalog do
           {:ok, [String.t()]} | {:error, term()}
   def registered_through(%__MODULE__{} = catalog, table, snapshot),
     do: catalog.impl.registered_through(catalog.config, table, snapshot)
+
+  @doc """
+  The count, total rows, and total bytes of a table's segments at `snapshot`.
+
+  This is `segments/3`'s question — "what would I read at `snapshot`" — as
+  sizes rather than paths. The planner asks it once per referenced table so a
+  query's response can report what its sealed tier weighs
+  (`Smolquery.QueryService.Statistics`), without fetching a path list it has
+  no other use for.
+  """
+  @spec segment_stats(t(), table_ref(), snapshot()) ::
+          {:ok, segment_stats()} | {:error, term()}
+  def segment_stats(%__MODULE__{} = catalog, table, snapshot),
+    do: catalog.impl.segment_stats(catalog.config, table, snapshot)
 
   @doc """
   Removes segments from a table's current snapshot, returning the new snapshot.

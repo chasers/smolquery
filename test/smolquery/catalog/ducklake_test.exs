@@ -324,6 +324,42 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "segment_stats/3" do
+    test "counts the files, rows, and bytes a snapshot reads", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 7)
+      {:ok, snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+
+      assert {:ok, stats} = Catalog.segment_stats(catalog, @table, snapshot)
+      assert stats.files == 2
+      assert stats.rows == 17
+      assert stats.bytes == a.byte_size + b.byte_size
+    end
+
+    test "a dropped segment no longer counts at the dropping snapshot", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 7)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a, b])
+      {:ok, dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      assert Catalog.segment_stats(catalog, @table, dropped) ==
+               {:ok, %{files: 1, rows: 7, bytes: b.byte_size}}
+    end
+
+    test "a table that never registered anything weighs nothing", %{catalog: catalog} do
+      {:ok, snapshot} = Catalog.current_snapshot(catalog)
+
+      assert Catalog.segment_stats(catalog, @table, snapshot) ==
+               {:ok, %{files: 0, rows: 0, bytes: 0}}
+    end
+  end
+
   describe "drop_segments/3" do
     test "removes a segment from the current snapshot but leaves the file", %{
       catalog: catalog,

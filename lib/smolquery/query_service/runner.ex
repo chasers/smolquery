@@ -134,8 +134,8 @@ defmodule Smolquery.QueryService.Runner do
 
     {job, result} =
       case outcome do
-        {:ok, %{snapshot: snapshot, frame: frame, duration_ms: duration}} ->
-          {Job.done(state.job, snapshot, DataFrame.n_rows(frame), duration), frame}
+        {:ok, %{snapshot: snapshot, frame: frame, duration_ms: duration, statistics: statistics}} ->
+          {Job.done(state.job, snapshot, DataFrame.n_rows(frame), duration, statistics), frame}
 
         {:error, reason} ->
           {Job.failed(state.job, reason), nil}
@@ -209,7 +209,13 @@ defmodule Smolquery.QueryService.Runner do
          {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
       duration = System.monotonic_time(:millisecond) - started
 
-      {:ok, %{snapshot: plan.snapshot, frame: frame, duration_ms: duration}}
+      {:ok,
+       %{
+         snapshot: plan.snapshot,
+         frame: frame,
+         duration_ms: duration,
+         statistics: plan.statistics
+       }}
     end
   end
 

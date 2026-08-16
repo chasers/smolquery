@@ -21,6 +21,7 @@ defmodule SmolqueryApi.JobController do
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
+  alias Smolquery.QueryService.Statistics
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Json
   alias SmolqueryApi.Runtime
@@ -108,8 +109,32 @@ defmodule SmolqueryApi.JobController do
       "snapshot" => job.snapshot,
       "rowCount" => job.row_count,
       "durationMs" => job.duration_ms,
+      "statistics" => statistics_json(job.statistics),
       "error" => error_json(job.error),
       "resultsAvailable" => results_available
+    }
+  end
+
+  defp statistics_json(nil), do: nil
+
+  defp statistics_json(%Statistics{} = statistics) do
+    %{
+      "filesTotal" => Statistics.files_total(statistics),
+      "filesScanned" => Statistics.files_scanned(statistics),
+      "rowsScanned" => Statistics.rows_scanned(statistics),
+      "bytesScanned" => Statistics.bytes_scanned(statistics),
+      "mibScanned" => Statistics.mib_scanned(statistics),
+      "hot" => tier_json(statistics.hot),
+      "sealed" => tier_json(statistics.sealed)
+    }
+  end
+
+  defp tier_json(tier) do
+    %{
+      "filesTotal" => tier.files_total,
+      "filesScanned" => tier.files_scanned,
+      "rowsScanned" => tier.rows_scanned,
+      "bytesScanned" => tier.bytes_scanned
     }
   end
 
