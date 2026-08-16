@@ -98,8 +98,9 @@ router map, never from request claims or path input.
 
 The discovery client requires JSON responses, byte-for-byte issuer equality,
 HTTPS authorization/token/JWKS endpoints, an algorithm overlap with the local
-asymmetric allowlist, and at least one public signing key compatible with that
-allowlist. It refuses redirects and bounds response bodies. Refresh I/O runs
+asymmetric allowlist, unique key ids, and at least one public signing key whose
+explicit algorithm and key type are compatible with that allowlist. It refuses
+redirects and bounds response bodies. Refresh I/O runs
 outside the cache process, so fresh reads continue while a key fetch is in
 flight; expired data still fails closed. Unknown-`kid` refreshes use a global
 cooldown measured from fetch completion, and failed discovery/JWKS attempts
