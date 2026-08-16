@@ -103,6 +103,14 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
 
     assert {:error, :jwks_no_compatible_signing_key} =
              Discovery.validate_jwks(%{"keys" => [Map.put(rsa, "use", "enc")]}, @config)
+
+    mixed_config = %{@config | algorithms: ["RS256", "ES256"]}
+
+    assert {:error, :jwks_no_compatible_signing_key} =
+             Discovery.validate_jwks(%{"keys" => [Map.put(rsa, "alg", "ES256")]}, mixed_config)
+
+    assert {:error, :jwks_duplicate_kid} =
+             Discovery.validate_jwks(%{"keys" => [rsa, rsa]}, @config)
   end
 
   test "rejects malformed and private JWKS keys" do
