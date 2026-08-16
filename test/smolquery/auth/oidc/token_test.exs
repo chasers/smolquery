@@ -349,6 +349,7 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
             issuer: "https://issuer.example",
             web_client_id: "web-client",
             web_client_auth_method: :none,
+            web_host: "ui.example",
             web_origin: "https://ui.example",
             web_redirect_uri: "https://ui.example/auth/callback",
             claim_capabilities: %{
@@ -382,6 +383,7 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
             issuer: "https://issuer.example",
             web_client_id: "web-client",
             web_client_auth_method: :none,
+            web_host: "ui.example",
             web_origin: "https://ui.example",
             web_redirect_uri: "https://ui.example/auth/callback"
           ]
@@ -499,6 +501,7 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
             issuer: "https://issuer.example",
             web_client_id: "web-client",
             web_client_auth_method: :none,
+            web_host: "ui.example",
             web_origin: "https://ui.example",
             web_redirect_uri: "https://ui.example/auth/callback"
           ]

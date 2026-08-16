@@ -115,7 +115,7 @@ defmodule SmolqueryWeb.Runtime do
            Static.web_context(), nil}
 
         :oidc ->
-          {nil, nil, nil, nil, OIDCConfig.new(config, :web)}
+          {nil, nil, nil, nil, OIDCConfig.new(oidc_config(config), :web)}
       end
 
     %__MODULE__{
@@ -144,6 +144,21 @@ defmodule SmolqueryWeb.Runtime do
 
   defp env_var(:username), do: "SMOLQUERY_WEB_USERNAME"
   defp env_var(:password), do: "SMOLQUERY_WEB_PASSWORD"
+
+  defp oidc_config(config) do
+    config
+    |> Keyword.get(:oidc, config)
+    |> Keyword.put(:web_host, resolve_web_host(config))
+  end
+
+  defp resolve_web_host(config) do
+    Keyword.get_lazy(config, :web_host, fn ->
+      :smolquery
+      |> Application.get_env(SmolqueryWeb.Endpoint, [])
+      |> Keyword.get(:url, [])
+      |> Keyword.get(:host)
+    end)
+  end
 
   defp resolve_session_secret(config) do
     case Keyword.fetch(config, :secret_key_base) do

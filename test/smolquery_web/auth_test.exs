@@ -104,6 +104,7 @@ defmodule SmolqueryWeb.AuthTest do
           catalog: MapCatalog.new(),
           auth_mode: :oidc,
           secret_key_base: String.duplicate("s", 64),
+          web_host: "ui.example",
           oidc: [
             issuer: "https://issuer.example/",
             web_client_id: "web",
@@ -240,6 +241,7 @@ defmodule SmolqueryWeb.AuthTest do
           catalog: MapCatalog.new(),
           auth_mode: :oidc,
           secret_key_base: String.duplicate("s", 64),
+          web_host: "ui.example",
           oidc: [
             issuer: "https://issuer.example/",
             web_client_id: "web",

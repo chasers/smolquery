@@ -23,7 +23,7 @@ error.
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
 | `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires in static mode; a node with the `:web` role and no credential refuses to boot |
-| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
+| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`). In OIDC mode it must match `SMOLQUERY_OIDC_WEB_ORIGIN` |
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
 
@@ -41,8 +41,9 @@ Provider outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; it cannot alias the API resource audience |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
-| `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin |
-| `SMOLQUERY_OIDC_WEB_REDIRECT_URI` | exact HTTPS authorization callback URI |
+| `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin; its host must match `SMOLQUERY_WEB_HOST` |
+| `SMOLQUERY_OIDC_WEB_REDIRECT_URI` | authorization callback URI; must be exactly the web origin plus `/auth/callback`, without a query |
+| `SMOLQUERY_OIDC_WEB_SCOPES` | comma-separated browser authorization scopes (default `openid`); `openid` is mandatory, with at most 32 unique scope tokens and 1024 bytes total |
 | `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
 | `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}`; list-valued token claims union matching values |
@@ -59,12 +60,13 @@ Provider outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS/token response size (default `1048576`) |
 
 The browser flow generates fresh URL-safe state, nonce, and S256 PKCE verifier
-values for every login. Up to four bounded transactions live only in the
-encrypted, HTTP-only browser session, so concurrent tabs and callbacks may land
-on different web nodes. A callback removes only its matching state before token
-exchange; unrelated transactions remain available. Missing, mismatched,
-future-dated, and more-than-five-minute-old values are rejected, and the
-provider's authorization code is single-use. Token exchange uses the validated HTTPS
+values for every login. Each transaction lives in its own five-minute encrypted,
+HTTP-only callback cookie, so concurrent login and callback responses update
+different cookie slots and may land on different web nodes. A callback expires
+only its matching cookie before token exchange; unrelated transactions remain
+available. Sequential logins prune stale cookies and retain at most four active
+transactions. Missing, mismatched, future-dated, and expired values are rejected,
+and the provider's authorization code is single-use. Token exchange uses the validated HTTPS
 endpoint with redirects disabled and the configured client authentication
 method. Returned ID tokens
 are strictly verified for issuer, browser audience, subject, timestamps, nonce,

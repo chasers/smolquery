@@ -35,6 +35,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
         catalog: MapCatalog.new(),
         auth_mode: :oidc,
         secret_key_base: String.duplicate("s", 64),
+        web_host: "ui.example",
         oidc_http_client: token_client,
         oidc: [
           issuer: "https://issuer.example",
@@ -82,8 +83,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
     assert String.starts_with?(location, "https://issuer.example/authorize?")
     assert get_resp_header(login, "cache-control") == ["no-store"]
 
-    encoded_transaction = get_session(login, OIDC.transaction_key())
-    assert {:ok, transaction} = OIDC.decode_transaction(encoded_transaction)
+    transaction = transaction(login)
     login_cookie = login |> get_resp_header("set-cookie") |> Enum.join("\n")
     refute login_cookie =~ transaction.state
     refute login_cookie =~ transaction.nonce
@@ -99,7 +99,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
     assert callback.status == 302
     assert get_resp_header(callback, "location") == ["/"]
     assert get_resp_header(callback, "cache-control") == ["no-store"]
-    assert get_session(callback, OIDC.transaction_key()) == nil
+    assert callback.resp_cookies[OIDC.transaction_cookie_name(transaction.state)].max_age == 0
 
     identity = get_session(callback, Session.key())
     assert identity["sub"] == "subject-1"
@@ -122,7 +122,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
     token_response: token_response
   } do
     login = get(build_conn(), ~p"/auth/login")
-    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    transaction = transaction(login)
     raw_expiry = System.system_time(:second) - 1
 
     Agent.update(token_response, fn _ ->
@@ -142,7 +142,8 @@ defmodule SmolqueryWeb.AuthControllerTest do
     conn: _conn
   } do
     login = get(build_conn(), ~p"/auth/login")
-    transaction_cookie = get_session(login, OIDC.transaction_key())
+    transaction = transaction(login)
+    transaction_cookie_name = OIDC.transaction_cookie_name(transaction.state)
 
     callback =
       login
@@ -151,13 +152,13 @@ defmodule SmolqueryWeb.AuthControllerTest do
 
     assert callback.status == 400
     assert callback.resp_body == "authentication failed"
-    assert get_session(callback, OIDC.transaction_key()) == transaction_cookie
+    refute Map.has_key?(callback.resp_cookies, transaction_cookie_name)
     refute_received {:token_request, _url, _options}
   end
 
   test "provider error callback consumes its matching transaction without exchange" do
     login = get(build_conn(), ~p"/auth/login")
-    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    transaction = transaction(login)
 
     callback =
       login
@@ -166,50 +167,70 @@ defmodule SmolqueryWeb.AuthControllerTest do
 
     assert callback.status == 400
     assert callback.resp_body == "authentication failed"
-    assert get_session(callback, OIDC.transaction_key()) == nil
+    assert callback.resp_cookies[OIDC.transaction_cookie_name(transaction.state)].max_age == 0
     refute_received {:token_request, _url, _options}
   end
 
-  test "concurrent login callbacks consume only their matching transactions", %{
+  test "concurrent login responses use independent callback cookies", %{
     token_response: token_response
   } do
     first_login = get(build_conn(), ~p"/auth/login")
-    {:ok, first} = OIDC.decode_transaction(get_session(first_login, OIDC.transaction_key()))
+    second_login = get(build_conn(), ~p"/auth/login")
+    first = transaction(first_login)
+    second = transaction(second_login)
 
-    second_login = first_login |> recycle() |> get(~p"/auth/login")
-    [second_location] = get_resp_header(second_login, "location")
-    second_params = second_location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+    refute OIDC.transaction_cookie_name(first.state) == OIDC.transaction_cookie_name(second.state)
 
     Agent.update(token_response, fn _ -> token_response(first.nonce, "operator") end)
 
     first_callback =
-      second_login
+      first_login
       |> recycle()
       |> get(~p"/auth/callback?state=#{first.state}&code=first-code")
 
     assert first_callback.status == 302
 
-    assert {:ok, second} =
-             OIDC.decode_transaction(get_session(first_callback, OIDC.transaction_key()))
-
-    assert second.state == second_params["state"]
-
     Agent.update(token_response, fn _ -> token_response(second.nonce, "operator") end)
 
     second_callback =
-      first_callback
+      second_login
       |> recycle()
       |> get(~p"/auth/callback?state=#{second.state}&code=second-code")
 
     assert second_callback.status == 302
-    assert get_session(second_callback, OIDC.transaction_key()) == nil
+  end
+
+  test "renders a CSRF-protected logout control that clears the identity", %{
+    token_response: token_response
+  } do
+    login = get(build_conn(), ~p"/auth/login")
+    transaction = transaction(login)
+    Agent.update(token_response, fn _ -> token_response(transaction.nonce, "operator") end)
+
+    callback =
+      login
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
+
+    pending_login = callback |> recycle() |> get(~p"/auth/login")
+    pending_transaction = transaction(pending_login)
+    pending_cookie = OIDC.transaction_cookie_name(pending_transaction.state)
+
+    page = pending_login |> recycle() |> get(~p"/")
+    assert page.resp_body =~ "Log out"
+    [_, csrf_token] = Regex.run(~r/name="_csrf_token" value="([^"]+)"/, page.resp_body)
+
+    logout = page |> recycle() |> post(~p"/auth/logout", %{"_csrf_token" => csrf_token})
+    assert redirected_to(logout) == "/"
+    assert logout.private.plug_session_info == :drop
+    assert logout.resp_cookies[pending_cookie].max_age == 0
   end
 
   test "callback admits a valid web_access-only identity", %{
     token_response: token_response
   } do
     login = get(build_conn(), ~p"/auth/login")
-    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    transaction = transaction(login)
     Agent.update(token_response, fn _ -> token_response(transaction.nonce, "reader") end)
 
     callback =
@@ -232,7 +253,7 @@ defmodule SmolqueryWeb.AuthControllerTest do
     token_response: token_response
   } do
     login = get(build_conn(), ~p"/auth/login")
-    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    transaction = transaction(login)
     expires_at = System.system_time(:second) + 2 - runtime.oidc.clock_skew
 
     Agent.update(token_response, fn _ ->
@@ -329,12 +350,23 @@ defmodule SmolqueryWeb.AuthControllerTest do
 
   defp callback_as(token_response, role) do
     login = get(build_conn(), ~p"/auth/login")
-    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    transaction = transaction(login)
     Agent.update(token_response, fn _ -> token_response(transaction.nonce, role) end)
 
     login
     |> recycle()
     |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
+  end
+
+  defp transaction(conn) do
+    [location] = get_resp_header(conn, "location")
+
+    state =
+      location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
+
+    name = OIDC.transaction_cookie_name(state)
+    {:ok, transaction} = OIDC.decode_transaction_cookie(conn.resp_cookies[name].value)
+    transaction
   end
 
   defp token_response(nonce, role) do
