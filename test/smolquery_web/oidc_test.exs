@@ -105,6 +105,64 @@ defmodule SmolqueryWeb.OIDCTest do
     assert {:error, :invalid_transaction} = OIDC.consume(%{}, transaction.state)
   end
 
+  test "stores a bounded set and consumes only the matching transaction" do
+    transactions =
+      Enum.map(1..5, fn index ->
+        %{
+          state: "state-#{index}",
+          nonce: "nonce-#{index}",
+          verifier: String.duplicate(Integer.to_string(index), 43),
+          created_at: 1_000
+        }
+      end)
+
+    cookie =
+      Enum.reduce(transactions, nil, fn transaction, cookie ->
+        assert {:ok, next_cookie} = OIDC.add_transaction(cookie, transaction, now: 1_000)
+        next_cookie
+      end)
+
+    assert {:error, :invalid_transaction, cookie} =
+             OIDC.take_transaction(cookie, "state-1", now: 1_000)
+
+    assert {:ok, second, cookie} = OIDC.take_transaction(cookie, "state-2", now: 1_000)
+    assert second.nonce == "nonce-2"
+
+    assert {:error, :invalid_transaction, ^cookie} =
+             OIDC.take_transaction(cookie, "unknown", now: 1_000)
+
+    remaining = Enum.drop(transactions, 2)
+
+    assert nil ==
+             Enum.reduce(remaining, cookie, fn transaction, cookie ->
+               assert {:ok, ^transaction, remaining_cookie} =
+                        OIDC.take_transaction(cookie, transaction.state, now: 1_000)
+
+               remaining_cookie
+             end)
+  end
+
+  test "accepts a legacy single transaction while adding a concurrent login" do
+    first = %{
+      state: "first",
+      nonce: "first-nonce",
+      verifier: String.duplicate("a", 43),
+      created_at: 1_000
+    }
+
+    second = %{
+      state: "second",
+      nonce: "second-nonce",
+      verifier: String.duplicate("b", 43),
+      created_at: 1_000
+    }
+
+    legacy = OIDC.encode_transaction(first)
+    assert {:ok, cookie} = OIDC.add_transaction(legacy, second, now: 1_000)
+    assert {:ok, ^first, remaining} = OIDC.take_transaction(cookie, "first", now: 1_000)
+    assert {:ok, ^second, nil} = OIDC.take_transaction(remaining, "second", now: 1_000)
+  end
+
   test "form-encodes confidential client credentials before HTTP Basic", %{
     runtime: runtime
   } do

@@ -2,11 +2,12 @@ defmodule SmolqueryWeb.OIDC do
   @moduledoc """
   Bounded authorization-code transactions for the browser OIDC flow.
 
-  The encrypted browser session carries one short-lived transaction so login
-  and callback can land on different web nodes. Callback deletes that value
-  before exchange and the authorization code is single-use at the provider.
-  Provider metadata and signing keys come only from the supervised provider
-  cache; this module never runs discovery itself.
+  The encrypted browser session carries a small set of short-lived transactions
+  so concurrent tabs and callbacks may land on different web nodes. A callback
+  removes only its matching state before exchange; unrelated transactions remain
+  available and the authorization code is single-use at the provider. Provider
+  metadata and signing keys come only from the supervised provider cache; this
+  module never runs discovery itself.
   """
 
   alias Assent.Strategy.OIDC
@@ -14,6 +15,7 @@ defmodule SmolqueryWeb.OIDC do
   alias SmolqueryWeb.Runtime
 
   @transaction_ttl 300
+  @max_transactions 4
   @request_options [retry: false, redirect: false, raw: true, decode_body: false]
   @transaction_key "oidc_transaction"
 
@@ -24,8 +26,56 @@ defmodule SmolqueryWeb.OIDC do
           created_at: integer()
         }
 
-  @doc "Returns the encrypted-session key for an authorization transaction."
+  @doc "Returns the encrypted-session key for authorization transactions."
   def transaction_key, do: @transaction_key
+
+  @doc "Adds one transaction to the bounded encrypted-session value."
+  def add_transaction(value, transaction, opts \\ []) do
+    now = Keyword.get(opts, :now, System.system_time(:second))
+
+    with encoded when is_map(encoded) <- encode_transaction(transaction),
+         {:ok, transaction} <- decode_transaction(encoded) do
+      transactions =
+        value
+        |> decode_or_empty()
+        |> Enum.filter(&active_transaction?(&1, now))
+        |> Enum.reject(&secure_equal?(&1.state, transaction.state))
+        |> Kernel.++([transaction])
+        |> Enum.take(-@max_transactions)
+
+      {:ok, encode_transactions(transactions)}
+    else
+      _failure -> {:error, :invalid_transaction}
+    end
+  end
+
+  @doc "Removes and returns only the active transaction matching callback state."
+  def take_transaction(value, provided, opts \\ [])
+
+  def take_transaction(value, provided, opts)
+      when is_binary(provided) and byte_size(provided) <= 256 do
+    now = Keyword.get(opts, :now, System.system_time(:second))
+
+    case decode_transactions(value) do
+      {:ok, transactions} ->
+        transactions = Enum.filter(transactions, &active_transaction?(&1, now))
+
+        case Enum.find_index(transactions, &secure_equal?(&1.state, provided)) do
+          nil ->
+            {:error, :invalid_transaction, encode_transactions(transactions)}
+
+          index ->
+            {transaction, remaining} = List.pop_at(transactions, index)
+            {:ok, transaction, encode_transactions(remaining)}
+        end
+
+      {:error, :invalid_transaction} ->
+        {:error, :invalid_transaction, nil}
+    end
+  end
+
+  def take_transaction(_value, _provided, _opts),
+    do: {:error, :invalid_transaction, nil}
 
   @doc "Serializes a bounded authorization transaction for the encrypted session."
   def encode_transaction(%{
@@ -64,6 +114,9 @@ defmodule SmolqueryWeb.OIDC do
       _failure -> {:error, :invalid_transaction}
     end
   end
+
+  def decode_transaction(%{"v" => 2, "transactions" => [transaction]}),
+    do: decode_transaction(transaction)
 
   def decode_transaction(_value), do: {:error, :invalid_transaction}
 
@@ -287,6 +340,46 @@ defmodule SmolqueryWeb.OIDC do
   end
 
   defp provider(%Runtime{name: name}), do: Module.concat(name, "OIDCProvider")
+
+  defp decode_or_empty(value) do
+    case decode_transactions(value) do
+      {:ok, transactions} -> transactions
+      {:error, :invalid_transaction} -> []
+    end
+  end
+
+  defp decode_transactions(nil), do: {:ok, []}
+
+  defp decode_transactions(%{"v" => 2, "transactions" => values})
+       when is_list(values) and length(values) <= @max_transactions do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, transactions} ->
+      case decode_transaction(value) do
+        {:ok, transaction} -> {:cont, {:ok, [transaction | transactions]}}
+        {:error, :invalid_transaction} -> {:halt, {:error, :invalid_transaction}}
+      end
+    end)
+    |> case do
+      {:ok, transactions} -> {:ok, Enum.reverse(transactions)}
+      error -> error
+    end
+  end
+
+  defp decode_transactions(value) do
+    case decode_transaction(value) do
+      {:ok, transaction} -> {:ok, [transaction]}
+      {:error, :invalid_transaction} -> {:error, :invalid_transaction}
+    end
+  end
+
+  defp encode_transactions([]), do: nil
+
+  defp encode_transactions(transactions),
+    do: %{"v" => 2, "transactions" => Enum.map(transactions, &encode_transaction/1)}
+
+  defp active_transaction?(transaction, now) do
+    age = now - transaction.created_at
+    age >= 0 and age <= @transaction_ttl
+  end
 
   defp bounded_binary(value, min, max)
        when is_binary(value) and byte_size(value) >= min and byte_size(value) <= max,

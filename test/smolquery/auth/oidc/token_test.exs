@@ -433,6 +433,13 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
     assert {:ok, _context} =
              Token.authenticate_web(token(claims), config, provider, "nonce", now: @now)
 
+    skewed_claims = Map.put(browser_claims(), "exp", @now - 1)
+
+    assert {:ok, skewed_context} =
+             Token.authenticate_web(token(skewed_claims), config, provider, "nonce", now: @now)
+
+    assert skewed_context.expires_at == skewed_claims["exp"] + config.clock_skew
+
     Process.exit(provider, :normal)
   end
 

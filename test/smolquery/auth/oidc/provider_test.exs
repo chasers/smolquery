@@ -37,13 +37,52 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     Process.exit(pid, :normal)
   end
 
-  test "provider outage fails startup and never returns an authorization-ready cache" do
+  test "provider outage or unusable keys fail startup" do
     Process.flag(:trap_exit, true)
-    client = fn _, _ -> {:error, :timeout} end
     config = Config.new([oidc: [issuer: "https://issuer.example/", api_audience: "api"]], :api)
 
     assert {:error, {:oidc_provider_failed, {:http_error, :timeout}}} =
-             Provider.start_link(name: unique_name(), config: config, http_client: client)
+             Provider.start_link(
+               name: unique_name(),
+               config: config,
+               http_client: fn _, _ -> {:error, :timeout} end
+             )
+
+    ec_only = %{
+      "keys" => [
+        %{
+          "kid" => "ec",
+          "kty" => "EC",
+          "crv" => "P-256",
+          "x" => Base.url_encode64(:binary.copy(<<1>>, 32), padding: false),
+          "y" => Base.url_encode64(:binary.copy(<<2>>, 32), padding: false)
+        }
+      ]
+    }
+
+    assert {:error, {:oidc_provider_failed, :jwks_no_compatible_signing_key}} =
+             Provider.start_link(
+               name: unique_name(),
+               config: config,
+               http_client: client(@metadata, ec_only, self())
+             )
+
+    mixed_config = %{config | algorithms: ["RS256", "ES256"]}
+    mismatched = %{"keys" => [Map.put(hd(@jwks["keys"]), "alg", "ES256")]}
+
+    assert {:error, {:oidc_provider_failed, :jwks_no_compatible_signing_key}} =
+             Provider.start_link(
+               name: unique_name(),
+               config: mixed_config,
+               http_client: client(@metadata, mismatched, self())
+             )
+
+    assert {:error, {:oidc_provider_failed, :jwks_duplicate_kid}} =
+             Provider.start_link(
+               name: unique_name(),
+               config: config,
+               http_client: client(@metadata, %{"keys" => @jwks["keys"] ++ @jwks["keys"]}, self())
+             )
   end
 
   test "provider calls return tagged results after a delayed injected refresh" do
@@ -203,7 +242,76 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     Process.exit(pid, :normal)
   end
 
-  test "failed forced refresh starts cooldown and returns stale cache without retrying" do
+  test "fresh cache reads remain responsive while a forced refresh is in flight" do
+    test = self()
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client = fn url, _options ->
+      case url do
+        "https://issuer.example/.well-known/openid-configuration" ->
+          {:ok, response(@metadata)}
+
+        "https://keys.example/keys" ->
+          case Agent.get_and_update(counter, fn value -> {value, value + 1} end) do
+            0 ->
+              {:ok, response(@jwks)}
+
+            _ ->
+              send(test, {:refresh_started, self()})
+
+              receive do
+                :finish_refresh -> {:ok, response(@jwks)}
+              end
+          end
+      end
+    end
+
+    config = Config.new([oidc: [issuer: "https://issuer.example/", api_audience: "api"]], :api)
+    {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
+    refresh = Task.async(fn -> Provider.refresh_jwks(pid) end)
+
+    assert_receive {:refresh_started, worker}
+    assert {:ok, @jwks} = Provider.jwks(pid)
+    send(worker, :finish_refresh)
+    assert {:ok, @jwks} = Task.await(refresh)
+    Process.exit(pid, :normal)
+  end
+
+  test "stopping the provider terminates an in-flight refresh worker" do
+    test = self()
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client = fn url, _options ->
+      case url do
+        "https://issuer.example/.well-known/openid-configuration" ->
+          {:ok, response(@metadata)}
+
+        "https://keys.example/keys" ->
+          case Agent.get_and_update(counter, fn value -> {value, value + 1} end) do
+            0 ->
+              {:ok, response(@jwks)}
+
+            _ ->
+              send(test, {:refresh_worker, self()})
+
+              receive do
+                :blocked -> {:ok, response(@jwks)}
+              end
+          end
+      end
+    end
+
+    config = Config.new([oidc: [issuer: "https://issuer.example/", api_audience: "api"]], :api)
+    {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
+    spawn(fn -> Provider.refresh_jwks(pid) end)
+
+    assert_receive {:refresh_worker, worker}
+    monitor = Process.monitor(worker)
+    GenServer.stop(pid)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :killed}
+  end
+
+  test "failed refreshes are backoff-limited and never return a stale success" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     client = fn url, _options ->
@@ -222,6 +330,7 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
           {:ok, response(@jwks)}
 
         {"https://keys.example/keys", _} ->
+          Process.sleep(20)
           {:error, :timeout}
       end
     end
@@ -232,7 +341,9 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
           oidc: [
             issuer: "https://issuer.example/",
             api_audience: "api",
-            jwks_max_age_ms: 0
+            jwks_max_age_ms: 0,
+            forced_refresh_cooldown_ms: 1,
+            refresh_failure_backoff_ms: 100_000
           ]
         ],
         :api
@@ -241,6 +352,8 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
 
     assert {:error, {:jwks_unavailable, {:http_error, :timeout}}} = Provider.refresh_jwks(pid)
+    assert {:error, {:jwks_unavailable, {:http_error, :timeout}}} = Provider.jwks(pid)
+    assert Agent.get(counter, & &1) == 2
 
     Process.exit(pid, :normal)
   end

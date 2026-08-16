@@ -28,7 +28,7 @@ defmodule Smolquery.Auth.OIDC.Discovery do
       when is_map(metadata) do
     with {:ok, url} <- fetch_https_endpoint(metadata, "jwks_uri"),
          {:ok, body} <- get_json(url, config, client),
-         :ok <- validate_jwks(body) do
+         :ok <- validate_jwks(body, config) do
       {:ok, body}
     end
   end
@@ -54,6 +54,21 @@ defmodule Smolquery.Auth.OIDC.Discovery do
   end
 
   def validate_jwks(_jwks), do: {:error, :jwks_malformed}
+
+  @doc "Validates that a JWKS contains a key usable by the local algorithm policy."
+  @spec validate_jwks(map(), Config.t()) :: :ok | {:error, term()}
+  def validate_jwks(%{"keys" => keys} = jwks, %Config{} = config) do
+    with :ok <- validate_jwks(jwks),
+         :ok <- unique_key_ids(keys),
+         true <- Enum.any?(keys, &usable_signing_key?(&1, config.algorithms)) do
+      :ok
+    else
+      false -> {:error, :jwks_no_compatible_signing_key}
+      error -> error
+    end
+  end
+
+  def validate_jwks(_jwks, %Config{}), do: {:error, :jwks_malformed}
 
   defp discovery_url(issuer),
     do:
@@ -267,6 +282,39 @@ defmodule Smolquery.Auth.OIDC.Discovery do
   end
 
   defp public_jwk_shape?(_key), do: false
+
+  defp usable_signing_key?(key, algorithms) when is_map(key) do
+    key_use = Map.get(key, "use")
+    key_alg = Map.get(key, "alg")
+    key_ops = Map.get(key, "key_ops")
+
+    (is_nil(key_use) or key_use == "sig") and
+      (is_nil(key_ops) or (is_list(key_ops) and "verify" in key_ops)) and
+      key_algorithm_compatible?(key, key_alg, algorithms)
+  end
+
+  defp usable_signing_key?(_key, _algorithms), do: false
+
+  defp unique_key_ids(keys) do
+    key_ids = Enum.map(keys, &Map.fetch!(&1, "kid"))
+    if length(key_ids) == length(Enum.uniq(key_ids)), do: :ok, else: {:error, :jwks_duplicate_kid}
+  end
+
+  defp key_algorithm_compatible?(key, nil, algorithms),
+    do: Enum.any?(algorithms, &key_supports_algorithm?(key, &1))
+
+  defp key_algorithm_compatible?(key, algorithm, algorithms),
+    do: algorithm in algorithms and key_supports_algorithm?(key, algorithm)
+
+  defp key_supports_algorithm?(%{"kty" => "RSA"}, algorithm),
+    do: String.starts_with?(algorithm, "RS") or String.starts_with?(algorithm, "PS")
+
+  defp key_supports_algorithm?(%{"kty" => "EC", "crv" => curve}, algorithm) do
+    Map.get(%{"ES256" => "P-256", "ES384" => "P-384", "ES512" => "P-521"}, algorithm) ==
+      curve
+  end
+
+  defp key_supports_algorithm?(_key, _algorithm), do: false
 
   defp no_private_fields?(key),
     do: Enum.all?(~w(d p q dp dq qi oth k), &(not Map.has_key?(key, &1)))

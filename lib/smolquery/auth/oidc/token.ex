@@ -233,12 +233,12 @@ defmodule Smolquery.Auth.OIDC.Token do
          :ok <- exact_issuer(claims, config.issuer),
          :ok <- valid_web_audience(claims, config.web_client_id),
          {:ok, _subject} <- required_string(claims, "sub"),
-         {:ok, _expires_at} <- valid_expiry(claims, config.clock_skew, now),
+         {:ok, expires_at} <- valid_expiry(claims, config.clock_skew, now),
          :ok <- valid_not_before(claims, config.clock_skew, now),
          :ok <- valid_web_issued_at(claims, config.iat_future_seconds, now),
          :ok <- valid_nonce(claims, nonce) do
       {:ok,
-       Map.put(claims, "__expires_at", Map.fetch!(claims, "exp"))
+       Map.put(claims, "__expires_at", expires_at)
        |> Map.put("__subject", Map.fetch!(claims, "sub"))}
     else
       _failure -> :error
