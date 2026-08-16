@@ -19,6 +19,13 @@ defmodule SmolqueryApi.InsertController do
   @max_ndjson_bytes 8_000_000
 
   @doc """
+  The NDJSON body ceiling — what `SmolqueryApi.Admission` reserves for an
+  insert that declares no `content-length`.
+  """
+  @spec max_ndjson_bytes() :: pos_integer()
+  def max_ndjson_bytes, do: @max_ndjson_bytes
+
+  @doc """
   Inserts the body's rows into a table.
 
   One body shape: `application/x-ndjson`, one JSON object per line — the same
