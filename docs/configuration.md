@@ -21,6 +21,7 @@ error.
 | `SMOLQUERY_AUTH_MODE` | authentication mode (`static` or `oidc`); required on `:api` and `:web` nodes; OIDC starts only with the validated `SMOLQUERY_OIDC_*` settings |
 | `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires in static mode; a node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
+| `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` | the most ingest-body bytes an API node admits at once (T-245). `SmolqueryApi.Admission` counts `POST .../insert` and `.../load` bodies by declared `content-length` before any body is read, and refuses past the limit with a 429 and `retry-after: 1` — the refusal costs a header read, never a body, so a client burst sheds load instead of OOMKilling the pod. Unset, the limit is **a quarter of the container's cgroup memory limit**, floored at one NDJSON body (`8000000`); without a cgroup limit, `268435456`. An idle counter always admits one request — the route's own body cap decides what is too large |
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
 | `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires in static mode; a node with the `:web` role and no credential refuses to boot |
 | `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`). In OIDC mode it must match `SMOLQUERY_OIDC_WEB_ORIGIN` |
@@ -38,8 +39,8 @@ outage or malformed discovery/JWKS never opens either listener.
 | variable | effect |
 |---|---|
 | `SMOLQUERY_OIDC_ISSUER` | exact HTTPS issuer string; trailing slash is retained, while query, fragment, and userinfo are rejected |
-| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles; when a browser client id is configured, the two values must differ |
-| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; it cannot alias the API resource audience |
+| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles; it must differ from the browser client id when both are configured |
+| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; on API roles, supply it unless an API-specific token type or required-claim profile distinguishes access tokens |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
 | `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin; its host must match `SMOLQUERY_WEB_HOST` |
@@ -48,9 +49,9 @@ outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
 | `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}`; list-valued token claims union matching values |
-| `SMOLQUERY_OIDC_API_TOKEN_TYPES` / `SMOLQUERY_OIDC_WEB_TOKEN_TYPES` | optional role-specific comma-separated protected-header `typ` allowlists; use these when API access tokens and browser ID tokens carry different types |
+| `SMOLQUERY_OIDC_API_TOKEN_TYPES` / `SMOLQUERY_OIDC_WEB_TOKEN_TYPES` | role-specific comma-separated protected-header `typ` allowlists; an API role without the browser client id must configure this or `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` |
 | `SMOLQUERY_OIDC_TOKEN_TYPES` | backward-compatible common `typ` allowlist used only when the role-specific setting is absent |
-| `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` / `SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS` | optional role-specific JSON objects mapping required payload claim names to allowed exact string values, e.g. `{"token_use":["access"]}` and `{"token_use":["id"]}` |
+| `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` / `SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS` | role-specific JSON objects mapping required payload claim names to allowed exact string values, e.g. `{"token_use":["access"]}` and `{"token_use":["id"]}`; an API role without the browser client id must configure this or `SMOLQUERY_OIDC_API_TOKEN_TYPES` |
 | `SMOLQUERY_OIDC_REQUIRED_CLAIMS` | backward-compatible common required-claim map used only when the role-specific setting is absent |
 | `SMOLQUERY_OIDC_MAX_TOKEN_BYTES` / `SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES` | bounds compact token and individual encoded segments before JOSE decoding (defaults `65536` / `32768`) |
 | `SMOLQUERY_OIDC_IAT_FUTURE_SECONDS` | maximum future `iat` allowance (default `300`); `exp` contexts remain active through the configured clock-skew boundary |
@@ -63,8 +64,12 @@ outage or malformed discovery/JWKS never opens either listener.
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
 algorithm, a compatible public signing key, exact issuer and audience, and
 integer NumericDate claims. API and web token type/required-claim profiles are
-resolved separately, and a combined deployment refuses to use its browser
-client id as the API audience. Unknown keys trigger one supervised JWKS refresh,
+resolved separately. An API role refuses to boot unless it has either the browser
+client ID to exclude from token audiences or an API-specific token type/required-claim
+profile. When configured, the browser client ID must not appear in an API token's
+`aud`; providers should identify the authorized client through `azp` or `client_id`
+instead. This prevents a browser ID token from crossing the access-token boundary.
+Unknown keys trigger one supervised JWKS refresh,
 subject to the global forced-refresh cooldown; concurrent or repeated unknown
 keys within that cooldown reuse the current cache and reject without another
 network fetch. All other failures reject without revealing the verification
@@ -106,7 +111,7 @@ as tenant identifiers.
 | `SMOLQUERY_MERGE_INPUTS_PER_CALL` | cap on `read_parquet` inputs any one of the merge's engine calls carries (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout. The merge reads a larger input list in capped chunks into a temp table, so a seal claim of any size merges. The default's derivation is in `Smolquery.StorageService.Runtime`'s docs |
 | `SMOLQUERY_STORAGE_MEMORY_LIMIT` | DuckDB memory limit for the storage merge engine (T-250). Unset, the limit is **half the container's cgroup memory limit**, so the merge scales with the pod; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT` — one size for every engine on every role, which is what left a 4 Gi pod merging inside 954 MiB. The resolved value and its source are logged at boot |
 | `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` | DuckDB memory limit for the compaction engine (T-259). Compaction runs on its own engine so a timed-out merge cannot starve seals, and the compactor recycles it after a call exit. Unset, the limit is **a quarter of the container's cgroup memory limit**; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT`. The resolved value and its source are logged at boot |
-| `SMOLQUERY_COMPACT_MAX_ROWS` | cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes, and on ~100x-compressible data a 47 MiB group held ~25M rows — merge cost scales with rows, so the group blew the merge's five-minute budget and re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O. A head file no neighbor fits beside under the cap is skipped, so a row-heavy file cannot wedge the table's backlog |
+| `SMOLQUERY_COMPACT_MAX_ROWS` | cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes, and on ~100x-compressible data a 47 MiB group held ~25M rows — merge cost scales with rows, so the group blew the merge's five-minute budget and re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O. A head file no neighbor fits beside under the cap is skipped, so a row-heavy file cannot wedge the table's backlog. The default is a start, not a pin-rate prediction: the compactor adapts the cap per table — a merge OOM halves a table's cap, never below `65536` rows, and sustained evidence at the tightened cap earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`, T-262) |
 | `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
 | `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |

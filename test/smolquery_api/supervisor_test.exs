@@ -1,8 +1,11 @@
 defmodule SmolqueryApi.SupervisorTest do
   use ExUnit.Case, async: false
 
+  alias Smolquery.Runtime.Publisher
   alias Smolquery.Test.ApiEndpoint
+  alias Smolquery.Test.Eventually
   alias Smolquery.Test.MapCatalog
+  alias Smolquery.Test.OIDCProvider
   alias SmolqueryApi.Runtime
 
   @key "supervisor-test-key"
@@ -22,7 +25,7 @@ defmodule SmolqueryApi.SupervisorTest do
     opts = Keyword.merge([api_key: @key, catalog: MapCatalog.new()], opts)
 
     start_supervised!({SmolqueryApi.Supervisor, opts})
-    on_exit(fn -> Runtime.delete(SmolqueryApi) end)
+    on_exit(fn -> Runtime.delete(Keyword.get(opts, :name, SmolqueryApi)) end)
 
     SmolqueryApi.Endpoint.base_url()
   end
@@ -52,5 +55,66 @@ defmodule SmolqueryApi.SupervisorTest do
     assert_raise ArgumentError, ~r/refuses to boot/, fn ->
       SmolqueryApi.Supervisor.start_link(name: :api_no_key, catalog: MapCatalog.new())
     end
+  end
+
+  test "does not start the endpoint when the OIDC provider fails to boot" do
+    name = :api_oidc_boot_failure
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:shutdown, _reason}} =
+             SmolqueryApi.Supervisor.start_link(oidc_options(name, OIDCProvider.failing_client()))
+
+    refute Process.whereis(SmolqueryApi.Endpoint)
+    refute Process.whereis(Module.concat(name, "OIDCProvider"))
+    assert Runtime.fetch(name) == :error
+  end
+
+  test "orders runtime publication and the endpoint after the OIDC provider" do
+    name = :api_oidc_child_order
+    runtime = Runtime.new(oidc_options(name, OIDCProvider.client()))
+
+    assert {:ok, {_flags, children}} = SmolqueryApi.Supervisor.init(runtime)
+
+    assert [
+             %{id: Smolquery.Auth.OIDC.Provider},
+             %{id: {Publisher, Runtime, ^name}},
+             %{id: SmolqueryApi.Admission},
+             %{id: SmolqueryApi.Endpoint}
+           ] = children
+  end
+
+  test "restarts the endpoint subtree when the OIDC provider dies" do
+    name = :api_oidc_restart
+    start_api(oidc_options(name, OIDCProvider.client()))
+    provider_name = Module.concat(name, "OIDCProvider")
+    provider = Process.whereis(provider_name)
+    endpoint = Process.whereis(SmolqueryApi.Endpoint)
+
+    Process.exit(provider, :kill)
+
+    assert Eventually.until(fn ->
+             replacement_provider = Process.whereis(provider_name)
+             replacement_endpoint = Process.whereis(SmolqueryApi.Endpoint)
+
+             is_pid(replacement_provider) and replacement_provider != provider and
+               is_pid(replacement_endpoint) and replacement_endpoint != endpoint
+           end)
+
+    replacement_base = SmolqueryApi.Endpoint.base_url()
+    assert Req.get!(replacement_base <> "/healthz", retry: false).status == 200
+  end
+
+  defp oidc_options(name, client) do
+    [
+      name: name,
+      auth_mode: :oidc,
+      catalog: MapCatalog.new(),
+      oidc_provider_http_client: client,
+      oidc: [
+        issuer: "https://issuer.example",
+        api_audience: "smolquery-api",
+        web_client_id: "smolquery-web"
+      ]
+    ]
   end
 end

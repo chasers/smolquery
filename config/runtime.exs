@@ -126,6 +126,14 @@ if api_key = System.get_env("SMOLQUERY_API_KEY") do
   config :smolquery, SmolqueryApi, api_key: api_key
 end
 
+# T-245: the 429 must fire while the request is still a header. Unset, the
+# in-flight limit derives as a quarter of the cgroup memory limit.
+if bytes = System.get_env("SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES") do
+  config :smolquery, SmolqueryApi,
+    insert_max_in_flight_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES", bytes)
+end
+
 if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
   config :smolquery, :internal_secret, internal_secret
 end

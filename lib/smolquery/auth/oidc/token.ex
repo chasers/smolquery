@@ -23,7 +23,8 @@ defmodule Smolquery.Auth.OIDC.Token do
   def authenticate(token, config, provider, opts \\ []) do
     now = Keyword.get(opts, :now, System.system_time(:second))
 
-    with {:ok, header} <- parse_header(token, config),
+    with true <- Config.api_token_boundary?(config),
+         {:ok, header} <- parse_header(token, config),
          :ok <- validate_header(header, config),
          {:ok, jwks} <- provider_jwks(provider),
          {:ok, jwk} <- select_or_refresh(header, jwks, provider, config),
@@ -40,7 +41,8 @@ defmodule Smolquery.Auth.OIDC.Token do
   def verify(token, config, jwks, refreshed_jwks, opts \\ []) do
     now = Keyword.get(opts, :now, System.system_time(:second))
 
-    with {:ok, header} <- parse_header(token, config),
+    with true <- Config.api_token_boundary?(config),
+         {:ok, header} <- parse_header(token, config),
          :ok <- validate_header(header, config),
          {:ok, jwk} <- select_or_refresh_with(header, jwks, refreshed_jwks, config),
          {:ok, claims} <- verify_claims(token, jwk, config, now),
@@ -204,6 +206,7 @@ defmodule Smolquery.Auth.OIDC.Token do
     with :ok <- required_claims(claims, config.required_claims),
          :ok <- exact_issuer(claims, config.issuer),
          :ok <- valid_audience(claims, config.api_audience),
+         :ok <- exclude_browser_audience(claims, config.web_client_id),
          {:ok, subject} <- required_string(claims, "sub"),
          {:ok, expires_at} <- valid_expiry(claims, config.clock_skew, now),
          :ok <- valid_not_before(claims, config.clock_skew, now),
@@ -253,6 +256,18 @@ defmodule Smolquery.Auth.OIDC.Token do
   end
 
   defp valid_audience(_claims, _expected), do: :error
+
+  defp exclude_browser_audience(_claims, nil), do: :ok
+
+  defp exclude_browser_audience(%{"aud" => audience}, browser_client_id)
+       when is_binary(audience),
+       do: if(audience == browser_client_id, do: :error, else: :ok)
+
+  defp exclude_browser_audience(%{"aud" => audiences}, browser_client_id)
+       when is_list(audiences),
+       do: if(browser_client_id in audiences, do: :error, else: :ok)
+
+  defp exclude_browser_audience(_claims, _browser_client_id), do: :error
 
   defp required_string(claims, key) do
     case Map.get(claims, key) do

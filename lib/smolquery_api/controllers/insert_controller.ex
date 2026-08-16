@@ -19,6 +19,13 @@ defmodule SmolqueryApi.InsertController do
   @max_ndjson_bytes 8_000_000
 
   @doc """
+  The NDJSON body ceiling — what `SmolqueryApi.Admission` reserves for an
+  insert that declares no `content-length`.
+  """
+  @spec max_ndjson_bytes() :: pos_integer()
+  def max_ndjson_bytes, do: @max_ndjson_bytes
+
+  @doc """
   Inserts the body's rows into a table.
 
   One body shape: `application/x-ndjson`, one JSON object per line — the same
@@ -117,17 +124,13 @@ defmodule SmolqueryApi.InsertController do
   """
   @spec insert_error(Plug.Conn.t(), term()) :: Plug.Conn.t()
   def insert_error(conn, :buffer_full) do
-    conn
-    |> put_resp_header("retry-after", "1")
-    |> Errors.send_error(429, "RESOURCE_EXHAUSTED", "buffer full, retry later")
+    Errors.send_resource_exhausted(conn, 1, "buffer full, retry later")
   end
 
   def insert_error(conn, {:overloaded, predicted_ms}) do
-    conn
-    |> put_resp_header("retry-after", Integer.to_string(max(ceil(predicted_ms / 1000), 1)))
-    |> Errors.send_error(
-      429,
-      "RESOURCE_EXHAUSTED",
+    Errors.send_resource_exhausted(
+      conn,
+      max(ceil(predicted_ms / 1000), 1),
       "write path overloaded, ~#{predicted_ms} ms behind; retry later"
     )
   end
