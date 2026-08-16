@@ -33,15 +33,12 @@ defmodule Smolquery.QueryService.TraceTest do
     test "a stranger's spans are not collected" do
       collector = Trace.attach("job-2", self())
 
-      {:ok, stranger} =
-        Task.start(fn ->
-          Process.delete(:"$callers")
+      Task.async(fn ->
+        Process.delete(:"$callers")
 
-          Trace.span(:build, fn -> :ok end)
-        end)
-
-      ref = Process.monitor(stranger)
-      assert_receive {:DOWN, ^ref, :process, ^stranger, :normal}
+        Trace.span(:build, fn -> :ok end)
+      end)
+      |> Task.await()
 
       assert Trace.stop(collector) == []
     end
