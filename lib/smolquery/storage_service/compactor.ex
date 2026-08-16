@@ -188,10 +188,11 @@ defmodule Smolquery.StorageService.Compactor do
   The per-table row caps after a sweep — the workload-adaptive half of the
   row bound (T-262).
 
-  The derived cap assumes 512 bytes of pinned memory per row, and a workload
-  decides its own pin rate: wide, repetitive text fields pin kilobytes per
-  row while compressing well enough to pass every static cap. So the caps
-  answer the workload instead of predicting it. A merge that OOMs halves the
+  No static bytes-per-row constant predicts a workload's pin rate: wide,
+  repetitive text fields pin kilobytes per row while compressing well enough
+  to pass every static cap, and narrow rows pin almost nothing. So the
+  runtime's cap is only a start, and the caps here answer the workload
+  instead of predicting it. A merge that OOMs halves the
   table's cap, never below #{@row_cap_floor} rows. Only tables that OOMed
   carry an entry, so the map stays empty on healthy deployments. The caps
   live in the compactor's state: a restart forgets them, and the first OOM

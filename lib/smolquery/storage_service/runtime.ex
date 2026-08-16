@@ -86,17 +86,16 @@ defmodule Smolquery.StorageService.Runtime do
   ~25M rows, and merge cost — the staging inserts and the clustered `ORDER
   BY` on the final `COPY` — scales with rows, so the byte-bounded group blew
   the merge's five-minute `COPY` budget and re-planned identically every
-  sweep. Left `nil`, the cap derives from the compaction engine's memory
-  budget at 512 bytes per row, resolved by `with_compact_max_rows/2` once
-  when the compactor starts (T-262): the sandbox measured a 4Mi-row group pinning ~1 GiB during
-  the merge — the whole of a 1 GiB budget — and a group the engine cannot
-  merge re-plans identically forever, because splitting it only produces
-  outputs the next group re-ingests up to the same cap. Half the observed
-  pin rate leaves 2x headroom. Without a resolvable budget the cap falls
-  back to 4Mi rows. The 512 B/row constant is a starting point, not a
-  promise — the compactor halves a table's cap after a merge OOM and
-  recovers it on success (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`),
-  so a workload that pins more per row converges on its own cap. Normal
+  sweep. Left `nil`, the cap starts at 4Mi rows, resolved by
+  `with_compact_max_rows/1` once when the compactor starts. The start
+  assumes no bytes-per-row pin rate on purpose: the sandbox did measure a
+  4Mi-row group pinning ~1 GiB during a merge — the whole of a 1 GiB budget
+  — but those were very large rows, and a cap derived from their pin rate
+  would starve typical workloads. The compactor fits the cap to the
+  workload instead: a merge OOM halves a table's cap and sustained evidence
+  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  T-262), so a workload that pins more per row converges on its own cap
+  after one bad merge, and every other workload keeps the full cap. Normal
   ~3x-compressible data hits the byte cap first, so the row cap only bites
   the pathological case it exists for. Sizing already reads each footer's
   `num_rows`, so the cap costs no new I/O.
@@ -170,8 +169,6 @@ defmodule Smolquery.StorageService.Runtime do
   alias Smolquery.BufferService.Ring
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
-
-  require Logger
 
   @enforce_keys [:name, :store, :catalog, :ring]
   defstruct [
@@ -351,81 +348,27 @@ defmodule Smolquery.StorageService.Runtime do
 
   defp derived_memory_limit(nil, :none, _divisor), do: nil
 
-  @compact_bytes_per_row 512
-  @compact_max_rows_fallback 4_194_304
-  @compact_max_rows_floor 65_536
+  @compact_max_rows_default 4_194_304
 
   @doc """
   The runtime with `compact_max_rows` resolved to an integer.
 
-  An explicit cap survives untouched. A `nil` cap derives from the
-  compaction engine's memory budget at #{@compact_bytes_per_row} bytes per
-  row — half the pin rate the sandbox measured, so a group at the cap keeps
-  2x headroom (T-262). The budget is the same quarter of the cgroup limit
-  `compact_engine_memory_limit/2` resolves, taken as raw bytes rather than
-  re-parsed from the formatted size string. An explicit
-  `compact_engine_memory_limit` is parsed instead; a budget string DuckDB
-  accepts but this parser cannot read (such as `"80%"`) logs a warning and
-  falls back, never silently. A budget too small for the floor still yields
-  #{@compact_max_rows_floor} rows, and no resolvable budget — no explicit
-  limit, no cgroup — falls back to #{@compact_max_rows_fallback} rows, the
-  fixed default this derivation replaced.
+  An explicit cap survives untouched. A `nil` cap starts at
+  #{@compact_max_rows_default} rows. The start deliberately assumes no
+  bytes-per-row pin rate: the one figure the sandbox measured came from a
+  bench with very large rows, and deriving every deployment's cap from it
+  would starve typical workloads. The compactor owns fitting the cap to the
+  workload instead — a merge OOM halves a table's cap and sustained evidence
+  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  T-262).
   """
-  @spec with_compact_max_rows(t(), {:ok, pos_integer()} | :none) :: t()
-  def with_compact_max_rows(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
-
-  def with_compact_max_rows(%__MODULE__{compact_max_rows: rows} = runtime, _cgroup)
+  @spec with_compact_max_rows(t()) :: t()
+  def with_compact_max_rows(%__MODULE__{compact_max_rows: rows} = runtime)
       when is_integer(rows),
       do: runtime
 
-  def with_compact_max_rows(%__MODULE__{} = runtime, cgroup) do
-    rows = derived_compact_max_rows(runtime.compact_engine_memory_limit, cgroup)
-
-    %{runtime | compact_max_rows: rows}
-  end
-
-  defp derived_compact_max_rows(nil, {:ok, bytes}), do: budget_rows(div(bytes, 4))
-
-  defp derived_compact_max_rows(nil, :none), do: @compact_max_rows_fallback
-
-  defp derived_compact_max_rows(limit, _cgroup) when is_binary(limit) do
-    case memory_limit_bytes(limit) do
-      nil ->
-        Logger.warning(
-          "cannot read compact_engine_memory_limit #{inspect(limit)} as a byte count; " <>
-            "compact_max_rows falls back to #{@compact_max_rows_fallback}"
-        )
-
-        @compact_max_rows_fallback
-
-      bytes ->
-        budget_rows(bytes)
-    end
-  end
-
-  defp budget_rows(bytes),
-    do: max(div(bytes, @compact_bytes_per_row), @compact_max_rows_floor)
-
-  defp memory_limit_bytes(limit) do
-    case Regex.run(~r/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i, String.trim(limit)) do
-      [_, number, unit] ->
-        {number, ""} = Float.parse(number)
-        trunc(number * unit_bytes(String.downcase(unit)))
-
-      _no_match ->
-        nil
-    end
-  end
-
-  defp unit_bytes("b"), do: 1
-  defp unit_bytes("kb"), do: 1_000
-  defp unit_bytes("mb"), do: 1_000_000
-  defp unit_bytes("gb"), do: 1_000_000_000
-  defp unit_bytes("tb"), do: 1_000_000_000_000
-  defp unit_bytes("kib"), do: 1_024
-  defp unit_bytes("mib"), do: 1_048_576
-  defp unit_bytes("gib"), do: 1_073_741_824
-  defp unit_bytes("tib"), do: 1_099_511_627_776
+  def with_compact_max_rows(%__MODULE__{} = runtime),
+    do: %{runtime | compact_max_rows: @compact_max_rows_default}
 
   @doc """
   The engine a merge's calls run on.
@@ -550,8 +493,7 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_compact_max_rows(%__MODULE__{compact_max_rows: rows}) do
     raise ArgumentError,
           "unsupported compact_max_rows: #{inspect(rows)} " <>
-            "(expected a positive integer, or nil to derive it from the " <>
-            "compaction engine's memory budget)"
+            "(expected a positive integer, or nil for the default)"
   end
 
   defp validate_compact_engine_memory_limit(
