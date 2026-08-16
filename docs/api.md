@@ -11,11 +11,13 @@ with no mode or required credentials fails the boot rather than serve an open
 API. Successful requests carry a normalized principal and context. `/healthz`
 is the one unauthenticated route.
 
-T-232 performs authentication before body parsing and deliberately applies a
-coarse safe gate: an OIDC token must map to `query`, `ingest`, and
-`catalog_manage`. T-233 will move these decisions to per-route capability
-checks; until then, tokens missing any one of those capabilities receive the
-same 401 response as invalid tokens.
+Authentication runs before body parsing, followed by a closed per-route
+capability check. `query` covers catalog reads and query/job routes, `ingest`
+covers insert and load, and `catalog_manage` covers dataset/table creation and
+table policy updates. A missing, malformed, or expired context returns the
+generic 401 envelope; an authenticated context without the route capability
+returns the generic 403 envelope. Static API credentials retain all three
+capabilities.
 
 ```sh
 curl http://127.0.0.1:4000/healthz
@@ -85,9 +87,14 @@ inserts accept.
 Failures answer one JSON envelope everywhere:
 
 ```json
-{"error": {"code": 401, "status": "UNAUTHENTICATED", "message": "missing or invalid API key"}}
+{"error": {"code": 401, "status": "UNAUTHENTICATED", "message": "missing or invalid API credential"}}
 ```
+
+An authenticated request without the route capability receives the same-shaped
+403 envelope with `PERMISSION_DENIED`; neither response discloses token claims,
+roles, or scopes.
 
 A `503 UNAVAILABLE` from a query means a buffer node the reader expected could
 not answer, so the result would have been silently short — see
-[fan-out](architecture.md#clustered-fan-out).
+[fan-out](architecture.md#clustered-fan-out). Authentication and authorization
+failures never include claims, roles, scopes, or provider details.

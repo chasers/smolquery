@@ -1,75 +1,96 @@
 defmodule SmolqueryApi.Router do
   @moduledoc """
-  The HTTP front door — one listener, every external surface (PL-8 D1,
-  Phoenix since PL-16).
+  The HTTP front door for the API.
 
-  A peer of the services, not part of one: routes dispatch only to service
-  client modules and `Smolquery.Catalog`, never into a service's internals, so
-  the split-out rules hold by construction. Started by the `:api` role.
-
-  One pipeline, and its order is the contract: instance → auth → admission →
-  parsers. `SmolqueryApi.Auth` runs before `SmolqueryApi.Parsers`, so an
-  unauthenticated body is never read; `SmolqueryApi.Admission` sits between
-  them, so an ingest body is counted against the in-flight limit before its
-  first byte is read (T-245); the catch-all route at the bottom runs
-  *inside* the authed pipeline, so an unauthenticated request is answered 401
-  whether its path exists or not — 404 never reveals which routes are real.
-
-  v1 surface so far:
-
-      GET  /healthz                                liveness, no auth
-      GET  /metrics                                Prometheus text (internal secret)
-      GET  /v1/datasets                            list datasets
-      POST /v1/datasets                            create a dataset
-      GET  /v1/datasets/:ds/tables                 list a dataset's tables
-      POST /v1/datasets/:ds/tables                 create a table
-      GET  /v1/datasets/:ds/tables/:table          a table's schema + retention
-      PATCH /v1/datasets/:ds/tables/:table         set/clear retention policy
-      POST /v1/datasets/:ds/tables/:table/insert   streaming insert
-      POST /v1/datasets/:ds/tables/:table/load     batch load (NDJSON/CSV/Parquet body)
-      POST /v1/queries                             sync query, first page inline
-      POST /v1/jobs                                async query job
-      GET  /v1/jobs/:id                            job status + stats (history fallback)
-      GET  /v1/jobs/:id/results                    page a finished job's rows
-      DELETE /v1/jobs/:id                          cancel
-
-  Failures speak `SmolqueryApi.Errors`' envelope, and nothing else — including
-  what body parsing rejects (`SmolqueryApi.Parsers`) and anything a route
-  raises (`SmolqueryApi.ErrorJSON`).
-
-  The instance plug fills `conn.private.smolquery_api` only when absent —
-  the seam that lets a test publish a uniquely-named runtime, inject its name
-  with `put_private/3`, and dispatch through the one endpoint concurrently.
+  Every request enters an instance-specific pipeline. Protected routes run in
+  the order instance, authentication, closed capability authorization,
+  admission for ingest bodies, parsers, and controller. Authentication and
+  authorization therefore reject requests before bodies are read or reserved.
+  The authenticated catch-all keeps absent routes indistinguishable from real
+  routes until credentials have been accepted.
   """
 
   use Phoenix.Router
 
-  pipeline :api do
+  pipeline :authenticated do
     plug :put_instance
     plug SmolqueryApi.Auth
+  end
+
+  pipeline :query do
+    plug :put_instance
+    plug SmolqueryApi.Auth
+    plug SmolqueryApi.Authorization, capability: :query
+    plug SmolqueryApi.Parsers
+  end
+
+  pipeline :ingest do
+    plug :put_instance
+    plug SmolqueryApi.Auth
+    plug SmolqueryApi.Authorization, capability: :ingest
     plug :admit_ingest
     plug SmolqueryApi.Parsers
   end
 
+  pipeline :catalog_manage do
+    plug :put_instance
+    plug SmolqueryApi.Auth
+    plug SmolqueryApi.Authorization, capability: :catalog_manage
+    plug SmolqueryApi.Parsers
+  end
+
+  pipeline :public do
+    plug :put_instance
+  end
+
+  pipeline :metrics do
+    plug :put_instance
+    plug SmolqueryApi.Auth
+    plug SmolqueryApi.Parsers
+  end
+
   scope "/", SmolqueryApi do
-    pipe_through :api
+    pipe_through :public
 
     get "/healthz", HealthController, :show
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :metrics
+
     get "/metrics", MetricsController, :show
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :query
 
     get "/v1/datasets", DatasetController, :index
-    post "/v1/datasets", DatasetController, :create
     get "/v1/datasets/:dataset/tables", TableController, :index
-    post "/v1/datasets/:dataset/tables", TableController, :create
     get "/v1/datasets/:dataset/tables/:table", TableController, :show
-    patch "/v1/datasets/:dataset/tables/:table", TableController, :update
-    post "/v1/datasets/:dataset/tables/:table/insert", InsertController, :create
-    post "/v1/datasets/:dataset/tables/:table/load", LoadController, :create
     post "/v1/queries", QueryController, :create
     post "/v1/jobs", JobController, :create
     get "/v1/jobs/:id/results", JobController, :results
     get "/v1/jobs/:id", JobController, :show
     delete "/v1/jobs/:id", JobController, :delete
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :ingest
+
+    post "/v1/datasets/:dataset/tables/:table/insert", InsertController, :create
+    post "/v1/datasets/:dataset/tables/:table/load", LoadController, :create
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :catalog_manage
+
+    post "/v1/datasets", DatasetController, :create
+    post "/v1/datasets/:dataset/tables", TableController, :create
+    patch "/v1/datasets/:dataset/tables/:table", TableController, :update
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :authenticated
 
     match :*, "/*path", NoRouteController, :not_found
   end
@@ -77,7 +98,7 @@ defmodule SmolqueryApi.Router do
   defp put_instance(conn, _opts) do
     case conn.private do
       %{smolquery_api: _name} -> conn
-      _absent -> put_private(conn, :smolquery_api, SmolqueryApi)
+      _absent -> Plug.Conn.put_private(conn, :smolquery_api, SmolqueryApi)
     end
   end
 
