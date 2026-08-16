@@ -63,18 +63,20 @@ The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
 algorithm, a compatible public signing key, exact issuer and audience, and
 integer NumericDate claims. API and web token type/required-claim profiles are
 resolved separately, and a combined deployment refuses to use its browser
-client id as the API audience. Unknown keys trigger one supervised JWKS refresh, subject to the global forced-refresh cooldown;
-concurrent or repeated unknown keys within that cooldown reuse the current cache and reject
-without another network fetch. All other failures reject without revealing the verification reason. The
-context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the accepted
-expiration-skew boundary. Before T-233, an OIDC API token must map to all three
-current API capabilities (`query`, `ingest`, and `catalog_manage`), so this layer
-cannot accidentally grant a query-only token write or catalog access.
+client id as the API audience. Unknown keys trigger one supervised JWKS refresh,
+subject to the global forced-refresh cooldown; concurrent or repeated unknown
+keys within that cooldown reuse the current cache and reject without another
+network fetch. All other failures reject without revealing the verification
+reason. The context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the
+accepted expiration-skew boundary. Before T-233, an OIDC API token must map to
+all three current API capabilities (`query`, `ingest`, and `catalog_manage`), so
+this layer cannot accidentally grant a query-only token write or catalog access.
 
 The discovery client requires JSON responses, byte-for-byte issuer equality,
 HTTPS authorization/token/JWKS endpoints, an algorithm overlap with the local
-asymmetric allowlist, and at least one public signing key compatible with that
-allowlist. It refuses redirects and bounds response bodies. Refresh I/O runs
+asymmetric allowlist, unique key ids, and at least one public signing key whose
+explicit algorithm and key type are compatible with that allowlist. It refuses
+redirects and bounds response bodies. Refresh I/O runs
 outside the cache process, so fresh reads continue while a key fetch is in
 flight; expired data still fails closed. Unknown-`kid` refreshes use a global
 cooldown measured from fetch completion, and failed discovery/JWKS attempts

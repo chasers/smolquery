@@ -66,6 +66,23 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
                config: config,
                http_client: client(@metadata, ec_only, self())
              )
+
+    mixed_config = %{config | algorithms: ["RS256", "ES256"]}
+    mismatched = %{"keys" => [Map.put(hd(@jwks["keys"]), "alg", "ES256")]}
+
+    assert {:error, {:oidc_provider_failed, :jwks_no_compatible_signing_key}} =
+             Provider.start_link(
+               name: unique_name(),
+               config: mixed_config,
+               http_client: client(@metadata, mismatched, self())
+             )
+
+    assert {:error, {:oidc_provider_failed, :jwks_duplicate_kid}} =
+             Provider.start_link(
+               name: unique_name(),
+               config: config,
+               http_client: client(@metadata, %{"keys" => @jwks["keys"] ++ @jwks["keys"]}, self())
+             )
   end
 
   test "provider calls return tagged results after a delayed injected refresh" do
@@ -258,6 +275,40 @@ defmodule Smolquery.Auth.OIDC.ProviderTest do
     send(worker, :finish_refresh)
     assert {:ok, @jwks} = Task.await(refresh)
     Process.exit(pid, :normal)
+  end
+
+  test "stopping the provider terminates an in-flight refresh worker" do
+    test = self()
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    client = fn url, _options ->
+      case url do
+        "https://issuer.example/.well-known/openid-configuration" ->
+          {:ok, response(@metadata)}
+
+        "https://keys.example/keys" ->
+          case Agent.get_and_update(counter, fn value -> {value, value + 1} end) do
+            0 ->
+              {:ok, response(@jwks)}
+
+            _ ->
+              send(test, {:refresh_worker, self()})
+
+              receive do
+                :blocked -> {:ok, response(@jwks)}
+              end
+          end
+      end
+    end
+
+    config = Config.new([oidc: [issuer: "https://issuer.example/", api_audience: "api"]], :api)
+    {:ok, pid} = Provider.start_link(name: unique_name(), config: config, http_client: client)
+    spawn(fn -> Provider.refresh_jwks(pid) end)
+
+    assert_receive {:refresh_worker, worker}
+    monitor = Process.monitor(worker)
+    GenServer.stop(pid)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :killed}
   end
 
   test "failed refreshes are backoff-limited and never return a stale success" do
