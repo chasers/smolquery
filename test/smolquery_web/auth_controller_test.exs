@@ -135,8 +135,11 @@ defmodule SmolqueryWeb.AuthControllerTest do
     assert get_session(callback, Session.key())["exp"] == raw_expiry + runtime.oidc.clock_skew
   end
 
-  test "state mismatch is generic, clears the transaction, and never exchanges", %{conn: _conn} do
+  test "state mismatch is generic, preserves unrelated transactions, and never exchanges", %{
+    conn: _conn
+  } do
     login = get(build_conn(), ~p"/auth/login")
+    transaction_cookie = get_session(login, OIDC.transaction_key())
 
     callback =
       login
@@ -145,8 +148,43 @@ defmodule SmolqueryWeb.AuthControllerTest do
 
     assert callback.status == 400
     assert callback.resp_body == "authentication failed"
-    assert get_session(callback, OIDC.transaction_key()) == nil
+    assert get_session(callback, OIDC.transaction_key()) == transaction_cookie
     refute_received {:token_request, _url, _options}
+  end
+
+  test "concurrent login callbacks consume only their matching transactions", %{
+    token_response: token_response
+  } do
+    first_login = get(build_conn(), ~p"/auth/login")
+    {:ok, first} = OIDC.decode_transaction(get_session(first_login, OIDC.transaction_key()))
+
+    second_login = first_login |> recycle() |> get(~p"/auth/login")
+    [second_location] = get_resp_header(second_login, "location")
+    second_params = second_location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+    Agent.update(token_response, fn _ -> token_response(first.nonce, "operator") end)
+
+    first_callback =
+      second_login
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{first.state}&code=first-code")
+
+    assert first_callback.status == 302
+
+    assert {:ok, second} =
+             OIDC.decode_transaction(get_session(first_callback, OIDC.transaction_key()))
+
+    assert second.state == second_params["state"]
+
+    Agent.update(token_response, fn _ -> token_response(second.nonce, "operator") end)
+
+    second_callback =
+      first_callback
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{second.state}&code=second-code")
+
+    assert second_callback.status == 302
+    assert get_session(second_callback, OIDC.transaction_key()) == nil
   end
 
   test "callback denies a valid identity missing the temporary coarse capabilities", %{

@@ -8,15 +8,18 @@ defmodule SmolqueryWeb.AuthController do
   def login(conn, _params) do
     case Runtime.fetch(SmolqueryWeb) do
       {:ok, %{auth_mode: :oidc} = runtime} ->
-        case OIDC.begin(runtime) do
-          {:ok, url, transaction} ->
-            conn
-            |> no_store()
-            |> put_session(OIDC.transaction_key(), OIDC.encode_transaction(transaction))
-            |> redirect(external: url)
-
-          _ ->
-            error(conn)
+        with {:ok, url, transaction} <- OIDC.begin(runtime),
+             {:ok, transactions} <-
+               OIDC.add_transaction(
+                 get_session(conn, OIDC.transaction_key()),
+                 transaction
+               ) do
+          conn
+          |> no_store()
+          |> put_session(OIDC.transaction_key(), transactions)
+          |> redirect(external: url)
+        else
+          _failure -> error(conn)
         end
 
       _ ->
@@ -25,18 +28,22 @@ defmodule SmolqueryWeb.AuthController do
   end
 
   def callback(conn, %{"state" => state, "code" => code}) do
-    transaction_cookie = OIDC.decode_transaction(get_session(conn, OIDC.transaction_key()))
-    conn = delete_session(conn, OIDC.transaction_key())
+    case OIDC.take_transaction(get_session(conn, OIDC.transaction_key()), state) do
+      {:ok, transaction, remaining} ->
+        conn = put_transactions(conn, remaining)
 
-    with {:ok, runtime} <- oidc_runtime(),
-         {:ok, cookie} <- transaction_cookie,
-         {:ok, transaction} <- OIDC.consume(cookie, state),
-         {:ok, context} <- OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
-         true <- Auth.coarse_web_access?(context),
-         {:ok, conn} <- Auth.assign_identity(conn, context) do
-      conn |> no_store() |> redirect(to: "/")
-    else
-      _ -> error(conn)
+        with {:ok, runtime} <- oidc_runtime(),
+             {:ok, context} <-
+               OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
+             true <- Auth.coarse_web_access?(context),
+             {:ok, conn} <- Auth.assign_identity(conn, context) do
+          conn |> no_store() |> redirect(to: "/")
+        else
+          _failure -> error(conn)
+        end
+
+      {:error, :invalid_transaction, remaining} ->
+        conn |> put_transactions(remaining) |> error()
     end
   end
 
@@ -60,6 +67,11 @@ defmodule SmolqueryWeb.AuthController do
       _ -> :error
     end
   end
+
+  defp put_transactions(conn, nil), do: delete_session(conn, OIDC.transaction_key())
+
+  defp put_transactions(conn, transactions),
+    do: put_session(conn, OIDC.transaction_key(), transactions)
 
   defp error(conn) do
     conn
