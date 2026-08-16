@@ -48,6 +48,11 @@ if redirect_uri = System.get_env("SMOLQUERY_OIDC_WEB_REDIRECT_URI") do
   config :smolquery, Smolquery.Auth.OIDC.Config, web_redirect_uri: redirect_uri
 end
 
+if scopes = System.get_env("SMOLQUERY_OIDC_WEB_SCOPES") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    web_scopes: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_WEB_SCOPES", scopes)
+end
+
 if algorithms = System.get_env("SMOLQUERY_OIDC_ALGORITHMS") do
   config :smolquery, Smolquery.Auth.OIDC.Config,
     algorithms: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_ALGORITHMS", algorithms)

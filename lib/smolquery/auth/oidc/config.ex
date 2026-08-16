@@ -20,6 +20,7 @@ defmodule Smolquery.Auth.OIDC.Config do
     :web_client_auth_method,
     :web_origin,
     :web_redirect_uri,
+    :web_scopes,
     :algorithms,
     :clock_skew,
     :claim_capabilities,
@@ -43,6 +44,7 @@ defmodule Smolquery.Auth.OIDC.Config do
           web_client_auth_method: :none | :client_secret_basic,
           web_origin: String.t() | nil,
           web_redirect_uri: String.t() | nil,
+          web_scopes: [String.t()] | nil,
           algorithms: [String.t()],
           clock_skew: non_neg_integer(),
           claim_capabilities: claim_capabilities(),
@@ -66,6 +68,7 @@ defmodule Smolquery.Auth.OIDC.Config do
     request_timeout_ms: 10_000,
     max_body_bytes: 1_048_576,
     web_client_auth_method: :client_secret_basic,
+    web_scopes: ["openid"],
     claim_capabilities: %{}
   ]
 
@@ -86,6 +89,7 @@ defmodule Smolquery.Auth.OIDC.Config do
       required_for_role(config, :web_client_id, role, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
 
     {web_origin, web_redirect_uri} = web_urls(config, role)
+    web_scopes = web_scopes(config, role)
     auth_method = config |> Keyword.fetch!(:web_client_auth_method) |> auth_method!()
     web_client_secret = client_secret(config, auth_method, role)
     algorithms = algorithms!(Keyword.fetch!(config, :algorithms))
@@ -99,6 +103,7 @@ defmodule Smolquery.Auth.OIDC.Config do
       web_client_auth_method: auth_method,
       web_origin: web_origin,
       web_redirect_uri: web_redirect_uri,
+      web_scopes: web_scopes,
       algorithms: algorithms,
       clock_skew: bounded_integer!(config, :clock_skew, "SMOLQUERY_OIDC_CLOCK_SKEW", 300),
       claim_capabilities: claim_capabilities,
@@ -200,6 +205,7 @@ defmodule Smolquery.Auth.OIDC.Config do
   defp web_urls(config, :web) do
     origin = https_uri!(config, :web_origin, "SMOLQUERY_OIDC_WEB_ORIGIN")
     redirect = https_uri!(config, :web_redirect_uri, "SMOLQUERY_OIDC_WEB_REDIRECT_URI")
+    web_host = nonempty!(Keyword.get(config, :web_host), "SMOLQUERY_WEB_HOST")
     origin_uri = URI.parse(origin)
     redirect_uri = URI.parse(redirect)
 
@@ -208,17 +214,60 @@ defmodule Smolquery.Auth.OIDC.Config do
       invalid!("SMOLQUERY_OIDC_WEB_ORIGIN", origin, "an HTTPS origin without a path")
     end
 
-    if origin_tuple(origin_uri) != origin_tuple(redirect_uri) do
+    if origin_tuple(origin_uri) != origin_tuple(redirect_uri) or
+         redirect_uri.path != "/auth/callback" or redirect_uri.query != nil do
       invalid!(
         "SMOLQUERY_OIDC_WEB_REDIRECT_URI",
         redirect,
-        "a URI with the exact configured web origin"
+        "the exact configured web origin with path /auth/callback and no query"
+      )
+    end
+
+    if not same_host?(origin_uri.host, web_host) do
+      invalid!(
+        "SMOLQUERY_WEB_HOST",
+        web_host,
+        "the host from SMOLQUERY_OIDC_WEB_ORIGIN"
       )
     end
 
     {origin, redirect}
   end
 
+  defp web_scopes(_config, :api), do: nil
+
+  defp web_scopes(config, :web) do
+    scopes = Keyword.fetch!(config, :web_scopes)
+
+    valid =
+      if is_list(scopes) do
+        count = Enum.count_until(scopes, 33)
+
+        count in 1..32 and MapSet.size(MapSet.new(scopes)) == count and "openid" in scopes and
+          Enum.all?(scopes, &valid_scope?/1) and byte_size(Enum.join(scopes, " ")) <= 1_024
+      else
+        false
+      end
+
+    if valid,
+      do: scopes,
+      else:
+        invalid!(
+          "SMOLQUERY_OIDC_WEB_SCOPES",
+          scopes,
+          "a unique list of at most 32 OAuth scope tokens including openid"
+        )
+  end
+
+  defp valid_scope?(scope) when is_binary(scope) and byte_size(scope) in 1..128 do
+    Enum.all?(:binary.bin_to_list(scope), fn byte ->
+      byte == 0x21 or byte in 0x23..0x5B or byte in 0x5D..0x7E
+    end)
+  end
+
+  defp valid_scope?(_scope), do: false
+
+  defp same_host?(left, right), do: String.downcase(left) == String.downcase(right)
   defp origin_tuple(uri), do: {uri.scheme, uri.host, uri.port || default_port(uri.scheme)}
   defp default_port("https"), do: 443
 

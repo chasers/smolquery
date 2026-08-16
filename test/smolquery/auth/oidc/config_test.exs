@@ -8,6 +8,7 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     api_audience: "smolquery-api",
     web_client_id: "smolquery-web",
     web_client_secret: "secret",
+    web_host: "ui.example",
     web_origin: "https://ui.example",
     web_redirect_uri: "https://ui.example/auth/callback"
   ]
@@ -31,6 +32,39 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     end
 
     assert Config.new([oidc: Keyword.delete(@base, :web_client_id)], :api)
+  end
+
+  test "requires the deployed host and exact callback route" do
+    for {key, value, env} <- [
+          {:web_host, "other.example", "SMOLQUERY_WEB_HOST"},
+          {:web_redirect_uri, "https://ui.example/not-the-callback",
+           "SMOLQUERY_OIDC_WEB_REDIRECT_URI"},
+          {:web_redirect_uri, "https://ui.example/auth/callback?next=/",
+           "SMOLQUERY_OIDC_WEB_REDIRECT_URI"}
+        ] do
+      assert_raise ArgumentError, ~r/#{env}/, fn ->
+        Config.new([oidc: Keyword.put(@base, key, value)], :web)
+      end
+    end
+  end
+
+  test "validates bounded browser authorization scopes" do
+    config =
+      Config.new([oidc: Keyword.put(@base, :web_scopes, ["openid", "profile", "groups"])], :web)
+
+    assert config.web_scopes == ["openid", "profile", "groups"]
+
+    for scopes <- [
+          [],
+          ["profile"],
+          ["openid", "openid"],
+          ["openid", "not a scope"],
+          ["openid" | Enum.map(1..32, &"scope#{&1}")]
+        ] do
+      assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_WEB_SCOPES/, fn ->
+        Config.new([oidc: Keyword.put(@base, :web_scopes, scopes)], :web)
+      end
+    end
   end
 
   test "rejects insecure, malformed, and unbounded settings" do

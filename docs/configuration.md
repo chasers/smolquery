@@ -23,7 +23,7 @@ error.
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
 | `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires in static mode; a node with the `:web` role and no credential refuses to boot |
-| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
+| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`). In OIDC mode it must match `SMOLQUERY_OIDC_WEB_ORIGIN` |
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
 | `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
 
@@ -42,8 +42,9 @@ never opens either listener.
 | `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
-| `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin |
-| `SMOLQUERY_OIDC_WEB_REDIRECT_URI` | exact HTTPS authorization callback URI |
+| `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin; its host must match `SMOLQUERY_WEB_HOST` |
+| `SMOLQUERY_OIDC_WEB_REDIRECT_URI` | authorization callback URI; must be exactly the web origin plus `/auth/callback`, without a query |
+| `SMOLQUERY_OIDC_WEB_SCOPES` | comma-separated browser authorization scopes (default `openid`); `openid` is mandatory, with at most 32 unique scope tokens and 1024 bytes total |
 | `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
 | `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}` |
