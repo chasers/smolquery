@@ -52,6 +52,8 @@ defmodule Smolquery.MixProject do
       {:bandit, "~> 1.12"},
       {:plug, "~> 1.20"},
       {:req, "~> 0.7"},
+      {:assent, "~> 0.3.0"},
+      {:jose, "~> 1.11"},
       {:req_s3, "~> 0.2"},
       {:aws_credentials, "~> 1.1", runtime: false},
       {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},

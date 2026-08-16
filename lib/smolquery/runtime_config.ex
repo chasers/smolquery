@@ -60,6 +60,60 @@ defmodule Smolquery.RuntimeConfig do
   def positive_integer_or_infinity!(_name, "infinity"), do: :infinity
   def positive_integer_or_infinity!(name, value), do: positive_integer!(name, value)
 
+  @doc "Parses a non-empty comma-separated list of trimmed strings."
+  @spec csv!(String.t(), String.t()) :: [String.t()]
+  def csv!(name, value) do
+    values = value |> String.split(",") |> Enum.map(&String.trim/1)
+
+    if values != [] and Enum.all?(values, &(&1 != "")),
+      do: values,
+      else: invalid!(name, value, "a non-empty comma-separated list")
+  end
+
+  @doc "Parses a bounded non-negative integer."
+  @spec bounded_non_negative_integer!(String.t(), String.t(), pos_integer()) :: non_neg_integer()
+  def bounded_non_negative_integer!(name, value, maximum) do
+    integer = non_negative_integer!(name, value)
+    if integer <= maximum, do: integer, else: invalid!(name, value, "an integer in 0..#{maximum}")
+  end
+
+  @doc "Parses a JSON claim-value-to-capabilities mapping without atomizing input."
+  @spec capability_mapping!(String.t(), String.t()) :: map()
+  def capability_mapping!(name, value) do
+    case JSON.decode(value) do
+      {:ok, mapping} when is_map(mapping) ->
+        Enum.reduce(mapping, %{}, &parse_claim_mapping(name, value, &1, &2))
+
+      _ ->
+        invalid!(name, value, "a JSON object of claim names to value maps")
+    end
+  end
+
+  defp parse_claim_mapping(name, original, {claim, values}, acc) do
+    if is_binary(claim) and claim != "" and is_map(values) do
+      Map.put(acc, claim, parse_claim_values(name, original, values))
+    else
+      invalid!(name, original, "a JSON object of claim names to value maps")
+    end
+  end
+
+  defp parse_claim_values(name, original, values) do
+    parsed = Enum.reduce(values, %{}, &parse_claim_value(name, original, &1, &2))
+
+    if map_size(parsed) == 0,
+      do: invalid!(name, original, "non-empty claim value maps"),
+      else: parsed
+  end
+
+  defp parse_claim_value(name, original, {claim_value, capabilities}, acc) do
+    if is_binary(claim_value) and claim_value != "" and is_list(capabilities) and
+         capabilities != [] do
+      Map.put(acc, claim_value, Enum.map(capabilities, &capability!(name, original, &1)))
+    else
+      invalid!(name, original, "a JSON object of non-empty claim values and capability arrays")
+    end
+  end
+
   @doc """
   Parses a release boolean as `true`, `1`, `false`, or `0`.
   """
@@ -124,6 +178,17 @@ defmodule Smolquery.RuntimeConfig do
 
   defp parse_integer!(name, value, _minimum, _maximum),
     do: invalid!(name, value, "a decimal integer")
+
+  defp capability!(name, value, capability) do
+    case capability do
+      "web_access" -> :web_access
+      "query" -> :query
+      "ingest" -> :ingest
+      "catalog_manage" -> :catalog_manage
+      "platform_operate" -> :platform_operate
+      _ -> invalid!(name, value, "known Smolquery capabilities")
+    end
+  end
 
   defp invalid!(name, value, expected) do
     raise ArgumentError,

@@ -63,6 +63,7 @@ defmodule SmolqueryApi.Auth do
   defp authenticated_context(conn) do
     with ["Bearer " <> key] <- get_req_header(conn, "authorization"),
          {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api),
+         :static <- runtime.auth_mode,
          true <- Plug.Crypto.secure_compare(key, runtime.api_key) do
       {:ok, runtime.context}
     else

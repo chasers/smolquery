@@ -24,9 +24,46 @@ defmodule SmolqueryWeb.RuntimeTest do
       end
     end
 
-    test "refuses oidc and malformed auth modes without falling back" do
-      assert_raise ArgumentError, ~r/not supported/, fn ->
+    test "validates oidc settings without falling back to static" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_ISSUER/, fn ->
         Runtime.new(name: :web_runtime_test, auth_mode: :oidc)
+      end
+
+      runtime =
+        Runtime.new(
+          name: :web_runtime_test,
+          auth_mode: :oidc,
+          secret_key_base: @secret,
+          web_host: "ui.example",
+          oidc: [
+            issuer: "https://issuer.example/",
+            web_client_id: "smolquery-web",
+            web_client_secret: "client-secret",
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        )
+
+      assert runtime.username == nil
+      assert runtime.password == nil
+      assert runtime.context == nil
+      assert runtime.oidc.issuer == "https://issuer.example/"
+      refute inspect(runtime) =~ "client-secret"
+
+      assert_raise ArgumentError, ~r/SMOLQUERY_WEB_HOST/, fn ->
+        Runtime.new(
+          name: :web_runtime_test,
+          auth_mode: :oidc,
+          secret_key_base: @secret,
+          web_host: "other.example",
+          oidc: [
+            issuer: "https://issuer.example/",
+            web_client_id: "smolquery-web",
+            web_client_secret: "client-secret",
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        )
       end
 
       assert_raise ArgumentError, ~r/invalid value/, fn ->

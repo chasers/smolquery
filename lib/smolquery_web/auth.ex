@@ -52,7 +52,7 @@ defmodule SmolqueryWeb.Auth do
     end
   end
 
-  defp authenticate(conn, runtime) do
+  defp authenticate(conn, %{auth_mode: :static} = runtime) do
     conn
     |> Plug.BasicAuth.basic_auth(
       username: runtime.username,
@@ -61,6 +61,8 @@ defmodule SmolqueryWeb.Auth do
     )
     |> mark(runtime)
   end
+
+  defp authenticate(conn, %{auth_mode: :oidc}), do: challenge(conn)
 
   defp mark(%Plug.Conn{halted: true} = conn, _runtime), do: conn
 
@@ -92,9 +94,11 @@ defmodule SmolqueryWeb.Auth do
   @spec on_mount(:require_authenticated, LiveView.unsigned_params(), map(), LiveView.Socket.t()) ::
           {:cont | :halt, LiveView.Socket.t()}
   def on_mount(:require_authenticated, _params, session, socket) do
-    with {:ok, runtime} <- Runtime.fetch(SmolqueryWeb),
-         marker when marker == runtime.session_marker <- session[Atom.to_string(@marker)] do
-      {:cont, Auth.assign_context(socket, runtime.context)}
+    with {:ok, %{auth_mode: :static} = runtime} <- Runtime.fetch(SmolqueryWeb),
+         marker when is_binary(marker) and marker == runtime.session_marker <-
+           session[Atom.to_string(@marker)],
+         %Smolquery.Auth.Context{} = context <- runtime.context do
+      {:cont, Auth.assign_context(socket, context)}
     else
       _unauthenticated -> {:halt, LiveView.redirect(socket, to: "/")}
     end

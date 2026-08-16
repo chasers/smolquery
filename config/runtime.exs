@@ -15,6 +15,76 @@ if auth_mode = System.get_env("SMOLQUERY_AUTH_MODE") do
   config :smolquery, SmolqueryWeb, auth_mode: mode
 end
 
+if issuer = System.get_env("SMOLQUERY_OIDC_ISSUER") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, issuer: issuer
+end
+
+if audience = System.get_env("SMOLQUERY_OIDC_API_AUDIENCE") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, api_audience: audience
+end
+
+if client_id = System.get_env("SMOLQUERY_OIDC_WEB_CLIENT_ID") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, web_client_id: client_id
+end
+
+if client_secret = System.get_env("SMOLQUERY_OIDC_WEB_CLIENT_SECRET") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, web_client_secret: client_secret
+end
+
+if auth_method = System.get_env("SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    web_client_auth_method:
+      Smolquery.RuntimeConfig.enum!("SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD", auth_method, [
+        {"none", :none},
+        {"client_secret_basic", :client_secret_basic}
+      ])
+end
+
+if origin = System.get_env("SMOLQUERY_OIDC_WEB_ORIGIN") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, web_origin: origin
+end
+
+if redirect_uri = System.get_env("SMOLQUERY_OIDC_WEB_REDIRECT_URI") do
+  config :smolquery, Smolquery.Auth.OIDC.Config, web_redirect_uri: redirect_uri
+end
+
+if scopes = System.get_env("SMOLQUERY_OIDC_WEB_SCOPES") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    web_scopes: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_WEB_SCOPES", scopes)
+end
+
+if algorithms = System.get_env("SMOLQUERY_OIDC_ALGORITHMS") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    algorithms: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_ALGORITHMS", algorithms)
+end
+
+if skew = System.get_env("SMOLQUERY_OIDC_CLOCK_SKEW") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    clock_skew: Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_OIDC_CLOCK_SKEW", skew)
+end
+
+if mappings = System.get_env("SMOLQUERY_OIDC_CLAIM_CAPABILITIES") do
+  config :smolquery, Smolquery.Auth.OIDC.Config,
+    claim_capabilities:
+      Smolquery.RuntimeConfig.capability_mapping!("SMOLQUERY_OIDC_CLAIM_CAPABILITIES", mappings)
+end
+
+for {env, key, max} <- [
+      {"SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS", :discovery_max_age_ms, 86_400_000},
+      {"SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", :jwks_max_age_ms, 86_400_000},
+      {"SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS", :refresh_failure_backoff_ms, 86_400_000},
+      {"SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS", :connect_timeout_ms, 30_000},
+      {"SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS", :receive_timeout_ms, 60_000},
+      {"SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS", :request_timeout_ms, 120_000},
+      {"SMOLQUERY_OIDC_MAX_BODY_BYTES", :max_body_bytes, 10_485_760}
+    ] do
+  if value = System.get_env(env) do
+    config :smolquery, Smolquery.Auth.OIDC.Config, [
+      {key, Smolquery.RuntimeConfig.bounded_non_negative_integer!(env, value, max)}
+    ]
+  end
+end
+
 if api_key = System.get_env("SMOLQUERY_API_KEY") do
   config :smolquery, SmolqueryApi, api_key: api_key
 end
