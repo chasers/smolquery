@@ -211,13 +211,13 @@ defmodule SmolqueryWeb.QueryLive.Index do
           id="sql-editor"
           name="query[sql]"
           rows="6"
-          placeholder="SELECT ... (⌘⏎ runs)"
+          placeholder="SELECT ..."
           phx-hook=".SubmitOnMetaEnter"
           class="textarea textarea-bordered w-full font-mono"
         >{@sql}</textarea>
         <div class="flex gap-2 items-center">
           <button type="submit" class="btn btn-primary btn-sm" disabled={running?(@job)}>
-            Run
+            Run <kbd class="kbd kbd-xs">⌘⏎</kbd>
           </button>
           <button
             :for={{label, mode} <- [{"Explain", "plan"}, {"Analyze", "analyze"}]}
