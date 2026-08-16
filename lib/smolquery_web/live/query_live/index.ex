@@ -217,7 +217,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
         >{@sql}</textarea>
         <div class="flex gap-2 items-center">
           <button type="submit" class="btn btn-primary btn-sm" disabled={running?(@job)}>
-            Run <kbd class="kbd kbd-xs">⌘⏎</kbd>
+            Run ⌘⏎
           </button>
           <button
             :for={{label, mode} <- [{"Explain", "plan"}, {"Analyze", "analyze"}]}
