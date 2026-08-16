@@ -4,17 +4,26 @@
 same stack as the web UI's `SmolqueryWeb`), started by the `:api` role, routing
 only to service client modules and the catalog (the same boundary rule the
 services hold each other to). Set `SMOLQUERY_AUTH_MODE=static` for the static
-Bearer-key adapter, or `oidc` for the validated OIDC foundation. T-231 keeps
-OIDC API requests denied until T-232 adds token verification. Every static
-`/v1` request requires `SMOLQUERY_API_KEY`; a node with no mode or required
-credentials fails the boot rather than serve an open API. Successful static
-requests carry a normalized service principal and context. `/healthz` is the
-one unauthenticated route.
+Bearer-key adapter, or `oidc` for OIDC access-token verification. Every
+static `/v1` request requires `SMOLQUERY_API_KEY`; OIDC requests require a
+signed bearer access token matching the configured issuer and audience. A node
+with no mode or required credentials fails the boot rather than serve an open
+API. Successful requests carry a normalized principal and context. `/healthz`
+is the one unauthenticated route.
+
+T-232 performs authentication before body parsing and deliberately applies a
+coarse safe gate: an OIDC token must map to `query`, `ingest`, and
+`catalog_manage`. T-233 will move these decisions to per-route capability
+checks; until then, tokens missing any one of those capabilities receive the
+same 401 response as invalid tokens.
 
 ```sh
 curl http://127.0.0.1:4000/healthz
 
 auth='authorization: Bearer '$SMOLQUERY_API_KEY
+# In OIDC mode, replace the static key with an access token issued for
+# SMOLQUERY_OIDC_API_AUDIENCE:
+# auth='authorization: Bearer '$OIDC_ACCESS_TOKEN
 json='content-type: application/json'
 curl -H "$auth" -H "$json" -d '{"id": "analytics"}' http://127.0.0.1:4000/v1/datasets
 curl -H "$auth" -H "$json" -d '{"id": "events", "schema": [

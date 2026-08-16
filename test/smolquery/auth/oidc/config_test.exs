@@ -154,6 +154,98 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     end
   end
 
+  test "validates token type and required payload claim settings" do
+    config =
+      Config.new(
+        [
+          oidc:
+            Keyword.merge(@base,
+              typ_allowlist: ["at+jwt"],
+              required_claims: %{"token_use" => ["access"]},
+              max_token_bytes: 1024,
+              max_segment_bytes: 512,
+              iat_future_seconds: 60,
+              forced_refresh_cooldown_ms: 250
+            )
+        ],
+        :api
+      )
+
+    assert config.typ_allowlist == ["at+jwt"]
+    assert config.required_claims == %{"token_use" => ["access"]}
+    assert config.max_token_bytes == 1024
+    assert config.max_segment_bytes == 512
+    assert config.iat_future_seconds == 60
+    assert config.forced_refresh_cooldown_ms == 250
+
+    for {key, value, env} <- [
+          {:typ_allowlist, ["at+jwt", "at+jwt"], "SMOLQUERY_OIDC_TOKEN_TYPES"},
+          {:required_claims, %{"token_use" => []}, "SMOLQUERY_OIDC_REQUIRED_CLAIMS"},
+          {:max_token_bytes, 0, "SMOLQUERY_OIDC_MAX_TOKEN_BYTES"},
+          {:max_segment_bytes, 0, "SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES"},
+          {:iat_future_seconds, -1, "SMOLQUERY_OIDC_IAT_FUTURE_SECONDS"},
+          {:forced_refresh_cooldown_ms, 0, "SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS"}
+        ] do
+      assert_raise ArgumentError, ~r/#{env}/, fn ->
+        Config.new([oidc: Keyword.put(@base, key, value)], :api)
+      end
+    end
+  end
+
+  test "resolves separate API and web token profiles with global fallbacks" do
+    options =
+      Keyword.merge(@base,
+        typ_allowlist: ["legacy+jwt"],
+        required_claims: %{"legacy" => ["true"]},
+        api_typ_allowlist: ["at+jwt"],
+        api_required_claims: %{"token_use" => ["access"]},
+        web_typ_allowlist: ["JWT"],
+        web_required_claims: %{"token_use" => ["id"]}
+      )
+
+    api = Config.new([oidc: options], :api)
+    web = Config.new([oidc: options], :web)
+
+    assert api.typ_allowlist == ["at+jwt"]
+    assert api.required_claims == %{"token_use" => ["access"]}
+    assert web.typ_allowlist == ["JWT"]
+    assert web.required_claims == %{"token_use" => ["id"]}
+
+    fallback = Config.new([oidc: @base ++ [typ_allowlist: ["legacy+jwt"]]], :api)
+    assert fallback.typ_allowlist == ["legacy+jwt"]
+
+    assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_API_TOKEN_TYPES/, fn ->
+      invalid = Keyword.put(options, :api_typ_allowlist, ["at+jwt", "at+jwt"])
+      Config.new([oidc: invalid], :api)
+    end
+  end
+
+  test "requires an explicit API access-token boundary" do
+    no_browser_client = Keyword.delete(@base, :web_client_id)
+    config = Config.new([oidc: no_browser_client], :api)
+
+    assert_raise ArgumentError, ~r/distinguish access tokens from browser ID tokens/, fn ->
+      Config.validate_api_token_boundary!(config)
+    end
+
+    typed =
+      no_browser_client
+      |> Keyword.put(:api_typ_allowlist, ["at+jwt"])
+      |> then(&Config.new([oidc: &1], :api))
+
+    assert Config.validate_api_token_boundary!(typed) == typed
+  end
+
+  test "rejects an API audience that aliases the browser client id" do
+    options = Keyword.put(@base, :api_audience, "smolquery-web")
+
+    for role <- [:api, :web] do
+      assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_API_AUDIENCE.*different/, fn ->
+        Config.new([oidc: options], role)
+      end
+    end
+  end
+
   test "redacts the client secret" do
     config = Config.new([oidc: @base], :web)
     refute inspect(config) =~ "\"secret\""

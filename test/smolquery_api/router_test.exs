@@ -32,6 +32,18 @@ defmodule SmolqueryApi.RouterTest do
       assert response.status == 200
       assert JSON.decode!(response.resp_body) == %{"status" => "ok"}
     end
+
+    test "POST healthz requires auth and does not parse valid or malformed bodies" do
+      name = start_api()
+      valid = request(name, conn(:post, "/healthz", "{}"))
+      malformed = request(name, conn(:post, "/healthz", "not-json"))
+
+      assert valid.status == 401
+      assert malformed.status == 401
+      assert valid.resp_body == malformed.resp_body
+      assert %Plug.Conn.Unfetched{aspect: :body_params} = valid.body_params
+      assert %Plug.Conn.Unfetched{aspect: :body_params} = malformed.body_params
+    end
   end
 
   describe "metrics" do
@@ -80,7 +92,7 @@ defmodule SmolqueryApi.RouterTest do
       assert %{"error" => %{"code" => 401, "status" => "UNAUTHENTICATED", "message" => message}} =
                JSON.decode!(response.resp_body)
 
-      assert message =~ "API key"
+      assert message == "missing or invalid API credential"
     end
 
     test "a correct key attaches the normalized service context" do

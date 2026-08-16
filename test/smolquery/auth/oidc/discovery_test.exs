@@ -4,6 +4,16 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
   alias Smolquery.Auth.OIDC.{Config, Discovery}
 
   @config Config.new([oidc: [issuer: "https://issuer.example/", api_audience: "api"]], :api)
+  @rsa_public JOSE.JWK.generate_key({:rsa, 2048})
+              |> JOSE.JWK.to_public()
+              |> JOSE.JWK.to_map()
+              |> elem(1)
+              |> Map.put("kid", "one")
+  @ec_public JOSE.JWK.generate_key({:ec, "P-256"})
+             |> JOSE.JWK.to_public()
+             |> JOSE.JWK.to_map()
+             |> elem(1)
+             |> Map.put("kid", "ec-one")
   @metadata %{
     "issuer" => "https://issuer.example/",
     "authorization_endpoint" => "https://login.example/authorize",
@@ -38,7 +48,7 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
                {:ok, response(@metadata, 200, "Application/JSON; charset=utf-8")}
              end)
 
-    jwks = %{"keys" => [%{"kid" => "one", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}]}
+    jwks = %{"keys" => [@rsa_public]}
 
     assert {:ok, _} =
              Discovery.fetch_jwks(@config, @metadata, fn _, _ ->
@@ -93,36 +103,46 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
   end
 
   test "requires a signing key compatible with the configured algorithms" do
-    rsa = %{"kid" => "rsa", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}
-    ec = %{"kid" => "ec", "kty" => "EC", "crv" => "P-256", "x" => "AQ", "y" => "AQ"}
-
-    assert :ok = Discovery.validate_jwks(%{"keys" => [rsa]}, @config)
+    assert :ok = Discovery.validate_jwks(%{"keys" => [@rsa_public]}, @config)
 
     assert {:error, :jwks_no_compatible_signing_key} =
-             Discovery.validate_jwks(%{"keys" => [ec]}, @config)
+             Discovery.validate_jwks(%{"keys" => [@ec_public]}, @config)
 
     assert {:error, :jwks_no_compatible_signing_key} =
-             Discovery.validate_jwks(%{"keys" => [Map.put(rsa, "use", "enc")]}, @config)
+             Discovery.validate_jwks(%{"keys" => [Map.put(@rsa_public, "use", "enc")]}, @config)
 
     mixed_config = %{@config | algorithms: ["RS256", "ES256"]}
 
     assert {:error, :jwks_no_compatible_signing_key} =
-             Discovery.validate_jwks(%{"keys" => [Map.put(rsa, "alg", "ES256")]}, mixed_config)
+             Discovery.validate_jwks(
+               %{"keys" => [Map.put(@rsa_public, "alg", "ES256")]},
+               mixed_config
+             )
 
     assert {:error, :jwks_duplicate_kid} =
-             Discovery.validate_jwks(%{"keys" => [rsa, rsa]}, @config)
+             Discovery.validate_jwks(%{"keys" => [@rsa_public, @rsa_public]}, @config)
   end
 
   test "rejects malformed and private JWKS keys" do
-    assert :ok ==
+    assert :ok == Discovery.validate_jwks(%{"keys" => [@rsa_public]})
+    assert :ok == Discovery.validate_jwks(%{"keys" => [@ec_public]})
+
+    assert {:error, :jwks_malformed} =
              Discovery.validate_jwks(%{
-               "keys" => [%{"kid" => "one", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}]
+               "keys" => [%{"kid" => "weak", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}]
              })
 
-    assert :ok ==
+    padded_weak_modulus = Base.url_encode64(<<0, 1::size(2048)>>, padding: false)
+
+    assert {:error, :jwks_malformed} =
              Discovery.validate_jwks(%{
                "keys" => [
-                 %{"kid" => "one", "kty" => "EC", "crv" => "P-256", "x" => "AQ", "y" => "AQ"}
+                 %{
+                   "kid" => "padded-weak",
+                   "kty" => "RSA",
+                   "n" => padded_weak_modulus,
+                   "e" => "AQAB"
+                 }
                ]
              })
 
@@ -132,18 +152,10 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
              })
 
     assert {:error, :jwks_malformed} =
-             Discovery.validate_jwks(%{
-               "keys" => [
-                 %{"kid" => "one", "kty" => "RSA", "n" => "AQ", "e" => "AQAB", "d" => "private"}
-               ]
-             })
+             Discovery.validate_jwks(%{"keys" => [Map.put(@rsa_public, "d", "private")]})
 
     assert {:error, :jwks_malformed} =
-             Discovery.validate_jwks(%{
-               "keys" => [
-                 %{"kid" => "one", "kty" => "RSA", "n" => "AQ", "e" => "AQAB", "oth" => []}
-               ]
-             })
+             Discovery.validate_jwks(%{"keys" => [Map.put(@rsa_public, "oth", [])]})
   end
 
   defp response(body, status \\ 200, content_type \\ "application/json") do

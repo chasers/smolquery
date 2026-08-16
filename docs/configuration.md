@@ -31,16 +31,16 @@ error.
 ### OIDC foundation (T-231)
 
 OIDC mode is explicit and fail-closed. The API and web roles validate their
-own required settings before their listeners start. T-231 only starts and
-validates the discovery/JWKS cache; request authentication and browser login
-are added by later stack layers. Provider outage or malformed discovery/JWKS
-never opens either listener.
+own required settings before their listeners start. T-232 verifies API bearer
+access tokens against the supervised discovery/JWKS cache. Browser login and
+per-route capability authorization are added by later stack layers. Provider
+outage or malformed discovery/JWKS never opens either listener.
 
 | variable | effect |
 |---|---|
 | `SMOLQUERY_OIDC_ISSUER` | exact HTTPS issuer string; trailing slash is retained, while query, fragment, and userinfo are rejected |
 | `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles; it must differ from the browser client id when both are configured |
-| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; optional on API-only roles so the token verifier can reject browser-client audiences |
+| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; on API roles, supply it unless an API-specific token type or required-claim profile distinguishes access tokens |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
 | `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin; its host must match `SMOLQUERY_WEB_HOST` |
@@ -48,21 +48,47 @@ never opens either listener.
 | `SMOLQUERY_OIDC_WEB_SCOPES` | comma-separated browser authorization scopes (default `openid`); `openid` is mandatory, with at most 32 unique scope tokens and 1024 bytes total |
 | `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
-| `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}` |
+| `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}`; list-valued token claims union matching values |
+| `SMOLQUERY_OIDC_API_TOKEN_TYPES` / `SMOLQUERY_OIDC_WEB_TOKEN_TYPES` | role-specific comma-separated protected-header `typ` allowlists; an API role without the browser client id must configure this or `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` |
+| `SMOLQUERY_OIDC_TOKEN_TYPES` | backward-compatible common `typ` allowlist used only when the role-specific setting is absent |
+| `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` / `SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS` | role-specific JSON objects mapping required payload claim names to allowed exact string values, e.g. `{"token_use":["access"]}` and `{"token_use":["id"]}`; an API role without the browser client id must configure this or `SMOLQUERY_OIDC_API_TOKEN_TYPES` |
+| `SMOLQUERY_OIDC_REQUIRED_CLAIMS` | backward-compatible common required-claim map used only when the role-specific setting is absent |
+| `SMOLQUERY_OIDC_MAX_TOKEN_BYTES` / `SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES` | bounds compact token and individual encoded segments before JOSE decoding (defaults `65536` / `32768`) |
+| `SMOLQUERY_OIDC_IAT_FUTURE_SECONDS` | maximum future `iat` allowance (default `300`); `exp` contexts remain active through the configured clock-skew boundary |
 | `SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS` / `SMOLQUERY_OIDC_JWKS_MAX_AGE_MS` | bounded cache freshness windows (defaults `3600000`) |
+| `SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS` | positive minimum interval between unknown-`kid` forced JWKS fetches (default `1000`); concurrent/repeated attempts reuse the current cache and fail closed if the key remains unknown |
 | `SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS` | positive interval suppressing repeated discovery/JWKS network attempts after a failed refresh (default `1000`) |
 | `SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS` / `SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS` / `SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS` | bounded Req connection, per-chunk receive, and complete-response timeouts (defaults `2000` / `5000` / `10000`) |
 | `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS response size (default `1048576`) |
 
-The discovery client requires JSON responses, byte-for-byte issuer equality, HTTPS
-authorization/token/JWKS endpoints, an algorithm overlap with the local
+The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
+algorithm, a compatible public signing key, exact issuer and audience, and
+integer NumericDate claims. API and web token type/required-claim profiles are
+resolved separately. An API role refuses to boot unless it has either the browser
+client ID to exclude from token audiences or an API-specific token type/required-claim
+profile. When configured, the browser client ID must not appear in an API token's
+`aud`; providers should identify the authorized client through `azp` or `client_id`
+instead. This prevents a browser ID token from crossing the access-token boundary.
+Unknown keys trigger one supervised JWKS refresh,
+subject to the global forced-refresh cooldown; concurrent or repeated unknown
+keys within that cooldown reuse the current cache and reject without another
+network fetch. All other failures reject without revealing the verification
+reason. The context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the
+accepted expiration-skew boundary. Before T-233, an OIDC API token must map to
+all three current API capabilities (`query`, `ingest`, and `catalog_manage`), so
+this layer cannot accidentally grant a query-only token write or catalog access.
+
+The discovery client requires JSON responses, byte-for-byte issuer equality,
+HTTPS authorization/token/JWKS endpoints, an algorithm overlap with the local
 asymmetric allowlist, unique key ids, and at least one public signing key whose
 explicit algorithm and key type are compatible with that allowlist. It refuses
 redirects and bounds response bodies. Refresh I/O runs
 outside the cache process, so fresh reads continue while a key fetch is in
-flight; expired data still fails closed. A failed refresh suppresses repeated
-network attempts for the configured backoff. The client does not trust `jku`,
-token headers, claims, or provider groups as tenant identifiers.
+flight; expired data still fails closed. Unknown-`kid` refreshes use a global
+cooldown measured from fetch completion, and failed discovery/JWKS attempts
+start a separate retry backoff. Protected `jku`, `jwk`, `x5u`, `crit`, and `b64`
+headers are rejected. The client does not trust token claims or provider groups
+as tenant identifiers.
 
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 

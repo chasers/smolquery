@@ -93,6 +93,10 @@ defmodule Smolquery.RuntimeConfigTest do
     assert RuntimeConfig.csv!("ALGORITHMS", "RS256, ES256") == ["RS256", "ES256"]
     assert RuntimeConfig.bounded_non_negative_integer!("SKEW", "30", 300) == 30
 
+    assert RuntimeConfig.string_lists!("REQUIRED", ~s({"token_use":["access"]})) == %{
+             "token_use" => ["access"]
+           }
+
     assert RuntimeConfig.capability_mapping!(
              "CLAIMS",
              ~s({"roles":{"reader":["query"],"operator":["web_access","platform_operate"]}})
@@ -102,10 +106,11 @@ defmodule Smolquery.RuntimeConfigTest do
 
     for {function, value} <- [
           {&RuntimeConfig.csv!("ALGORITHMS", &1), ""},
+          {&RuntimeConfig.string_lists!("REQUIRED", &1), "[]"},
           {&RuntimeConfig.capability_mapping!("CLAIMS", &1), ""},
           {&RuntimeConfig.capability_mapping!("CLAIMS", &1), "roles=unknown"}
         ] do
-      assert_raise ArgumentError, ~r/ALGORITHMS|CLAIMS/, fn -> function.(value) end
+      assert_raise ArgumentError, ~r/ALGORITHMS|CLAIMS|REQUIRED/, fn -> function.(value) end
     end
   end
 
@@ -139,7 +144,17 @@ defmodule Smolquery.RuntimeConfigTest do
         "SMOLQUERY_OIDC_CLOCK_SKEW" => "30",
         "SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS" => "250",
         "SMOLQUERY_OIDC_CLAIM_CAPABILITIES" =>
-          ~s({"roles":{"reader":["query"],"operator":["web_access"]}})
+          ~s({"roles":{"reader":["query"],"operator":["web_access"]}}),
+        "SMOLQUERY_OIDC_TOKEN_TYPES" => "legacy+jwt",
+        "SMOLQUERY_OIDC_API_TOKEN_TYPES" => "at+jwt",
+        "SMOLQUERY_OIDC_WEB_TOKEN_TYPES" => "JWT",
+        "SMOLQUERY_OIDC_REQUIRED_CLAIMS" => ~s({"legacy":["true"]}),
+        "SMOLQUERY_OIDC_API_REQUIRED_CLAIMS" => ~s({"token_use":["access"]}),
+        "SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS" => ~s({"token_use":["id"]}),
+        "SMOLQUERY_OIDC_MAX_TOKEN_BYTES" => "2048",
+        "SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES" => "1024",
+        "SMOLQUERY_OIDC_IAT_FUTURE_SECONDS" => "60",
+        "SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS" => "250"
       },
       fn ->
         runtime = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
@@ -147,6 +162,16 @@ defmodule Smolquery.RuntimeConfigTest do
 
         assert oidc[:issuer] == "https://issuer.example/"
         assert oidc[:algorithms] == ["RS256", "PS256"]
+        assert oidc[:typ_allowlist] == ["legacy+jwt"]
+        assert oidc[:api_typ_allowlist] == ["at+jwt"]
+        assert oidc[:web_typ_allowlist] == ["JWT"]
+        assert oidc[:required_claims] == %{"legacy" => ["true"]}
+        assert oidc[:api_required_claims] == %{"token_use" => ["access"]}
+        assert oidc[:web_required_claims] == %{"token_use" => ["id"]}
+        assert oidc[:max_token_bytes] == 2048
+        assert oidc[:max_segment_bytes] == 1024
+        assert oidc[:iat_future_seconds] == 60
+        assert oidc[:forced_refresh_cooldown_ms] == 250
         assert oidc[:refresh_failure_backoff_ms] == 250
 
         assert oidc[:claim_capabilities] == %{
