@@ -277,6 +277,33 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
     assert MapSet.equal?(context.capabilities, MapSet.new())
   end
 
+  test "rejects browser ID-token audiences at the API boundary" do
+    config = %{@base_config | web_client_id: "smolquery-web"}
+
+    browser_id_claims =
+      valid_claims(%{
+        "aud" => ["smolquery-web", "smolquery-api"],
+        "azp" => "smolquery-web",
+        "nonce" => "browser-nonce",
+        "scope" => ["query", "admin"]
+      })
+
+    assert :error =
+             Token.verify(token(browser_id_claims), config, @jwks, %{}, now: @now)
+
+    access_claims =
+      valid_claims(%{
+        "aud" => ["other-resource", "smolquery-api"],
+        "azp" => "smolquery-web",
+        "scope" => ["query"]
+      })
+
+    assert {:ok, context} =
+             Token.verify(token(access_claims), config, @jwks, %{}, now: @now)
+
+    assert MapSet.equal?(context.capabilities, MapSet.new([:query]))
+  end
+
   test "enforces optional type and required claim values" do
     config = %{
       @base_config
