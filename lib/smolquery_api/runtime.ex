@@ -90,9 +90,22 @@ defmodule SmolqueryApi.Runtime do
         :insert_max_in_flight_bytes
       ])
     )
+    |> validate_insert_max_in_flight_bytes()
   end
 
-  @in_flight_floor 8_000_000
+  defp validate_insert_max_in_flight_bytes(
+         %__MODULE__{insert_max_in_flight_bytes: bytes} = runtime
+       )
+       when (is_integer(bytes) and bytes > 0) or is_nil(bytes),
+       do: runtime
+
+  defp validate_insert_max_in_flight_bytes(%__MODULE__{insert_max_in_flight_bytes: bytes}) do
+    raise ArgumentError,
+          "unsupported insert_max_in_flight_bytes: #{inspect(bytes)} " <>
+            "(expected a positive integer, or nil to derive it from the " <>
+            "container's cgroup memory limit)"
+  end
+
   @in_flight_fallback 268_435_456
 
   @doc """
@@ -113,7 +126,7 @@ defmodule SmolqueryApi.Runtime do
       do: bytes
 
   def insert_max_in_flight_bytes(%__MODULE__{}, {:ok, bytes}),
-    do: max(div(bytes, 4), @in_flight_floor)
+    do: max(div(bytes, 4), SmolqueryApi.InsertController.max_ndjson_bytes())
 
   def insert_max_in_flight_bytes(%__MODULE__{}, :none), do: @in_flight_fallback
 

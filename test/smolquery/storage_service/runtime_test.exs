@@ -215,11 +215,23 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 4_194_304
     end
 
-    test "a budget string DuckDB would accept but the parser does not falls back" do
+    test "reads a fractional budget the way DuckDB does" do
       runtime =
-        Runtime.new(name: __MODULE__.OpaqueRowCap, compact_engine_memory_limit: "1.5GB")
+        Runtime.new(name: __MODULE__.FractionalRowCap, compact_engine_memory_limit: "1.5GB")
 
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 4_194_304
+      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 2_929_687
+    end
+
+    test "a budget string the parser cannot read warns and falls back" do
+      runtime =
+        Runtime.new(name: __MODULE__.OpaqueRowCap, compact_engine_memory_limit: "80%")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 4_194_304
+        end)
+
+      assert log =~ "cannot read compact_engine_memory_limit"
     end
   end
 

@@ -27,10 +27,20 @@ defmodule SmolqueryApi.Admission do
   reservation. The server is one process per API instance; two calls per
   request is noise next to a multi-megabyte body.
 
+  A load reserves its declared size for the whole request, upload phase
+  included, even though the body spools to disk in small chunks and only the
+  parse phase materializes it. That is deliberate: the counter must cover the
+  request's resident peak — a load's parse holds many times the file — and a
+  reservation that shrank during the upload would admit inserts the parse
+  phase then competes with. The cost is that one large load can hold most of
+  a small limit for its full duration.
+
   A request dispatched for an instance with no admission server passes
   uncounted. In production the server starts under `SmolqueryApi.Supervisor`
   ahead of the endpoint, so that window is a supervisor restart; in tests it
-  is the default, and only admission's own tests start the server.
+  is the default, and only admission's own tests start the server. The same
+  contract covers a server that dies between the lookup and the call: the
+  request passes uncounted rather than crash.
   """
 
   use GenServer
@@ -77,7 +87,10 @@ defmodule SmolqueryApi.Admission do
   def admit_conn(%Plug.Conn{} = conn), do: conn
 
   defp admit_conn(conn, server, bytes) do
-    case GenServer.call(server, {:admit, bytes, self()}) do
+    case admit(server, bytes) do
+      :no_server ->
+        conn
+
       {:ok, reservation} ->
         Plug.Conn.register_before_send(conn, fn conn ->
           release(server, reservation)
@@ -94,6 +107,12 @@ defmodule SmolqueryApi.Admission do
         )
         |> Plug.Conn.halt()
     end
+  end
+
+  defp admit(server, bytes) do
+    GenServer.call(server, {:admit, bytes, self()})
+  catch
+    :exit, _reason -> :no_server
   end
 
   @doc """
@@ -166,6 +185,8 @@ defmodule SmolqueryApi.Admission do
   def handle_info({:DOWN, reservation, :process, _pid, _reason}, state) do
     {:noreply, drop(state, reservation)}
   end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   defp drop(state, reservation) do
     case Map.pop(state.reservations, reservation) do

@@ -149,6 +149,23 @@ defmodule SmolqueryApi.AdmissionTest do
     assert post_ndjson(name, ~s({"id": 1}\n)).status == 200
   end
 
+  test "a server that dies between the lookup and the call passes uncounted", %{name: name} do
+    stop_supervised!({:admission, name})
+
+    stub = spawn(fn -> receive do: (_call -> :ok) end)
+    Process.register(stub, Admission.server(name))
+
+    assert post_ndjson(name, ~s({"id": 1}\n)).status == 200
+  end
+
+  test "a stray message does not crash the server", %{name: name} do
+    server = Process.whereis(Admission.server(name))
+    send(server, :stray)
+
+    assert Admission.in_flight(name) == 0
+    assert Process.alive?(server)
+  end
+
   defp await(check, attempts \\ 50) do
     cond do
       check.() -> :ok

@@ -66,5 +66,21 @@ defmodule SmolqueryApi.RuntimeTest do
 
       assert Runtime.insert_max_in_flight_bytes(runtime, :none) == 268_435_456
     end
+
+    test "an explicit non-positive limit refuses to boot" do
+      assert_raise ArgumentError, ~r/insert_max_in_flight_bytes/, fn ->
+        Runtime.new(name: :api_admission_zero, api_key: "k", insert_max_in_flight_bytes: 0)
+      end
+    end
+
+    test "an explicit non-integer limit refuses to boot" do
+      assert_raise ArgumentError, ~r/insert_max_in_flight_bytes/, fn ->
+        Runtime.new(
+          name: :api_admission_string,
+          api_key: "k",
+          insert_max_in_flight_bytes: "256MB"
+        )
+      end
+    end
   end
 end

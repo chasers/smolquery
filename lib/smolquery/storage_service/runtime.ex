@@ -87,8 +87,8 @@ defmodule Smolquery.StorageService.Runtime do
   BY` on the final `COPY` — scales with rows, so the byte-bounded group blew
   the merge's five-minute `COPY` budget and re-planned identically every
   sweep. Left `nil`, the cap derives from the compaction engine's memory
-  budget at 512 bytes per row, resolved by `with_compact_max_rows/2` at each
-  sweep (T-262): the sandbox measured a 4Mi-row group pinning ~1 GiB during
+  budget at 512 bytes per row, resolved by `with_compact_max_rows/2` once
+  when the compactor starts (T-262): the sandbox measured a 4Mi-row group pinning ~1 GiB during
   the merge — the whole of a 1 GiB budget — and a group the engine cannot
   merge re-plans identically forever, because splitting it only produces
   outputs the next group re-ingests up to the same cap. Half the observed
@@ -170,6 +170,8 @@ defmodule Smolquery.StorageService.Runtime do
   alias Smolquery.BufferService.Ring
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
+
+  require Logger
 
   @enforce_keys [:name, :store, :catalog, :ring]
   defstruct [
@@ -359,7 +361,12 @@ defmodule Smolquery.StorageService.Runtime do
   An explicit cap survives untouched. A `nil` cap derives from the
   compaction engine's memory budget at #{@compact_bytes_per_row} bytes per
   row — half the pin rate the sandbox measured, so a group at the cap keeps
-  2x headroom (T-262). A budget too small for the floor still yields
+  2x headroom (T-262). The budget is the same quarter of the cgroup limit
+  `compact_engine_memory_limit/2` resolves, taken as raw bytes rather than
+  re-parsed from the formatted size string. An explicit
+  `compact_engine_memory_limit` is parsed instead; a budget string DuckDB
+  accepts but this parser cannot read (such as `"80%"`) logs a warning and
+  falls back, never silently. A budget too small for the floor still yields
   #{@compact_max_rows_floor} rows, and no resolvable budget — no explicit
   limit, no cgroup — falls back to #{@compact_max_rows_fallback} rows, the
   fixed default this derivation replaced.
@@ -372,27 +379,41 @@ defmodule Smolquery.StorageService.Runtime do
       do: runtime
 
   def with_compact_max_rows(%__MODULE__{} = runtime, cgroup) do
-    rows =
-      runtime
-      |> compact_engine_memory_limit(cgroup)
-      |> derived_compact_max_rows()
+    rows = derived_compact_max_rows(runtime.compact_engine_memory_limit, cgroup)
 
     %{runtime | compact_max_rows: rows}
   end
 
-  defp derived_compact_max_rows(nil), do: @compact_max_rows_fallback
+  defp derived_compact_max_rows(nil, {:ok, bytes}), do: budget_rows(div(bytes, 4))
 
-  defp derived_compact_max_rows(limit) do
+  defp derived_compact_max_rows(nil, :none), do: @compact_max_rows_fallback
+
+  defp derived_compact_max_rows(limit, _cgroup) when is_binary(limit) do
     case memory_limit_bytes(limit) do
-      nil -> @compact_max_rows_fallback
-      bytes -> max(div(bytes, @compact_bytes_per_row), @compact_max_rows_floor)
+      nil ->
+        Logger.warning(
+          "cannot read compact_engine_memory_limit #{inspect(limit)} as a byte count; " <>
+            "compact_max_rows falls back to #{@compact_max_rows_fallback}"
+        )
+
+        @compact_max_rows_fallback
+
+      bytes ->
+        budget_rows(bytes)
     end
   end
 
+  defp budget_rows(bytes),
+    do: max(div(bytes, @compact_bytes_per_row), @compact_max_rows_floor)
+
   defp memory_limit_bytes(limit) do
-    case Regex.run(~r/^(\d+)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i, String.trim(limit)) do
-      [_, digits, unit] -> String.to_integer(digits) * unit_bytes(String.downcase(unit))
-      _ -> nil
+    case Regex.run(~r/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i, String.trim(limit)) do
+      [_, number, unit] ->
+        {number, ""} = Float.parse(number)
+        trunc(number * unit_bytes(String.downcase(unit)))
+
+      _no_match ->
+        nil
     end
   end
 
