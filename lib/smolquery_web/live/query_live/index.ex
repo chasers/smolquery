@@ -11,8 +11,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
   use SmolqueryWeb, :live_view
 
   alias Smolquery.QueryService
-  alias SmolqueryWeb.DataTable
-  alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.{Authorization, DataTable, Runtime}
 
   @page_size 100
   @poll_ms 200
@@ -37,21 +36,57 @@ defmodule SmolqueryWeb.QueryLive.Index do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("sql_changed", %{"query" => %{"sql" => sql}}, socket) do
-    {:noreply, assign(socket, :sql, sql)}
+  def handle_event("sql_changed", params, socket) do
+    with :ok <- Authorization.event(socket, :query),
+         %{"query" => %{"sql" => sql}} when is_binary(sql) <- params do
+      {:noreply, assign(socket, :sql, sql)}
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_event("run", %{"query" => %{"sql" => sql}}, socket) do
-    case String.trim(sql) do
-      "" ->
-        {:noreply, assign(socket, :run_error, "Write some SQL first")}
+  def handle_event("run", params, socket) do
+    with :ok <- Authorization.event(socket, :query),
+         %{"query" => %{"sql" => sql}} when is_binary(sql) <- params do
+      case String.trim(sql) do
+        "" ->
+          {:noreply, assign(socket, :run_error, "Write some SQL first")}
 
-      _sql ->
-        submit(assign(socket, :sql, sql))
+        _sql ->
+          submit(assign(socket, :sql, sql))
+      end
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, assign(socket, :run_error, "Write some SQL first")}
     end
   end
 
   def handle_event("cancel", _params, socket) do
+    case Authorization.event(socket, :query) do
+      {:error, _reason, denied} -> {:noreply, denied}
+      :ok -> cancel(socket)
+    end
+  end
+
+  def handle_event("page", params, socket) do
+    with :ok <- Authorization.event(socket, :query),
+         dir when dir in ["next", "prev"] <- Map.get(params, "dir") do
+      page =
+        case dir do
+          "next" -> socket.assigns.page + 1
+          "prev" -> max(socket.assigns.page - 1, 0)
+        end
+
+      {:noreply,
+       socket |> assign(:page, min(page, last_page(socket.assigns.frame))) |> page_rows()}
+    else
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  defp cancel(socket) do
     if socket.assigns.job do
       QueryService.Client.cancel(socket.assigns.runtime.query_name, socket.assigns.job.id)
     end
@@ -59,24 +94,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
     {:noreply, socket}
   end
 
-  def handle_event("page", %{"dir" => dir}, socket) do
-    page =
-      case dir do
-        "next" -> socket.assigns.page + 1
-        "prev" -> max(socket.assigns.page - 1, 0)
-      end
-
-    {:noreply, socket |> assign(:page, min(page, last_page(socket.assigns.frame))) |> page_rows()}
-  end
-
   @impl Phoenix.LiveView
   def handle_info({:poll, job_id}, socket) do
-    current = socket.assigns.job
-
-    if current && current.id == job_id do
+    with :ok <- Authorization.event(socket, :query),
+         current when not is_nil(current) <- socket.assigns.job,
+         true <- current.id == job_id do
       poll(socket, job_id)
     else
-      {:noreply, socket}
+      {:error, _reason, denied} -> {:noreply, denied}
+      _ -> {:noreply, socket}
     end
   end
 

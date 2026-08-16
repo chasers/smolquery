@@ -3,6 +3,7 @@ defmodule SmolqueryWeb.AuthController do
 
   use SmolqueryWeb, :controller
 
+  alias Smolquery.Auth.Policy
   alias SmolqueryWeb.{Auth, OIDC, Runtime}
 
   def login(conn, _params) do
@@ -24,19 +25,8 @@ defmodule SmolqueryWeb.AuthController do
 
   def callback(conn, %{"state" => state, "code" => code}) do
     case OIDC.take_transaction(conn, state) do
-      {:ok, transaction, conn} ->
-        with {:ok, runtime} <- oidc_runtime(),
-             {:ok, context} <-
-               OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
-             true <- Auth.coarse_web_access?(context),
-             {:ok, conn} <- Auth.assign_identity(conn, context) do
-          conn |> no_store() |> redirect(to: "/")
-        else
-          _failure -> error(conn)
-        end
-
-      {:error, :invalid_transaction, conn} ->
-        error(conn)
+      {:ok, transaction, conn} -> complete_callback(conn, transaction, code)
+      {:error, :invalid_transaction, conn} -> error(conn)
     end
   end
 
@@ -58,6 +48,18 @@ defmodule SmolqueryWeb.AuthController do
     |> OIDC.clear_transactions()
     |> configure_session(drop: true)
     |> redirect(to: "/")
+  end
+
+  defp complete_callback(conn, transaction, code) do
+    with {:ok, runtime} <- oidc_runtime(),
+         {:ok, context} <- OIDC.authenticate(runtime, transaction, code, oidc_options(runtime)),
+         :ok <- Policy.authorize(context, :web_access),
+         {:ok, conn} <- Auth.assign_identity(conn, context) do
+      target = if Policy.authorize(context, :query) == :ok, do: "/", else: "/cluster"
+      conn |> no_store() |> redirect(to: target)
+    else
+      _failure -> error(conn)
+    end
   end
 
   defp oidc_options(%{oidc_http_client: client}) when is_function(client, 2),

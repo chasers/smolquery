@@ -72,15 +72,15 @@ defmodule SmolqueryWeb.ClusterLiveTest do
       refute has_element?(lv, "button", "Drain")
     end
 
-    test "drain runs async over :rpc and flashes the result", %{conn: conn} do
+    test "a crafted drain event cannot target a known non-buffer member", %{conn: conn} do
       start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/cluster")
 
-      render_click(lv, "drain", %{"node" => to_string(node())})
-      html = render_async(lv)
+      html = render_click(lv, "drain", %{"node" => to_string(node())})
 
-      assert html =~ "buffer_service_unavailable"
+      assert html =~ "is not a buffer member"
+      refute html =~ "buffer_service_unavailable"
     end
   end
 end

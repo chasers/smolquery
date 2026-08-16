@@ -154,12 +154,12 @@ defmodule SmolqueryWeb.AuthTest do
     test "HTTP and LiveView reject incomplete or wrong-issuer OIDC sessions", %{runtime: runtime} do
       {:ok, principal} = Principal.oidc(runtime.oidc.issuer, "subject", :user)
 
-      {:ok, incomplete} =
+      {:ok, expired} =
         Context.single_tenant(principal, [:web_access],
-          expires_at: System.system_time(:second) + 60
+          expires_at: System.system_time(:second) - 1
         )
 
-      assert {:ok, identity} = Session.encode(incomplete)
+      assert {:ok, identity} = Session.encode(expired)
 
       conn =
         :get
@@ -256,6 +256,30 @@ defmodule SmolqueryWeb.AuthTest do
 
       assert {:halt, socket} = Auth.on_mount(:require_authenticated, %{}, %{}, %LiveView.Socket{})
       assert {:redirect, %{to: "/auth/login"}} = socket.redirected
+    end
+
+    test "a credential rotation revokes an already-connected static socket" do
+      runtime = start_web!()
+      socket = %LiveView.Socket{private: %{lifecycle: %LiveView.Lifecycle{}}}
+
+      assert {:cont, socket} =
+               Auth.on_mount(
+                 :require_authenticated,
+                 %{},
+                 %{"authenticated" => runtime.session_marker},
+                 socket
+               )
+
+      Runtime.put(Runtime.new(catalog: MapCatalog.new(), password: "rotated-password"))
+
+      assert {:halt, denied} = LiveView.Lifecycle.handle_event("kill", %{}, socket)
+      assert {:redirect, %{to: "/"}} = denied.redirected
+      assert_receive :smolquery_static_auth_check, 1_100
+
+      assert {:halt, denied} =
+               LiveView.Lifecycle.handle_info(:smolquery_static_auth_check, socket)
+
+      assert {:redirect, %{to: "/"}} = denied.redirected
     end
 
     test "a rotated password revokes the marker old sessions carry and preserves identity" do

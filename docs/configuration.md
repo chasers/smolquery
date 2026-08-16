@@ -73,10 +73,15 @@ method. Returned ID tokens
 are strictly verified for issuer, browser audience, subject, timestamps, nonce,
 and applicable hash claims. Browser sessions contain only normalized identity,
 capabilities, and expiry; they never contain raw tokens or claims. Every web
-OIDC session currently requires `web_access`, `query`, `ingest`,
-`catalog_manage`, and `platform_operate` until the web capability layer lands.
-A CSRF-protected `POST /auth/logout` always drops the local session without
-depending on the provider. Production builds mark the encrypted cookie Secure;
+OIDC session requires `web_access`. Query and table pages additionally require
+`query`; dataset/table creation and retention changes require
+`catalog_manage`; cluster kill, restart, and drain require `platform_operate`.
+The UI hides controls without those capabilities, but every event handler checks
+again before parsing input or causing side effects. Cluster fleet reads remain
+available to any `web_access` principal.
+A CSRF-protected `POST /auth/logout` drops the local session and all pending
+login transaction cookies without depending on the provider. Production builds mark the identity
+and transaction cookies Secure;
 development and test builds retain explicit HTTP compatibility.
 
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric

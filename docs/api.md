@@ -19,6 +19,13 @@ generic 401 envelope; an authenticated context without the route capability
 returns the generic 403 envelope. Static API credentials retain all three
 capabilities.
 
+The browser UI uses the same normalized capability contract: `web_access` is
+required for entry and LiveView reconnects; `query` gates query and table pages
+and query operations; `catalog_manage` gates dataset/table creation and
+retention changes; and `platform_operate` gates cluster kill, restart, and
+drain. Fleet reads remain available with `web_access`; UI controls are only a
+convenience and server-side event checks remain authoritative.
+
 ```sh
 curl http://127.0.0.1:4000/healthz
 

@@ -4,8 +4,8 @@ defmodule SmolqueryWeb.Auth do
 
   Static mode retains Basic authentication and its marker rotation semantics.
   OIDC mode reconstructs a minimal encrypted session identity on every request
-  and mount. The temporary T-234 gate requires every currently powerful web
-  capability, including `platform_operate`, until the web policy layer lands.
+  and mount. Browser entry and every socket require only `:web_access`; route
+  and operation-specific capabilities are enforced by `SmolqueryWeb.Authorization`.
   """
 
   @behaviour Plug
@@ -16,11 +16,10 @@ defmodule SmolqueryWeb.Auth do
   alias Smolquery.Auth
   alias Smolquery.Auth.Context
   alias Smolquery.Auth.Policy
-  alias SmolqueryWeb.{Runtime, Session}
+  alias SmolqueryWeb.{Authorization, Runtime, Session}
 
   @realm "smolquery"
   @marker :authenticated
-  @required_web_capabilities [:web_access, :query, :ingest, :catalog_manage, :platform_operate]
 
   @impl Plug
   def init(opts), do: Keyword.get(opts, :name, SmolqueryWeb)
@@ -60,7 +59,6 @@ defmodule SmolqueryWeb.Auth do
       {:ok, context} ->
         with true <- context.principal.issuer == runtime.oidc.issuer,
              :ok <- Policy.authorize(context, :web_access),
-             true <- coarse_web_access?(context),
              {:ok, identity} <- Session.encode(context) do
           conn
           |> configure_session(renew: true)
@@ -98,7 +96,8 @@ defmodule SmolqueryWeb.Auth do
     with marker when is_binary(marker) <- session[Atom.to_string(@marker)],
          true <- marker == runtime.session_marker,
          %Context{} = context <- runtime.context do
-      {:cont, Auth.assign_context(socket, context)}
+      socket = socket |> Auth.assign_context(context) |> Authorization.attach_static(marker)
+      {:cont, socket}
     else
       _ -> {:halt, LiveView.redirect(socket, to: "/")}
     end
@@ -107,18 +106,13 @@ defmodule SmolqueryWeb.Auth do
   defp mount_oidc(runtime, session, socket) do
     with {:ok, context} <- Session.decode(session[Session.key()]),
          true <- context.principal.issuer == runtime.oidc.issuer,
-         :ok <- Policy.authorize(context, :web_access),
-         true <- coarse_web_access?(context) do
-      {:cont, Auth.assign_context(socket, context)}
+         :ok <- Policy.authorize(context, :web_access) do
+      socket = Auth.assign_context(socket, context)
+      {:cont, Authorization.attach(socket, :web_access)}
     else
       _ -> {:halt, LiveView.redirect(socket, to: "/auth/login")}
     end
   end
-
-  def coarse_web_access?(%Context{} = context),
-    do: Enum.all?(@required_web_capabilities, &Context.granted?(context, &1))
-
-  def coarse_web_access?(_), do: false
 
   defp put_identity(conn, context) do
     case Session.encode(context) do

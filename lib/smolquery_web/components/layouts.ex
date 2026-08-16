@@ -26,6 +26,7 @@ defmodule SmolqueryWeb.Layouts do
 
   """
   attr :flash, :map, required: true, doc: "the map of flash messages"
+  attr :can_query, :boolean, default: true
 
   attr :current_scope, :map,
     default: nil,
@@ -39,17 +40,20 @@ defmodule SmolqueryWeb.Layouts do
     ~H"""
     <header class="navbar px-4 sm:px-6 lg:px-8 border-b border-base-300 bg-base-100">
       <div class="flex-1">
-        <a href={~p"/tables"} class="flex-1 flex w-fit items-center gap-2">
+        <a
+          href={if(@can_query, do: ~p"/tables", else: ~p"/cluster")}
+          class="flex-1 flex w-fit items-center gap-2"
+        >
           <.icon name="hero-bolt-solid" class="size-5 text-primary" />
           <span class="text-lg font-semibold tracking-tight">smolquery</span>
         </a>
       </div>
       <div class="flex-none">
         <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
+          <li :if={@can_query}>
             <a href={~p"/tables"} class="btn btn-ghost">Tables</a>
           </li>
-          <li>
+          <li :if={@can_query}>
             <a href={~p"/query"} class="btn btn-ghost">Query</a>
           </li>
           <li>

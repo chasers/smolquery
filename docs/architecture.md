@@ -752,8 +752,11 @@ job status outlives the result TTL even though the rows do not.
 
 Three layers, each fail-closed:
 
-- **The front door** requires the static Bearer key on every `/v1` route; a node
-  holding the `:api` role with no key refuses to boot.
+- **The front door** requires an explicit authentication mode. Static API mode
+  requires the configured Bearer key; OIDC API mode strictly verifies signed
+  access tokens through bounded discovery/JWKS caches, then checks the closed
+  route capability matrix before body parsing. A node holding the `:api` role
+  with incomplete settings refuses to boot.
 - **Internal HTTP** (`HotServer`'s manifest and segment routes) requires the
   internal secret; readers attach it — `HotClient` as a header, the DuckDB
   engines via an http `CREATE SECRET`. A single node generates one at boot; a
@@ -766,14 +769,17 @@ Three layers, each fail-closed:
 Single-tenant remains the model — auth says *whether* you may query, not *which
 tables*. Inter-node traffic can be switched to mutual TLS (`GEN_RPC_TLS`,
 `DIST_TLS`); verification is chain-only against the cluster CA, so the CA is the
-trust boundary. The web UI requires its own basic-auth credential
-(`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The credential is not
-the API key, so a UI rotation does not break an ingest client. Static mode
-normalizes both credentials into provider-neutral principals and contexts; the
-credential itself never enters the identity or session. A rotation also
-revokes existing UI sessions. The UI binds loopback by default. A node with
-the `:web` role refuses to boot without the explicit `SMOLQUERY_AUTH_MODE` and
-credential.
+trust boundary. The web UI also requires an explicit mode. Static mode uses
+its own basic-auth credential (`SMOLQUERY_WEB_USERNAME` /
+`SMOLQUERY_WEB_PASSWORD`), separate from the API key. OIDC mode uses
+Authorization Code with state, nonce, and S256 PKCE, strict ID-token validation,
+and a bounded encrypted cookie containing only normalized identity and
+capabilities. LiveView mount, reconnect, events, messages, and async results
+recheck the required capability; expired OIDC sessions and rotated static
+credentials revoke connected sockets as well as later requests. Both modes
+normalize credentials into provider-neutral principals and contexts, never raw
+secrets or provider tokens. The UI binds loopback by default, and a node with
+the `:web` role refuses to boot when the selected mode's settings are incomplete.
 
 ## See also
 
