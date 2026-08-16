@@ -47,6 +47,16 @@ defmodule SmolqueryWeb.AuthController do
     end
   end
 
+  def callback(conn, %{"state" => state}) do
+    remaining =
+      case OIDC.take_transaction(get_session(conn, OIDC.transaction_key()), state) do
+        {:ok, _transaction, remaining} -> remaining
+        {:error, :invalid_transaction, remaining} -> remaining
+      end
+
+    conn |> put_transactions(remaining) |> error()
+  end
+
   def callback(conn, _params), do: error(conn)
 
   def logout(conn, _params) do

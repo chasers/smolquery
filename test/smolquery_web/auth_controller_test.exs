@@ -152,6 +152,21 @@ defmodule SmolqueryWeb.AuthControllerTest do
     refute_received {:token_request, _url, _options}
   end
 
+  test "provider error callback consumes its matching transaction without exchange" do
+    login = get(build_conn(), ~p"/auth/login")
+    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+
+    callback =
+      login
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{transaction.state}&error=access_denied")
+
+    assert callback.status == 400
+    assert callback.resp_body == "authentication failed"
+    assert get_session(callback, OIDC.transaction_key()) == nil
+    refute_received {:token_request, _url, _options}
+  end
+
   test "concurrent login callbacks consume only their matching transactions", %{
     token_response: token_response
   } do
