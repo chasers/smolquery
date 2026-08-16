@@ -283,6 +283,98 @@ defmodule SmolqueryApi.JobControllerTest do
     end
   end
 
+  describe "the result budget (result_max_rows)" do
+    setup do
+      query = :"api_budget_query_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {QueryService.Supervisor,
+         name: query,
+         catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
+         result_max_rows: 5},
+        id: query
+      )
+
+      on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+      name = :"api_budget_#{:erlang.unique_integer([:positive])}"
+
+      runtime =
+        Runtime.new(
+          name: name,
+          api_key: @key,
+          catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
+          query_name: query
+        )
+
+      Runtime.put(runtime)
+      on_exit(fn -> Runtime.delete(name) end)
+
+      %{name: name}
+    end
+
+    test "a result past the budget is a 400 RESULT_TOO_LARGE, not a materialized frame",
+         %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT range AS n FROM range(10)"})
+
+      assert response.status == 400
+
+      assert %{"error" => %{"status" => "RESULT_TOO_LARGE", "message" => message}} =
+               JSON.decode!(response.resp_body)
+
+      assert message =~ "5"
+      assert message =~ "LIMIT"
+    end
+
+    test "a result exactly at the budget passes whole", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT range AS n FROM range(5)"})
+
+      assert response.status == 200
+      assert %{"totalRows" => 5} = JSON.decode!(response.resp_body)
+    end
+
+    test "a trailing semicolon and comment survive the wrap", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 AS n; -- done"})
+
+      assert response.status == 200
+      assert %{"rows" => [%{"n" => 1}]} = JSON.decode!(response.resp_body)
+    end
+
+    test "comment markers inside a string literal are data, not syntax", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT '--; not a comment' AS s"})
+
+      assert response.status == 200
+      assert %{"rows" => [%{"s" => "--; not a comment"}]} = JSON.decode!(response.resp_body)
+    end
+
+    test "an over-budget explain still answers with the plan", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{
+          "query" => "SELECT range AS n FROM range(10)",
+          "explain" => "plan"
+        })
+
+      assert %{"job" => %{"state" => "done", "explain" => explain}} =
+               JSON.decode!(response.resp_body)
+
+      assert explain =~ "RANGE"
+    end
+
+    test "ORDER BY survives the wrap", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{
+          "query" => "SELECT range AS n FROM range(5) ORDER BY n DESC"
+        })
+
+      assert %{"rows" => rows} = JSON.decode!(response.resp_body)
+      assert Enum.map(rows, & &1["n"]) == [4, 3, 2, 1, 0]
+    end
+  end
+
   describe "POST /v1/jobs + GET /v1/jobs/:id (async)" do
     test "submit, poll to done, page the results", %{name: name} do
       submitted = post_json(name, "/v1/jobs", %{"query" => "SELECT 40 + 2 AS n"})

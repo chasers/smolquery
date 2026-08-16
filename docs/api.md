@@ -66,7 +66,9 @@ manifest.
 
 Query results page from the frame the runner holds until `result_ttl_ms`;
 temporal and decimal values arrive as ISO 8601 / decimal strings, mirroring what
-inserts accept.
+inserts accept. A result larger than `result_max_rows` (default 1,000 —
+see [configuration](configuration.md)) fails the query with
+`400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
 
 ## Explain
 

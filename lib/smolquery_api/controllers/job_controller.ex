@@ -321,6 +321,10 @@ defmodule SmolqueryApi.JobController do
 
   defp error_json(nil), do: nil
   defp error_json({:invalid_query, message}) when is_binary(message), do: message
+
+  defp error_json({:result_too_large, max}),
+    do: "result exceeded result_max_rows (#{max}); add a LIMIT or aggregate the query"
+
   defp error_json(error) when is_binary(error), do: error
   defp error_json(error), do: inspect(error)
 

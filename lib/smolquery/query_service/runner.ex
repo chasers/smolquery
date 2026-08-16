@@ -20,6 +20,28 @@ defmodule Smolquery.QueryService.Runner do
   expires, then stops normally — the registry entry goes with it, and a later
   fetch is honestly `:not_found`. The registry value tracks `:active` versus
   `:settled`, which is what lets admission count only jobs still doing work.
+
+  ## The result budget
+
+  The frame path is deliberately uncapped in the engine (T-17), and
+  `job_memory_limit` binds only DuckDB's side — the materialized frame lives
+  in Polars memory outside it. So the runner bounds the result itself
+  (T-274): the user's SQL executes inside `SELECT * FROM (...) LIMIT
+  result_max_rows + 1`, and a frame that comes back over the budget fails
+  the job as `{:result_too_large, max}`. Enforcing through `LIMIT` means
+  DuckDB stops producing rows at the bound — the over-budget query never
+  materializes, which is the point. The `+ 1` is how a truncated result is
+  told apart from one that exactly fits.
+
+  The SQL inside the wrap is the statement's canonical text
+  (`json_deserialize_sql(json_serialize_sql(...))` on the job's own engine),
+  not the user's bytes: a trailing semicolon or comment would break the
+  parenthesized form, and no textual strip can remove them safely — `--`
+  and `;` are literal characters inside a string. DuckDB's parser is the
+  only thing that knows the difference, and it is already the only parser
+  here. ORDER BY survives the wrap: DuckDB preserves a subquery's order
+  through the outer LIMIT, the same insertion-order guarantee paging
+  already leans on.
   """
 
   use GenServer, restart: :temporary
@@ -27,6 +49,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Explorer.DataFrame
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
+  alias Smolquery.Engine.Result
   alias Smolquery.EngineSecrets
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
@@ -221,7 +244,10 @@ defmodule Smolquery.QueryService.Runner do
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan))
            end),
-         {:ok, outcome} <- Trace.span(:execute, fn -> outcome(connection, plan, explain) end) do
+         {:ok, outcome} <-
+           Trace.span(:execute, fn ->
+             outcome(connection, plan, runtime.result_max_rows, explain)
+           end) do
       duration = System.monotonic_time(:millisecond) - started
 
       {:ok,
@@ -233,16 +259,32 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp outcome(connection, plan, nil) do
-    with {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
-      {:ok, %{frame: frame, explain: nil}}
+  defp outcome(connection, plan, max_rows, nil) do
+    with {:ok, sql} <- bounded(connection, plan.sql, max_rows),
+         {:ok, frame} <- Connection.frame(connection, sql, [], :infinity) do
+      if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
+        {:error, {:result_too_large, max_rows}}
+      else
+        {:ok, %{frame: frame, explain: nil}}
+      end
     end
   end
 
-  defp outcome(connection, plan, explain) do
+  defp outcome(connection, plan, _max_rows, explain) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
       {:ok, %{frame: nil, explain: explain_text(result)}}
+    end
+  end
+
+  defp bounded(_connection, sql, :infinity), do: {:ok, sql}
+
+  defp bounded(connection, sql, max_rows) do
+    canonical =
+      "SELECT json_deserialize_sql(json_serialize_sql(#{Smolquery.Identifier.sql_string(sql)}))"
+
+    with {:ok, result} <- Connection.query(connection, canonical, [], :infinity) do
+      {:ok, "SELECT * FROM (#{Result.one!(result)}) LIMIT #{max_rows + 1}"}
     end
   end
 

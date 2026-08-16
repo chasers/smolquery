@@ -62,6 +62,10 @@ defmodule SmolqueryApi.QueryController do
     Json.send_json(conn, 200, body)
   end
 
+  defp answer(conn, %Job{state: :error, error: {:result_too_large, _max}} = job, _frame) do
+    Errors.send_error(conn, 400, "RESULT_TOO_LARGE", error_message(job))
+  end
+
   defp answer(conn, %Job{state: :error, error: error} = job, _frame) do
     if hot_tier_unavailable?(error) do
       Errors.send_error(
@@ -80,6 +84,11 @@ defmodule SmolqueryApi.QueryController do
   end
 
   defp error_message(%Job{error: {:invalid_query, message}}) when is_binary(message), do: message
+
+  defp error_message(%Job{error: {:result_too_large, max}}) do
+    "result exceeded result_max_rows (#{max}); add a LIMIT or aggregate the query"
+  end
+
   defp error_message(%Job{error: error}), do: inspect(error)
 
   defp hot_tier_unavailable?({:hot_tier_unavailable, _reason}), do: true
