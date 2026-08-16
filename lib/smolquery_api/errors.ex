@@ -24,6 +24,20 @@ defmodule SmolqueryApi.Errors do
   end
 
   @doc """
+  Sends the shed-load refusal every over-capacity route speaks: 429,
+  `RESOURCE_EXHAUSTED`, and a `retry-after` of `seconds`.
+
+  One function so the contract cannot drift between the buffer's refusals,
+  the job ceiling, and ingest admission.
+  """
+  @spec send_resource_exhausted(Plug.Conn.t(), pos_integer(), String.t()) :: Plug.Conn.t()
+  def send_resource_exhausted(conn, seconds, message) do
+    conn
+    |> put_resp_header("retry-after", Integer.to_string(seconds))
+    |> send_error(429, "RESOURCE_EXHAUSTED", message)
+  end
+
+  @doc """
   Sends the envelope a failure reason maps to.
 
   The clauses cover what the catalog and schema layers actually return; any

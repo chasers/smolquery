@@ -104,8 +104,7 @@ defmodule Smolquery.Auth.OIDC.Config do
 
     api_audience = required_for_role(config, :api_audience, role, "SMOLQUERY_OIDC_API_AUDIENCE")
 
-    web_client_id =
-      required_for_role(config, :web_client_id, role, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
+    web_client_id = web_client_id(config, role)
 
     :ok = distinct_audiences(config)
     {web_origin, web_redirect_uri} = web_urls(config, role)
@@ -278,9 +277,6 @@ defmodule Smolquery.Auth.OIDC.Config do
   defp required_for_role(config, :api_audience, :api, env),
     do: nonempty!(Keyword.get(config, :api_audience), env)
 
-  defp required_for_role(config, :web_client_id, :web, env),
-    do: nonempty!(Keyword.get(config, :web_client_id), env)
-
   defp required_for_role(_config, _key, _role, _env), do: nil
 
   defp distinct_audiences(config) do
@@ -335,6 +331,16 @@ defmodule Smolquery.Auth.OIDC.Config do
     case Keyword.fetch(config, role_key) do
       {:ok, value} -> {value, role_env}
       :error -> {Keyword.fetch!(config, global_key), global_env}
+    end
+  end
+
+  defp web_client_id(config, :web),
+    do: nonempty!(Keyword.get(config, :web_client_id), "SMOLQUERY_OIDC_WEB_CLIENT_ID")
+
+  defp web_client_id(config, :api) do
+    case Keyword.get(config, :web_client_id) do
+      nil -> nil
+      client_id -> nonempty!(client_id, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
     end
   end
 

@@ -33,6 +33,7 @@ defmodule SmolqueryApi.Runtime do
 
   alias Smolquery.Auth.Context
   alias Smolquery.Auth.Mode
+  alias Smolquery.Auth.OIDC
   alias Smolquery.Auth.OIDC.Config, as: OIDCConfig
   alias Smolquery.Auth.Static
   alias Smolquery.Catalog
@@ -47,9 +48,11 @@ defmodule SmolqueryApi.Runtime do
     :catalog,
     :catalog_opts,
     :oidc,
+    :oidc_provider_http_client,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
-    load_max_bytes: 268_435_456
+    load_max_bytes: 268_435_456,
+    insert_max_in_flight_bytes: nil
   ]
 
   @type t :: %__MODULE__{
@@ -59,10 +62,12 @@ defmodule SmolqueryApi.Runtime do
           context: Context.t() | nil,
           catalog: Catalog.t(),
           oidc: OIDCConfig.t() | nil,
+          oidc_provider_http_client: Smolquery.Auth.OIDC.Discovery.http_client() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
-          load_max_bytes: pos_integer()
+          load_max_bytes: pos_integer(),
+          insert_max_in_flight_bytes: pos_integer() | nil
         }
 
   @doc """
@@ -84,7 +89,7 @@ defmodule SmolqueryApi.Runtime do
 
     auth_mode = Mode.runtime_mode!(config, "the API", :api)
 
-    {api_key, context, oidc} =
+    {api_key, context, oidc, oidc_provider_http_client} =
       case auth_mode do
         :static ->
           key =
@@ -96,10 +101,10 @@ defmodule SmolqueryApi.Runtime do
               role: :api
             )
 
-          {key, Static.api_context(), nil}
+          {key, Static.api_context(), nil, nil}
 
         :oidc ->
-          {nil, nil, OIDCConfig.new(config, :api)}
+          {nil, nil, OIDCConfig.new(config, :api), OIDC.provider_http_client!(config)}
       end
 
     %__MODULE__{
@@ -108,11 +113,57 @@ defmodule SmolqueryApi.Runtime do
       api_key: api_key,
       context: context,
       oidc: oidc,
+      oidc_provider_http_client: oidc_provider_http_client,
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :load_max_bytes]))
+    |> struct!(
+      Keyword.take(config, [
+        :ingest_name,
+        :query_name,
+        :load_max_bytes,
+        :insert_max_in_flight_bytes
+      ])
+    )
+    |> validate_insert_max_in_flight_bytes()
   end
+
+  defp validate_insert_max_in_flight_bytes(
+         %__MODULE__{insert_max_in_flight_bytes: bytes} = runtime
+       )
+       when (is_integer(bytes) and bytes > 0) or is_nil(bytes),
+       do: runtime
+
+  defp validate_insert_max_in_flight_bytes(%__MODULE__{insert_max_in_flight_bytes: bytes}) do
+    raise ArgumentError,
+          "unsupported insert_max_in_flight_bytes: #{inspect(bytes)} " <>
+            "(expected a positive integer, or nil to derive it from the " <>
+            "container's cgroup memory limit)"
+  end
+
+  @in_flight_fallback 268_435_456
+
+  @doc """
+  The most ingest-body bytes `SmolqueryApi.Admission` admits at once (T-245).
+
+  An explicit `insert_max_in_flight_bytes` wins. Left `nil`, the limit
+  derives as a quarter of the container's cgroup memory limit — in-flight
+  bodies are resident heap, and the write path needs the rest of the budget
+  for encode buffers and the accumulators — floored at one NDJSON body so a
+  small container still ingests. Without a cgroup limit the fallback is
+  #{@in_flight_fallback} bytes.
+  """
+  @spec insert_max_in_flight_bytes(t(), {:ok, pos_integer()} | :none) :: pos_integer()
+  def insert_max_in_flight_bytes(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
+
+  def insert_max_in_flight_bytes(%__MODULE__{insert_max_in_flight_bytes: bytes}, _cgroup)
+      when is_integer(bytes),
+      do: bytes
+
+  def insert_max_in_flight_bytes(%__MODULE__{}, {:ok, bytes}),
+    do: max(div(bytes, 4), SmolqueryApi.InsertController.max_ndjson_bytes())
+
+  def insert_max_in_flight_bytes(%__MODULE__{}, :none), do: @in_flight_fallback
 
   use Smolquery.Runtime
 
