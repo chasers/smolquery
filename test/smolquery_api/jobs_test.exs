@@ -140,6 +140,39 @@ defmodule SmolqueryApi.JobControllerTest do
       refute Map.has_key?(page3, "nextPageToken")
     end
 
+    test "trace: true returns a span waterfall on the job", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "trace" => true})
+
+      assert %{"job" => %{"trace" => %{"spans" => spans}}} = JSON.decode!(response.resp_body)
+
+      names = Enum.map(spans, & &1["name"])
+      assert "engine_start" in names
+      assert "serialize" in names
+      assert "execute" in names
+
+      assert Enum.all?(spans, fn span ->
+               is_integer(span["startUs"]) and is_integer(span["durationUs"])
+             end)
+
+      assert spans == Enum.sort_by(spans, & &1["startUs"])
+    end
+
+    test "without trace the job carries none", %{name: name} do
+      response = post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n"})
+
+      assert %{"job" => %{"trace" => nil}} = JSON.decode!(response.resp_body)
+    end
+
+    test "a non-boolean trace is refused", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "trace" => "yes"})
+
+      assert response.status == 400
+      assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
+      assert message =~ "trace"
+    end
+
     test "explain: plan answers the engine's plan instead of rows", %{name: name} do
       response =
         post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "explain" => "plan"})

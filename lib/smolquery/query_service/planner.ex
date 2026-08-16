@@ -126,6 +126,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.QueryService.Trace
 
   @doc """
   Plans `sql` against the catalog and the hot tier, as one consistent read.
@@ -137,13 +138,17 @@ defmodule Smolquery.QueryService.Planner do
   """
   @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
   def plan(%Runtime{} = runtime, connection, sql) do
-    with {:ok, ast} <- serialize(connection, sql),
+    with {:ok, ast} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
          {:ok, statement} <- gate(ast),
          {:ok, refs} <- refs(statement),
-         {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
-         {:ok, tables} <- resolve(runtime, refs, snapshot),
-         {:ok, manifests} <- manifests(runtime, refs) do
-      {:ok, build(sql, snapshot, refs, tables, manifests, Pruner.conjuncts(statement, refs))}
+         {:ok, snapshot} <-
+           Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
+         {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
+         {:ok, manifests} <- Trace.span(:manifests, fn -> manifests(runtime, refs) end) do
+      {:ok,
+       Trace.span(:build, fn ->
+         build(sql, snapshot, refs, tables, manifests, Pruner.conjuncts(statement, refs))
+       end)}
     end
   end
 
@@ -273,7 +278,10 @@ defmodule Smolquery.QueryService.Planner do
       pairs
       |> Task.async_stream(
         fn {parent, partition, url} ->
-          {parent, HotClient.manifest(url, partition, timeout_ms: runtime.buffer_timeout_ms)}
+          {parent,
+           Trace.span(:manifest_fetch, %{url: url}, fn ->
+             HotClient.manifest(url, partition, timeout_ms: runtime.buffer_timeout_ms)
+           end)}
         end,
         ordered: true,
         on_timeout: :kill_task,

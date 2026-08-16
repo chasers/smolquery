@@ -43,6 +43,9 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
+      [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
+                                          — one per query phase (Smolquery.QueryService.Trace);
+                                          not aggregated here, collected per job when tracing
   """
 
   use GenServer
