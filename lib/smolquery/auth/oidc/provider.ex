@@ -17,6 +17,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
   @operation_timeout_ms 301_000
 
   @type refresh :: %{
+          pid: pid(),
           monitor_ref: reference(),
           result_ref: reference(),
           from: GenServer.from(),
@@ -150,6 +151,14 @@ defmodule Smolquery.Auth.OIDC.Provider do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  @impl GenServer
+  def terminate(_reason, %{refresh: %{pid: pid}}) do
+    Process.exit(pid, :kill)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
   defp start_refresh(kind, operation, from, state) do
     cond do
       state.refresh != nil ->
@@ -162,10 +171,11 @@ defmodule Smolquery.Auth.OIDC.Provider do
         parent = self()
         result_ref = make_ref()
 
-        {_pid, monitor_ref} =
+        {pid, monitor_ref} =
           spawn_monitor(fn -> send(parent, {result_ref, perform_refresh(kind, state)}) end)
 
         refresh = %{
+          pid: pid,
           monitor_ref: monitor_ref,
           result_ref: result_ref,
           from: from,

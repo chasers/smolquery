@@ -59,6 +59,7 @@ defmodule Smolquery.Auth.OIDC.Discovery do
   @spec validate_jwks(map(), Config.t()) :: :ok | {:error, term()}
   def validate_jwks(%{"keys" => keys} = jwks, %Config{} = config) do
     with :ok <- validate_jwks(jwks),
+         :ok <- unique_key_ids(keys),
          true <- Enum.any?(keys, &usable_signing_key?(&1, config.algorithms)) do
       :ok
     else
@@ -288,12 +289,22 @@ defmodule Smolquery.Auth.OIDC.Discovery do
     key_ops = Map.get(key, "key_ops")
 
     (is_nil(key_use) or key_use == "sig") and
-      (is_nil(key_alg) or key_alg in algorithms) and
       (is_nil(key_ops) or (is_list(key_ops) and "verify" in key_ops)) and
-      Enum.any?(algorithms, &key_supports_algorithm?(key, &1))
+      key_algorithm_compatible?(key, key_alg, algorithms)
   end
 
   defp usable_signing_key?(_key, _algorithms), do: false
+
+  defp unique_key_ids(keys) do
+    key_ids = Enum.map(keys, &Map.fetch!(&1, "kid"))
+    if length(key_ids) == length(Enum.uniq(key_ids)), do: :ok, else: {:error, :jwks_duplicate_kid}
+  end
+
+  defp key_algorithm_compatible?(key, nil, algorithms),
+    do: Enum.any?(algorithms, &key_supports_algorithm?(key, &1))
+
+  defp key_algorithm_compatible?(key, algorithm, algorithms),
+    do: algorithm in algorithms and key_supports_algorithm?(key, algorithm)
 
   defp key_supports_algorithm?(%{"kty" => "RSA"}, algorithm),
     do: String.starts_with?(algorithm, "RS") or String.starts_with?(algorithm, "PS")
