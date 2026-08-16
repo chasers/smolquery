@@ -23,7 +23,8 @@ defmodule Smolquery.Auth.OIDC.Token do
   def authenticate(token, config, provider, opts \\ []) do
     now = Keyword.get(opts, :now, System.system_time(:second))
 
-    with {:ok, header} <- parse_header(token, config),
+    with true <- Config.api_token_boundary?(config),
+         {:ok, header} <- parse_header(token, config),
          :ok <- validate_header(header, config),
          {:ok, jwks} <- provider_jwks(provider),
          {:ok, jwk} <- select_or_refresh(header, jwks, provider, config),
@@ -40,7 +41,8 @@ defmodule Smolquery.Auth.OIDC.Token do
   def verify(token, config, jwks, refreshed_jwks, opts \\ []) do
     now = Keyword.get(opts, :now, System.system_time(:second))
 
-    with {:ok, header} <- parse_header(token, config),
+    with true <- Config.api_token_boundary?(config),
+         {:ok, header} <- parse_header(token, config),
          :ok <- validate_header(header, config),
          {:ok, jwk} <- select_or_refresh_with(header, jwks, refreshed_jwks, config),
          {:ok, claims} <- verify_claims(token, jwk, config, now),

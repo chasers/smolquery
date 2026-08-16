@@ -50,6 +50,7 @@ defmodule SmolqueryApi.OIDCAuthTest do
         oidc: [
           issuer: "https://issuer.example",
           api_audience: "smolquery-api",
+          web_client_id: "smolquery-web",
           claim_capabilities: %{
             "scope" => %{
               "query" => [:query],

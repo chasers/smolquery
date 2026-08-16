@@ -238,6 +238,29 @@ defmodule Smolquery.Auth.OIDC.Config do
 
   def algorithms, do: @algorithms
 
+  @doc "Reports whether configuration separates API access tokens from browser ID tokens."
+  @spec api_token_boundary?(t()) :: boolean()
+  def api_token_boundary?(%__MODULE__{
+        web_client_id: web_client_id,
+        typ_allowlist: typ_allowlist,
+        required_claims: required_claims
+      }) do
+    nonempty_string?(web_client_id) or typ_allowlist != [] or map_size(required_claims) > 0
+  end
+
+  @doc "Requires an explicit boundary between API access tokens and browser ID tokens."
+  @spec validate_api_token_boundary!(t()) :: t()
+  def validate_api_token_boundary!(%__MODULE__{} = config) do
+    if api_token_boundary?(config) do
+      config
+    else
+      raise ArgumentError,
+            "API OIDC authentication requires SMOLQUERY_OIDC_WEB_CLIENT_ID, " <>
+              "SMOLQUERY_OIDC_API_TOKEN_TYPES, or SMOLQUERY_OIDC_API_REQUIRED_CLAIMS " <>
+              "to distinguish access tokens from browser ID tokens"
+    end
+  end
+
   @doc "Returns the closed set of configured protected-header token types."
   @spec string_allowlist!(term(), String.t()) :: [String.t()]
   def string_allowlist!([], _env), do: []

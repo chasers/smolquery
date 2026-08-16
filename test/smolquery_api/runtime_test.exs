@@ -33,13 +33,36 @@ defmodule SmolqueryApi.RuntimeTest do
           auth_mode: :oidc,
           oidc: [
             issuer: "https://issuer.example",
-            api_audience: "smolquery-api"
+            api_audience: "smolquery-api",
+            web_client_id: "smolquery-web"
           ]
         )
 
       assert runtime.api_key == nil
       assert runtime.context == nil
       assert runtime.oidc.issuer == "https://issuer.example"
+
+      assert_raise ArgumentError, ~r/distinguish access tokens from browser ID tokens/, fn ->
+        Runtime.new(
+          name: :api_runtime_test,
+          auth_mode: :oidc,
+          oidc: [issuer: "https://issuer.example", api_audience: "smolquery-api"]
+        )
+      end
+
+      profile_runtime =
+        Runtime.new(
+          name: :api_runtime_profile,
+          auth_mode: :oidc,
+          oidc: [
+            issuer: "https://issuer.example",
+            api_audience: "smolquery-api",
+            api_typ_allowlist: ["at+jwt"]
+          ]
+        )
+
+      assert profile_runtime.oidc.web_client_id == nil
+      assert profile_runtime.oidc.typ_allowlist == ["at+jwt"]
 
       assert_raise ArgumentError, ~r/invalid value/, fn ->
         Runtime.new(name: :api_runtime_test, auth_mode: :invalid, api_key: "k")

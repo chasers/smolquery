@@ -104,7 +104,8 @@ defmodule SmolqueryApi.Runtime do
           {key, Static.api_context(), nil, nil}
 
         :oidc ->
-          {nil, nil, OIDCConfig.new(config, :api), OIDC.provider_http_client!(config)}
+          oidc = config |> OIDCConfig.new(:api) |> OIDCConfig.validate_api_token_boundary!()
+          {nil, nil, oidc, OIDC.provider_http_client!(config)}
       end
 
     %__MODULE__{

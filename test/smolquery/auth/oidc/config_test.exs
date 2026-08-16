@@ -220,6 +220,22 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     end
   end
 
+  test "requires an explicit API access-token boundary" do
+    no_browser_client = Keyword.delete(@base, :web_client_id)
+    config = Config.new([oidc: no_browser_client], :api)
+
+    assert_raise ArgumentError, ~r/distinguish access tokens from browser ID tokens/, fn ->
+      Config.validate_api_token_boundary!(config)
+    end
+
+    typed =
+      no_browser_client
+      |> Keyword.put(:api_typ_allowlist, ["at+jwt"])
+      |> then(&Config.new([oidc: &1], :api))
+
+    assert Config.validate_api_token_boundary!(typed) == typed
+  end
+
   test "rejects an API audience that aliases the browser client id" do
     options = Keyword.put(@base, :api_audience, "smolquery-web")
 

@@ -21,6 +21,7 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
                    oidc: [
                      issuer: "https://issuer.example",
                      api_audience: "smolquery-api",
+                     web_client_id: "smolquery-web",
                      claim_capabilities: %{
                        "scope" => %{
                          "query" => [:query],
@@ -278,8 +279,6 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
   end
 
   test "rejects browser ID-token audiences at the API boundary" do
-    config = %{@base_config | web_client_id: "smolquery-web"}
-
     browser_id_claims =
       valid_claims(%{
         "aud" => ["smolquery-web", "smolquery-api"],
@@ -289,7 +288,7 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
       })
 
     assert :error =
-             Token.verify(token(browser_id_claims), config, @jwks, %{}, now: @now)
+             Token.verify(token(browser_id_claims), @base_config, @jwks, %{}, now: @now)
 
     access_claims =
       valid_claims(%{
@@ -299,9 +298,12 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
       })
 
     assert {:ok, context} =
-             Token.verify(token(access_claims), config, @jwks, %{}, now: @now)
+             Token.verify(token(access_claims), @base_config, @jwks, %{}, now: @now)
 
     assert MapSet.equal?(context.capabilities, MapSet.new([:query]))
+
+    unbound = %{@base_config | web_client_id: nil}
+    assert :error = Token.verify(token(valid_claims()), unbound, @jwks, %{}, now: @now)
   end
 
   test "enforces optional type and required claim values" do
