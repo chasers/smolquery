@@ -80,11 +80,14 @@ release publishes a multi-architecture image to GHCR and attaches both a
 `ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
-discovery, and the sealed-store dependencies before deploying. The Secret must
-also hold `SMOLQUERY_AUTH_MODE=static` for any pod whose roles include `api` or
-`web`. Pods with the `web` role additionally need
-`SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
-`SMOLQUERY_SECRET_KEY_BASE`; a pod without the required settings refuses to boot.
+discovery, and the sealed-store dependencies before deploying. Every pod whose
+roles include `api` or `web` must set `SMOLQUERY_AUTH_MODE` explicitly to
+`static` or `oidc` and provide that mode's required settings. Static web pods
+need `SMOLQUERY_WEB_USERNAME` and `SMOLQUERY_WEB_PASSWORD`; every web pod needs
+`SMOLQUERY_SECRET_KEY_BASE`. See [configuration](docs/configuration.md#authentication)
+and [deployment](docs/deployment.md#explicit-authentication-mode) for the OIDC
+provider and role-specific settings. A pod with an incomplete mode refuses to
+boot.
 
 ## Features
 

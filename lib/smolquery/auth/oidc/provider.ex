@@ -3,10 +3,11 @@ defmodule Smolquery.Auth.OIDC.Provider do
   Supervised, bounded-freshness OIDC metadata and JWKS cache.
 
   Discovery and JWKS are loaded synchronously during `init/1`, so a role cannot
-  start its listener without a validated provider key set. Metadata refreshes
-  use monotonic time and atomically refresh the key set before publishing new
-  metadata. Failed refreshes retain the prior state but return an error; keys
-  are never returned as a successful stale fallback.
+  start its listener without a compatible provider signing key. Refresh I/O
+  runs outside the GenServer so fresh cache reads remain available while an
+  unknown key triggers a fetch. Metadata refreshes atomically replace the key
+  set before publishing new metadata. Failed refreshes retain the prior state,
+  fail closed, and suppress outbound retries for the configured backoff.
   """
 
   use GenServer
@@ -15,6 +16,13 @@ defmodule Smolquery.Auth.OIDC.Provider do
 
   @operation_timeout_ms 301_000
 
+  @type refresh :: %{
+          monitor_ref: reference(),
+          result_ref: reference(),
+          from: GenServer.from(),
+          kind: :provider | :jwks,
+          operation: :metadata | :jwks | :refresh_jwks
+        }
   @type t :: %{
           config: Config.t(),
           metadata: map(),
@@ -22,6 +30,9 @@ defmodule Smolquery.Auth.OIDC.Provider do
           jwks: map(),
           jwks_at: integer(),
           forced_refresh_at: integer() | nil,
+          refresh: refresh() | nil,
+          refresh_error: term() | nil,
+          refresh_failed_at: integer() | nil,
           http_client: Discovery.http_client()
         }
 
@@ -61,6 +72,9 @@ defmodule Smolquery.Auth.OIDC.Provider do
          jwks: jwks,
          jwks_at: now,
          forced_refresh_at: nil,
+         refresh: nil,
+         refresh_error: nil,
+         refresh_failed_at: nil,
          http_client: client
        }}
     else
@@ -69,40 +83,113 @@ defmodule Smolquery.Auth.OIDC.Provider do
   end
 
   @impl GenServer
-  def handle_call(:metadata, _from, state) do
-    case ensure_metadata(state) do
-      {:ok, state} -> {:reply, {:ok, state.metadata}, state}
-      {:error, reason, state} -> {:reply, {:error, {:discovery_refresh_failed, reason}}, state}
+  def handle_call(:metadata, from, state) do
+    if fresh?(state.metadata_at, state.config.discovery_max_age_ms),
+      do: {:reply, {:ok, state.metadata}, state},
+      else: start_refresh(:provider, :metadata, from, state)
+  end
+
+  @impl GenServer
+  def handle_call(:jwks, from, state) do
+    cond do
+      not fresh?(state.metadata_at, state.config.discovery_max_age_ms) ->
+        start_refresh(:provider, :jwks, from, state)
+
+      fresh?(state.jwks_at, state.config.jwks_max_age_ms) ->
+        {:reply, {:ok, state.jwks}, state}
+
+      true ->
+        start_refresh(:jwks, :jwks, from, state)
     end
   end
 
   @impl GenServer
-  def handle_call(operation, _from, state) when operation in [:jwks, :refresh_jwks] do
-    case ensure_metadata_if_expired(state) do
-      {:ok, state} ->
-        case fetch_jwks_if_needed(operation, state) do
-          {:ok, reply, state} -> {:reply, reply, state}
-          {:error, reason, state} -> {:reply, {:error, reason}, state}
-        end
+  def handle_call(:refresh_jwks, from, state) do
+    cond do
+      not fresh?(state.metadata_at, state.config.discovery_max_age_ms) ->
+        start_refresh(:provider, :refresh_jwks, from, state)
 
-      {:error, reason, state} ->
-        {:reply, {:error, {:discovery_refresh_failed, reason}}, state}
+      state.refresh != nil ->
+        {:reply, {:ok, state.jwks}, state}
+
+      not forced_refresh_allowed?(state) ->
+        {:reply, {:ok, state.jwks}, state}
+
+      true ->
+        start_refresh(:jwks, :refresh_jwks, from, state)
     end
   end
 
-  defp ensure_metadata_if_expired(state) do
-    if fresh?(state.metadata_at, state.config.discovery_max_age_ms),
-      do: {:ok, state},
-      else: refresh_provider(state)
+  @impl GenServer
+  def handle_info(
+        {result_ref, result},
+        %{refresh: %{result_ref: result_ref} = refresh} = state
+      ) do
+    Process.demonitor(refresh.monitor_ref, [:flush])
+    state = %{state | refresh: nil}
+    {reply, state} = complete_refresh(refresh, result, state)
+    GenServer.reply(refresh.from, reply)
+    {:noreply, state}
   end
 
-  defp refresh_provider(state) do
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, _reason},
+        %{refresh: %{monitor_ref: monitor_ref} = refresh} = state
+      ) do
+    reason = :provider_refresh_failed
+    now = now_ms()
+    GenServer.reply(refresh.from, {:error, reason})
+
+    state =
+      state
+      |> mark_forced_refresh(refresh.operation, now)
+      |> Map.merge(%{refresh: nil, refresh_error: reason, refresh_failed_at: now})
+
+    {:noreply, state}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  defp start_refresh(kind, operation, from, state) do
+    cond do
+      state.refresh != nil ->
+        {:reply, {:error, :provider_refresh_in_progress}, state}
+
+      not retry_allowed?(state) ->
+        {:reply, {:error, state.refresh_error}, state}
+
+      true ->
+        parent = self()
+        result_ref = make_ref()
+
+        {_pid, monitor_ref} =
+          spawn_monitor(fn -> send(parent, {result_ref, perform_refresh(kind, state)}) end)
+
+        refresh = %{
+          monitor_ref: monitor_ref,
+          result_ref: result_ref,
+          from: from,
+          kind: kind,
+          operation: operation
+        }
+
+        {:noreply, %{state | refresh: refresh}}
+    end
+  end
+
+  defp perform_refresh(:provider, state) do
     with {:ok, metadata} <- Discovery.fetch(state.config, state.http_client),
          {:ok, jwks} <- refresh_jwks_for_metadata(state, metadata) do
-      now = now_ms()
-      {:ok, %{state | metadata: metadata, metadata_at: now, jwks: jwks, jwks_at: now}}
+      {:ok, %{metadata: metadata, jwks: jwks}}
     else
-      {:error, reason} -> {:error, reason, state}
+      {:error, reason} -> {:error, {:discovery_refresh_failed, reason}}
+    end
+  end
+
+  defp perform_refresh(:jwks, state) do
+    case Discovery.fetch_jwks(state.config, state.metadata, state.http_client) do
+      {:ok, jwks} -> {:ok, %{jwks: jwks}}
+      {:error, reason} -> {:error, {:jwks_unavailable, reason}}
     end
   end
 
@@ -113,43 +200,51 @@ defmodule Smolquery.Auth.OIDC.Provider do
     end
   end
 
-  defp ensure_metadata(state), do: ensure_metadata_if_expired(state)
+  defp complete_refresh(refresh, {:ok, values}, state) do
+    now = now_ms()
 
-  defp fetch_jwks_if_needed(:jwks, state) do
-    if fresh?(state.jwks_at, state.config.jwks_max_age_ms) do
-      {:ok, {:ok, state.jwks}, state}
-    else
-      fetch_jwks(state)
-    end
+    state =
+      state
+      |> publish_refresh(refresh.kind, values, now)
+      |> mark_forced_refresh(refresh.operation, now)
+      |> clear_failure()
+
+    {success_reply(refresh.operation, state), state}
   end
 
-  defp fetch_jwks_if_needed(:refresh_jwks, state) do
-    if forced_refresh_allowed?(state) do
-      fetch_forced_jwks(state)
-    else
-      {:ok, {:ok, state.jwks}, state}
-    end
+  defp complete_refresh(refresh, {:error, reason}, state) do
+    now = now_ms()
+
+    state =
+      state
+      |> mark_forced_refresh(refresh.operation, now)
+      |> Map.merge(%{refresh_error: reason, refresh_failed_at: now})
+
+    {{:error, reason}, state}
   end
 
-  defp fetch_forced_jwks(state) do
-    attempted_at = now_ms()
+  defp publish_refresh(state, :provider, %{metadata: metadata, jwks: jwks}, now),
+    do: %{state | metadata: metadata, metadata_at: now, jwks: jwks, jwks_at: now}
 
-    case Discovery.fetch_jwks(state.config, state.metadata, state.http_client) do
-      {:ok, jwks} ->
-        {:ok, {:ok, jwks},
-         %{state | jwks: jwks, jwks_at: attempted_at, forced_refresh_at: attempted_at}}
+  defp publish_refresh(state, :jwks, %{jwks: jwks}, now),
+    do: %{state | jwks: jwks, jwks_at: now}
 
-      {:error, reason} ->
-        {:error, {:jwks_unavailable, reason}, %{state | forced_refresh_at: attempted_at}}
-    end
-  end
+  defp mark_forced_refresh(state, :refresh_jwks, now),
+    do: %{state | forced_refresh_at: now}
 
-  defp fetch_jwks(state) do
-    case Discovery.fetch_jwks(state.config, state.metadata, state.http_client) do
-      {:ok, jwks} -> {:ok, {:ok, jwks}, %{state | jwks: jwks, jwks_at: now_ms()}}
-      {:error, reason} -> {:error, {:jwks_unavailable, reason}, state}
-    end
-  end
+  defp mark_forced_refresh(state, _operation, _now), do: state
+
+  defp success_reply(:metadata, state), do: {:ok, state.metadata}
+
+  defp success_reply(operation, state) when operation in [:jwks, :refresh_jwks],
+    do: {:ok, state.jwks}
+
+  defp clear_failure(state), do: %{state | refresh_error: nil, refresh_failed_at: nil}
+
+  defp retry_allowed?(%{refresh_failed_at: nil}), do: true
+
+  defp retry_allowed?(state),
+    do: now_ms() - state.refresh_failed_at >= state.config.refresh_failure_backoff_ms
 
   defp forced_refresh_allowed?(%{forced_refresh_at: nil}), do: true
 
