@@ -17,7 +17,7 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     config = Config.new([oidc: @base], :api)
     assert config.issuer == "https://issuer.example/"
     assert config.api_audience == "smolquery-api"
-    assert config.web_client_id == nil
+    assert config.web_client_id == "smolquery-web"
     assert config.algorithms == ["RS256"]
     assert config.refresh_failure_backoff_ms == 1_000
   end
@@ -31,7 +31,12 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
       Config.new([oidc: Keyword.delete(@base, :web_client_id)], :web)
     end
 
-    assert Config.new([oidc: Keyword.delete(@base, :web_client_id)], :api)
+    assert %Config{web_client_id: nil} =
+             Config.new([oidc: Keyword.delete(@base, :web_client_id)], :api)
+
+    assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_WEB_CLIENT_ID/, fn ->
+      Config.new([oidc: Keyword.put(@base, :web_client_id, "")], :api)
+    end
   end
 
   test "requires the deployed host and exact callback route" do
@@ -213,6 +218,22 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
       invalid = Keyword.put(options, :api_typ_allowlist, ["at+jwt", "at+jwt"])
       Config.new([oidc: invalid], :api)
     end
+  end
+
+  test "requires an explicit API access-token boundary" do
+    no_browser_client = Keyword.delete(@base, :web_client_id)
+    config = Config.new([oidc: no_browser_client], :api)
+
+    assert_raise ArgumentError, ~r/distinguish access tokens from browser ID tokens/, fn ->
+      Config.validate_api_token_boundary!(config)
+    end
+
+    typed =
+      no_browser_client
+      |> Keyword.put(:api_typ_allowlist, ["at+jwt"])
+      |> then(&Config.new([oidc: &1], :api))
+
+    assert Config.validate_api_token_boundary!(typed) == typed
   end
 
   test "rejects an API audience that aliases the browser client id" do

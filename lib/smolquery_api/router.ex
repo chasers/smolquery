@@ -2,10 +2,12 @@ defmodule SmolqueryApi.Router do
   @moduledoc """
   The HTTP front door for the API.
 
-  Every request enters an instance-specific pipeline. API routes then run in
-  the order instance, authentication, closed route capability authorization,
-  parsers, and controller. The authenticated catch-all keeps absent routes
-  indistinguishable from real routes until credentials have been accepted.
+  Every request enters an instance-specific pipeline. Protected routes run in
+  the order instance, authentication, closed capability authorization,
+  admission for ingest bodies, parsers, and controller. Authentication and
+  authorization therefore reject requests before bodies are read or reserved.
+  The authenticated catch-all keeps absent routes indistinguishable from real
+  routes until credentials have been accepted.
   """
 
   use Phoenix.Router
@@ -26,6 +28,7 @@ defmodule SmolqueryApi.Router do
     plug :put_instance
     plug SmolqueryApi.Auth
     plug SmolqueryApi.Authorization, capability: :ingest
+    plug :admit_ingest
     plug SmolqueryApi.Parsers
   end
 
@@ -98,4 +101,6 @@ defmodule SmolqueryApi.Router do
       _absent -> Plug.Conn.put_private(conn, :smolquery_api, SmolqueryApi)
     end
   end
+
+  defp admit_ingest(conn, _opts), do: SmolqueryApi.Admission.admit_conn(conn)
 end

@@ -143,9 +143,7 @@ defmodule SmolqueryApi.JobController do
   """
   @spec query_error(Plug.Conn.t(), term()) :: Plug.Conn.t()
   def query_error(conn, :too_many_jobs) do
-    conn
-    |> put_resp_header("retry-after", "1")
-    |> Errors.send_error(429, "RESOURCE_EXHAUSTED", "too many jobs in flight, retry later")
+    Errors.send_resource_exhausted(conn, 1, "too many jobs in flight, retry later")
   end
 
   def query_error(conn, :query_service_unavailable) do
