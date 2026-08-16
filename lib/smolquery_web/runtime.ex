@@ -17,7 +17,8 @@ defmodule SmolqueryWeb.Runtime do
   `auth_mode: :static` explicitly selects the static Basic-auth adapter, while
   `:oidc` validates and starts the OIDC provider cache. There is no default or
   fallback: a node holding the `:web` role with missing mode or OIDC settings
-  refuses to boot. Browser login is added by T-234.
+  refuses to boot. OIDC browser login uses the supervised provider cache and an
+  encrypted, node-portable authorization transaction.
 
   `catalog` is where the UI resolves datasets, tables, and schemas — the same
   seam `SmolqueryApi` uses. Given options (or nothing), the UI starts its own
@@ -62,6 +63,7 @@ defmodule SmolqueryWeb.Runtime do
     :catalog,
     :catalog_opts,
     :oidc,
+    :oidc_http_client,
     :oidc_provider_http_client,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService
@@ -76,6 +78,8 @@ defmodule SmolqueryWeb.Runtime do
           context: Context.t() | nil,
           catalog: Catalog.t(),
           oidc: OIDCConfig.t() | nil,
+          oidc_http_client:
+            (String.t(), keyword() -> {:ok, Req.Response.t()} | {:error, term()}) | nil,
           oidc_provider_http_client: Smolquery.Auth.OIDC.Discovery.http_client() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
@@ -90,8 +94,8 @@ defmodule SmolqueryWeb.Runtime do
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
   overrides them. Raises if the authentication mode is missing, or unless
   static mode holds non-empty credentials. OIDC mode validates its provider
-  foundation; browser login remains denied until T-234. A session secret of at
-  least 64 bytes is always required.
+  foundation before browser login is exposed. A session secret of at least 64
+  bytes is always required.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -130,7 +134,7 @@ defmodule SmolqueryWeb.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :query_name]))
+    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :oidc_http_client]))
   end
 
   defp fetch_credential!(config, key) do
