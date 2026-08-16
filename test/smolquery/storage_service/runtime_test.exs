@@ -113,7 +113,7 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
 
     test "refuses an unusable compact_max_rows at boot, not at first sweep" do
-      for rows <- [0, -1, "4194304", nil] do
+      for rows <- [0, -1, "4194304"] do
         assert_raise ArgumentError, ~r/unsupported compact_max_rows/, fn ->
           Runtime.new(name: __MODULE__.BadRowCap, compact_max_rows: rows)
         end
@@ -171,6 +171,27 @@ defmodule Smolquery.StorageService.RuntimeTest do
       runtime = Runtime.new(name: __MODULE__.InheritedCompactLimit)
 
       assert Runtime.compact_engine_memory_limit(runtime, :none) == nil
+    end
+  end
+
+  describe "with_compact_max_rows/1" do
+    test "an explicit cap survives untouched" do
+      runtime = Runtime.new(name: __MODULE__.ExplicitRowCap, compact_max_rows: 20)
+
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 20
+    end
+
+    test "an unset cap starts at the default, for the compactor to adapt per table" do
+      runtime = Runtime.new(name: __MODULE__.DefaultRowCap)
+
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 4_194_304
+    end
+
+    test "an explicit engine budget does not change the start" do
+      runtime =
+        Runtime.new(name: __MODULE__.BudgetRowCap, compact_engine_memory_limit: "1GiB")
+
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 4_194_304
     end
   end
 
