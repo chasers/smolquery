@@ -93,9 +93,13 @@ defmodule Smolquery.StorageService.Runtime do
   merge re-plans identically forever, because splitting it only produces
   outputs the next group re-ingests up to the same cap. Half the observed
   pin rate leaves 2x headroom. Without a resolvable budget the cap falls
-  back to 4Mi rows. Normal ~3x-compressible data hits the byte cap first,
-  so the row cap only bites the pathological case it exists for. Sizing
-  already reads each footer's `num_rows`, so the cap costs no new I/O.
+  back to 4Mi rows. The 512 B/row constant is a starting point, not a
+  promise — the compactor halves a table's cap after a merge OOM and
+  recovers it on success (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`),
+  so a workload that pins more per row converges on its own cap. Normal
+  ~3x-compressible data hits the byte cap first, so the row cap only bites
+  the pathological case it exists for. Sizing already reads each footer's
+  `num_rows`, so the cap costs no new I/O.
 
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes

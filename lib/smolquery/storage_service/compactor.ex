@@ -69,6 +69,10 @@ defmodule Smolquery.StorageService.Compactor do
   cap never needs this — two files under `compact_below_bytes` always fit —
   but a single small file can carry more rows than the cap admits twice.
 
+  The row cap also adapts per table: a merge OOM halves the table's cap and
+  a success doubles it back, because no static bytes-per-row constant fits
+  every workload — see `adjusted_row_caps/3` (T-262).
+
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
   reach `compact_max_bytes`, the rows found reach `compact_max_rows`, or the
@@ -130,7 +134,7 @@ defmodule Smolquery.StorageService.Compactor do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime]
+  defstruct [:runtime, row_caps: %{}]
 
   @group_max_staging_chunks 64
   @stage_chunk_target_bytes 67_108_864
@@ -161,14 +165,78 @@ defmodule Smolquery.StorageService.Compactor do
     runtime = Runtime.with_compact_max_rows(state.runtime)
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
-      outcomes = Enum.map(tables, &compact_table(runtime, &1))
+      outcomes = Enum.map(tables, &compact_table(runtime, state.row_caps, &1))
 
-      {:ok,
-       %{
-         compacted: for({:ok, swap} <- outcomes, do: swap),
-         failed: for({:failed, failure} <- outcomes, do: failure)
-       }}
+      report = %{
+        compacted: for({:ok, swap} <- outcomes, do: swap),
+        failed: for({:failed, failure} <- outcomes, do: failure)
+      }
+
+      row_caps = adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
+
+      {:ok, report, %{state | row_caps: row_caps}}
     end
+  end
+
+  @row_cap_floor 65_536
+
+  @doc """
+  The per-table row caps after a sweep — the workload-adaptive half of the
+  row bound (T-262).
+
+  The derived cap assumes 512 bytes of pinned memory per row, and a workload
+  decides its own pin rate: wide, repetitive text fields pin kilobytes per
+  row while compressing well enough to pass every static cap. So the caps
+  answer the workload instead of predicting it. A merge that OOMs halves the
+  table's cap, never below #{@row_cap_floor} rows; a table that compacts
+  doubles its cap back toward the runtime's, and sheds the override when it
+  gets there. Only tables that OOMed carry an entry, so the map stays empty
+  on healthy deployments. The caps live in the compactor's state: a restart
+  forgets them, and the first OOM after the restart re-learns them.
+  """
+  @spec adjusted_row_caps(%{Catalog.table_ref() => pos_integer()}, [term()], pos_integer()) ::
+          %{Catalog.table_ref() => pos_integer()}
+  def adjusted_row_caps(row_caps, outcomes, resolved) do
+    Enum.reduce(outcomes, row_caps, fn
+      {:ok, %{table: table}}, caps ->
+        relax(caps, table, resolved)
+
+      {:failed, %{table: table, reason: reason}}, caps ->
+        if merge_oom?(reason), do: tighten(caps, table, resolved), else: caps
+
+      _skip, caps ->
+        caps
+    end)
+  end
+
+  defp tighten(caps, table, resolved) do
+    attempted = caps |> Map.get(table, resolved) |> min(resolved)
+    Map.put(caps, table, max(div(attempted, 2), @row_cap_floor))
+  end
+
+  defp relax(caps, table, resolved) do
+    case caps do
+      %{^table => cap} when cap * 2 >= resolved -> Map.delete(caps, table)
+      %{^table => cap} -> Map.put(caps, table, cap * 2)
+      _no_override -> caps
+    end
+  end
+
+  defp merge_oom?({:put_failed, _key, {:merge_failed, %Adbc.Error{message: message}}}),
+    do: message =~ "Out of Memory"
+
+  defp merge_oom?(_reason), do: false
+
+  defp compact_table(runtime, row_caps, table_ref) do
+    runtime = table_capped(runtime, row_caps, table_ref)
+    compact_table(runtime, table_ref)
+  end
+
+  defp table_capped(runtime, row_caps, table_ref) do
+    cap =
+      row_caps |> Map.get(table_ref, runtime.compact_max_rows) |> min(runtime.compact_max_rows)
+
+    %{runtime | compact_max_rows: cap}
   end
 
   defp compact_table(runtime, table_ref) do

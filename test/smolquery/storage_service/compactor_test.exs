@@ -288,4 +288,64 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
+
+  describe "adjusted_row_caps/3 (T-262)" do
+    @resolved 4_194_304
+
+    defp oom_failure(table) do
+      {:failed,
+       %{
+         table: table,
+         reason:
+           {:put_failed, "analytics/events/x.parquet",
+            {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}}}
+       }}
+    end
+
+    test "a merge OOM halves the table's cap" do
+      caps = Compactor.adjusted_row_caps(%{}, [oom_failure(@table)], @resolved)
+
+      assert caps == %{@table => div(@resolved, 2)}
+    end
+
+    test "repeated OOMs keep halving, never below the floor" do
+      caps =
+        Enum.reduce(1..30, %{}, fn _sweep, caps ->
+          Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved)
+        end)
+
+      assert caps == %{@table => 65_536}
+    end
+
+    test "a success doubles the cap and sheds the override at the resolved cap" do
+      caps = %{@table => div(@resolved, 4)}
+      success = {:ok, %{table: @table, key: "k", replaced: 2, snapshot: 1}}
+
+      doubled = Compactor.adjusted_row_caps(caps, [success], @resolved)
+      assert doubled == %{@table => div(@resolved, 2)}
+
+      assert Compactor.adjusted_row_caps(doubled, [success], @resolved) == %{}
+    end
+
+    test "a success without an override changes nothing" do
+      success = {:ok, %{table: @table, key: "k", replaced: 2, snapshot: 1}}
+
+      assert Compactor.adjusted_row_caps(%{}, [success], @resolved) == %{}
+    end
+
+    test "a failure that is not a merge OOM changes nothing" do
+      timeout =
+        {:failed,
+         %{
+           table: @table,
+           reason:
+             {:put_failed, "analytics/events/x.parquet",
+              {:merge_failed, %Smolquery.Engine.CallExited{reason: :timeout}}}
+         }}
+
+      sizing = {:failed, %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "x"}}}}
+
+      assert Compactor.adjusted_row_caps(%{}, [timeout, sizing, :skip], @resolved) == %{}
+    end
+  end
 end

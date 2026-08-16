@@ -12,7 +12,9 @@ defmodule Smolquery.StorageService.Sweeper do
 
   The using module supplies `run/1` — state in, `{:ok, report}` or
   `{:error, reason}` out — and defines its struct (with a `runtime` field)
-  before the `use`.
+  before the `use`. A sweeper that carries state across sweeps returns
+  `{:ok, report, state}` or `{:error, reason, state}` instead; the two-tuple
+  forms keep the state unchanged.
   """
 
   defmacro __using__(opts) do
@@ -30,12 +32,15 @@ defmodule Smolquery.StorageService.Sweeper do
 
       @impl GenServer
       def handle_call(:sweep, _from, state) do
-        {:reply, run(state), state}
+        {reply, state} = split_result(run(state), state)
+        {:reply, reply, state}
       end
 
       @impl GenServer
       def handle_info(:sweep, state) do
-        case run(state) do
+        {result, state} = split_result(run(state), state)
+
+        case result do
           {:ok, _report} ->
             :ok
 
@@ -45,6 +50,10 @@ defmodule Smolquery.StorageService.Sweeper do
 
         {:noreply, schedule(state)}
       end
+
+      defp split_result({:ok, report, state}, _state), do: {{:ok, report}, state}
+      defp split_result({:error, reason, state}, _state), do: {{:error, reason}, state}
+      defp split_result(result, state), do: {result, state}
 
       @impl GenServer
       def handle_info(_message, state), do: {:noreply, state}
