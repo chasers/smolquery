@@ -114,6 +114,27 @@ defmodule SmolqueryWeb.AuthControllerTest do
     assert_receive {:token_request, "https://issuer.example/token", _options}
   end
 
+  test "callback preserves the accepted expiration-skew boundary", %{
+    runtime: runtime,
+    token_response: token_response
+  } do
+    login = get(build_conn(), ~p"/auth/login")
+    {:ok, transaction} = OIDC.decode_transaction(get_session(login, OIDC.transaction_key()))
+    raw_expiry = System.system_time(:second) - 1
+
+    Agent.update(token_response, fn _ ->
+      token_response(transaction.nonce, "operator", raw_expiry)
+    end)
+
+    callback =
+      login
+      |> recycle()
+      |> get(~p"/auth/callback?state=#{transaction.state}&code=authorization-code")
+
+    assert callback.status == 302
+    assert get_session(callback, Session.key())["exp"] == raw_expiry + runtime.oidc.clock_skew
+  end
+
   test "state mismatch is generic, clears the transaction, and never exchanges", %{conn: _conn} do
     login = get(build_conn(), ~p"/auth/login")
 
@@ -146,13 +167,17 @@ defmodule SmolqueryWeb.AuthControllerTest do
   end
 
   defp token_response(nonce, role) do
+    token_response(nonce, role, System.system_time(:second) + 300)
+  end
+
+  defp token_response(nonce, role, expires_at) do
     now = System.system_time(:second)
 
     claims = %{
       "iss" => "https://issuer.example",
       "aud" => "web-client",
       "sub" => "subject-1",
-      "exp" => now + 300,
+      "exp" => expires_at,
       "iat" => now,
       "nonce" => nonce,
       "roles" => [role]
