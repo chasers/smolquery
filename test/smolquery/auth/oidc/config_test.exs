@@ -153,6 +153,44 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     end
   end
 
+  test "resolves separate API and web token profiles with global fallbacks" do
+    options =
+      Keyword.merge(@base,
+        typ_allowlist: ["legacy+jwt"],
+        required_claims: %{"legacy" => ["true"]},
+        api_typ_allowlist: ["at+jwt"],
+        api_required_claims: %{"token_use" => ["access"]},
+        web_typ_allowlist: ["JWT"],
+        web_required_claims: %{"token_use" => ["id"]}
+      )
+
+    api = Config.new([oidc: options], :api)
+    web = Config.new([oidc: options], :web)
+
+    assert api.typ_allowlist == ["at+jwt"]
+    assert api.required_claims == %{"token_use" => ["access"]}
+    assert web.typ_allowlist == ["JWT"]
+    assert web.required_claims == %{"token_use" => ["id"]}
+
+    fallback = Config.new([oidc: @base ++ [typ_allowlist: ["legacy+jwt"]]], :api)
+    assert fallback.typ_allowlist == ["legacy+jwt"]
+
+    assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_API_TOKEN_TYPES/, fn ->
+      invalid = Keyword.put(options, :api_typ_allowlist, ["at+jwt", "at+jwt"])
+      Config.new([oidc: invalid], :api)
+    end
+  end
+
+  test "rejects an API audience that aliases the browser client id" do
+    options = Keyword.put(@base, :api_audience, "smolquery-web")
+
+    for role <- [:api, :web] do
+      assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_API_AUDIENCE.*different/, fn ->
+        Config.new([oidc: options], role)
+      end
+    end
+  end
+
   test "redacts the client secret" do
     config = Config.new([oidc: @base], :web)
     refute inspect(config) =~ "\"secret\""

@@ -69,10 +69,32 @@ if token_types = System.get_env("SMOLQUERY_OIDC_TOKEN_TYPES") do
     typ_allowlist: Smolquery.RuntimeConfig.csv!("SMOLQUERY_OIDC_TOKEN_TYPES", token_types)
 end
 
+for {env, key} <- [
+      {"SMOLQUERY_OIDC_API_TOKEN_TYPES", :api_typ_allowlist},
+      {"SMOLQUERY_OIDC_WEB_TOKEN_TYPES", :web_typ_allowlist}
+    ] do
+  if token_types = System.get_env(env) do
+    config :smolquery, Smolquery.Auth.OIDC.Config, [
+      {key, Smolquery.RuntimeConfig.csv!(env, token_types)}
+    ]
+  end
+end
+
 if required_claims = System.get_env("SMOLQUERY_OIDC_REQUIRED_CLAIMS") do
   config :smolquery, Smolquery.Auth.OIDC.Config,
     required_claims:
       Smolquery.RuntimeConfig.string_lists!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", required_claims)
+end
+
+for {env, key} <- [
+      {"SMOLQUERY_OIDC_API_REQUIRED_CLAIMS", :api_required_claims},
+      {"SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS", :web_required_claims}
+    ] do
+  if required_claims = System.get_env(env) do
+    config :smolquery, Smolquery.Auth.OIDC.Config, [
+      {key, Smolquery.RuntimeConfig.string_lists!(env, required_claims)}
+    ]
+  end
 end
 
 for {env, key, max} <- [

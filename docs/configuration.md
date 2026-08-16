@@ -38,8 +38,8 @@ outage or malformed discovery/JWKS never opens either listener.
 | variable | effect |
 |---|---|
 | `SMOLQUERY_OIDC_ISSUER` | exact HTTPS issuer string; trailing slash is retained, while query, fragment, and userinfo are rejected |
-| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles |
-| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles |
+| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles; when a browser client id is configured, the two values must differ |
+| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; it cannot alias the API resource audience |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
 | `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin |
@@ -47,8 +47,10 @@ outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_ALGORITHMS` | comma-separated local allowlist (default `RS256`); token or discovery metadata never expands it |
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
 | `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}`; list-valued token claims union matching values |
-| `SMOLQUERY_OIDC_TOKEN_TYPES` | optional comma-separated protected-header `typ` allowlist; when set, a token must carry one exact type |
-| `SMOLQUERY_OIDC_REQUIRED_CLAIMS` | optional JSON object mapping required payload claim names to allowed exact string values, e.g. `{"token_use":["access"]}` |
+| `SMOLQUERY_OIDC_API_TOKEN_TYPES` / `SMOLQUERY_OIDC_WEB_TOKEN_TYPES` | optional role-specific comma-separated protected-header `typ` allowlists; use these when API access tokens and browser ID tokens carry different types |
+| `SMOLQUERY_OIDC_TOKEN_TYPES` | backward-compatible common `typ` allowlist used only when the role-specific setting is absent |
+| `SMOLQUERY_OIDC_API_REQUIRED_CLAIMS` / `SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS` | optional role-specific JSON objects mapping required payload claim names to allowed exact string values, e.g. `{"token_use":["access"]}` and `{"token_use":["id"]}` |
+| `SMOLQUERY_OIDC_REQUIRED_CLAIMS` | backward-compatible common required-claim map used only when the role-specific setting is absent |
 | `SMOLQUERY_OIDC_MAX_TOKEN_BYTES` / `SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES` | bounds compact token and individual encoded segments before JOSE decoding (defaults `65536` / `32768`) |
 | `SMOLQUERY_OIDC_IAT_FUTURE_SECONDS` | maximum future `iat` allowance (default `300`); `exp` contexts remain active through the configured clock-skew boundary |
 | `SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS` / `SMOLQUERY_OIDC_JWKS_MAX_AGE_MS` | bounded cache freshness windows (defaults `3600000`) |
@@ -59,7 +61,9 @@ outage or malformed discovery/JWKS never opens either listener.
 
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
 algorithm, a compatible public signing key, exact issuer and audience, and
-integer NumericDate claims. Unknown keys trigger one supervised JWKS refresh, subject to the global forced-refresh cooldown;
+integer NumericDate claims. API and web token type/required-claim profiles are
+resolved separately, and a combined deployment refuses to use its browser
+client id as the API audience. Unknown keys trigger one supervised JWKS refresh, subject to the global forced-refresh cooldown;
 concurrent or repeated unknown keys within that cooldown reuse the current cache and reject
 without another network fetch. All other failures reject without revealing the verification reason. The
 context expiry is `exp + SMOLQUERY_OIDC_CLOCK_SKEW`, matching the accepted

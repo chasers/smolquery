@@ -104,16 +104,14 @@ defmodule Smolquery.Auth.OIDC.Config do
     web_client_id =
       required_for_role(config, :web_client_id, role, "SMOLQUERY_OIDC_WEB_CLIENT_ID")
 
+    :ok = distinct_audiences(config)
     {web_origin, web_redirect_uri} = web_urls(config, role)
     auth_method = config |> Keyword.fetch!(:web_client_auth_method) |> auth_method!()
     web_client_secret = client_secret(config, auth_method, role)
     algorithms = algorithms!(Keyword.fetch!(config, :algorithms))
     claim_capabilities = claim_capabilities!(Keyword.fetch!(config, :claim_capabilities))
 
-    typ_allowlist =
-      string_allowlist!(Keyword.fetch!(config, :typ_allowlist), "SMOLQUERY_OIDC_TOKEN_TYPES")
-
-    required_claims = required_claims!(Keyword.fetch!(config, :required_claims))
+    {typ_allowlist, required_claims} = token_profile(config, role)
 
     %__MODULE__{
       issuer: issuer,
@@ -250,20 +248,22 @@ defmodule Smolquery.Auth.OIDC.Config do
 
   @doc "Validates exact required payload claim values."
   @spec required_claims!(term()) :: required_claims()
-  def required_claims!(claims) when is_map(claims) do
+  def required_claims!(claims), do: required_claims!(claims, "SMOLQUERY_OIDC_REQUIRED_CLAIMS")
+
+  defp required_claims!(claims, env) when is_map(claims) do
     Enum.reduce(claims, %{}, fn {claim, values}, acc ->
       if nonempty_string?(claim) and is_list(values) and values != [] and
            Enum.all?(values, &nonempty_string?/1) and
            length(values) == length(Enum.uniq(values)) do
         Map.put(acc, claim, values)
       else
-        invalid!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", claims, "a map of claim names to string lists")
+        invalid!(env, claims, "a map of claim names to string lists")
       end
     end)
   end
 
-  def required_claims!(value),
-    do: invalid!("SMOLQUERY_OIDC_REQUIRED_CLAIMS", value, "a map of claim names to string lists")
+  defp required_claims!(value, env),
+    do: invalid!(env, value, "a map of claim names to string lists")
 
   @spec raise_invalid_claim_mapping(term()) :: no_return()
   defp raise_invalid_claim_mapping(mapping),
@@ -277,6 +277,61 @@ defmodule Smolquery.Auth.OIDC.Config do
     do: nonempty!(Keyword.get(config, :web_client_id), env)
 
   defp required_for_role(_config, _key, _role, _env), do: nil
+
+  defp distinct_audiences(config) do
+    api_audience = Keyword.get(config, :api_audience)
+    web_client_id = Keyword.get(config, :web_client_id)
+
+    if nonempty_string?(api_audience) and api_audience == web_client_id do
+      invalid!(
+        "SMOLQUERY_OIDC_API_AUDIENCE",
+        api_audience,
+        "a resource audience different from SMOLQUERY_OIDC_WEB_CLIENT_ID"
+      )
+    end
+
+    :ok
+  end
+
+  defp token_profile(config, role) do
+    {type_key, type_env, claims_key, claims_env} =
+      case role do
+        :api ->
+          {:api_typ_allowlist, "SMOLQUERY_OIDC_API_TOKEN_TYPES", :api_required_claims,
+           "SMOLQUERY_OIDC_API_REQUIRED_CLAIMS"}
+
+        :web ->
+          {:web_typ_allowlist, "SMOLQUERY_OIDC_WEB_TOKEN_TYPES", :web_required_claims,
+           "SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS"}
+      end
+
+    {types, type_env} =
+      role_profile_value(
+        config,
+        type_key,
+        :typ_allowlist,
+        type_env,
+        "SMOLQUERY_OIDC_TOKEN_TYPES"
+      )
+
+    {claims, claims_env} =
+      role_profile_value(
+        config,
+        claims_key,
+        :required_claims,
+        claims_env,
+        "SMOLQUERY_OIDC_REQUIRED_CLAIMS"
+      )
+
+    {string_allowlist!(types, type_env), required_claims!(claims, claims_env)}
+  end
+
+  defp role_profile_value(config, role_key, global_key, role_env, global_env) do
+    case Keyword.fetch(config, role_key) do
+      {:ok, value} -> {value, role_env}
+      :error -> {Keyword.fetch!(config, global_key), global_env}
+    end
+  end
 
   defp web_urls(_config, :api), do: {nil, nil}
 
