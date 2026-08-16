@@ -6,13 +6,21 @@ defmodule SmolqueryWeb.QueryLive.Index do
   it lands somewhere terminal, so state, duration, and errors stream into the
   page as they happen. Results are one `Explorer.DataFrame` paged client-side;
   cancel really cancels the job, not just the page.
+
+  A finished job's scan statistics render under the editor. Explain and
+  Analyze submit the same SQL with the `explain` option and render the
+  engine's plan text instead of rows; the Trace toggle submits with
+  `trace: true` and renders the job's phase spans as a
+  `SmolqueryWeb.Waterfall`.
   """
 
   use SmolqueryWeb, :live_view
 
   alias Smolquery.QueryService
+  alias Smolquery.QueryService.Statistics
   alias SmolqueryWeb.DataTable
   alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.Waterfall
 
   @page_size 100
   @poll_ms 200
@@ -26,6 +34,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:page_title, "Query")
       |> assign(:runtime, runtime)
       |> assign(:sql, "")
+      |> assign(:trace, false)
       |> assign(:job, nil)
       |> assign(:frame, nil)
       |> assign(:page, 0)
@@ -37,18 +46,16 @@ defmodule SmolqueryWeb.QueryLive.Index do
   end
 
   @impl Phoenix.LiveView
-  def handle_event("sql_changed", %{"query" => %{"sql" => sql}}, socket) do
-    {:noreply, assign(socket, :sql, sql)}
+  def handle_event("sql_changed", %{"query" => query}, socket) do
+    {:noreply, editor(socket, query)}
   end
 
-  def handle_event("run", %{"query" => %{"sql" => sql}}, socket) do
-    case String.trim(sql) do
-      "" ->
-        {:noreply, assign(socket, :run_error, "Write some SQL first")}
+  def handle_event("run", %{"query" => query}, socket) do
+    socket |> editor(query) |> submit_or_warn([])
+  end
 
-      _sql ->
-        submit(assign(socket, :sql, sql))
-    end
+  def handle_event("explain", %{"mode" => mode}, socket) do
+    submit_or_warn(socket, explain: explain_mode(mode))
   end
 
   def handle_event("cancel", _params, socket) do
@@ -80,8 +87,26 @@ defmodule SmolqueryWeb.QueryLive.Index do
     end
   end
 
-  defp submit(socket) do
-    case QueryService.Client.submit(socket.assigns.runtime.query_name, socket.assigns.sql) do
+  defp editor(socket, query) do
+    socket
+    |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
+    |> assign(:trace, Map.get(query, "trace") == "true")
+  end
+
+  defp explain_mode("analyze"), do: :analyze
+  defp explain_mode(_mode), do: :plan
+
+  defp submit_or_warn(socket, opts) do
+    case String.trim(socket.assigns.sql) do
+      "" -> {:noreply, assign(socket, :run_error, "Write some SQL first")}
+      _sql -> submit(socket, opts)
+    end
+  end
+
+  defp submit(socket, opts) do
+    opts = if socket.assigns.trace, do: [{:trace, true} | opts], else: opts
+
+    case QueryService.Client.submit(socket.assigns.runtime.query_name, socket.assigns.sql, opts) do
       {:ok, job} ->
         Process.send_after(self(), {:poll, job.id}, @poll_ms)
 
@@ -149,6 +174,14 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp running?(nil), do: false
   defp running?(job), do: not QueryService.Job.terminal?(job)
 
+  defp statistics_line(statistics) do
+    "scanned #{Statistics.mib_scanned(statistics)} MiB · " <>
+      "#{Statistics.rows_scanned(statistics)} rows · " <>
+      "#{Statistics.files_scanned(statistics)}/#{Statistics.files_total(statistics)} files " <>
+      "(hot #{statistics.hot.files_scanned}/#{statistics.hot.files_total}, " <>
+      "sealed #{statistics.sealed.files_scanned})"
+  end
+
   defp state_badge(:done), do: "badge-success"
   defp state_badge(:error), do: "badge-error"
   defp state_badge(:cancelled), do: "badge-warning"
@@ -172,6 +205,25 @@ defmodule SmolqueryWeb.QueryLive.Index do
             Run
           </button>
           <button
+            :for={{label, mode} <- [{"Explain", "plan"}, {"Analyze", "analyze"}]}
+            type="button"
+            phx-click="explain"
+            phx-value-mode={mode}
+            class="btn btn-sm"
+            disabled={running?(@job)}
+          >
+            {label}
+          </button>
+          <label class="label cursor-pointer gap-1 text-sm">
+            <input
+              type="checkbox"
+              name="query[trace]"
+              value="true"
+              checked={@trace}
+              class="checkbox checkbox-sm"
+            /> Trace
+          </label>
+          <button
             :if={running?(@job)}
             type="button"
             phx-click="cancel"
@@ -193,6 +245,20 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
       <div :if={@job && @job.state == :error} class="alert alert-error text-sm font-mono">
         {inspect(@job.error)}
+      </div>
+
+      <div :if={@job && @job.statistics} class="text-sm opacity-70">
+        {statistics_line(@job.statistics)}
+      </div>
+
+      <pre
+        :if={@job && @job.explain}
+        class="bg-base-200 rounded p-3 text-xs font-mono overflow-x-auto"
+      >{@job.explain}</pre>
+
+      <div :if={@job && @job.trace} class="space-y-1">
+        <h2 class="text-sm font-semibold">Trace</h2>
+        <Waterfall.waterfall id="trace" spans={@job.trace} />
       </div>
 
       <div :if={@frame}>
