@@ -174,52 +174,24 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
-  describe "with_compact_max_rows/2" do
+  describe "with_compact_max_rows/1" do
     test "an explicit cap survives untouched" do
       runtime = Runtime.new(name: __MODULE__.ExplicitRowCap, compact_max_rows: 20)
 
-      assert Runtime.with_compact_max_rows(runtime, {:ok, 4_294_967_296}).compact_max_rows == 20
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 20
     end
 
-    test "derives 512 bytes per row from the cgroup-quartered budget" do
-      runtime = Runtime.new(name: __MODULE__.DerivedRowCap)
+    test "an unset cap starts at the default, for the compactor to adapt per table" do
+      runtime = Runtime.new(name: __MODULE__.DefaultRowCap)
 
-      assert Runtime.with_compact_max_rows(runtime, {:ok, 4_294_967_296}).compact_max_rows ==
-               2_097_152
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 4_194_304
     end
 
-    test "derives from an explicit engine budget when there is no cgroup" do
+    test "an explicit engine budget does not change the start" do
       runtime =
         Runtime.new(name: __MODULE__.BudgetRowCap, compact_engine_memory_limit: "1GiB")
 
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 2_097_152
-    end
-
-    test "reads decimal units the way DuckDB does" do
-      runtime =
-        Runtime.new(name: __MODULE__.DecimalRowCap, compact_engine_memory_limit: "1GB")
-
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 1_953_125
-    end
-
-    test "a tiny budget still yields the floor" do
-      runtime =
-        Runtime.new(name: __MODULE__.TinyRowCap, compact_engine_memory_limit: "1MiB")
-
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 65_536
-    end
-
-    test "no resolvable budget falls back to the fixed default" do
-      runtime = Runtime.new(name: __MODULE__.FallbackRowCap)
-
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 4_194_304
-    end
-
-    test "a budget string DuckDB would accept but the parser does not falls back" do
-      runtime =
-        Runtime.new(name: __MODULE__.OpaqueRowCap, compact_engine_memory_limit: "1.5GB")
-
-      assert Runtime.with_compact_max_rows(runtime, :none).compact_max_rows == 4_194_304
+      assert Runtime.with_compact_max_rows(runtime).compact_max_rows == 4_194_304
     end
   end
 

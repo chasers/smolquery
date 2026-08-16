@@ -69,9 +69,10 @@ defmodule Smolquery.StorageService.Compactor do
   cap never needs this — two files under `compact_below_bytes` always fit —
   but a single small file can carry more rows than the cap admits twice.
 
-  The row cap also adapts per table: a merge OOM halves the table's cap and
-  a success doubles it back, because no static bytes-per-row constant fits
-  every workload — see `adjusted_row_caps/3` (T-262).
+  The row cap also adapts per table: a merge OOM halves the table's cap, and
+  evidence at the tightened cap earns it back, because no static
+  bytes-per-row constant fits every workload — see `adjusted_row_caps/3`
+  (T-262).
 
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
@@ -149,6 +150,7 @@ defmodule Smolquery.StorageService.Compactor do
   """
   @spec start_link(Runtime.t()) :: GenServer.on_start()
   def start_link(%Runtime{} = runtime) do
+    runtime = Runtime.with_compact_max_rows(runtime)
     GenServer.start_link(__MODULE__, runtime, name: Runtime.compactor(runtime.name))
   end
 
@@ -162,7 +164,7 @@ defmodule Smolquery.StorageService.Compactor do
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
 
   defp run(state) do
-    runtime = Runtime.with_compact_max_rows(state.runtime)
+    runtime = state.runtime
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       outcomes = Enum.map(tables, &compact_table(runtime, state.row_caps, &1))
@@ -179,50 +181,100 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   @row_cap_floor 65_536
+  @relax_patience_start 2
+  @relax_patience_max 64
 
   @doc """
   The per-table row caps after a sweep — the workload-adaptive half of the
   row bound (T-262).
 
-  The derived cap assumes 512 bytes of pinned memory per row, and a workload
-  decides its own pin rate: wide, repetitive text fields pin kilobytes per
-  row while compressing well enough to pass every static cap. So the caps
-  answer the workload instead of predicting it. A merge that OOMs halves the
-  table's cap, never below #{@row_cap_floor} rows; a table that compacts
-  doubles its cap back toward the runtime's, and sheds the override when it
-  gets there. Only tables that OOMed carry an entry, so the map stays empty
-  on healthy deployments. The caps live in the compactor's state: a restart
-  forgets them, and the first OOM after the restart re-learns them.
+  No static bytes-per-row constant predicts a workload's pin rate: wide,
+  repetitive text fields pin kilobytes per row while compressing well enough
+  to pass every static cap, and narrow rows pin almost nothing. So the
+  runtime's cap is only a start, and the caps here answer the workload
+  instead of predicting it. A merge that OOMs halves the
+  table's cap, never below #{@row_cap_floor} rows. Only tables that OOMed
+  carry an entry, so the map stays empty on healthy deployments. The caps
+  live in the compactor's state: a restart forgets them, and the first OOM
+  after the restart re-learns them.
+
+  Raising a cap needs evidence, because a raise re-probes the level that
+  OOMed and a failed probe burns a multi-minute merge. A sweep counts toward
+  the raise when the table's group compacts at more than half its cap — a
+  two-file success proves nothing about a cap-sized group — or when the cap
+  itself makes every plan skip, since a cap wedged at the floor produces no
+  successes to learn from. The cap doubles after `patience` such sweeps, and
+  sheds the override when it reaches the runtime's. Each OOM doubles the
+  table's patience, up to #{@relax_patience_max} sweeps, so a table sitting
+  on its true limit probes it rarely instead of every other sweep.
   """
-  @spec adjusted_row_caps(%{Catalog.table_ref() => pos_integer()}, [term()], pos_integer()) ::
-          %{Catalog.table_ref() => pos_integer()}
+  @spec adjusted_row_caps(
+          %{Catalog.table_ref() => map()},
+          [term()],
+          pos_integer()
+        ) :: %{Catalog.table_ref() => map()}
   def adjusted_row_caps(row_caps, outcomes, resolved) do
     Enum.reduce(outcomes, row_caps, fn
-      {:ok, %{table: table}}, caps ->
-        relax(caps, table, resolved)
+      {:ok, %{table: table, rows: rows}}, caps ->
+        relax(caps, table, rows, resolved)
+
+      {:skip, table}, caps ->
+        case caps do
+          %{^table => entry} -> advance(caps, table, entry, resolved)
+          _no_override -> caps
+        end
 
       {:failed, %{table: table, reason: reason}}, caps ->
         if merge_oom?(reason), do: tighten(caps, table, resolved), else: caps
 
-      _skip, caps ->
+      _not_owned, caps ->
         caps
     end)
   end
 
   defp tighten(caps, table, resolved) do
-    attempted = caps |> Map.get(table, resolved) |> min(resolved)
-    Map.put(caps, table, max(div(attempted, 2), @row_cap_floor))
+    {attempted, patience} =
+      case caps do
+        %{^table => %{cap: cap, patience: patience}} ->
+          {min(cap, resolved), min(patience * 2, @relax_patience_max)}
+
+        _no_override ->
+          {resolved, @relax_patience_start}
+      end
+
+    Map.put(caps, table, %{
+      cap: max(div(attempted, 2), @row_cap_floor),
+      streak: 0,
+      patience: patience
+    })
   end
 
-  defp relax(caps, table, resolved) do
+  defp relax(caps, table, rows, resolved) do
     case caps do
-      %{^table => cap} when cap * 2 >= resolved -> Map.delete(caps, table)
-      %{^table => cap} -> Map.put(caps, table, cap * 2)
-      _no_override -> caps
+      %{^table => %{cap: cap} = entry} when rows * 2 >= cap ->
+        advance(caps, table, entry, resolved)
+
+      _small_group_or_no_override ->
+        caps
     end
   end
 
-  defp merge_oom?({:put_failed, _key, {:merge_failed, %Adbc.Error{message: message}}}),
+  defp advance(caps, table, entry, resolved) do
+    cond do
+      entry.streak + 1 < entry.patience ->
+        Map.put(caps, table, %{entry | streak: entry.streak + 1})
+
+      entry.cap * 2 >= resolved ->
+        Map.delete(caps, table)
+
+      true ->
+        Map.put(caps, table, %{entry | cap: entry.cap * 2, streak: 0})
+    end
+  end
+
+  defp merge_oom?({:put_failed, _key, reason}), do: merge_oom?(reason)
+
+  defp merge_oom?({:merge_failed, %Adbc.Error{message: message}}),
     do: message =~ "Out of Memory"
 
   defp merge_oom?(_reason), do: false
@@ -234,7 +286,10 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp table_capped(runtime, row_caps, table_ref) do
     cap =
-      row_caps |> Map.get(table_ref, runtime.compact_max_rows) |> min(runtime.compact_max_rows)
+      case row_caps do
+        %{^table_ref => %{cap: cap}} -> min(cap, runtime.compact_max_rows)
+        _no_override -> runtime.compact_max_rows
+      end
 
     %{runtime | compact_max_rows: cap}
   end
@@ -248,7 +303,7 @@ defmodule Smolquery.StorageService.Compactor do
       swap(runtime, table_ref, group, started_at)
     else
       false -> :skip
-      :skip -> :skip
+      :skip -> {:skip, table_ref}
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
     end
   end
@@ -374,7 +429,8 @@ defmodule Smolquery.StorageService.Compactor do
         %{result: :ok}
       )
 
-      {:ok, %{table: table_ref, key: key, replaced: length(paths), snapshot: snapshot}}
+      {:ok,
+       %{table: table_ref, key: key, replaced: length(paths), rows: row_count, snapshot: snapshot}}
     else
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
     end
@@ -427,23 +483,38 @@ defmodule Smolquery.StorageService.Compactor do
     {:failed, %{table: table_ref, reason: reason}}
   end
 
-  defp recycle_on_exit(runtime, {step, %CallExited{}})
-       when step in [:sizing_failed, :merge_failed] do
-    engine = Runtime.compact_engine(runtime.name)
-    stale_connection = Process.whereis(Engine.connection_name(engine))
+  @doc """
+  Whether a compaction failure carries a `Smolquery.Engine.CallExited` — what
+  `failed/4` recycles the compaction engine on. A final `COPY`'s exit arrives
+  wrapped by the store as `{:put_failed, key, {:merge_failed, exit}}`; sizing
+  and staging exits arrive bare.
+  """
+  @spec engine_call_exited?(term()) :: boolean()
+  def engine_call_exited?({:put_failed, _key, reason}), do: engine_call_exited?(reason)
 
-    case Process.whereis(Engine.database_name(engine)) do
-      nil ->
-        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+  def engine_call_exited?({step, %CallExited{}}) when step in [:sizing_failed, :merge_failed],
+    do: true
 
-      database ->
-        Logger.warning("recycling the compaction engine after an engine call exit")
-        Process.exit(database, :kill)
-        await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+  def engine_call_exited?(_reason), do: false
+
+  defp recycle_on_exit(runtime, reason) do
+    if engine_call_exited?(reason) do
+      engine = Runtime.compact_engine(runtime.name)
+      stale_connection = Process.whereis(Engine.connection_name(engine))
+
+      case Process.whereis(Engine.database_name(engine)) do
+        nil ->
+          await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+
+        database ->
+          Logger.warning("recycling the compaction engine after an engine call exit")
+          Process.exit(database, :kill)
+          await_engine(engine, stale_connection, @engine_recycle_wait_ms)
+      end
+    else
+      :ok
     end
   end
-
-  defp recycle_on_exit(_runtime, _reason), do: :ok
 
   defp await_engine(_engine, _stale_connection, remaining_ms) when remaining_ms <= 0, do: :ok
 
