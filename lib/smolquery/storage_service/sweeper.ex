@@ -31,6 +31,8 @@ defmodule Smolquery.StorageService.Sweeper do
 
       require Logger
 
+      alias Smolquery.StorageService.Sweeper
+
       @impl GenServer
       def init(%Smolquery.StorageService.Runtime{} = runtime) do
         {:ok, schedule(%__MODULE__{runtime: runtime})}
@@ -38,13 +40,13 @@ defmodule Smolquery.StorageService.Sweeper do
 
       @impl GenServer
       def handle_call(:sweep, _from, state) do
-        {reply, state} = Smolquery.StorageService.Sweeper.split_result(run(state), state)
+        {reply, state} = Sweeper.split_result(run(state), state)
         {:reply, reply, state}
       end
 
       @impl GenServer
       def handle_info(:sweep, state) do
-        {result, state} = Smolquery.StorageService.Sweeper.split_result(run(state), state)
+        {result, state} = Sweeper.split_result(run(state), state)
 
         case result do
           {:ok, _report} ->
