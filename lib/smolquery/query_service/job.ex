@@ -25,6 +25,7 @@ defmodule Smolquery.QueryService.Job do
     :row_count,
     :duration_ms,
     :statistics,
+    :explain,
     :error
   ]
 
@@ -40,6 +41,7 @@ defmodule Smolquery.QueryService.Job do
           row_count: non_neg_integer() | nil,
           duration_ms: non_neg_integer() | nil,
           statistics: Statistics.t() | nil,
+          explain: String.t() | nil,
           error: term()
         }
 
@@ -79,6 +81,29 @@ defmodule Smolquery.QueryService.Job do
         row_count: row_count,
         duration_ms: duration_ms,
         statistics: statistics,
+        finished_at: System.system_time(:millisecond)
+    }
+  end
+
+  @doc """
+  The job, finished with a query plan instead of rows.
+
+  An explain job runs the whole pipeline — plan, views, lockdown — but asks
+  the engine for its plan (`explain: :plan`) or a profiled execution
+  (`explain: :analyze`) rather than a result frame, so it finishes with
+  `explain` text, no `row_count`, and no result to page. Like `statistics`,
+  history does not persist it.
+  """
+  @spec explained(t(), Catalog.snapshot(), non_neg_integer(), Statistics.t() | nil, String.t()) ::
+          t()
+  def explained(%__MODULE__{} = job, snapshot, duration_ms, statistics, explain) do
+    %{
+      job
+      | state: :done,
+        snapshot: snapshot,
+        duration_ms: duration_ms,
+        statistics: statistics,
+        explain: explain,
         finished_at: System.system_time(:millisecond)
     }
   end

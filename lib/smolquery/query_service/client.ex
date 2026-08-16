@@ -38,10 +38,14 @@ defmodule Smolquery.QueryService.Client do
   alias Smolquery.QueryService.Runner
   alias Smolquery.QueryService.Runtime
 
-  @type option :: {:timeout_ms, pos_integer()}
+  @type option :: {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze}
 
   @doc """
   Runs `sql` and waits for its result.
+
+  With `explain: :plan` or `explain: :analyze` the job finishes with the
+  engine's plan text on `job.explain` and no result frame — see
+  `Smolquery.QueryService.Job.explained/5`.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which
@@ -72,7 +76,7 @@ defmodule Smolquery.QueryService.Client do
     with {:ok, runtime} <- runtime(name),
          :ok <- admit(runtime) do
       job = Job.new(sql)
-      spec = {Runner, {runtime, job, Keyword.take(opts, [:timeout_ms])}}
+      spec = {Runner, {runtime, job, Keyword.take(opts, [:timeout_ms, :explain])}}
 
       case DynamicSupervisor.start_child(
              {:via, PartitionSupervisor, {Runtime.runners(name), job.id}},

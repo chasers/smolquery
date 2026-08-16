@@ -140,6 +140,63 @@ defmodule SmolqueryApi.JobControllerTest do
       refute Map.has_key?(page3, "nextPageToken")
     end
 
+    test "explain: plan answers the engine's plan instead of rows", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "explain" => "plan"})
+
+      assert response.status == 200
+      body = JSON.decode!(response.resp_body)
+
+      assert %{
+               "job" => %{
+                 "state" => "done",
+                 "explain" => explain,
+                 "rowCount" => nil,
+                 "resultsAvailable" => false
+               }
+             } = body
+
+      assert explain =~ "PROJECTION"
+      refute Map.has_key?(body, "rows")
+    end
+
+    test "explain: analyze runs the query and reports timings", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "explain" => "analyze"})
+
+      assert %{"job" => %{"explain" => explain}} = JSON.decode!(response.resp_body)
+      assert explain =~ "Total Time"
+    end
+
+    test "an unknown explain value is refused, not silently run", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "explain" => "yes"})
+
+      assert response.status == 400
+      assert %{"error" => %{"message" => message}} = JSON.decode!(response.resp_body)
+      assert message =~ "explain"
+    end
+
+    test "an async explain job carries its plan on the job, and its results route is a 409",
+         %{name: name} do
+      response =
+        post_json(name, "/v1/jobs", %{"query" => "SELECT 1 + 1 AS n", "explain" => "plan"})
+
+      assert %{"id" => id, "state" => "pending"} = JSON.decode!(response.resp_body)
+
+      assert Eventually.until(fn ->
+               {200, job} = get_json(name, "/v1/jobs/#{id}")
+               job["state"] == "done"
+             end)
+
+      {200, job} = get_json(name, "/v1/jobs/#{id}")
+      assert job["explain"] =~ "PROJECTION"
+      assert job["resultsAvailable"] == false
+
+      {409, body} = get_json(name, "/v1/jobs/#{id}/results")
+      assert body["error"]["message"] =~ "explain"
+    end
+
     test "a query that finishes badly is the caller's 400, with the planner's message",
          %{name: name} do
       response = post_json(name, "/v1/queries", %{"query" => "DROP TABLE analytics.events"})

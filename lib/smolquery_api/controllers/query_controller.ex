@@ -32,12 +32,8 @@ defmodule SmolqueryApi.QueryController do
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, _params) do
     with {:ok, sql} <- JobController.sql(conn.body_params),
-         {:ok, job, frame} <-
-           Client.query(
-             JobController.query_name(conn),
-             sql,
-             JobController.submit_opts(conn.body_params)
-           ) do
+         {:ok, opts} <- JobController.submit_opts(conn.body_params),
+         {:ok, job, frame} <- Client.query(JobController.query_name(conn), sql, opts) do
       answer(conn, job, frame)
     else
       {:error, :timeout} ->
@@ -51,6 +47,10 @@ defmodule SmolqueryApi.QueryController do
       {:error, reason} ->
         JobController.query_error(conn, reason)
     end
+  end
+
+  defp answer(conn, %Job{state: :done, explain: explain} = job, nil) when is_binary(explain) do
+    Json.send_json(conn, 200, %{"job" => JobController.job_json(job, false)})
   end
 
   defp answer(conn, %Job{state: :done} = job, %DataFrame{} = frame) do
