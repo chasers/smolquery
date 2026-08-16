@@ -25,6 +25,7 @@ defmodule Smolquery.Auth.OIDC.Config do
     :claim_capabilities,
     :discovery_max_age_ms,
     :jwks_max_age_ms,
+    :refresh_failure_backoff_ms,
     :connect_timeout_ms,
     :receive_timeout_ms,
     :request_timeout_ms,
@@ -47,6 +48,7 @@ defmodule Smolquery.Auth.OIDC.Config do
           claim_capabilities: claim_capabilities(),
           discovery_max_age_ms: non_neg_integer(),
           jwks_max_age_ms: non_neg_integer(),
+          refresh_failure_backoff_ms: pos_integer(),
           connect_timeout_ms: pos_integer(),
           receive_timeout_ms: pos_integer(),
           request_timeout_ms: pos_integer(),
@@ -58,6 +60,7 @@ defmodule Smolquery.Auth.OIDC.Config do
     clock_skew: 30,
     discovery_max_age_ms: 3_600_000,
     jwks_max_age_ms: 3_600_000,
+    refresh_failure_backoff_ms: 1_000,
     connect_timeout_ms: 2_000,
     receive_timeout_ms: 5_000,
     request_timeout_ms: 10_000,
@@ -108,6 +111,13 @@ defmodule Smolquery.Auth.OIDC.Config do
         ),
       jwks_max_age_ms:
         bounded_integer!(config, :jwks_max_age_ms, "SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", 86_400_000),
+      refresh_failure_backoff_ms:
+        positive_bounded_integer!(
+          config,
+          :refresh_failure_backoff_ms,
+          "SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS",
+          86_400_000
+        ),
       connect_timeout_ms:
         positive_bounded_integer!(
           config,

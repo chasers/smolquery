@@ -92,6 +92,19 @@ defmodule Smolquery.Auth.OIDC.DiscoveryTest do
              Discovery.fetch_request("http://127.0.0.1:#{port}/", request_options(1024, 20))
   end
 
+  test "requires a signing key compatible with the configured algorithms" do
+    rsa = %{"kid" => "rsa", "kty" => "RSA", "n" => "AQ", "e" => "AQAB"}
+    ec = %{"kid" => "ec", "kty" => "EC", "crv" => "P-256", "x" => "AQ", "y" => "AQ"}
+
+    assert :ok = Discovery.validate_jwks(%{"keys" => [rsa]}, @config)
+
+    assert {:error, :jwks_no_compatible_signing_key} =
+             Discovery.validate_jwks(%{"keys" => [ec]}, @config)
+
+    assert {:error, :jwks_no_compatible_signing_key} =
+             Discovery.validate_jwks(%{"keys" => [Map.put(rsa, "use", "enc")]}, @config)
+  end
+
   test "rejects malformed and private JWKS keys" do
     assert :ok ==
              Discovery.validate_jwks(%{

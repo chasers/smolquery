@@ -48,13 +48,18 @@ never opens either listener.
 | `SMOLQUERY_OIDC_CLOCK_SKEW` | bounded non-negative seconds for later token validation (default `30`) |
 | `SMOLQUERY_OIDC_CLAIM_CAPABILITIES` | optional JSON object mapping claim names to exact string values and capability arrays, e.g. `{"roles":{"reader":["query"],"operator":["web_access","query","platform_operate"]}}` |
 | `SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS` / `SMOLQUERY_OIDC_JWKS_MAX_AGE_MS` | bounded cache freshness windows (defaults `3600000`) |
+| `SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS` | positive interval suppressing repeated discovery/JWKS network attempts after a failed refresh (default `1000`) |
 | `SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS` / `SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS` / `SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS` | bounded Req connection, per-chunk receive, and complete-response timeouts (defaults `2000` / `5000` / `10000`) |
 | `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS response size (default `1048576`) |
 
 The discovery client requires JSON responses, byte-for-byte issuer equality, HTTPS
-authorization/token/JWKS endpoints, and an algorithm overlap with the local
-asymmetric allowlist. It refuses redirects and bounds response bodies. It does not trust `jku`, token headers, claims, or provider groups
-as tenant identifiers.
+authorization/token/JWKS endpoints, an algorithm overlap with the local
+asymmetric allowlist, and at least one public signing key compatible with that
+allowlist. It refuses redirects and bounds response bodies. Refresh I/O runs
+outside the cache process, so fresh reads continue while a key fetch is in
+flight; expired data still fails closed. A failed refresh suppresses repeated
+network attempts for the configured backoff. The client does not trust `jku`,
+token headers, claims, or provider groups as tenant identifiers.
 
 | `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
 

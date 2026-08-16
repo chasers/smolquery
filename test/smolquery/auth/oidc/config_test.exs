@@ -18,6 +18,7 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
     assert config.api_audience == "smolquery-api"
     assert config.web_client_id == nil
     assert config.algorithms == ["RS256"]
+    assert config.refresh_failure_backoff_ms == 1_000
   end
 
   test "requires API audience and web settings only for their roles" do
@@ -40,6 +41,7 @@ defmodule Smolquery.Auth.OIDC.ConfigTest do
       {:algorithms, ["none"], "SMOLQUERY_OIDC_ALGORITHMS"},
       {:algorithms, ["RS256", "RS256"], "SMOLQUERY_OIDC_ALGORITHMS"},
       {:clock_skew, 301, "SMOLQUERY_OIDC_CLOCK_SKEW"},
+      {:refresh_failure_backoff_ms, 0, "SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS"},
       {:receive_timeout_ms, 0, "SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS"}
     ]
 

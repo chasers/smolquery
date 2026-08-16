@@ -67,6 +67,7 @@ end
 for {env, key, max} <- [
       {"SMOLQUERY_OIDC_DISCOVERY_MAX_AGE_MS", :discovery_max_age_ms, 86_400_000},
       {"SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", :jwks_max_age_ms, 86_400_000},
+      {"SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS", :refresh_failure_backoff_ms, 86_400_000},
       {"SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS", :connect_timeout_ms, 30_000},
       {"SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS", :receive_timeout_ms, 60_000},
       {"SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS", :request_timeout_ms, 120_000},

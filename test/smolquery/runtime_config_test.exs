@@ -137,6 +137,7 @@ defmodule Smolquery.RuntimeConfigTest do
         "SMOLQUERY_OIDC_API_AUDIENCE" => "api",
         "SMOLQUERY_OIDC_ALGORITHMS" => "RS256,PS256",
         "SMOLQUERY_OIDC_CLOCK_SKEW" => "30",
+        "SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS" => "250",
         "SMOLQUERY_OIDC_CLAIM_CAPABILITIES" =>
           ~s({"roles":{"reader":["query"],"operator":["web_access"]}})
       },
@@ -146,6 +147,7 @@ defmodule Smolquery.RuntimeConfigTest do
 
         assert oidc[:issuer] == "https://issuer.example/"
         assert oidc[:algorithms] == ["RS256", "PS256"]
+        assert oidc[:refresh_failure_backoff_ms] == 250
 
         assert oidc[:claim_capabilities] == %{
                  "roles" => %{"reader" => [:query], "operator" => [:web_access]}
