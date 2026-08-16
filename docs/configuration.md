@@ -78,8 +78,9 @@ OIDC session requires `web_access`. Query and table pages additionally require
 The UI hides controls without those capabilities, but every event handler checks
 again before parsing input or causing side effects. Cluster fleet reads remain
 available to any `web_access` principal.
-A CSRF-protected `POST /auth/logout` always drops the local session without
-depending on the provider. Production builds mark the encrypted cookie Secure;
+A CSRF-protected `POST /auth/logout` drops the local session and all pending
+login transaction cookies without depending on the provider. Production builds mark the identity
+and transaction cookies Secure;
 development and test builds retain explicit HTTP compatibility.
 
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
