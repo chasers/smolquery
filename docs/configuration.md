@@ -39,8 +39,8 @@ never opens either listener.
 | variable | effect |
 |---|---|
 | `SMOLQUERY_OIDC_ISSUER` | exact HTTPS issuer string; trailing slash is retained, while query, fragment, and userinfo are rejected |
-| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles |
-| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles |
+| `SMOLQUERY_OIDC_API_AUDIENCE` | required API access-token audience on `:api` roles; it must differ from the browser client id when both are configured |
+| `SMOLQUERY_OIDC_WEB_CLIENT_ID` | required browser client id on `:web` roles; optional on API-only roles so the token verifier can reject browser-client audiences |
 | `SMOLQUERY_OIDC_WEB_CLIENT_SECRET` | required only with `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD=client_secret_basic`; never shown by runtime inspection |
 | `SMOLQUERY_OIDC_WEB_CLIENT_AUTH_METHOD` | `client_secret_basic` (default) or `none` |
 | `SMOLQUERY_OIDC_WEB_ORIGIN` | exact HTTPS public browser origin; its host must match `SMOLQUERY_WEB_HOST` |
