@@ -1,6 +1,7 @@
 defmodule SmolqueryApi.SupervisorTest do
   use ExUnit.Case, async: false
 
+  alias Smolquery.Runtime.Publisher
   alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.MapCatalog
@@ -65,7 +66,21 @@ defmodule SmolqueryApi.SupervisorTest do
 
     refute Process.whereis(SmolqueryApi.Endpoint)
     refute Process.whereis(Module.concat(name, "OIDCProvider"))
-    Runtime.delete(name)
+    assert Runtime.fetch(name) == :error
+  end
+
+  test "orders runtime publication and the endpoint after the OIDC provider" do
+    name = :api_oidc_child_order
+    runtime = Runtime.new(oidc_options(name, OIDCProvider.client()))
+
+    assert {:ok, {_flags, children}} = SmolqueryApi.Supervisor.init(runtime)
+
+    assert [
+             %{id: Smolquery.Auth.OIDC.Provider},
+             %{id: {Publisher, Runtime, ^name}},
+             %{id: SmolqueryApi.Admission},
+             %{id: SmolqueryApi.Endpoint}
+           ] = children
   end
 
   test "restarts the endpoint subtree when the OIDC provider dies" do
@@ -95,7 +110,11 @@ defmodule SmolqueryApi.SupervisorTest do
       auth_mode: :oidc,
       catalog: MapCatalog.new(),
       oidc_provider_http_client: client,
-      oidc: [issuer: "https://issuer.example", api_audience: "smolquery-api"]
+      oidc: [
+        issuer: "https://issuer.example",
+        api_audience: "smolquery-api",
+        web_client_id: "smolquery-web"
+      ]
     ]
   end
 end

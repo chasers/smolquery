@@ -18,6 +18,7 @@ defmodule SmolqueryApi.Supervisor do
 
   alias Smolquery.Auth.OIDC
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Runtime.Publisher
   alias SmolqueryApi.Runtime
 
   @doc """
@@ -35,8 +36,6 @@ defmodule SmolqueryApi.Supervisor do
 
   @impl Supervisor
   def init(%Runtime{} = runtime) do
-    Runtime.put(runtime)
-
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
         OIDC.children(
@@ -45,7 +44,11 @@ defmodule SmolqueryApi.Supervisor do
           runtime.name,
           runtime.oidc_provider_http_client
         ) ++
-        [{SmolqueryApi.Admission, runtime}, SmolqueryApi.Endpoint]
+        [
+          {Publisher, {Runtime, runtime}},
+          {SmolqueryApi.Admission, runtime},
+          SmolqueryApi.Endpoint
+        ]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
