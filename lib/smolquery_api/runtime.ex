@@ -33,6 +33,7 @@ defmodule SmolqueryApi.Runtime do
 
   alias Smolquery.Auth.Context
   alias Smolquery.Auth.Mode
+  alias Smolquery.Auth.OIDC
   alias Smolquery.Auth.OIDC.Config, as: OIDCConfig
   alias Smolquery.Auth.Static
   alias Smolquery.Catalog
@@ -47,6 +48,7 @@ defmodule SmolqueryApi.Runtime do
     :catalog,
     :catalog_opts,
     :oidc,
+    :oidc_provider_http_client,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
     load_max_bytes: 268_435_456,
@@ -60,6 +62,7 @@ defmodule SmolqueryApi.Runtime do
           context: Context.t() | nil,
           catalog: Catalog.t(),
           oidc: OIDCConfig.t() | nil,
+          oidc_provider_http_client: Smolquery.Auth.OIDC.Discovery.http_client() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
@@ -85,7 +88,7 @@ defmodule SmolqueryApi.Runtime do
 
     auth_mode = Mode.runtime_mode!(config, "the API", :api)
 
-    {api_key, context, oidc} =
+    {api_key, context, oidc, oidc_provider_http_client} =
       case auth_mode do
         :static ->
           key =
@@ -97,10 +100,10 @@ defmodule SmolqueryApi.Runtime do
               role: :api
             )
 
-          {key, Static.api_context(), nil}
+          {key, Static.api_context(), nil, nil}
 
         :oidc ->
-          {nil, nil, OIDCConfig.new(config, :api)}
+          {nil, nil, OIDCConfig.new(config, :api), OIDC.provider_http_client!(config)}
       end
 
     %__MODULE__{
@@ -109,6 +112,7 @@ defmodule SmolqueryApi.Runtime do
       api_key: api_key,
       context: context,
       oidc: oidc,
+      oidc_provider_http_client: oidc_provider_http_client,
       catalog: catalog,
       catalog_opts: catalog_opts
     }
