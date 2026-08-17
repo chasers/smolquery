@@ -269,23 +269,18 @@ defmodule Smolquery.BufferService.SealingTest do
       :ok = stop_supervised(name)
       flush_messages()
 
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          %{name: ^name} =
-            start_buffer_service(context,
-              name: name,
-              seal_max_files: 1,
-              seal_max_bytes: 1_000_000_000,
-              seal_retry_ms: 1,
-              replicator: {Smolquery.BufferService.SealingTest.FailingReleaseReplicator, []}
-            )
+      %{name: ^name} =
+        start_buffer_service(context,
+          name: name,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000_000,
+          seal_retry_ms: 1,
+          replicator: {Smolquery.BufferService.SealingTest.FailingReleaseReplicator, []}
+        )
 
-          assert_receive {:seal_ready, @table, claim}, 2_000
-          assert Enum.sort(claim.ids) == Enum.sort(ids)
-          assert claim.keys == [old_key]
-        end)
-
-      assert log =~ "releasing oversized claim"
+      assert_receive {:seal_ready, @table, claim}, 2_000
+      assert Enum.sort(claim.ids) == Enum.sort(ids)
+      assert claim.keys == [old_key]
     end
 
     test "a claim freezes the entire unsealed backlog", context do

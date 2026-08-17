@@ -66,6 +66,16 @@ defmodule Smolquery.Test.StubCatalog do
     do: record(owner, :segment_stats, [table, snapshot], {:ok, %{files: 1, rows: 10, bytes: 100}})
 
   @impl Catalog
+  def segment_files(owner, table, snapshot),
+    do:
+      record(
+        owner,
+        :segment_files,
+        [table, snapshot],
+        {:ok, [%{path: "/stub.parquet", rows: 10, bytes: 100}]}
+      )
+
+  @impl Catalog
   def drop_segments(owner, table, paths),
     do: record(owner, :drop_segments, [table, paths], {:ok, @snapshot})
 

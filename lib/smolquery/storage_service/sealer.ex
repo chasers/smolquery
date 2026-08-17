@@ -196,7 +196,7 @@ defmodule Smolquery.StorageService.Sealer do
         duration_us: System.monotonic_time(:microsecond) - attempt.started_at,
         segments: attempt.segments
       },
-      %{result: result}
+      %{result: result, table_ref: attempt.table_ref}
     )
   end
 

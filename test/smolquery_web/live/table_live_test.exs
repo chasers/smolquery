@@ -3,6 +3,7 @@ defmodule SmolqueryWeb.TableLiveTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Schema
+  alias Smolquery.Test.Eventually
 
   defp seed(runtime) do
     :ok = Catalog.create_dataset(runtime.catalog, "analytics")
@@ -169,6 +170,113 @@ defmodule SmolqueryWeb.TableLiveTest do
 
       assert {:error, {:live_redirect, %{to: "/tables"}}} =
                live(conn, ~p"/tables/nope/missing")
+    end
+  end
+
+  describe "lifecycle (T-295)" do
+    defp seed_lifeview(runtime) do
+      :ok = Catalog.create_dataset(runtime.catalog, "lifeview")
+
+      :ok =
+        Catalog.create_table(
+          runtime.catalog,
+          {"lifeview", "events"},
+          Schema.new!([{"id", :int64, nullable: false}])
+        )
+    end
+
+    defp seal_event(result, overrides \\ %{}) do
+      Map.merge(
+        %{
+          kind: :seal,
+          table_ref: {"lifeview", "events"},
+          node: node(),
+          result: result,
+          measurements: %{duration_us: 1_200_000, segments: 16},
+          at: System.system_time(:millisecond)
+        },
+        overrides
+      )
+    end
+
+    test "renders the hot and sealed tiers on load", %{conn: conn} do
+      runtime = start_web!()
+      seed_lifeview(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
+
+      html = render_async(lv)
+      assert html =~ "Lifecycle"
+      assert html =~ "hot tier unreachable"
+      assert html =~ "Catalog stats unavailable"
+      assert html =~ "Waiting for commits, seals, and compactions"
+    end
+
+    test "a lifecycle event lands in the feed and a failure streak shows", %{conn: conn} do
+      runtime = start_web!()
+      seed_lifeview(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
+      render_async(lv)
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+      html = render(lv)
+      assert html =~ "seal ok · 16 segments"
+
+      send(lv.pid, {:lifecycle, seal_event(:error)})
+      send(lv.pid, {:lifecycle, seal_event(:error)})
+      html = render(lv)
+      assert html =~ "2 failed seals"
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+      refute render(lv) =~ "failed seals"
+    end
+
+    test "the last seal stays pinned after commits push it out of the feed", %{conn: conn} do
+      runtime = start_web!()
+      seed_lifeview(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
+      render_async(lv)
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+
+      for _flood <- 1..9 do
+        send(
+          lv.pid,
+          {:lifecycle,
+           %{
+             kind: :commit,
+             table_ref: {"lifeview", "events"},
+             node: node(),
+             result: :ok,
+             measurements: %{rows: 200, bytes: 11_700},
+             at: System.system_time(:millisecond)
+           }}
+        )
+      end
+
+      html = render(lv)
+      assert html =~ "seal ok · 16 segments"
+      assert html =~ "last"
+    end
+
+    test "a broadcast through the bridge reaches the page", %{conn: conn} do
+      runtime = start_web!()
+      seed_lifeview(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
+      render_async(lv)
+
+      :telemetry.execute(
+        [:smolquery, :compact, :swap],
+        %{replaced: 5, duration_us: 2_000_000},
+        %{result: :ok, table_ref: {"lifeview", "events"}}
+      )
+
+      assert Eventually.until(fn ->
+               render(lv) =~ "compaction ok · 5 replaced"
+             end)
     end
   end
 end

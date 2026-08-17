@@ -558,7 +558,7 @@ defmodule Smolquery.StorageService.Compactor do
       :telemetry.execute(
         [:smolquery, :compact, :swap],
         %{replaced: length(paths), duration_us: elapsed_us(started_at)},
-        %{result: :ok}
+        %{result: :ok, table_ref: table_ref}
       )
 
       {:ok,
@@ -607,7 +607,7 @@ defmodule Smolquery.StorageService.Compactor do
     :telemetry.execute(
       [:smolquery, :compact, :swap],
       %{replaced: 0, duration_us: elapsed_us(started_at)},
-      %{result: :error}
+      %{result: :error, table_ref: table_ref}
     )
 
     recycle_on_exit(runtime, reason)

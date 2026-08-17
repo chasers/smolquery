@@ -9,6 +9,12 @@ defmodule Smolquery.Application do
   Order within a node does not encode a dependency: services reach each other
   through client modules that tolerate a peer being absent, so a node starting
   `:storage` before `:buffer` is not a problem for either.
+
+  `Smolquery.PubSub` and `Smolquery.Lifecycle` run on every node regardless
+  of role: lifecycle events originate wherever the work runs (a buffer's
+  commit, a storage node's seal or compaction), and Phoenix.PubSub's pg
+  adapter carries a broadcast across the cluster only between nodes that
+  run the same-named pubsub. A web-only pubsub would hear nothing (T-295).
   """
 
   use Application
@@ -20,7 +26,12 @@ defmodule Smolquery.Application do
     Smolquery.InternalSecret.ensure()
 
     children =
-      [Smolquery.Telemetry, Smolquery.Cluster.RingCache] ++
+      [
+        Smolquery.Telemetry,
+        {Phoenix.PubSub, name: Smolquery.PubSub},
+        Smolquery.Lifecycle,
+        Smolquery.Cluster.RingCache
+      ] ++
         Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)

@@ -450,6 +450,49 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def segment_files(%__MODULE__{} = config, {dataset, table}, snapshot)
+      when is_integer(snapshot) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, result} <-
+           query(
+             config,
+             "SELECT df.path, df.path_is_relative, " <>
+               "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
+               "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT) " <>
+               "FROM #{metadata_schema(config.catalog)}.ducklake_data_file df " <>
+               "JOIN #{metadata_schema(config.catalog)}.ducklake_table t " <>
+               "ON t.table_id = df.table_id " <>
+               "JOIN #{metadata_schema(config.catalog)}.ducklake_schema s " <>
+               "ON s.schema_id = t.schema_id " <>
+               "WHERE s.schema_name = $1 AND t.table_name = $2 " <>
+               "AND df.begin_snapshot <= $3 " <>
+               "AND (df.end_snapshot IS NULL OR df.end_snapshot > $3) " <>
+               "AND t.begin_snapshot <= $3 " <>
+               "AND (t.end_snapshot IS NULL OR t.end_snapshot > $3) " <>
+               "ORDER BY df.path",
+             [dataset, table, snapshot]
+           ) do
+      segment_file_rows(result.rows)
+    end
+  end
+
+  defp segment_file_rows(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn
+      [path, relative, rows, bytes], {:ok, files} when relative in [false, 0] ->
+        {:cont, {:ok, [%{path: path, rows: rows, bytes: bytes} | files]}}
+
+      [path, _relative, _rows, _bytes], _acc ->
+        {:halt, {:error, {:relative_segment_path, path}}}
+    end)
+    |> case do
+      {:ok, files} -> {:ok, Enum.reverse(files)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl Catalog
   def drop_segments(%__MODULE__{} = config, _table, []), do: current_snapshot(config)
 
   def drop_segments(%__MODULE__{} = config, table, paths) do

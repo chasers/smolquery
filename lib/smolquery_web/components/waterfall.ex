@@ -58,7 +58,15 @@ defmodule SmolqueryWeb.Waterfall do
 
   defp row_title(span), do: to_string(span.name)
 
-  defp duration_label(us) when us >= 1_000_000, do: "#{Float.round(us / 1_000_000, 2)} s"
-  defp duration_label(us) when us >= 1_000, do: "#{Float.round(us / 1_000, 1)} ms"
-  defp duration_label(us), do: "#{us} µs"
+  @doc """
+  A human-readable duration from microseconds.
+
+  Public because it is the UI's one duration format: the waterfall and the
+  lifecycle card (T-295) label durations through the same function, so the
+  two cannot drift.
+  """
+  @spec duration_label(non_neg_integer()) :: String.t()
+  def duration_label(us) when us >= 1_000_000, do: "#{Float.round(us / 1_000_000, 2)} s"
+  def duration_label(us) when us >= 1_000, do: "#{Float.round(us / 1_000, 1)} ms"
+  def duration_label(us), do: "#{us} µs"
 end

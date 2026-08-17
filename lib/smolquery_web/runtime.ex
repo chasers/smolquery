@@ -46,7 +46,8 @@ defmodule SmolqueryWeb.Runtime do
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
-    query_name: Smolquery.QueryService
+    query_name: Smolquery.QueryService,
+    buffer_name: Smolquery.BufferService
   ]
 
   @type t :: %__MODULE__{
@@ -57,7 +58,8 @@ defmodule SmolqueryWeb.Runtime do
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
-          query_name: atom()
+          query_name: atom(),
+          buffer_name: atom()
         }
 
   @session_secret_min_bytes 64
@@ -91,7 +93,7 @@ defmodule SmolqueryWeb.Runtime do
       catalog: catalog,
       catalog_opts: catalog_opts
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :query_name]))
+    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :buffer_name]))
   end
 
   defp fetch_credential!(config, key) do
