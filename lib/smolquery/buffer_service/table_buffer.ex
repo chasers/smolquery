@@ -58,10 +58,16 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   The idle window is a few milliseconds rather than zero so a burst's
   simultaneous first inserts still coalesce into one commit. The choice is
-  made once, when the window's first chunk arms the timer: a window armed
-  long just before load vanishes waits the full interval once, and the next
-  window adapts. Real concurrency keeps today's behavior — the window opens
-  above the threshold and the interval and byte caps rule unchanged.
+  made when the window's first chunk arms the timer, and re-made every time
+  a commit settles: a window armed long re-arms with the idle interval the
+  moment `in_flight_inserts` falls below the threshold (T-285). Without the
+  re-arm, a mid-range load — enough writers to open every window long, too
+  few to fill `flush_max_bytes` quickly — waited out the byte cap on every
+  commit, and the ack floor became `flush_max_bytes` over the arrival rate.
+  Shortening is one-directional: a window armed short stays short. Real
+  concurrency keeps today's behavior — the window opens above the threshold,
+  commits settle with the count still above it, and the interval and byte
+  caps rule unchanged.
 
   ## Backpressure is immediate
 
@@ -503,7 +509,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @impl GenServer
-  def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag}} = state) do
+  def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag, _interval}} = state) do
     {:noreply, %{state | timer: nil} |> handoff() |> run_maintenance()}
   end
 
@@ -546,6 +552,19 @@ defmodule Smolquery.BufferService.TableBuffer do
         in_flight_inserts: state.in_flight_inserts - inserts,
         in_flight_ids: Enum.reduce(batch_ids, state.in_flight_ids, &MapSet.delete(&2, &1))
     }
+    |> shorten_window()
+  end
+
+  defp shorten_window(%__MODULE__{timer: nil} = state), do: state
+
+  defp shorten_window(%__MODULE__{timer: {_timer, _tag, interval}} = state) do
+    idle = state.runtime.flush_idle_interval_ms
+
+    if interval > idle and state.in_flight_inserts < state.runtime.commit_siblings do
+      %{state | timer: cancel(state.timer)} |> arm(idle)
+    else
+      state
+    end
   end
 
   defp await_in_flight(%__MODULE__{in_flight: 0} = state), do: state
@@ -929,14 +948,16 @@ defmodule Smolquery.BufferService.TableBuffer do
       state.byte_size + bytes > state.runtime.max_buffered_bytes
   end
 
-  defp schedule(%__MODULE__{timer: nil} = state) do
-    tag = make_ref()
-    timer = Process.send_after(self(), {:flush, tag}, flush_after(state))
-
-    %{state | timer: {timer, tag}}
-  end
+  defp schedule(%__MODULE__{timer: nil} = state), do: arm(state, flush_after(state))
 
   defp schedule(state), do: state
+
+  defp arm(state, interval) do
+    tag = make_ref()
+    timer = Process.send_after(self(), {:flush, tag}, interval)
+
+    %{state | timer: {timer, tag, interval}}
+  end
 
   defp flush_after(state) do
     if state.in_flight_inserts < state.runtime.commit_siblings do
@@ -948,7 +969,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp cancel(nil), do: nil
 
-  defp cancel({timer, _tag}) do
+  defp cancel({timer, _tag, _interval}) do
     Process.cancel_timer(timer)
 
     nil

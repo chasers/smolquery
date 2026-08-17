@@ -120,7 +120,9 @@ defmodule Smolquery.BufferService.Runtime do
   adaptive, after Postgres's `commit_delay`/`commit_siblings` (T-202). An
   accumulation window that opens with fewer than `commit_siblings` inserts
   already in flight closes after `flush_idle_interval_ms` instead of
-  `flush_interval_ms`. The wait only buys batching when other writers are
+  `flush_interval_ms`. A window that opened long re-arms with the idle
+  interval when a commit settles and the in-flight count falls below the
+  threshold (T-285). The wait only buys batching when other writers are
   active; at one writer it is pure ack latency. `commit_siblings: 0` turns
   the short window off. See `Smolquery.BufferService.TableBuffer` for what
   counts as in flight and when the choice is made.

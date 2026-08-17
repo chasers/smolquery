@@ -356,12 +356,14 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert {:ok, %{row_count: 1}} = Task.await(writer)
     end
 
-    test "a window that opens above commit_siblings holds the full interval", context do
+    test "a window armed long re-arms short when in flight settles below commit_siblings",
+         context do
       %{name: name} =
         start_buffer_service(context,
           flush_interval_ms: 60_000,
           flush_idle_interval_ms: 1,
-          commit_siblings: 1
+          commit_siblings: 1,
+          write_timeout_ms: 5_000
         )
 
       {:ok, _boot} = Client.write_batch(name, @table, batch(1..1))
@@ -388,13 +390,13 @@ defmodule Smolquery.BufferService.TableBufferTest do
       second = Task.async(fn -> Client.write_batch(name, @table, batch(3..3)) end)
       assert Eventually.until(fn -> accumulated_rows(name) == 1 end)
 
+      Process.sleep(50)
+      assert accumulated_rows(name) == 1
+
       send(committer, :release)
       Task.await(holder)
 
       assert {:ok, %{row_count: 1}} = Task.await(first)
-      assert accumulated_rows(name) == 1
-
-      assert Client.flush(name, @table) == :ok
       assert {:ok, %{row_count: 1}} = Task.await(second)
     end
   end
