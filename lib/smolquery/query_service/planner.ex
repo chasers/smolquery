@@ -119,7 +119,6 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster
   alias Smolquery.Engine.Connection
-  alias Smolquery.Engine.Result
   alias Smolquery.Identifier
   alias Smolquery.Partitions
   alias Smolquery.QueryService.Plan
@@ -132,13 +131,14 @@ defmodule Smolquery.QueryService.Planner do
   Plans `sql` against the catalog and the hot tier, as one consistent read.
 
   `connection` (an `Smolquery.Engine.Connection` server) is only used to
-  parse — `json_serialize_sql` runs there and nothing else does. The runner
-  passes its own job engine's connection, so parsing never queues behind
-  another job's scan.
+  parse — one round trip runs `json_serialize_sql` for the AST and derives
+  the statement's canonical text (`Plan.canonical_sql`, what the runner's
+  result budget wraps), and nothing else does. The runner passes its own job
+  engine's connection, so parsing never queues behind another job's scan.
   """
   @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
   def plan(%Runtime{} = runtime, connection, sql) do
-    with {:ok, ast} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
+    with {:ok, ast, canonical} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
          {:ok, statement} <- gate(ast),
          {:ok, refs} <- refs(statement),
          {:ok, snapshot} <-
@@ -147,7 +147,15 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, manifests} <- Trace.span(:manifests, fn -> manifests(runtime, refs) end) do
       {:ok,
        Trace.span(:build, fn ->
-         build(sql, snapshot, refs, tables, manifests, Pruner.conjuncts(statement, refs))
+         build(
+           sql,
+           canonical,
+           snapshot,
+           refs,
+           tables,
+           manifests,
+           Pruner.conjuncts(statement, refs)
+         )
        end)}
     end
   end
@@ -164,19 +172,28 @@ defmodule Smolquery.QueryService.Planner do
   @spec table_refs(GenServer.server(), String.t()) ::
           {:ok, [Catalog.table_ref()]} | {:error, term()}
   def table_refs(connection, sql) do
-    with {:ok, ast} <- serialize(connection, sql),
+    with {:ok, ast, _canonical} <- serialize(connection, sql),
          {:ok, statement} <- gate(ast) do
       refs(statement)
     end
   end
 
   defp serialize(connection, sql) do
+    quoted = Identifier.sql_string(sql)
+
     with {:ok, result} <-
            Connection.query(
              connection,
-             "SELECT json_serialize_sql(#{Identifier.sql_string(sql)})"
-           ) do
-      result |> Result.one!() |> JSON.decode()
+             "SELECT json_serialize_sql(#{quoted}), " <>
+               "CASE WHEN json_extract_string(json_serialize_sql(#{quoted}), '$.error') = 'false' " <>
+               "THEN json_deserialize_sql(json_serialize_sql(#{quoted})) END"
+           ),
+         [[json, canonical]] <- result.rows,
+         {:ok, ast} <- JSON.decode(json) do
+      {:ok, ast, canonical}
+    else
+      {:error, reason} -> {:error, reason}
+      rows when is_list(rows) -> {:error, {:invalid_query, rows}}
     end
   end
 
@@ -247,15 +264,22 @@ defmodule Smolquery.QueryService.Planner do
   defp resolve(runtime, refs, snapshot) do
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
       with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot),
-           {:ok, stats} <- Catalog.segment_stats(runtime.catalog, ref, snapshot) do
+           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot) do
         sealed = MapSet.new(paths, &Path.basename/1)
+        stats = segment_stats(runtime, ref, snapshot)
 
         {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed, stats: stats})}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp segment_stats(runtime, ref, snapshot) do
+    case Catalog.segment_stats(runtime.catalog, ref, snapshot) do
+      {:ok, stats} -> stats
+      {:error, _reason} -> :unavailable
+    end
   end
 
   defp manifests(_runtime, []), do: {:ok, %{}}
@@ -356,7 +380,7 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, snapshot, refs, tables, manifests, conjuncts) do
+  defp build(sql, canonical, snapshot, refs, tables, manifests, conjuncts) do
     members =
       Map.new(refs, fn ref ->
         {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
@@ -371,6 +395,7 @@ defmodule Smolquery.QueryService.Planner do
 
     %Plan{
       sql: sql,
+      canonical_sql: canonical,
       snapshot: snapshot,
       tables: refs,
       statements: statements,
@@ -380,29 +405,33 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp statistics(members, hot, tables) do
-    surviving = hot |> Map.values() |> List.flatten()
-
-    hot_tier =
-      Statistics.tier(
-        members |> Map.values() |> List.flatten() |> length(),
-        length(surviving),
-        Enum.sum_by(surviving, & &1["row_count"]),
-        Enum.sum_by(surviving, & &1["byte_size"])
-      )
-
     sealed = tables |> Map.values() |> Enum.map(& &1.stats)
 
-    sealed_files = Enum.sum_by(sealed, & &1.files)
+    if :unavailable in sealed do
+      nil
+    else
+      surviving = hot |> Map.values() |> List.flatten()
 
-    sealed_tier =
-      Statistics.tier(
-        sealed_files,
-        sealed_files,
-        Enum.sum_by(sealed, & &1.rows),
-        Enum.sum_by(sealed, & &1.bytes)
-      )
+      hot_tier =
+        Statistics.tier(
+          members |> Map.values() |> List.flatten() |> length(),
+          length(surviving),
+          Enum.sum_by(surviving, & &1["row_count"]),
+          Enum.sum_by(surviving, & &1["byte_size"])
+        )
 
-    Statistics.new(hot_tier, sealed_tier)
+      sealed_files = Enum.sum_by(sealed, & &1.files)
+
+      sealed_tier =
+        Statistics.tier(
+          sealed_files,
+          sealed_files,
+          Enum.sum_by(sealed, & &1.rows),
+          Enum.sum_by(sealed, & &1.bytes)
+        )
+
+      Statistics.new(hot_tier, sealed_tier)
+    end
   end
 
   defp include?(entry, sealed) do

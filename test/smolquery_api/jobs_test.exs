@@ -164,6 +164,20 @@ defmodule SmolqueryApi.JobControllerTest do
       assert %{"job" => %{"trace" => nil}} = JSON.decode!(response.resp_body)
     end
 
+    test "null options are absent options, not errors", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{
+          "query" => "SELECT 1 + 1 AS n",
+          "explain" => nil,
+          "trace" => nil
+        })
+
+      assert response.status == 200
+
+      assert %{"rows" => [%{"n" => 2}], "job" => %{"trace" => nil, "explain" => nil}} =
+               JSON.decode!(response.resp_body)
+    end
+
     test "a non-boolean trace is refused", %{name: name} do
       response =
         post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "trace" => "yes"})

@@ -20,8 +20,13 @@ defmodule Smolquery.QueryService.Trace do
   runner's pid is the emitter or among the emitter's callers. No job id has
   to thread through the planner for that to hold.
 
-  A collector that outlives its runner cannot leak: a handler whose table
-  died raises on insert, and telemetry detaches a raising handler.
+  A collector cannot outlive its runner: the runner detaches it in
+  `terminate/2`, and if the runner dies too hard for terminate to run, the
+  handler detaches itself on the next span it sees after its owner is gone.
+  The second path matters because the ancestry guard alone would never heal —
+  a dead owner makes the guard false for every future span, so the handler
+  would neither insert nor raise, and telemetry only auto-detaches a handler
+  that raises.
   """
 
   @event [:smolquery, :query, :span]
@@ -29,7 +34,9 @@ defmodule Smolquery.QueryService.Trace do
   @typedoc """
   One recorded phase: its name, start offset and duration in microseconds,
   and whatever the emitter attached (a manifest fetch carries its `url`).
-  Offsets are relative to the earliest span in the job's trace.
+  Offsets are relative to the earliest span in the job's trace — `stop/1`
+  rebases them. The raw telemetry event carries `start_us` as unrebased
+  `System.monotonic_time/1`, which is usually a large negative number.
   """
   @type span :: %{
           name: atom(),
@@ -74,20 +81,31 @@ defmodule Smolquery.QueryService.Trace do
     id = {__MODULE__, job_id}
     table = :ets.new(__MODULE__, [:public, :duplicate_bag])
 
-    :telemetry.attach(id, @event, &__MODULE__.handle_event/4, %{table: table, owner: owner})
+    :telemetry.attach(id, @event, &__MODULE__.handle_event/4, %{
+      id: id,
+      table: table,
+      owner: owner
+    })
 
     %{id: id, table: table}
   end
 
   @doc false
   @spec handle_event([atom()], map(), map(), map()) :: :ok
-  def handle_event(@event, measurements, meta, %{table: table, owner: owner}) do
-    if self() == owner or owner in Process.get(:"$callers", []) do
-      :ets.insert(
-        table,
-        {measurements.start_us, measurements.duration_us, Map.fetch!(meta, :phase),
-         Map.delete(meta, :phase)}
-      )
+  def handle_event(@event, measurements, meta, %{id: id, table: table, owner: owner}) do
+    cond do
+      self() == owner or owner in Process.get(:"$callers", []) ->
+        :ets.insert(
+          table,
+          {measurements.start_us, measurements.duration_us, Map.fetch!(meta, :phase),
+           Map.delete(meta, :phase)}
+        )
+
+      Process.alive?(owner) ->
+        :ok
+
+      true ->
+        :telemetry.detach(id)
     end
 
     :ok

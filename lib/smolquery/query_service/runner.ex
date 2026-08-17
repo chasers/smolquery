@@ -33,15 +33,15 @@ defmodule Smolquery.QueryService.Runner do
   materializes, which is the point. The `+ 1` is how a truncated result is
   told apart from one that exactly fits.
 
-  The SQL inside the wrap is the statement's canonical text
-  (`json_deserialize_sql(json_serialize_sql(...))` on the job's own engine),
-  not the user's bytes: a trailing semicolon or comment would break the
-  parenthesized form, and no textual strip can remove them safely — `--`
-  and `;` are literal characters inside a string. DuckDB's parser is the
-  only thing that knows the difference, and it is already the only parser
-  here. ORDER BY survives the wrap: DuckDB preserves a subquery's order
-  through the outer LIMIT, the same insertion-order guarantee paging
-  already leans on.
+  The SQL inside the wrap is the statement's canonical text, carried on the
+  plan (`Smolquery.QueryService.Plan.canonical_sql` — the planner derives it
+  in the same round trip that parses the query), not the user's bytes: a
+  trailing semicolon or comment would break the parenthesized form, and no
+  textual strip can remove them safely — `--` and `;` are literal
+  characters inside a string. DuckDB's parser is the only thing that knows
+  the difference, and it is already the only parser here. ORDER BY survives
+  the wrap: DuckDB preserves a subquery's order through the outer LIMIT,
+  the same insertion-order guarantee paging already leans on.
   """
 
   use GenServer, restart: :temporary
@@ -49,7 +49,6 @@ defmodule Smolquery.QueryService.Runner do
   alias Explorer.DataFrame
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
-  alias Smolquery.Engine.Result
   alias Smolquery.EngineSecrets
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
@@ -165,12 +164,17 @@ defmodule Smolquery.QueryService.Runner do
 
     {job, result} =
       case outcome do
-        {:ok, %{explain: explain} = done} when is_binary(explain) ->
-          {Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, explain),
-           nil}
+        {:ok, %{result: {:explain, text}} = done} ->
+          {Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, text), nil}
 
-        {:ok, %{snapshot: snapshot, frame: frame, duration_ms: duration, statistics: statistics}} ->
-          {Job.done(state.job, snapshot, DataFrame.n_rows(frame), duration, statistics), frame}
+        {:ok, %{result: {:frame, frame}} = done} ->
+          {Job.done(
+             state.job,
+             done.snapshot,
+             DataFrame.n_rows(frame),
+             done.duration_ms,
+             done.statistics
+           ), frame}
 
         {:error, reason} ->
           {Job.failed(state.job, reason), nil}
@@ -203,7 +207,16 @@ defmodule Smolquery.QueryService.Runner do
 
   @impl GenServer
   def terminate(_reason, state) do
+    stop_collector(state.collector)
     stop_engine(state.engine)
+  end
+
+  defp stop_collector(nil), do: :ok
+
+  defp stop_collector(collector) do
+    Trace.stop(collector)
+
+    :ok
   end
 
   defp start_engine(runtime) do
@@ -244,28 +257,28 @@ defmodule Smolquery.QueryService.Runner do
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan))
            end),
-         {:ok, outcome} <-
+         {:ok, result} <-
            Trace.span(:execute, fn ->
              outcome(connection, plan, runtime.result_max_rows, explain)
            end) do
       duration = System.monotonic_time(:millisecond) - started
 
       {:ok,
-       Map.merge(outcome, %{
+       %{
+         result: result,
          snapshot: plan.snapshot,
          duration_ms: duration,
          statistics: plan.statistics
-       })}
+       }}
     end
   end
 
   defp outcome(connection, plan, max_rows, nil) do
-    with {:ok, sql} <- bounded(connection, plan.sql, max_rows),
-         {:ok, frame} <- Connection.frame(connection, sql, [], :infinity) do
+    with {:ok, frame} <- Connection.frame(connection, bounded(plan, max_rows), [], :infinity) do
       if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
         {:error, {:result_too_large, max_rows}}
       else
-        {:ok, %{frame: frame, explain: nil}}
+        {:ok, {:frame, frame}}
       end
     end
   end
@@ -273,26 +286,26 @@ defmodule Smolquery.QueryService.Runner do
   defp outcome(connection, plan, _max_rows, explain) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
-      {:ok, %{frame: nil, explain: explain_text(result)}}
+      {:ok, {:explain, explain_text(result)}}
     end
   end
 
-  defp bounded(_connection, sql, :infinity), do: {:ok, sql}
+  defp bounded(plan, :infinity), do: plan.sql
 
-  defp bounded(connection, sql, max_rows) do
-    canonical =
-      "SELECT json_deserialize_sql(json_serialize_sql(#{Smolquery.Identifier.sql_string(sql)}))"
-
-    with {:ok, result} <- Connection.query(connection, canonical, [], :infinity) do
-      {:ok, "SELECT * FROM (#{Result.one!(result)}) LIMIT #{max_rows + 1}"}
-    end
-  end
+  defp bounded(plan, max_rows),
+    do: "SELECT * FROM (#{plan.canonical_sql}) LIMIT #{max_rows + 1}"
 
   defp explain_sql(:plan, sql), do: "EXPLAIN " <> sql
   defp explain_sql(:analyze, sql), do: "EXPLAIN ANALYZE " <> sql
 
   defp explain_text(result) do
-    Enum.map_join(result.rows, "\n", fn row -> row |> List.last() |> to_string() end)
+    Enum.map_join(result.rows, "\n", fn row ->
+      result.columns
+      |> Enum.zip(row)
+      |> Map.new()
+      |> Map.fetch!("explain_value")
+      |> to_string()
+    end)
   end
 
   defp engine_secrets(%Runtime{} = runtime) do
