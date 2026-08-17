@@ -35,7 +35,8 @@ defmodule SmolqueryApi.JobController do
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, _params) do
     with {:ok, sql} <- sql(conn.body_params),
-         {:ok, job} <- Client.submit(query_name(conn), sql, submit_opts(conn.body_params)) do
+         {:ok, opts} <- submit_opts(conn.body_params),
+         {:ok, job} <- Client.submit(query_name(conn), sql, opts) do
       Json.send_json(conn, 200, job_json(job, false))
     else
       {:error, reason} -> query_error(conn, reason)
@@ -69,6 +70,14 @@ defmodule SmolqueryApi.JobController do
       case Client.fetch(query_name(conn), job_id) do
         {:ok, %Job{state: :done} = job, %DataFrame{} = frame} ->
           Json.send_json(conn, 200, page_body(job, frame, offset, max_results))
+
+        {:ok, %Job{state: :done, explain: explain}, _frame} when is_binary(explain) ->
+          Errors.send_error(
+            conn,
+            409,
+            "FAILED_PRECONDITION",
+            "an explain job has no result rows; read explain from GET /v1/jobs/:id"
+          )
 
         {:ok, %Job{state: state}, _frame} when state in [:pending, :running] ->
           Json.send_json(conn, 200, %{"complete" => false, "rows" => []})
@@ -110,6 +119,7 @@ defmodule SmolqueryApi.JobController do
       "rowCount" => job.row_count,
       "durationMs" => job.duration_ms,
       "statistics" => statistics_json(job.statistics),
+      "explain" => job.explain,
       "error" => error_json(job.error),
       "resultsAvailable" => results_available
     }
@@ -189,17 +199,28 @@ defmodule SmolqueryApi.JobController do
 
   @doc """
   Submit options a request body may carry.
-  """
-  @spec submit_opts(map()) :: keyword()
-  def submit_opts(body) do
-    case body do
-      %{"timeoutMs" => timeout} when is_integer(timeout) and timeout > 0 ->
-        [timeout_ms: timeout]
 
-      _no_timeout ->
-        []
+  `timeoutMs` bounds the job; `explain` (`"plan"` or `"analyze"`) asks for
+  the engine's plan instead of rows. Any other `explain` value is refused —
+  silently running the query a caller asked to explain would be the worst
+  possible reading of a typo.
+  """
+  @spec submit_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_param, String.t()}}
+  def submit_opts(body) do
+    with {:ok, explain} <- explain_opt(body) do
+      {:ok, timeout_opt(body) ++ explain}
     end
   end
+
+  defp timeout_opt(%{"timeoutMs" => timeout}) when is_integer(timeout) and timeout > 0,
+    do: [timeout_ms: timeout]
+
+  defp timeout_opt(_body), do: []
+
+  defp explain_opt(%{"explain" => "plan"}), do: {:ok, [explain: :plan]}
+  defp explain_opt(%{"explain" => "analyze"}), do: {:ok, [explain: :analyze]}
+  defp explain_opt(%{"explain" => _other}), do: {:error, {:invalid_param, "explain"}}
+  defp explain_opt(_body), do: {:ok, []}
 
   @doc """
   The body's `query` field.

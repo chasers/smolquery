@@ -34,7 +34,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Segments.Store
 
-  @type option :: {:timeout_ms, pos_integer()}
+  @type option :: {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -82,6 +82,7 @@ defmodule Smolquery.QueryService.Runner do
     state = %{
       runtime: runtime,
       job: job,
+      explain: Keyword.get(opts, :explain),
       engine: nil,
       task: nil,
       result: nil,
@@ -97,8 +98,9 @@ defmodule Smolquery.QueryService.Runner do
       {:ok, engine} ->
         runtime = state.runtime
         sql = state.job.sql
+        explain = state.explain
         connection = engine.connection
-        task = Task.async(fn -> execute(runtime, connection, sql) end)
+        task = Task.async(fn -> execute(runtime, connection, sql, explain) end)
 
         {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
 
@@ -134,6 +136,10 @@ defmodule Smolquery.QueryService.Runner do
 
     {job, result} =
       case outcome do
+        {:ok, %{explain: explain} = done} when is_binary(explain) ->
+          {Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, explain),
+           nil}
+
         {:ok, %{snapshot: snapshot, frame: frame, duration_ms: duration, statistics: statistics}} ->
           {Job.done(state.job, snapshot, DataFrame.n_rows(frame), duration, statistics), frame}
 
@@ -201,22 +207,41 @@ defmodule Smolquery.QueryService.Runner do
   defp extensions(%Runtime{engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
 
-  defp execute(runtime, connection, sql) do
+  defp execute(runtime, connection, sql, explain) do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
          :ok <- run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan)),
-         {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
+         {:ok, outcome} <- outcome(connection, plan, explain) do
       duration = System.monotonic_time(:millisecond) - started
 
       {:ok,
-       %{
+       Map.merge(outcome, %{
          snapshot: plan.snapshot,
-         frame: frame,
          duration_ms: duration,
          statistics: plan.statistics
-       }}
+       })}
     end
+  end
+
+  defp outcome(connection, plan, nil) do
+    with {:ok, frame} <- Connection.frame(connection, plan.sql, [], :infinity) do
+      {:ok, %{frame: frame, explain: nil}}
+    end
+  end
+
+  defp outcome(connection, plan, explain) do
+    with {:ok, result} <-
+           Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
+      {:ok, %{frame: nil, explain: explain_text(result)}}
+    end
+  end
+
+  defp explain_sql(:plan, sql), do: "EXPLAIN " <> sql
+  defp explain_sql(:analyze, sql), do: "EXPLAIN ANALYZE " <> sql
+
+  defp explain_text(result) do
+    Enum.map_join(result.rows, "\n", fn row -> row |> List.last() |> to_string() end)
   end
 
   defp engine_secrets(%Runtime{} = runtime) do
