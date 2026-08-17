@@ -35,25 +35,37 @@ defmodule Smolquery.StorageService.Compactor do
   parallelism by table count: one node owned a hot table's whole backlog,
   carried every merge's memory pressure alone, and OOMed while its peers
   idled (T-269). The unit of ownership is now `{table_ref, bucket}`, where a
-  segment's bucket is its ULID timestamp divided by `compact_bucket_ms`. A
-  node lists every table's segments — a cheap metadata read — but sizes and
-  merges only the buckets the ring hands it, so footer I/O and merge work
-  both spread across the fleet. Bucket candidate sets are disjoint, so two
-  nodes cannot plan the same group by construction; the residual two-owner
-  window is a ring change mid-sweep, the same window the per-table gate had.
-  Ownership is checked per bucket immediately before planning, rather than
-  once per sweep, to keep that window narrow — a sweep merges serially and
-  can run for minutes. What makes the overlap survivable is the catalog's
-  registration diff being re-derived inside every commit retry
-  (`Smolquery.Catalog.DuckLake`), so the losing node's retry re-reads what
-  the winner committed instead of replaying a stale swap.
+  segment's bucket is its ULID timestamp divided by `compact_bucket_ms`.
+  Disjointness holds only while every storage node runs the same
+  `compact_bucket_ms`: divergent values during a rolling config change give
+  two nodes overlapping owned sets until the rollout completes, so change
+  the value fleet-wide, not node by node. The overlap is survivable (below)
+  but wasteful while it lasts.
 
-  A group never crosses a bucket boundary, so merged output stays as
-  time-local as its inputs and min/max pruning does not erode. The costs are
-  accepted and small: a run spanning a boundary never merges together, a
-  bucket can strand a straggler under `compact_min_inputs`, and a path whose
-  basename is not a ULID has no bucket, so it silently stops being a
-  compaction candidate (it could never derive an output key anyway).
+  Every node lists every table's segments each sweep — the listing is what
+  makes owned buckets knowable, so fleet-wide listing load is N x T catalog
+  queries per interval where the per-table gate cost T. The listing is
+  metadata-only, but its cost scales with segment count; sizing and merging
+  stay owned-only, so footer I/O and merge work spread across the fleet.
+
+  Ownership is snapshotted once per table, before sizing: sizing a large
+  backlog takes chunked engine calls and can run for minutes, so a ring
+  change mid-scan re-opens the two-owner overlap for later buckets — the
+  same window the per-table gate had across a sweep. What makes the overlap
+  survivable is the catalog's registration diff being re-derived inside
+  every commit retry (`Smolquery.Catalog.DuckLake`), so the losing node's
+  retry re-reads what the winner committed instead of replaying a stale
+  swap.
+
+  A group crosses a bucket boundary in exactly one case: a bucket that
+  cannot meet `compact_min_inputs` alone rolls its candidates forward into
+  this node's next owned bucket, oldest first, so a quiet table that seals
+  one small file per bucket still compacts instead of accreting forever.
+  Cross-node disjointness holds — a carry only ever holds this node's own
+  candidates — and everything else stays bucket-local, so merged output
+  stays as time-local as its inputs and min/max pruning does not erode. A
+  path whose basename is not a ULID has no bucket, so it silently stops
+  being a compaction candidate (it could never derive an output key anyway).
   The merged segment's id derives from its newest input's timestamp, so a
   still-undersized output lands back in its own bucket and the same node
   keeps converging it.
@@ -239,6 +251,13 @@ defmodule Smolquery.StorageService.Compactor do
   calibration. An OOM at a cap that was not probing — a level that
   previously held — logs at warning, because it means memory pressure
   changed, not that the compactor is learning.
+
+  Cap state is per node and in-memory. Under bucket-sharded ownership
+  (T-269) each node calibrates a table independently, so a fleet of N pays
+  up to N calibration OOMs per table, and a restart or a bucket moving to a
+  fresh node re-enters calibration — a regression arriving at that moment
+  logs at info, not warning. The calibration line says so, and the warning
+  fires on the recurrence.
   """
   @spec adjusted_row_caps(
           %{Catalog.table_ref() => map()},
@@ -256,15 +275,17 @@ defmodule Smolquery.StorageService.Compactor do
           _no_override -> caps
         end
 
-      {:failed, %{table: table, reason: reason}}, caps ->
-        if merge_oom?(reason), do: tighten(caps, table, resolved), else: caps
+      {:failed, %{table: table, reason: reason} = failure}, caps ->
+        if merge_oom?(reason),
+          do: tighten(caps, table, resolved, Map.get(failure, :rows)),
+          else: caps
 
       _not_owned, caps ->
         caps
     end)
   end
 
-  defp tighten(caps, table, resolved) do
+  defp tighten(caps, table, resolved, rows) do
     {attempted, patience, kind} =
       case caps do
         %{^table => %{cap: cap, patience: patience, probe: probe}} ->
@@ -276,29 +297,35 @@ defmodule Smolquery.StorageService.Compactor do
       end
 
     cap = max(div(attempted, 2), @row_cap_floor)
-    log_tighten(kind, table, attempted, cap)
+    log_tighten(kind, table, oom_phrase(rows, attempted), cap)
 
     Map.put(caps, table, %{cap: cap, streak: 0, patience: patience, probe: false})
   end
 
-  defp log_tighten(:probe, table, attempted, cap) do
+  defp oom_phrase(nil, attempted), do: "a merge OOM under the #{attempted}-row cap"
+
+  defp oom_phrase(rows, attempted),
+    do: "a merge of #{rows} rows OOMed under the #{attempted}-row cap"
+
+  defp log_tighten(:probe, table, oom, cap) do
     Logger.info(
-      "compaction row-cap probe of #{inspect(table)} found its limit: a merge OOM at " <>
-        "#{attempted} rows is expected while probing; the cap returns to #{cap}"
+      "compaction row-cap probe of #{inspect(table)} found its limit: #{oom} " <>
+        "(expected while probing); the cap returns to #{cap}"
     )
   end
 
-  defp log_tighten(:calibration, table, attempted, cap) do
+  defp log_tighten(:calibration, table, oom, cap) do
     Logger.info(
-      "compaction row cap of #{inspect(table)} is calibrating: first merge OOM at " <>
-        "#{attempted} rows; the cap tightens to #{cap}"
+      "compaction row cap of #{inspect(table)} is calibrating: first merge OOM " <>
+        "on this node (#{oom}); the cap tightens to #{cap}. A restart or a ring " <>
+        "change also lands here, so recurrence at this cap logs as a warning"
     )
   end
 
-  defp log_tighten(:regression, table, attempted, cap) do
+  defp log_tighten(:regression, table, oom, cap) do
     Logger.warning(
       "unexpected compaction merge OOM under the already-tightened row cap of " <>
-        "#{inspect(table)}: #{attempted} -> #{cap} rows; " <>
+        "#{inspect(table)}: #{oom}; the cap tightens to #{cap} — " <>
         "the compaction engine memory limit may be too small"
     )
   end
@@ -363,8 +390,8 @@ defmodule Smolquery.StorageService.Compactor do
     routing = Routing.resolve(runtime.name)
 
     with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
-         [_ | _] = buckets <- owned_buckets(runtime, routing, table_ref, paths),
-         {:ok, group} <- first_group(runtime, buckets) do
+         [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
+         {:ok, group} <- plan(runtime, owned) do
       swap(runtime, table_ref, group, started_at)
     else
       [] -> :skip
@@ -373,13 +400,15 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp owned_buckets(runtime, routing, table_ref, paths) do
+  defp owned_paths(runtime, routing, table_ref, paths) do
     paths
-    |> Enum.group_by(&bucket(&1, runtime.compact_bucket_ms))
-    |> Map.delete(:error)
-    |> Enum.sort()
-    |> Enum.filter(fn {bucket, _paths} -> Routing.own?(routing, {table_ref, bucket}) end)
-    |> Enum.map(fn {_bucket, bucket_paths} -> bucket_paths end)
+    |> Enum.sort_by(&Path.basename/1)
+    |> Enum.filter(fn path ->
+      case bucket(path, runtime.compact_bucket_ms) do
+        :error -> false
+        bucket -> Routing.own?(routing, {table_ref, bucket})
+      end
+    end)
   end
 
   defp bucket(path, bucket_ms) do
@@ -389,22 +418,34 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp first_group(runtime, buckets) do
-    Enum.reduce_while(buckets, :skip, fn paths, :skip ->
-      case plan(runtime, paths) do
-        {:ok, group} -> {:halt, {:ok, group}}
-        :skip -> {:cont, :skip}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  defp plan(runtime, paths) do
-    if length(paths) < runtime.compact_min_inputs do
+  defp plan(runtime, owned) do
+    if length(owned) < runtime.compact_min_inputs do
       :skip
     else
-      with {:ok, undersized} <- undersized(runtime, Enum.sort_by(paths, &Path.basename/1)) do
-        group(runtime, undersized)
+      plan_undersized(runtime, owned)
+    end
+  end
+
+  defp plan_undersized(runtime, owned) do
+    with {:ok, undersized} <- undersized(runtime, owned) do
+      undersized
+      |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
+      |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
+      |> carried_group(runtime, [])
+    end
+  end
+
+  defp carried_group([], _runtime, _carry), do: :skip
+
+  defp carried_group([bucket_entries | rest], runtime, carry) do
+    candidates = carry ++ bucket_entries
+
+    if length(candidates) < runtime.compact_min_inputs do
+      carried_group(rest, runtime, candidates)
+    else
+      case group(runtime, candidates) do
+        :skip -> carried_group(rest, runtime, candidates)
+        {:ok, group} -> {:ok, group}
       end
     end
   end
@@ -523,7 +564,7 @@ defmodule Smolquery.StorageService.Compactor do
       {:ok,
        %{table: table_ref, key: key, replaced: length(paths), rows: row_count, snapshot: snapshot}}
     else
-      {:error, reason} -> failed(runtime, table_ref, reason, started_at)
+      {:error, reason} -> failed(runtime, table_ref, reason, started_at, row_count)
     end
   end
 
@@ -560,7 +601,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp failed(runtime, table_ref, reason, started_at) do
+  defp failed(runtime, table_ref, reason, started_at, rows \\ nil) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
     :telemetry.execute(
@@ -571,7 +612,9 @@ defmodule Smolquery.StorageService.Compactor do
 
     recycle_on_exit(runtime, reason)
 
-    {:failed, %{table: table_ref, reason: reason}}
+    failure = %{table: table_ref, reason: reason}
+
+    {:failed, if(rows, do: Map.put(failure, :rows, rows), else: failure)}
   end
 
   @doc """

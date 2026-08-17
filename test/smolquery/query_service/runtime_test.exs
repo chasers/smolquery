@@ -53,7 +53,9 @@ defmodule Smolquery.QueryService.RuntimeTest do
 
     test "read_engine_threads defaults to nil and takes an override (T-279)" do
       assert Runtime.new(name: __MODULE__.ThreadsDefault).read_engine_threads == nil
-      assert Runtime.new(name: __MODULE__.Threads, read_engine_threads: 4).read_engine_threads == 4
+
+      assert Runtime.new(name: __MODULE__.Threads, read_engine_threads: 4).read_engine_threads ==
+               4
     end
   end
 

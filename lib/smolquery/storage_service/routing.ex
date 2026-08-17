@@ -48,6 +48,13 @@ defmodule Smolquery.StorageService.Routing do
 
   @type t :: %__MODULE__{name: atom(), ring: Ring.t()}
 
+  @typedoc """
+  What ownership is checked for: a table for seal, GC, and retention work,
+  or a `{table_ref, bucket}` pair for compaction (T-269), where the bucket
+  is a segment ULID's timestamp over `compact_bucket_ms`.
+  """
+  @type key :: Store.table_ref() | {Store.table_ref(), non_neg_integer()}
+
   @doc """
   The routing for an instance.
   """
@@ -60,16 +67,16 @@ defmodule Smolquery.StorageService.Routing do
   end
 
   @doc """
-  The node owning `table_ref`'s seal work.
+  The node owning `key`'s work.
   """
-  @spec owner(t(), Store.table_ref()) :: node()
-  def owner(%__MODULE__{ring: ring}, table_ref), do: Ring.owner(ring, table_ref)
+  @spec owner(t(), key()) :: node()
+  def owner(%__MODULE__{ring: ring}, key), do: Ring.owner(ring, key)
 
   @doc """
-  Whether this node owns `table_ref`'s seal work right now.
+  Whether this node owns `key`'s work right now.
   """
-  @spec own?(t(), Store.table_ref()) :: boolean()
-  def own?(%__MODULE__{} = routing, table_ref), do: owner(routing, table_ref) == node()
+  @spec own?(t(), key()) :: boolean()
+  def own?(%__MODULE__{} = routing, key), do: owner(routing, key) == node()
 
   @doc """
   Drops a cached routing, so the next resolve rebuilds it from configuration.
