@@ -1,5 +1,13 @@
 defmodule Smolquery.LifecycleTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  @moduledoc """
+  Runs in the serial phase on purpose: these tests execute real
+  `[:smolquery, :buffer, :commit]` (and friends) telemetry events, which bump
+  the same node-wide counters `Smolquery.TelemetryTest` asserts exact deltas
+  on. Concurrent with the async phase, those emissions race its
+  snapshot-then-assert windows.
+  """
 
   alias Smolquery.Lifecycle
 
