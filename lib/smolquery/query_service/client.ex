@@ -41,6 +41,8 @@ defmodule Smolquery.QueryService.Client do
   @type option ::
           {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze} | {:trace, boolean()}
 
+  @submit_option_keys [:timeout_ms, :explain, :trace]
+
   @doc """
   Runs `sql` and waits for its result.
 
@@ -78,7 +80,7 @@ defmodule Smolquery.QueryService.Client do
     with {:ok, runtime} <- runtime(name),
          :ok <- admit(runtime) do
       job = Job.new(sql)
-      spec = {Runner, {runtime, job, Keyword.take(opts, [:timeout_ms, :explain, :trace])}}
+      spec = {Runner, {runtime, job, Keyword.take(opts, @submit_option_keys)}}
 
       case DynamicSupervisor.start_child(
              {:via, PartitionSupervisor, {Runtime.runners(name), job.id}},

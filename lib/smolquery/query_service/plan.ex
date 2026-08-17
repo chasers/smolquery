@@ -12,7 +12,12 @@ defmodule Smolquery.QueryService.Plan do
   and the pruner, keyed by table: their row counts and stats are what query
   statistics and pruning decisions are made of. `statistics` is those
   decisions counted (`Smolquery.QueryService.Statistics`) — what the plan
-  reads, per tier, reported out with the finished job.
+  reads, per tier, reported out with the finished job; `nil` when the
+  catalog could not answer the sizes, because statistics are reporting and
+  must not fail a query that would have run. `canonical_sql` is the
+  statement's text as DuckDB's parser re-emits it — no comments, no
+  trailing semicolon — which is what makes the runner's result-budget wrap
+  safe to parenthesize.
   """
 
   alias Smolquery.BufferService.HotClient
@@ -20,10 +25,11 @@ defmodule Smolquery.QueryService.Plan do
   alias Smolquery.QueryService.Statistics
 
   @enforce_keys [:sql, :snapshot]
-  defstruct [:sql, :snapshot, :statistics, tables: [], statements: [], hot: %{}]
+  defstruct [:sql, :canonical_sql, :snapshot, :statistics, tables: [], statements: [], hot: %{}]
 
   @type t :: %__MODULE__{
           sql: String.t(),
+          canonical_sql: String.t() | nil,
           snapshot: Catalog.snapshot(),
           tables: [Catalog.table_ref()],
           statements: [String.t()],

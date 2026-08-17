@@ -43,6 +43,21 @@ defmodule Smolquery.QueryService.TraceTest do
       assert Trace.stop(collector) == []
     end
 
+    test "a collector whose owner died detaches itself on the next span" do
+      owner = spawn(fn -> :ok end)
+      ref = Process.monitor(owner)
+      assert_receive {:DOWN, ^ref, :process, ^owner, _reason}
+
+      collector = Trace.attach("job-dead", owner)
+
+      Trace.span(:serialize, fn -> :ok end)
+
+      handler_ids =
+        [:smolquery, :query, :span] |> :telemetry.list_handlers() |> Enum.map(& &1.id)
+
+      refute collector.id in handler_ids
+    end
+
     test "stopping detaches: later spans go nowhere and the table is gone" do
       collector = Trace.attach("job-3", self())
 

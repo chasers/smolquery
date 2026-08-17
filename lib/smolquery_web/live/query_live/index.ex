@@ -98,9 +98,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp explain_mode(_mode), do: :plan
 
   defp submit_or_warn(socket, opts) do
-    case String.trim(socket.assigns.sql) do
-      "" -> {:noreply, assign(socket, :run_error, "Write some SQL first")}
-      _sql -> submit(socket, opts)
+    cond do
+      running?(socket.assigns.job) ->
+        {:noreply, socket}
+
+      String.trim(socket.assigns.sql) == "" ->
+        {:noreply, assign(socket, :run_error, "Write some SQL first")}
+
+      true ->
+        submit(socket, opts)
     end
   end
 

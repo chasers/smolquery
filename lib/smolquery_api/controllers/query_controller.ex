@@ -85,9 +85,8 @@ defmodule SmolqueryApi.QueryController do
 
   defp error_message(%Job{error: {:invalid_query, message}}) when is_binary(message), do: message
 
-  defp error_message(%Job{error: {:result_too_large, max}}) do
-    "result exceeded result_max_rows (#{max}); add a LIMIT or aggregate the query"
-  end
+  defp error_message(%Job{error: {:result_too_large, max}}),
+    do: JobController.result_too_large_message(max)
 
   defp error_message(%Job{error: error}), do: inspect(error)
 

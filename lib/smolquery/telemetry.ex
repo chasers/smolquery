@@ -45,7 +45,9 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
                                           — one per query phase (Smolquery.QueryService.Trace);
-                                          not aggregated here, collected per job when tracing
+                                          not aggregated here, collected per job when tracing.
+                                          start_us is raw monotonic time (usually negative);
+                                          only a collected trace rebases it to an offset
   """
 
   use GenServer

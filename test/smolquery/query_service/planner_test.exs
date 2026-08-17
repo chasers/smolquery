@@ -325,6 +325,27 @@ defmodule Smolquery.QueryService.PlannerTest do
              }
     end
 
+    test "a stats read failing degrades statistics to nil, not the query" do
+      runtime =
+        runtime(
+          [entry("01A")],
+          answers: [stats: %{{@table, @snapshot} => {:error, :metadata_locked}}]
+        )
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      assert plan.statistics == nil
+      assert [%{"id" => "01A"}] = plan.hot[@table]
+    end
+
+    test "the plan carries the statement's canonical text" do
+      runtime = runtime([])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT 1 AS n; -- trailing")
+
+      assert plan.canonical_sql == "SELECT 1 AS n"
+    end
+
     test "a query touching no tables weighs nothing" do
       runtime = runtime([])
 

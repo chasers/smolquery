@@ -58,7 +58,10 @@ defmodule Smolquery.Test.FixedCatalog do
   def segment_stats(answers, table, snapshot) do
     case Map.fetch(answers, :stats) do
       {:ok, stats} ->
-        {:ok, Map.get(stats, {table, snapshot}, %{files: 0, rows: 0, bytes: 0})}
+        case Map.get(stats, {table, snapshot}, %{files: 0, rows: 0, bytes: 0}) do
+          {:error, _reason} = error -> error
+          sizes -> {:ok, sizes}
+        end
 
       :error ->
         with {:ok, paths} <- segments(answers, table, snapshot) do

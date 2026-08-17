@@ -238,11 +238,12 @@ defmodule SmolqueryApi.JobController do
 
   defp explain_opt(%{"explain" => "plan"}), do: {:ok, [explain: :plan]}
   defp explain_opt(%{"explain" => "analyze"}), do: {:ok, [explain: :analyze]}
+  defp explain_opt(%{"explain" => nil}), do: {:ok, []}
   defp explain_opt(%{"explain" => _other}), do: {:error, {:invalid_param, "explain"}}
   defp explain_opt(_body), do: {:ok, []}
 
   defp trace_opt(%{"trace" => true}), do: {:ok, [trace: true]}
-  defp trace_opt(%{"trace" => false}), do: {:ok, []}
+  defp trace_opt(%{"trace" => value}) when value in [false, nil], do: {:ok, []}
   defp trace_opt(%{"trace" => _other}), do: {:error, {:invalid_param, "trace"}}
   defp trace_opt(_body), do: {:ok, []}
 
@@ -319,11 +320,18 @@ defmodule SmolqueryApi.JobController do
     milliseconds |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
   end
 
+  @doc """
+  The caller-facing message for a result past `result_max_rows`, shared by
+  the sync and async routes so their wording cannot drift.
+  """
+  @spec result_too_large_message(pos_integer()) :: String.t()
+  def result_too_large_message(max),
+    do: "result exceeded result_max_rows (#{max}); add a LIMIT or aggregate the query"
+
   defp error_json(nil), do: nil
   defp error_json({:invalid_query, message}) when is_binary(message), do: message
 
-  defp error_json({:result_too_large, max}),
-    do: "result exceeded result_max_rows (#{max}); add a LIMIT or aggregate the query"
+  defp error_json({:result_too_large, max}), do: result_too_large_message(max)
 
   defp error_json(error) when is_binary(error), do: error
   defp error_json(error), do: inspect(error)

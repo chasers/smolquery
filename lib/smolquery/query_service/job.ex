@@ -79,17 +79,8 @@ defmodule Smolquery.QueryService.Job do
   """
   @spec done(t(), Catalog.snapshot(), non_neg_integer(), non_neg_integer(), Statistics.t() | nil) ::
           t()
-  def done(%__MODULE__{} = job, snapshot, row_count, duration_ms, statistics) do
-    %{
-      job
-      | state: :done,
-        snapshot: snapshot,
-        row_count: row_count,
-        duration_ms: duration_ms,
-        statistics: statistics,
-        finished_at: System.system_time(:millisecond)
-    }
-  end
+  def done(%__MODULE__{} = job, snapshot, row_count, duration_ms, statistics),
+    do: finish(job, snapshot, duration_ms, statistics, row_count: row_count)
 
   @doc """
   The job, finished with a query plan instead of rows.
@@ -102,16 +93,21 @@ defmodule Smolquery.QueryService.Job do
   """
   @spec explained(t(), Catalog.snapshot(), non_neg_integer(), Statistics.t() | nil, String.t()) ::
           t()
-  def explained(%__MODULE__{} = job, snapshot, duration_ms, statistics, explain) do
-    %{
-      job
-      | state: :done,
-        snapshot: snapshot,
-        duration_ms: duration_ms,
-        statistics: statistics,
-        explain: explain,
-        finished_at: System.system_time(:millisecond)
-    }
+  def explained(%__MODULE__{} = job, snapshot, duration_ms, statistics, explain),
+    do: finish(job, snapshot, duration_ms, statistics, explain: explain)
+
+  defp finish(%__MODULE__{} = job, snapshot, duration_ms, statistics, fields) do
+    struct!(
+      %{
+        job
+        | state: :done,
+          snapshot: snapshot,
+          duration_ms: duration_ms,
+          statistics: statistics,
+          finished_at: System.system_time(:millisecond)
+      },
+      fields
+    )
   end
 
   @doc """
