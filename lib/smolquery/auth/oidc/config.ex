@@ -24,8 +24,14 @@ defmodule Smolquery.Auth.OIDC.Config do
     :algorithms,
     :clock_skew,
     :claim_capabilities,
+    :typ_allowlist,
+    :required_claims,
+    :max_token_bytes,
+    :max_segment_bytes,
+    :iat_future_seconds,
     :discovery_max_age_ms,
     :jwks_max_age_ms,
+    :forced_refresh_cooldown_ms,
     :refresh_failure_backoff_ms,
     :connect_timeout_ms,
     :receive_timeout_ms,
@@ -36,6 +42,7 @@ defmodule Smolquery.Auth.OIDC.Config do
   @type claim_capabilities :: %{
           optional(String.t()) => %{optional(String.t()) => [Context.capability()]}
         }
+  @type required_claims :: %{optional(String.t()) => [String.t()]}
   @type t :: %__MODULE__{
           issuer: String.t(),
           api_audience: String.t() | nil,
@@ -48,8 +55,14 @@ defmodule Smolquery.Auth.OIDC.Config do
           algorithms: [String.t()],
           clock_skew: non_neg_integer(),
           claim_capabilities: claim_capabilities(),
+          typ_allowlist: [String.t()],
+          required_claims: required_claims(),
+          max_token_bytes: pos_integer(),
+          max_segment_bytes: pos_integer(),
+          iat_future_seconds: non_neg_integer(),
           discovery_max_age_ms: non_neg_integer(),
           jwks_max_age_ms: non_neg_integer(),
+          forced_refresh_cooldown_ms: pos_integer(),
           refresh_failure_backoff_ms: pos_integer(),
           connect_timeout_ms: pos_integer(),
           receive_timeout_ms: pos_integer(),
@@ -62,11 +75,17 @@ defmodule Smolquery.Auth.OIDC.Config do
     clock_skew: 30,
     discovery_max_age_ms: 3_600_000,
     jwks_max_age_ms: 3_600_000,
+    forced_refresh_cooldown_ms: 1_000,
     refresh_failure_backoff_ms: 1_000,
     connect_timeout_ms: 2_000,
     receive_timeout_ms: 5_000,
     request_timeout_ms: 10_000,
     max_body_bytes: 1_048_576,
+    typ_allowlist: [],
+    required_claims: %{},
+    max_token_bytes: 65_536,
+    max_segment_bytes: 32_768,
+    iat_future_seconds: 300,
     web_client_auth_method: :client_secret_basic,
     web_scopes: ["openid"],
     claim_capabilities: %{}
@@ -87,12 +106,15 @@ defmodule Smolquery.Auth.OIDC.Config do
 
     web_client_id = web_client_id(config, role)
 
+    :ok = distinct_audiences(config)
     {web_origin, web_redirect_uri} = web_urls(config, role)
     web_scopes = web_scopes(config, role)
     auth_method = config |> Keyword.fetch!(:web_client_auth_method) |> auth_method!()
     web_client_secret = client_secret(config, auth_method, role)
     algorithms = algorithms!(Keyword.fetch!(config, :algorithms))
     claim_capabilities = claim_capabilities!(Keyword.fetch!(config, :claim_capabilities))
+
+    {typ_allowlist, required_claims} = token_profile(config, role)
 
     %__MODULE__{
       issuer: issuer,
@@ -106,6 +128,29 @@ defmodule Smolquery.Auth.OIDC.Config do
       algorithms: algorithms,
       clock_skew: bounded_integer!(config, :clock_skew, "SMOLQUERY_OIDC_CLOCK_SKEW", 300),
       claim_capabilities: claim_capabilities,
+      typ_allowlist: typ_allowlist,
+      required_claims: required_claims,
+      max_token_bytes:
+        positive_bounded_integer!(
+          config,
+          :max_token_bytes,
+          "SMOLQUERY_OIDC_MAX_TOKEN_BYTES",
+          1_048_576
+        ),
+      max_segment_bytes:
+        positive_bounded_integer!(
+          config,
+          :max_segment_bytes,
+          "SMOLQUERY_OIDC_MAX_TOKEN_SEGMENT_BYTES",
+          524_288
+        ),
+      iat_future_seconds:
+        bounded_integer!(
+          config,
+          :iat_future_seconds,
+          "SMOLQUERY_OIDC_IAT_FUTURE_SECONDS",
+          86_400
+        ),
       discovery_max_age_ms:
         bounded_integer!(
           config,
@@ -115,6 +160,13 @@ defmodule Smolquery.Auth.OIDC.Config do
         ),
       jwks_max_age_ms:
         bounded_integer!(config, :jwks_max_age_ms, "SMOLQUERY_OIDC_JWKS_MAX_AGE_MS", 86_400_000),
+      forced_refresh_cooldown_ms:
+        positive_bounded_integer!(
+          config,
+          :forced_refresh_cooldown_ms,
+          "SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS",
+          86_400_000
+        ),
       refresh_failure_backoff_ms:
         positive_bounded_integer!(
           config,
@@ -186,6 +238,60 @@ defmodule Smolquery.Auth.OIDC.Config do
 
   def algorithms, do: @algorithms
 
+  @doc "Reports whether configuration separates API access tokens from browser ID tokens."
+  @spec api_token_boundary?(t()) :: boolean()
+  def api_token_boundary?(%__MODULE__{
+        web_client_id: web_client_id,
+        typ_allowlist: typ_allowlist,
+        required_claims: required_claims
+      }) do
+    nonempty_string?(web_client_id) or typ_allowlist != [] or map_size(required_claims) > 0
+  end
+
+  @doc "Requires an explicit boundary between API access tokens and browser ID tokens."
+  @spec validate_api_token_boundary!(t()) :: t()
+  def validate_api_token_boundary!(%__MODULE__{} = config) do
+    if api_token_boundary?(config) do
+      config
+    else
+      raise ArgumentError,
+            "API OIDC authentication requires SMOLQUERY_OIDC_WEB_CLIENT_ID, " <>
+              "SMOLQUERY_OIDC_API_TOKEN_TYPES, or SMOLQUERY_OIDC_API_REQUIRED_CLAIMS " <>
+              "to distinguish access tokens from browser ID tokens"
+    end
+  end
+
+  @doc "Returns the closed set of configured protected-header token types."
+  @spec string_allowlist!(term(), String.t()) :: [String.t()]
+  def string_allowlist!([], _env), do: []
+
+  def string_allowlist!(values, env) when is_list(values) do
+    if Enum.all?(values, &nonempty_string?/1) and length(values) == length(Enum.uniq(values)),
+      do: values,
+      else: invalid!(env, values, "a unique non-empty string list")
+  end
+
+  def string_allowlist!(value, env), do: invalid!(env, value, "a string list")
+
+  @doc "Validates exact required payload claim values."
+  @spec required_claims!(term()) :: required_claims()
+  def required_claims!(claims), do: required_claims!(claims, "SMOLQUERY_OIDC_REQUIRED_CLAIMS")
+
+  defp required_claims!(claims, env) when is_map(claims) do
+    Enum.reduce(claims, %{}, fn {claim, values}, acc ->
+      if nonempty_string?(claim) and is_list(values) and values != [] and
+           Enum.all?(values, &nonempty_string?/1) and
+           length(values) == length(Enum.uniq(values)) do
+        Map.put(acc, claim, values)
+      else
+        invalid!(env, claims, "a map of claim names to string lists")
+      end
+    end)
+  end
+
+  defp required_claims!(value, env),
+    do: invalid!(env, value, "a map of claim names to string lists")
+
   @spec raise_invalid_claim_mapping(term()) :: no_return()
   defp raise_invalid_claim_mapping(mapping),
     do:
@@ -195,6 +301,61 @@ defmodule Smolquery.Auth.OIDC.Config do
     do: nonempty!(Keyword.get(config, :api_audience), env)
 
   defp required_for_role(_config, _key, _role, _env), do: nil
+
+  defp distinct_audiences(config) do
+    api_audience = Keyword.get(config, :api_audience)
+    web_client_id = Keyword.get(config, :web_client_id)
+
+    if nonempty_string?(api_audience) and api_audience == web_client_id do
+      invalid!(
+        "SMOLQUERY_OIDC_API_AUDIENCE",
+        api_audience,
+        "a resource audience different from SMOLQUERY_OIDC_WEB_CLIENT_ID"
+      )
+    end
+
+    :ok
+  end
+
+  defp token_profile(config, role) do
+    {type_key, type_env, claims_key, claims_env} =
+      case role do
+        :api ->
+          {:api_typ_allowlist, "SMOLQUERY_OIDC_API_TOKEN_TYPES", :api_required_claims,
+           "SMOLQUERY_OIDC_API_REQUIRED_CLAIMS"}
+
+        :web ->
+          {:web_typ_allowlist, "SMOLQUERY_OIDC_WEB_TOKEN_TYPES", :web_required_claims,
+           "SMOLQUERY_OIDC_WEB_REQUIRED_CLAIMS"}
+      end
+
+    {types, type_env} =
+      role_profile_value(
+        config,
+        type_key,
+        :typ_allowlist,
+        type_env,
+        "SMOLQUERY_OIDC_TOKEN_TYPES"
+      )
+
+    {claims, claims_env} =
+      role_profile_value(
+        config,
+        claims_key,
+        :required_claims,
+        claims_env,
+        "SMOLQUERY_OIDC_REQUIRED_CLAIMS"
+      )
+
+    {string_allowlist!(types, type_env), required_claims!(claims, claims_env)}
+  end
+
+  defp role_profile_value(config, role_key, global_key, role_env, global_env) do
+    case Keyword.fetch(config, role_key) do
+      {:ok, value} -> {value, role_env}
+      :error -> {Keyword.fetch!(config, global_key), global_env}
+    end
+  end
 
   defp web_client_id(config, :web),
     do: nonempty!(Keyword.get(config, :web_client_id), "SMOLQUERY_OIDC_WEB_CLIENT_ID")

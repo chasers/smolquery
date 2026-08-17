@@ -267,13 +267,13 @@ defmodule Smolquery.Auth.OIDC.Discovery do
 
   defp public_jwk_shape?(%{"kid" => kid, "kty" => "RSA", "n" => n, "e" => e} = key)
        when is_binary(kid) and kid != "" and is_binary(n) and is_binary(e) do
-    no_private_fields?(key) and valid_b64url?(n) and valid_b64url?(e)
+    no_private_fields?(key) and strong_rsa_public_key?(n, e)
   end
 
   defp public_jwk_shape?(%{"kid" => kid, "kty" => "EC", "crv" => curve, "x" => x, "y" => y} = key)
        when is_binary(kid) and kid != "" and curve in ["P-256", "P-384", "P-521"] and is_binary(x) and
               is_binary(y) do
-    no_private_fields?(key) and valid_b64url?(x) and valid_b64url?(y)
+    no_private_fields?(key) and valid_ec_coordinate?(curve, x) and valid_ec_coordinate?(curve, y)
   end
 
   defp public_jwk_shape?(%{"kid" => kid, "kty" => "OKP", "crv" => curve, "x" => x} = key)
@@ -319,9 +319,48 @@ defmodule Smolquery.Auth.OIDC.Discovery do
   defp no_private_fields?(key),
     do: Enum.all?(~w(d p q dp dq qi oth k), &(not Map.has_key?(key, &1)))
 
-  defp valid_b64url?(value) do
-    value != "" and match?({:ok, _}, Base.url_decode64(value, padding: false)) and
-      Base.url_encode64(elem(Base.url_decode64(value, padding: false), 1), padding: false) ==
-        value
+  defp strong_rsa_public_key?(modulus, exponent) do
+    with {:ok, modulus_bytes} <- canonical_b64url(modulus),
+         {:ok, exponent_bytes} <- canonical_b64url(exponent),
+         true <- rsa_modulus_at_least_2048_bits?(modulus_bytes),
+         exponent <- :binary.decode_unsigned(exponent_bytes),
+         true <- exponent >= 3 and rem(exponent, 2) == 1 do
+      true
+    else
+      _invalid -> false
+    end
   end
+
+  defp rsa_modulus_at_least_2048_bits?(<<0, _rest::binary>>), do: false
+
+  defp rsa_modulus_at_least_2048_bits?(<<first, _rest::binary>> = modulus) do
+    byte_size(modulus) > 256 or (byte_size(modulus) == 256 and first >= 128)
+  end
+
+  defp rsa_modulus_at_least_2048_bits?(_modulus), do: false
+
+  defp valid_ec_coordinate?(curve, coordinate) do
+    expected_bytes = %{"P-256" => 32, "P-384" => 48, "P-521" => 66}
+
+    case canonical_b64url(coordinate) do
+      {:ok, decoded} -> byte_size(decoded) == Map.fetch!(expected_bytes, curve)
+      :error -> false
+    end
+  end
+
+  defp valid_b64url?(value), do: match?({:ok, _decoded}, canonical_b64url(value))
+
+  defp canonical_b64url(value) when is_binary(value) and value != "" do
+    case Base.url_decode64(value, padding: false) do
+      {:ok, decoded} ->
+        if decoded != "" and Base.url_encode64(decoded, padding: false) == value,
+          do: {:ok, decoded},
+          else: :error
+
+      :error ->
+        :error
+    end
+  end
+
+  defp canonical_b64url(_value), do: :error
 end

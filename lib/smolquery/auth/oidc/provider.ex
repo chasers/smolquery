@@ -30,6 +30,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
           metadata_at: integer(),
           jwks: map(),
           jwks_at: integer(),
+          forced_refresh_at: integer() | nil,
           refresh: refresh() | nil,
           refresh_error: term() | nil,
           refresh_failed_at: integer() | nil,
@@ -51,7 +52,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
   @spec jwks(pid() | atom()) :: {:ok, map()} | {:error, term()}
   def jwks(server), do: GenServer.call(server, :jwks, @operation_timeout_ms)
 
-  @doc "Forces one bounded JWKS refresh, used later for an unknown key id."
+  @doc "Refreshes JWKS for an unknown key id, subject to the global cooldown."
   @spec refresh_jwks(pid() | atom()) :: {:ok, map()} | {:error, term()}
   def refresh_jwks(server), do: GenServer.call(server, :refresh_jwks, @operation_timeout_ms)
 
@@ -71,6 +72,7 @@ defmodule Smolquery.Auth.OIDC.Provider do
          metadata_at: now,
          jwks: jwks,
          jwks_at: now,
+         forced_refresh_at: nil,
          refresh: nil,
          refresh_error: nil,
          refresh_failed_at: nil,
@@ -104,9 +106,19 @@ defmodule Smolquery.Auth.OIDC.Provider do
 
   @impl GenServer
   def handle_call(:refresh_jwks, from, state) do
-    if fresh?(state.metadata_at, state.config.discovery_max_age_ms),
-      do: start_refresh(:jwks, :refresh_jwks, from, state),
-      else: start_refresh(:provider, :refresh_jwks, from, state)
+    cond do
+      not fresh?(state.metadata_at, state.config.discovery_max_age_ms) ->
+        start_refresh(:provider, :refresh_jwks, from, state)
+
+      state.refresh != nil ->
+        {:reply, {:ok, state.jwks}, state}
+
+      not forced_refresh_allowed?(state) ->
+        {:reply, {:ok, state.jwks}, state}
+
+      true ->
+        start_refresh(:jwks, :refresh_jwks, from, state)
+    end
   end
 
   @impl GenServer
@@ -126,15 +138,15 @@ defmodule Smolquery.Auth.OIDC.Provider do
         %{refresh: %{monitor_ref: monitor_ref} = refresh} = state
       ) do
     reason = :provider_refresh_failed
+    now = now_ms()
     GenServer.reply(refresh.from, {:error, reason})
 
-    {:noreply,
-     %{
-       state
-       | refresh: nil,
-         refresh_error: reason,
-         refresh_failed_at: now_ms()
-     }}
+    state =
+      state
+      |> mark_forced_refresh(refresh.operation, now)
+      |> Map.merge(%{refresh: nil, refresh_error: reason, refresh_failed_at: now})
+
+    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -200,19 +212,37 @@ defmodule Smolquery.Auth.OIDC.Provider do
 
   defp complete_refresh(refresh, {:ok, values}, state) do
     now = now_ms()
-    state = publish_refresh(refresh.kind, values, now, state)
-    {success_reply(refresh.operation, state), clear_failure(state)}
+
+    state =
+      state
+      |> publish_refresh(refresh.kind, values, now)
+      |> mark_forced_refresh(refresh.operation, now)
+      |> clear_failure()
+
+    {success_reply(refresh.operation, state), state}
   end
 
-  defp complete_refresh(_refresh, {:error, reason}, state) do
-    {{:error, reason}, %{state | refresh_error: reason, refresh_failed_at: now_ms()}}
+  defp complete_refresh(refresh, {:error, reason}, state) do
+    now = now_ms()
+
+    state =
+      state
+      |> mark_forced_refresh(refresh.operation, now)
+      |> Map.merge(%{refresh_error: reason, refresh_failed_at: now})
+
+    {{:error, reason}, state}
   end
 
-  defp publish_refresh(:provider, %{metadata: metadata, jwks: jwks}, now, state),
+  defp publish_refresh(state, :provider, %{metadata: metadata, jwks: jwks}, now),
     do: %{state | metadata: metadata, metadata_at: now, jwks: jwks, jwks_at: now}
 
-  defp publish_refresh(:jwks, %{jwks: jwks}, now, state),
+  defp publish_refresh(state, :jwks, %{jwks: jwks}, now),
     do: %{state | jwks: jwks, jwks_at: now}
+
+  defp mark_forced_refresh(state, :refresh_jwks, now),
+    do: %{state | forced_refresh_at: now}
+
+  defp mark_forced_refresh(state, _operation, _now), do: state
 
   defp success_reply(:metadata, state), do: {:ok, state.metadata}
 
@@ -225,6 +255,11 @@ defmodule Smolquery.Auth.OIDC.Provider do
 
   defp retry_allowed?(state),
     do: now_ms() - state.refresh_failed_at >= state.config.refresh_failure_backoff_ms
+
+  defp forced_refresh_allowed?(%{forced_refresh_at: nil}), do: true
+
+  defp forced_refresh_allowed?(state),
+    do: now_ms() - state.forced_refresh_at >= state.config.forced_refresh_cooldown_ms
 
   defp fresh?(_fetched_at, 0), do: false
   defp fresh?(fetched_at, max_age), do: now_ms() - fetched_at <= max_age

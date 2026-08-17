@@ -1,8 +1,10 @@
 defmodule SmolqueryApi.Auth do
   @moduledoc """
-  Bearer-key authentication for every `/v1` route (PL-8 D5).
+  Bearer authentication for every `/v1` route (PL-8 D5).
 
-  One static key, compared in constant time. `/healthz` is exempt — a load
+  Static credentials use one key compared in constant time. OIDC credentials
+  use strict access-token verification against the supervised provider cache.
+  `GET /healthz` is exempt — a load
   balancer probing liveness holds no credentials — and `/metrics` answers to
   the *internal* secret instead of the API key: metrics are for operators,
   not tenants, and the scraper is the same class of caller as a hot-tier
@@ -21,6 +23,8 @@ defmodule SmolqueryApi.Auth do
   import Plug.Conn
 
   alias Smolquery.Auth
+  alias Smolquery.Auth.Context
+  alias Smolquery.Auth.OIDC.Token
   alias Smolquery.InternalSecret
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Runtime
@@ -29,7 +33,7 @@ defmodule SmolqueryApi.Auth do
   def init(opts), do: opts
 
   @impl Plug
-  def call(%Plug.Conn{path_info: ["healthz"]} = conn, _opts), do: conn
+  def call(%Plug.Conn{method: "GET", path_info: ["healthz"]} = conn, _opts), do: conn
 
   def call(%Plug.Conn{path_info: ["metrics"]} = conn, _opts) do
     if internal?(conn) do
@@ -48,7 +52,7 @@ defmodule SmolqueryApi.Auth do
 
       :error ->
         conn
-        |> Errors.send_error(401, "UNAUTHENTICATED", "missing or invalid API key")
+        |> Errors.send_error(401, "UNAUTHENTICATED", "missing or invalid API credential")
         |> halt()
     end
   end
@@ -61,13 +65,34 @@ defmodule SmolqueryApi.Auth do
   end
 
   defp authenticated_context(conn) do
-    with ["Bearer " <> key] <- get_req_header(conn, "authorization"),
-         {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api),
-         :static <- runtime.auth_mode,
-         true <- Plug.Crypto.secure_compare(key, runtime.api_key) do
-      {:ok, runtime.context}
+    with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
+         {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api) do
+      authenticate(runtime, token)
     else
       _unauthenticated -> :error
     end
+  end
+
+  defp authenticate(%{auth_mode: :static, api_key: key, context: context}, token)
+       when is_binary(key) do
+    if Plug.Crypto.secure_compare(token, key), do: {:ok, context}, else: :error
+  end
+
+  defp authenticate(%{auth_mode: :oidc, oidc: config, name: name}, token) do
+    provider = Module.concat(name, "OIDCProvider")
+
+    case Token.authenticate(token, config, provider) do
+      {:ok, context} ->
+        if coarse_api_access?(context), do: {:ok, context}, else: :error
+
+      :error ->
+        :error
+    end
+  end
+
+  defp authenticate(_runtime, _token), do: :error
+
+  defp coarse_api_access?(context) do
+    Enum.all?([:query, :ingest, :catalog_manage], &Context.granted?(context, &1))
   end
 end

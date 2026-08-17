@@ -75,8 +75,9 @@ defmodule SmolqueryApi.Runtime do
 
   Application config for `SmolqueryApi` supplies the defaults; `opts`
   overrides them. Raises if the authentication mode is missing, or if static
-  mode has no non-empty `api_key`. OIDC mode validates its provider foundation;
-  request token verification remains denied until T-232.
+  mode has no non-empty `api_key`. OIDC mode validates its provider foundation
+  and verifies API bearer tokens through the supervised provider cache; per-route
+  capability checks are added by T-233.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -103,7 +104,8 @@ defmodule SmolqueryApi.Runtime do
           {key, Static.api_context(), nil, nil}
 
         :oidc ->
-          {nil, nil, OIDCConfig.new(config, :api), OIDC.provider_http_client!(config)}
+          oidc = config |> OIDCConfig.new(:api) |> OIDCConfig.validate_api_token_boundary!()
+          {nil, nil, oidc, OIDC.provider_http_client!(config)}
       end
 
     %__MODULE__{
