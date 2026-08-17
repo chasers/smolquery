@@ -15,7 +15,12 @@ defmodule SmolqueryWeb.TableLive.Show do
   subscribes to `Smolquery.Lifecycle`, so a seal on a storage node or a
   commit on a buffer owner pushes to this page the moment it lands — an
   event updates the feed instantly and schedules one debounced refetch of
-  the tier state, so an event burst costs one round of reads. The hot tier
+  the tier state, so an event burst costs one round of reads. The debounce
+  guard holds until the fetch *completes*, not until its timer fires: the
+  hot-manifest read blocks on the routed call's timeout when a buffer node
+  is unreachable, and clearing the guard early let a steady commit stream
+  stack unbounded concurrent blocked fetches against an already-degraded
+  cluster. The hot tier
   reads through `Smolquery.BufferService.Client`, which routes to each
   partition's ring owner; a node the route cannot reach renders as
   unavailable rather than failing the page. Seal-failure streaks are
@@ -37,6 +42,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   alias Smolquery.Schema
   alias SmolqueryWeb.DataTable
   alias SmolqueryWeb.Runtime
+  alias SmolqueryWeb.Waterfall
 
   @preview_rows 50
   @lifecycle_debounce_ms 300
@@ -112,11 +118,17 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   def handle_async(:lifecycle, {:ok, lifecycle}, socket) do
-    {:noreply, assign(socket, :lifecycle, lifecycle)}
+    {:noreply,
+     socket
+     |> assign(:lifecycle, lifecycle)
+     |> assign(:lifecycle_refresh_queued, false)}
   end
 
   def handle_async(:lifecycle, {:exit, reason}, socket) do
-    {:noreply, assign(socket, :lifecycle, {:error, reason})}
+    {:noreply,
+     socket
+     |> assign(:lifecycle, {:error, reason})
+     |> assign(:lifecycle_refresh_queued, false)}
   end
 
   @impl Phoenix.LiveView
@@ -130,10 +142,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   def handle_info(:refresh_lifecycle, socket) do
-    {:noreply,
-     socket
-     |> assign(:lifecycle_refresh_queued, false)
-     |> fetch_lifecycle()}
+    {:noreply, fetch_lifecycle(socket)}
   end
 
   defp start_lifecycle(socket) do
@@ -185,7 +194,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp hot_partitions(runtime, table_ref) do
-    for {_dataset, partition} = ref <- Partitions.refs(table_ref, write_partitions()) do
+    for {_dataset, partition} = ref <- Partitions.refs(table_ref, write_partitions(runtime)) do
       %{ref: ref, label: partition, stages: hot_stages(runtime.buffer_name, ref)}
     end
   end
@@ -221,10 +230,16 @@ defmodule SmolqueryWeb.TableLive.Show do
     end
   end
 
-  defp write_partitions do
-    :smolquery
-    |> Application.get_env(Smolquery.QueryService, [])
-    |> Keyword.get(:write_partitions, 1)
+  defp write_partitions(runtime) do
+    case QueryService.Runtime.fetch(runtime.query_name) do
+      {:ok, query_runtime} ->
+        query_runtime.write_partitions
+
+      :error ->
+        :smolquery
+        |> Application.get_env(Smolquery.QueryService, [])
+        |> Keyword.get(:write_partitions, 1)
+    end
   end
 
   defp compact_below_bytes do
@@ -343,12 +358,12 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp event_line(%{kind: :seal} = event) do
     "seal #{event.result} · #{event.measurements.segments} segments · " <>
-      "#{format_us(event.measurements.duration_us)} (#{partition_of(event)})"
+      "#{Waterfall.duration_label(event.measurements.duration_us)} (#{partition_of(event)})"
   end
 
   defp event_line(%{kind: :compaction} = event) do
     "compaction #{event.result} · #{event.measurements.replaced} replaced · " <>
-      "#{format_us(event.measurements.duration_us)} (#{partition_of(event)})"
+      "#{Waterfall.duration_label(event.measurements.duration_us)} (#{partition_of(event)})"
   end
 
   defp partition_of(%{table_ref: {_dataset, partition}}), do: partition
@@ -359,9 +374,6 @@ defmodule SmolqueryWeb.TableLive.Show do
   defp format_bytes(bytes) when bytes >= 1_048_576, do: "#{Float.round(bytes / 1_048_576, 1)} MiB"
   defp format_bytes(bytes) when bytes >= 1_024, do: "#{Float.round(bytes / 1_024, 1)} KiB"
   defp format_bytes(bytes), do: "#{bytes} B"
-
-  defp format_us(us) when us >= 1_000_000, do: "#{Float.round(us / 1_000_000, 1)}s"
-  defp format_us(us), do: "#{div(us, 1_000)}ms"
 
   @impl Phoenix.LiveView
   def render(assigns) do

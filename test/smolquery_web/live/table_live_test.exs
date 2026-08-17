@@ -3,6 +3,7 @@ defmodule SmolqueryWeb.TableLiveTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Schema
+  alias Smolquery.Test.Eventually
 
   defp seed(runtime) do
     :ok = Catalog.create_dataset(runtime.catalog, "analytics")
@@ -173,11 +174,22 @@ defmodule SmolqueryWeb.TableLiveTest do
   end
 
   describe "lifecycle (T-295)" do
+    defp seed_lifeview(runtime) do
+      :ok = Catalog.create_dataset(runtime.catalog, "lifeview")
+
+      :ok =
+        Catalog.create_table(
+          runtime.catalog,
+          {"lifeview", "events"},
+          Schema.new!([{"id", :int64, nullable: false}])
+        )
+    end
+
     defp seal_event(result, overrides \\ %{}) do
       Map.merge(
         %{
           kind: :seal,
-          table_ref: {"analytics", "events"},
+          table_ref: {"lifeview", "events"},
           node: node(),
           result: result,
           measurements: %{duration_us: 1_200_000, segments: 16},
@@ -189,9 +201,9 @@ defmodule SmolqueryWeb.TableLiveTest do
 
     test "renders the hot and sealed tiers on load", %{conn: conn} do
       runtime = start_web!()
-      seed(runtime)
+      seed_lifeview(runtime)
 
-      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
 
       html = render_async(lv)
       assert html =~ "Lifecycle"
@@ -202,9 +214,9 @@ defmodule SmolqueryWeb.TableLiveTest do
 
     test "a lifecycle event lands in the feed and a failure streak shows", %{conn: conn} do
       runtime = start_web!()
-      seed(runtime)
+      seed_lifeview(runtime)
 
-      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
       render_async(lv)
 
       send(lv.pid, {:lifecycle, seal_event(:ok)})
@@ -222,9 +234,9 @@ defmodule SmolqueryWeb.TableLiveTest do
 
     test "the last seal stays pinned after commits push it out of the feed", %{conn: conn} do
       runtime = start_web!()
-      seed(runtime)
+      seed_lifeview(runtime)
 
-      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
       render_async(lv)
 
       send(lv.pid, {:lifecycle, seal_event(:ok)})
@@ -235,7 +247,7 @@ defmodule SmolqueryWeb.TableLiveTest do
           {:lifecycle,
            %{
              kind: :commit,
-             table_ref: {"analytics", "events"},
+             table_ref: {"lifeview", "events"},
              node: node(),
              result: :ok,
              measurements: %{rows: 200, bytes: 11_700},
@@ -251,31 +263,20 @@ defmodule SmolqueryWeb.TableLiveTest do
 
     test "a broadcast through the bridge reaches the page", %{conn: conn} do
       runtime = start_web!()
-      seed(runtime)
+      seed_lifeview(runtime)
 
-      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      {:ok, lv, _html} = live(conn, ~p"/tables/lifeview/events")
       render_async(lv)
 
       :telemetry.execute(
         [:smolquery, :compact, :swap],
         %{replaced: 5, duration_us: 2_000_000},
-        %{result: :ok, table_ref: {"analytics", "events"}}
+        %{result: :ok, table_ref: {"lifeview", "events"}}
       )
 
-      assert render_eventually(lv, "compaction ok · 5 replaced")
-    end
-
-    defp render_eventually(lv, needle, attempts \\ 50)
-
-    defp render_eventually(_lv, _needle, 0), do: false
-
-    defp render_eventually(lv, needle, attempts) do
-      if render(lv) =~ needle do
-        true
-      else
-        Process.sleep(20)
-        render_eventually(lv, needle, attempts - 1)
-      end
+      assert Eventually.until(fn ->
+               render(lv) =~ "compaction ok · 5 replaced"
+             end)
     end
   end
 end

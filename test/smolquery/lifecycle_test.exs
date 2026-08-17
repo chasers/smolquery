@@ -3,7 +3,7 @@ defmodule Smolquery.LifecycleTest do
 
   alias Smolquery.Lifecycle
 
-  @table {"analytics", "events"}
+  @table {"lifecycle_bridge", "events"}
 
   test "a seal attempt event broadcasts on the parent table's topic" do
     :ok = Lifecycle.subscribe(@table)
@@ -11,13 +11,13 @@ defmodule Smolquery.LifecycleTest do
     :telemetry.execute(
       [:smolquery, :seal, :attempt],
       %{duration_us: 1_200_000, segments: 16},
-      %{result: :ok, table_ref: {"analytics", "events__p1"}}
+      %{result: :ok, table_ref: {"lifecycle_bridge", "events__p1"}}
     )
 
     assert_receive {:lifecycle, event}
     assert event.kind == :seal
     assert event.result == :ok
-    assert event.table_ref == {"analytics", "events__p1"}
+    assert event.table_ref == {"lifecycle_bridge", "events__p1"}
     assert event.node == node()
     assert event.measurements.segments == 16
     assert is_integer(event.at)
@@ -59,7 +59,7 @@ defmodule Smolquery.LifecycleTest do
     :telemetry.execute(
       [:smolquery, :buffer, :commit],
       %{rows: 1, bytes: 1},
-      %{result: :ok, table_ref: {"analytics", "other"}}
+      %{result: :ok, table_ref: {"lifecycle_bridge", "other"}}
     )
 
     refute_receive {:lifecycle, _event}, 100

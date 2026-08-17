@@ -32,7 +32,13 @@ defmodule Smolquery.Lifecycle do
   traffic this node pushes onto the bus, on the node that pushed it. The handler runs in the emitting process and must never
   raise: `:telemetry` silently detaches a raising handler, which would stop
   every broadcast. A broadcast that cannot be delivered (the pubsub not
-  running, as in a bare unit test) is dropped rather than raised.
+  running, as in a bare unit test) is dropped rather than raised. The same
+  contract shapes two details: the handler head accepts only a 2-tuple
+  `table_ref` — an emitter passing anything else is skipped, not raised
+  into a `topic/1` `MatchError` that would detach the handler — and `init`
+  detaches before it attaches, because the handler outlives the process
+  when a brutal kill skips `terminate/2`, and `{:error, :already_exists}`
+  crashing every restart would turn one kill into a supervisor loop.
   """
 
   use GenServer
@@ -88,6 +94,7 @@ defmodule Smolquery.Lifecycle do
 
   @impl GenServer
   def init(_opts) do
+    _stale = :telemetry.detach(@handler_id)
     :ok = :telemetry.attach_many(@handler_id, @events, &__MODULE__.handle_event/4, nil)
 
     {:ok, nil}
@@ -97,7 +104,12 @@ defmodule Smolquery.Lifecycle do
   def terminate(_reason, _state), do: :telemetry.detach(@handler_id)
 
   @doc false
-  def handle_event([:smolquery, group, _name], measurements, %{table_ref: table_ref} = meta, nil) do
+  def handle_event(
+        [:smolquery, group, _name],
+        measurements,
+        %{table_ref: {_dataset, _table} = table_ref} = meta,
+        nil
+      ) do
     event = %{
       kind: kind(group),
       table_ref: table_ref,
