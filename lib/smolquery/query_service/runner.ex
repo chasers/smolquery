@@ -32,9 +32,11 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Trace
   alias Smolquery.Segments.Store
 
-  @type option :: {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze}
+  @type option ::
+          {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze} | {:trace, boolean()}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -83,6 +85,8 @@ defmodule Smolquery.QueryService.Runner do
       runtime: runtime,
       job: job,
       explain: Keyword.get(opts, :explain),
+      trace: Keyword.get(opts, :trace, false),
+      collector: nil,
       engine: nil,
       task: nil,
       result: nil,
@@ -94,7 +98,9 @@ defmodule Smolquery.QueryService.Runner do
 
   @impl GenServer
   def handle_continue(:run, state) do
-    case start_engine(state.runtime) do
+    state = %{state | collector: collector(state)}
+
+    case Trace.span(:engine_start, fn -> start_engine(state.runtime) end) do
       {:ok, engine} ->
         runtime = state.runtime
         sql = state.job.sql
@@ -211,8 +217,11 @@ defmodule Smolquery.QueryService.Runner do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
-         :ok <- run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan)),
-         {:ok, outcome} <- outcome(connection, plan, explain) do
+         :ok <-
+           Trace.span(:statements, fn ->
+             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan))
+           end),
+         {:ok, outcome} <- Trace.span(:execute, fn -> outcome(connection, plan, explain) end) do
       duration = System.monotonic_time(:millisecond) - started
 
       {:ok,
@@ -313,7 +322,14 @@ defmodule Smolquery.QueryService.Runner do
     %{state | task: nil}
   end
 
+  defp collector(%{trace: true, job: job}), do: Trace.attach(job.id, self())
+  defp collector(_state), do: nil
+
+  defp traced(%{collector: nil}, job), do: job
+  defp traced(%{collector: collector}, job), do: %{job | trace: Trace.stop(collector)}
+
   defp settle(state, job) do
+    job = traced(state, job)
     stop_engine(state.engine)
     record_history(state.runtime, job)
 
@@ -333,7 +349,7 @@ defmodule Smolquery.QueryService.Runner do
 
     Process.send_after(self(), :expire, state.runtime.result_ttl_ms)
 
-    %{state | job: job, engine: nil, waiters: []}
+    %{state | job: job, engine: nil, waiters: [], collector: nil}
   end
 
   defp stop_engine(nil), do: :ok

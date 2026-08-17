@@ -7,11 +7,15 @@ defmodule Smolquery.QueryService.Job do
   way: `:pending` → `:running` → one of `:done`, `:error`, `:cancelled`.
   `row_count` and `duration_ms` are filled when the job finishes; `snapshot`
   is the catalog snapshot the plan pinned, recorded so a caller can correlate
-  what a query saw with what the catalog held.
+  what a query saw with what the catalog held. A job submitted with
+  `trace: true` settles with its phase spans on `trace`
+  (`Smolquery.QueryService.Trace`) whatever state it settled in — a failed
+  or cancelled job's partial trace is exactly what explains it.
   """
 
   alias Smolquery.Catalog
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.QueryService.Trace
   alias Smolquery.Segments.Id
 
   @enforce_keys [:id, :sql, :state, :submitted_at]
@@ -26,6 +30,7 @@ defmodule Smolquery.QueryService.Job do
     :duration_ms,
     :statistics,
     :explain,
+    :trace,
     :error
   ]
 
@@ -42,6 +47,7 @@ defmodule Smolquery.QueryService.Job do
           duration_ms: non_neg_integer() | nil,
           statistics: Statistics.t() | nil,
           explain: String.t() | nil,
+          trace: [Trace.span()] | nil,
           error: term()
         }
 

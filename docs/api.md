@@ -43,7 +43,7 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 | `PATCH /v1/datasets/:ds/tables/:t` | set or clear retention and/or clustering. Retention: `{"retention": {"column": "ts", "ttlMs": 2592000000}}` ages rows out of `ts` after 30 days, segment-grained and conservative (a segment is dropped only once *every* row in it has aged out); `{"retention": null}` keeps rows forever again. Clustering: `{"clustering": ["project_id", "ts"]}` sorts future writes by those columns (ClickHouse `ORDER BY` analog); `{"clustering": []}` clears it. Columns must exist on the schema (unknown names are 422). Changing clustering does not rewrite existing segments. A body carrying both fields applies them atomically — an error response means neither changed |
 | `POST /v1/datasets/:ds/tables/:t/insert` | streaming insert — **`application/x-ndjson` only**, one JSON object per line, the same bytes ClickHouse takes as `JSONEachRow`; `insertId` is a query parameter. A JSON-array body is a 415: two content types were two ingest paths and the array one measured 3-4x slower with nothing announcing which you got. A 200 means the buffer service has every accepted row durable and queryable; rejected rows come back per-index in `insertErrors` (partial failure is a 200, BigQuery-style); a full or overloaded buffer is a 429 whose `retry-after` says how far behind the write path is; a node with too many ingest-body bytes already in flight also answers 429, with `retry-after: 1`, before it reads the body (`SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES`, T-245). An optional `insertId` makes the request idempotent: retrying after a timeout or dropped response with the same id (and the same rows) cannot double-count — without one, retries are at-least-once |
 | `POST /v1/datasets/:ds/tables/:t/load` | batch load — the body is the file (`application/x-ndjson`, `text/csv`, or `application/vnd.apache.parquet`), pushed through the same insert path in chunks; capped by `load_max_bytes` (413 past it), counted whole against the same in-flight admission limit as `/insert` for the request's full duration, synchronous, and not atomic — a mid-load failure reports what was already durable, and unlike `/insert` it takes no `insertId`, so a retry re-inserts. Two measured caveats ([benchmarks](benchmarks.md)): the body spools to disk but the parser materializes every row, so a load peaks at **~10× the file in memory**; and the cap is in *bytes*, which at 61 columns is ~120k rows of NDJSON but ~254k of CSV. It is also **not** the fast path — concurrent `/insert` is 2.4× quicker |
-| `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504. `"explain": "plan"` answers the engine's query plan instead of rows, `"analyze"` executes the query and answers the profiled plan; either way the text arrives as `explain` on the job and the response carries no rows |
+| `POST /v1/queries` | sync query — the finished job plus its first page of rows (`maxResults`, default 1000); a query that outlives `timeoutMs` is cancelled and answered 504. `"explain": "plan"` answers the engine's query plan instead of rows, `"analyze"` executes the query and answers the profiled plan; either way the text arrives as `explain` on the job and the response carries no rows. `"trace": true` returns the query's phase spans on the job for a waterfall view |
 | `POST /v1/jobs` | the same query as an async job — returns it pending; takes the same `explain` option, whose output lands on `GET /v1/jobs/:id` |
 | `GET /v1/jobs/:id` | status and stats; once the result TTL expires, answered from durable job history |
 | `GET /v1/jobs/:id/results` | page a finished job's rows with `max_results` + `page_token`; expired results are 410, unknown jobs 404 |
@@ -79,6 +79,32 @@ rows and timings. An explain job finishes `done` with the text on the job's
 silently running a query the caller asked to explain would be the worst
 reading of a typo. Like `statistics`, history does not persist `explain`, so
 it is gone once the result TTL expires.
+
+## Tracing
+
+`"trace": true` (default false) collects the query's phase spans and returns
+them on the job as a waterfall-ready list — offsets and durations in
+microseconds, rebased to the earliest span:
+
+```json
+{"trace": {"spans": [
+  {"name": "engine_start",   "startUs": 0,     "durationUs": 41210, "meta": {}},
+  {"name": "serialize",      "startUs": 41400, "durationUs": 803,   "meta": {}},
+  {"name": "snapshot",       "startUs": 42250, "durationUs": 1100,  "meta": {}},
+  {"name": "resolve",        "startUs": 43380, "durationUs": 2900,  "meta": {}},
+  {"name": "manifests",      "startUs": 46300, "durationUs": 8100,  "meta": {}},
+  {"name": "manifest_fetch", "startUs": 46310, "durationUs": 7900,  "meta": {"url": "http://buffer-0:4321"}},
+  {"name": "build",          "startUs": 54500, "durationUs": 350,   "meta": {}},
+  {"name": "statements",     "startUs": 54900, "durationUs": 4200,  "meta": {}},
+  {"name": "execute",        "startUs": 59200, "durationUs": 812000,"meta": {}}
+]}}
+```
+
+Every phase always emits an `[:smolquery, :query, :span]` telemetry event;
+`trace` only decides whether this job collects them. A job that failed or was
+cancelled still settles with the spans it got — the partial trace is exactly
+what explains it. Like `statistics` and `explain`, history does not persist
+the trace. Non-boolean `trace` values are a 400.
 
 ## Query statistics
 

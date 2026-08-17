@@ -120,8 +120,25 @@ defmodule SmolqueryApi.JobController do
       "durationMs" => job.duration_ms,
       "statistics" => statistics_json(job.statistics),
       "explain" => job.explain,
+      "trace" => trace_json(job.trace),
       "error" => error_json(job.error),
       "resultsAvailable" => results_available
+    }
+  end
+
+  defp trace_json(nil), do: nil
+
+  defp trace_json(spans) do
+    %{
+      "spans" =>
+        Enum.map(spans, fn span ->
+          %{
+            "name" => Atom.to_string(span.name),
+            "startUs" => span.start_us,
+            "durationUs" => span.duration_us,
+            "meta" => Map.new(span.meta, fn {key, value} -> {Atom.to_string(key), value} end)
+          }
+        end)
     }
   end
 
@@ -201,14 +218,16 @@ defmodule SmolqueryApi.JobController do
   Submit options a request body may carry.
 
   `timeoutMs` bounds the job; `explain` (`"plan"` or `"analyze"`) asks for
-  the engine's plan instead of rows. Any other `explain` value is refused —
-  silently running the query a caller asked to explain would be the worst
-  possible reading of a typo.
+  the engine's plan instead of rows; `trace` (boolean, default false)
+  collects the job's phase spans onto the response. Any other `explain` or
+  `trace` value is refused — silently running the query a caller asked to
+  explain would be the worst possible reading of a typo.
   """
   @spec submit_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_param, String.t()}}
   def submit_opts(body) do
-    with {:ok, explain} <- explain_opt(body) do
-      {:ok, timeout_opt(body) ++ explain}
+    with {:ok, explain} <- explain_opt(body),
+         {:ok, trace} <- trace_opt(body) do
+      {:ok, timeout_opt(body) ++ explain ++ trace}
     end
   end
 
@@ -221,6 +240,11 @@ defmodule SmolqueryApi.JobController do
   defp explain_opt(%{"explain" => "analyze"}), do: {:ok, [explain: :analyze]}
   defp explain_opt(%{"explain" => _other}), do: {:error, {:invalid_param, "explain"}}
   defp explain_opt(_body), do: {:ok, []}
+
+  defp trace_opt(%{"trace" => true}), do: {:ok, [trace: true]}
+  defp trace_opt(%{"trace" => false}), do: {:ok, []}
+  defp trace_opt(%{"trace" => _other}), do: {:error, {:invalid_param, "trace"}}
+  defp trace_opt(_body), do: {:ok, []}
 
   @doc """
   The body's `query` field.
