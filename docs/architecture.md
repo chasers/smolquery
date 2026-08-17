@@ -760,6 +760,14 @@ touching a call site. Counters only, with paired totals for means
 and labels drawn from closed sets so cardinality is bounded by code, not
 traffic.
 
+`Smolquery.Lifecycle` is the second consumer of the same events (T-295): it
+rebroadcasts the per-table ones (commits, seal attempts, compaction swaps)
+over `Smolquery.PubSub`, whose pg adapter spans the cluster, so the table
+page's lifecycle card updates live from whichever node did the work. The two
+consumers stay strictly parallel — `/metrics` remains per-node state counting
+only what that node emitted; nothing carried over PubSub lands in another
+node's counters.
+
 Terminal jobs are recorded in a `smolquery_jobs` table inside the same SQLite
 database that backs the DuckLake catalog (via DuckDB's `sqlite` extension), so
 job status outlives the result TTL even though the rows do not.

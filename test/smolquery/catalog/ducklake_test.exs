@@ -360,6 +360,28 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "segment_files/3" do
+    test "lists each segment's path, rows, and bytes", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 7)
+      {:ok, snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+
+      assert {:ok, files} = Catalog.segment_files(catalog, @table, snapshot)
+      assert Enum.sort_by(files, & &1.path) |> Enum.map(& &1.rows) |> Enum.sum() == 17
+      assert Enum.map(files, & &1.path) |> Enum.sort() == Enum.sort([a.path, b.path])
+      assert Enum.all?(files, &(&1.bytes > 0))
+    end
+
+    test "a table that never registered anything lists nothing", %{catalog: catalog} do
+      {:ok, snapshot} = Catalog.current_snapshot(catalog)
+
+      assert Catalog.segment_files(catalog, @table, snapshot) == {:ok, []}
+    end
+  end
+
   describe "drop_segments/3" do
     test "removes a segment from the current snapshot but leaves the file", %{
       catalog: catalog,

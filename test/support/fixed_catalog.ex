@@ -47,6 +47,13 @@ defmodule Smolquery.Test.FixedCatalog do
     do: {:ok, Map.get(segments, {table, snapshot}, [])}
 
   @impl Catalog
+  def segment_files(answers, table, snapshot) do
+    with {:ok, paths} <- segments(answers, table, snapshot) do
+      {:ok, Enum.map(paths, &%{path: &1, rows: 0, bytes: 0})}
+    end
+  end
+
+  @impl Catalog
   def registered_through(answers, table, snapshot) do
     case Map.fetch(answers, :registered) do
       {:ok, registered} -> {:ok, Map.get(registered, {table, snapshot}, [])}

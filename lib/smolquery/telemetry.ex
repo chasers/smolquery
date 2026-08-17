@@ -34,12 +34,18 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :buffer, :wire]        %{duration_us}, meta %{transport: :local | :remote}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
-                                            replicate_us}, meta %{result: :ok | :error}
+                                            replicate_us},
+                                          meta %{result: :ok | :error, table_ref: ref}
       [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused}
       [:smolquery, :buffer, :dedup]       %{rows}
       [:smolquery, :seal, :attempt]       %{duration_us, segments},
-                                          meta %{result: :ok | :error | :crashed}
-      [:smolquery, :compact, :swap]       %{replaced, duration_us}, meta %{result: :ok | :error}
+                                          meta %{result: :ok | :error | :crashed, table_ref: ref}
+      [:smolquery, :compact, :swap]       %{replaced, duration_us},
+                                          meta %{result: :ok | :error, table_ref: ref}
+
+  The per-table events carry `table_ref` in metadata for
+  `Smolquery.Lifecycle`'s PubSub bridge; it is never a label here, so
+  metric cardinality stays bounded by this file.
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}

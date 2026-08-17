@@ -171,4 +171,82 @@ defmodule SmolqueryWeb.TableLiveTest do
                live(conn, ~p"/tables/nope/missing")
     end
   end
+
+  describe "lifecycle (T-295)" do
+    defp seal_event(result, overrides \\ %{}) do
+      Map.merge(
+        %{
+          kind: :seal,
+          table_ref: {"analytics", "events"},
+          node: node(),
+          result: result,
+          measurements: %{duration_us: 1_200_000, segments: 16},
+          at: System.system_time(:millisecond)
+        },
+        overrides
+      )
+    end
+
+    test "renders the hot and sealed tiers on load", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+
+      html = render_async(lv)
+      assert html =~ "Lifecycle"
+      assert html =~ "hot tier unreachable"
+      assert html =~ "Catalog stats unavailable"
+      assert html =~ "Waiting for commits, seals, and compactions"
+    end
+
+    test "a lifecycle event lands in the feed and a failure streak shows", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      render_async(lv)
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+      html = render(lv)
+      assert html =~ "seal ok · 16 segments"
+
+      send(lv.pid, {:lifecycle, seal_event(:error)})
+      send(lv.pid, {:lifecycle, seal_event(:error)})
+      html = render(lv)
+      assert html =~ "2 failed seals"
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+      refute render(lv) =~ "failed seals"
+    end
+
+    test "a broadcast through the bridge reaches the page", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      render_async(lv)
+
+      :telemetry.execute(
+        [:smolquery, :compact, :swap],
+        %{replaced: 5, duration_us: 2_000_000},
+        %{result: :ok, table_ref: {"analytics", "events"}}
+      )
+
+      assert render_eventually(lv, "compaction ok · 5 replaced")
+    end
+
+    defp render_eventually(lv, needle, attempts \\ 50)
+
+    defp render_eventually(_lv, _needle, 0), do: false
+
+    defp render_eventually(lv, needle, attempts) do
+      if render(lv) =~ needle do
+        true
+      else
+        Process.sleep(20)
+        render_eventually(lv, needle, attempts - 1)
+      end
+    end
+  end
 end

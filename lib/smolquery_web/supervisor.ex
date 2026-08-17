@@ -37,10 +37,7 @@ defmodule SmolqueryWeb.Supervisor do
 
     children =
       DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
-        [
-          {Phoenix.PubSub, name: Smolquery.PubSub},
-          SmolqueryWeb.Endpoint
-        ]
+        [SmolqueryWeb.Endpoint]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

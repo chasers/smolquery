@@ -75,6 +75,15 @@ defmodule Smolquery.Catalog do
         }
 
   @typedoc """
+  One sealed segment's path and weight, for `segment_files/3`.
+  """
+  @type segment_file :: %{
+          path: String.t(),
+          rows: non_neg_integer(),
+          bytes: non_neg_integer()
+        }
+
+  @typedoc """
   The mutable table settings a `PATCH` can carry, keyed by which were present.
 
   A key that is absent is left untouched; `retention: nil` and `clustering: []`
@@ -99,6 +108,8 @@ defmodule Smolquery.Catalog do
               {:ok, [String.t()]} | {:error, term()}
   @callback segment_stats(config :: term(), table_ref(), snapshot()) ::
               {:ok, segment_stats()} | {:error, term()}
+  @callback segment_files(config :: term(), table_ref(), snapshot()) ::
+              {:ok, [segment_file()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
@@ -225,6 +236,19 @@ defmodule Smolquery.Catalog do
           {:ok, segment_stats()} | {:error, term()}
   def segment_stats(%__MODULE__{} = catalog, table, snapshot),
     do: catalog.impl.segment_stats(catalog.config, table, snapshot)
+
+  @doc """
+  Each segment's path, rows, and bytes at `snapshot` — `segment_stats/3` per
+  file rather than summed.
+
+  The lifecycle UI's question (T-295): compaction is visible only in the size
+  distribution — how many segments sit under `compact_below_bytes`, and how
+  they merge away over time — which no aggregate answers.
+  """
+  @spec segment_files(t(), table_ref(), snapshot()) ::
+          {:ok, [segment_file()]} | {:error, term()}
+  def segment_files(%__MODULE__{} = catalog, table, snapshot),
+    do: catalog.impl.segment_files(catalog.config, table, snapshot)
 
   @doc """
   Removes segments from a table's current snapshot, returning the new snapshot.

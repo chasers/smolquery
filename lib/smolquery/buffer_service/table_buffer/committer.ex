@@ -430,7 +430,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
         manifest_us: added_at - encoded_at,
         replicate_us: done_at - added_at
       },
-      %{result: if(match?({:ok, _ack}, result), do: :ok, else: :error)}
+      %{
+        result: if(match?({:ok, _ack}, result), do: :ok, else: :error),
+        table_ref: state.table_ref
+      }
     )
 
     reply_to_pending(commit.pending, result, rejected)
