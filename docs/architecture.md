@@ -335,6 +335,11 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   past either valve retires in valve-sized claims, back to back, so a table
   under sustained ingest self-corrects. A custom `seal_consumer` receives
   claims up to the valves and must bound its own engine calls the same way.
+  The valves also reach a claim frozen before they existed (T-294): a live
+  claim over the current valves is released whole — never re-signalled —
+  and re-claims as valve-sized claims, while a seal attempt still running
+  for the released claim is refused at three gates (a liveness check before
+  its merge and before its register, and a claim-key fence on retire).
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's

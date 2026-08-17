@@ -35,6 +35,25 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     * *after retirement* — there is nothing left to do, and a repeated retire is
       `:ok` by the buffer's contract
 
+  ## A released claim's attempt is refused, not reconciled (T-294)
+
+  A claim frozen larger than the current valves allow is *released* by its
+  owner and re-derived as valve-sized claims — see
+  `Smolquery.BufferService.TableBuffer`. An attempt for the released claim
+  can still be running, and its segment must not register: the re-derived
+  claims cover the same rows under other keys, so both landing would commit
+  the rows twice. Three gates hold that line. The attempt checks the claim
+  is still live against the origin's served manifest before it merges — a
+  stale attempt costs one manifest read, not hours of merge. It checks
+  again between merge and register, which narrows the remaining window to
+  the moments between two calls — the same narrowing standard as the
+  stale-owner gate above. And retirement carries the claim's keys, so the
+  buffer refuses to stamp ids whose live claim moved on
+  (`Smolquery.BufferService.HotManifest.retire/6`), which holds even for an
+  attempt that raced past both checks. Entries already sealed, and entries
+  gone from the manifest, stay the reconciliation cases they always were —
+  the guard skips them.
+
   ## Retirement goes through the buffer's client, not its HTTP API
 
   The manifest and the segment bytes come over HTTP because `httpfs` needs them
@@ -71,15 +90,34 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   alias Smolquery.Partitions
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Handoff
+  alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime
 
   @impl Handoff
   def seal(_config, %Runtime{} = runtime, table_ref, claim) do
-    with {:ok, snapshot} <- commit(runtime, table_ref, claim) do
+    with :ok <- claim_live(runtime, table_ref, claim),
+         {:ok, snapshot} <- commit(runtime, table_ref, claim) do
       retire(runtime, table_ref, claim, snapshot)
     end
   end
+
+  defp claim_live(runtime, table_ref, %{ids: ids, keys: keys} = claim)
+       when is_list(ids) and is_list(keys) do
+    with {:ok, entries} <- HotTier.manifest(runtime, table_ref, claim[:origin]) do
+      claimed = MapSet.new(ids)
+
+      entries
+      |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
+      |> Enum.reject(&(&1["sealed_at"] || &1["claim_keys"] == keys))
+      |> case do
+        [] -> :ok
+        stale -> {:error, {:stale_claim, Enum.map(stale, & &1["id"])}}
+      end
+    end
+  end
+
+  defp claim_live(_runtime, _table_ref, _claim), do: :ok
 
   # The hot tier speaks partition refs; the catalog knows only real tables
   # (Smolquery.Partitions). Every catalog operation here maps to the parent,
@@ -97,13 +135,21 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   end
 
   defp merge_and_register(runtime, table_ref, claim) do
-    with {:ok, segment} <- Merge.run(runtime, table_ref, claim) do
+    with {:ok, segment} <- Merge.run(runtime, table_ref, claim),
+         :ok <- claim_live(runtime, table_ref, claim) do
       Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
     end
   end
 
   defp retire(runtime, table_ref, claim, snapshot) do
-    Client.retire_at(claim[:origin], runtime.buffer_name, table_ref, claim.ids, snapshot)
+    Client.retire_at(
+      claim[:origin],
+      runtime.buffer_name,
+      table_ref,
+      claim.ids,
+      snapshot,
+      claim[:keys]
+    )
   end
 
   defp sealed_paths(runtime, %{keys: keys}) when is_list(keys) and keys != [],

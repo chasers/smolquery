@@ -351,6 +351,41 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
+  Releases the table's live claim, returning its ids to pending.
+
+  The way out of a claim frozen larger than the current valves allow (T-294):
+  the input-set-never-moves rule holds for as long as a claim is live, so a
+  claim is never shrunk in place — it is released whole, and the next claim
+  re-derives from the pending tail under the valves, with a key the new
+  subset names. `ids` must match the live claim's, the same whole-or-nothing
+  rule `claim/5` freezes under; a different live set is
+  `{:error, :claim_mismatch}`. No live claim absorbs as `:ok` — a replica
+  re-applying a release it already holds, or one whose claim never froze,
+  has nothing to release and nothing wrong.
+  """
+  @spec release(t(), Store.table_ref(), [String.t()], log() | nil) :: :ok | {:error, term()}
+  def release(%__MODULE__{} = manifest, table_ref, ids, log \\ nil) do
+    case live_claim(manifest, table_ref) do
+      :error -> :ok
+      {:ok, live} -> release_live(manifest, table_ref, live, ids, log)
+    end
+  end
+
+  defp release_live(manifest, table_ref, live, ids, log) do
+    if Enum.sort(live.ids) == ids |> Enum.uniq() |> Enum.sort() do
+      record = %{"op" => "release", "ids" => live.ids}
+
+      with :ok <- append(manifest, table_ref, record, log) do
+        live.ids
+        |> Enum.flat_map(&lookup(manifest, table_ref, &1))
+        |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
+      end
+    else
+      {:error, :claim_mismatch}
+    end
+  end
+
+  @doc """
   The table's outstanding claim, if a sealer still owes one.
 
   A claim is live until every entry in it is sealed — which is what limits a table
@@ -380,18 +415,44 @@ defmodule Smolquery.BufferService.HotManifest do
   and stamping only some would leave the rest claimed but unsealed, so the next
   re-signal would ask a sealer to rebuild that claim's segment from a subset and
   overwrite the committed one with fewer rows.
+
+  `keys` fences the retire against a released claim (T-294): a sealer names
+  the claim keys its segment was written under, and an unsealed entry whose
+  `claim_keys` no longer match refuses the whole retire as
+  `{:error, {:stale_claim, ...}}` — the claim was released and re-derived
+  while that attempt ran, and stamping its ids sealed would let the
+  re-derived claims' segments double-commit the rows. `nil` skips the fence,
+  for callers retiring outside any claim. The idempotent retry contract is
+  unchanged either way: ids already sealed, and ids the reaper has deleted,
+  stay `:ok`.
   """
-  @spec retire(t(), Store.table_ref(), [String.t()], non_neg_integer(), log() | nil) ::
-          :ok | {:error, term()}
-  def retire(%__MODULE__{} = manifest, table_ref, ids, snapshot, log \\ nil) do
+  @spec retire(
+          t(),
+          Store.table_ref(),
+          [String.t()],
+          non_neg_integer(),
+          [String.t()] | nil,
+          log() | nil
+        ) :: :ok | {:error, term()}
+  def retire(%__MODULE__{} = manifest, table_ref, ids, snapshot, keys \\ nil, log \\ nil) do
     case unsealed(manifest, table_ref, ids) do
       [] ->
         :ok
 
       pending ->
-        seal_all(manifest, table_ref, with_claim(manifest, table_ref, pending), snapshot, log)
+        case stale_for(pending, keys) do
+          [] ->
+            seal_all(manifest, table_ref, with_claim(manifest, table_ref, pending), snapshot, log)
+
+          stale ->
+            {:error, {:stale_claim, %{keys: keys, ids: Enum.map(stale, & &1.id)}}}
+        end
     end
   end
+
+  defp stale_for(_pending, nil), do: []
+
+  defp stale_for(pending, keys), do: Enum.reject(pending, &(&1.claim_keys == keys))
 
   @doc """
   Deletes `ids` from the store and the manifest.
@@ -801,6 +862,16 @@ defmodule Smolquery.BufferService.HotManifest do
      Enum.reduce(ids, acc, fn id, acc ->
        case Map.fetch(acc, id) do
          {:ok, entry} -> Map.put(acc, id, Entry.claim(entry, keys))
+         :error -> acc
+       end
+     end)}
+  end
+
+  defp apply_record(%{"op" => "release", "ids" => ids}, acc) do
+    {:ok,
+     Enum.reduce(ids, acc, fn id, acc ->
+       case Map.fetch(acc, id) do
+         {:ok, entry} -> Map.put(acc, id, Entry.claim(entry, []))
          :error -> acc
        end
      end)}

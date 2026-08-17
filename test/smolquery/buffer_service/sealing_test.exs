@@ -182,6 +182,49 @@ defmodule Smolquery.BufferService.SealingTest do
       assert remainder.ids == Enum.drop(backlog, 16)
     end
 
+    test "an oversized claim frozen under old valves releases and drains (T-294)", context do
+      name = :"resize_#{:erlang.unique_integer([:positive])}"
+
+      %{name: ^name} = start_buffer_service(context, name: name, seal_max_files: 1_000_000)
+
+      ids =
+        for n <- 1..18 do
+          {:ok, ack} = Client.write_batch(name, @table, batch(n..n))
+          ack.segment_id
+        end
+
+      {:ok, runtime} = Runtime.fetch(name)
+      {:ok, prefix} = Store.prefix(@table)
+      {:ok, old_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
+      {:ok, oversized} = HotManifest.claim(runtime.manifest, @table, ids, [old_key])
+      assert Enum.sort(oversized.ids) == Enum.sort(ids)
+
+      :ok = stop_supervised(name)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          %{name: ^name} =
+            start_buffer_service(context,
+              name: name,
+              seal_max_files: 1,
+              seal_max_bytes: 1_000_000_000,
+              seal_retry_ms: 1
+            )
+
+          assert_receive {:seal_ready, @table, claim}, 2_000
+          assert claim.ids == Enum.take(ids, 16)
+          refute claim.keys == [old_key]
+
+          :ok = Client.retire(name, @table, claim.ids, 1)
+          flush_messages()
+
+          assert_receive {:seal_ready, @table, remainder}, 2_000
+          assert remainder.ids == Enum.drop(ids, 16)
+        end)
+
+      assert log =~ "released oversized claim"
+    end
+
     test "a claim freezes the entire unsealed backlog", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 100)
 

@@ -221,7 +221,7 @@ defmodule Smolquery.BufferService.HotManifestTest do
       segment = write(manifest, @table, rows(2))
       {:ok, entry} = HotManifest.add(manifest, @table, segment, log)
 
-      assert HotManifest.retire(manifest, @table, [entry.id], 7, log) == :ok
+      assert HotManifest.retire(manifest, @table, [entry.id], 7, nil, log) == :ok
       assert HotManifest.drop(manifest, @table, [entry.id], log) == :ok
       assert HotManifest.close_log(log) == :ok
 

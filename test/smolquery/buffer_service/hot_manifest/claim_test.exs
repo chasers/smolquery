@@ -125,6 +125,95 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
     end
   end
 
+  describe "release/4" do
+    test "returns the live claim's ids to pending, so the next claim re-derives", %{
+      manifest: manifest
+    } do
+      first = add(manifest, @table)
+      second = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [first.id, second.id], @keys)
+
+      assert :ok = HotManifest.release(manifest, @table, claim.ids)
+      assert HotManifest.live_claim(manifest, @table) == :error
+
+      assert manifest
+             |> HotManifest.entries(@table)
+             |> Enum.all?(&(&1.claim_keys == []))
+
+      other = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
+      assert {:ok, next} = HotManifest.claim(manifest, @table, [first.id], other)
+      assert next.ids == [first.id]
+      assert next.keys == other
+    end
+
+    test "refuses ids that are not the live claim's", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      other = add(manifest, @table)
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+
+      assert HotManifest.release(manifest, @table, [other.id]) == {:error, :claim_mismatch}
+      assert {:ok, _still_live} = HotManifest.live_claim(manifest, @table)
+    end
+
+    test "absorbs a release with no live claim", %{manifest: manifest} do
+      entry = add(manifest, @table)
+
+      assert :ok = HotManifest.release(manifest, @table, [entry.id])
+
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+      :ok = HotManifest.release(manifest, @table, claim.ids)
+
+      assert :ok = HotManifest.release(manifest, @table, claim.ids)
+    end
+
+    test "survives recovery, so a restarted buffer does not resurrect the claim", context do
+      manifest = context.manifest
+      first = add(manifest, @table)
+      second = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [first.id, second.id], @keys)
+      :ok = HotManifest.release(manifest, @table, claim.ids)
+
+      assert {:ok, %{entries: 2}} = HotManifest.recover(manifest, @table)
+      assert HotManifest.live_claim(manifest, @table) == :error
+    end
+  end
+
+  describe "retire/6 key fencing" do
+    test "retires under the claim's own keys, refuses stale ones", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+
+      stale = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
+
+      assert HotManifest.retire(manifest, @table, claim.ids, 7, stale) ==
+               {:error, {:stale_claim, %{keys: stale, ids: claim.ids}}}
+
+      assert {:ok, unsealed} = HotManifest.entry(manifest, @table, entry.id)
+      assert is_nil(unsealed.sealed_at)
+
+      assert HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys) == :ok
+    end
+
+    test "refuses a released claim's old keys", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+      :ok = HotManifest.release(manifest, @table, claim.ids)
+
+      assert {:error, {:stale_claim, _diff}} =
+               HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys)
+    end
+
+    test "stays idempotent for sealed and reaped ids, keys or not", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+      :ok = HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys)
+
+      stale = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
+      assert HotManifest.retire(manifest, @table, claim.ids, 9, stale) == :ok
+      assert HotManifest.retire(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SZ"], 9, stale) == :ok
+    end
+  end
+
   describe "live_claim/2" do
     test "is an error with nothing claimed", %{manifest: manifest} do
       _entry = add(manifest, @table)

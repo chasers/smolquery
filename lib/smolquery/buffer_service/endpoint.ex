@@ -194,7 +194,7 @@ defmodule Smolquery.BufferService.Endpoint do
   @spec apply_replica_mutation(atom(), Store.table_ref(), :claim | :retire | :drop, map(), term()) ::
           :ok | {:error, term()}
   def apply_replica_mutation(name, table_ref, op, args, epoch)
-      when op in [:claim, :retire, :drop] do
+      when op in [:claim, :retire, :drop, :release] do
     with {:ok, runtime} <- runtime(name),
          :ok <- replica_epoch_check(name, epoch) do
       if holds_nothing?(runtime, table_ref) do
@@ -253,12 +253,12 @@ defmodule Smolquery.BufferService.Endpoint do
   `{:error, :buffer_unavailable}` rather than an exit — retire is idempotent, so
   the sealer just retries.
   """
-  @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
+  @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer(), [String.t()] | nil) ::
           :ok | {:error, term()}
-  def retire(name, table_ref, ids, snapshot) do
+  def retire(name, table_ref, ids, snapshot, keys \\ nil) do
     with {:ok, runtime} <- runtime(name),
          {:ok, buffer} <- buffer(runtime, table_ref) do
-      TableBuffer.retire(buffer, ids, snapshot)
+      TableBuffer.retire(buffer, ids, snapshot, keys)
     end
   catch
     :exit, {:noproc, _call} -> {:error, :buffer_unavailable}

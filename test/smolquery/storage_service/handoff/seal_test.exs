@@ -291,6 +291,45 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
     end
   end
 
+  describe "a released claim (T-294)" do
+    defp release_and_reclaim(context, claim, keep) do
+      :ok = HotManifest.release(context.buffer_runtime.manifest, @table, claim.ids)
+
+      {:ok, prefix} = Store.prefix(@table)
+      {:ok, new_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SW")
+      {:ok, next} = HotManifest.claim(context.buffer_runtime.manifest, @table, keep, [new_key])
+
+      next
+    end
+
+    test "an attempt for a released claim is refused before it merges", context do
+      ids = [write(context.buffer, 1..2), write(context.buffer, 3..4)]
+      claim = freeze_claim(context, ids)
+      _next = release_and_reclaim(context, claim, [hd(ids)])
+
+      assert {:error, {:stale_claim, stale}} = seal(context, claim)
+      assert Enum.sort(stale) == Enum.sort(claim.ids)
+      assert sealed_count(context) == 0
+      assert visible_ids(context) == [1, 2, 3, 4]
+    end
+
+    test "the retire fence refuses an attempt that raced past both guards", context do
+      ids = [write(context.buffer, 1..2)]
+      claim = freeze_claim(context, ids)
+
+      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
+
+      _next = release_and_reclaim(context, claim, ids)
+
+      assert {:error, {:stale_claim, _diff}} =
+               Client.retire(context.buffer, @table, claim.ids, 1, claim.keys)
+
+      assert {:ok, entries} = Client.hot_manifest(context.buffer, @table)
+      assert Enum.all?(entries, &(&1.sealed_at == nil))
+    end
+  end
+
   describe "the orphan a crash leaves" do
     test "an uncommitted merge output is swept, and a committed one is not", context do
       ids = [write(context.buffer, 1..2)]
