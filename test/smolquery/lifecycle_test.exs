@@ -16,6 +16,19 @@ defmodule Smolquery.LifecycleTest do
   test "a seal attempt event broadcasts on the parent table's topic" do
     :ok = Lifecycle.subscribe(@table)
 
+    handler = "lifecycle-test-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:smolquery, :lifecycle, :broadcast],
+        fn _event, _measurements, meta, nil -> send(parent, {:counted, meta.kind}) end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
     :telemetry.execute(
       [:smolquery, :seal, :attempt],
       %{duration_us: 1_200_000, segments: 16},
@@ -30,7 +43,7 @@ defmodule Smolquery.LifecycleTest do
     assert event.measurements.segments == 16
     assert is_integer(event.at)
 
-    assert Smolquery.Telemetry.render() =~ ~s(smolquery_lifecycle_broadcasts_total{kind="seal"})
+    assert_receive {:counted, :seal}
   end
 
   test "a commit and a compaction map to their kinds" do
