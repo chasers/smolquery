@@ -21,6 +21,8 @@ defmodule Smolquery.LifecycleTest do
     assert event.node == node()
     assert event.measurements.segments == 16
     assert is_integer(event.at)
+
+    assert Smolquery.Telemetry.render() =~ ~s(smolquery_lifecycle_broadcasts_total{kind="seal"})
   end
 
   test "a commit and a compaction map to their kinds" do

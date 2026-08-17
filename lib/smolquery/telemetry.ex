@@ -43,9 +43,13 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
                                           meta %{result: :ok | :error, table_ref: ref}
 
+      [:smolquery, :lifecycle, :broadcast] %{count},
+                                          meta %{kind: :commit | :seal | :compaction}
+
   The per-table events carry `table_ref` in metadata for
   `Smolquery.Lifecycle`'s PubSub bridge; it is never a label here, so
-  metric cardinality stays bounded by this file.
+  metric cardinality stays bounded by this file. The bridge's own
+  broadcasts are counted back here per node, by kind — a closed set.
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
@@ -72,7 +76,8 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :compact, :swap],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
-    [:smolquery, :query, :job]
+    [:smolquery, :query, :job],
+    [:smolquery, :lifecycle, :broadcast]
   ]
 
   @help %{
@@ -111,6 +116,8 @@ defmodule Smolquery.Telemetry do
     "smolquery_gc_segments_swept_total" => "Uncommitted sealed segments GC deleted.",
     "smolquery_gc_staged_files_swept_total" => "Leaked staging files GC deleted.",
     "smolquery_query_jobs_total" => "Query jobs reaching a terminal state, by state.",
+    "smolquery_lifecycle_broadcasts_total" =>
+      "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean."
   }
@@ -290,6 +297,10 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :query, :job], measurements, meta, nil) do
     bump({"smolquery_query_jobs_total", [state: Map.get(meta, :state, :unknown)]}, 1)
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
+  end
+
+  def handle_event([:smolquery, :lifecycle, :broadcast], _measurements, meta, nil) do
+    bump({"smolquery_lifecycle_broadcasts_total", [kind: Map.get(meta, :kind, :unknown)]}, 1)
   end
 
   def handle_event(_event, _measurements, _meta, nil), do: :ok

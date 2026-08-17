@@ -25,7 +25,11 @@ defmodule Smolquery.Lifecycle do
   counts only what this node itself emitted, and nothing this bridge
   carries over PubSub is ever written into another node's counters — a
   scrape is per-node state, and cross-node aggregation is the scraper's
-  job, not the emitter's. The handler runs in the emitting process and must never
+  job, not the emitter's. What a node's scrape *does* count is this bridge's
+  own output: each delivered broadcast emits
+  `[:smolquery, :lifecycle, :broadcast]`, which `Smolquery.Telemetry` renders
+  as `smolquery_lifecycle_broadcasts_total` by kind — how much lifecycle
+  traffic this node pushes onto the bus, on the node that pushed it. The handler runs in the emitting process and must never
   raise: `:telemetry` silently detaches a raising handler, which would stop
   every broadcast. A broadcast that cannot be delivered (the pubsub not
   running, as in a bare unit test) is dropped rather than raised.
@@ -103,12 +107,17 @@ defmodule Smolquery.Lifecycle do
       at: System.system_time(:millisecond)
     }
 
-    try do
-      Phoenix.PubSub.broadcast(Smolquery.PubSub, topic(table_ref), {:lifecycle, event})
-    rescue
-      ArgumentError -> :ok
-    catch
-      :exit, _reason -> :ok
+    delivered =
+      try do
+        Phoenix.PubSub.broadcast(Smolquery.PubSub, topic(table_ref), {:lifecycle, event})
+      rescue
+        ArgumentError -> {:error, :pubsub_unavailable}
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+
+    with :ok <- delivered do
+      :telemetry.execute([:smolquery, :lifecycle, :broadcast], %{count: 1}, %{kind: event.kind})
     end
 
     :ok
