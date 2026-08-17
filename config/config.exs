@@ -131,7 +131,8 @@ config :smolquery, Smolquery.QueryService,
   max_concurrent_jobs: 8,
   default_timeout_ms: 60_000,
   job_memory_limit: "1GB",
-  result_ttl_ms: 300_000
+  result_ttl_ms: 300_000,
+  result_max_rows: 10_000
 
 config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",

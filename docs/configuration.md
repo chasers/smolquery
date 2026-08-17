@@ -165,7 +165,8 @@ config :smolquery, Smolquery.QueryService,
   max_concurrent_jobs: 8,
   default_timeout_ms: 60_000,
   job_memory_limit: "1GB",
-  result_ttl_ms: 300_000
+  result_ttl_ms: 300_000,
+  result_max_rows: 10_000
 ```
 
 Engine options can also be passed per instance to `Smolquery.Engine.start_link/1`,
@@ -291,3 +292,12 @@ to read it, even though the query path never writes through the store itself.
 every job's runtime; `job_memory_limit` is each job engine's DuckDB
 `memory_limit`; `result_ttl_ms` is how long a finished job holds its result
 frame for an async caller.
+
+`result_max_rows` (default 10,000 — matching the API's `maxResults`
+ceiling, so every result the budget admits is pageable in one page) bounds
+a job's materialized result
+(T-274). `job_memory_limit` binds only DuckDB's scan — the result frame lives
+in Polars memory outside it — so this is the bound that turns a `SELECT *`
+over a large table into a `RESULT_TOO_LARGE` error instead of an OOM. It is
+enforced as a `LIMIT` inside the engine, so an over-budget query stops
+producing rows at the bound. `:infinity` disables it.

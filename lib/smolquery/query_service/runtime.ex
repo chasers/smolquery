@@ -19,7 +19,8 @@ defmodule Smolquery.QueryService.Runtime do
         max_concurrent_jobs: 8,
         default_timeout_ms: 60_000,
         job_memory_limit: "1GB",
-        result_ttl_ms: 300_000
+        result_ttl_ms: 300_000,
+        result_max_rows: 10_000
 
   `catalog` is where plans resolve tables: snapshot pins, segment lists,
   schemas. Given options (or nothing), the service starts its own
@@ -58,6 +59,14 @@ defmodule Smolquery.QueryService.Runtime do
   otherwise. `job_memory_limit` is handed to each job engine's DuckDB
   `memory_limit`. `result_ttl_ms` is how long a finished job holds its result
   frame for an async caller to fetch.
+
+  `result_max_rows` bounds how many rows a job's result frame may hold
+  (T-274). `job_memory_limit` binds only DuckDB's scan — the materialized
+  frame lives in Polars memory outside it — so without this bound a
+  `SELECT *` over a large table is an OOM, not an error. The runner enforces
+  it inside the engine (a `LIMIT` around the user's SQL), so an over-budget
+  query stops producing rows at the bound instead of materializing first and
+  failing after. `:infinity` disables it, restoring the pre-T-274 posture.
 
   `job_bootstrap` is the SQL each job engine runs before its first query —
   by default, the `ATTACH` that binds the same lake the `catalog`
@@ -116,6 +125,7 @@ defmodule Smolquery.QueryService.Runtime do
     default_timeout_ms: 60_000,
     job_memory_limit: "1GB",
     result_ttl_ms: 300_000,
+    result_max_rows: 10_000,
     write_partitions: 1
   ]
 
@@ -136,6 +146,7 @@ defmodule Smolquery.QueryService.Runtime do
           default_timeout_ms: pos_integer(),
           job_memory_limit: String.t(),
           result_ttl_ms: pos_integer(),
+          result_max_rows: pos_integer() | :infinity,
           write_partitions: pos_integer(),
           store: Store.t() | nil
         }
@@ -151,6 +162,7 @@ defmodule Smolquery.QueryService.Runtime do
     :default_timeout_ms,
     :job_memory_limit,
     :result_ttl_ms,
+    :result_max_rows,
     :write_partitions
   ]
 
