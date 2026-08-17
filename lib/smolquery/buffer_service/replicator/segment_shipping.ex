@@ -37,6 +37,19 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   harmless, while a follower left behind freezes divergent claims — and two
   different claims over the same rows double-commit them to the catalog.
 
+  A follower that answers a claim with `:partial_claim` is healed rather
+  than retried at (T-289): the diff names the ids the follower lacks, the
+  owner re-ships each missing entry — bytes and manifest record, the same
+  `accept_replica` a group commit uses — and the claim is applied once
+  more. Without this, the owner recomputes the same id set every
+  maintenance tick, so a follower that lost entries (a recreated pod, a
+  missed commit) answers the same refusal every ~5 s forever and the table
+  never seals. Only `missing` ids heal; a diff naming `sealed` ids means
+  the follower already retired them and the owner is the one behind —
+  re-shipping an unsealed entry over a sealed one would set up a
+  double-commit at the next retire, so that divergence fails the claim
+  loudly instead.
+
   After the followers ack, the same mutation fans out best-effort to every
   other node the read side might ask (`Routing.manifest_nodes/1`): a ring
   change strands replicated copies on an ex-owner or ex-follower that the
@@ -78,9 +91,13 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
 
   @behaviour Smolquery.BufferService.Replicator
 
+  require Logger
+
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Routing
+  alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.Transport
   alias Smolquery.Segments.Store
 
@@ -114,11 +131,112 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
       epoch = RingEpoch.current_epoch(mutation.name)
       args = [mutation.table_ref, mutation.op, mutation.args, epoch]
 
-      with :ok <- ship(targets, mutation.name, :apply_replica_mutation, args) do
+      with :ok <- ship_mutation(targets, mutation, args) do
         config
         |> other_holders(mutation.name, targets)
         |> ship_best_effort(mutation.name, args)
       end
+    end
+  end
+
+  defp ship_mutation(targets, mutation, args) do
+    Enum.reduce_while(targets, :ok, fn target, :ok ->
+      case apply_mutation(target, mutation, args) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp apply_mutation({transport, node, instance} = target, mutation, args) do
+    case Transport.invoke(
+           transport,
+           node,
+           :bulk,
+           :apply_replica_mutation,
+           [instance | args],
+           timeout(mutation.name)
+         ) do
+      :ok ->
+        :ok
+
+      {:error, {:partial_claim, %{missing: [_ | _] = missing, sealed: []}}}
+      when mutation.op == :claim ->
+        heal_then_retry(target, mutation, args, missing)
+
+      {:error, reason} ->
+        {:error, {:replication_failed, node, reason}}
+
+      other ->
+        {:error, {:replication_failed, node, other}}
+    end
+  end
+
+  defp heal_then_retry({transport, node, instance} = target, mutation, args, missing) do
+    with :ok <- reship(target, mutation, missing) do
+      Logger.warning(
+        "healed a partial claim on #{inspect(mutation.table_ref)}: re-shipped " <>
+          "#{length(missing)} missing entries to #{node} (#{inspect(missing)})"
+      )
+
+      case Transport.invoke(
+             transport,
+             node,
+             :bulk,
+             :apply_replica_mutation,
+             [instance | args],
+             timeout(mutation.name)
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:replication_failed, node, reason}}
+        other -> {:error, {:replication_failed, node, other}}
+      end
+    end
+  end
+
+  defp reship({_transport, node, _instance} = target, mutation, missing) do
+    case Runtime.fetch(mutation.name) do
+      {:ok, runtime} ->
+        reship_all(target, mutation, runtime, missing)
+
+      :error ->
+        {:error, {:replication_failed, node, {:heal_failed, :runtime_unavailable}}}
+    end
+  end
+
+  defp reship_all({_transport, node, _instance} = target, mutation, runtime, missing) do
+    epoch = RingEpoch.current_epoch(mutation.name)
+
+    Enum.reduce_while(missing, :ok, fn id, :ok ->
+      case reship_entry(target, mutation, runtime, id, epoch) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:replication_failed, node, reason}}}
+      end
+    end)
+  end
+
+  defp reship_entry({transport, node, instance}, mutation, runtime, id, epoch) do
+    with {:ok, entry} <- owner_entry(runtime.manifest, mutation.table_ref, id),
+         {:ok, bytes} <- segment_bytes(runtime.store, entry.key) do
+      case Transport.invoke(
+             transport,
+             node,
+             :bulk,
+             :accept_replica,
+             [instance, mutation.table_ref, entry, bytes, epoch],
+             timeout(mutation.name)
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:heal_failed, id, reason}}
+        other -> {:error, {:heal_failed, id, other}}
+      end
+    end
+  end
+
+  defp owner_entry(manifest, table_ref, id) do
+    case HotManifest.entry(manifest, table_ref, id) do
+      {:ok, entry} -> {:ok, entry}
+      :error -> {:error, {:heal_failed, id, :not_on_owner}}
     end
   end
 

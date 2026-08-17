@@ -135,6 +135,77 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert entry.sealed_at
   end
 
+  test "a claim heals a follower that lost entries, by re-shipping them (T-289)", context do
+    {owner, follower} = start_pair(context)
+
+    {:ok, first} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-12"))
+    {:ok, second} = Client.write_batch(owner, @table, batch([%{"id" => 2}], "b-13"))
+
+    :ok =
+      Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: [second.segment_id]}, nil)
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert [_lone_survivor] = HotManifest.entries(follower_runtime.manifest, @table)
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert log =~ "healed a partial claim"
+    assert log =~ second.segment_id
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    assert {:ok, claim} = HotManifest.live_claim(owner_runtime.manifest, @table)
+    assert Enum.sort(claim.ids) == Enum.sort([first.segment_id, second.segment_id])
+    assert {:ok, ^claim} = HotManifest.live_claim(follower_runtime.manifest, @table)
+
+    {:ok, entry} = HotManifest.entry(follower_runtime.manifest, @table, second.segment_id)
+    {:ok, prefix} = Store.prefix(@table)
+    {:ok, key} = Store.key(prefix, entry.id)
+    assert File.exists?(Store.location(follower_runtime.store, key))
+  end
+
+  test "a claim over ids the follower already sealed fails loudly, naming them", context do
+    {owner, follower} = start_pair(context)
+
+    {:ok, first} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-14"))
+    {:ok, second} = Client.write_batch(owner, @table, batch([%{"id" => 2}], "b-15"))
+
+    :ok =
+      Endpoint.apply_replica_mutation(
+        follower,
+        @table,
+        :retire,
+        %{ids: [second.segment_id], snapshot: 9},
+        nil
+      )
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert log =~ ":partial_claim"
+    assert log =~ second.segment_id
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert HotManifest.live_claim(owner_runtime.manifest, @table) == :error
+
+    {:ok, entry} = HotManifest.entry(follower_runtime.manifest, @table, second.segment_id)
+    assert entry.sealed_at == 9
+
+    refute Enum.any?(
+             HotManifest.entries(follower_runtime.manifest, @table),
+             &(&1.id == first.segment_id and &1.claim_keys != [])
+           )
+  end
+
   test "an unreachable follower's compensation clears the applied copy", context do
     follower = start_instance(context)
 

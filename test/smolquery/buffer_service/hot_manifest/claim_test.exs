@@ -96,13 +96,16 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
                {:error, :claim_outstanding}
     end
 
-    test "refuses a set it can only partially freeze", %{manifest: manifest} do
+    test "refuses a set it can only partially freeze, naming the divergence", %{
+      manifest: manifest
+    } do
       sealed = add(manifest, @table)
       :ok = HotManifest.retire(manifest, @table, [sealed.id], 7)
       live = add(manifest, @table)
+      absent = "01KYWPEEGAM8FQVQS5S2QF26SV"
 
-      assert HotManifest.claim(manifest, @table, [sealed.id, live.id], @keys) ==
-               {:error, :partial_claim}
+      assert HotManifest.claim(manifest, @table, [sealed.id, live.id, absent], @keys) ==
+               {:error, {:partial_claim, %{missing: [absent], sealed: [sealed.id]}}}
 
       assert {:ok, entry} = HotManifest.entry(manifest, @table, live.id)
       assert entry.claim_keys == []
