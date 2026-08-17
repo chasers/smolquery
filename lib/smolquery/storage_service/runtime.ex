@@ -100,6 +100,18 @@ defmodule Smolquery.StorageService.Runtime do
   the pathological case it exists for. Sizing already reads each footer's
   `num_rows`, so the cap costs no new I/O.
 
+  `compact_bucket_ms` shards a table's compaction across the storage ring
+  (T-269). Ownership used to be per table, so one node compacted a hot table
+  alone — and OOMed alone — while its peers idled. The compactor now owns
+  `{table_ref, bucket}`, where a segment's bucket is its ULID timestamp
+  divided by this value. Buckets are disjoint, so two nodes cannot plan the
+  same group, and a group never crosses a bucket boundary, so merged output
+  stays time-local. The default of one hour trades off two failure shapes: a
+  smaller bucket spreads a backlog across more nodes but strands more
+  boundary files under `compact_min_inputs`; a larger one concentrates work.
+  A backlog inside one bucket still compacts on one node — a small backlog
+  by definition.
+
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
   the merge engine, one rung down: explicit knob, else a quarter of the
@@ -199,6 +211,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_min_inputs: 2,
     compact_max_bytes: 134_217_728,
     compact_max_rows: nil,
+    compact_bucket_ms: 3_600_000,
     compact_engine_memory_limit: nil,
     merge_engine: nil,
     merge_inputs_per_call: 12,
@@ -230,6 +243,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_min_inputs: pos_integer(),
           compact_max_bytes: pos_integer(),
           compact_max_rows: pos_integer() | nil,
+          compact_bucket_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
           merge_engine: atom() | nil,
           merge_inputs_per_call: pos_integer(),
@@ -256,6 +270,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_min_inputs,
     :compact_max_bytes,
     :compact_max_rows,
+    :compact_bucket_ms,
     :compact_engine_memory_limit,
     :merge_inputs_per_call,
     :retention_interval_ms,
@@ -297,6 +312,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compact_engine_memory_limit()
     |> validate_compression()
     |> validate_seal_row_group_size()
+    |> validate_compact_bucket_ms()
     |> validate_compact_inputs()
     |> validate_compact_max_rows()
     |> validate_merge_inputs_per_call()
@@ -479,6 +495,15 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_seal_row_group_size(%__MODULE__{seal_row_group_size: size}) do
     raise ArgumentError,
           "unsupported seal_row_group_size: #{inspect(size)} (expected a positive integer)"
+  end
+
+  defp validate_compact_bucket_ms(%__MODULE__{compact_bucket_ms: ms} = runtime)
+       when is_integer(ms) and ms > 0,
+       do: runtime
+
+  defp validate_compact_bucket_ms(%__MODULE__{compact_bucket_ms: ms}) do
+    raise ArgumentError,
+          "unsupported compact_bucket_ms: #{inspect(ms)} (expected a positive integer)"
   end
 
   defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)

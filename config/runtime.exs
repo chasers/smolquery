@@ -206,6 +206,15 @@ if rows = System.get_env("SMOLQUERY_COMPACT_MAX_ROWS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_MAX_ROWS", rows)
 end
 
+# T-269: compaction ownership is per {table, time bucket}, so a hot table's
+# backlog spreads across the storage fleet instead of one node compacting
+# (and OOMing) alone. The bucket is a segment ULID's timestamp over this.
+if ms = System.get_env("SMOLQUERY_COMPACT_BUCKET_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_bucket_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_BUCKET_MS", ms)
+end
+
 # T-259: compaction runs on its own engine so a timed-out merge cannot starve
 # seals. Unset, the limit derives as a quarter of the cgroup memory limit.
 if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do

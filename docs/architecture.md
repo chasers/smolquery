@@ -502,7 +502,12 @@ residue of eager and age-cap seals — so a quiet table stops accreting files. I
 sweeps every `compact_interval_ms`, needs no signals (the catalog itself says
 which segments are small; sizes come from Parquet footers), and per table per
 sweep replaces one oldest-first run of segments under `compact_below_bytes` with
-a single merged segment, capped at `compact_max_bytes`. The group has no
+a single merged segment, capped at `compact_max_bytes`. Ownership shards on
+`{table, time bucket}` (T-269): a segment's bucket is its ULID timestamp over
+`compact_bucket_ms`, the storage ring owns each bucket independently, and a
+group never crosses a bucket boundary — so a hot table's backlog compacts on
+every storage node at once, with disjoint work by construction, and merged
+output stays time-local. The group has no
 input-count cap (T-248). The merge reads its inputs in chunks of
 `merge_inputs_per_call`, so a backlog of any file count merges in one sweep.
 An input-count cap would instead make each sweep re-ingest the previous
