@@ -21,7 +21,10 @@ defmodule SmolqueryWeb.TableLive.Show do
   unavailable rather than failing the page. Seal-failure streaks are
   derived from the event stream (a `:seal` error extends a partition's
   streak, `:ok` clears it), so the page needs nothing from the sealer's
-  process state.
+  process state. The latest seal and compaction stay pinned above the feed:
+  commits arrive every flush interval and would push the rare events out of
+  a bounded feed within seconds — observed on the first live run of this
+  page — while a seal or a compaction is exactly what a reader came to see.
   """
 
   use SmolqueryWeb, :live_view
@@ -55,6 +58,7 @@ defmodule SmolqueryWeb.TableLive.Show do
           |> assign(:preview, :loading)
           |> assign(:lifecycle, :loading)
           |> assign(:events, [])
+          |> assign(:last_by_kind, %{})
           |> assign(:seal_streaks, %{})
           |> assign(:lifecycle_refresh_queued, false)
           |> load_retention()
@@ -120,6 +124,7 @@ defmodule SmolqueryWeb.TableLive.Show do
     {:noreply,
      socket
      |> update(:events, &Enum.take([event | &1], @event_feed_limit))
+     |> update(:last_by_kind, &Map.put(&1, event.kind, event))
      |> track_streak(event)
      |> queue_lifecycle_refresh()}
   end
@@ -516,6 +521,17 @@ defmodule SmolqueryWeb.TableLive.Show do
 
                 <div>
                   <div class="text-xs uppercase opacity-60 mb-1">Events</div>
+                  <div
+                    :for={kind <- [:seal, :compaction]}
+                    :if={Map.has_key?(@last_by_kind, kind)}
+                    class="text-sm font-mono flex gap-2"
+                  >
+                    <span class="badge badge-outline badge-sm">last</span>
+                    <span class="opacity-60">{event_time(@last_by_kind[kind])}</span>
+                    <span class={@last_by_kind[kind].result != :ok && "text-error"}>
+                      {event_line(@last_by_kind[kind])}
+                    </span>
+                  </div>
                   <div :if={@events == []} class="text-sm opacity-70">
                     Waiting for commits, seals, and compactions…
                   </div>

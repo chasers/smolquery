@@ -220,6 +220,35 @@ defmodule SmolqueryWeb.TableLiveTest do
       refute render(lv) =~ "failed seals"
     end
 
+    test "the last seal stays pinned after commits push it out of the feed", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+      render_async(lv)
+
+      send(lv.pid, {:lifecycle, seal_event(:ok)})
+
+      for _flood <- 1..9 do
+        send(
+          lv.pid,
+          {:lifecycle,
+           %{
+             kind: :commit,
+             table_ref: {"analytics", "events"},
+             node: node(),
+             result: :ok,
+             measurements: %{rows: 200, bytes: 11_700},
+             at: System.system_time(:millisecond)
+           }}
+        )
+      end
+
+      html = render(lv)
+      assert html =~ "seal ok · 16 segments"
+      assert html =~ "last"
+    end
+
     test "a broadcast through the bridge reaches the page", %{conn: conn} do
       runtime = start_web!()
       seed(runtime)
