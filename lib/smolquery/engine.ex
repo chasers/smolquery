@@ -1,19 +1,29 @@
 defmodule Smolquery.Engine do
   @moduledoc """
-  DuckDB read engine — a supervised `Adbc.Database` → `Adbc.Connection` subtree.
+  A named, supervised DuckDB engine: an `Adbc.Database` → `Adbc.Connection`
+  subtree under one registered name.
 
-  The engine is a disposable, stateless reader: nothing here is storage of
-  record. Segments live as Parquet on disk or object storage, and DuckDB is
-  pointed at them per query. An engine can be thrown away and rebuilt at any
-  time without data loss, which is why the default database is in-memory.
+  ## Who uses it — and who does not
 
-  The subtree is `rest_for_one`: the database starts first, connections after
-  it, so a database crash rebuilds the connections that depend on it, while a
-  connection crash leaves the database alone.
+  The named, long-lived engines run on this module: the buffer write pool,
+  the storage merge and compaction engines, and every DuckLake catalog
+  engine, the query planner's included.
 
-  This is shared infrastructure rather than part of a service — `QueryService`
-  reads through it today and the sealer may later merge through it, so it sits
-  outside the service layers that `.reach.exs` keeps apart.
+  **Query job engines do not.** `Smolquery.QueryService.Runner` starts a
+  private database and connection per job. It passes its own settings:
+  `job_memory_limit` and `read_engine_threads`. The configuration below
+  never reaches a query scan. Neither do `SMOLQUERY_ENGINE_THREADS` and
+  `SMOLQUERY_MEMORY_LIMIT` (T-279).
+
+  ## Disposable by design
+
+  Nothing here is storage of record. Segments live as Parquet on disk or in
+  object storage. DuckDB is pointed at them per query, so an engine can be
+  thrown away and rebuilt without data loss. That is why the default
+  database is in-memory. The subtree is `rest_for_one`: a database crash
+  rebuilds its connections; a connection crash leaves the database alone.
+  It is shared infrastructure, not part of one service, so it sits outside
+  the service layers `.reach.exs` keeps apart.
 
   ## Configuration
 
@@ -22,19 +32,23 @@ defmodule Smolquery.Engine do
         extensions: [:httpfs, :json],
         max_result_rows: 100_000
 
+  These values are the **fallback** for named engines only. Each service
+  overrides what it owns: the write pool divides `threads` across its
+  members, and the storage engines derive their memory limits from the
+  cgroup first.
+
   Extension names and settings are interpolated into SQL (DuckDB takes no
-  parameters in `INSTALL`/`LOAD`/`SET`), so they are configuration-only inputs —
-  never pass user-supplied values.
+  parameters in `INSTALL`/`LOAD`/`SET`). Never pass user-supplied values.
 
   ## Two result contracts, chosen by size
 
-  `query/3` returns a `Smolquery.Engine.Result` — ordered columns and rows of plain
-  Elixir terms. It is the right shape for the queries the system asks itself, all
-  of which return tens of rows, and it refuses a result over `:max_result_rows`
-  rather than spending gigabytes of heap converting one.
+  `query/3` returns a `Smolquery.Engine.Result`: ordered columns and rows of
+  plain Elixir terms. It fits the queries the system asks itself — tens of
+  rows — and it refuses a result over `:max_result_rows` rather than convert
+  gigabytes to heap.
 
-  `frame/3` returns an `Explorer.DataFrame`, with the Arrow stream going straight
-  to Polars in Rust. That is the read path for user queries, whose size nobody
+  `frame/3` returns an `Explorer.DataFrame`. The Arrow stream goes straight
+  to Polars in Rust. This is the shape for results whose size nobody
   controls.
 
   ## Usage
