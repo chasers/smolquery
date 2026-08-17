@@ -224,6 +224,7 @@ defmodule Smolquery.BufferService.SealingTest do
       assert Enum.sort(oversized.ids) == Enum.sort(ids)
 
       :ok = stop_supervised(name)
+      flush_messages()
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
@@ -266,6 +267,7 @@ defmodule Smolquery.BufferService.SealingTest do
       {:ok, _oversized} = HotManifest.claim(runtime.manifest, @table, ids, [old_key])
 
       :ok = stop_supervised(name)
+      flush_messages()
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
