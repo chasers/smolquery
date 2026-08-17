@@ -14,11 +14,10 @@ defmodule SmolqueryWeb.Runtime do
         password: "...",
         catalog: [metadata: "sqlite:...", data_path: "..."]
 
-  `auth_mode: :static` explicitly selects the static Basic-auth adapter.
-  There is no default or fallback: a node holding the `:web` role with a
-  missing or unsupported mode, or without credentials, refuses to boot. The
-  credential is not the API key, so a UI rotation does not break an ingest
-  client. Multiple credentials and rotation come later, as for the API.
+  `auth_mode: :static` explicitly selects the static Basic-auth adapter, while
+  `:oidc` validates and starts the OIDC provider cache. There is no default or
+  fallback: a node holding the `:web` role with missing mode or OIDC settings
+  refuses to boot. Browser login is added by T-234.
 
   `catalog` is where the UI resolves datasets, tables, and schemas — the same
   seam `SmolqueryApi` uses. Given options (or nothing), the UI starts its own
@@ -36,11 +35,23 @@ defmodule SmolqueryWeb.Runtime do
   """
 
   alias Smolquery.Auth.Context
+  alias Smolquery.Auth.Mode
+  alias Smolquery.Auth.OIDC
+  alias Smolquery.Auth.OIDC.Config, as: OIDCConfig
   alias Smolquery.Auth.Static
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :auth_mode, :username, :password, :session_marker, :context, :catalog]
-  @derive {Inspect, except: [:username, :password, :session_marker]}
+  @enforce_keys [
+    :name,
+    :auth_mode,
+    :username,
+    :password,
+    :session_marker,
+    :context,
+    :catalog,
+    :oidc
+  ]
+  @derive {Inspect, except: [:username, :password, :session_marker, :oidc]}
   defstruct [
     :name,
     :auth_mode,
@@ -50,18 +61,22 @@ defmodule SmolqueryWeb.Runtime do
     :context,
     :catalog,
     :catalog_opts,
+    :oidc,
+    :oidc_provider_http_client,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService
   ]
 
   @type t :: %__MODULE__{
           name: atom(),
-          auth_mode: :static,
-          username: String.t(),
-          password: String.t(),
-          session_marker: String.t(),
-          context: Context.t(),
+          auth_mode: :static | :oidc,
+          username: String.t() | nil,
+          password: String.t() | nil,
+          session_marker: String.t() | nil,
+          context: Context.t() | nil,
           catalog: Catalog.t(),
+          oidc: OIDCConfig.t() | nil,
+          oidc_provider_http_client: Smolquery.Auth.OIDC.Discovery.http_client() | nil,
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom()
@@ -73,11 +88,10 @@ defmodule SmolqueryWeb.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
-  overrides them. Raises if the authentication mode is missing or unsupported,
-  or unless the merged options hold a non-empty `username` and a non-empty
-  `password`. Also raises unless a session secret of at least 64 bytes is
-  present — the `:secret_key_base` option, or the endpoint's own
-  `secret_key_base` config.
+  overrides them. Raises if the authentication mode is missing, or unless
+  static mode holds non-empty credentials. OIDC mode validates its provider
+  foundation; browser login remains denied until T-234. A session secret of at
+  least 64 bytes is always required.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -87,18 +101,32 @@ defmodule SmolqueryWeb.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
-    auth_mode = Static.mode!(config, "the web UI", :web)
-    username = fetch_credential!(config, :username)
-    password = fetch_credential!(config, :password)
+    auth_mode = Mode.runtime_mode!(config, "the web UI", :web)
     secret_key_base = validate_session_secret!(resolve_session_secret(config))
+
+    {username, password, marker, context, oidc, oidc_provider_http_client} =
+      case auth_mode do
+        :static ->
+          username = fetch_credential!(config, :username)
+          password = fetch_credential!(config, :password)
+
+          {username, password, session_marker(secret_key_base, username, password),
+           Static.web_context(), nil, nil}
+
+        :oidc ->
+          {nil, nil, nil, nil, OIDCConfig.new(oidc_config(config), :web),
+           OIDC.provider_http_client!(config)}
+      end
 
     %__MODULE__{
       name: name,
       auth_mode: auth_mode,
       username: username,
       password: password,
-      session_marker: session_marker(secret_key_base, username, password),
-      context: Static.web_context(),
+      session_marker: marker,
+      context: context,
+      oidc: oidc,
+      oidc_provider_http_client: oidc_provider_http_client,
       catalog: catalog,
       catalog_opts: catalog_opts
     }
@@ -117,6 +145,21 @@ defmodule SmolqueryWeb.Runtime do
 
   defp env_var(:username), do: "SMOLQUERY_WEB_USERNAME"
   defp env_var(:password), do: "SMOLQUERY_WEB_PASSWORD"
+
+  defp oidc_config(config) do
+    config
+    |> Keyword.get(:oidc, config)
+    |> Keyword.put(:web_host, resolve_web_host(config))
+  end
+
+  defp resolve_web_host(config) do
+    Keyword.get_lazy(config, :web_host, fn ->
+      :smolquery
+      |> Application.get_env(SmolqueryWeb.Endpoint, [])
+      |> Keyword.get(:url, [])
+      |> Keyword.get(:host)
+    end)
+  end
 
   defp resolve_session_secret(config) do
     case Keyword.fetch(config, :secret_key_base) do

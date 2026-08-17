@@ -16,12 +16,7 @@ defmodule Smolquery.Auth.Static do
   @api_capabilities [:query, :ingest, :catalog_manage]
   @web_capabilities [:web_access, :query, :catalog_manage, :platform_operate]
 
-  @doc """
-  Resolves the explicit authentication mode from application configuration.
-
-  OIDC is rejected until its runtime support is available; it never falls
-  through to static authentication.
-  """
+  @doc "Resolves the explicit static mode; OIDC remains unsupported by this adapter."
   @spec mode!(keyword(), String.t(), atom()) :: :static
   def mode!(config, service, role) do
     case Keyword.get(config, :auth_mode) do
@@ -32,9 +27,7 @@ defmodule Smolquery.Auth.Static do
     end
   end
 
-  @doc """
-  Builds the stable service context used by an authenticated API key.
-  """
+  @doc "Builds the stable service context used by an authenticated API key."
   @spec api_context() :: Context.t()
   def api_context do
     {:ok, principal} = Principal.local(@api_source, :api_key, :service)
@@ -42,9 +35,7 @@ defmodule Smolquery.Auth.Static do
     context
   end
 
-  @doc """
-  Builds the stable operator context used by authenticated web Basic auth.
-  """
+  @doc "Builds the stable operator context used by authenticated web Basic auth."
   @spec web_context() :: Context.t()
   def web_context do
     {:ok, principal} = Principal.local(@web_source, :basic, :user)

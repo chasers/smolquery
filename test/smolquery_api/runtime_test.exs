@@ -22,10 +22,24 @@ defmodule SmolqueryApi.RuntimeTest do
       end
     end
 
-    test "refuses oidc and malformed auth modes without falling back" do
-      assert_raise ArgumentError, ~r/not supported/, fn ->
+    test "validates oidc settings without falling back to static" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_OIDC_ISSUER/, fn ->
         Runtime.new(name: :api_runtime_test, auth_mode: :oidc, api_key: "k")
       end
+
+      runtime =
+        Runtime.new(
+          name: :api_runtime_test,
+          auth_mode: :oidc,
+          oidc: [
+            issuer: "https://issuer.example",
+            api_audience: "smolquery-api"
+          ]
+        )
+
+      assert runtime.api_key == nil
+      assert runtime.context == nil
+      assert runtime.oidc.issuer == "https://issuer.example"
 
       assert_raise ArgumentError, ~r/invalid value/, fn ->
         Runtime.new(name: :api_runtime_test, auth_mode: :invalid, api_key: "k")
