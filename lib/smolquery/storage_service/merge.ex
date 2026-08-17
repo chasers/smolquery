@@ -141,15 +141,16 @@ defmodule Smolquery.StorageService.Merge do
   retry, since a claim's inputs are frozen — and the claim would never retire.
   Intersecting first turns a stranded table back into a slightly worse sort.
 
-  `ROW_GROUP_SIZE` is set only when clustering columns are non-empty — the same
-  `Schema.clustering_columns/1` gate as `ORDER BY`. Row groups buy pruning only
-  when the seal sorts: tight min/max bounds on the clustering key let scans skip
-  groups. Without that sort the knob changes nothing about what a scan can prune
-  and still splits the file into smaller groups, which cost more metadata and
-  compress worse — measured at +25% sealed size on an unclustered table in
-  `bench/sealer.exs` (64 micro-segments × 10k rows). Unclustered tables therefore
-  keep DuckDB's default row group. The value is configured once at boot as
-  `seal_row_group_size` on `Smolquery.StorageService.Runtime`.
+  `ROW_GROUP_SIZE` is set on every seal `COPY`, clustered or not (T-280). A
+  sealed-tier scan over `httpfs` pays roughly one range request per row group,
+  so the row-group count is the scan's request count, and the default of
+  1_048_576 rows cuts it ~8x against DuckDB's 122_880-row default. The knob
+  used to be gated on `Schema.clustering_columns/1`, when its default was
+  16_384: groups that small buy clustered-key pruning but cost metadata and
+  compression — measured at +25% sealed size on an unclustered table in
+  `bench/sealer.exs` (64 micro-segments × 10k rows). At 1M rows that penalty
+  runs the other way, so the gate is gone. The value is configured once at
+  boot as `seal_row_group_size` on `Smolquery.StorageService.Runtime`.
 
   ## Compression has to match the writer's, or sealing inflates the data
 
@@ -327,7 +328,7 @@ defmodule Smolquery.StorageService.Merge do
   defp copy_staged(runtime, schema, table, staged) do
     sql = """
     COPY (SELECT * FROM #{table}#{order_by(schema)})
-    TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
+    TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
     """
 
     with {:ok, _result} <- query(runtime, sql, [staged], @staged_copy_timeout_ms), do: :ok
@@ -437,18 +438,11 @@ defmodule Smolquery.StorageService.Merge do
   defp copy(runtime, schema, projection, urls, staged) do
     sql = """
     COPY (SELECT #{projection} FROM #{scan(urls)}#{order_by(schema)})
-    TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}#{row_group_option(schema, runtime)})
+    TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
     """
 
     with {:ok, _result} <- query(runtime, sql, urls ++ [staged], @staged_copy_timeout_ms),
          do: :ok
-  end
-
-  defp row_group_option(%Schema{} = schema, %Runtime{} = runtime) do
-    case Schema.clustering_columns(schema) do
-      [] -> ""
-      _ -> ", ROW_GROUP_SIZE #{runtime.seal_row_group_size}"
-    end
   end
 
   defp order_by(%Schema{} = schema) do

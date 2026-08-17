@@ -18,7 +18,7 @@ defmodule Smolquery.StorageService.Runtime do
         buffer_timeout_ms: 30_000,
         engine_extensions: [:httpfs],
         compression: :zstd,
-        seal_row_group_size: 16_384,
+        seal_row_group_size: 1_048_576,
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -147,9 +147,14 @@ defmodule Smolquery.StorageService.Runtime do
   2.85 times larger than the micro-segments they replaced (`bench/sealer.exs`).
 
   `seal_row_group_size` is the `ROW_GROUP_SIZE` passed to DuckDB's `COPY` when
-  the sealer and compactor write sealed Parquet. It defaults to `16_384` and is
-  validated here at boot for the same reason as `compression`: a bad value
-  discovered per attempt would crash every re-signalled seal forever.
+  the sealer and compactor write sealed Parquet. It defaults to `1_048_576`
+  (T-280): a sealed-tier scan over `httpfs` pays roughly one range request per
+  row group, so large groups cut a query's request count ~8x against DuckDB's
+  122_880-row default. The trade is coarser row-group pruning on clustered
+  tables and more `COPY` buffering per group — the merge engine's memory limit
+  is the bound that has to hold. It is validated here at boot for the same
+  reason as `compression`: a bad value discovered per attempt would crash
+  every re-signalled seal forever.
 
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
@@ -184,7 +189,7 @@ defmodule Smolquery.StorageService.Runtime do
     engine_extensions: [:httpfs],
     engine_memory_limit: nil,
     compression: :zstd,
-    seal_row_group_size: 16_384,
+    seal_row_group_size: 1_048_576,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     gc_interval_ms: 300_000,

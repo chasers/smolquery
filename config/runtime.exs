@@ -188,6 +188,15 @@ if inputs = System.get_env("SMOLQUERY_MERGE_INPUTS_PER_CALL") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_INPUTS_PER_CALL", inputs)
 end
 
+# T-280: the `ROW_GROUP_SIZE` on every sealed Parquet `COPY`. A sealed-tier
+# scan over httpfs pays roughly one range request per row group, so this
+# value sets a query's request count per segment.
+if size = System.get_env("SMOLQUERY_SEAL_ROW_GROUP_SIZE") do
+  config :smolquery, Smolquery.StorageService,
+    seal_row_group_size:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_ROW_GROUP_SIZE", size)
+end
+
 # T-260: bytes alone do not bound a compaction group's merge cost — on
 # highly compressible data the decompressed row count diverges from the
 # compressed bytes by ~100x, and merge cost scales with rows.

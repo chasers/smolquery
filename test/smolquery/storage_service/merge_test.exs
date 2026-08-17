@@ -142,15 +142,17 @@ defmodule Smolquery.StorageService.MergeTest do
     end)
   end
 
-  test "leaves DuckDB's default row group on unclustered tables", %{
+  test "sets row group size on unclustered tables too (T-280)", %{
     buffer: buffer,
     runtime: runtime
   } do
+    runtime = %{runtime | seal_row_group_size: 500}
+
     ids = seal_many(buffer, @table, [1..1000, 1001..2000, 2001..3000, 3001..4000, 4001..5000])
 
     assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
     assert segment.row_count == 5000
-    assert row_group_count(runtime, segment) == 1
+    assert row_group_count(runtime, segment) > 1
   end
 
   test "sets row group size when clustering columns are non-empty", %{
