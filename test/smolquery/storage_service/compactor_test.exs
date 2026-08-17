@@ -20,6 +20,7 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
   alias Smolquery.StorageService.Compactor
+  alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
   @moduletag :integration
@@ -287,6 +288,50 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
+  end
+
+  test "a group never crosses a bucket boundary (T-269)", context do
+    runtime = start_compactor(context, compact_bucket_ms: 1_000)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 1, 11..20)
+    seal(runtime, context.catalog, 2, 21..30)
+    seal(runtime, context.catalog, 2, 31..40)
+
+    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert [%{table: @table, replaced: 2}] = report.compacted
+    assert {:ok, [_merged, _c, _d]} = Catalog.segments(context.catalog, @table, :current)
+
+    assert {:ok, second} = Compactor.sweep(context.storage)
+    assert [%{table: @table, replaced: 2}] = second.compacted
+    assert lake_rows(context.storage) == 40
+  end
+
+  test "an unowned bucket is left for its owner (T-269)", context do
+    runtime =
+      start_compactor(context,
+        ring: [node(), :"storage1@elsewhere.invalid"],
+        compact_bucket_ms: 1_000
+      )
+
+    routing = Routing.resolve(context.storage)
+    owned? = fn index -> Routing.own?(routing, {@table, index}) end
+    mine = Enum.find(1..100, owned?)
+    theirs = Enum.find(1..100, &(not owned?.(&1)))
+
+    seal(runtime, context.catalog, mine, 1..10)
+    seal(runtime, context.catalog, mine, 11..20)
+    a = seal(runtime, context.catalog, theirs, 21..30)
+    b = seal(runtime, context.catalog, theirs, 31..40)
+
+    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert [%{table: @table, replaced: 2}] = report.compacted
+    assert report.failed == []
+
+    {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+
+    for segment <- [a, b] do
+      assert Store.location(runtime.store, segment.key) in current
+    end
   end
 
   describe "adjusted_row_caps/3 (T-262)" do

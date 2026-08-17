@@ -27,14 +27,36 @@ defmodule Smolquery.StorageService.Compactor do
   This is exactly the "polling for a compaction-due signal" case Milestone 8
   L6 (PL-11 D6) calls out: `Catalog.tables/1` returns the same catalog-wide
   list to every storage node's compactor, so without a gate every node would
-  plan and race to compact the same undersized run. Ownership is checked per
-  table, immediately before planning it, rather than once per sweep — a sweep
-  merges serially and can run for minutes, and an ownership snapshot from its
-  start would widen the two-owner overlap a ring change already opens. The
-  gate narrows that overlap; what makes the overlap survivable is the
-  catalog's registration diff being re-derived inside every commit retry
+  plan and race to compact the same undersized run.
+
+  ## Ownership is per time bucket, not per table
+
+  The gate used to check `Routing.own?(table_ref)`, which bounded compaction
+  parallelism by table count: one node owned a hot table's whole backlog,
+  carried every merge's memory pressure alone, and OOMed while its peers
+  idled (T-269). The unit of ownership is now `{table_ref, bucket}`, where a
+  segment's bucket is its ULID timestamp divided by `compact_bucket_ms`. A
+  node lists every table's segments — a cheap metadata read — but sizes and
+  merges only the buckets the ring hands it, so footer I/O and merge work
+  both spread across the fleet. Bucket candidate sets are disjoint, so two
+  nodes cannot plan the same group by construction; the residual two-owner
+  window is a ring change mid-sweep, the same window the per-table gate had.
+  Ownership is checked per bucket immediately before planning, rather than
+  once per sweep, to keep that window narrow — a sweep merges serially and
+  can run for minutes. What makes the overlap survivable is the catalog's
+  registration diff being re-derived inside every commit retry
   (`Smolquery.Catalog.DuckLake`), so the losing node's retry re-reads what
   the winner committed instead of replaying a stale swap.
+
+  A group never crosses a bucket boundary, so merged output stays as
+  time-local as its inputs and min/max pruning does not erode. The costs are
+  accepted and small: a run spanning a boundary never merges together, a
+  bucket can strand a straggler under `compact_min_inputs`, and a path whose
+  basename is not a ULID has no bucket, so it silently stops being a
+  compaction candidate (it could never derive an output key anyway).
+  The merged segment's id derives from its newest input's timestamp, so a
+  still-undersized output lands back in its own bucket and the same node
+  keeps converging it.
 
   ## The policy is deliberately boring
 
@@ -42,8 +64,10 @@ defmodule Smolquery.StorageService.Compactor do
   from the Parquet footers, never a data read), oldest first — segment ids are
   ULIDs, so name order is time order — greedily grouped until adding the next
   would pass `compact_max_bytes`, compacted only if at least
-  `compact_min_inputs` made the cut. One group per table per sweep; a table
-  with more work keeps its place in line rather than monopolizing the sweep.
+  `compact_min_inputs` made the cut, all within one owned bucket, oldest
+  owned bucket first. One group per table per sweep per node; a table with
+  more work keeps its place in line rather than monopolizing the sweep, and
+  a fleet of N owners advances up to N of its buckets per sweep.
 
   Bytes bound the group (T-248), with one safety valve. A small input-count
   cap made a small-segment backlog converge across sweeps, with each group
@@ -296,16 +320,43 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp compact_table(runtime, table_ref) do
     started_at = System.monotonic_time(:microsecond)
+    routing = Routing.resolve(runtime.name)
 
-    with true <- runtime.name |> Routing.resolve() |> Routing.own?(table_ref),
-         {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
-         {:ok, group} <- plan(runtime, paths) do
+    with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
+         [_ | _] = buckets <- owned_buckets(runtime, routing, table_ref, paths),
+         {:ok, group} <- first_group(runtime, buckets) do
       swap(runtime, table_ref, group, started_at)
     else
-      false -> :skip
+      [] -> :skip
       :skip -> {:skip, table_ref}
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
     end
+  end
+
+  defp owned_buckets(runtime, routing, table_ref, paths) do
+    paths
+    |> Enum.group_by(&bucket(&1, runtime.compact_bucket_ms))
+    |> Map.delete(:error)
+    |> Enum.sort()
+    |> Enum.filter(fn {bucket, _paths} -> Routing.own?(routing, {table_ref, bucket}) end)
+    |> Enum.map(fn {_bucket, bucket_paths} -> bucket_paths end)
+  end
+
+  defp bucket(path, bucket_ms) do
+    case path |> Path.basename(".parquet") |> Id.timestamp() do
+      {:ok, timestamp} -> div(timestamp, bucket_ms)
+      :error -> :error
+    end
+  end
+
+  defp first_group(runtime, buckets) do
+    Enum.reduce_while(buckets, :skip, fn paths, :skip ->
+      case plan(runtime, paths) do
+        {:ok, group} -> {:halt, {:ok, group}}
+        :skip -> {:cont, :skip}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp plan(runtime, paths) do

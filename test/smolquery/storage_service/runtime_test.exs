@@ -74,6 +74,12 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
+    test "refuses a non-positive compact_bucket_ms at boot, not per sweep (T-269)" do
+      assert_raise ArgumentError, ~r/unsupported compact_bucket_ms/, fn ->
+        Runtime.new(name: __MODULE__.BadBucket, compact_bucket_ms: 0)
+      end
+    end
+
     test "refuses a non-positive seal_row_group_size at boot, not per seal attempt" do
       assert_raise ArgumentError, ~r/unsupported seal_row_group_size/, fn ->
         Runtime.new(name: __MODULE__.BadRowGroup, seal_row_group_size: 0)
