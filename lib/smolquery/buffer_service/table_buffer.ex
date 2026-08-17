@@ -113,6 +113,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   claims, oldest first. The remainder still crosses `seal_max_bytes` or
   `seal_max_files`, so the next maintenance tick claims it as soon as this
   claim retires — a table under sustained ingest self-corrects (T-246).
+  The valves also reach *backwards*, to a live claim frozen before they
+  existed (T-294): a claim over the current valves is released whole,
+  replicated like any mutation, and the ids return to pending, where the
+  very next claim re-freezes the oldest valve-sized batch under a new key.
+  A release that cannot replicate — a diverged follower answering
+  `:claim_mismatch` — re-signals the oversized claim and retries the
+  release next tick: signalling the doomed claim is the pre-valve behavior,
+  while signalling nothing would stall the table's sealing silently with no
+  path that ever heals it. An attempt already running for a released claim
+  is refused at three gates on the storage side — see
+  `Smolquery.StorageService.Handoff.Seal`.
   Within a claim, calls are bounded too: `Smolquery.StorageService.Merge`
   reads inputs in chunks of `merge_inputs_per_call`, so no call carries an
   unbounded `read_parquet` list.
@@ -353,11 +364,14 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @doc """
   Stamps `ids` as sealed at a catalog snapshot.
+
+  `keys` fences the retire against a released claim — see
+  `Smolquery.BufferService.HotManifest.retire/6`. `nil` skips the fence.
   """
-  @spec retire(GenServer.server(), [String.t()], non_neg_integer(), timeout()) ::
+  @spec retire(GenServer.server(), [String.t()], non_neg_integer(), [String.t()] | nil, timeout()) ::
           :ok | {:error, term()}
-  def retire(buffer, ids, snapshot, timeout \\ 5_000),
-    do: GenServer.call(buffer, {:retire, ids, snapshot}, timeout)
+  def retire(buffer, ids, snapshot, keys \\ nil, timeout \\ 5_000),
+    do: GenServer.call(buffer, {:retire, ids, snapshot, keys}, timeout)
 
   @doc """
   Runs the seal check and the grace-period sweep now, without waiting for the tick.
@@ -476,11 +490,12 @@ defmodule Smolquery.BufferService.TableBuffer do
     {:noreply, run_maintenance(state)}
   end
 
-  def handle_call({:retire, ids, snapshot}, _from, state) do
+  def handle_call({:retire, ids, snapshot, keys}, _from, state) do
     result =
       Committer.with_log(state.committer, fn log ->
-        with :ok <- append_replicas(state, :retire, %{ids: ids, snapshot: snapshot}) do
-          HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, log)
+        with :ok <-
+               append_replicas(state, :retire, %{ids: ids, snapshot: snapshot, keys: keys}) do
+          HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, keys, log)
         end
       end)
 
@@ -631,11 +646,73 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp signal_when_ready(state) do
     if RingEpoch.owner?(state.runtime.name, state.table_ref) do
       case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-        {:ok, claim} -> resignal(state, claim)
+        {:ok, claim} -> resignal_or_resize(state, claim, &claim_when_sealable/1)
         :error -> claim_when_sealable(state)
       end
     else
       state
+    end
+  end
+
+  defp resignal_or_resize(state, claim, reclaim) do
+    if claim_oversized?(state, claim) and released?(state, claim) do
+      reclaim.(state)
+    else
+      resignal(state, claim)
+    end
+  end
+
+  defp claim_oversized?(_state, %{ids: []}), do: false
+
+  defp claim_oversized?(state, claim) do
+    case claim_entries(state, claim) do
+      [] ->
+        false
+
+      entries ->
+        batch =
+          claim_batch(
+            entries,
+            state.runtime.seal_max_bytes * @claim_valve_factor,
+            state.runtime.seal_max_files * @claim_valve_factor
+          )
+
+        length(batch) < length(entries)
+    end
+  end
+
+  defp claim_entries(state, claim) do
+    Enum.flat_map(claim.ids, fn id ->
+      case HotManifest.entry(state.runtime.manifest, state.table_ref, id) do
+        {:ok, entry} -> [entry]
+        :error -> []
+      end
+    end)
+  end
+
+  defp released?(state, claim) do
+    result =
+      Committer.with_log(state.committer, fn log ->
+        with :ok <- append_replicas(state, :release, %{ids: claim.ids}) do
+          HotManifest.release(state.runtime.manifest, state.table_ref, claim.ids, log)
+        end
+      end)
+
+    case result do
+      :ok ->
+        Logger.warning(
+          "released oversized claim on #{inspect(state.table_ref)}: " <>
+            "#{length(claim.ids)} inputs return to pending and re-claim under the valves (T-294)"
+        )
+
+        true
+
+      {:error, reason} ->
+        Logger.warning(
+          "releasing oversized claim on #{inspect(state.table_ref)} failed: #{inspect(reason)}"
+        )
+
+        false
     end
   end
 
@@ -659,11 +736,19 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp force_signal(state) do
     if RingEpoch.owner?(state.runtime.name, state.table_ref) do
       case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-        {:ok, claim} -> signal(state, claim)
+        {:ok, claim} -> force_signal_or_resize(state, claim)
         :error -> force_claim(state)
       end
     else
       state
+    end
+  end
+
+  defp force_signal_or_resize(state, claim) do
+    if claim_oversized?(state, claim) and released?(state, claim) do
+      force_claim(state)
+    else
+      signal(state, claim)
     end
   end
 
@@ -819,9 +904,22 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  defp apply_replica_mutation(state, :retire, %{ids: ids, snapshot: snapshot}) do
+  defp apply_replica_mutation(state, :release, %{ids: ids}) do
     Committer.with_log(state.committer, fn log ->
-      HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, log)
+      HotManifest.release(state.runtime.manifest, state.table_ref, ids, log)
+    end)
+  end
+
+  defp apply_replica_mutation(state, :retire, %{ids: ids, snapshot: snapshot} = args) do
+    Committer.with_log(state.committer, fn log ->
+      HotManifest.retire(
+        state.runtime.manifest,
+        state.table_ref,
+        ids,
+        snapshot,
+        Map.get(args, :keys),
+        log
+      )
     end)
   end
 

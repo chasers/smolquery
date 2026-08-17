@@ -305,6 +305,26 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
            end)
   end
 
+  test "a release mutation clears the follower's live claim, idempotently", context do
+    {owner, follower} = start_pair(context)
+
+    assert {:ok, _ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-16"))
+    [entry] = entries(follower)
+    claim = %{ids: [entry.id], keys: ["sealed-key"]}
+    :ok = Endpoint.apply_replica_mutation(follower, @table, :claim, claim, nil)
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert {:ok, _live} = HotManifest.live_claim(follower_runtime.manifest, @table)
+
+    assert :ok =
+             Endpoint.apply_replica_mutation(follower, @table, :release, %{ids: [entry.id]}, nil)
+
+    assert HotManifest.live_claim(follower_runtime.manifest, @table) == :error
+
+    assert :ok =
+             Endpoint.apply_replica_mutation(follower, @table, :release, %{ids: [entry.id]}, nil)
+  end
+
   test "a re-shipped claim is absorbed as ok, a different claim is refused", context do
     {owner, follower} = start_pair(context)
 

@@ -164,10 +164,10 @@ defmodule Smolquery.BufferService.Client do
   segments stay readable until the grace period expires, because a query planned
   at an older snapshot is still entitled to them.
   """
-  @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
+  @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer(), [String.t()] | nil) ::
           :ok | {:error, term()}
-  def retire(name, table_ref, ids, snapshot) do
-    route(name, :control, :retire, [name, table_ref, ids, snapshot], table_ref, :control)
+  def retire(name, table_ref, ids, snapshot, keys \\ nil) do
+    route(name, :control, :retire, [name, table_ref, ids, snapshot, keys], table_ref, :control)
   end
 
   @doc """
@@ -179,14 +179,23 @@ defmodule Smolquery.BufferService.Client do
   means the ring owner and the holder are different nodes. `nil` falls back to
   ring routing, for claims that carry no origin.
   """
-  @spec retire_at(node() | nil, atom(), Store.table_ref(), [String.t()], non_neg_integer()) ::
-          :ok | {:error, term()}
-  def retire_at(nil, name, table_ref, ids, snapshot), do: retire(name, table_ref, ids, snapshot)
+  @spec retire_at(
+          node() | nil,
+          atom(),
+          Store.table_ref(),
+          [String.t()],
+          non_neg_integer(),
+          [String.t()] | nil
+        ) :: :ok | {:error, term()}
+  def retire_at(node, name, table_ref, ids, snapshot, keys \\ nil)
 
-  def retire_at(node, name, table_ref, ids, snapshot) do
+  def retire_at(nil, name, table_ref, ids, snapshot, keys),
+    do: retire(name, table_ref, ids, snapshot, keys)
+
+  def retire_at(node, name, table_ref, ids, snapshot, keys) do
     name
     |> Routing.resolve()
-    |> invoke(node, :control, :retire, [name, table_ref, ids, snapshot], :control)
+    |> invoke(node, :control, :retire, [name, table_ref, ids, snapshot, keys], :control)
   end
 
   @doc """
