@@ -16,8 +16,8 @@ defmodule SmolqueryApi.Runtime do
   `auth_mode: :static` explicitly selects the static Bearer-key adapter, while
   `:oidc` validates and starts the OIDC provider cache. There is no default or
   fallback: a node holding the `:api` role with missing mode or OIDC settings
-  refuses to boot rather than serve an open API. Request token verification is
-  added by T-232.
+  refuses to boot rather than serve an open API. Request authentication and
+  closed per-route capability authorization run before parsers and controllers.
 
   The listener (ip, port) is Phoenix's own concern and lives under
   `config :smolquery, SmolqueryApi.Endpoint` — the same split
@@ -76,8 +76,8 @@ defmodule SmolqueryApi.Runtime do
   Application config for `SmolqueryApi` supplies the defaults; `opts`
   overrides them. Raises if the authentication mode is missing, or if static
   mode has no non-empty `api_key`. OIDC mode validates its provider foundation
-  and verifies API bearer tokens through the supervised provider cache; per-route
-  capability checks are added by T-233.
+  and verifies API bearer tokens through the supervised provider cache; the
+  router selects the closed route capability map.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
