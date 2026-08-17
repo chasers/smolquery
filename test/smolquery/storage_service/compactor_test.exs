@@ -290,7 +290,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 
-  test "a group never crosses a bucket boundary (T-269)", context do
+  test "a self-sufficient bucket groups alone; stragglers carry forward (T-269)", context do
     runtime = start_compactor(context, compact_bucket_ms: 1_000)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 1, 11..20)
@@ -298,12 +298,22 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 2, 31..40)
 
     assert {:ok, report} = Compactor.sweep(context.storage)
-    assert [%{table: @table, replaced: 2}] = report.compacted
+    assert [%{table: @table, replaced: 2, rows: 20}] = report.compacted
     assert {:ok, [_merged, _c, _d]} = Catalog.segments(context.catalog, @table, :current)
 
     assert {:ok, second} = Compactor.sweep(context.storage)
-    assert [%{table: @table, replaced: 2}] = second.compacted
+    assert [%{table: @table, replaced: 3, rows: 40}] = second.compacted
     assert lake_rows(context.storage) == 40
+  end
+
+  test "a bucket below compact_min_inputs rolls into the next owned bucket", context do
+    runtime = start_compactor(context, compact_bucket_ms: 1_000)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert [%{table: @table, replaced: 2}] = report.compacted
+    assert lake_rows(context.storage) == 20
   end
 
   test "an unowned bucket is left for its owner (T-269)", context do
@@ -365,6 +375,15 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
     end
 
+    test "an OOM failure carrying the group's rows tightens the cap the same way" do
+      {:failed, failure} = oom_failure(@table)
+
+      caps =
+        Compactor.adjusted_row_caps(%{}, [{:failed, Map.put(failure, :rows, 300_000)}], @resolved)
+
+      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
+    end
+
     test "a staging-phase OOM tightens the cap the same way" do
       caps = Compactor.adjusted_row_caps(%{}, [staging_oom_failure(@table)], @resolved)
 
@@ -386,10 +405,16 @@ defmodule Smolquery.StorageService.CompactorTest do
       half = compacted(@table, div(@resolved, 2))
 
       counted = Compactor.adjusted_row_caps(caps, [quarter], @resolved)
-      assert counted == %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}}
+
+      assert counted == %{
+               @table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}
+             }
 
       doubled = Compactor.adjusted_row_caps(counted, [quarter], @resolved)
-      assert doubled == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}}
+
+      assert doubled == %{
+               @table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}
+             }
 
       counted = Compactor.adjusted_row_caps(doubled, [half], @resolved)
       assert Compactor.adjusted_row_caps(counted, [half], @resolved) == %{}

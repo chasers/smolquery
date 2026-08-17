@@ -104,13 +104,18 @@ defmodule Smolquery.StorageService.Runtime do
   (T-269). Ownership used to be per table, so one node compacted a hot table
   alone — and OOMed alone — while its peers idled. The compactor now owns
   `{table_ref, bucket}`, where a segment's bucket is its ULID timestamp
-  divided by this value. Buckets are disjoint, so two nodes cannot plan the
-  same group, and a group never crosses a bucket boundary, so merged output
-  stays time-local. The default of one hour trades off two failure shapes: a
-  smaller bucket spreads a backlog across more nodes but strands more
-  boundary files under `compact_min_inputs`; a larger one concentrates work.
-  A backlog inside one bucket still compacts on one node — a small backlog
-  by definition.
+  divided by this value. **Set it identically on every storage node**:
+  disjoint ownership is a property of every node computing the same bucket
+  ids, and divergent values during a rolling change give two nodes
+  overlapping owned sets until the rollout completes. Buckets are otherwise
+  disjoint, so two nodes cannot plan the same group, and a group crosses a
+  bucket boundary only when a bucket cannot meet `compact_min_inputs` alone
+  — its candidates roll forward into the node's next owned bucket, so quiet
+  tables still compact. The default of one hour trades parallelism against
+  time-locality: a smaller bucket spreads a backlog across more nodes but
+  widens straggler carries; a larger one concentrates work. A backlog
+  inside one bucket still compacts on one node — a small backlog by
+  definition.
 
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
@@ -164,9 +169,14 @@ defmodule Smolquery.StorageService.Runtime do
   row group, so large groups cut a query's request count ~8x against DuckDB's
   122_880-row default. The trade is coarser row-group pruning on clustered
   tables and more `COPY` buffering per group — the merge engine's memory limit
-  is the bound that has to hold. It is validated here at boot for the same
-  reason as `compression`: a bad value discovered per attempt would crash
-  every re-signalled seal forever.
+  is the bound that has to hold. Unlike compaction's row cap, the seal path
+  has no OOM adaptation, and a seal claim's inputs are frozen: a `COPY` that
+  deterministically OOMs at this size retries identically forever and wedges
+  the table's seal path. On a memory-tight node whose seal OOMs recur after
+  a raise, lower `SMOLQUERY_SEAL_ROW_GROUP_SIZE` or raise the merge engine's
+  memory limit. It is validated here at boot for the same reason as
+  `compression`: a bad value discovered per attempt would crash every
+  re-signalled seal forever.
 
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
