@@ -314,11 +314,16 @@ defmodule Smolquery.BufferService.HotManifest do
   a replicated claim whose ack was lost is re-shipped verbatim, and refusing the
   retry would wedge the owner's seal pipeline forever. And the set is frozen whole
   or not at all — an id that cannot be frozen (already sealed, or never held)
-  makes the claim `{:error, :partial_claim}`, because `keys` were derived from
-  the full requested set and stamping a subset with them would break the
-  output's input-derived identity. `keys` are recorded rather than recomputed at
-  seal time, which is what keeps the output name stable even if one of the
-  inputs later goes missing from the store.
+  makes the claim `{:error, {:partial_claim, %{missing: ids, sealed: ids}}}`,
+  because `keys` were derived from the full requested set and stamping a subset
+  with them would break the output's input-derived identity. The error names the
+  divergence (T-289): a replica answering an owner's claim is describing a set it
+  does not hold, and without the ids the owner can neither repair the replica nor
+  say more than "failed" in its log. `missing` ids this manifest never heard of
+  are repairable by re-shipping; `sealed` ids it already retired are the owner
+  being behind, which re-shipping must not paper over. `keys` are recorded rather
+  than recomputed at seal time, which is what keeps the output name stable even
+  if one of the inputs later goes missing from the store.
   """
   @spec claim(t(), Store.table_ref(), [String.t()], [String.t()], log() | nil) ::
           {:ok, claim()} | {:error, term()}
@@ -508,10 +513,26 @@ defmodule Smolquery.BufferService.HotManifest do
     requested = Enum.uniq(ids)
 
     case unsealed(manifest, table_ref, requested) do
-      [] -> {:error, :nothing_to_claim}
-      entries when length(entries) == length(requested) -> {:ok, entries}
-      _partial -> {:error, :partial_claim}
+      [] ->
+        {:error, :nothing_to_claim}
+
+      entries when length(entries) == length(requested) ->
+        {:ok, entries}
+
+      entries ->
+        {:error, {:partial_claim, divergence(manifest, table_ref, requested, entries)}}
     end
+  end
+
+  defp divergence(manifest, table_ref, requested, entries) do
+    held = MapSet.new(entries, & &1.id)
+
+    {missing, sealed} =
+      requested
+      |> Enum.reject(&MapSet.member?(held, &1))
+      |> Enum.split_with(&(entry(manifest, table_ref, &1) == :error))
+
+    %{missing: missing, sealed: sealed}
   end
 
   defp freeze(manifest, table_ref, entries, keys, log) do
