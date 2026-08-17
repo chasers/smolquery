@@ -540,9 +540,11 @@ When `clustering` is non-empty, rows are stably sorted by those columns in
 declared order with nulls last at every write point: the buffer's micro-segment
 flush (`Smolquery.Segments.Writer`), the seal merge, and compaction (`ORDER BY`
 on the storage service's `COPY`). There is no new index structure — the sorted
-Parquet's row-group min/max stats are the sparse index, which is why the sealed
-tier's `ROW_GROUP_SIZE` is explicit configuration (`seal_row_group_size`) rather
-than a DuckDB default. The write path pays for it: flush throughput at
+Parquet's row-group min/max stats are the sparse index. The sealed
+tier's `ROW_GROUP_SIZE` is explicit configuration (`seal_row_group_size`) on
+every table, clustered or not (T-280): a sealed-tier scan over `httpfs` pays
+roughly one range request per row group, so the default of 1,048,576 rows
+trades pruning granularity for an ~8x smaller request count per segment. The write path pays for it: flush throughput at
 saturation is **~7%** slower — Polars sorts the built frame in Rust, and on the
 ack path the [ack budget](benchmarks.md) governs — and seal merge peaks
 **~+180 MiB** higher in transient OS RSS under `memory_limit`
