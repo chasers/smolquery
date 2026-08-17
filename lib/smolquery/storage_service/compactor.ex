@@ -422,12 +422,16 @@ defmodule Smolquery.StorageService.Compactor do
     if length(owned) < runtime.compact_min_inputs do
       :skip
     else
-      with {:ok, undersized} <- undersized(runtime, owned) do
-        undersized
-        |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
-        |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
-        |> carried_group(runtime, [])
-      end
+      plan_undersized(runtime, owned)
+    end
+  end
+
+  defp plan_undersized(runtime, owned) do
+    with {:ok, undersized} <- undersized(runtime, owned) do
+      undersized
+      |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
+      |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
+      |> carried_group(runtime, [])
     end
   end
 
