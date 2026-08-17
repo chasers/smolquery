@@ -77,6 +77,77 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert render_click(lv, "cancel") =~ "done"
     end
 
+    test "a run renders the scan statistics line", %{conn: conn, query: query} do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_submit(lv, "run", %{"query" => %{"sql" => "SELECT 1 AS n"}})
+
+      assert Eventually.until(fn -> render(lv) =~ "done" end)
+
+      assert render(lv) =~ "0/0 files"
+    end
+
+    test "explain renders the engine's plan instead of rows", %{conn: conn, query: query} do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_change(lv, "sql_changed", %{"query" => %{"sql" => "SELECT 1 AS n"}})
+      render_click(lv, "explain", %{"mode" => "plan"})
+
+      assert Eventually.until(fn -> render(lv) =~ "done" end)
+
+      html = render(lv)
+      assert html =~ "PROJECTION"
+      refute html =~ "data_table"
+    end
+
+    test "explain rejects blank SQL", %{conn: conn, query: query} do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      assert render_click(lv, "explain", %{"mode" => "plan"}) =~ "Write some SQL first"
+    end
+
+    test "the trace toggle starts enabled", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/query")
+
+      assert html =~ ~s|name="query[trace]"|
+      assert html =~ "checked"
+    end
+
+    test "a traced run renders a waterfall", %{conn: conn, query: query} do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_submit(lv, "run", %{"query" => %{"sql" => "SELECT 1 AS n", "trace" => "true"}})
+
+      assert Eventually.until(fn -> render(lv) =~ "done" end)
+
+      html = render(lv)
+      assert html =~ "Trace"
+      assert html =~ "engine_start"
+      assert html =~ "execute"
+    end
+
+    test "unchecking the toggle skips the trace", %{conn: conn, query: query} do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_submit(lv, "run", %{"query" => %{"sql" => "SELECT 1 AS n"}})
+
+      assert Eventually.until(fn -> render(lv) =~ "done" end)
+
+      refute render(lv) =~ "engine_start"
+    end
+
     test "a broken query surfaces the job error", %{conn: conn, query: query} do
       start_web!(query_name: query)
 
