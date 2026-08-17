@@ -323,15 +323,18 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   for the next claim. A sealer therefore merges the same inputs into the same
   output no matter how many times it is told or which side crashed, which is
   what makes retrying safe instead of duplicating rows.
-- **A claim holds the oldest unsealed entries up to 16 × `seal_max_bytes`**
-  (T-246, T-247). The byte valve bounds one sealed segment and the bytes the
-  merge stages. Within a claim, the merge bounds its own engine calls: it
-  reads an input list over `merge_inputs_per_call` in capped chunks into a
-  temp table, then one `COPY` writes the segment. No `read_parquet` call is
-  unbounded. A backlog past the valve retires in valve-sized claims, back to
-  back, so a table under sustained ingest self-corrects. A custom
-  `seal_consumer` receives claims up to the valve and must bound its own
-  engine calls the same way.
+- **A claim holds the oldest unsealed entries up to 16 × `seal_max_bytes`
+  and 16 × `seal_max_files`** (T-246, T-247, T-288). The byte valve bounds
+  one sealed segment and the bytes the merge stages. The count valve bounds
+  the merge's per-input footer round trips, which tiny micro-segments rack
+  up without moving the byte valve — an outage's backlog must freeze as
+  several sealable claims, not one unsealable one. Within a claim, the
+  merge bounds its own engine calls: it reads an input list over
+  `merge_inputs_per_call` in capped chunks into a temp table, then one
+  `COPY` writes the segment. No `read_parquet` call is unbounded. A backlog
+  past either valve retires in valve-sized claims, back to back, so a table
+  under sustained ingest self-corrects. A custom `seal_consumer` receives
+  claims up to the valves and must bound its own engine calls the same way.
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`, so at catalog snapshot `S` the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's

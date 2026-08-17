@@ -127,16 +127,18 @@ defmodule Smolquery.BufferService.Runtime do
   the short window off. See `Smolquery.BufferService.TableBuffer` for what
   counts as in flight and when the choice is made.
 
-  A claim freezes the oldest unsealed entries up to 16 × `seal_max_bytes` —
-  the byte valve that bounds one sealed segment and the merge's staged bytes
-  (see `Smolquery.BufferService.TableBuffer`). The storage side's merge
-  bounds its own engine calls (`merge_inputs_per_call` on
-  `Smolquery.StorageService.Runtime`), so a valve-sized claim is always safe
-  to seal. A backlog past the valve retires in valve-sized claims, back to
-  back, and a table under sustained ingest self-corrects (T-246, T-247). A
-  custom `seal_consumer` inherits the same contract: a claim can hold up to
-  the valve's bytes and file count, so a consumer that merges must bound its
-  own calls the way `Smolquery.StorageService.Merge` does.
+  A claim freezes the oldest unsealed entries up to 16 × `seal_max_bytes`
+  and 16 × `seal_max_files` — the byte valve bounds one sealed segment and
+  the merge's staged bytes, the count valve bounds the merge's per-input
+  footer round trips (T-288; see `Smolquery.BufferService.TableBuffer`).
+  The storage side's merge bounds its own engine calls
+  (`merge_inputs_per_call` on `Smolquery.StorageService.Runtime`), so a
+  valve-sized claim is always safe to seal. A backlog past either valve
+  retires in valve-sized claims, back to back, and a table under sustained
+  ingest self-corrects (T-246, T-247). A custom `seal_consumer` inherits the
+  same contract: a claim can hold up to the valves' bytes and file count, so
+  a consumer that merges must bound its own calls the way
+  `Smolquery.StorageService.Merge` does.
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
