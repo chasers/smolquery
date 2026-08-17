@@ -40,6 +40,16 @@ defmodule Smolquery.QueryService.ClientTest do
       assert DataFrame.to_columns(frame)["n"] == [2]
     end
 
+    test "read_engine_threads sets the job engine's DuckDB threads (T-279)" do
+      name = start_service(read_engine_threads: 2)
+
+      assert {:ok, job, frame} =
+               Client.query(name, "SELECT current_setting('threads') AS threads")
+
+      assert job.state == :done
+      assert DataFrame.to_columns(frame)["threads"] == [2]
+    end
+
     test "lockdown denies user SQL the filesystem (PL-8 D7)" do
       name = start_service()
 

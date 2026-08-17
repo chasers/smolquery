@@ -225,7 +225,7 @@ defmodule Smolquery.QueryService.Runner do
         Connection.start_link(
           database: database,
           extensions: extensions(runtime),
-          settings: [memory_limit: runtime.job_memory_limit],
+          settings: engine_settings(runtime),
           statements: engine_secrets(runtime) ++ runtime.job_bootstrap,
           max_rows: :infinity
         )
@@ -236,6 +236,12 @@ defmodule Smolquery.QueryService.Runner do
       end
     end
   end
+
+  defp engine_settings(%Runtime{read_engine_threads: nil} = runtime),
+    do: [memory_limit: runtime.job_memory_limit]
+
+  defp engine_settings(%Runtime{read_engine_threads: threads} = runtime),
+    do: [memory_limit: runtime.job_memory_limit, threads: threads]
 
   defp stop_and_report(database, reason) do
     Process.exit(database, :kill)
