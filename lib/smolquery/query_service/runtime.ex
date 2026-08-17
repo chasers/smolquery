@@ -60,6 +60,14 @@ defmodule Smolquery.QueryService.Runtime do
   `memory_limit`. `result_ttl_ms` is how long a finished job holds its result
   frame for an async caller to fetch.
 
+  `read_engine_threads` (default `nil`) is handed to each job engine's DuckDB
+  `threads`, the read-side counterpart of the buffer's
+  `:write_engine_threads`. Left unset, the job engine takes DuckDB's own core
+  detection, which a cgroup-limited container can misreport. A sealed-tier
+  scan overlaps its `httpfs` range requests per thread, so this value is also
+  the scan's request concurrency ceiling. It is per job engine: jobs in
+  flight multiply it, up to `max_concurrent_jobs`.
+
   `result_max_rows` bounds how many rows a job's result frame may hold
   (T-274). `job_memory_limit` binds only DuckDB's scan — the materialized
   frame lives in Polars memory outside it — so without this bound a
@@ -124,6 +132,7 @@ defmodule Smolquery.QueryService.Runtime do
     max_concurrent_jobs: 8,
     default_timeout_ms: 60_000,
     job_memory_limit: "1GB",
+    read_engine_threads: nil,
     result_ttl_ms: 300_000,
     result_max_rows: 10_000,
     write_partitions: 1
@@ -145,6 +154,7 @@ defmodule Smolquery.QueryService.Runtime do
           max_concurrent_jobs: pos_integer(),
           default_timeout_ms: pos_integer(),
           job_memory_limit: String.t(),
+          read_engine_threads: pos_integer() | nil,
           result_ttl_ms: pos_integer(),
           result_max_rows: pos_integer() | :infinity,
           write_partitions: pos_integer(),
@@ -161,6 +171,7 @@ defmodule Smolquery.QueryService.Runtime do
     :max_concurrent_jobs,
     :default_timeout_ms,
     :job_memory_limit,
+    :read_engine_threads,
     :result_ttl_ms,
     :result_max_rows,
     :write_partitions

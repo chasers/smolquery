@@ -74,6 +74,7 @@ until the pinned version's driver exists for that target.
 | `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. When no explicit engine thread count is configured, both the engine and the pool resolve `System.schedulers_online()` on the deployment host at boot, not on the release builder. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
 | `SMOLQUERY_WRITE_ENGINE_THREADS` | DuckDB threads for one write-pool member, replacing the division. The division describes a budget only while the pool is smaller than the thread count — past that it sits at its floor of one, and an operator who wants a different shape states the number |
 | `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` | DuckDB memory limit for one write-pool member (e.g. `512MB`). Unset, every member inherits `SMOLQUERY_MEMORY_LIMIT` whole, so the node's declared DuckDB write budget is `write_pool_size ×` that — a size string has its own grammar, and nothing divides it for you |
+| `SMOLQUERY_READ_ENGINE_THREADS` | DuckDB threads for one query job's private engine (T-279), the read-side counterpart of `SMOLQUERY_WRITE_ENGINE_THREADS`. Unset, each job engine takes DuckDB's own core detection, which a cgroup-limited container can misreport. A sealed-tier scan overlaps its `httpfs` range requests per thread, so this is also the scan's request-concurrency ceiling; jobs in flight multiply it, up to `max_concurrent_jobs` |
 | `SMOLQUERY_WRITE_PARTITIONS` | how many buffer identities one table's writes spread over, and so how many nodes ingest it (`1`). Reader and writer counts must match — set it identically on ingest and query roles |
 | `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` (`4001`), on every node — peers derive each other's hot-tier URLs from node name plus this port |
 | `SMOLQUERY_HOT_SERVER_IP` | `HotServer` bind (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
@@ -165,6 +166,7 @@ config :smolquery, Smolquery.QueryService,
   max_concurrent_jobs: 8,
   default_timeout_ms: 60_000,
   job_memory_limit: "1GB",
+  read_engine_threads: nil,
   result_ttl_ms: 300_000,
   result_max_rows: 10_000
 ```
@@ -290,8 +292,10 @@ sealed tier lives there — every job's engine needs the matching `CREATE SECRET
 to read it, even though the query path never writes through the store itself.
 `max_concurrent_jobs` refuses rather than queues; `default_timeout_ms` bounds
 every job's runtime; `job_memory_limit` is each job engine's DuckDB
-`memory_limit`; `result_ttl_ms` is how long a finished job holds its result
-frame for an async caller.
+`memory_limit`; `read_engine_threads` is each job engine's DuckDB `threads`
+(T-279) — unset, DuckDB detects cores itself, and the count doubles as the
+scan's `httpfs` request-concurrency ceiling; `result_ttl_ms` is how long a
+finished job holds its result frame for an async caller.
 
 `result_max_rows` (default 10,000 — matching the API's `maxResults`
 ceiling, so every result the budget admits is pageable in one page) bounds

@@ -244,6 +244,17 @@ if threads = System.get_env("SMOLQUERY_WRITE_ENGINE_THREADS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_WRITE_ENGINE_THREADS", threads)
 end
 
+# `SMOLQUERY_READ_ENGINE_THREADS` is the read-side counterpart: each query
+# job's private engine takes it as DuckDB `threads`. Left unset, the job
+# engine takes DuckDB's own core detection, which a cgroup-limited container
+# can misreport. A sealed-tier scan overlaps its httpfs range requests per
+# thread, so this value is also the scan's request concurrency ceiling.
+if threads = System.get_env("SMOLQUERY_READ_ENGINE_THREADS") do
+  config :smolquery, Smolquery.QueryService,
+    read_engine_threads:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_READ_ENGINE_THREADS", threads)
+end
+
 # `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` is the one that cannot be derived: a
 # DuckDB memory limit is a size string with its own grammar, so the pool cannot
 # divide it the way it divides threads. Left unset, every member inherits

@@ -50,6 +50,11 @@ defmodule Smolquery.QueryService.RuntimeTest do
     test "defaults the buffer instance ownership questions go to" do
       assert Runtime.new(name: __MODULE__.Buffered).buffer_name == Smolquery.BufferService
     end
+
+    test "read_engine_threads defaults to nil and takes an override (T-279)" do
+      assert Runtime.new(name: __MODULE__.ThreadsDefault).read_engine_threads == nil
+      assert Runtime.new(name: __MODULE__.Threads, read_engine_threads: 4).read_engine_threads == 4
+    end
   end
 
   describe "put/1, fetch/1 and delete/1" do
