@@ -98,17 +98,24 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   The claim also names its output, derived from its inputs, so a table's sealed
   segment has a stable identity before any bytes exist. One key per claim, and
-  the claim takes the oldest unsealed entries up to a byte valve of
-  16 × `seal_max_bytes`. The valve bounds two things at once: how large one
-  sealed segment can get, and how many bytes the merge stages in its temp
-  table — engine memory and spill are finite, and a claim past them would
-  fail the same way on every retry. A backlog past the valve retires in
-  valve-sized claims. The remainder still crosses `seal_max_bytes`, so the
-  next maintenance tick claims it as soon as this claim retires — a table
-  under sustained ingest self-corrects (T-246). Within a claim, calls are
-  bounded too: `Smolquery.StorageService.Merge` reads inputs in chunks of
-  `merge_inputs_per_call`, so no call carries an unbounded `read_parquet`
-  list.
+  the claim takes the oldest unsealed entries up to two valves: a byte valve
+  of 16 × `seal_max_bytes`, and a count valve of 16 × `seal_max_files`
+  (T-288). The byte valve bounds how large one sealed segment can get and how
+  many bytes the merge stages in its temp table — engine memory and spill are
+  finite, and a claim past them would fail the same way on every retry. The
+  count valve bounds what the byte valve cannot see: per-input footer round
+  trips are the merge's real cost over `httpfs`, so an outage's backlog of
+  thousands of tiny micro-segments froze an hours-long merge into one claim
+  the byte valve waved through — and a frozen claim retries the same
+  oversized merge forever. The pre-chunking claim cap (T-244) bounded this
+  by construction; the count valve restores that bound at freeze time, where
+  claim size is decided. A backlog past either valve retires in valve-sized
+  claims, oldest first. The remainder still crosses `seal_max_bytes` or
+  `seal_max_files`, so the next maintenance tick claims it as soon as this
+  claim retires — a table under sustained ingest self-corrects (T-246).
+  Within a claim, calls are bounded too: `Smolquery.StorageService.Merge`
+  reads inputs in chunks of `merge_inputs_per_call`, so no call carries an
+  unbounded `read_parquet` list.
 
   ## Recovery, and what a crash costs
 
@@ -149,7 +156,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
-  @claim_max_bytes_factor 16
+  @claim_valve_factor 16
 
   defstruct [
     :runtime,
@@ -672,7 +679,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp claim_and_signal(state, unsealed) do
     ids =
       unsealed
-      |> claim_batch(state.runtime.seal_max_bytes * @claim_max_bytes_factor)
+      |> claim_batch(
+        state.runtime.seal_max_bytes * @claim_valve_factor,
+        state.runtime.seal_max_files * @claim_valve_factor
+      )
       |> Enum.map(& &1.id)
 
     result =
@@ -691,13 +701,18 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  defp claim_batch([first | rest], valve) do
-    {batch, _total} =
-      Enum.reduce_while(rest, {[first], first.byte_size}, fn entry, {batch, total} ->
-        if total + entry.byte_size > valve do
-          {:halt, {batch, total}}
-        else
-          {:cont, {[entry | batch], total + entry.byte_size}}
+  defp claim_batch([first | rest], byte_valve, count_valve) do
+    {batch, _total, _count} =
+      Enum.reduce_while(rest, {[first], first.byte_size, 1}, fn entry, {batch, total, count} ->
+        cond do
+          count >= count_valve ->
+            {:halt, {batch, total, count}}
+
+          total + entry.byte_size > byte_valve ->
+            {:halt, {batch, total, count}}
+
+          true ->
+            {:cont, {[entry | batch], total + entry.byte_size, count + 1}}
         end
       end)
 

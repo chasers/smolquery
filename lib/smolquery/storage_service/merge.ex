@@ -32,7 +32,7 @@ defmodule Smolquery.StorageService.Merge do
   on the shared connection therefore cannot collide, and a retry's
   `CREATE OR REPLACE` clears a crashed predecessor's leftover. A retry
   re-stages the whole claim — there is no partial-stage resume — and the
-  buffer's claim byte valve is what bounds that cost. The staging
+  buffer's claim valves (bytes and input count) are what bound that cost. The staging
   hop's cost is memory: the claim's rows live in the engine, spilling to the
   connection's `temp_directory` past its limit, until the final `COPY`.
 
@@ -49,7 +49,16 @@ defmodule Smolquery.StorageService.Merge do
   path whose budgets were real. A staging chunk
   gets two minutes for a similar reason: the count cap bounds its inputs, not
   its bytes, and twelve compaction inputs near `compact_below_bytes` move
-  hundreds of megabytes on a slow link. An `after` block drops the staging
+  hundreds of megabytes on a slow link. The schema `DESCRIBE` that precedes
+  a projection takes the same two minutes, not the 30 s default (T-288): its
+  own work is bounded — it reads the footers the projected read is about to
+  read anyway — but its budget is spent on a serialized connection, where
+  every other merge's staging call is this call's queue time. On the 30 s
+  default, three tables sealing backlogs concurrently starved each other's
+  first `DESCRIBE` behind their own two-minute staging calls, and each
+  timeout re-staged its whole claim, so no merge ever finished. A budget in
+  line with the calls it queues behind is what lets a merge wait its turn
+  instead of dying in line. An `after` block drops the staging
   table, so an error or an exit on the way out does not strand the staged
   rows on the shared connection. The drop's own call gets five seconds, not
   the 30 s default: on a wedged connection the drop queues behind the
@@ -430,7 +439,7 @@ defmodule Smolquery.StorageService.Merge do
   defp input_columns(runtime, urls) do
     sql = "DESCRIBE SELECT * FROM #{scan(urls)}"
 
-    with {:ok, result} <- query(runtime, sql, urls) do
+    with {:ok, result} <- query(runtime, sql, urls, @stage_chunk_timeout_ms) do
       {:ok, Enum.map(result.rows, &hd/1)}
     end
   end

@@ -150,6 +150,38 @@ defmodule Smolquery.BufferService.SealingTest do
       assert claim.ids == [first.segment_id]
     end
 
+    test "a backlog past the count valve claims in valve-sized claims, oldest first", context do
+      %{name: name} =
+        start_buffer_service(context,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000,
+          seal_retry_ms: 1
+        )
+
+      {:ok, first} = Client.write_batch(name, @table, batch(0..0))
+
+      assert_receive {:seal_ready, @table, live}, 500
+      assert live.ids == [first.segment_id]
+
+      backlog =
+        for n <- 1..18 do
+          {:ok, ack} = Client.write_batch(name, @table, batch(n..n))
+          ack.segment_id
+        end
+
+      :ok = Client.retire(name, @table, live.ids, 1)
+      flush_messages()
+
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert claim.ids == Enum.take(backlog, 16)
+
+      :ok = Client.retire(name, @table, claim.ids, 2)
+      flush_messages()
+
+      assert_receive {:seal_ready, @table, remainder}, 500
+      assert remainder.ids == Enum.drop(backlog, 16)
+    end
+
     test "a claim freezes the entire unsealed backlog", context do
       %{name: name} = start_buffer_service(context, seal_max_files: 100)
 
