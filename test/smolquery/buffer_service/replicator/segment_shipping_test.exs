@@ -40,15 +40,18 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     name
   end
 
-  defp start_pair(context) do
+  defp start_pair(context, owner_opts \\ []) do
     follower = start_instance(context)
 
     owner =
-      start_instance(context,
-        replicator:
-          {SegmentShipping,
-           replication_factor: 2,
-           targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end}
+      start_instance(
+        context,
+        [
+          replicator:
+            {SegmentShipping,
+             replication_factor: 2,
+             targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end}
+        ] ++ owner_opts
       )
 
     {owner, follower}
@@ -166,6 +169,52 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     {:ok, prefix} = Store.prefix(@table)
     {:ok, key} = Store.key(prefix, entry.id)
     assert File.exists?(Store.location(follower_runtime.store, key))
+  end
+
+  test "a heal larger than one batch converges across attempts", context do
+    {owner, follower} =
+      start_pair(context,
+        seal_max_files: 1_000_000,
+        seal_max_bytes: 1_000_000_000,
+        seal_max_age_ms: 600_000
+      )
+
+    ids =
+      for n <- 1..66 do
+        {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-batch-#{n}"))
+        ack.segment_id
+      end
+
+    dropped = Enum.drop(ids, 1)
+    :ok = Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: dropped}, nil)
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    first_attempt =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert first_attempt =~ "heal on"
+    assert first_attempt =~ "in progress"
+    assert first_attempt =~ "re-shipped 64 missing entries"
+    assert first_attempt =~ "1 remain"
+    assert first_attempt =~ ":heal_in_progress"
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    assert HotManifest.live_claim(owner_runtime.manifest, @table) == :error
+
+    second_attempt =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert second_attempt =~ "healed a partial claim"
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert {:ok, claim} = HotManifest.live_claim(owner_runtime.manifest, @table)
+    assert Enum.sort(claim.ids) == Enum.sort(ids)
+    assert {:ok, ^claim} = HotManifest.live_claim(follower_runtime.manifest, @table)
   end
 
   test "a claim over ids the follower already sealed fails loudly, naming them", context do

@@ -321,7 +321,10 @@ defmodule Smolquery.BufferService.HotManifest do
   does not hold, and without the ids the owner can neither repair the replica nor
   say more than "failed" in its log. `missing` ids this manifest never heard of
   are repairable by re-shipping; `sealed` ids it already retired are the owner
-  being behind, which re-shipping must not paper over. `keys` are recorded rather
+  being behind, which re-shipping must not paper over. The split is what this
+  manifest can still see: an id that was sealed and then reaped reports as
+  `missing`, because the drop erased the record — `missing` means "no entry
+  now", not "never held" (T-291). `keys` are recorded rather
   than recomputed at seal time, which is what keeps the output name stable even
   if one of the inputs later goes missing from the store.
   """

@@ -58,7 +58,7 @@ defmodule Smolquery.StorageService.Merge do
   first `DESCRIBE` behind their own two-minute staging calls, and each
   timeout re-staged its whole claim, so no merge ever finished. A budget in
   line with the calls it queues behind is what lets a merge wait its turn
-  instead of dying in line. An `after` block drops the staging
+  instead of failing before its statement ever runs. An `after` block drops the staging
   table, so an error or an exit on the way out does not strand the staged
   rows on the shared connection. The drop's own call gets five seconds, not
   the 30 s default: on a wedged connection the drop queues behind the

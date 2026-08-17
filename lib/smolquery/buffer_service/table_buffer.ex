@@ -106,7 +106,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   count valve bounds what the byte valve cannot see: per-input footer round
   trips are the merge's real cost over `httpfs`, so an outage's backlog of
   thousands of tiny micro-segments froze an hours-long merge into one claim
-  the byte valve waved through — and a frozen claim retries the same
+  the byte valve never noticed — and a frozen claim retries the same
   oversized merge forever. The pre-chunking claim cap (T-244) bounded this
   by construction; the count valve restores that bound at freeze time, where
   claim size is decided. A backlog past either valve retires in valve-sized
@@ -783,7 +783,9 @@ defmodule Smolquery.BufferService.TableBuffer do
       name: state.runtime.name,
       table_ref: state.table_ref,
       op: op,
-      args: args
+      args: args,
+      manifest: state.runtime.manifest,
+      store: state.runtime.store
     })
   end
 
