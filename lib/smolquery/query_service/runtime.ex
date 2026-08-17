@@ -20,7 +20,7 @@ defmodule Smolquery.QueryService.Runtime do
         default_timeout_ms: 60_000,
         job_memory_limit: "1GB",
         result_ttl_ms: 300_000,
-        result_max_rows: 1_000
+        result_max_rows: 10_000
 
   `catalog` is where plans resolve tables: snapshot pins, segment lists,
   schemas. Given options (or nothing), the service starts its own
@@ -125,7 +125,7 @@ defmodule Smolquery.QueryService.Runtime do
     default_timeout_ms: 60_000,
     job_memory_limit: "1GB",
     result_ttl_ms: 300_000,
-    result_max_rows: 1_000,
+    result_max_rows: 10_000,
     write_partitions: 1
   ]
 
