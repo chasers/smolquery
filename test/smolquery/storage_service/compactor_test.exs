@@ -362,13 +362,13 @@ defmodule Smolquery.StorageService.CompactorTest do
     test "a merge OOM halves the table's cap" do
       caps = Compactor.adjusted_row_caps(%{}, [oom_failure(@table)], @resolved)
 
-      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
     end
 
     test "a staging-phase OOM tightens the cap the same way" do
       caps = Compactor.adjusted_row_caps(%{}, [staging_oom_failure(@table)], @resolved)
 
-      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
     end
 
     test "repeated OOMs keep halving, never below the floor, and grow the patience" do
@@ -377,37 +377,52 @@ defmodule Smolquery.StorageService.CompactorTest do
           Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved)
         end)
 
-      assert caps == %{@table => %{cap: 65_536, streak: 0, patience: 64}}
+      assert caps == %{@table => %{cap: 65_536, streak: 0, patience: 64, probe: false}}
     end
 
     test "cap-filling successes raise the cap after the patience and shed at the resolved cap" do
-      caps = %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 2}}
+      caps = %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 2, probe: false}}
       quarter = compacted(@table, div(@resolved, 4))
       half = compacted(@table, div(@resolved, 2))
 
       counted = Compactor.adjusted_row_caps(caps, [quarter], @resolved)
-      assert counted == %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2}}
+      assert counted == %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}}
 
       doubled = Compactor.adjusted_row_caps(counted, [quarter], @resolved)
-      assert doubled == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2}}
+      assert doubled == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}}
 
       counted = Compactor.adjusted_row_caps(doubled, [half], @resolved)
       assert Compactor.adjusted_row_caps(counted, [half], @resolved) == %{}
     end
 
+    test "an OOM at a probed cap re-tightens and clears the probe (T-283)" do
+      caps = %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}}
+
+      assert Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved) ==
+               %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 4, probe: false}}
+    end
+
+    test "a success at a probed cap proves it and clears the probe (T-283)" do
+      caps = %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 4, probe: true}}
+      half = compacted(@table, div(@resolved, 2))
+
+      assert Compactor.adjusted_row_caps(caps, [half], @resolved) ==
+               %{@table => %{cap: div(@resolved, 2), streak: 1, patience: 4, probe: false}}
+    end
+
     test "a small group's success is not evidence for a raise" do
-      caps = %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2}}
+      caps = %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}}
 
       assert Compactor.adjusted_row_caps(caps, [compacted(@table, 100)], @resolved) == caps
     end
 
     test "a cap that makes every plan skip still earns its raise, so the floor unwedges" do
-      caps = %{@table => %{cap: 65_536, streak: 0, patience: 2}}
+      caps = %{@table => %{cap: 65_536, streak: 0, patience: 2, probe: false}}
 
       counted = Compactor.adjusted_row_caps(caps, [{:skip, @table}], @resolved)
       doubled = Compactor.adjusted_row_caps(counted, [{:skip, @table}], @resolved)
 
-      assert doubled == %{@table => %{cap: 131_072, streak: 0, patience: 2}}
+      assert doubled == %{@table => %{cap: 131_072, streak: 0, patience: 2, probe: true}}
     end
 
     test "a success or skip without an override changes nothing" do
