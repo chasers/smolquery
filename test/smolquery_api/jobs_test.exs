@@ -71,6 +71,32 @@ defmodule SmolqueryApi.JobControllerTest do
              } = JSON.decode!(response.resp_body)
     end
 
+    test "the finished job carries scan statistics for both tiers", %{name: name} do
+      response = post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n"})
+
+      assert %{"job" => %{"statistics" => statistics}} = JSON.decode!(response.resp_body)
+
+      assert statistics == %{
+               "filesTotal" => 0,
+               "filesScanned" => 0,
+               "rowsScanned" => 0,
+               "bytesScanned" => 0,
+               "mibScanned" => 0.0,
+               "hot" => %{
+                 "filesTotal" => 0,
+                 "filesScanned" => 0,
+                 "rowsScanned" => 0,
+                 "bytesScanned" => 0
+               },
+               "sealed" => %{
+                 "filesTotal" => 0,
+                 "filesScanned" => 0,
+                 "rowsScanned" => 0,
+                 "bytesScanned" => 0
+               }
+             }
+    end
+
     test "temporal and decimal values arrive as strings", %{name: name} do
       response =
         post_json(name, "/v1/queries", %{

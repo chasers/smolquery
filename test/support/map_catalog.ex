@@ -76,6 +76,9 @@ defmodule Smolquery.Test.MapCatalog do
   def registered_through(_agent, _table_ref, _snapshot), do: {:error, :not_supported}
 
   @impl Catalog
+  def segment_stats(_agent, _table_ref, _snapshot), do: {:error, :not_supported}
+
+  @impl Catalog
   def drop_segments(_agent, _table_ref, _paths), do: {:error, :not_supported}
 
   @impl Catalog

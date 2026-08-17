@@ -14,12 +14,18 @@ defmodule Smolquery.Test.FixedCatalog do
 
   @typedoc """
   The answers: `:snapshot`, `:schemas` (`table_ref => Schema.t`), and
-  `:segments` (`{table_ref, snapshot} => [path]`).
+  `:segments` (`{table_ref, snapshot} => [path]`). `:registered` overrides
+  `registered_through/3`; `:stats` overrides `segment_stats/3`, which
+  otherwise counts the `:segments` entry with zero rows and bytes.
   """
   @type answers :: %{
-          snapshot: Catalog.snapshot(),
-          schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
-          segments: %{{Catalog.table_ref(), Catalog.snapshot()} => [String.t()]}
+          :snapshot => Catalog.snapshot(),
+          :schemas => %{Catalog.table_ref() => Smolquery.Schema.t()},
+          :segments => %{{Catalog.table_ref(), Catalog.snapshot()} => [String.t()]},
+          optional(:registered) => %{{Catalog.table_ref(), Catalog.snapshot()} => [String.t()]},
+          optional(:stats) => %{
+            {Catalog.table_ref(), Catalog.snapshot()} => Catalog.segment_stats()
+          }
         }
 
   @spec new(answers()) :: Catalog.t()
@@ -45,6 +51,19 @@ defmodule Smolquery.Test.FixedCatalog do
     case Map.fetch(answers, :registered) do
       {:ok, registered} -> {:ok, Map.get(registered, {table, snapshot}, [])}
       :error -> segments(answers, table, snapshot)
+    end
+  end
+
+  @impl Catalog
+  def segment_stats(answers, table, snapshot) do
+    case Map.fetch(answers, :stats) do
+      {:ok, stats} ->
+        {:ok, Map.get(stats, {table, snapshot}, %{files: 0, rows: 0, bytes: 0})}
+
+      :error ->
+        with {:ok, paths} <- segments(answers, table, snapshot) do
+          {:ok, %{files: length(paths), rows: 0, bytes: 0}}
+        end
     end
   end
 

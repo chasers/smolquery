@@ -87,6 +87,13 @@ defmodule Smolquery.Test.PathCatalog do
   end
 
   @impl Catalog
+  def segment_stats(agent, table, snapshot) do
+    with {:ok, paths} <- segments(agent, table, snapshot) do
+      {:ok, %{files: length(paths), rows: 0, bytes: 0}}
+    end
+  end
+
+  @impl Catalog
   def register_segments(agent, _table, segments) do
     Enum.each(segments, &register(agent, &1.path))
 
