@@ -36,6 +36,7 @@ defmodule Smolquery.BufferService.Replicator do
 
   """
 
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -71,12 +72,20 @@ defmodule Smolquery.BufferService.Replicator do
   the same rows double-commit them to the catalog. `args` is the mutation's
   own vocabulary: `%{ids: ids, keys: keys}` for `:claim`,
   `%{ids: ids, snapshot: snapshot}` for `:retire`, `%{ids: ids}` for `:drop`.
+
+  `manifest` and `store` are the owner's, handed along the way `commit`
+  carries its store: an implementation that repairs a diverged replica
+  (T-289's partial-claim heal) resolves entries and bytes from what the
+  caller gave it, rather than reaching back into the owner's runtime by
+  global name.
   """
   @type mutation :: %{
           name: atom(),
           table_ref: Store.table_ref(),
           op: :claim | :retire | :drop,
-          args: map()
+          args: map(),
+          manifest: HotManifest.t(),
+          store: Store.t()
         }
 
   @doc """
