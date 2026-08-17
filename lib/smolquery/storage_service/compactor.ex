@@ -231,6 +231,14 @@ defmodule Smolquery.StorageService.Compactor do
   sheds the override when it reaches the runtime's. Each OOM doubles the
   table's patience, up to #{@relax_patience_max} sweeps, so a table sitting
   on its true limit probes it rarely instead of every other sweep.
+
+  The log lines classify each OOM, because a probe finding its limit is the
+  design working while an OOM under a tightened cap is not (T-283). A raise
+  marks the entry as a probe; the next outcome resolves it. An OOM at a
+  probed cap logs at info as expected. A table's first OOM logs at info as
+  calibration. An OOM at a cap that was not probing — a level that
+  previously held — logs at warning, because it means memory pressure
+  changed, not that the compactor is learning.
   """
   @spec adjusted_row_caps(
           %{Catalog.table_ref() => map()},
@@ -257,20 +265,42 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp tighten(caps, table, resolved) do
-    {attempted, patience} =
+    {attempted, patience, kind} =
       case caps do
-        %{^table => %{cap: cap, patience: patience}} ->
-          {min(cap, resolved), min(patience * 2, @relax_patience_max)}
+        %{^table => %{cap: cap, patience: patience, probe: probe}} ->
+          {min(cap, resolved), min(patience * 2, @relax_patience_max),
+           if(probe, do: :probe, else: :regression)}
 
         _no_override ->
-          {resolved, @relax_patience_start}
+          {resolved, @relax_patience_start, :calibration}
       end
 
-    Map.put(caps, table, %{
-      cap: max(div(attempted, 2), @row_cap_floor),
-      streak: 0,
-      patience: patience
-    })
+    cap = max(div(attempted, 2), @row_cap_floor)
+    log_tighten(kind, table, attempted, cap)
+
+    Map.put(caps, table, %{cap: cap, streak: 0, patience: patience, probe: false})
+  end
+
+  defp log_tighten(:probe, table, attempted, cap) do
+    Logger.info(
+      "compaction row-cap probe of #{inspect(table)} found its limit: a merge OOM at " <>
+        "#{attempted} rows is expected while probing; the cap returns to #{cap}"
+    )
+  end
+
+  defp log_tighten(:calibration, table, attempted, cap) do
+    Logger.info(
+      "compaction row cap of #{inspect(table)} is calibrating: first merge OOM at " <>
+        "#{attempted} rows; the cap tightens to #{cap}"
+    )
+  end
+
+  defp log_tighten(:regression, table, attempted, cap) do
+    Logger.warning(
+      "unexpected compaction merge OOM under the already-tightened row cap of " <>
+        "#{inspect(table)}: #{attempted} -> #{cap} rows; " <>
+        "the compaction engine memory limit may be too small"
+    )
   end
 
   defp relax(caps, table, rows, resolved) do
@@ -286,13 +316,23 @@ defmodule Smolquery.StorageService.Compactor do
   defp advance(caps, table, entry, resolved) do
     cond do
       entry.streak + 1 < entry.patience ->
-        Map.put(caps, table, %{entry | streak: entry.streak + 1})
+        Map.put(caps, table, %{entry | streak: entry.streak + 1, probe: false})
 
       entry.cap * 2 >= resolved ->
+        Logger.info(
+          "compaction row cap of #{inspect(table)} earned back the resolved " <>
+            "#{resolved} rows"
+        )
+
         Map.delete(caps, table)
 
       true ->
-        Map.put(caps, table, %{entry | cap: entry.cap * 2, streak: 0})
+        Logger.info(
+          "compaction row cap of #{inspect(table)} probes #{entry.cap * 2} rows; " <>
+            "a merge OOM at this level is expected and re-tightens the cap"
+        )
+
+        Map.put(caps, table, %{entry | cap: entry.cap * 2, streak: 0, probe: true})
     end
   end
 
