@@ -10,12 +10,13 @@ defmodule SmolqueryApi.Runtime do
   ## Configuration
 
       config :smolquery, SmolqueryApi,
+        auth_mode: :static,
         api_key: "..."
 
-  `api_key` is the one static Bearer key every `/v1` route requires (PL-8 D5).
-  There is no default and no fallback: a node holding the `:api` role with no
-  key configured refuses to boot rather than serve an open API. Multi-key and
-  rotation are explicitly later.
+  `auth_mode: :static` explicitly selects the static Bearer-key adapter. There
+  is no default or fallback: a node holding the `:api` role with a missing or
+  unsupported mode, or without a key, refuses to boot rather than serve an open
+  API. Multi-key and rotation are explicitly later.
 
   The listener (ip, port) is Phoenix's own concern and lives under
   `config :smolquery, SmolqueryApi.Endpoint` — the same split
@@ -29,13 +30,17 @@ defmodule SmolqueryApi.Runtime do
   `%Smolquery.Catalog{}` outright, it reads through that and starts nothing.
   """
 
+  alias Smolquery.Auth.Context
+  alias Smolquery.Auth.Static
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :api_key, :catalog]
+  @enforce_keys [:name, :auth_mode, :api_key, :context, :catalog]
   @derive {Inspect, except: [:api_key]}
   defstruct [
     :name,
+    :auth_mode,
     :api_key,
+    :context,
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
@@ -46,7 +51,9 @@ defmodule SmolqueryApi.Runtime do
 
   @type t :: %__MODULE__{
           name: atom(),
+          auth_mode: :static,
           api_key: String.t(),
+          context: Context.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
@@ -59,7 +66,8 @@ defmodule SmolqueryApi.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryApi` supplies the defaults; `opts`
-  overrides them. Raises if no non-empty `api_key` is present in either.
+  overrides them. Raises if the authentication mode is missing or unsupported,
+  or if no non-empty `api_key` is present in either.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -69,8 +77,11 @@ defmodule SmolqueryApi.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
+    auth_mode = Static.mode!(config, "the API", :api)
+
     %__MODULE__{
       name: name,
+      auth_mode: auth_mode,
       api_key:
         Smolquery.Runtime.fetch_required!(config, :api_key,
           service: "the API",
@@ -79,6 +90,7 @@ defmodule SmolqueryApi.Runtime do
           scope: SmolqueryApi,
           role: :api
         ),
+      context: Static.api_context(),
       catalog: catalog,
       catalog_opts: catalog_opts
     }

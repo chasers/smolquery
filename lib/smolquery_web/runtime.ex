@@ -9,13 +9,14 @@ defmodule SmolqueryWeb.Runtime do
   ## Configuration
 
       config :smolquery, SmolqueryWeb,
+        auth_mode: :static,
         username: "...",
         password: "...",
         catalog: [metadata: "sqlite:...", data_path: "..."]
 
-  `username` and `password` are the one static basic-auth credential that
-  every UI route requires (`SmolqueryWeb.Auth`). There is no default and no
-  fallback: a node with the `:web` role and no credential refuses to boot. The
+  `auth_mode: :static` explicitly selects the static Basic-auth adapter.
+  There is no default or fallback: a node holding the `:web` role with a
+  missing or unsupported mode, or without credentials, refuses to boot. The
   credential is not the API key, so a UI rotation does not break an ingest
   client. Multiple credentials and rotation come later, as for the API.
 
@@ -34,15 +35,19 @@ defmodule SmolqueryWeb.Runtime do
   test.
   """
 
+  alias Smolquery.Auth.Context
+  alias Smolquery.Auth.Static
   alias Smolquery.Catalog
 
-  @enforce_keys [:name, :username, :password, :session_marker, :catalog]
-  @derive {Inspect, except: [:username, :password]}
+  @enforce_keys [:name, :auth_mode, :username, :password, :session_marker, :context, :catalog]
+  @derive {Inspect, except: [:username, :password, :session_marker]}
   defstruct [
     :name,
+    :auth_mode,
     :username,
     :password,
     :session_marker,
+    :context,
     :catalog,
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
@@ -51,9 +56,11 @@ defmodule SmolqueryWeb.Runtime do
 
   @type t :: %__MODULE__{
           name: atom(),
+          auth_mode: :static,
           username: String.t(),
           password: String.t(),
           session_marker: String.t(),
+          context: Context.t(),
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
@@ -66,9 +73,10 @@ defmodule SmolqueryWeb.Runtime do
   Resolves configuration into a runtime.
 
   Application config for `SmolqueryWeb` supplies the defaults; `opts`
-  overrides them. Raises unless the merged options hold a non-empty `username`
-  and a non-empty `password`. Also raises unless a session secret of at least
-  64 bytes is present — the `:secret_key_base` option, or the endpoint's own
+  overrides them. Raises if the authentication mode is missing or unsupported,
+  or unless the merged options hold a non-empty `username` and a non-empty
+  `password`. Also raises unless a session secret of at least 64 bytes is
+  present — the `:secret_key_base` option, or the endpoint's own
   `secret_key_base` config.
   """
   @spec new(keyword()) :: t()
@@ -79,15 +87,18 @@ defmodule SmolqueryWeb.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
+    auth_mode = Static.mode!(config, "the web UI", :web)
     username = fetch_credential!(config, :username)
     password = fetch_credential!(config, :password)
     secret_key_base = validate_session_secret!(resolve_session_secret(config))
 
     %__MODULE__{
       name: name,
+      auth_mode: auth_mode,
       username: username,
       password: password,
       session_marker: session_marker(secret_key_base, username, password),
+      context: Static.web_context(),
       catalog: catalog,
       catalog_opts: catalog_opts
     }

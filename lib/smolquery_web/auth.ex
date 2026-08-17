@@ -35,6 +35,7 @@ defmodule SmolqueryWeb.Auth do
   import Plug.Conn
 
   alias Phoenix.LiveView
+  alias Smolquery.Auth
   alias SmolqueryWeb.Runtime
 
   @realm "smolquery"
@@ -64,11 +65,14 @@ defmodule SmolqueryWeb.Auth do
   defp mark(%Plug.Conn{halted: true} = conn, _runtime), do: conn
 
   defp mark(conn, runtime) do
-    if get_session(conn, @marker) == runtime.session_marker do
-      conn
-    else
-      put_session(conn, @marker, runtime.session_marker)
-    end
+    conn =
+      if get_session(conn, @marker) == runtime.session_marker do
+        conn
+      else
+        put_session(conn, @marker, runtime.session_marker)
+      end
+
+    Auth.assign_context(conn, runtime.context)
   end
 
   defp challenge(conn) do
@@ -90,7 +94,7 @@ defmodule SmolqueryWeb.Auth do
   def on_mount(:require_authenticated, _params, session, socket) do
     with {:ok, runtime} <- Runtime.fetch(SmolqueryWeb),
          marker when marker == runtime.session_marker <- session[Atom.to_string(@marker)] do
-      {:cont, socket}
+      {:cont, Auth.assign_context(socket, runtime.context)}
     else
       _unauthenticated -> {:halt, LiveView.redirect(socket, to: "/")}
     end

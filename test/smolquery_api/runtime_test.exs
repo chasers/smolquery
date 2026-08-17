@@ -16,9 +16,25 @@ defmodule SmolqueryApi.RuntimeTest do
       assert Runtime.new(api_key: "k").name == SmolqueryApi
     end
 
+    test "refuses to resolve without an auth mode" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_AUTH_MODE/, fn ->
+        Runtime.new(name: :api_runtime_test, auth_mode: nil, api_key: "k")
+      end
+    end
+
+    test "refuses oidc and malformed auth modes without falling back" do
+      assert_raise ArgumentError, ~r/not supported/, fn ->
+        Runtime.new(name: :api_runtime_test, auth_mode: :oidc, api_key: "k")
+      end
+
+      assert_raise ArgumentError, ~r/invalid value/, fn ->
+        Runtime.new(name: :api_runtime_test, auth_mode: :invalid, api_key: "k")
+      end
+    end
+
     test "refuses to resolve without an api_key" do
       assert_raise ArgumentError, ~r/refuses to boot without an API key/, fn ->
-        Runtime.new(name: :api_runtime_test)
+        Runtime.new(name: :api_runtime_test, api_key: nil)
       end
     end
 
