@@ -54,6 +54,17 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   gone from the manifest, stay the reconciliation cases they always were —
   the guard skips them.
 
+  A stale refusal also compensates: any of the claim's keys already
+  registered are dropped from the catalog before the error returns. An
+  attempt refused after its register — or one finding a predecessor's
+  registration — would otherwise strand a segment whose rows the re-derived
+  claims commit again under their own keys, and nothing else would ever
+  remove it: GC deliberately spares committed segments, and no later attempt
+  for the released claim runs past the first gate. Between that registration
+  and the drop the rows count twice at the current snapshot — the same
+  transient window a crash between commit and retire always had, closed the
+  same way by the next actor to look.
+
   ## Retirement goes through the buffer's client, not its HTTP API
 
   The manifest and the segment bytes come over HTTP because `httpfs` needs them
@@ -84,6 +95,8 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   @behaviour Smolquery.StorageService.Handoff
 
+  require Logger
+
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Catalog
@@ -96,10 +109,56 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   @impl Handoff
   def seal(_config, %Runtime{} = runtime, table_ref, claim) do
-    with :ok <- claim_live(runtime, table_ref, claim),
-         {:ok, snapshot} <- commit(runtime, table_ref, claim) do
-      retire(runtime, table_ref, claim, snapshot)
+    result =
+      with :ok <- claim_live(runtime, table_ref, claim),
+           {:ok, snapshot} <- commit(runtime, table_ref, claim) do
+        retire(runtime, table_ref, claim, snapshot)
+      end
+
+    case result do
+      {:error, {:stale_claim, _diff}} = error ->
+        compensate_stale(runtime, table_ref, claim)
+
+        error
+
+      other ->
+        other
     end
+  end
+
+  defp compensate_stale(runtime, table_ref, claim) do
+    with {:ok, paths} <- sealed_paths(runtime, claim),
+         {:ok, registered} <-
+           Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
+      held = MapSet.new(registered)
+
+      paths
+      |> Enum.filter(&MapSet.member?(held, &1))
+      |> drop_orphans(runtime, table_ref)
+    end
+
+    :ok
+  end
+
+  defp drop_orphans([], _runtime, _table_ref), do: :ok
+
+  defp drop_orphans(orphans, runtime, table_ref) do
+    case Catalog.drop_segments(runtime.catalog, Partitions.parent(table_ref), orphans) do
+      {:ok, snapshot} ->
+        Logger.warning(
+          "dropped #{length(orphans)} registered segment(s) of a released claim on " <>
+            "#{inspect(table_ref)} at snapshot #{snapshot} — the re-derived claims " <>
+            "re-commit these rows under their own keys"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "failed to drop a released claim's registered segment(s) on " <>
+            "#{inspect(table_ref)}: #{inspect(reason)} — the rows double-count until dropped"
+        )
+    end
+
+    :ok
   end
 
   defp claim_live(runtime, table_ref, %{ids: ids, keys: keys} = claim)

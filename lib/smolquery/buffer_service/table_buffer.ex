@@ -114,10 +114,14 @@ defmodule Smolquery.BufferService.TableBuffer do
   `seal_max_files`, so the next maintenance tick claims it as soon as this
   claim retires — a table under sustained ingest self-corrects (T-246).
   The valves also reach *backwards*, to a live claim frozen before they
-  existed (T-294): a claim over the current valves is never re-signalled —
-  it is released whole, replicated like any mutation, and the ids return
-  to pending, where the very next claim re-freezes the oldest valve-sized
-  batch under a new key. An attempt already running for the released claim
+  existed (T-294): a claim over the current valves is released whole,
+  replicated like any mutation, and the ids return to pending, where the
+  very next claim re-freezes the oldest valve-sized batch under a new key.
+  A release that cannot replicate — a diverged follower answering
+  `:claim_mismatch` — re-signals the oversized claim and retries the
+  release next tick: signalling the doomed claim is the pre-valve behavior,
+  while signalling nothing would stall the table's sealing silently with no
+  path that ever heals it. An attempt already running for a released claim
   is refused at three gates on the storage side — see
   `Smolquery.StorageService.Handoff.Seal`.
   Within a claim, calls are bounded too: `Smolquery.StorageService.Merge`
@@ -651,15 +655,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp resignal_or_resize(state, claim, reclaim) do
-    cond do
-      not claim_oversized?(state, claim) ->
-        resignal(state, claim)
-
-      released?(state, claim) ->
-        reclaim.(state)
-
-      true ->
-        state
+    if claim_oversized?(state, claim) and released?(state, claim) do
+      reclaim.(state)
+    else
+      resignal(state, claim)
     end
   end
 
@@ -746,10 +745,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp force_signal_or_resize(state, claim) do
-    cond do
-      not claim_oversized?(state, claim) -> signal(state, claim)
-      released?(state, claim) -> force_claim(state)
-      true -> state
+    if claim_oversized?(state, claim) and released?(state, claim) do
+      force_claim(state)
+    else
+      signal(state, claim)
     end
   end
 

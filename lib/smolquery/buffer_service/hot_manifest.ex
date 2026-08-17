@@ -422,9 +422,12 @@ defmodule Smolquery.BufferService.HotManifest do
   `{:error, {:stale_claim, ...}}` — the claim was released and re-derived
   while that attempt ran, and stamping its ids sealed would let the
   re-derived claims' segments double-commit the rows. `nil` skips the fence,
-  for callers retiring outside any claim. The idempotent retry contract is
-  unchanged either way: ids already sealed, and ids the reaper has deleted,
-  stay `:ok`.
+  for callers retiring outside any claim — which includes, for exactly one
+  rolling deploy, sealers from the release that predates the fence; that
+  window keeps the pre-fence exposure and closes when the last old sealer
+  drains (`docs/deployment.md` says how to order the rollout). The
+  idempotent retry contract is unchanged either way: ids already sealed, and
+  ids the reaper has deleted, stay `:ok`.
   """
   @spec retire(
           t(),

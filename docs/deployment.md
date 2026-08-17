@@ -43,6 +43,17 @@ the sealed-store dependencies before you deploy it.
 
 ## Upgrade notes
 
+### Claim release and the retire fence (T-294)
+
+The release that ships T-294 fences retirement on the claim's keys, but a
+sealer from the previous release retires without keys, and a keyless retire
+skips the fence. During the one rollout that ships this change, an old
+storage node's in-flight seal attempt can still stamp a since-released
+claim's entries sealed — the exact pre-fix exposure, ending when the last
+old sealer drains. To close the window, roll storage nodes before buffer
+nodes; a claim released by a new buffer then never has an old sealer's
+attempt outstanding.
+
 ### Web role credentials (0.7.1)
 
 From 0.7.1, the `smolquery-env` Secret must hold `SMOLQUERY_WEB_USERNAME`,

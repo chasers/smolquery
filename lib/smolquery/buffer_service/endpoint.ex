@@ -191,8 +191,13 @@ defmodule Smolquery.BufferService.Endpoint do
   (a restarting node's entries live there until recovery replays them, and
   fast-pathing a gating claim in that window would falsely ack it).
   """
-  @spec apply_replica_mutation(atom(), Store.table_ref(), :claim | :retire | :drop, map(), term()) ::
-          :ok | {:error, term()}
+  @spec apply_replica_mutation(
+          atom(),
+          Store.table_ref(),
+          :claim | :retire | :drop | :release,
+          map(),
+          term()
+        ) :: :ok | {:error, term()}
   def apply_replica_mutation(name, table_ref, op, args, epoch)
       when op in [:claim, :retire, :drop, :release] do
     with {:ok, runtime} <- runtime(name),

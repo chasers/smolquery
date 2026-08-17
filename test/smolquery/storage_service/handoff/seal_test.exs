@@ -328,6 +328,24 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       assert {:ok, entries} = Client.hot_manifest(context.buffer, @table)
       assert Enum.all?(entries, &(&1.sealed_at == nil))
     end
+
+    test "a stale refusal drops the orphan a raced attempt registered", context do
+      ids = [write(context.buffer, 1..2)]
+      claim = freeze_claim(context, ids)
+
+      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
+
+      next = release_and_reclaim(context, claim, ids)
+
+      assert {:error, {:stale_claim, _stale}} = seal(context, claim)
+      assert sealed_count(context) == 0
+      assert visible_ids(context) == [1, 2]
+
+      assert seal(context, next) == :ok
+      assert sealed_count(context) == 1
+      assert visible_ids(context) == [1, 2]
+    end
   end
 
   describe "the orphan a crash leaves" do
