@@ -31,10 +31,9 @@ error.
 ### OIDC foundation (T-231)
 
 OIDC mode is explicit and fail-closed. The API and web roles validate their
-own required settings before their listeners start. T-232 verifies API bearer
-access tokens against the supervised discovery/JWKS cache. Browser login and
-per-route capability authorization are added by later stack layers. Provider
-outage or malformed discovery/JWKS never opens either listener.
+own required settings before their listeners start. API bearer access tokens and
+browser authorization-code sessions use the supervised discovery/JWKS cache.
+Provider outage or malformed discovery/JWKS never opens either listener.
 
 | variable | effect |
 |---|---|
@@ -59,7 +58,26 @@ outage or malformed discovery/JWKS never opens either listener.
 | `SMOLQUERY_OIDC_FORCED_REFRESH_COOLDOWN_MS` | positive minimum interval between unknown-`kid` forced JWKS fetches (default `1000`); concurrent/repeated attempts reuse the current cache and fail closed if the key remains unknown |
 | `SMOLQUERY_OIDC_REFRESH_FAILURE_BACKOFF_MS` | positive interval suppressing repeated discovery/JWKS network attempts after a failed refresh (default `1000`) |
 | `SMOLQUERY_OIDC_CONNECT_TIMEOUT_MS` / `SMOLQUERY_OIDC_RECEIVE_TIMEOUT_MS` / `SMOLQUERY_OIDC_REQUEST_TIMEOUT_MS` | bounded Req connection, per-chunk receive, and complete-response timeouts (defaults `2000` / `5000` / `10000`) |
-| `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS response size (default `1048576`) |
+| `SMOLQUERY_OIDC_MAX_BODY_BYTES` | bounded discovery/JWKS/token response size (default `1048576`) |
+
+The browser flow generates fresh URL-safe state, nonce, and S256 PKCE verifier
+values for every login. Each transaction lives in its own five-minute encrypted,
+HTTP-only callback cookie, so concurrent login and callback responses update
+different cookie slots and may land on different web nodes. A callback expires
+only its matching cookie before token exchange; unrelated transactions remain
+available. Sequential logins prune stale cookies and retain at most four active
+transactions. Missing, mismatched, future-dated, and expired values are rejected,
+and the provider's authorization code is single-use. Token exchange uses the validated HTTPS
+endpoint with redirects disabled and the configured client authentication
+method. Returned ID tokens
+are strictly verified for issuer, browser audience, subject, timestamps, nonce,
+and applicable hash claims. Browser sessions contain only normalized identity,
+capabilities, and expiry; they never contain raw tokens or claims. Every web
+OIDC session currently requires `web_access`, `query`, `ingest`,
+`catalog_manage`, and `platform_operate` until the web capability layer lands.
+A CSRF-protected `POST /auth/logout` always drops the local session without
+depending on the provider. Production builds mark the encrypted cookie Secure;
+development and test builds retain explicit HTTP compatibility.
 
 The API verifier requires a non-empty `kid`, a locally allowlisted asymmetric
 algorithm, a compatible public signing key, exact issuer and audience, and

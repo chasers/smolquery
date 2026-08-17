@@ -34,6 +34,8 @@ defmodule SmolqueryWeb.Layouts do
   slot :inner_block, required: true
 
   def app(assigns) do
+    assigns = assign(assigns, :show_logout, oidc_mode?())
+
     ~H"""
     <header class="navbar px-4 sm:px-6 lg:px-8 border-b border-base-300 bg-base-100">
       <div class="flex-1">
@@ -53,6 +55,12 @@ defmodule SmolqueryWeb.Layouts do
           <li>
             <a href={~p"/cluster"} class="btn btn-ghost">Cluster</a>
           </li>
+          <li :if={@show_logout}>
+            <form action={~p"/auth/logout"} method="post">
+              <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+              <button type="submit" class="btn btn-ghost">Log out</button>
+            </form>
+          </li>
           <li>
             <.theme_toggle />
           </li>
@@ -68,6 +76,10 @@ defmodule SmolqueryWeb.Layouts do
 
     <.flash_group flash={@flash} />
     """
+  end
+
+  defp oidc_mode? do
+    match?({:ok, %{auth_mode: :oidc}}, SmolqueryWeb.Runtime.fetch(SmolqueryWeb))
   end
 
   @doc """

@@ -1,6 +1,7 @@
 defmodule Smolquery.Auth.OIDC.TokenTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Auth.Context
   alias Smolquery.Auth.OIDC.{Config, Provider, Token}
 
   @now 1_700_000_000
@@ -368,6 +369,185 @@ defmodule Smolquery.Auth.OIDC.TokenTest do
                now: @now
              )
   end
+
+  test "strictly verifies browser ID token claims and maps capabilities" do
+    config =
+      Config.new(
+        [
+          oidc: [
+            issuer: "https://issuer.example",
+            web_client_id: "web-client",
+            web_client_auth_method: :none,
+            web_host: "ui.example",
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback",
+            claim_capabilities: %{
+              "roles" => %{
+                "operator" => [:web_access, :query, :ingest, :catalog_manage, :platform_operate]
+              }
+            }
+          ]
+        ],
+        :web
+      )
+
+    {:ok, provider} = start_provider()
+
+    assert {:ok, context} =
+             Token.authenticate_web(token(browser_claims()), config, provider, "nonce",
+               access_token: "access-token",
+               code: "authorization-code",
+               now: @now
+             )
+
+    assert MapSet.equal?(context.capabilities, MapSet.new(Context.capabilities()))
+    Process.exit(provider, :normal)
+  end
+
+  test "rejects browser tokens with a missing iat, wrong nonce, or wrong audience" do
+    config =
+      Config.new(
+        [
+          oidc: [
+            issuer: "https://issuer.example",
+            web_client_id: "web-client",
+            web_client_auth_method: :none,
+            web_host: "ui.example",
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        ],
+        :web
+      )
+
+    {:ok, provider} = start_provider()
+
+    for claims <- [
+          Map.delete(browser_claims(), "iat"),
+          Map.put(browser_claims(), "nonce", "other"),
+          Map.put(browser_claims(), "aud", "other")
+        ] do
+      assert :error =
+               Token.authenticate_web(
+                 token(claims, %{"alg" => "RS256", "kid" => "one"}),
+                 config,
+                 provider,
+                 "nonce",
+                 now: @now
+               )
+    end
+
+    Process.exit(provider, :normal)
+  end
+
+  test "enforces browser issuer, expiry, nbf, iat, audience, and azp boundaries" do
+    config = web_provider_config()
+    {:ok, provider} = start_provider()
+
+    invalid_claims = [
+      Map.put(browser_claims(), "iss", "https://other.example"),
+      Map.put(browser_claims(), "exp", @now - config.clock_skew),
+      Map.put(browser_claims(), "nbf", @now + config.clock_skew + 1),
+      Map.put(browser_claims(), "iat", @now + config.iat_future_seconds + 1),
+      Map.merge(browser_claims(), %{"aud" => ["web-client"], "azp" => "other-client"}),
+      Map.put(browser_claims(), "aud", ["web-client", "other-client"])
+    ]
+
+    for claims <- invalid_claims do
+      assert :error =
+               Token.authenticate_web(token(claims), config, provider, "nonce", now: @now)
+    end
+
+    claims =
+      Map.merge(browser_claims(), %{"aud" => ["web-client", "other"], "azp" => "web-client"})
+
+    assert {:ok, _context} =
+             Token.authenticate_web(token(claims), config, provider, "nonce", now: @now)
+
+    skewed_claims = Map.put(browser_claims(), "exp", @now - 1)
+
+    assert {:ok, skewed_context} =
+             Token.authenticate_web(token(skewed_claims), config, provider, "nonce", now: @now)
+
+    assert skewed_context.expires_at == skewed_claims["exp"] + config.clock_skew
+
+    Process.exit(provider, :normal)
+  end
+
+  test "enforces configured browser required claims and optional token hash claims" do
+    config = %{web_provider_config() | required_claims: %{"token_use" => ["id"]}}
+    {:ok, provider} = start_provider()
+
+    assert :error =
+             Token.authenticate_web(token(browser_claims()), config, provider, "nonce", now: @now)
+
+    claims =
+      browser_claims()
+      |> Map.put("token_use", "id")
+      |> Map.put("at_hash", oidc_hash("access-token"))
+      |> Map.put("c_hash", oidc_hash("authorization-code"))
+
+    assert {:ok, _context} =
+             Token.authenticate_web(token(claims), config, provider, "nonce",
+               access_token: "access-token",
+               code: "authorization-code",
+               now: @now
+             )
+
+    assert :error =
+             Token.authenticate_web(token(claims), config, provider, "nonce",
+               access_token: "wrong-access-token",
+               code: "authorization-code",
+               now: @now
+             )
+
+    Process.exit(provider, :normal)
+  end
+
+  defp oidc_hash(value) do
+    digest = :crypto.hash(:sha256, value)
+    digest |> binary_part(0, div(byte_size(digest), 2)) |> Base.url_encode64(padding: false)
+  end
+
+  defp start_provider do
+    Provider.start_link(
+      name: unique_name(),
+      config: web_provider_config(),
+      http_client: fn url, _ ->
+        case url do
+          "https://issuer.example/.well-known/openid-configuration" -> {:ok, response(@metadata)}
+          "https://issuer.example/keys" -> {:ok, response(@jwks)}
+        end
+      end
+    )
+  end
+
+  defp web_provider_config,
+    do:
+      Config.new(
+        [
+          oidc: [
+            issuer: "https://issuer.example",
+            web_client_id: "web-client",
+            web_client_auth_method: :none,
+            web_host: "ui.example",
+            web_origin: "https://ui.example",
+            web_redirect_uri: "https://ui.example/auth/callback"
+          ]
+        ],
+        :web
+      )
+
+  defp browser_claims,
+    do: %{
+      "iss" => "https://issuer.example",
+      "aud" => "web-client",
+      "sub" => "subject-1",
+      "exp" => @now + 100,
+      "iat" => @now,
+      "nonce" => "nonce",
+      "roles" => ["operator"]
+    }
 
   defp unique_name, do: {:global, {__MODULE__, System.unique_integer([:positive])}}
 
