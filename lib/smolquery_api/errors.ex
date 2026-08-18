@@ -121,7 +121,12 @@ defmodule SmolqueryApi.Errors do
   end
 
   def from_reason(conn, {:invalid_partitions, _partitions}) do
-    send_error(conn, 400, "INVALID_ARGUMENT", "partitions must be a positive integer")
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      "partitions must be an integer between 1 and #{Smolquery.Partitions.max_count()}"
+    )
   end
 
   def from_reason(conn, {:partitions_not_raisable, current, requested}) do

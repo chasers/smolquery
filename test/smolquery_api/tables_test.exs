@@ -436,7 +436,7 @@ defmodule SmolqueryApi.TableControllerTest do
     test "refuses a malformed count", %{name: name} do
       create_events(name)
 
-      for bad <- [0, -1, "3", nil, 1.5] do
+      for bad <- [0, -1, "3", nil, 1.5, Smolquery.Partitions.max_count() + 1] do
         response =
           patch_json(name, "/v1/datasets/analytics/tables/events", %{"partitions" => bad})
 

@@ -110,8 +110,7 @@ defmodule Smolquery.IngestService.Client do
     }
 
     batch_id = Keyword.get(opts, :batch_id)
-    partitions = Partitions.count(schema.partitions, runtime.write_partitions)
-    target = Partitions.write_ref(table_ref, partitions, batch_id)
+    target = write_target(table_ref, schema, runtime, batch_id)
 
     batch =
       case batch_id do
@@ -198,6 +197,12 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
+  defp write_target(table_ref, schema, runtime, batch_id) do
+    partitions = Partitions.count(schema.partitions, runtime.write_partitions)
+
+    Partitions.write_ref(table_ref, partitions, batch_id)
+  end
+
   defp decode_lines(body) do
     body
     |> String.split("\n", trim: true)
@@ -212,8 +217,7 @@ defmodule Smolquery.IngestService.Client do
   defp write_frame(runtime, table_ref, schema, frame, byte_size, opts, parse_us) do
     batch = %{schema: schema, frame: frame, byte_size: byte_size}
     batch_id = Keyword.get(opts, :batch_id)
-    partitions = Partitions.count(schema.partitions, runtime.write_partitions)
-    target = Partitions.write_ref(table_ref, partitions, batch_id)
+    target = write_target(table_ref, schema, runtime, batch_id)
 
     batch =
       case batch_id do
@@ -250,8 +254,7 @@ defmodule Smolquery.IngestService.Client do
 
   defp write(runtime, table_ref, schema, valid, errors, batch_id) do
     batch = batch(schema, valid, batch_id)
-    partitions = Partitions.count(schema.partitions, runtime.write_partitions)
-    target = Partitions.write_ref(table_ref, partitions, batch_id)
+    target = write_target(table_ref, schema, runtime, batch_id)
 
     with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
       measure(length(valid), errors)

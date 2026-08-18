@@ -53,9 +53,16 @@ defmodule Smolquery.Partitions do
   schema may trail by one `schema_cache_ttl_ms` — a reader expanding more
   partitions than a writer fills answers long, never short, and an unfilled
   partition's manifest is empty. Lowering is not supported: partitions past
-  the count still hold hot rows a reader would no longer expand. Expect
-  `insertId` retries that straddle a count change to be at-least-once,
-  exactly like a retry that straddles a ring join.
+  the count still hold hot rows a reader would no longer expand. The catalog
+  write itself is monotonic (a lower count is a no-op), so concurrent raises
+  converge on the maximum and no caller can lower a stored count.
+
+  Two caveats survive from the deployment-wide days. Lowering the
+  *default* still needs the fleet at rest for every table without its own
+  catalog count — those tables have no floor but the default. And during the
+  raise's cache window, two ingest nodes can hash one `insertId` with
+  different counts, so a retry that straddles a count change is
+  at-least-once, exactly like a retry that straddles a ring join.
   """
 
   alias Smolquery.Segments.Store
@@ -98,14 +105,25 @@ defmodule Smolquery.Partitions do
   The partition count in effect for a table: its own catalog count when one
   is set, never below the deployment's `write_partitions`.
 
-  The maximum keeps the count raise-only from every direction — a table with
-  no catalog count follows the deployment default, and neither a low catalog
-  count nor a lowered default can shrink a table below what writers may
-  already have filled.
+  The maximum keeps a catalog count raise-only against the default. A table
+  with no catalog count follows the deployment default alone — lowering that
+  default is still a fleet-at-rest operation for such tables, exactly as the
+  moduledoc describes.
   """
   @spec count(pos_integer() | nil, pos_integer()) :: pos_integer()
   def count(nil, configured), do: configured
   def count(table_count, configured), do: max(table_count, configured)
+
+  @doc """
+  The most partitions any table may declare.
+
+  Each partition costs a `TableBuffer`, a manifest, a claim, and a
+  hot-manifest fetch per query plan per manifest URL, so the count is capped
+  well past any useful `min(P, N)` and well inside the catalog column's
+  INTEGER range. Both the API and the catalog refuse a larger value.
+  """
+  @spec max_count() :: pos_integer()
+  def max_count, do: 64
 
   @doc """
   The table `ref` carries rows for: itself, unless it names a partition.

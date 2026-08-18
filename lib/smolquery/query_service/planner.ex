@@ -288,8 +288,7 @@ defmodule Smolquery.QueryService.Planner do
   # A partitioned table's hot tier lives under several buffer refs
   # (Smolquery.Partitions), so each table expands into its partition refs for
   # the fetch and every page gathers under the parent — the rest of the plan
-  # keeps seeing one hot tier per table. The count is the table's own where
-  # the catalog holds one (T-304), already read by resolve/3.
+  # keeps seeing one hot tier per table.
   defp manifests(runtime, refs, tables) do
     urls = manifest_urls(runtime)
 

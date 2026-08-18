@@ -70,8 +70,12 @@ defmodule Smolquery.Catalog do
   Like retention and clustering, this is table metadata: it lives here so
   every node reads one answer instead of each trusting its own configuration.
   A table without a count uses the deployment's `write_partitions`. Lowering
-  a count strands rows in partitions readers no longer expand, so callers
-  treat the count as raise-only; the catalog stores what it is given.
+  a count strands rows in partitions readers no longer expand, so the count
+  is raise-only and the write itself is monotonic: a value at or below the
+  stored count is a no-op, and concurrent raises converge on the maximum.
+  The API refuses a lower value with an error so the caller learns why; the
+  monotonic write is the backstop that holds without the API in the path.
+  At most `Smolquery.Partitions.max_count/0`.
   """
   @type partitions :: pos_integer()
 
@@ -360,11 +364,12 @@ defmodule Smolquery.Catalog do
     do: catalog.impl.clustering(catalog.config, table)
 
   @doc """
-  Sets a table's write-partition count.
+  Raises a table's write-partition count.
 
-  See the `t:partitions/0` typedoc for the raise-only contract: enforcing it
-  is the caller's check, made where a validation error can still reach the
-  user who typed it (the same split retention and clustering use).
+  See the `t:partitions/0` typedoc for the raise-only contract: the write is
+  monotonic, so a value at or below the stored count is a no-op rather than
+  an error. Refusing a lower value with an error the user can read is the
+  API layer's job (the same split retention and clustering use).
   """
   @spec put_partitions(t(), table_ref(), partitions()) :: :ok | {:error, term()}
   def put_partitions(%__MODULE__{} = catalog, table, count)
