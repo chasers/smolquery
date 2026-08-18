@@ -37,6 +37,8 @@ spec:
         - name: smolquery
           image: smolquery:latest
           ports:
+            - name: metrics
+              containerPort: 4003
             - name: epmd
               containerPort: 4369
             - name: gen-rpc

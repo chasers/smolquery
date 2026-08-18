@@ -31,7 +31,7 @@ defmodule SmolqueryApi.Auth do
   def call(%Plug.Conn{path_info: ["healthz"]} = conn, _opts), do: conn
 
   def call(%Plug.Conn{path_info: ["metrics"]} = conn, _opts) do
-    if internal?(conn) do
+    if InternalSecret.proven?(conn) do
       conn
     else
       conn
@@ -47,13 +47,6 @@ defmodule SmolqueryApi.Auth do
       conn
       |> Errors.send_error(401, "UNAUTHENTICATED", "missing or invalid API key")
       |> halt()
-    end
-  end
-
-  defp internal?(conn) do
-    case get_req_header(conn, InternalSecret.header()) do
-      [secret] -> Plug.Crypto.secure_compare(secret, InternalSecret.value())
-      _missing -> false
     end
   end
 

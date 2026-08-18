@@ -34,7 +34,7 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 | route | |
 |---|---|
 | `GET /healthz` | liveness; the one unauthenticated route |
-| `GET /metrics` | Prometheus text, gated by the *internal* secret (`x-smolquery-internal`), not the API key — metrics are for operators, not tenants |
+| `GET /metrics` | Prometheus text, gated by the *internal* secret (`x-smolquery-internal`), not the API key — metrics are for operators, not tenants. Every node also serves this route on its own metrics listener (`SMOLQUERY_METRICS_PORT`, default 4003), so nodes without the `:api` role are scrapable too |
 | `GET /v1/datasets` | list datasets |
 | `POST /v1/datasets` | create a dataset (idempotent) |
 | `GET /v1/datasets/:ds/tables` | list a dataset's tables |

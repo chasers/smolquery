@@ -38,6 +38,8 @@ spec:
           ports:
             - name: hot-server
               containerPort: 4001
+            - name: metrics
+              containerPort: 4003
             - name: epmd
               containerPort: 4369
             - name: gen-rpc
