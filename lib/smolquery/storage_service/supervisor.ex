@@ -21,6 +21,15 @@ defmodule Smolquery.StorageService.Supervisor do
   each just-uploaded segment back when a commit registers it (DuckLake's
   add-data-files collects the file's footer stats).
 
+  The merge engine carries one connection per seal slot
+  (`max_concurrent_seals`, T-299). An `Adbc.Connection` serializes its
+  callers, so on a single connection two "concurrent" seals only
+  interleaved — one table's slow or doomed merge was every other table's
+  wait, and one stuck claim stalled sealing cluster-wide. Per-slot
+  connections share the one DuckDB instance and its memory limit, so the
+  concurrency is real without splitting the memory budget.
+  `Smolquery.StorageService.Sealer` pins each attempt to a free slot.
+
   The merge engine is sized to the pod it runs in: its memory limit resolves
   per `Smolquery.StorageService.Runtime.engine_memory_limit/2` — an explicit
   knob, else half the cgroup memory limit, else `Smolquery.Engine`'s
@@ -119,7 +128,10 @@ defmodule Smolquery.StorageService.Supervisor do
         "half the cgroup memory limit"
       )
 
-    [{:name, Runtime.engine(runtime.name)} | shared_engine_opts(runtime)] ++ merge_limit
+    [
+      {:name, Runtime.engine(runtime.name)},
+      {:connections, runtime.max_concurrent_seals} | shared_engine_opts(runtime)
+    ] ++ merge_limit
   end
 
   defp compact_engine_opts(%Runtime{} = runtime) do

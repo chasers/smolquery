@@ -38,6 +38,8 @@ defmodule Smolquery.StorageService.SealerTest do
         name: name,
         dir: Path.join(context.tmp_dir, "sealed"),
         max_concurrent_seals: Map.get(context, :max_concurrent_seals, 2),
+        seal_backoff_base_ms: Map.get(context, :seal_backoff_base_ms, 0),
+        seal_backoff_max_ms: Map.get(context, :seal_backoff_max_ms, 600_000),
         handoff: {HandoffProbe, {self(), Map.get(context, :result, :ok)}}
       )
 
@@ -201,6 +203,100 @@ defmodule Smolquery.StorageService.SealerTest do
     assert log =~ "[error]"
     assert log =~ "5 consecutive failures"
     assert log =~ "may never seal"
+  end
+
+  @tag :tmp_dir
+  @tag max_concurrent_seals: 1
+  @tag seal_backoff_base_ms: 30_000
+  @tag result: {:error, :handoff_refused}
+  test "a failing table cools down, so a healthy one takes the only slot (T-299)",
+       %{name: name} do
+    capture_log(fn -> run_attempt(name, @events) end)
+
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    refute_receive {:sealing, @events, _claim, _cooling}, 50
+
+    Sealer.seal_ready(name, @clicks, claim(["b"]))
+    assert_receive {:sealing, @clicks, _claim, attempt}
+
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
+  @tag seal_backoff_base_ms: 50
+  @tag result: {:error, :handoff_refused}
+  test "an expired cooldown admits the table again", %{name: name} do
+    capture_log(fn -> run_attempt(name, @events) end)
+
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    refute_receive {:sealing, @events, _claim, _cooling}, 20
+
+    Process.sleep(100)
+
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, _claim, attempt}
+
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
+  @tag seal_backoff_base_ms: 50
+  test "a success clears the cooldown with the failure count", %{name: name} do
+    capture_log(fn -> run_attempt(name, @events, {:error, :handoff_refused}) end)
+
+    Process.sleep(100)
+    run_attempt(name, @events, :ok)
+    assert Sealer.failures(name) == %{}
+
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    assert_receive {:sealing, @events, _claim, attempt}
+
+    HandoffProbe.release(attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
+  test "concurrent attempts run on distinct merge-engine connections (T-299)", %{name: name} do
+    Sealer.seal_ready(name, @events, claim(["a"]))
+    Sealer.seal_ready(name, @clicks, claim(["b"]))
+
+    assert_receive {:sealing, @events, _events_claim, events_attempt}
+    assert_receive {:sealing, @clicks, _clicks_claim, clicks_attempt}
+
+    assert_receive {:sealing_engine, @events, {engine, 1}}
+    assert_receive {:sealing_engine, @clicks, {^engine, 2}}
+    assert engine == Runtime.engine(name)
+
+    HandoffProbe.release(events_attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [@clicks] end)
+
+    Sealer.seal_ready(name, @events, claim(["c"]))
+    assert_receive {:sealing, @events, _next_claim, next_attempt}
+    assert_receive {:sealing_engine, @events, {^engine, 1}}
+
+    HandoffProbe.release(clicks_attempt)
+    HandoffProbe.release(next_attempt)
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
+  test "the cooldown doubles per consecutive failure and caps" do
+    runtime = %Runtime{
+      name: :backoff,
+      store: nil,
+      catalog: nil,
+      ring: nil,
+      seal_backoff_base_ms: 100,
+      seal_backoff_max_ms: 1_000
+    }
+
+    assert Sealer.backoff_ms(1, runtime) == 100
+    assert Sealer.backoff_ms(2, runtime) == 200
+    assert Sealer.backoff_ms(4, runtime) == 800
+    assert Sealer.backoff_ms(5, runtime) == 1_000
+    assert Sealer.backoff_ms(500, runtime) == 1_000
   end
 
   @tag :tmp_dir

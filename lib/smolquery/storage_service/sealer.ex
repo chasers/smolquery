@@ -47,6 +47,19 @@ defmodule Smolquery.StorageService.Sealer do
   `[:smolquery, :seal, :stuck]`, which `Smolquery.Telemetry` counts as
   `smolquery_seal_stuck_attempts_total` — a stuck claim should page on a
   nonzero rate, not wait to be found in the logs (T-293).
+
+  The count also paces the retries (T-299). Attempts run one merge-engine
+  connection per slot — `start_attempt` pins each to a free slot, so a slow
+  table's statements never serialize another table's (see
+  `Smolquery.StorageService.Supervisor`). What a doomed claim still burns
+  every re-signal is an attempt slot and the engine's shared memory — on
+  the eu-central-1 sandbox that stalled sealing cluster-wide. After a
+  failure the table cools down for `backoff_ms/2` — `seal_backoff_base_ms`
+  doubling per consecutive failure up to `seal_backoff_max_ms` — and
+  signals inside the cooldown are shed the same way signals at the
+  concurrency bound are: level-triggered re-signalling makes the shed a
+  delay, never a lost seal. A success clears the cooldown with the count.
+  A cooling table holds no slot, so a table that can seal takes it instead.
   """
 
   use GenServer
@@ -60,9 +73,10 @@ defmodule Smolquery.StorageService.Sealer do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, attempts: %{}, failures: %{}]
+  defstruct [:runtime, attempts: %{}, failures: %{}, retry_at: %{}]
 
   @stuck_after 5
+  @backoff_doubling_cap 30
 
   @doc """
   Starts the sealer for a runtime.
@@ -138,6 +152,7 @@ defmodule Smolquery.StorageService.Sealer do
     cond do
       not owner?(state, table_ref) -> {:noreply, ignore_foreign(state, table_ref)}
       sealing?(state, table_ref) -> {:noreply, state}
+      cooling_down?(state, table_ref) -> {:noreply, shed_cooling(state, table_ref)}
       at_capacity?(state) -> {:noreply, shed(state, table_ref)}
       true -> {:noreply, start_attempt(state, table_ref, claim)}
     end
@@ -189,7 +204,11 @@ defmodule Smolquery.StorageService.Sealer do
   defp record(state, attempt, _result) do
     record_attempt(:ok, attempt)
 
-    %{state | failures: Map.delete(state.failures, attempt.table_ref)}
+    %{
+      state
+      | failures: Map.delete(state.failures, attempt.table_ref),
+        retry_at: Map.delete(state.retry_at, attempt.table_ref)
+    }
   end
 
   defp record_attempt(result, attempt) do
@@ -216,8 +235,42 @@ defmodule Smolquery.StorageService.Sealer do
 
     log_failure(table_ref, description, consecutive)
 
-    %{state | failures: Map.put(state.failures, table_ref, consecutive)}
+    retry_at = now_ms() + backoff_ms(consecutive, state.runtime)
+
+    %{
+      state
+      | failures: Map.put(state.failures, table_ref, consecutive),
+        retry_at: Map.put(state.retry_at, table_ref, retry_at)
+    }
   end
+
+  @doc false
+  @spec backoff_ms(pos_integer(), Runtime.t()) :: non_neg_integer()
+  def backoff_ms(consecutive, runtime) do
+    doublings = min(consecutive - 1, @backoff_doubling_cap)
+
+    min(runtime.seal_backoff_base_ms * Integer.pow(2, doublings), runtime.seal_backoff_max_ms)
+  end
+
+  defp cooling_down?(state, table_ref) do
+    case Map.fetch(state.retry_at, table_ref) do
+      {:ok, retry_at} -> now_ms() < retry_at
+      :error -> false
+    end
+  end
+
+  defp shed_cooling(state, table_ref) do
+    Logger.debug(fn ->
+      consecutive = Map.get(state.failures, table_ref, 0)
+
+      "seal of #{inspect(table_ref)} shed: cooling down after " <>
+        "#{consecutive} consecutive failures (T-299)"
+    end)
+
+    state
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   defp log_failure(table_ref, description, consecutive) when consecutive >= @stuck_after do
     Logger.error(
@@ -257,19 +310,28 @@ defmodule Smolquery.StorageService.Sealer do
 
   defp start_attempt(state, table_ref, claim) do
     runtime = state.runtime
+    slot = free_slot(state)
+    attempt_runtime = %{runtime | merge_engine: {Runtime.engine(runtime.name), slot}}
 
     task =
       Task.Supervisor.async_nolink(Runtime.seals(runtime.name), fn ->
-        Handoff.seal(runtime.handoff, runtime, table_ref, claim)
+        Handoff.seal(runtime.handoff, attempt_runtime, table_ref, claim)
       end)
 
     attempt = %{
       table_ref: table_ref,
       segments: claim_segments(claim),
-      started_at: System.monotonic_time(:microsecond)
+      started_at: System.monotonic_time(:microsecond),
+      slot: slot
     }
 
     %{state | attempts: Map.put(state.attempts, task.ref, attempt)}
+  end
+
+  defp free_slot(state) do
+    used = state.attempts |> Map.values() |> MapSet.new(& &1.slot)
+
+    Enum.find(1..state.runtime.max_concurrent_seals, &(not MapSet.member?(used, &1)))
   end
 
   defp claim_segments(%{ids: ids}) when is_list(ids), do: length(ids)
