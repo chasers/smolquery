@@ -120,6 +120,19 @@ defmodule SmolqueryApi.Errors do
     send_error(conn, 422, "INVALID_ARGUMENT", "clustering column does not exist: #{column}")
   end
 
+  def from_reason(conn, {:invalid_partitions, _partitions}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "partitions must be a positive integer")
+  end
+
+  def from_reason(conn, {:partitions_not_raisable, current, requested}) do
+    send_error(
+      conn,
+      422,
+      "FAILED_PRECONDITION",
+      "partitions is raise-only: the table holds #{current}, #{requested} would strand rows"
+    )
+  end
+
   def from_reason(conn, _reason) do
     send_error(conn, 500, "INTERNAL", "internal error")
   end

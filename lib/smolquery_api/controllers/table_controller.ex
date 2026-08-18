@@ -61,7 +61,7 @@ defmodule SmolqueryApi.TableController do
   end
 
   @doc """
-  A table's schema, retention policy, and clustering key.
+  A table's schema, retention policy, clustering key, and partition count.
   """
   @spec show(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def show(conn, %{"dataset" => dataset, "table" => table}) do
@@ -88,8 +88,14 @@ defmodule SmolqueryApi.TableController do
   future writes; `{"clustering": []}` clears it. Columns must exist on the
   schema. Existing segments are not rewritten.
 
-  A body carrying both applies them as one change
-  (`Smolquery.Catalog.put_table_options/3`): an error response means neither
+  Partitions: `{"partitions": 3}` sets the table's own write-partition count
+  (T-304) — the effective count is never below the deployment's
+  `write_partitions` (`Smolquery.Partitions.count/2`). Raise-only: a value
+  below the stored count is refused, because partitions past it still hold
+  hot rows a reader would no longer expand. There is no clear.
+
+  A body carrying several applies them as one change
+  (`Smolquery.Catalog.put_table_options/3`): an error response means none
   stuck.
   """
   @spec update(Plug.Conn.t(), map()) :: Plug.Conn.t()
@@ -114,17 +120,20 @@ defmodule SmolqueryApi.TableController do
       "id" => table,
       "schema" => TableSchema.to_json(schema),
       "retention" => retention_to_json(policy),
-      "clustering" => schema.clustering
+      "clustering" => schema.clustering,
+      "partitions" => schema.partitions
     }
   end
 
   defp patch_from_json(body, schema) do
     has_retention = Map.has_key?(body, "retention")
     has_clustering = Map.has_key?(body, "clustering")
+    has_partitions = Map.has_key?(body, "partitions")
 
-    if has_retention or has_clustering do
-      with {:ok, updates} <- maybe_retention(body, schema, has_retention, %{}) do
-        maybe_clustering(body, schema, has_clustering, updates)
+    if has_retention or has_clustering or has_partitions do
+      with {:ok, updates} <- maybe_retention(body, schema, has_retention, %{}),
+           {:ok, updates} <- maybe_clustering(body, schema, has_clustering, updates) do
+        maybe_partitions(body, schema, has_partitions, updates)
       end
     else
       {:error, {:missing_field, "retention"}}
@@ -146,6 +155,28 @@ defmodule SmolqueryApi.TableController do
       {:ok, Map.put(updates, :clustering, clustering)}
     end
   end
+
+  defp maybe_partitions(_body, _schema, false, updates), do: {:ok, updates}
+
+  defp maybe_partitions(body, schema, true, updates) do
+    with {:ok, count} <- partitions_from_json(body, schema) do
+      {:ok, Map.put(updates, :partitions, count)}
+    end
+  end
+
+  defp partitions_from_json(%{"partitions" => count}, schema)
+       when is_integer(count) and count > 0 do
+    case schema.partitions do
+      current when is_integer(current) and count < current ->
+        {:error, {:partitions_not_raisable, current, count}}
+
+      _current ->
+        {:ok, count}
+    end
+  end
+
+  defp partitions_from_json(%{"partitions" => count}, _schema),
+    do: {:error, {:invalid_partitions, count}}
 
   defp retention_to_json(nil), do: nil
 
