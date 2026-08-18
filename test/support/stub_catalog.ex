@@ -98,6 +98,13 @@ defmodule Smolquery.Test.StubCatalog do
   def clustering(owner, table), do: record(owner, :clustering, [table], {:ok, []})
 
   @impl Catalog
+  def put_partitions(owner, table, count),
+    do: record(owner, :put_partitions, [table, count], :ok)
+
+  @impl Catalog
+  def partitions(owner, table), do: record(owner, :partitions, [table], {:ok, nil})
+
+  @impl Catalog
   def expire_snapshots(owner, older_than_ms),
     do: record(owner, :expire_snapshots, [older_than_ms], {:ok, 0})
 

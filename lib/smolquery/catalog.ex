@@ -65,6 +65,17 @@ defmodule Smolquery.Catalog do
   @type clustering :: [String.t()]
 
   @typedoc """
+  A table's own write-partition count (`Smolquery.Partitions`, T-304).
+
+  Like retention and clustering, this is table metadata: it lives here so
+  every node reads one answer instead of each trusting its own configuration.
+  A table without a count uses the deployment's `write_partitions`. Lowering
+  a count strands rows in partitions readers no longer expand, so callers
+  treat the count as raise-only; the catalog stores what it is given.
+  """
+  @type partitions :: pos_integer()
+
+  @typedoc """
   Aggregate size of a table's sealed tier at a snapshot: how many segment
   files a read at that snapshot lists, and their total rows and bytes.
   """
@@ -91,7 +102,8 @@ defmodule Smolquery.Catalog do
   """
   @type table_options :: %{
           optional(:retention) => retention() | nil,
-          optional(:clustering) => clustering()
+          optional(:clustering) => clustering(),
+          optional(:partitions) => partitions()
         }
 
   @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
@@ -124,6 +136,10 @@ defmodule Smolquery.Catalog do
               :ok | {:error, term()}
   @callback clustering(config :: term(), table_ref()) ::
               {:ok, clustering()} | {:error, term()}
+  @callback put_partitions(config :: term(), table_ref(), partitions()) ::
+              :ok | {:error, term()}
+  @callback partitions(config :: term(), table_ref()) ::
+              {:ok, partitions() | nil} | {:error, term()}
   @callback put_table_options(config :: term(), table_ref(), table_options()) ::
               :ok | {:error, term()}
   @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
@@ -344,8 +360,28 @@ defmodule Smolquery.Catalog do
     do: catalog.impl.clustering(catalog.config, table)
 
   @doc """
-  Applies a table's mutable settings — retention and/or clustering — as one
-  change: on an error, none of them stick.
+  Sets a table's write-partition count.
+
+  See the `t:partitions/0` typedoc for the raise-only contract: enforcing it
+  is the caller's check, made where a validation error can still reach the
+  user who typed it (the same split retention and clustering use).
+  """
+  @spec put_partitions(t(), table_ref(), partitions()) :: :ok | {:error, term()}
+  def put_partitions(%__MODULE__{} = catalog, table, count)
+      when is_integer(count) and count > 0,
+      do: catalog.impl.put_partitions(catalog.config, table, count)
+
+  @doc """
+  A table's write-partition count, or `nil` when the deployment's
+  `write_partitions` applies.
+  """
+  @spec partitions(t(), table_ref()) :: {:ok, partitions() | nil} | {:error, term()}
+  def partitions(%__MODULE__{} = catalog, table),
+    do: catalog.impl.partitions(catalog.config, table)
+
+  @doc """
+  Applies a table's mutable settings — retention, clustering, and/or
+  partitions — as one change: on an error, none of them stick.
 
   This is the write behind a `PATCH`, and atomicity is why it exists as its
   own operation rather than a loop over `put_retention/3` and
@@ -360,8 +396,9 @@ defmodule Smolquery.Catalog do
     if function_exported?(catalog.impl, :put_table_options, 3) do
       catalog.impl.put_table_options(catalog.config, table, options)
     else
-      with :ok <- sequential_put(catalog, table, options, :retention) do
-        sequential_put(catalog, table, options, :clustering)
+      with :ok <- sequential_put(catalog, table, options, :retention),
+           :ok <- sequential_put(catalog, table, options, :clustering) do
+        sequential_put(catalog, table, options, :partitions)
       end
     end
   end
@@ -371,6 +408,9 @@ defmodule Smolquery.Catalog do
 
   defp sequential_put(catalog, table, %{clustering: columns}, :clustering),
     do: put_clustering(catalog, table, columns)
+
+  defp sequential_put(catalog, table, %{partitions: count}, :partitions),
+    do: put_partitions(catalog, table, count)
 
   defp sequential_put(_catalog, _table, _options, _key), do: :ok
 

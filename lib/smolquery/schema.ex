@@ -28,6 +28,11 @@ defmodule Smolquery.Schema do
   because sorting is the only thing the key ever does. `clustering_columns/1`,
   not the raw field, is what a write point should sort by.
 
+  `partitions` rides here for the same reason: the table's own write-partition
+  count (`Smolquery.Partitions`, T-304), read from the catalog, reaching the
+  ingest cache and the query planner with no extra round trip. `nil` means the
+  catalog holds no count and the deployment's `write_partitions` applies.
+
   Milestone 1 verified that every one of these round-trips byte-identically
   through Explorer's Parquet writer, so a segment written here reads back
   through DuckDB unchanged.
@@ -47,9 +52,13 @@ defmodule Smolquery.Schema do
   alias Smolquery.Schema.Field
 
   @enforce_keys [:fields]
-  defstruct fields: nil, clustering: []
+  defstruct fields: nil, clustering: [], partitions: nil
 
-  @type t :: %__MODULE__{fields: [Field.t()], clustering: [String.t()]}
+  @type t :: %__MODULE__{
+          fields: [Field.t()],
+          clustering: [String.t()],
+          partitions: pos_integer() | nil
+        }
 
   @type logical_type ::
           :int64
