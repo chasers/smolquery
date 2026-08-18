@@ -32,6 +32,10 @@ smolquery-*.tar
 # (see skills/README.md); nothing under .claude/ is committed.
 /.claude/
 
+# Local session-start plan pointers; real plans live in the smolsqls tracker db
+# (see CONTRIBUTING.md). Never committed.
+/.plans/
+
 # Repo-local scoped kubeconfig (pins kubectl to kind-smolquery; holds a client key).
 /.kube/
 
