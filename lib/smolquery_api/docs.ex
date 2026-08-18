@@ -128,6 +128,18 @@ defmodule SmolqueryApi.Docs do
         }
       },
       %{
+        "method" => "DELETE",
+        "path" => "/v1/datasets/:dataset/tables/:table/segments",
+        "auth" => "bearer",
+        "summary" =>
+          "Drops segments from a table's current snapshot by path — the " <>
+            "operator route for a segment the compactor quarantined as " <>
+            "permanently corrupt (T-310). Idempotent: a path already gone " <>
+            "is not an error. Formalizes the loss; the file itself is " <>
+            "untouched, reclaimed later by GC.",
+        "request" => %{"paths" => ["store-relative segment path, at least one"]}
+      },
+      %{
         "method" => "POST",
         "path" => "/v1/datasets/:dataset/tables/:table/insert",
         "auth" => "bearer",

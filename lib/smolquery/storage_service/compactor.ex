@@ -171,11 +171,12 @@ defmodule Smolquery.StorageService.Compactor do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, row_caps: %{}]
+  defstruct [:runtime, row_caps: %{}, quarantine: %{}, quarantined_paths: MapSet.new()]
 
   @group_max_staging_chunks 64
   @stage_chunk_target_bytes 67_108_864
   @engine_recycle_wait_ms 5_000
+  @quarantine_after 5
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -203,7 +204,11 @@ defmodule Smolquery.StorageService.Compactor do
     runtime = state.runtime
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
-      outcomes = Enum.map(tables, &compact_table(runtime, state.row_caps, &1))
+      outcomes =
+        Enum.map(
+          tables,
+          &compact_table(runtime, state.row_caps, state.quarantined_paths, &1)
+        )
 
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
@@ -212,7 +217,16 @@ defmodule Smolquery.StorageService.Compactor do
 
       row_caps = adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
 
-      {:ok, report, %{state | row_caps: row_caps}}
+      {quarantine, quarantined_paths} =
+        adjusted_quarantine(
+          state.quarantine,
+          state.quarantined_paths,
+          outcomes,
+          @quarantine_after
+        )
+
+      {:ok, report,
+       %{state | row_caps: row_caps, quarantine: quarantine, quarantined_paths: quarantined_paths}}
     end
   end
 
@@ -370,9 +384,71 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp merge_oom?(_reason), do: false
 
-  defp compact_table(runtime, row_caps, table_ref) do
+  @doc """
+  The quarantine state after a sweep — segments a permanently-failing group
+  is made of, and the map is stopped from planning again (T-310).
+
+  A failure counts toward quarantine only when it carries the input paths
+  that failed (`plan/2`'s sizing and `swap/4`'s merge both attach them) and
+  is neither an OOM nor an engine call exit — both already have their own
+  recovery (`adjusted_row_caps/3`, `recycle_on_exit/2`) and can legitimately
+  repeat identically for several sweeps while calibrating. What is left is
+  the signature of a segment that is actually corrupt: the same group, the
+  same non-OOM, non-exit error, sweep after sweep.
+
+  The streak is keyed by the group's sorted paths, not the table, because
+  `plan/2` can regroup a table's candidates differently sweep to sweep as
+  segments arrive; a group reaching `threshold` quarantines every path in
+  it and its streak entry is dropped — quarantine does not decay, so a
+  quarantined path stays out of every future plan on this node until an
+  operator drops or replaces it (`Catalog.drop_segments/3`) and it stops
+  being a candidate at all.
+  """
+  @spec adjusted_quarantine(
+          %{[String.t()] => pos_integer()},
+          MapSet.t(String.t()),
+          [term()],
+          pos_integer()
+        ) :: {%{[String.t()] => pos_integer()}, MapSet.t(String.t())}
+  def adjusted_quarantine(quarantine, quarantined_paths, outcomes, threshold) do
+    Enum.reduce(outcomes, {quarantine, quarantined_paths}, fn
+      {:failed, %{table: table_ref, reason: reason, paths: [_ | _] = paths}}, acc ->
+        if merge_oom?(reason) or engine_call_exited?(reason) do
+          acc
+        else
+          quarantine_step(acc, table_ref, paths, threshold)
+        end
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp quarantine_step({quarantine, quarantined_paths}, table_ref, paths, threshold) do
+    key = Enum.sort(paths)
+    streak = Map.get(quarantine, key, 0) + 1
+
+    if streak >= threshold do
+      Logger.warning(
+        "compaction quarantined #{length(paths)} segment(s) of #{inspect(table_ref)} " <>
+          "after #{streak} identical failures: #{inspect(paths)}"
+      )
+
+      :telemetry.execute(
+        [:smolquery, :compact, :quarantine],
+        %{},
+        %{table_ref: table_ref, paths: paths}
+      )
+
+      {Map.delete(quarantine, key), Enum.into(paths, quarantined_paths)}
+    else
+      {Map.put(quarantine, key, streak), quarantined_paths}
+    end
+  end
+
+  defp compact_table(runtime, row_caps, quarantined_paths, table_ref) do
     runtime = table_capped(runtime, row_caps, table_ref)
-    compact_table(runtime, table_ref)
+    compact_table(runtime, quarantined_paths, table_ref)
   end
 
   defp table_capped(runtime, row_caps, table_ref) do
@@ -385,18 +461,27 @@ defmodule Smolquery.StorageService.Compactor do
     %{runtime | compact_max_rows: cap}
   end
 
-  defp compact_table(runtime, table_ref) do
+  defp compact_table(runtime, quarantined_paths, table_ref) do
     started_at = System.monotonic_time(:microsecond)
     routing = Routing.resolve(runtime.name)
 
     with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
-         {:ok, group} <- plan(runtime, owned) do
+         [_ | _] = plannable <- Enum.reject(owned, &MapSet.member?(quarantined_paths, &1)),
+         {:ok, group} <- plan(runtime, plannable) do
       swap(runtime, table_ref, group, started_at)
     else
-      [] -> :skip
-      :skip -> {:skip, table_ref}
-      {:error, reason} -> failed(runtime, table_ref, reason, started_at)
+      [] ->
+        :skip
+
+      :skip ->
+        {:skip, table_ref}
+
+      {:error, reason} ->
+        failed(runtime, table_ref, reason, started_at)
+
+      {:error, reason, failed_paths} ->
+        failed(runtime, table_ref, reason, started_at, paths: failed_paths)
     end
   end
 
@@ -455,7 +540,7 @@ defmodule Smolquery.StorageService.Compactor do
     |> Enum.chunk_every(runtime.merge_inputs_per_call)
     |> Enum.reduce_while(%{chunks: [], bytes: 0, rows: 0, count: 0}, &size_chunk(runtime, &1, &2))
     |> case do
-      {:error, reason} -> {:error, reason}
+      {:error, reason, chunk} -> {:error, reason, chunk}
       %{chunks: chunks} -> {:ok, chunks |> Enum.reverse() |> List.flatten()}
     end
   end
@@ -477,7 +562,7 @@ defmodule Smolquery.StorageService.Compactor do
         )
 
       {:error, reason} ->
-        {:halt, {:error, reason}}
+        {:halt, {:error, reason, chunk}}
     end
   end
 
@@ -564,7 +649,8 @@ defmodule Smolquery.StorageService.Compactor do
       {:ok,
        %{table: table_ref, key: key, replaced: length(paths), rows: row_count, snapshot: snapshot}}
     else
-      {:error, reason} -> failed(runtime, table_ref, reason, started_at, row_count)
+      {:error, reason} ->
+        failed(runtime, table_ref, reason, started_at, rows: row_count, paths: paths)
     end
   end
 
@@ -601,7 +687,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp failed(runtime, table_ref, reason, started_at, rows \\ nil) do
+  defp failed(runtime, table_ref, reason, started_at, opts \\ []) do
     Logger.warning("compaction of #{inspect(table_ref)} failed: #{inspect(reason)}")
 
     :telemetry.execute(
@@ -612,9 +698,15 @@ defmodule Smolquery.StorageService.Compactor do
 
     recycle_on_exit(runtime, reason)
 
-    failure = %{table: table_ref, reason: reason}
+    failure = %{table: table_ref, reason: reason, paths: Keyword.get(opts, :paths, [])}
 
-    {:failed, if(rows, do: Map.put(failure, :rows, rows), else: failure)}
+    failure =
+      case Keyword.get(opts, :rows) do
+        nil -> failure
+        rows -> Map.put(failure, :rows, rows)
+      end
+
+    {:failed, failure}
   end
 
   @doc """
