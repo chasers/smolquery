@@ -138,17 +138,19 @@ defmodule Smolquery.StorageService.Compactor do
   pid proves the rebuild), and moves to the next table. The
   abandoned statement's DuckDB instance burns until it completes, but nothing
   queues behind it anymore, and a killed merge is free to retry: the output
-  key is derived, so next sweep's attempt overwrites its orphan.
+  key is derived, so next sweep's attempt converges on the same key.
 
-  ## The output key is derived, so a retry overwrites instead of duplicating
+  ## The output key is derived, so a retry converges instead of duplicating
 
   The merged segment's id comes from the sorted input ids
   (`Smolquery.Segments.Id.derive/2`), the same identity rule the sealer's
   claims use. A compaction that crashed after writing but before the swap
-  re-plans the same group next sweep, derives the same key, and overwrites its
-  own orphan — which GC would otherwise sweep, since nothing ever registered
-  it. Old files are never deleted here: earlier snapshots still read them, and
-  physical reclaim is GC's job once no snapshot does.
+  re-plans the same group next sweep, derives the same key, and finds its own
+  orphan already committed — the store's write-once put reports that as
+  success (T-308), and the swap registers the orphan, a complete segment the
+  crashed run validated before committing. Old files are never deleted here:
+  earlier snapshots still read them, and physical reclaim is GC's job once no
+  snapshot does.
 
   ## The swap is verified, because the failure it guards against is silent
 

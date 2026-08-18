@@ -107,6 +107,16 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert File.read!(first.location) == FakeParquet.bytes("original")
     end
 
+    test "a retry to a committed key reports the committed size, not its own", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert {:ok, first} = Store.put(store, "one.parquet", write("original"))
+      assert {:ok, retry} = Store.put(store, "one.parquet", write("a-much-longer-retry-body"))
+
+      assert first.byte_size == byte_size(FakeParquet.bytes("original"))
+      assert retry.byte_size == first.byte_size
+    end
+
     test "a retry to a committed key leaves nothing staged behind", %{tmp_dir: dir} do
       store = Local.new(dir: dir)
       {:ok, _first} = Store.put(store, "one.parquet", write("original"))

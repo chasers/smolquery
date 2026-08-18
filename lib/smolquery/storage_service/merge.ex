@@ -120,10 +120,11 @@ defmodule Smolquery.StorageService.Merge do
   ## The output is already named
 
   The key comes from the claim, not from this module. It was derived from the
-  claim's inputs when the claim was frozen, so a retry writes the same key — an
-  idempotent overwrite of identical rows rather than a second segment. That is
-  what makes a crashed merge free to retry, and it is why this module never
-  generates an id.
+  claim's inputs when the claim was frozen, so a retry writes the same key —
+  the store commits it once and reports every later identical put as a no-op
+  success (T-308), rather than creating a second segment. That is what makes
+  a crashed merge free to retry, and it is why this module never generates an
+  id.
 
   ## What it does not do
 
@@ -226,8 +227,8 @@ defmodule Smolquery.StorageService.Merge do
   Merges already-sealed segments at `urls` into the segment `key` names.
 
   The compactor's entry point: same projection onto the catalog's declared
-  schema, same codec, same idempotent overwrite of a deterministic key —
-  only the inputs differ. They come from the catalog rather than a hot
+  schema, same codec, same write-once put of a deterministic key — only the
+  inputs differ. They come from the catalog rather than a hot
   manifest, so their row counts are read from the Parquet footers instead of
   vouched for by a buffer. That is a metadata read, not the read-back the
   moduledoc rules out: a footer's `num_rows` is the file's row count by
