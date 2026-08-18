@@ -40,6 +40,12 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :buffer, :dedup]       %{rows}
       [:smolquery, :seal, :attempt]       %{duration_us, segments},
                                           meta %{result: :ok | :error | :crashed, table_ref: ref}
+      [:smolquery, :seal, :stuck]         %{consecutive}, meta %{table_ref: ref}
+                                          — a failed attempt at or past the sealer's
+                                          stuck threshold; alert on rate > 0 (T-293)
+      [:smolquery, :buffer, :release_failure] %{consecutive}, meta %{table_ref: ref}
+                                          — an oversized-claim release that could not
+                                          replicate (T-294, T-297)
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
                                           meta %{result: :ok | :error, table_ref: ref}
 
@@ -73,6 +79,8 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :buffer, :admission],
     [:smolquery, :buffer, :dedup],
     [:smolquery, :seal, :attempt],
+    [:smolquery, :seal, :stuck],
+    [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
@@ -106,6 +114,10 @@ defmodule Smolquery.Telemetry do
       "Time seal attempts ran, by result; divide by attempts for the mean (T-244).",
     "smolquery_seal_segments_total" =>
       "Micro-segments in seal attempts, by result; divide by attempts for the mean batch size (T-244).",
+    "smolquery_seal_stuck_attempts_total" =>
+      "Seal attempts that failed at or past the stuck threshold; a nonzero rate means a claim may never seal (T-293).",
+    "smolquery_seal_release_failures_total" =>
+      "Oversized-claim releases that could not replicate; a nonzero rate means sealing on a table is stalled (T-297).",
     "smolquery_compactions_total" => "Compaction swaps, by result.",
     "smolquery_compaction_microseconds_total" =>
       "Time compaction attempts ran, by result; divide by compactions for the mean (T-244).",
@@ -268,6 +280,14 @@ defmodule Smolquery.Telemetry do
       {"smolquery_seal_segments_total", [result: result(meta)]},
       Map.get(measurements, :segments, 0)
     )
+  end
+
+  def handle_event([:smolquery, :seal, :stuck], _measurements, _meta, nil) do
+    bump({"smolquery_seal_stuck_attempts_total", []}, 1)
+  end
+
+  def handle_event([:smolquery, :buffer, :release_failure], _measurements, _meta, nil) do
+    bump({"smolquery_seal_release_failures_total", []}, 1)
   end
 
   def handle_event([:smolquery, :compact, :swap], measurements, meta, nil) do

@@ -325,6 +325,168 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
              Endpoint.apply_replica_mutation(follower, @table, :release, %{ids: [entry.id]}, nil)
   end
 
+  test "a release against a diverged follower claim heals it, then re-claims under the valves (T-297)",
+       context do
+    owner_name = :"t297_owner_#{:erlang.unique_integer([:positive])}"
+    follower = start_instance(context)
+
+    replicate_to_follower = [
+      replicator:
+        {SegmentShipping,
+         replication_factor: 2,
+         targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end}
+    ]
+
+    owner =
+      start_instance(
+        context,
+        [
+          name: owner_name,
+          seal_max_files: 1_000_000,
+          seal_max_bytes: 1_000_000_000,
+          seal_max_age_ms: 600_000
+        ] ++ replicate_to_follower
+      )
+
+    ids =
+      for n <- 1..18 do
+        {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-t297-#{n}"))
+        ack.segment_id
+      end
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    {:ok, prefix} = Store.prefix(@table)
+    {:ok, old_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
+    {:ok, _oversized} = HotManifest.claim(owner_runtime.manifest, @table, ids, [old_key])
+
+    diverged = %{ids: Enum.take(ids, 2), keys: ["diverged-key"]}
+    :ok = Endpoint.apply_replica_mutation(follower, @table, :claim, diverged, nil)
+
+    :ok = stop_supervised(owner)
+
+    owner =
+      start_instance(
+        context,
+        [
+          name: owner_name,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000_000,
+          seal_max_age_ms: 600_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        ] ++ replicate_to_follower
+      )
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+
+    assert Eventually.until(fn ->
+             match?([{_buffer, _load}], Registry.lookup(Runtime.registry(owner), @table))
+           end)
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+    assert log =~ "healed a diverged release"
+    assert log =~ "released oversized claim"
+    refute log =~ "releasing oversized claim on"
+
+    assert {:ok, live} = HotManifest.live_claim(owner_runtime.manifest, @table)
+    assert live.ids == Enum.take(ids, 16)
+    refute live.keys == [old_key]
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert {:ok, ^live} = HotManifest.live_claim(follower_runtime.manifest, @table)
+  end
+
+  test "a diverged claim over ids the owner sealed refuses the heal, naming them (T-297)",
+       context do
+    owner_name = :"t297_guard_#{:erlang.unique_integer([:positive])}"
+    follower = start_instance(context)
+
+    replicate_to_follower = [
+      replicator:
+        {SegmentShipping,
+         replication_factor: 2,
+         targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end}
+    ]
+
+    owner =
+      start_instance(
+        context,
+        [
+          name: owner_name,
+          seal_max_files: 1_000_000,
+          seal_max_bytes: 1_000_000_000,
+          seal_max_age_ms: 600_000
+        ] ++ replicate_to_follower
+      )
+
+    {:ok, retired} = Client.write_batch(owner, @table, batch([%{"id" => 0}], "b-t297-g-0"))
+
+    ids =
+      for n <- 1..18 do
+        {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-t297-g-#{n}"))
+        ack.segment_id
+      end
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    :ok = HotManifest.retire(owner_runtime.manifest, @table, [retired.segment_id], 42)
+
+    {:ok, prefix} = Store.prefix(@table)
+    {:ok, old_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
+    {:ok, _oversized} = HotManifest.claim(owner_runtime.manifest, @table, ids, [old_key])
+
+    diverged = %{ids: [retired.segment_id, hd(ids)], keys: ["diverged-key"]}
+    :ok = Endpoint.apply_replica_mutation(follower, @table, :claim, diverged, nil)
+
+    :ok = stop_supervised(owner)
+
+    owner =
+      start_instance(
+        context,
+        [
+          name: owner_name,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000_000,
+          seal_max_age_ms: 600_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        ] ++ replicate_to_follower
+      )
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+
+    assert Eventually.until(fn ->
+             match?([{_buffer, _load}], Registry.lookup(Runtime.registry(owner), @table))
+           end)
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+    assert log =~ "releasing oversized claim"
+    assert log =~ ":diverged_claim_sealed_on_owner"
+    assert log =~ retired.segment_id
+    refute log =~ "healed a diverged release"
+
+    assert {:ok, live} = HotManifest.live_claim(owner_runtime.manifest, @table)
+    assert live.keys == [old_key]
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert {:ok, diverged_live} = HotManifest.live_claim(follower_runtime.manifest, @table)
+    assert Enum.sort(diverged_live.ids) == Enum.sort(diverged.ids)
+
+    escalated =
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _attempt <- 1..4, do: :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert escalated =~ "consecutive failures, sealing on this table is stalled (T-297)"
+  end
+
   test "a re-shipped claim is absorbed as ok, a different claim is refused", context do
     {owner, follower} = start_pair(context)
 

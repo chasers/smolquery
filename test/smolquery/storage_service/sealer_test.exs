@@ -204,6 +204,32 @@ defmodule Smolquery.StorageService.SealerTest do
   end
 
   @tag :tmp_dir
+  @tag result: {:error, :handoff_refused}
+  test "emits the stuck event at the threshold, not before (T-293)", %{name: name} do
+    handler = "stuck-#{:erlang.unique_integer([:positive])}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:smolquery, :seal, :stuck],
+        fn _event, measurements, meta, nil -> send(parent, {:stuck, measurements, meta}) end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    capture_log(fn -> Enum.each(1..4, fn _ -> run_attempt(name, @events) end) end)
+    refute_received {:stuck, _measurements, _meta}
+
+    capture_log(fn -> run_attempt(name, @events) end)
+    assert_receive {:stuck, %{consecutive: 5}, %{table_ref: @events}}
+
+    capture_log(fn -> run_attempt(name, @events) end)
+    assert_receive {:stuck, %{consecutive: 6}, %{table_ref: @events}}
+  end
+
+  @tag :tmp_dir
   test "ignores an unrelated message", %{name: name} do
     sealer = Process.whereis(Runtime.sealer(name))
     send(sealer, :unrelated)
