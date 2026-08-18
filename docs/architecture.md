@@ -597,15 +597,25 @@ deployment-wide default. A table can carry its own count in catalog metadata —
 a `smolquery_partitions` side table beside clustering's, read back onto
 `Smolquery.Schema.partitions` and carried through the ingest schema cache and
 the query planner's per-plan resolve. The effective count is the maximum of
-the two (`Smolquery.Partitions.count/2`), which makes it raise-only from every
-direction — the runbook answer to a backed-up table is `PATCH
-{"partitions": N}`, no config change, no fleet-at-rest window. The raise is
+the two (`Smolquery.Partitions.count/2`, at most
+`Smolquery.Partitions.max_count/0` = 64) — the runbook answer to a backed-up
+table is `PATCH {"partitions": N}`, no config change and no fleet-at-rest
+window once every node runs a release with catalog-count support. The raise is
 safe online because the lag runs one way: the planner reads the catalog on
 every plan while a writer's cached schema trails by at most one
 `schema_cache_ttl_ms`, so a reader expands more partitions than writers fill —
 answering long, never short — and an unfilled partition's manifest is empty.
+That same cache window makes an `insertId` retry straddling the raise
+at-least-once, exactly like a retry straddling a ring join.
+
 Lowering is refused (422): partitions past the count still hold hot rows a
-reader would no longer expand.
+reader would no longer expand. The catalog write itself is monotonic — a
+lower count is a no-op, so concurrent raises converge on the maximum and no
+racing writer can lower a stored count behind the API's check. Two residual
+caveats: lowering the deployment *default* still needs the fleet at rest for
+every table without its own catalog count, and during the rolling deploy that
+first ships this feature a not-yet-upgraded query node ignores catalog counts
+and would answer short — raise a count only after the rollout completes.
 
 ### Retention and snapshot expiry
 

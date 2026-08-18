@@ -166,11 +166,14 @@ defmodule SmolqueryApi.TableController do
 
   defp partitions_from_json(%{"partitions" => count}, schema)
        when is_integer(count) and count > 0 do
-    case schema.partitions do
-      current when is_integer(current) and count < current ->
-        {:error, {:partitions_not_raisable, current, count}}
+    cond do
+      count > Smolquery.Partitions.max_count() ->
+        {:error, {:invalid_partitions, count}}
 
-      _current ->
+      is_integer(schema.partitions) and count < schema.partitions ->
+        {:error, {:partitions_not_raisable, schema.partitions, count}}
+
+      true ->
         {:ok, count}
     end
   end

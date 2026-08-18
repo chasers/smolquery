@@ -194,19 +194,21 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp hot_partitions(runtime, table_ref) do
-    count = Partitions.count(catalog_partitions(runtime, table_ref), write_partitions(runtime))
-
-    for {_dataset, partition} = ref <- Partitions.refs(table_ref, count) do
-      %{ref: ref, label: partition, stages: hot_stages(runtime.buffer_name, ref)}
-    end
-  end
-
-  defp catalog_partitions(runtime, table_ref) do
     case Catalog.partitions(runtime.catalog, table_ref) do
-      {:ok, count} -> count
-      {:error, _reason} -> nil
+      {:ok, catalog_count} ->
+        count = Partitions.count(catalog_count, write_partitions(runtime))
+
+        for {_dataset, partition} = ref <- Partitions.refs(table_ref, count) do
+          %{ref: ref, label: partition, stages: hot_stages(runtime.buffer_name, ref)}
+        end
+
+      {:error, _reason} ->
+        :unavailable
     end
   end
+
+  defp hot_list(:unavailable), do: []
+  defp hot_list(partitions) when is_list(partitions), do: partitions
 
   defp hot_stages(buffer_name, ref) do
     case BufferService.Client.hot_manifest(buffer_name, ref) do
@@ -472,7 +474,10 @@ defmodule SmolqueryWeb.TableLive.Show do
                   <div class="text-xs uppercase opacity-60 mb-1">
                     Hot tier — pending → claimed → sealed awaiting reap
                   </div>
-                  <div :for={partition <- lifecycle.hot} class="mb-2">
+                  <div :if={lifecycle.hot == :unavailable} class="text-sm opacity-70">
+                    The catalog's partition count is unreachable.
+                  </div>
+                  <div :for={partition <- hot_list(lifecycle.hot)} class="mb-2">
                     <div class="flex items-center gap-2 text-sm font-mono">
                       <span class="w-56 truncate">{partition.label}</span>
                       <%= if partition.stages == :unavailable do %>

@@ -118,6 +118,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Engine
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
+  alias Smolquery.Partitions
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store
@@ -356,9 +357,30 @@ defmodule Smolquery.Catalog.DuckLake do
              [config.catalog, dataset, table]
            ),
          {:ok, schema} <- build_schema(result.rows, {dataset, table}),
-         {:ok, clustering} <- clustering(config, {dataset, table}),
-         {:ok, partitions} <- partitions(config, {dataset, table}) do
+         {:ok, clustering, partitions} <- side_options(config, {dataset, table}) do
       {:ok, %{schema | clustering: clustering, partitions: partitions}}
+    end
+  end
+
+  defp side_options(config, {dataset, table}) do
+    sql =
+      "SELECT 0 AS kind, column_name AS name, position AS value " <>
+        "FROM #{clustering_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
+        "UNION ALL SELECT 1, NULL, partition_count " <>
+        "FROM #{partitions_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
+        "ORDER BY kind, value"
+
+    with {:ok, result} <- query(config, sql, [dataset, table]) do
+      {clustering_rows, partition_rows} =
+        Enum.split_with(result.rows, fn [kind, _name, _value] -> kind == 0 end)
+
+      clustering = Enum.map(clustering_rows, fn [_kind, name, _position] -> name end)
+
+      case partition_rows do
+        [] -> {:ok, clustering, nil}
+        [[_kind, _name, count]] -> {:ok, clustering, count}
+        rows -> {:error, {:ambiguous_partitions, rows}}
+      end
     end
   end
 
@@ -682,7 +704,9 @@ defmodule Smolquery.Catalog.DuckLake do
         {:halt, {:error, {:invalid_clustering, columns}}}
 
       {:partitions, count}, :ok when is_integer(count) and count > 0 ->
-        {:cont, :ok}
+        if count <= Partitions.max_count(),
+          do: {:cont, :ok},
+          else: {:halt, {:error, {:invalid_partitions, count}}}
 
       {:partitions, count}, :ok ->
         {:halt, {:error, {:invalid_partitions, count}}}
@@ -736,9 +760,13 @@ defmodule Smolquery.Catalog.DuckLake do
 
       {:ok, count} ->
         [
-          delete_partitions_sql(config, dataset, table),
-          "INSERT INTO #{partitions_table(config.catalog)} VALUES (" <>
-            "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, #{count})"
+          delete_partitions_below_sql(config, dataset, table, count),
+          "INSERT INTO #{partitions_table(config.catalog)} " <>
+            "SELECT #{Identifier.sql_string(dataset)}, " <>
+            "#{Identifier.sql_string(table)}, #{count} " <>
+            "WHERE NOT EXISTS (SELECT 1 FROM #{partitions_table(config.catalog)} " <>
+            "WHERE dataset = #{Identifier.sql_string(dataset)} " <>
+            "AND table_name = #{Identifier.sql_string(table)})"
         ]
     end
   end
@@ -833,9 +861,10 @@ defmodule Smolquery.Catalog.DuckLake do
       "PRIMARY KEY (dataset, table_name))"
   end
 
-  defp delete_partitions_sql(config, dataset, table) do
+  defp delete_partitions_below_sql(config, dataset, table, count) do
     "DELETE FROM #{partitions_table(config.catalog)} WHERE dataset = " <>
-      "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)}"
+      "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)} " <>
+      "AND partition_count < #{count}"
   end
 
   defp delete_clustering_sql(config, dataset, table) do

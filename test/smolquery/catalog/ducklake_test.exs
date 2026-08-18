@@ -631,12 +631,26 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.partitions(catalog, {"analytics", "clicks"}) == {:ok, nil}
     end
 
+    test "a lower count is a no-op, not an overwrite", %{catalog: catalog} do
+      assert Catalog.put_partitions(catalog, @table, 6) == :ok
+      assert Catalog.put_partitions(catalog, @table, 2) == :ok
+      assert Catalog.partitions(catalog, @table) == {:ok, 6}
+
+      assert Catalog.put_table_options(catalog, @table, %{partitions: 3}) == :ok
+      assert Catalog.partitions(catalog, @table) == {:ok, 6}
+    end
+
     test "refuses a malformed count", %{catalog: catalog} do
       assert {:error, {:invalid_partitions, 0}} =
                catalog.impl.put_table_options(catalog.config, @table, %{partitions: 0})
 
       assert {:error, {:invalid_partitions, "3"}} =
                catalog.impl.put_table_options(catalog.config, @table, %{partitions: "3"})
+
+      over = Smolquery.Partitions.max_count() + 1
+
+      assert {:error, {:invalid_partitions, ^over}} =
+               catalog.impl.put_table_options(catalog.config, @table, %{partitions: over})
     end
 
     test "table_schema attaches the count to the Schema struct", %{catalog: catalog} do

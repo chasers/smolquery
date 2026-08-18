@@ -118,7 +118,7 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def put_partitions(agent, table_ref, count) when is_integer(count) and count > 0 do
-    Agent.update(agent, &%{&1 | partitions: Map.put(&1.partitions, table_ref, count)})
+    Agent.update(agent, &raise_partitions(&1, table_ref, count))
   end
 
   @impl Catalog
@@ -132,8 +132,19 @@ defmodule Smolquery.Test.MapCatalog do
       state
       |> apply_option(options, :retention, table_ref)
       |> apply_option(options, :clustering, table_ref)
-      |> apply_option(options, :partitions, table_ref)
+      |> apply_partitions(options, table_ref)
     end)
+  end
+
+  defp apply_partitions(state, options, table_ref) do
+    case Map.fetch(options, :partitions) do
+      {:ok, count} -> raise_partitions(state, table_ref, count)
+      :error -> state
+    end
+  end
+
+  defp raise_partitions(state, table_ref, count) do
+    %{state | partitions: Map.update(state.partitions, table_ref, count, &max(&1, count))}
   end
 
   defp apply_option(state, options, key, table_ref) do
