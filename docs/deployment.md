@@ -43,6 +43,17 @@ the sealed-store dependencies before you deploy it.
 
 ## Upgrade notes
 
+One note per release, newest first.
+
+### Per-table partition counts (T-304)
+
+The release that ships T-304 lets a table raise its own write-partition
+count with `PATCH {"partitions": N}`. A query node on an older release
+ignores catalog counts. It expands only `SMOLQUERY_WRITE_PARTITIONS`
+partitions, so it answers short while upgraded ingest nodes fill more.
+
+**Do not raise a table's count until every node runs this release.**
+
 ### Claim release and the retire fence (T-294)
 
 The release that ships T-294 fences retirement on the claim's keys, but a
@@ -61,6 +72,36 @@ From 0.7.1, the `smolquery-env` Secret must hold `SMOLQUERY_WEB_USERNAME`,
 roles include `web`. A web pod without them **refuses to boot**, and that
 boot failure stops the pod's other roles too. Push the secrets before you
 roll the image.
+
+## Sizing write partitions
+
+**Size the partition count for seal drain, not for ingest spread.** Sealing
+is the slow stage: each partition seals one claim at a time, so one
+partition's seal throughput caps that partition's sustainable ingest.
+
+A raise helps sealing twice:
+
+- It multiplies concurrent seals. One table can seal on
+  `min(P, N) × max_concurrent_seals` slots.
+- It divides each partition's ingest, so each seal claim is smaller.
+
+Ingest does not need the extra split. The extra split does not hurt it.
+
+Two ways to raise the count:
+
+1. Raise one backed-up table online: `PATCH {"partitions": N}` (T-304).
+2. Raise the fleet default: set `SMOLQUERY_WRITE_PARTITIONS` and roll the
+   fleet.
+
+Costs rise with the count. Each partition adds a `TableBuffer`, a manifest,
+a claim, and one hot-manifest fetch per manifest URL on every plan that
+touches the table. Smaller per-partition flushes also dilute group commit.
+The cap is **64**.
+
+Compaction does not use partitions. It shards on `{table, bucket}`
+(`SMOLQUERY_COMPACT_BUCKET_MS`), so its throughput scales with bucket width,
+storage pod count, and the compaction engine's resources. The other seal
+levers are `max_concurrent_seals`, the storage memory limits, and pod count.
 
 ## Catalog format upgrades
 

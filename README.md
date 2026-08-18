@@ -349,6 +349,8 @@ skills/                        # Claude Code skills (./skills/install.sh; see sk
   included.
 - [**HTTP API**](docs/api.md) — the `/v1` surface, schema types, and the error
   envelope.
+- [**Glossary**](docs/glossary.md) — the terms each service uses, defined in
+  one place.
 - [**Benchmarks**](docs/benchmarks.md) — the measurements the design decisions
   were made on.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, the PR workflow, and the
