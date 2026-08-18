@@ -30,6 +30,12 @@ defmodule Smolquery.StorageService.Routing do
     * otherwise application configuration — either way the built ring is
       cached against the member list it came from (`Smolquery.Cluster.RingCache`)
 
+  Reusing `Ring` also carries its partition placement (T-301): a partition
+  ref rotates off its parent's position (`Smolquery.Partitions`), so a
+  table's P partitions seal on `min(P, N)` distinct storage nodes. One
+  table's seal concurrency is therefore `min(P, N) x max_concurrent_seals`,
+  and `write_partitions` is the knob that raises it.
+
   `Smolquery.StorageService.Sealer` and `Smolquery.StorageService.Compactor`
   both call `own?/2` before acting on a signal or a sweep's table — the gate
   D6 describes. Routing to the right node in the first place (this module's

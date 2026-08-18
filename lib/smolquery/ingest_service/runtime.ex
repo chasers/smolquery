@@ -26,8 +26,10 @@ defmodule Smolquery.IngestService.Runtime do
 
   `write_partitions` spreads each table's writes over that many buffer
   identities (`Smolquery.Partitions`) — across the ring, so across nodes. The
-  query service's `write_partitions` must match; see the caveats there and in
-  `Smolquery.Partitions`.
+  storage ring places the same partitions the same way, so the count also
+  sets one table's seal parallelism: `min(P, N)` storage nodes at
+  `max_concurrent_seals` each (T-301). The query service's `write_partitions`
+  must match; see the caveats there and in `Smolquery.Partitions`.
 
   `ndjson_passthrough` forwards an `application/x-ndjson` body to the owning
   buffer as the bytes the client sent, so this node spends no CPU per row. It

@@ -1,6 +1,7 @@
 defmodule Smolquery.StorageService.RoutingTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Partitions
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
@@ -55,6 +56,35 @@ defmodule Smolquery.StorageService.RoutingTest do
       foreign_table = find_table_owned_by(routing, :"storage1@elsewhere.invalid")
 
       refute Routing.own?(routing, foreign_table)
+    end
+  end
+
+  describe "owner/2 with partitions" do
+    test "a table's partitions seal on distinct storage nodes (T-301)", %{tmp_dir: dir} do
+      name = unique_name()
+
+      runtime =
+        Runtime.new(
+          name: name,
+          dir: dir,
+          ring: [
+            :"storage1@elsewhere.invalid",
+            :"storage2@elsewhere.invalid",
+            :"storage3@elsewhere.invalid"
+          ]
+        )
+
+      :ok = Runtime.put(runtime)
+      on_exit(fn -> Runtime.delete(name) end)
+
+      routing = Routing.resolve(name)
+
+      owners =
+        @table
+        |> Partitions.refs(3)
+        |> Enum.map(&Routing.owner(routing, &1))
+
+      assert [_first, _second, _third] = Enum.uniq(owners)
     end
   end
 
