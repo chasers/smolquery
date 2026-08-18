@@ -1,33 +1,39 @@
 # Deployment
 
-This document tells you how a release is published, what the release
-artifacts contain, and how to upgrade a deployment that holds data. For the
-full environment-variable reference, see [configuration.md](configuration.md).
+This document covers three topics:
+
+- How a release is published.
+- What the release artifacts contain.
+- How to upgrade a deployment that holds data.
+
+For the full environment-variable reference, see
+[configuration.md](configuration.md).
 
 ## How a release is published
 
-Every merge to `main` publishes an image. A **version bump** additionally
-creates a versioned release: a `main` commit that raises the `version:` line
-in `mix.exs` to a stable `X.Y.Z` value.
+Every merge to `main` publishes an image. A **version bump** also creates a
+versioned release. A version bump is a `main` commit that raises the
+`version:` line in `mix.exs` to a stable `X.Y.Z` value.
 
 The pipeline runs in this order:
 
-1. A pull request runs the CI workflow and the Cluster workflow. The Cluster
-   suite runs against real kind hosts. Both gate the merge. Branch protection
-   keeps the pull request current with `main`, so the merged tree is one CI
-   already saw.
+1. A pull request runs the continuous integration (CI) workflow and the
+   Cluster workflow. The Cluster suite runs against real kind hosts. Both
+   workflows gate the merge. Branch protection keeps the pull request
+   current with `main`. Thus CI already saw the merged tree.
 2. The Release workflow runs on the merge push to `main`. It publishes a
    multi-architecture `ghcr.io/chasers/smolquery` image tagged with the
    commit (`sha-<commit>`).
-3. When the commit bumped the version, the run aliases that image as
-   `vX.Y.Z` and creates the GitHub release.
+3. When the commit bumps the version, the run aliases that image as
+   `vX.Y.Z`. The run also creates the GitHub release.
 
 A release run that fails after the merge does not need a new version bump.
-Dispatch the Release workflow with the bump commit as `sha`; the run reuses
-the image it already published and finishes the tag and the release.
+Dispatch the Release workflow with the bump commit as `sha`. The run reuses
+the image it already published. The run then finishes the tag and the
+release.
 
-The image digest is the durable reference; pin deployments to it, not to a
-tag.
+Pin deployments to the image digest, not to a tag. The digest is the
+durable reference.
 
 ## Release artifacts
 
@@ -37,9 +43,12 @@ Each release attaches two files:
 - `release-manifest.yaml` — the `deploy/base` manifest with every smolquery
   image pinned to that digest.
 
-The manifest is **not** a standalone production deployment. You must provide
-the `smolquery-env` Secret, the Postgres catalog and discovery database, and
-the sealed-store dependencies before you deploy it.
+The manifest is **not** a standalone production deployment. Provide these
+items before you deploy it:
+
+- the `smolquery-env` Secret,
+- the Postgres catalog and discovery database,
+- the sealed-store dependencies.
 
 ## Upgrade notes
 
@@ -56,22 +65,26 @@ partitions, so it answers short while upgraded ingest nodes fill more.
 
 ### Claim release and the retire fence (T-294)
 
-The release that ships T-294 fences retirement on the claim's keys, but a
-sealer from the previous release retires without keys, and a keyless retire
-skips the fence. During the one rollout that ships this change, an old
-storage node's in-flight seal attempt can still stamp a since-released
-claim's entries sealed — the exact pre-fix exposure, ending when the last
-old sealer drains. To close the window, roll storage nodes before buffer
-nodes; a claim released by a new buffer then never has an old sealer's
-attempt outstanding.
+**Roll storage nodes before buffer nodes** during the one rollout that
+ships T-294. The release fences retirement on the claim's keys. A sealer
+from the previous release retires without keys, and a keyless retire skips
+the fence. An old storage node's in-flight seal attempt can therefore still
+stamp a since-released claim's entries sealed — the exact pre-fix exposure.
+The window ends when the last old sealer drains. With storage rolled first,
+a claim released by a new buffer never has an old sealer's attempt
+outstanding.
 
 ### Web role credentials (0.7.1)
 
-From 0.7.1, the `smolquery-env` Secret must hold `SMOLQUERY_WEB_USERNAME`,
-`SMOLQUERY_WEB_PASSWORD`, and `SMOLQUERY_SECRET_KEY_BASE` for any pod whose
-roles include `web`. A web pod without them **refuses to boot**, and that
-boot failure stops the pod's other roles too. Push the secrets before you
-roll the image.
+From 0.7.1, the `smolquery-env` Secret must hold three values for any pod
+whose roles include `web`:
+
+- `SMOLQUERY_WEB_USERNAME`
+- `SMOLQUERY_WEB_PASSWORD`
+- `SMOLQUERY_SECRET_KEY_BASE`
+
+A web pod without them **refuses to boot**. That boot failure stops the
+pod's other roles too. Push the secrets before you roll the image.
 
 ## Sizing write partitions
 
@@ -112,56 +125,61 @@ Two versions must agree for a node to run:
 - The **extension version** ships in the image, inside the pinned DuckDB
   driver.
 
-A node can attach a catalog only when its extension speaks the catalog's
-format. Most DuckDB pin bumps keep the format. A pin bump that raises it
-(0.4 → 1.0 arrived with DuckDB 1.5.3) is a hard barrier. No rolling upgrade
-can straddle it.
+A node can attach a catalog only when its extension supports the catalog's
+format. Most DuckDB pin bumps keep the format. A pin bump that raises the
+format is a hard barrier (the 0.4 → 1.0 raise arrived with DuckDB 1.5.3).
+A rolling upgrade cannot run nodes on both sides of that barrier.
 
 ### What each mismatch does
 
-- **New extension, old catalog**: the attach is refused. The node
-  crash-loops at boot. Nothing changes. This is the default behavior, and it
-  is an interlock: the rollout halts loudly before anything irreversible
-  happens. Old pods keep serving. Rollback is a redeploy of the old image.
+- **New extension, old catalog**: the node refuses the attach. The node
+  crash-loops at boot. Nothing changes. This is the default behavior. It is
+  an interlock: the rollout halts visibly before an irreversible change.
+  Old pods keep serving. Rollback is a redeploy of the old image.
 - **Old extension, migrated catalog**: every catalog operation fails. The
-  only path back is a restore of the metadata database from a snapshot.
+  only recovery is a restore of the metadata database from a snapshot.
 
 ### The migration flag
 
 `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION=true` turns the refusal into a
-migration. The first new-extension node to attach rewrites the shared
-catalog to its format, in place. The migration is **one-way**.
+migration. The first node with the new extension that attaches rewrites the
+shared catalog to its format, in place. The migration is **one-way**.
 
-From that instant, every old-extension pod fails its catalog operations —
-queries, seals, commits — until the rollout replaces it. That window is an
-availability gap, not corruption. The old pods' statements fail against
-tables they no longer understand, and DuckLake's metadata operations stay
-transactional throughout.
+From that instant, every pod with the old extension fails its catalog
+operations: queries, seals, and commits. The failures continue until the
+rollout replaces the pod. That window is an availability gap, not
+corruption.
+
+The old pods' statements fail against tables they no longer understand.
+DuckLake's metadata operations stay transactional throughout.
 
 The flag defaults to `false` because the failure modes are not symmetric.
-Off, an accidental format-bumping upgrade costs a redeploy. On, the same
-accident cuts every old pod off from a catalog they can never use again, and
-the only rollback is a database restore.
+With the flag off, an accidental format-bumping upgrade costs a redeploy.
+With the flag on, the same accident cuts every old pod off from the
+catalog. The old pods can never use the catalog again. The only rollback
+is a database restore.
 
 ### Upgrade procedure
 
 Use this procedure for a format-bumping upgrade on a deployment with data:
 
 1. **Snapshot the metadata database.** The snapshot plus the old image is
-   the whole rollback story.
+   the full rollback plan.
 2. Set `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION=true` in the environment the
    pods read. Confirm the value reaches the pods.
 3. Roll the new image. The first pod to attach migrates the catalog. Expect
-   old pods to error until the rollout completes.
-4. Verify: a write, a query, a seal.
-5. Unset the flag. A dev or sandbox cluster can keep it on as a deliberate
-   trade — self-healing rollouts instead of the interlock. Keep the
-   interlock when a catalog restore would hurt.
+   errors from old pods until the rollout completes.
+4. Verify a write, a query, and a seal.
+5. Unset the flag. A dev or sandbox cluster can keep the flag on as a
+   deliberate trade: self-healing rollouts instead of the interlock. Keep
+   the interlock when a catalog restore is costly.
 
 ### Known boundary
 
 Parallel StatefulSet rollouts can attach several stale-catalog pods at the
-same moment. Each one requests the migration. DuckLake runs the migration
-inside the attach's transaction, but this codebase has no test that pins
-concurrent migration of one catalog. If a failed first boot is not
-acceptable, roll one pod first and let it migrate alone.
+same moment. Each pod requests the migration. DuckLake runs the migration
+inside the attach's transaction. However, this codebase has no test that
+pins concurrent migration of one catalog.
+
+If a failed first boot is not acceptable, roll one pod first. Let that pod
+migrate alone.

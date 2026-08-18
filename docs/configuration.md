@@ -1,15 +1,21 @@
 # Configuration
 
-smolquery is configured by environment variables in a release (resolved at boot
-in `config/runtime.exs`) and by application config in a Mix project. The
-environment variables are the deployment surface; the application config is the
-full set of dials behind them. Release environment values are validated before
-any service subtree starts. Numeric operational values must be positive decimal integers unless a setting
-explicitly documents zero as a switch (such as `SMOLQUERY_COMMIT_SIBLINGS`),
-listener ports must be in `1..65535`, IP values must be valid IPv4 or IPv6
-addresses, and `SMOLQUERY_MAX_RESULT_ROWS` additionally accepts `infinity`.
-Invalid values name the variable, received value, and accepted shape in the boot
-error.
+Environment variables configure a release. Application config configures a Mix
+project. `config/runtime.exs` resolves the environment variables at boot. The
+environment variables are the deployment surface. The application config is the
+full set of settings behind them.
+
+The release validates environment values before any service subtree starts:
+
+- A numeric operational value must be a positive decimal integer. The exception
+  is a setting that documents zero as a switch, such as
+  `SMOLQUERY_COMMIT_SIBLINGS`.
+- A listener port must be in `1..65535`.
+- An IP (Internet Protocol) value must be a valid IPv4 or IPv6 address.
+- `SMOLQUERY_MAX_RESULT_ROWS` also accepts `infinity`.
+
+An invalid value fails the boot. The boot error names the variable, the
+received value, and the accepted shape.
 
 ## Environment variables
 
@@ -17,91 +23,93 @@ error.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_ROLES` | which service subtrees start — `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web` (all). An unknown name fails the boot |
-| `SMOLQUERY_API_KEY` | the Bearer key every `/v1` route requires; a node with the `:api` role and no key refuses to boot |
-| `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | API bind (`0.0.0.0` in the prod image / `4000`) |
-| `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` | the most ingest-body bytes an API node admits at once (T-245). `SmolqueryApi.Admission` counts `POST .../insert` and `.../load` bodies by declared `content-length` before any body is read, and refuses past the limit with a 429 and `retry-after: 1` — the refusal costs a header read, never a body, so a client burst sheds load instead of OOMKilling the pod. Unset, the limit is **a quarter of the container's cgroup memory limit**, floored at one NDJSON body (`8000000`); without a cgroup limit, `268435456`. An idle counter always admits one request — the route's own body cap decides what is too large |
-| `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | web UI bind — expose the listener only on purpose (`127.0.0.1` / `4002`) |
-| `SMOLQUERY_METRICS_IP` / `SMOLQUERY_METRICS_PORT` | metrics listener bind — `GET /metrics` on every node, whatever its roles, gated by the internal secret (`127.0.0.1` single-node, `0.0.0.0` in the prod image / `4003`) |
-| `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | the basic-auth credential every UI route requires; a node with the `:web` role and no credential refuses to boot |
-| `SMOLQUERY_WEB_HOST` | the public host of the UI; also the default `check_origin` source (`localhost`) |
-| `SMOLQUERY_WEB_CHECK_ORIGIN` | `false` to accept any websocket origin, or a comma-separated origin list — each entry needs a scheme or a leading `//`, e.g. `https://ui.example.com` (the `SMOLQUERY_WEB_HOST` value) |
-| `SMOLQUERY_SECRET_KEY_BASE` | signs the web UI session that guards the LiveView socket; **required** on a node with the `:web` role, at least 64 bytes (`mix phx.gen.secret`), same value on every `:web` node |
-| `SMOLQUERY_INTERNAL_SECRET` | what internal HTTP proves itself with; generated per boot on a single node, required as a non-empty shared value before a cluster boots |
+| `SMOLQUERY_ROLES` | Selects the service subtrees that start (`all`). Use `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web`. An unknown name fails the boot |
+| `SMOLQUERY_API_KEY` | The Bearer key that every `/v1` route requires. A node with the `:api` role and no key refuses to boot |
+| `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | The API (application programming interface) bind address and port (`0.0.0.0` in the prod image / `4000`) |
+| `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` | The most ingest-body bytes that an API node admits at once (T-245). `SmolqueryApi.Admission` counts `POST .../insert` and `.../load` bodies by the declared `content-length` before it reads any body. Past the limit, it refuses a request with a 429 and `retry-after: 1`. The refusal costs a header read, never a body. A client burst thus sheds load instead of an out-of-memory (OOM) kill of the pod. Unset, the limit is a quarter of the container's cgroup memory limit, with a floor of one NDJSON (newline-delimited JSON) body (`8000000`). Without a cgroup limit, the value is `268435456`. An idle counter always admits one request; the route's own body cap decides what is too large |
+| `SMOLQUERY_WEB_IP` / `SMOLQUERY_WEB_PORT` | The web UI (user interface) bind address and port (`127.0.0.1` / `4002`). Expose the listener only on purpose |
+| `SMOLQUERY_METRICS_IP` / `SMOLQUERY_METRICS_PORT` | The metrics listener bind address and port (`127.0.0.1` single-node, `0.0.0.0` in the prod image / `4003`). Every node serves `GET /metrics`, whatever its roles. The internal secret gates the endpoint |
+| `SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD` | The basic-auth credential that every UI route requires. A node with the `:web` role and no credential refuses to boot |
+| `SMOLQUERY_WEB_HOST` | The public host of the UI (`localhost`). It is also the default `check_origin` source |
+| `SMOLQUERY_WEB_CHECK_ORIGIN` | Set `false` to accept any websocket origin. Or set a comma-separated origin list (default: the `SMOLQUERY_WEB_HOST` value). Each entry needs a scheme or a leading `//`, for example `https://ui.example.com` |
+| `SMOLQUERY_SECRET_KEY_BASE` | Signs the web UI session that guards the LiveView socket. **Required** on a node with the `:web` role. The value must be at least 64 bytes (`mix phx.gen.secret`). Set the same value on every `:web` node |
+| `SMOLQUERY_INTERNAL_SECRET` | The secret that internal HTTP uses to prove itself. A single node generates it per boot. A cluster requires a non-empty shared value before it boots |
 
 ### Storage and the catalog
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_DATA_DIR` | the one directory everything durable lives under (`/data` in the image) |
-| `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | split a tier onto its own disk (under the data dir) |
-| `SMOLQUERY_CATALOG` | DuckLake metadata database, e.g. `postgres:dbname=smolquery` (the data dir's SQLite) |
-| `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format — one-way; nodes on the old extension cannot read the result (`false`; see [deployment.md](deployment.md#catalog-format-upgrades)) |
-| `SMOLQUERY_SNAPSHOT_KEEP_MS` | the time-travel promise; must exceed the longest pinned query and `retire_grace_ms` (`86400000`) |
-| `SMOLQUERY_SEAL_ROW_GROUP_SIZE` | `ROW_GROUP_SIZE` on every sealed Parquet `COPY` — seal and compaction alike (`1048576`, T-280). A sealed-tier scan over `httpfs` pays roughly one range request per row group, so this value sets a query's request count per segment; smaller groups buy finer clustered-key pruning at that cost. Applies to newly written segments only — compaction never revisits a healthy-sized segment, so old data keeps its old row groups. The seal path has no OOM adaptation and a claim's inputs are frozen, so a seal `COPY` that deterministically OOMs at this size retries forever: on a memory-tight node, lower this value or raise `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
-| `SMOLQUERY_MERGE_INPUTS_PER_CALL` | cap on `read_parquet` inputs any one of the merge's engine calls carries (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout. The merge reads a larger input list in capped chunks into a temp table, so a seal claim of any size merges. The default's derivation is in `Smolquery.StorageService.Runtime`'s docs |
-| `SMOLQUERY_STORAGE_MEMORY_LIMIT` | DuckDB memory limit for the storage merge engine (T-250). Unset, the limit is **half the container's cgroup memory limit**, so the merge scales with the pod; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT` — one size for every engine on every role, which is what left a 4 Gi pod merging inside 954 MiB. The resolved value and its source are logged at boot |
-| `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` | DuckDB memory limit for the compaction engine (T-259). Compaction runs on its own engine so a timed-out merge cannot starve seals, and the compactor recycles it after a call exit. Unset, the limit is **a quarter of the container's cgroup memory limit**; only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT`. The resolved value and its source are logged at boot |
-| `SMOLQUERY_COMPACT_MAX_ROWS` | cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes, and on ~100x-compressible data a 47 MiB group held ~25M rows — merge cost scales with rows, so the group blew the merge's five-minute budget and re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O. A head file no neighbor fits beside under the cap is skipped, so a row-heavy file cannot wedge the table's backlog. The default is a start, not a pin-rate prediction: the compactor adapts the cap per table — a merge OOM halves a table's cap, never below `65536` rows, and sustained evidence at the tightened cap earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`, T-262) |
-| `SMOLQUERY_COMPACT_BUCKET_MS` | the time-bucket width compaction ownership shards on (`3600000`, T-269). Ownership used to be per table, so one node compacted a hot table alone while its peers idled; the ring now owns `{table, bucket}`, where a segment's bucket is its ULID timestamp over this value. **Set it identically on every storage node** — disjointness requires every node to compute the same bucket ids, and divergent values during a rolling change make two nodes merge the same runs until the rollout completes. A merge group stays inside its bucket except one case: a bucket that cannot meet `compact_min_inputs` alone rolls its candidates into the node's next owned bucket, so quiet tables still compact. Smaller buckets spread a backlog across more nodes but widen those carries |
-| `SMOLQUERY_S3_BUCKET` | puts the sealed tier on an S3-compatible store: points both the storage service's and the query service's `store:` at `Segments.Store.S3` |
-| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | static S3 credentials. Set both, or neither — leaving both out uses the [AWS credential chain](#s3-credentials) instead. One without the other is rejected at startup |
-| `SMOLQUERY_S3_ENDPOINT` | S3-compatible endpoint (unset targets AWS S3) |
-| `SMOLQUERY_S3_REGION` | S3 region (`us-east-1`) |
+| `SMOLQUERY_DATA_DIR` | The one directory that holds everything durable (`/data` in the image) |
+| `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | Splits a tier onto its own disk (default: under the data dir) |
+| `SMOLQUERY_CATALOG` | The DuckLake metadata database, for example `postgres:dbname=smolquery` (default: the data dir's SQLite) |
+| `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format (`false`). The migration is one-way. Nodes on the old extension cannot read the result. See [deployment.md](deployment.md#catalog-format-upgrades) |
+| `SMOLQUERY_SNAPSHOT_KEEP_MS` | The time-travel promise (`86400000`). The value must exceed the longest pinned query. It must also exceed `retire_grace_ms` |
+| `SMOLQUERY_SEAL_ROW_GROUP_SIZE` | Sets `ROW_GROUP_SIZE` on every sealed Parquet `COPY`, for seal and compaction alike (`1048576`, T-280). A sealed-tier scan over `httpfs` pays roughly one range request per row group. This value thus sets a query's request count per segment. Smaller groups buy finer clustered-key pruning at that cost. The setting applies to newly written segments only. Compaction never revisits a healthy-sized segment, so old data keeps its old row groups. The seal path has no OOM adaptation. A claim's inputs are frozen. A seal `COPY` that deterministically OOMs at this size therefore retries forever. On a memory-tight node, lower this value or raise `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
+| `SMOLQUERY_MERGE_INPUTS_PER_CALL` | The cap on `read_parquet` inputs in any one engine call of the merge (`12`, T-246/T-247). Per-input cost over `httpfs` is what outruns the engine's 30 s call timeout. The merge reads a larger input list in capped chunks into a temp table. A seal claim of any size therefore merges. The docs of `Smolquery.StorageService.Runtime` derive the default |
+| `SMOLQUERY_STORAGE_MEMORY_LIMIT` | The DuckDB memory limit for the storage merge engine (T-250). Unset, the limit is half the container's cgroup memory limit. The merge thus scales with the pod. Only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT`. That fallback is one size for every engine on every role. That one size is what left a 4 Gi pod merging inside 954 MiB. The boot log shows the resolved value and its source |
+| `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` | The DuckDB memory limit for the compaction engine (T-259). Compaction runs on its own engine, so a timed-out merge cannot starve seals. The compactor recycles the engine after a call exit. Unset, the limit is a quarter of the container's cgroup memory limit. Only without a cgroup limit does the engine fall back to `SMOLQUERY_MEMORY_LIMIT`. The boot log shows the resolved value and its source |
+| `SMOLQUERY_COMPACT_MAX_ROWS` | The cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes only. On ~100x-compressible data, a 47 MiB group held ~25M rows. Merge cost scales with rows, so that group blew the merge's five-minute budget. It then re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O (input/output). The compactor skips a head file when no neighbor fits beside it under the cap. A row-heavy file thus cannot wedge the table's backlog. The default is a start, not a prediction of the pin rate. The compactor adapts the cap per table. A merge OOM halves a table's cap, never below `65536` rows. Sustained evidence at the tightened cap earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`, T-262) |
+| `SMOLQUERY_COMPACT_BUCKET_MS` | The time-bucket width that compaction ownership shards on (`3600000`, T-269). Ownership used to be per table. One node then compacted a hot table alone while its peers idled. The ring now owns `{table, bucket}`. A segment's bucket is its ULID (Universally Unique Lexicographically Sortable Identifier) timestamp over this value. **Set it identically on every storage node.** Disjointness requires every node to compute the same bucket ids. Divergent values during a rolling change make two nodes merge the same runs until the rollout completes. A merge group stays inside its bucket, with one exception. A bucket that cannot meet `compact_min_inputs` alone rolls its candidates into the node's next owned bucket. Quiet tables thus still compact. Smaller buckets spread a backlog across more nodes. They also widen those carries |
+| `SMOLQUERY_S3_BUCKET` | Puts the sealed tier on an S3-compatible store. It points the `store:` of both the storage service and the query service at `Segments.Store.S3` |
+| `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | Static S3 credentials. Set both, or neither. With both unset, the store uses the AWS (Amazon Web Services) [credential chain](#s3-credentials) instead. Startup rejects one without the other |
+| `SMOLQUERY_S3_ENDPOINT` | The S3-compatible endpoint. Unset targets AWS S3 |
+| `SMOLQUERY_S3_REGION` | The S3 region (`us-east-1`) |
 | `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (`path` when an endpoint is set) |
-| `SMOLQUERY_S3_STAGING_DIR` | local scratch for segments before upload (`<data dir>/sealed-staging`) |
+| `SMOLQUERY_S3_STAGING_DIR` | The local scratch directory for segments before upload (`<data dir>/sealed-staging`) |
 
 ### Engine and the write path
 
-The build packages DuckDB 1.5.3 through ADBC 0.12.1 and every database process
-uses that same driver version. The compile-time asset is selected from the build
-target: macOS uses the universal asset, while Linux GNU uses the matching
-`aarch64` or `x86_64` asset. An unsupported target falls back to ADBC's own
-driver matrix, so Mix tasks still run there; the engine then refuses to start
-until the pinned version's driver exists for that target.
+The build packages DuckDB 1.5.3 through ADBC (Arrow Database Connectivity)
+0.12.1. Every database process uses that same driver version. The build target
+selects the compile-time asset. macOS uses the universal asset. Linux GNU uses
+the matching `aarch64` or `x86_64` asset.
+
+An unsupported target falls back to ADBC's own driver matrix, so Mix tasks
+still run there. On such a target, the engine refuses to start until the pinned
+version's driver exists.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_MEMORY_LIMIT` | per-engine DuckDB memory limit (`2GB`). The storage merge engine resolves its own instead — see `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
-| `SMOLQUERY_ENGINE_THREADS` | DuckDB threads for one standalone engine, and the number the write pool divides (the deployment host's scheduler count) |
-| `SMOLQUERY_MAX_RESULT_ROWS` | ceiling on rows `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
-| `SMOLQUERY_SPILL_DIR` | root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage; it is intentionally separate from `SMOLQUERY_DATA_DIR` |
-| `SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE` | per-instance spill limit (e.g. `10GiB`). DuckDB otherwise permits up to 90% of free space per instance. The limit multiplies: `N` concurrent instances may spill `N ×` this value, so it is not a disk budget |
-| `SMOLQUERY_FLUSH_INTERVAL_MS` | group-commit cadence, and so the ack-latency bound (`1000`) |
-| `SMOLQUERY_COMMIT_SIBLINGS` | the in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window opening below it closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead — waiting only buys batching when other writers are active. `0` turns the short window off |
-| `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | the group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). A few ms rather than zero so a burst's simultaneous first inserts still share one commit |
-| `SMOLQUERY_FLUSH_MAX_BYTES` | the other trigger: accumulated wire bytes that force a group commit before the interval elapses (`2000000`). Whichever fires first ends the commit, so a batch size and arrival rate that reach this sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative — raise it to let the cadence actually govern, at the cost of resident bytes per table |
-| `SMOLQUERY_MAX_BUFFERED_BYTES` | the admission ceiling on one table's accumulator, past which a write is refused with `buffer_full` (`64000000`). Must stay comfortably above `SMOLQUERY_FLUSH_MAX_BYTES` — the accumulator overshoots the flush trigger by up to one batch. A pair that is not strictly greater logs a warning at the buffer boot, and the row-side pair (`flush_max_rows`/`max_buffered_rows`) gets the same check |
-| `SMOLQUERY_ENCODE_CONCURRENCY` | how many of a table's Parquet encodes may run at once (the node's scheduler count — a container held to one core encodes serially, which is what one core means); the manifest append, replication round and replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS quotas — set this and the pool size explicitly where quotas are the fence |
-| `SMOLQUERY_FLUSH_WRITER` | which writer turns a flush into Parquet: `duckdb` (default) or `polars`; any other value fails boot. `duckdb` also stops the ingest edge parsing — the NDJSON body is forwarded to the owning buffer as bytes and one `COPY ... read_json` parses, sorts and writes it at flush. The default path defers schema validation to flush, then salvages a failed batch row by row, preserving per-row `insertErrors`; a bad row does not always fail the whole commit, and successful rows are still written. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
-| `SMOLQUERY_WRITE_POOL_SIZE` | how many DuckDB instances a `duckdb` flush writer runs (the node's scheduler count, capped at `32`; valid `1..32` — boot refuses anything else). Selected per segment, not per table, since a table has one committer and hashing on it would send every flush to one connection. Each member gets `Smolquery.Engine`'s thread count divided by the pool size (floor one) and inherits its memory limit whole — the two variables below size a member explicitly. When no explicit engine thread count is configured, both the engine and the pool resolve `System.schedulers_online()` on the deployment host at boot, not on the release builder. Deriving the count from the host means the *declared* DuckDB write memory scales with it: see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`, and read the resolved numbers off the `buffer shape:` line at boot |
-| `SMOLQUERY_WRITE_ENGINE_THREADS` | DuckDB threads for one write-pool member, replacing the division. The division describes a budget only while the pool is smaller than the thread count — past that it sits at its floor of one, and an operator who wants a different shape states the number |
-| `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` | DuckDB memory limit for one write-pool member (e.g. `512MB`). Unset, every member inherits `SMOLQUERY_MEMORY_LIMIT` whole, so the node's declared DuckDB write budget is `write_pool_size ×` that — a size string has its own grammar, and nothing divides it for you |
-| `SMOLQUERY_READ_ENGINE_THREADS` | DuckDB threads for one query job's private engine (T-279), the read-side counterpart of `SMOLQUERY_WRITE_ENGINE_THREADS`. Unset, each job engine takes DuckDB's own core detection, which a cgroup-limited container can misreport. A sealed-tier scan overlaps its `httpfs` range requests per thread, so this is also the scan's request-concurrency ceiling; jobs in flight multiply it, up to `max_concurrent_jobs` |
-| `SMOLQUERY_WRITE_PARTITIONS` | how many buffer identities one table's writes spread over, and so how many nodes ingest and seal it (`1`). This is the deployment-wide *default*: a table's own count in catalog metadata can raise it online, per table, via `PATCH {"partitions": N}` (T-304) — the effective count is the maximum of the two. Reader and writer defaults must match — set it identically on ingest and query roles. **Lower it only with the fleet at rest**: a table without its own catalog count has no floor but this default, so lowering it under load strands that table's hot rows in partitions readers no longer expand |
-| `SMOLQUERY_HOT_SERVER_PORT` | port `HotServer` binds to serve micro-segments over `httpfs` (`4001`), on every node — peers derive each other's hot-tier URLs from node name plus this port |
-| `SMOLQUERY_HOT_SERVER_IP` | `HotServer` bind (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
-| `SMOLQUERY_BUFFER_BASE_URL` | where the sealer and query planner reach the hot tier on a single node (`http://127.0.0.1:4001`) |
+| `SMOLQUERY_MEMORY_LIMIT` | The per-engine DuckDB memory limit (`2GB`). The storage merge engine resolves its own limit instead — see `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
+| `SMOLQUERY_ENGINE_THREADS` | The DuckDB threads for one standalone engine (default: the deployment host's scheduler count). The write pool also divides this number |
+| `SMOLQUERY_MAX_RESULT_ROWS` | The ceiling on rows that `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
+| `SMOLQUERY_SPILL_DIR` | The root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage. It is intentionally separate from `SMOLQUERY_DATA_DIR` |
+| `SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE` | The per-instance spill limit, for example `10GiB`. DuckDB otherwise permits up to 90% of free space per instance. The limit multiplies: `N` concurrent instances may spill `N ×` this value. It is not a disk budget |
+| `SMOLQUERY_FLUSH_INTERVAL_MS` | The group-commit cadence (`1000`). It is thus the ack-latency bound |
+| `SMOLQUERY_COMMIT_SIBLINGS` | The in-flight insert count at which the full interval applies (`5`, Postgres's `commit_siblings`). A window that opens below this count closes after `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` instead. The wait only buys batching when other writers are active. `0` turns the short window off |
+| `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | The group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). The value is a few ms rather than zero, so the simultaneous first inserts of a burst still share one commit |
+| `SMOLQUERY_FLUSH_MAX_BYTES` | The other flush trigger (`2000000`): accumulated wire bytes that force a group commit before the interval elapses. Whichever trigger fires first ends the commit. A batch size and arrival rate that reach this cap sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative. Raise the cap to let the cadence govern, at the cost of resident bytes per table |
+| `SMOLQUERY_MAX_BUFFERED_BYTES` | The admission ceiling on one table's accumulator (`64000000`). Past it, the buffer refuses a write with `buffer_full`. Keep the value above `SMOLQUERY_FLUSH_MAX_BYTES` with a clear margin; the accumulator overshoots the flush trigger by up to one batch. A pair that is not strictly greater logs a warning at the buffer boot. The row-side pair (`flush_max_rows`/`max_buffered_rows`) gets the same check |
+| `SMOLQUERY_ENCODE_CONCURRENCY` | How many of a table's Parquet encodes run at once (default: the node's scheduler count). A container held to one core thus encodes serially; that is what one core means. The manifest append, the replication round, and the replies stay serialized in the Committer regardless. The scheduler count follows cpusets, not CFS (Completely Fair Scheduler) quotas. Where quotas are the fence, set this value and the pool size explicitly |
+| `SMOLQUERY_FLUSH_WRITER` | Selects the writer that turns a flush into Parquet: `duckdb` (default) or `polars`. Any other value fails the boot. `duckdb` also stops the parsing at the ingest edge. The NDJSON body goes to the owning buffer as bytes. One `COPY ... read_json` parses, sorts, and writes it at flush. The default path defers schema validation to flush. It then salvages a failed batch row by row. This preserves per-row `insertErrors`. A bad row does not always fail the whole commit; the writer still writes the successful rows. `/insert` accepts NDJSON only; the JSON-array envelope was removed |
+| `SMOLQUERY_WRITE_POOL_SIZE` | How many DuckDB instances a `duckdb` flush writer runs (default: the node's scheduler count, capped at `32`). Valid values are `1..32`; the boot refuses anything else. The pool selects a member per segment, not per table. A table has one committer, so a hash on the table would send every flush to one connection. Each member gets the thread count of `Smolquery.Engine` divided by the pool size (floor one). Each member inherits the engine's memory limit whole. The two variables below size a member explicitly. With no explicit engine thread count, both the engine and the pool resolve `System.schedulers_online()` at boot on the deployment host, not on the release builder. The host-derived count means the *declared* DuckDB write memory scales with it — see `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT`. Read the resolved numbers off the `buffer shape:` line at boot |
+| `SMOLQUERY_WRITE_ENGINE_THREADS` | The DuckDB threads for one write-pool member. It replaces the division. The division describes a budget only while the pool is smaller than the thread count. Past that point, the result sits at its floor of one. An operator who wants a different shape states the number |
+| `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` | The DuckDB memory limit for one write-pool member, for example `512MB`. Unset, every member inherits `SMOLQUERY_MEMORY_LIMIT` whole. The node's declared DuckDB write budget is then `write_pool_size ×` that value. A size string has its own grammar; nothing divides it for you |
+| `SMOLQUERY_READ_ENGINE_THREADS` | The DuckDB threads for the private engine of one query job (T-279). It is the read-side counterpart of `SMOLQUERY_WRITE_ENGINE_THREADS`. Unset, each job engine takes DuckDB's own core detection; a cgroup-limited container can misreport that. A sealed-tier scan overlaps its `httpfs` range requests per thread. This value is thus also the request-concurrency ceiling of the scan. Jobs in flight multiply it, up to `max_concurrent_jobs` |
+| `SMOLQUERY_WRITE_PARTITIONS` | How many buffer identities the writes of one table spread over (`1`). It thus sets how many nodes ingest and seal the table. This is the deployment-wide *default*. A table's own count in catalog metadata can raise it online, per table, via `PATCH {"partitions": N}` (T-304). The effective count is the maximum of the two. Reader and writer defaults must match; set the value identically on ingest and query roles. **Lower it only with the fleet at rest.** A table without its own catalog count has no floor but this default. A decrease under load strands that table's hot rows in partitions that readers no longer expand |
+| `SMOLQUERY_HOT_SERVER_PORT` | The port `HotServer` binds to serve micro-segments over `httpfs` (`4001`), on every node. Peers derive each other's hot-tier URLs from the node name plus this port |
+| `SMOLQUERY_HOT_SERVER_IP` | The `HotServer` bind address (`127.0.0.1` single-node, `0.0.0.0` once clustered) |
+| `SMOLQUERY_BUFFER_BASE_URL` | Where the sealer and the query planner reach the hot tier on a single node (`http://127.0.0.1:4001`) |
 
 ### Clustering
 
 | variable | effect (default) |
 |---|---|
-| `CATALOG_DATABASE_URL` | Postgres URL (e.g. `postgres://user:pass@host/db`). This is what makes a cluster: it tiers the DuckLake catalog onto Postgres (loading DuckDB's `postgres` extension alongside `ducklake`) and enables node discovery (`Smolquery.Cluster`, over `libcluster_postgres`) through that same database. One node is not a cluster, so a single-node deployment leaves it unset. `SMOLQUERY_CATALOG` overrides just the catalog side, e.g. to point it at a different database than discovery uses |
-| `SMOLQUERY_BUFFER_NODES` | the buffer fleet this deployment expects, as at most 256 comma-separated `name@host` node names. Names stay as bounded strings during release configuration and become node atoms only when the expected-nodes keeper consumes the fleet, so unrelated roles do not create atoms from this setting. An empty value seeds nothing and the keeper keeps polling, the same as unset. A reader fails a query when one of these cannot answer, instead of counting its unsealed rows as zero — `:pg` membership drops a crashed node exactly the way it drops a drained one, and only the expected set can tell them apart. Scaling down is drain, stop, *then* remove from the expected set. Unset (single-node, dev), the live ring is the whole set and nothing changes. With replication on, up to `replication_factor - 1` of these may be absent and reads still answer completely (T-97). Under clustering (`CATALOG_DATABASE_URL`), this list only *seeds* a Postgres-backed row on first boot (T-109): after that the live set is the row, readable on every node within ~1s of a change and CAS-writable at runtime (`Smolquery.BufferService.ExpectedNodes.resize/3`) with no redeploy — editing this variable later has no effect on an already-seeded deployment |
-| `SMOLQUERY_BUFFER_REPLICATION` | replication factor for the hot tier's unsealed tail (T-96). Set to `N >= 2` to enable `Replicator.SegmentShipping`; values below `2` fail boot. Every group commit is on `N` disks before its ack, a ring smaller than `N` refuses writes, and readers tolerate `N - 1` absent buffer nodes. Set it on every role — buffer nodes ship, query nodes use it to size read tolerance. Unset: single-copy (`Replicator.None`). **Raising it on a fleet with data**: read tolerance comes from this setting, not from actual copy counts, and nothing backfills segments committed before the change — until that pre-existing unsealed tail seals, a rollout that takes a node down can silently drop it from reads. Force-seal first (drain each node, or wait out `seal_max_age_ms`) before rolling restarts under the new factor |
-| `SMOLQUERY_BUFFER_REPLICAS` | on Kubernetes, the buffer StatefulSet's replica count: `rel/env.sh.eex` expands it into `SMOLQUERY_BUFFER_NODES` using pod-DNS naming (`SMOLQUERY_BUFFER_STATEFULSET`, default `smolquery-buffer`), so the expected fleet carries no hardcoded namespace and scaling is one number. Ignored if `SMOLQUERY_BUFFER_NODES` is set explicitly |
-| `GEN_RPC_PORT` | inter-node transport port (`5369`) |
-| `GEN_RPC_TLS` | `true` to switch buffer/query inter-node traffic to mutual TLS (`false` by default). Verification is chain-only against the cluster CA (the emqx gen_rpc fork does no hostname/CN check), so the CA is the trust boundary: certificate files are per node (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the file) but any CA-signed certificate authenticates to any peer — a leaked node cert means rotating the CA, not just that node |
-| `GEN_RPC_SSL_PORT` | gen_rpc TLS port (`5870`) |
-| `DIST_TLS` | `true` to run Erlang distribution (cluster membership only) over TLS with the same certificates (`false` by default) — set in `rel/env.sh.eex`, not `config/runtime.exs`, since distribution starts before the release's Elixir config does |
-| `POD_NAME` / `POD_NAMESPACE` | when set (a Kubernetes Downward API convention), `rel/env.sh.eex` derives `RELEASE_NODE` from the pod's stable headless-service DNS name — the same name a peer needs to reach this node |
-| `HEADLESS_SERVICE` | the headless-service name in that derived node name (`smolquery-headless`) |
-| `RELEASE_NODE_HOST` | overrides the derived host part of `RELEASE_NODE` outright (non-StatefulSet deployments) |
+| `CATALOG_DATABASE_URL` | The Postgres URL, for example `postgres://user:pass@host/db`. This is what makes a cluster. It tiers the DuckLake catalog onto Postgres; DuckDB loads the `postgres` extension alongside `ducklake`. It also enables node discovery through that same database (`Smolquery.Cluster`, over `libcluster_postgres`). One node is not a cluster, so a single-node deployment leaves it unset. `SMOLQUERY_CATALOG` overrides just the catalog side, for example to point it at a different database than discovery uses |
+| `SMOLQUERY_BUFFER_NODES` | The buffer fleet that this deployment expects: at most 256 comma-separated `name@host` node names. The names stay bounded strings during release configuration. They become node atoms only when the expected-nodes keeper consumes the fleet. Unrelated roles thus do not create atoms from this setting. An empty value seeds nothing; the keeper keeps polling, the same as unset. A reader fails a query when one of these nodes cannot answer. It does not count that node's unsealed rows as zero. `:pg` membership drops a crashed node exactly the way it drops a drained one. Only the expected set can tell them apart. To scale down: drain, stop, *then* remove the node from the expected set. Unset (single-node, dev), the live ring is the whole set; nothing changes. With replication on, up to `replication_factor - 1` of these nodes may be absent while reads still answer completely (T-97). Under clustering (`CATALOG_DATABASE_URL`), this list only *seeds* a Postgres-backed row on the first boot (T-109). After that, the live set is the row. Every node reads a change within ~1 s. A CAS (compare-and-swap) write can change the row at runtime (`Smolquery.BufferService.ExpectedNodes.resize/3`) with no redeploy. A later edit of this variable has no effect on an already-seeded deployment |
+| `SMOLQUERY_BUFFER_REPLICATION` | The replication factor for the hot tier's unsealed tail (T-96). Set `N >= 2` to enable `Replicator.SegmentShipping`; a value below `2` fails the boot. Every group commit is on `N` disks before its ack. A ring smaller than `N` refuses writes. Readers tolerate `N - 1` absent buffer nodes. Set it on every role: buffer nodes ship, query nodes size read tolerance from it. Unset means single-copy (`Replicator.None`). An increase on a fleet with data has a caveat. Read tolerance comes from this setting, not from actual copy counts. Nothing backfills segments committed before the change. Until that pre-existing unsealed tail seals, a rollout that takes a node down can silently drop it from reads. **Force-seal first** (drain each node, or wait out `seal_max_age_ms`) before rolling restarts under the new factor |
+| `SMOLQUERY_BUFFER_REPLICAS` | On Kubernetes, the replica count of the buffer StatefulSet. `rel/env.sh.eex` expands it into `SMOLQUERY_BUFFER_NODES` with pod-DNS (Domain Name System) naming (`SMOLQUERY_BUFFER_STATEFULSET`, default `smolquery-buffer`). The expected fleet thus carries no hardcoded namespace; scaling is one number. The release ignores it if `SMOLQUERY_BUFFER_NODES` is set explicitly |
+| `GEN_RPC_PORT` | The inter-node transport port (`5369`) |
+| `GEN_RPC_TLS` | `true` switches buffer/query inter-node traffic to mutual TLS (Transport Layer Security) (`false`). Verification is chain-only against the cluster CA (certificate authority); the emqx gen_rpc fork does no hostname or CN (common name) check. The CA is thus the trust boundary. Certificate files are per node (`GEN_RPC_TLS_DIR`, default `/etc/smolquery/gen-rpc-tls`; `POD_NAME` names the file). Any CA-signed certificate authenticates to any peer. A leaked node certificate thus means a rotation of the CA, not just of that node |
+| `GEN_RPC_SSL_PORT` | The gen_rpc TLS port (`5870`) |
+| `DIST_TLS` | `true` runs Erlang distribution (cluster membership only) over TLS with the same certificates (`false`). Set it in `rel/env.sh.eex`, not `config/runtime.exs`. Distribution starts before the release's Elixir config does |
+| `POD_NAME` / `POD_NAMESPACE` | When set (a Kubernetes Downward API convention), `rel/env.sh.eex` derives `RELEASE_NODE` from the pod's stable headless-service DNS name. That is the same name a peer needs to reach this node |
+| `HEADLESS_SERVICE` | The headless-service name in that derived node name (`smolquery-headless`) |
+| `RELEASE_NODE_HOST` | Overrides the derived host part of `RELEASE_NODE` outright (non-StatefulSet deployments) |
 
-The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`.
-They still mount per-node development certificates so operators can opt into
-mutual TLS by changing both values to `true` before applying the overlay.
+The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`. They
+still mount per-node development certificates. Operators can thus opt into
+mutual TLS: change both values to `true` before you apply the overlay.
 
 Releases, artifacts, and upgrade procedures live in
 [deployment.md](deployment.md).
@@ -176,59 +184,67 @@ config :smolquery, Smolquery.QueryService,
   result_max_rows: 10_000
 ```
 
-Engine options can also be passed per instance to `Smolquery.Engine.start_link/1`,
-which overrides the application config. `:threads` is intentionally absent from
-the defaults above: unless configured explicitly, each engine resolves it from
-`System.schedulers_online()` when it starts on the deployment host, not when the
-release is built. In a release, `SMOLQUERY_ENGINE_THREADS` sets it explicitly —
-the lever for a container whose CPU quota the scheduler count does not see.
+You can also pass engine options per instance to
+`Smolquery.Engine.start_link/1`. That overrides the application config.
+`:threads` is intentionally absent from the defaults above. Unless you
+configure it explicitly, each engine resolves it from
+`System.schedulers_online()` when the engine starts on the deployment host, not
+when the release is built. In a release, `SMOLQUERY_ENGINE_THREADS` sets it
+explicitly. That is the control for a container whose CPU quota the scheduler
+count does not see.
 
 ### The buffer service
 
-`:dir` is the buffer's root: micro-segments go to a `Store.Local` beneath
-`segments/`, manifest logs to `manifests/`. They are separate because they
-answer to different rules — segments can move to another store, while the log
+`:dir` is the buffer's root. Micro-segments go to a `Store.Local` beneath
+`segments/`. Manifest logs go to `manifests/`. They are separate because they
+answer to different rules: segments can move to another store, while the log
 stays on the node that gave the ack. Point the segments elsewhere with
 `store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}`.
 
-`flush_interval_ms` is the ack-latency dial: a batch waits out the remainder of
-the current group commit, so lowering it trades throughput for latency.
+`flush_interval_ms` is the ack-latency dial. A batch waits out the remainder of
+the current group commit. A lower value thus trades throughput for latency.
 
 That trade only exists when there is something to group. `commit_siblings` and
-`flush_idle_interval_ms` make the wait adaptive: a window that opens with
-fewer than `commit_siblings` inserts already in flight closes after
-`flush_idle_interval_ms` instead. A lone writer acks at commit speed rather
-than the interval, and real concurrency keeps the configured cadence.
+`flush_idle_interval_ms` make the wait adaptive. A window that opens with fewer
+than `commit_siblings` inserts in flight closes after `flush_idle_interval_ms`
+instead. A lone writer acks at commit speed rather than at the interval. Real
+concurrency keeps the configured cadence.
 
-It is only half the trigger, though, and under load usually not the half that
-fires. `flush_max_rows` and `flush_max_bytes` end a commit as soon as the
-accumulator reaches either, so a deployment whose arrival rate reaches
-`flush_max_bytes` in less than `flush_interval_ms` is running a cadence it
-never configured — the interval becomes decorative and commit size is pinned
-to the byte cap instead. Two 2 MB batches against the 8 MB default is a
-four-batch commit however long the interval says to wait. When tuning the
-cadence, check which one is actually ending the commit: divide
-`flush_max_bytes` by the offered bytes per second and compare against
-`flush_interval_ms`.
+The interval is only half the trigger. Under load, it is usually not the half
+that fires. `flush_max_rows` and `flush_max_bytes` end a commit as soon as the
+accumulator reaches either cap.
 
-`ring:` is the static fallback only — with `CATALOG_DATABASE_URL` set,
-ownership instead tracks which nodes are actually alive and hosting this
-instance, via `:pg` (`Smolquery.Cluster.PgGroup`); the config value only matters
-again if clustering is off.
+Consider a deployment whose arrival rate reaches `flush_max_bytes` in less than
+`flush_interval_ms`. It runs a cadence it never configured: the interval
+becomes decorative, and the byte cap pins the commit size instead. Four
+500 kB batches against the 2 MB default is a four-batch commit however long
+the interval says to wait.
+
+When you tune the cadence, check which trigger ends the commit:
+
+1. Divide `flush_max_bytes` by the offered bytes per second.
+2. Compare the result against `flush_interval_ms`.
+
+`ring:` is the static fallback only. With `CATALOG_DATABASE_URL` set, ownership
+instead tracks the nodes that are alive and host this instance, via `:pg`
+(`Smolquery.Cluster.PgGroup`). The config value only matters again if
+clustering is off.
 
 ### The storage service
 
 The storage service's own `ring:` is the static fallback for a *second*,
-independent ring — which storage node seals a table's work, not which buffer
-node accumulates it. With clustering on it likewise tracks live `:pg`
-membership, and `Smolquery.StorageService.Routing.own?/2` is what the sealer,
-compactor, retention, and GC gate on before acting. The gate is advisory, not
-mutual exclusion — during a ring change two nodes can transiently both pass it;
-what keeps that from double-registering a segment is the catalog re-deriving its
-registration diff inside every commit retry (see
-`Smolquery.StorageService.Routing` for the residual window).
+independent ring. This ring decides which storage node seals a table's work,
+not which buffer node accumulates it. With clustering on, it likewise tracks
+live `:pg` membership. `Smolquery.StorageService.Routing.own?/2` is the gate
+that the sealer, the compactor, retention, and GC (garbage collection) check
+before they act.
 
-`:dir` is where sealed segments land, and `:store` overrides it the same way —
+The gate is advisory, not mutual exclusion. During a ring change, two nodes can
+transiently both pass it. The catalog re-derives its registration diff inside
+every commit retry; that is what keeps a segment from a double registration.
+See `Smolquery.StorageService.Routing` for the residual window.
+
+`:dir` is where sealed segments land. `:store` overrides it the same way,
 including onto an object store:
 
 ```elixir
@@ -241,72 +257,84 @@ store: {Smolquery.Segments.Store.S3,
 ```
 
 In a release, configure that through the `SMOLQUERY_S3_*` environment variables
-rather than a config snippet: `config/config.exs` is evaluated at *build* time,
-so `System.get_env/1` there bakes the builder's credentials (or `nil`) into the
-artifact. The env wiring configures the query service's `store:` with the same
-values, which every job engine needs to read the sealed tier back.
+rather than a config snippet. Elixir evaluates `config/config.exs` at *build*
+time, so `System.get_env/1` there bakes the builder's credentials (or `nil`)
+into the artifact. The env wiring configures the query service's `store:` with
+the same values. Every job engine needs those values to read the sealed tier
+back.
 
 #### S3 credentials
 
-Leave `:access_key_id` and `:secret_access_key` out and the sealed tier
-authenticates through the AWS default credential chain instead — environment,
-profile, ECS, EKS Pod Identity, web identity, then EC2 instance metadata. That
-is how a deployment runs with no static S3 secrets at all, which some AWS
-organizations require: an SCP that denies `s3:*` to IAM users cannot be
-overridden by any IAM policy, and static keys can only ever be an IAM user.
+Leave `:access_key_id` and `:secret_access_key` out to authenticate the sealed
+tier through the AWS default **credential chain**: environment, profile, ECS,
+EKS Pod Identity, web identity, then EC2 instance metadata. This is how a
+deployment runs with no static S3 secrets at all. Some AWS organizations
+require that. No IAM (Identity and Access Management) policy can override an
+SCP (service control policy) that denies `s3:*` to IAM users. Static keys can
+only ever be an IAM user.
 
 Set both keys or neither. One alone is a half-written configuration, not a
-chain, so `Store.S3.new/1` rejects it at startup.
+chain. `Store.S3.new/1` rejects it at startup.
 
 Both halves of the sealed tier follow the same rule. Elixir signs its own
-uploads and listings through `Smolquery.AwsCredentials`, which resolves fresh
-credentials per request so rotation needs no restart. DuckDB engines get a
-`CREATE SECRET ... PROVIDER credential_chain, REFRESH auto` instead of static
-keys, and load the `aws` extension that provider comes from. `REFRESH auto`
-is what keeps the long-lived storage-service engine working past the expiry of
-the temporary credentials it started with.
+uploads and listings through `Smolquery.AwsCredentials`. That module resolves
+fresh credentials per request, so rotation needs no restart.
 
-MinIO and other non-AWS stores keep using static keys — they have no credential
-chain to consult.
+DuckDB engines get a `CREATE SECRET ... PROVIDER credential_chain, REFRESH
+auto` instead of static keys. They load the `aws` extension that this provider
+comes from. `REFRESH auto` keeps the long-lived storage-service engine working
+past the expiry of the temporary credentials it started with.
+
+MinIO and other non-AWS stores keep static keys. They have no credential chain
+to consult.
 
 `buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and
-segment bytes — honest for a single node. Clustered, each seal signal carries
-the node it came from, and the sealer derives that node's URL from the node name
-(`buffer_hot_port`), since the signal's origin — not the static config, and not
-even the ring's current owner — is where the claimed bytes physically live.
-`engine_extensions` loads `httpfs` into the sealer's own engine, which the merge
-cannot work without; the same engine also authenticates to the sealed tier's
+segment bytes. That is honest for a single node. Clustered, each seal signal
+carries the node it came from. The sealer derives that node's URL from the node
+name (`buffer_hot_port`). The claimed bytes physically live at the signal's
+origin — not at the static config, and not even at the ring's current owner.
+
+`engine_extensions` loads `httpfs` into the sealer's own engine. The merge
+cannot work without it. The same engine also authenticates to the sealed tier's
 `Store.S3` credentials, when configured, via `CREATE SECRET`
-(`Smolquery.EngineSecrets`), so a compaction re-merging existing sealed segments
-can read them back over `s3://`.
+(`Smolquery.EngineSecrets`). A compaction that re-merges existing sealed
+segments can thus read them back over `s3://`.
 
 ### The query service
 
 The query service runs each query as a job with a private DuckDB engine
 (`Smolquery.QueryService.Client.query/3` sync, `submit/3` + `fetch/2` async).
-Given `catalog:` options it starts its own DuckLake engine to plan through;
-given a `%Smolquery.Catalog{}` it starts none — but then `job_bootstrap:` must
-carry the `ATTACH` job engines need, since they attach the lake themselves.
+Given `catalog:` options, it starts its own DuckLake engine to plan through.
+Given a `%Smolquery.Catalog{}`, it starts none. In that case, `job_bootstrap:`
+must carry the `ATTACH` that job engines need, since they attach the lake
+themselves.
 
 `buffer_base_url` is where the planner reaches `HotServer` for hot manifests on
-a single node. Clustered, the planner ignores it and fans each table's manifest
-fetch out across the fleet instead — see [fan-out](architecture.md#clustered-fan-out).
+a single node. Clustered, the planner ignores it. It fans each table's manifest
+fetch out across the fleet instead — see
+[fan-out](architecture.md#clustered-fan-out).
 
 `store` takes the same `Store.S3` config as the storage service's when the
-sealed tier lives there — every job's engine needs the matching `CREATE SECRET`
-to read it, even though the query path never writes through the store itself.
-`max_concurrent_jobs` refuses rather than queues; `default_timeout_ms` bounds
-every job's runtime; `job_memory_limit` is each job engine's DuckDB
-`memory_limit`; `read_engine_threads` is each job engine's DuckDB `threads`
-(T-279) — unset, DuckDB detects cores itself, and the count doubles as the
-scan's `httpfs` request-concurrency ceiling; `result_ttl_ms` is how long a
-finished job holds its result frame for an async caller.
+sealed tier lives there. Every job's engine needs the matching `CREATE SECRET`
+to read it. The query path itself never writes through the store.
 
-`result_max_rows` (default 10,000 — matching the API's `maxResults`
-ceiling, so every result the budget admits is pageable in one page) bounds
-a job's materialized result
-(T-274). `job_memory_limit` binds only DuckDB's scan — the result frame lives
-in Polars memory outside it — so this is the bound that turns a `SELECT *`
-over a large table into a `RESULT_TOO_LARGE` error instead of an OOM. It is
-enforced as a `LIMIT` inside the engine, so an over-budget query stops
-producing rows at the bound. `:infinity` disables it.
+The remaining settings:
+
+- `max_concurrent_jobs` refuses rather than queues.
+- `default_timeout_ms` bounds every job's runtime.
+- `job_memory_limit` is each job engine's DuckDB `memory_limit`.
+- `read_engine_threads` is each job engine's DuckDB `threads` (T-279). Unset,
+  DuckDB detects cores itself. The count doubles as the scan's `httpfs`
+  request-concurrency ceiling.
+- `result_ttl_ms` is how long a finished job holds its result frame for an
+  async caller.
+
+`result_max_rows` bounds a job's materialized result (T-274). The default is
+10,000. That matches the API's `maxResults` ceiling, so every result the
+budget admits is pageable in one page.
+
+`job_memory_limit` binds only DuckDB's scan; the result frame lives in Polars
+memory outside it. This bound is thus what turns a `SELECT *` over a large
+table into a `RESULT_TOO_LARGE` error instead of an OOM. The engine enforces it
+as a `LIMIT`, so an over-budget query stops producing rows at the bound.
+`:infinity` disables it.
