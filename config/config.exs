@@ -121,6 +121,8 @@ config :smolquery, Smolquery.StorageService,
   seal_row_group_size: 1_048_576,
   target_segment_bytes: 268_435_456,
   max_concurrent_seals: 2,
+  seal_backoff_base_ms: 30_000,
+  seal_backoff_max_ms: 600_000,
   gc_interval_ms: 300_000,
   gc_grace_ms: 3_600_000,
   handoff: {Smolquery.StorageService.Handoff.Seal, []}

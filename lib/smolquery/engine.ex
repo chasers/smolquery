@@ -118,6 +118,15 @@ defmodule Smolquery.Engine do
     * `:name` — base name for the subtree; the database, connection, and
       supervisor are registered beneath it. Defaults to `#{inspect(__MODULE__)}`.
     * `:path` — DuckDB database file. Defaults to in-memory.
+    * `:connections` — how many connections the database carries; defaults
+      to 1. Each `Adbc.Connection` serializes its own callers, so an engine
+      whose callers must not wait on each other's statements asks for one
+      connection per concurrent caller and addresses it as `{name, slot}`
+      (T-299). The connections share one DuckDB instance: one
+      `memory_limit`, one buffer pool, one temp directory — concurrency
+      without splitting the memory budget into per-engine slices. Slot 1
+      keeps the single-connection name, so `query(name, ...)` and existing
+      callers stay slot-1 callers.
     * `:statements` — SQL run once per connection after extensions and
       settings, for session state a caller cannot afford to lose on a restart
       (a catalog `ATTACH`, say).
@@ -142,21 +151,32 @@ defmodule Smolquery.Engine do
     config = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
     config = Keyword.put(config, :threads, thread_count(config))
 
-    children = [
-      {DuckDB, database_opts(name, config)},
-      {Connection,
-       [
-         database: database_name(name),
-         name: connection_name(name),
-         extensions: Keyword.get(config, :extensions, []),
-         settings: settings(config),
-         statements: Keyword.get(config, :statements, []),
-         max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)
-       ] ++ Keyword.take(config, [:temp_directory, :max_temp_directory_size])}
-    ]
+    connections =
+      for slot <- 1..Keyword.get(config, :connections, 1) do
+        Supervisor.child_spec(
+          {Connection,
+           [
+             database: database_name(name),
+             name: connection_name(name, slot),
+             extensions: Keyword.get(config, :extensions, []),
+             settings: settings(config),
+             statements: Keyword.get(config, :statements, []),
+             max_rows: Keyword.get(config, :max_result_rows, @default_max_result_rows)
+           ] ++ Keyword.take(config, [:temp_directory, :max_temp_directory_size])},
+          id: connection_name(name, slot)
+        )
+      end
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    Supervisor.init([{DuckDB, database_opts(name, config)} | connections],
+      strategy: :rest_for_one
+    )
   end
+
+  @typedoc """
+  How a caller addresses an engine: the bare name reaches connection slot 1,
+  and `{name, slot}` reaches one connection of a multi-connection engine.
+  """
+  @type handle :: atom() | {atom(), pos_integer()}
 
   @doc """
   Runs `sql` on the named engine with positional `params` bound to `$1..$n`.
@@ -169,10 +189,10 @@ defmodule Smolquery.Engine do
   `COPY` over a whole staged backlog — says so here, instead of the timeout
   deciding how much data a statement may touch.
   """
-  @spec query(atom(), String.t(), [term()], timeout()) ::
+  @spec query(handle(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
-  def query(name, sql, params \\ [], timeout \\ 30_000) do
-    Connection.query(connection_name(name), sql, params, timeout)
+  def query(handle, sql, params \\ [], timeout \\ 30_000) do
+    Connection.query(connection(handle), sql, params, timeout)
   end
 
   @doc """
@@ -190,10 +210,10 @@ defmodule Smolquery.Engine do
   A timed-out statement is still running when this returns — the engine will
   finish or fail it on its own time, and OTP drops the late reply.
   """
-  @spec try_query(atom(), String.t(), [term()], timeout()) ::
+  @spec try_query(handle(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
-  def try_query(name, sql, params \\ [], timeout \\ 30_000) do
-    query(name, sql, params, timeout)
+  def try_query(handle, sql, params \\ [], timeout \\ 30_000) do
+    query(handle, sql, params, timeout)
   catch
     :exit, reason -> {:error, CallExited.new(reason)}
   end
@@ -216,9 +236,9 @@ defmodule Smolquery.Engine do
   See `Smolquery.Engine.Connection.transaction/3` for why the transaction runs
   inside the connection process and why statements carry no parameters.
   """
-  @spec transaction(atom(), [String.t()]) :: :ok | {:error, Exception.t()}
-  def transaction(name, statements) do
-    Connection.transaction(connection_name(name), statements)
+  @spec transaction(handle(), [String.t()]) :: :ok | {:error, Exception.t()}
+  def transaction(handle, statements) do
+    Connection.transaction(connection(handle), statements)
   end
 
   @doc """
@@ -238,10 +258,10 @@ defmodule Smolquery.Engine do
       {:ok, parquet} = Explorer.DataFrame.dump_parquet(frame)
 
   """
-  @spec frame(atom(), String.t(), [term()]) ::
+  @spec frame(handle(), String.t(), [term()]) ::
           {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
-  def frame(name, sql, params \\ []) do
-    Connection.frame(connection_name(name), sql, params)
+  def frame(handle, sql, params \\ []) do
+    Connection.frame(connection(handle), sql, params)
   end
 
   @doc """
@@ -265,9 +285,17 @@ defmodule Smolquery.Engine do
 
   @doc """
   The registered name of an engine's connection process.
+
+  Slot 1 is the single-connection name, so an engine that never asked for
+  more connections is addressed exactly as before.
   """
-  @spec connection_name(atom()) :: atom()
-  def connection_name(name), do: Module.concat(name, "Connection")
+  @spec connection_name(atom(), pos_integer()) :: atom()
+  def connection_name(name, slot \\ 1)
+  def connection_name(name, 1), do: Module.concat(name, "Connection")
+  def connection_name(name, slot), do: Module.concat(name, "Connection#{slot}")
+
+  defp connection({name, slot}), do: connection_name(name, slot)
+  defp connection(name) when is_atom(name), do: connection_name(name)
 
   @doc """
   The registered name of an engine's database process.

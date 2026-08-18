@@ -20,8 +20,9 @@ defmodule Smolquery.Test.HandoffProbe do
   alias Smolquery.StorageService.Handoff
 
   @impl Handoff
-  def seal({test, result}, _runtime, table_ref, claim) do
+  def seal({test, result}, runtime, table_ref, claim) do
     send(test, {:sealing, table_ref, claim, self()})
+    send(test, {:sealing_engine, table_ref, runtime.merge_engine})
 
     receive do
       :release -> finish(result)

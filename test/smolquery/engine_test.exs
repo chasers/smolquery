@@ -29,6 +29,40 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "connections" do
+    test "slot 1 keeps the single-connection name" do
+      assert Engine.connection_name(MyEngine, 1) == MyEngine.Connection
+      assert Engine.connection_name(MyEngine, 2) == MyEngine.Connection2
+    end
+
+    test "starts one connection per slot and answers on each handle" do
+      pool = __MODULE__.Pool
+      start_supervised!({Engine, name: pool, connections: 2}, id: :pool)
+
+      assert is_pid(Process.whereis(Engine.connection_name(pool, 1)))
+      assert is_pid(Process.whereis(Engine.connection_name(pool, 2)))
+
+      assert {:ok, %Result{rows: [[1]]}} = Engine.query({pool, 1}, "SELECT 1")
+      assert {:ok, %Result{rows: [[2]]}} = Engine.query({pool, 2}, "SELECT 2")
+      assert {:ok, %Result{rows: [[3]]}} = Engine.query(pool, "SELECT 3")
+    end
+
+    test "a busy connection does not block another slot of the same engine (T-299)" do
+      pool = __MODULE__.BusyPool
+      start_supervised!({Engine, name: pool, connections: 2}, id: :busy_pool)
+
+      busy = Process.whereis(Engine.connection_name(pool, 1))
+      :ok = :sys.suspend(busy)
+
+      assert {:error, %CallExited{reason: :timeout}} =
+               Engine.try_query({pool, 1}, "SELECT 1", [], 100)
+
+      assert {:ok, %Result{rows: [[2]]}} = Engine.query({pool, 2}, "SELECT 2")
+
+      :ok = :sys.resume(busy)
+    end
+  end
+
   describe "version/1" do
     test "reports the linked DuckDB version" do
       assert Engine.version(@engine) == "v" <> Smolquery.DuckDB.version()

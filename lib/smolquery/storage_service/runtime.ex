@@ -54,6 +54,19 @@ defmodule Smolquery.StorageService.Runtime do
   level-triggered, so a signal shed at the bound costs a `seal_retry_ms` delay
   rather than a lost seal.
 
+  `seal_backoff_base_ms` and `seal_backoff_max_ms` pace a table whose seal
+  attempts keep failing (T-299). A claim failing identically every
+  re-signal burns an attempt slot and the merge engine's shared memory for
+  the full failed attempt, every time — the shape that stalled sealing
+  cluster-wide on the eu-central-1 sandbox. After `n` consecutive failures
+  the table's signals are shed for
+  `min(seal_backoff_base_ms * 2^(n-1), seal_backoff_max_ms)`; a success
+  clears the cooldown. Shedding is as safe here as at the concurrency
+  bound: the buffer re-signals every `seal_retry_ms`, so the cost is delay
+  on a table already failing, never a lost seal. The base defaults to
+  `seal_retry_ms`'s default, so the first failure adds nothing. A base of
+  `0` disables the cooldown.
+
   `ring` is the static node list `Smolquery.StorageService.Routing` falls back
   to — the storage-side ownership ring's node set once clustering is off, or
   before any node has joined `Smolquery.Cluster.PgGroup`'s `:pg` group for
@@ -127,9 +140,10 @@ defmodule Smolquery.StorageService.Runtime do
   merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
   the engine's 30 s call timeout: the eu-central-1 sandbox measured ≥ ~830 ms
   per input over `httpfs`, so a 36-input read already exceeded it. The default
-  of 12 comes from that measurement. The merge engine serializes up to three
-  calls (two seals plus a compaction), so each gets ~10 s, and
-  10 s / 830 ms ≈ 12. An input list over the cap does not shrink the merge.
+  of 12 comes from that measurement, made when the merge engine serialized
+  up to three callers on one connection; each seal slot now serializes only
+  its own calls (T-299), which leaves the cap comfortable rather than
+  tight. An input list over the cap does not shrink the merge.
   `Smolquery.StorageService.Merge` reads it in capped chunks into a session
   temp table and writes one output, so a claim of any size seals and no
   engine call is unbounded.
@@ -214,6 +228,8 @@ defmodule Smolquery.StorageService.Runtime do
     seal_row_group_size: 1_048_576,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
+    seal_backoff_base_ms: 30_000,
+    seal_backoff_max_ms: 600_000,
     gc_interval_ms: 300_000,
     gc_grace_ms: 3_600_000,
     compact_interval_ms: 300_000,
@@ -246,6 +262,8 @@ defmodule Smolquery.StorageService.Runtime do
           seal_row_group_size: pos_integer(),
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
+          seal_backoff_base_ms: non_neg_integer(),
+          seal_backoff_max_ms: non_neg_integer(),
           gc_interval_ms: pos_integer(),
           gc_grace_ms: pos_integer(),
           compact_interval_ms: pos_integer(),
@@ -255,7 +273,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_max_rows: pos_integer() | nil,
           compact_bucket_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
-          merge_engine: atom() | nil,
+          merge_engine: Smolquery.Engine.handle() | nil,
           merge_inputs_per_call: pos_integer(),
           retention_interval_ms: pos_integer(),
           snapshot_keep_ms: pos_integer(),
@@ -273,6 +291,8 @@ defmodule Smolquery.StorageService.Runtime do
     :seal_row_group_size,
     :target_segment_bytes,
     :max_concurrent_seals,
+    :seal_backoff_base_ms,
+    :seal_backoff_max_ms,
     :gc_interval_ms,
     :gc_grace_ms,
     :compact_interval_ms,
@@ -402,17 +422,23 @@ defmodule Smolquery.StorageService.Runtime do
     do: %{runtime | compact_max_rows: @compact_max_rows_default}
 
   @doc """
-  The engine a merge's calls run on.
+  The engine handle a merge's calls run on.
 
-  `nil` — every caller but the compactor — resolves to `engine/1`, the seal
-  merge engine. The compactor overrides the field on the runtime it hands
+  `nil` resolves to `engine/1`, the seal merge engine, on its first
+  connection. The compactor overrides the field on the runtime it hands
   `Smolquery.StorageService.Merge.compact/5`, so its merges run on
   `compact_engine/1` and a timed-out compaction statement cannot starve a
-  seal (T-259).
+  seal (T-259). `Smolquery.StorageService.Sealer` overrides it per attempt
+  with `{engine, slot}`, one merge-engine connection per seal slot, so one
+  table's slow merge is not another table's wait (T-299).
   """
-  @spec merge_engine(t()) :: atom()
+  @spec merge_engine(t()) :: Smolquery.Engine.handle()
   def merge_engine(%__MODULE__{merge_engine: nil, name: name}), do: engine(name)
   def merge_engine(%__MODULE__{merge_engine: engine}) when is_atom(engine), do: engine
+
+  def merge_engine(%__MODULE__{merge_engine: {engine, slot} = handle})
+      when is_atom(engine) and is_integer(slot),
+      do: handle
 
   @doc """
   The top-level supervisor for an instance, as `Supervisor.start_link/1` names it.
