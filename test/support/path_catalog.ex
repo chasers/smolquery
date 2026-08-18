@@ -134,6 +134,12 @@ defmodule Smolquery.Test.PathCatalog do
   def clustering(_agent, _table), do: {:ok, []}
 
   @impl Catalog
+  def put_partitions(_agent, _table, _count), do: :ok
+
+  @impl Catalog
+  def partitions(_agent, _table), do: {:ok, nil}
+
+  @impl Catalog
   def expire_snapshots(_agent, _older_than_ms), do: {:ok, 0}
 
   @impl Catalog

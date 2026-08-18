@@ -613,17 +613,56 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "partition count" do
+    test "round-trips a count through the metadata database", %{catalog: catalog} do
+      assert Catalog.partitions(catalog, @table) == {:ok, nil}
+
+      assert Catalog.put_partitions(catalog, @table, 3) == :ok
+      assert Catalog.partitions(catalog, @table) == {:ok, 3}
+
+      assert Catalog.put_partitions(catalog, @table, 6) == :ok
+      assert Catalog.partitions(catalog, @table) == {:ok, 6}
+    end
+
+    test "counts are per table", %{catalog: catalog} do
+      :ok = Catalog.create_table(catalog, {"analytics", "clicks"}, schema())
+
+      assert Catalog.put_partitions(catalog, @table, 3) == :ok
+      assert Catalog.partitions(catalog, {"analytics", "clicks"}) == {:ok, nil}
+    end
+
+    test "refuses a malformed count", %{catalog: catalog} do
+      assert {:error, {:invalid_partitions, 0}} =
+               catalog.impl.put_table_options(catalog.config, @table, %{partitions: 0})
+
+      assert {:error, {:invalid_partitions, "3"}} =
+               catalog.impl.put_table_options(catalog.config, @table, %{partitions: "3"})
+    end
+
+    test "table_schema attaches the count to the Schema struct", %{catalog: catalog} do
+      assert {:ok, schema} = Catalog.table_schema(catalog, @table)
+      assert schema.partitions == nil
+
+      assert Catalog.put_partitions(catalog, @table, 3) == :ok
+
+      assert {:ok, schema} = Catalog.table_schema(catalog, @table)
+      assert schema.partitions == 3
+    end
+  end
+
   describe "put_table_options/3" do
     test "applies retention and clustering as one change", %{catalog: catalog} do
       policy = %{column: "ts", ttl_ms: 86_400_000}
 
       assert Catalog.put_table_options(catalog, @table, %{
                retention: policy,
-               clustering: ["id", "ts"]
+               clustering: ["id", "ts"],
+               partitions: 3
              }) == :ok
 
       assert Catalog.retention(catalog, @table) == {:ok, policy}
       assert Catalog.clustering(catalog, @table) == {:ok, ["id", "ts"]}
+      assert Catalog.partitions(catalog, @table) == {:ok, 3}
 
       assert Catalog.put_table_options(catalog, @table, %{retention: nil, clustering: []}) == :ok
 

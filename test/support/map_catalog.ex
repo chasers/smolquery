@@ -18,7 +18,7 @@ defmodule Smolquery.Test.MapCatalog do
   def new do
     {:ok, agent} =
       Agent.start_link(fn ->
-        %{datasets: MapSet.new(), tables: %{}, retention: %{}, clustering: %{}}
+        %{datasets: MapSet.new(), tables: %{}, retention: %{}, clustering: %{}, partitions: %{}}
       end)
 
     %Catalog{impl: __MODULE__, config: agent}
@@ -59,7 +59,8 @@ defmodule Smolquery.Test.MapCatalog do
     case Map.fetch(state.tables, table_ref) do
       {:ok, schema} ->
         clustering = Map.get(state.clustering, table_ref, [])
-        {:ok, %{schema | clustering: clustering}}
+        partitions = Map.get(state.partitions, table_ref)
+        {:ok, %{schema | clustering: clustering, partitions: partitions}}
 
       :error ->
         {:error, {:unknown_table, table_ref}}
@@ -116,11 +117,22 @@ defmodule Smolquery.Test.MapCatalog do
   end
 
   @impl Catalog
+  def put_partitions(agent, table_ref, count) when is_integer(count) and count > 0 do
+    Agent.update(agent, &%{&1 | partitions: Map.put(&1.partitions, table_ref, count)})
+  end
+
+  @impl Catalog
+  def partitions(agent, table_ref) do
+    {:ok, agent |> Agent.get(& &1.partitions) |> Map.get(table_ref)}
+  end
+
+  @impl Catalog
   def put_table_options(agent, table_ref, options) when is_map(options) do
     Agent.update(agent, fn state ->
       state
       |> apply_option(options, :retention, table_ref)
       |> apply_option(options, :clustering, table_ref)
+      |> apply_option(options, :partitions, table_ref)
     end)
   end
 

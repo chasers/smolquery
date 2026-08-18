@@ -195,7 +195,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
     bootstrap = [
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
-      create_clustering_statement(catalog)
+      create_clustering_statement(catalog),
+      create_partitions_statement(catalog)
     ]
 
     config
@@ -355,8 +356,9 @@ defmodule Smolquery.Catalog.DuckLake do
              [config.catalog, dataset, table]
            ),
          {:ok, schema} <- build_schema(result.rows, {dataset, table}),
-         {:ok, clustering} <- clustering(config, {dataset, table}) do
-      {:ok, %{schema | clustering: clustering}}
+         {:ok, clustering} <- clustering(config, {dataset, table}),
+         {:ok, partitions} <- partitions(config, {dataset, table}) do
+      {:ok, %{schema | clustering: clustering, partitions: partitions}}
     end
   end
 
@@ -607,6 +609,29 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
+  @impl Catalog
+  def put_partitions(%__MODULE__{} = config, table_ref, count),
+    do: put_table_options(config, table_ref, %{partitions: count})
+
+  @impl Catalog
+  def partitions(%__MODULE__{} = config, {dataset, table}) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, result} <-
+           query(
+             config,
+             "SELECT partition_count FROM #{partitions_table(config.catalog)} " <>
+               "WHERE dataset = $1 AND table_name = $2",
+             [dataset, table]
+           ) do
+      case result.rows do
+        [] -> {:ok, nil}
+        [[count]] -> {:ok, count}
+        rows -> {:error, {:ambiguous_partitions, rows}}
+      end
+    end
+  end
+
   defp clustering_insert_sqls(config, dataset, table, columns) do
     Enum.map(Enum.with_index(columns), fn {column, position} ->
       "INSERT INTO #{clustering_table(config.catalog)} VALUES (" <>
@@ -656,6 +681,12 @@ defmodule Smolquery.Catalog.DuckLake do
       {:clustering, columns}, :ok ->
         {:halt, {:error, {:invalid_clustering, columns}}}
 
+      {:partitions, count}, :ok when is_integer(count) and count > 0 ->
+        {:cont, :ok}
+
+      {:partitions, count}, :ok ->
+        {:halt, {:error, {:invalid_partitions, count}}}
+
       {key, value}, :ok ->
         {:halt, {:error, {:unknown_table_option, key, value}}}
     end)
@@ -663,7 +694,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp option_statements(config, dataset, table, options) do
     retention_statements(config, dataset, table, options) ++
-      clustering_statements(config, dataset, table, options)
+      clustering_statements(config, dataset, table, options) ++
+      partitions_statements(config, dataset, table, options)
   end
 
   defp retention_statements(config, dataset, table, options) do
@@ -693,6 +725,20 @@ defmodule Smolquery.Catalog.DuckLake do
         [
           delete_clustering_sql(config, dataset, table)
           | clustering_insert_sqls(config, dataset, table, columns)
+        ]
+    end
+  end
+
+  defp partitions_statements(config, dataset, table, options) do
+    case Map.fetch(options, :partitions) do
+      :error ->
+        []
+
+      {:ok, count} ->
+        [
+          delete_partitions_sql(config, dataset, table),
+          "INSERT INTO #{partitions_table(config.catalog)} VALUES (" <>
+            "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, #{count})"
         ]
     end
   end
@@ -765,6 +811,31 @@ defmodule Smolquery.Catalog.DuckLake do
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
       "column_name VARCHAR NOT NULL, position INTEGER NOT NULL, " <>
       "PRIMARY KEY (dataset, table_name, position))"
+  end
+
+  defp partitions_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_partitions"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its partition-count side
+  table (T-304).
+
+  Bootstrap SQL like `create_clustering_statement/1`, and for the same
+  reason: the count is read by `table_schema/2`, the hottest catalog read in
+  the system, so a lazy `CREATE TABLE IF NOT EXISTS` there would put DDL on
+  the ingest and query paths. The primary key is the replica identity for a
+  published Postgres metadata DB — see `create_clustering_statement/1`.
+  """
+  @spec create_partitions_statement(String.t()) :: String.t()
+  def create_partitions_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{partitions_table(catalog)} (" <>
+      "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
+      "partition_count INTEGER NOT NULL, " <>
+      "PRIMARY KEY (dataset, table_name))"
+  end
+
+  defp delete_partitions_sql(config, dataset, table) do
+    "DELETE FROM #{partitions_table(config.catalog)} WHERE dataset = " <>
+      "#{Identifier.sql_string(dataset)} AND table_name = #{Identifier.sql_string(table)}"
   end
 
   defp delete_clustering_sql(config, dataset, table) do

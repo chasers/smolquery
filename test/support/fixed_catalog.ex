@@ -111,6 +111,12 @@ defmodule Smolquery.Test.FixedCatalog do
   def clustering(_answers, _table), do: {:error, :fixed}
 
   @impl Catalog
+  def put_partitions(_answers, _table, _count), do: {:error, :fixed}
+
+  @impl Catalog
+  def partitions(_answers, _table), do: {:error, :fixed}
+
+  @impl Catalog
   def expire_snapshots(_answers, _older_than_ms), do: {:error, :fixed}
 
   @impl Catalog
