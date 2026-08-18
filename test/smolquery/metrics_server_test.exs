@@ -12,10 +12,12 @@ defmodule Smolquery.MetricsServerTest do
   defp proven(conn), do: put_req_header(conn, InternalSecret.header(), InternalSecret.value())
 
   test "answers Prometheus text to the internal secret" do
+    :telemetry.execute([:smolquery, :gc, :sweep], %{swept: 1, staged: 0}, %{})
+
     response = scrape(proven(conn(:get, "/metrics")))
 
     assert response.status == 200
-    assert response.resp_body =~ "smolquery_"
+    assert response.resp_body =~ "smolquery_gc_segments_swept_total"
 
     assert {"content-type", "text/plain" <> _charset} =
              List.keyfind(response.resp_headers, "content-type", 0)
@@ -36,6 +38,8 @@ defmodule Smolquery.MetricsServerTest do
   test "listens on every node regardless of roles" do
     assert Smolquery.Roles.enabled() == []
 
+    :telemetry.execute([:smolquery, :gc, :sweep], %{swept: 1, staged: 0}, %{})
+
     response =
       Req.get!(MetricsServer.base_url() <> "/metrics",
         headers: [{InternalSecret.header(), InternalSecret.value()}],
@@ -43,6 +47,6 @@ defmodule Smolquery.MetricsServerTest do
       )
 
     assert response.status == 200
-    assert response.body =~ "smolquery_"
+    assert response.body =~ "smolquery_gc_segments_swept_total"
   end
 end
