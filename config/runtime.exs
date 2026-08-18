@@ -4,6 +4,17 @@ if roles = System.get_env("SMOLQUERY_ROLES") do
   config :smolquery, roles: Smolquery.Roles.parse!(roles)
 end
 
+if auth_mode = System.get_env("SMOLQUERY_AUTH_MODE") do
+  mode =
+    Smolquery.RuntimeConfig.enum!("SMOLQUERY_AUTH_MODE", auth_mode, [
+      {"static", :static},
+      {"oidc", :oidc}
+    ])
+
+  config :smolquery, SmolqueryApi, auth_mode: mode
+  config :smolquery, SmolqueryWeb, auth_mode: mode
+end
+
 if api_key = System.get_env("SMOLQUERY_API_KEY") do
   config :smolquery, SmolqueryApi, api_key: api_key
 end

@@ -4,6 +4,7 @@ defmodule SmolqueryApi.RouterTest do
   import Plug.Conn, only: [put_req_header: 3]
   import Plug.Test
 
+  alias Smolquery.Auth
   alias Smolquery.Test.ApiEndpoint
   alias SmolqueryApi.Runtime
 
@@ -82,12 +83,44 @@ defmodule SmolqueryApi.RouterTest do
       assert message =~ "API key"
     end
 
+    test "a correct key attaches the normalized service context" do
+      name = start_api()
+
+      response = request(name, conn(:get, "/v1/no/such/route") |> authorized())
+
+      assert response.status == 404
+      assert {:ok, context} = Auth.fetch_context(response)
+      assert context.principal.authn == :api_key
+      assert context.principal.kind == :service
+      assert context.principal.id == Runtime.new(name: name, api_key: @key).context.principal.id
+      assert MapSet.equal?(context.capabilities, MapSet.new([:query, :ingest, :catalog_manage]))
+      refute inspect(context) =~ @key
+    end
+
     test "a wrong key is a 401" do
       name = start_api()
 
       response = request(name, conn(:get, "/v1/datasets") |> authorized("wrong"))
 
       assert response.status == 401
+    end
+
+    test "rotating the API key preserves the principal identity" do
+      name = start_api()
+      first = request(name, authorized(conn(:get, "/v1/no/such/route")))
+
+      first_id =
+        first |> Auth.fetch_context() |> elem(1) |> Map.fetch!(:principal) |> Map.fetch!(:id)
+
+      Runtime.put(Runtime.new(name: name, api_key: "rotated-api-key"))
+      second = request(name, authorized(conn(:get, "/v1/no/such/route"), "rotated-api-key"))
+
+      second_id =
+        second |> Auth.fetch_context() |> elem(1) |> Map.fetch!(:principal) |> Map.fetch!(:id)
+
+      assert first_id == second_id
+      {:ok, context} = Auth.fetch_context(second)
+      refute inspect(context) =~ "rotated-api-key"
     end
 
     test "a non-bearer scheme is a 401" do

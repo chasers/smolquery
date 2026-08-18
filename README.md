@@ -36,6 +36,7 @@ docker build -t smolquery .
 docker run -d --name smolquery \
   -p 4000:4000 -p 4002:4002 \
   -v smolquery-data:/data \
+  -e SMOLQUERY_AUTH_MODE=static \
   -e SMOLQUERY_API_KEY=change-me \
   -e SMOLQUERY_WEB_IP=0.0.0.0 \
   -e SMOLQUERY_WEB_USERNAME=smolquery \
@@ -80,9 +81,10 @@ release publishes a multi-architecture image to GHCR and attaches both a
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
 discovery, and the sealed-store dependencies before deploying. The Secret must
-also hold `SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
-`SMOLQUERY_SECRET_KEY_BASE` for any pod whose roles include `web`; a pod
-without them refuses to boot.
+also hold `SMOLQUERY_AUTH_MODE=static` for any pod whose roles include `api` or
+`web`. Pods with the `web` role additionally need
+`SMOLQUERY_WEB_USERNAME`, `SMOLQUERY_WEB_PASSWORD`, and
+`SMOLQUERY_SECRET_KEY_BASE`; a pod without the required settings refuses to boot.
 
 ## Features
 

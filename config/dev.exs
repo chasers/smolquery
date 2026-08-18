@@ -2,9 +2,10 @@ import Config
 
 config :logger, level: :debug
 
-config :smolquery, SmolqueryApi, api_key: "smolquery-dev"
+config :smolquery, SmolqueryApi, auth_mode: :static, api_key: "smolquery-dev"
 
 config :smolquery, SmolqueryWeb,
+  auth_mode: :static,
   username: "smolquery",
   password: "smolquery"
 

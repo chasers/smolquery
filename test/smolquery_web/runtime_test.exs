@@ -18,6 +18,22 @@ defmodule SmolqueryWeb.RuntimeTest do
       assert Runtime.new().name == SmolqueryWeb
     end
 
+    test "refuses to resolve without an auth mode" do
+      assert_raise ArgumentError, ~r/SMOLQUERY_AUTH_MODE/, fn ->
+        Runtime.new(name: :web_runtime_test, auth_mode: nil)
+      end
+    end
+
+    test "refuses oidc and malformed auth modes without falling back" do
+      assert_raise ArgumentError, ~r/not supported/, fn ->
+        Runtime.new(name: :web_runtime_test, auth_mode: :oidc)
+      end
+
+      assert_raise ArgumentError, ~r/invalid value/, fn ->
+        Runtime.new(name: :web_runtime_test, auth_mode: :invalid)
+      end
+    end
+
     test "refuses to resolve without a username" do
       assert_raise ArgumentError, ~r/SMOLQUERY_WEB_USERNAME/, fn ->
         Runtime.new(name: :web_runtime_test, username: nil)
@@ -83,6 +99,7 @@ defmodule SmolqueryWeb.RuntimeTest do
 
       refute inspect(runtime) =~ "operator-name-7739"
       refute inspect(runtime) =~ "operator-secret-7739"
+      refute inspect(runtime) =~ runtime.session_marker
     end
   end
 

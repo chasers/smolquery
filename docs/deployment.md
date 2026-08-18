@@ -58,9 +58,16 @@ attempt outstanding.
 
 From 0.7.1, the `smolquery-env` Secret must hold `SMOLQUERY_WEB_USERNAME`,
 `SMOLQUERY_WEB_PASSWORD`, and `SMOLQUERY_SECRET_KEY_BASE` for any pod whose
-roles include `web`. A web pod without them **refuses to boot**, and that
-boot failure stops the pod's other roles too. Push the secrets before you
-roll the image.
+roles include `web`. A web pod without them **refuses to boot**, and that boot
+failure stops the pod's other roles too. Push the secrets before you roll the
+image.
+
+### Explicit authentication mode
+
+The current release requires `SMOLQUERY_AUTH_MODE=static` on every pod whose
+roles include `api` or `web`. The mode is explicit and fail-closed; a missing or
+unsupported mode refuses to boot. Pods with the `web` role still additionally
+need the web credentials and session secret described above.
 
 ## Catalog format upgrades
 

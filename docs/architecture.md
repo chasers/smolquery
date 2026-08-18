@@ -792,9 +792,12 @@ tables*. Inter-node traffic can be switched to mutual TLS (`GEN_RPC_TLS`,
 `DIST_TLS`); verification is chain-only against the cluster CA, so the CA is the
 trust boundary. The web UI requires its own basic-auth credential
 (`SMOLQUERY_WEB_USERNAME` / `SMOLQUERY_WEB_PASSWORD`). The credential is not
-the API key, so a UI rotation does not break an ingest client. A rotation also
+the API key, so a UI rotation does not break an ingest client. Static mode
+normalizes both credentials into provider-neutral principals and contexts; the
+credential itself never enters the identity or session. A rotation also
 revokes existing UI sessions. The UI binds loopback by default. A node with
-the `:web` role refuses to boot without the credential.
+the `:web` role refuses to boot without the explicit `SMOLQUERY_AUTH_MODE` and
+credential.
 
 ## See also
 

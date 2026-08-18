@@ -3,10 +3,12 @@
 `SmolqueryApi` is the front door — a Phoenix endpoint served by Bandit (the
 same stack as the web UI's `SmolqueryWeb`), started by the `:api` role, routing
 only to service client modules and the catalog (the same boundary rule the
-services hold each other to). Every `/v1` route requires the static
-Bearer key (`SMOLQUERY_API_KEY`); a node with the `:api` role and no key
-configured fails the boot rather than serve an open API. `/healthz` is the one
-unauthenticated route.
+services hold each other to). Set `SMOLQUERY_AUTH_MODE=static` while OIDC
+runtime support is unavailable. Every `/v1` route then requires the static
+Bearer key (`SMOLQUERY_API_KEY`); a node with the `:api` role and no mode or key
+configured fails the boot rather than serve an open API. Successful static
+requests carry a normalized service principal and context. `/healthz` is the
+one unauthenticated route.
 
 ```sh
 curl http://127.0.0.1:4000/healthz
