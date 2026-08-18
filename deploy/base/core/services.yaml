@@ -21,6 +21,8 @@ spec:
       port: 5870
     - name: hot-server
       port: 4001
+    - name: metrics
+      port: 4003
 ---
 apiVersion: v1
 kind: Service

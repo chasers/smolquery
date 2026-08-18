@@ -62,6 +62,21 @@ defmodule Smolquery.InternalSecret do
   end
 
   @doc """
+  Whether `conn` carries the secret in the header, compared in constant time.
+
+  The one check every internal listener runs — `BufferService.HotServer`,
+  `Smolquery.MetricsServer`, and `SmolqueryApi.Auth` for `/metrics`. A
+  repeated header is a refusal, not a pick-one.
+  """
+  @spec proven?(Plug.Conn.t()) :: boolean()
+  def proven?(%Plug.Conn{} = conn) do
+    case Plug.Conn.get_req_header(conn, @header) do
+      [secret] -> Plug.Crypto.secure_compare(secret, value())
+      _absent_or_repeated -> false
+    end
+  end
+
+  @doc """
   The `CREATE SECRET` statement that makes a DuckDB engine attach the header
   to every `httpfs` request under `scope`.
   """

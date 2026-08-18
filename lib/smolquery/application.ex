@@ -15,6 +15,8 @@ defmodule Smolquery.Application do
   commit, a storage node's seal or compaction), and Phoenix.PubSub's pg
   adapter carries a broadcast across the cluster only between nodes that
   run the same-named pubsub. A web-only pubsub would hear nothing (T-295).
+  `Smolquery.MetricsServer` is role-independent for the same reason: the
+  counters live where the work runs, so every node must be scrapable (T-302).
   """
 
   use Application
@@ -28,6 +30,7 @@ defmodule Smolquery.Application do
     children =
       [
         Smolquery.Telemetry,
+        Smolquery.MetricsServer,
         {Phoenix.PubSub, name: Smolquery.PubSub},
         Smolquery.Lifecycle,
         Smolquery.Cluster.RingCache

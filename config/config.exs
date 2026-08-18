@@ -47,6 +47,8 @@ config :smolquery, Smolquery.Engine,
 
 config :smolquery, :data_dir, "priv/data"
 
+config :smolquery, Smolquery.MetricsServer, ip: {127, 0, 0, 1}, port: 4003
+
 config :smolquery, SmolqueryApi.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   http: [ip: {127, 0, 0, 1}, port: 4000],

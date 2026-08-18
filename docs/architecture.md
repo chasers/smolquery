@@ -753,7 +753,10 @@ Every service emits plain `:telemetry` events at its seams — ingest
 accept/reject, buffer group commits (count, rows, time), admission refusals,
 batch-dedup hits, seal attempts, compaction swaps, retention drops, snapshot
 expiry, GC sweeps, terminal query jobs, API requests. `Smolquery.Telemetry`
-aggregates them into counters and `GET /metrics` renders Prometheus text; an
+aggregates them into counters and `GET /metrics` renders Prometheus text — on
+the API endpoint, and on `Smolquery.MetricsServer`, a role-independent
+listener (`SMOLQUERY_METRICS_PORT`, default 4003) every node starts so a
+buffer-only or storage-only node is scrapable too (T-302); an
 exporter wanting a different backend attaches to the same events without
 touching a call site. Counters only, with paired totals for means
 (`smolquery_buffer_commit_microseconds_total / smolquery_buffer_commits_total`),

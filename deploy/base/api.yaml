@@ -44,6 +44,8 @@ spec:
               containerPort: 4000
             - name: web
               containerPort: 4002
+            - name: metrics
+              containerPort: 4003
             - name: epmd
               containerPort: 4369
             - name: gen-rpc

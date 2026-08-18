@@ -42,6 +42,16 @@ if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
   config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
 end
 
+if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
+  config :smolquery, Smolquery.MetricsServer,
+    port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)
+end
+
+if metrics_ip = System.get_env("SMOLQUERY_METRICS_IP") do
+  config :smolquery, Smolquery.MetricsServer,
+    ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_METRICS_IP", metrics_ip)
+end
+
 if username = System.get_env("SMOLQUERY_WEB_USERNAME") do
   config :smolquery, SmolqueryWeb, username: username
 end

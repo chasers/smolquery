@@ -61,17 +61,10 @@ defmodule Smolquery.BufferService.HotServer do
 
   @impl Plug
   def call(conn, name) do
-    if authenticated?(conn) do
+    if Smolquery.InternalSecret.proven?(conn) do
       conn |> Plug.RewriteOn.call(@rewrite_on) |> route(name)
     else
       send_resp(conn, 401, "missing or invalid internal secret")
-    end
-  end
-
-  defp authenticated?(conn) do
-    case get_req_header(conn, Smolquery.InternalSecret.header()) do
-      [secret] -> Plug.Crypto.secure_compare(secret, Smolquery.InternalSecret.value())
-      _absent_or_repeated -> false
     end
   end
 
