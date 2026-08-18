@@ -581,6 +581,32 @@ and pins the table's tail in the hot tier forever.
 Setting or clearing a key affects future writes only. Existing segments are
 never rewritten.
 
+### Write partitions
+
+A table's hot tier is one `TableBuffer` on one ring-assigned node, so a single
+table's ingest — and, symmetrically, its sealing — is bounded by one node no
+matter how many the cluster has. `Smolquery.Partitions` lifts that ceiling by
+multiplying the table's buffer identity: partition `i` of `logs.events` is the
+ordinary ref `events__pN`, placed on the `i mod N`-th distinct ring node from
+the parent, so P partitions cover `min(P, N)` nodes exactly on both the buffer
+ring and the storage ring. One table's seal concurrency is `min(P, N) ×
+max_concurrent_seals` (T-301).
+
+The count has two sources (T-304). `SMOLQUERY_WRITE_PARTITIONS` is the
+deployment-wide default. A table can carry its own count in catalog metadata —
+a `smolquery_partitions` side table beside clustering's, read back onto
+`Smolquery.Schema.partitions` and carried through the ingest schema cache and
+the query planner's per-plan resolve. The effective count is the maximum of
+the two (`Smolquery.Partitions.count/2`), which makes it raise-only from every
+direction — the runbook answer to a backed-up table is `PATCH
+{"partitions": N}`, no config change, no fleet-at-rest window. The raise is
+safe online because the lag runs one way: the planner reads the catalog on
+every plan while a writer's cached schema trails by at most one
+`schema_cache_ttl_ms`, so a reader expands more partitions than writers fill —
+answering long, never short — and an unfilled partition's manifest is empty.
+Lowering is refused (422): partitions past the count still hold hot rows a
+reader would no longer expand.
+
 ### Retention and snapshot expiry
 
 `Smolquery.StorageService.Retention` ages data out, for tables that opt in with

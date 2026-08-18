@@ -76,7 +76,8 @@ defmodule SmolqueryApi.CrudIntegrationTest do
              "id" => "events",
              "schema" => @schema_json,
              "retention" => nil,
-             "clustering" => []
+             "clustering" => [],
+             "partitions" => nil
            }
   end
 

@@ -150,7 +150,8 @@ defmodule SmolqueryApi.TableControllerTest do
                "id" => "events",
                "schema" => @schema_json,
                "retention" => nil,
-               "clustering" => []
+               "clustering" => [],
+               "partitions" => nil
              }
     end
 
@@ -380,7 +381,7 @@ defmodule SmolqueryApi.TableControllerTest do
       assert body["clustering"] == ["id", "ts"]
     end
 
-    test "a rejected patch applies none of it", %{name: name} do
+    test "a rejected patch applies none of it (T-304 partitions included)", %{name: name} do
       create_events(name)
       kept = %{"column" => "ts", "ttlMs" => 1_000}
 
@@ -390,7 +391,8 @@ defmodule SmolqueryApi.TableControllerTest do
       rejected =
         patch_json(name, "/v1/datasets/analytics/tables/events", %{
           "retention" => %{"column" => "ts", "ttlMs" => 2_000},
-          "clustering" => ["no_such_column"]
+          "clustering" => ["no_such_column"],
+          "partitions" => 4
         })
 
       assert rejected.status == 422
@@ -398,6 +400,66 @@ defmodule SmolqueryApi.TableControllerTest do
       shown = JSON.decode!(get_json(name, "/v1/datasets/analytics/tables/events").resp_body)
       assert shown["retention"] == kept
       assert shown["clustering"] == []
+      assert shown["partitions"] == nil
+    end
+  end
+
+  describe "partitions (T-304)" do
+    test "sets and reads back a count, raise-only", %{name: name} do
+      create_events(name)
+
+      shown = JSON.decode!(get_json(name, "/v1/datasets/analytics/tables/events").resp_body)
+      assert shown["partitions"] == nil
+
+      raised =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"partitions" => 3})
+
+      assert raised.status == 200
+      assert JSON.decode!(raised.resp_body)["partitions"] == 3
+
+      again =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"partitions" => 6})
+
+      assert again.status == 200
+      assert JSON.decode!(again.resp_body)["partitions"] == 6
+
+      lowered =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{"partitions" => 2})
+
+      assert lowered.status == 422
+      assert JSON.decode!(lowered.resp_body)["error"]["message"] =~ "raise-only"
+
+      shown = JSON.decode!(get_json(name, "/v1/datasets/analytics/tables/events").resp_body)
+      assert shown["partitions"] == 6
+    end
+
+    test "refuses a malformed count", %{name: name} do
+      create_events(name)
+
+      for bad <- [0, -1, "3", nil, 1.5] do
+        response =
+          patch_json(name, "/v1/datasets/analytics/tables/events", %{"partitions" => bad})
+
+        assert response.status == 400
+      end
+    end
+
+    test "can patch partitions alongside retention and clustering", %{name: name} do
+      create_events(name)
+      policy = %{"column" => "ts", "ttlMs" => 1_000}
+
+      response =
+        patch_json(name, "/v1/datasets/analytics/tables/events", %{
+          "retention" => policy,
+          "clustering" => ["id", "ts"],
+          "partitions" => 3
+        })
+
+      assert response.status == 200
+      body = JSON.decode!(response.resp_body)
+      assert body["retention"] == policy
+      assert body["clustering"] == ["id", "ts"]
+      assert body["partitions"] == 3
     end
   end
 end
