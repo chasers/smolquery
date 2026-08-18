@@ -3,10 +3,12 @@ defmodule SmolqueryApi.Auth do
   Bearer-key authentication for every `/v1` route (PL-8 D5).
 
   One static key, compared in constant time. `/healthz` is exempt — a load
-  balancer probing liveness holds no credentials — and `/metrics` answers to
-  the *internal* secret instead of the API key: metrics are for operators,
-  not tenants, and the scraper is the same class of caller as a hot-tier
-  reader. The plug sits between `:match` and `:dispatch`, so an
+  balancer probing liveness holds no credentials — and `/v1/docs.json` is
+  exempt with it: the API's own description holds no tenant data, and an
+  agent needs the docs before it holds a key (`SmolqueryApi.Docs` states the
+  posture trade). `/metrics` answers to the *internal* secret instead of the
+  API key: metrics are for operators, not tenants, and the scraper is the
+  same class of caller as a hot-tier reader. The plug sits between `:match` and `:dispatch`, so an
   unauthenticated request learns nothing about which routes exist: it is a
   401 whether the path matches or not.
 
@@ -29,6 +31,8 @@ defmodule SmolqueryApi.Auth do
 
   @impl Plug
   def call(%Plug.Conn{path_info: ["healthz"]} = conn, _opts), do: conn
+
+  def call(%Plug.Conn{path_info: ["v1", "docs.json"]} = conn, _opts), do: conn
 
   def call(%Plug.Conn{path_info: ["metrics"]} = conn, _opts) do
     if InternalSecret.proven?(conn) do

@@ -54,6 +54,19 @@ defmodule SmolqueryWeb.Layouts do
             <a href={~p"/cluster"} class="btn btn-ghost">Cluster</a>
           </li>
           <li>
+            <a href={~p"/v1/docs.json"} class="btn btn-ghost" target="_blank">API docs</a>
+          </li>
+          <li>
+            <a
+              href="https://github.com/chasers/smolquery"
+              class="btn btn-ghost"
+              target="_blank"
+              rel="noopener"
+            >
+              GitHub
+            </a>
+          </li>
+          <li>
             <.theme_toggle />
           </li>
         </ul>

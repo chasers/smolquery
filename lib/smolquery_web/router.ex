@@ -21,6 +21,18 @@ defmodule SmolqueryWeb.Router do
     plug :put_secure_browser_headers
   end
 
+  pipeline :docs do
+    plug :accepts, ["json"]
+    plug :fetch_session
+    plug SmolqueryWeb.Auth
+  end
+
+  scope "/", SmolqueryWeb do
+    pipe_through :docs
+
+    get "/v1/docs.json", DocsController, :show
+  end
+
   scope "/", SmolqueryWeb do
     pipe_through :browser
 
