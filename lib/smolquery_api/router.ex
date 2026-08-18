@@ -18,6 +18,7 @@ defmodule SmolqueryApi.Router do
   v1 surface so far:
 
       GET  /healthz                                liveness, no auth
+      GET  /v1/docs.json                           the API described as JSON, no auth
       GET  /metrics                                Prometheus text (internal secret)
       GET  /v1/datasets                            list datasets
       POST /v1/datasets                            create a dataset
@@ -55,6 +56,7 @@ defmodule SmolqueryApi.Router do
     pipe_through :api
 
     get "/healthz", HealthController, :show
+    get "/v1/docs.json", DocsController, :show
     get "/metrics", MetricsController, :show
 
     get "/v1/datasets", DatasetController, :index
