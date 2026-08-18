@@ -21,6 +21,15 @@ defmodule Smolquery.Segments.Store.Local do
   data outright — so it is accepted and documented rather than worked around. A
   shared store has neither failure mode.
 
+  ## A committed key can never be blind-overwritten
+
+  The rename lands only if `put/3` first claims the key with an `O_EXCL`-style
+  exclusive create (`:file.open(target, [:write, :exclusive])`). A retry to a
+  key this store already holds — the same crash-recovery retry `Store.S3`
+  guards against with `If-None-Match: *` (T-308) — finds the claim taken,
+  discards its own staged bytes, and reports success without touching the
+  file that is already there.
+
   `fsync: false` trades that guarantee for speed. It is for a store whose
   contents are re-derivable, like a sealer's scratch space, and never for the
   buffer's hot tier.
@@ -74,7 +83,7 @@ defmodule Smolquery.Segments.Store.Local do
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          :ok <- sync(staged, config.fsync),
-         :ok <- File.rename(staged, target) do
+         :ok <- commit(staged, target) do
       {:ok, %{location: target, byte_size: size}}
     else
       {:error, reason} ->
@@ -122,6 +131,21 @@ defmodule Smolquery.Segments.Store.Local do
       |> Enum.filter(&(Store.staged_at(&1) <= cutoff and File.rm(&1) == :ok))
 
     {:ok, Enum.map(swept, &Path.basename/1)}
+  end
+
+  defp commit(staged, target) do
+    case :file.open(target, [:write, :exclusive, :raw]) do
+      {:ok, fd} ->
+        :file.close(fd)
+        File.rename(staged, target)
+
+      {:error, :eexist} ->
+        File.rm(staged)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp encode(staged, encoder) do

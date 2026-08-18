@@ -20,6 +20,20 @@ defmodule Smolquery.Segments.Store.S3 do
   are generated. `sweep_staging/2` cleans up a killed encoder's leftovers the
   same way `Store.Local` does.
 
+  ## A committed path can never be blind-overwritten
+
+  Every `put/3` PUT carries `If-None-Match: *`, so it can only ever create a
+  key, never replace one. `StorageService.Handoff.Seal` re-encodes and
+  re-uploads to the same deterministic key when it retries a claim whose
+  merge already ran but whose catalog registration did not land before a
+  crash (`register_segments/3` is idempotent by path for exactly that retry).
+  Without the conditional write, a retry that itself dies mid-upload — a
+  truncated re-encode racing an OOM kill, say — silently overwrites the
+  fully-committed original with garbage bytes no reader can then parse
+  (T-308). With it, that retry gets a `412 Precondition Failed` back; `put/3`
+  treats that as success, since the object already there is the correct one
+  and there is nothing left to do.
+
   ## Reading sealed segments back needs credentials DuckDB has, not just Elixir
 
   This module reads and writes bytes over HTTP; it says nothing about how the
@@ -328,10 +342,14 @@ defmodule Smolquery.Segments.Store.S3 do
   defp upload(config, key, staged, size) do
     case Req.put(request(config),
            url: "s3://#{config.bucket}/#{key}",
-           headers: [{"content-length", Integer.to_string(size)}],
+           headers: [
+             {"content-length", Integer.to_string(size)},
+             {"if-none-match", "*"}
+           ],
            body: File.stream!(staged, @chunk_bytes)
          ) do
       {:ok, %{status: status}} when status in 200..299 -> {:ok, size}
+      {:ok, %{status: 412}} -> {:ok, size}
       {:ok, %{status: status, body: body}} -> {:error, {:s3_status, status, body}}
       {:error, reason} -> {:error, reason}
     end
