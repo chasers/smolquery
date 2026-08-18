@@ -29,6 +29,11 @@ defmodule SmolqueryApi.SegmentController do
   does not currently hold is not an error: dropping is idempotent, the same
   as every other retirement in this codebase — an operator retrying a drop
   that already landed gets 200 again, not 404.
+
+  The response says what actually matched: `dropped` holds only the paths
+  the current snapshot held, `notFound` the rest. A typo'd path therefore
+  comes back in `notFound` instead of being echoed as dropped while the
+  corrupt segment keeps breaking readers.
   """
   @spec delete(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def delete(conn, %{"dataset" => dataset, "table" => table}) do
@@ -37,8 +42,15 @@ defmodule SmolqueryApi.SegmentController do
 
     with {:ok, paths} <- paths_from_json(conn.body_params),
          {:ok, _schema} <- Catalog.table_schema(catalog, table_ref),
-         {:ok, snapshot} <- Catalog.drop_segments(catalog, table_ref, paths) do
-      Json.send_json(conn, 200, %{"dropped" => paths, "snapshot" => snapshot})
+         {:ok, current} <- Catalog.segments(catalog, table_ref, :current),
+         listed = MapSet.new(current),
+         {dropped, missing} = Enum.split_with(paths, &MapSet.member?(listed, &1)),
+         {:ok, snapshot} <- Catalog.drop_segments(catalog, table_ref, dropped) do
+      Json.send_json(conn, 200, %{
+        "dropped" => dropped,
+        "notFound" => missing,
+        "snapshot" => snapshot
+      })
     else
       {:error, reason} -> Errors.from_reason(conn, reason)
     end

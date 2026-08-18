@@ -142,7 +142,8 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
   end
 
   test "leaves segments at or above the size floor alone", context do
@@ -150,7 +151,9 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
+
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 
@@ -159,7 +162,8 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
   end
 
   test "groups oldest first and leaves what would pass the ceiling", context do
@@ -208,7 +212,8 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert current == [merged]
     assert lake_rows(context.storage) == 50
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
   end
 
   test "a sweep survives an engine that cannot answer its calls (T-251)", context do
@@ -250,12 +255,17 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     File.write!(bad.path, "not a parquet file")
 
+    bad_path = bad.path
+
     for _sweep <- 1..5 do
       assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
-      assert %{table: @table, reason: {:sizing_failed, %Adbc.Error{}}} = failure
+
+      assert %{table: @table, reason: {:sizing_failed, %Adbc.Error{}}, paths: [^bad_path]} =
+               failure
     end
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: [[bad.path]]}}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
     assert Enum.sort(current) == Enum.sort([good.path, bad.path])
@@ -297,7 +307,8 @@ defmodule Smolquery.StorageService.CompactorTest do
   test "an empty catalog sweeps nothing", context do
     start_compactor(context, [])
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
   end
 
   test "a table this node's storage ring hands to another node is left alone", context do
@@ -305,7 +316,9 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: []}}
+
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 
@@ -499,10 +512,12 @@ defmodule Smolquery.StorageService.CompactorTest do
     end
 
     test "a failure below the threshold only counts, it does not quarantine" do
+      {:failed, %{reason: reason}} = corrupt_failure(@table, @paths)
+
       {quarantine, quarantined} =
         Compactor.adjusted_quarantine(%{}, MapSet.new(), [corrupt_failure(@table, @paths)], 3)
 
-      assert quarantine == %{Enum.sort(@paths) => 1}
+      assert quarantine == %{Enum.sort(@paths) => %{reason: reason, streak: 1}}
       assert quarantined == MapSet.new()
     end
 
@@ -518,7 +533,7 @@ defmodule Smolquery.StorageService.CompactorTest do
         end)
 
       assert quarantine == %{}
-      assert quarantined == MapSet.new(@paths)
+      assert quarantined == MapSet.new([Enum.sort(@paths)])
     end
 
     test "a merge OOM never counts toward quarantine, however often it repeats" do
@@ -572,6 +587,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     test "quarantine is keyed by the exact path set, not the table" do
       other_paths = ["analytics/events/c.parquet"]
+      {:failed, %{reason: reason}} = corrupt_failure(@table, @paths)
 
       {quarantine, _quarantined} =
         Compactor.adjusted_quarantine(
@@ -581,7 +597,70 @@ defmodule Smolquery.StorageService.CompactorTest do
           3
         )
 
-      assert quarantine == %{Enum.sort(@paths) => 1, other_paths => 1}
+      assert quarantine == %{
+               Enum.sort(@paths) => %{reason: reason, streak: 1},
+               other_paths => %{reason: reason, streak: 1}
+             }
+    end
+
+    test "a changed reason restarts the streak instead of accumulating" do
+      first = corrupt_failure(@table, @paths)
+
+      changed =
+        {:failed,
+         %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "other"}}, paths: @paths}}
+
+      {quarantine, quarantined} =
+        Enum.reduce([first, changed, first], {%{}, MapSet.new()}, fn outcome, acc ->
+          Compactor.adjusted_quarantine(elem(acc, 0), elem(acc, 1), [outcome], 3)
+        end)
+
+      assert %{streak: 1} = quarantine[Enum.sort(@paths)]
+      assert quarantined == MapSet.new()
+    end
+
+    test "a store put failure never counts toward quarantine" do
+      outage =
+        {:failed,
+         %{
+           table: @table,
+           reason: {:put_failed, "analytics/events/x.parquet", {:s3_status, 503, "slow down"}},
+           paths: @paths
+         }}
+
+      {quarantine, quarantined} =
+        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
+          Compactor.adjusted_quarantine(quarantine, quarantined, [outage], 3)
+        end)
+
+      assert quarantine == %{}
+      assert quarantined == MapSet.new()
+    end
+
+    test "a catalog conflict or a swap invariant failure never counts toward quarantine" do
+      for reason <- [:commit_conflict, {:inputs_survived_swap, @paths}] do
+        failure = {:failed, %{table: @table, reason: reason, paths: @paths}}
+
+        assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [failure], 1) ==
+                 {%{}, MapSet.new()}
+      end
+    end
+  end
+
+  describe "active_quarantined_paths/2 (T-310)" do
+    test "a group binds while the listing holds every member" do
+      groups = MapSet.new([Enum.sort(@paths)])
+      listed = @paths ++ ["analytics/events/d.parquet"]
+
+      assert Compactor.active_quarantined_paths(groups, listed) == MapSet.new(@paths)
+    end
+
+    test "a group releases its survivors once any member leaves the listing" do
+      groups = MapSet.new([Enum.sort(@paths)])
+      [dropped | survivors] = @paths
+
+      assert Compactor.active_quarantined_paths(groups, survivors) == MapSet.new()
+      refute dropped in survivors
     end
   end
 
