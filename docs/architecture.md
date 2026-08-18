@@ -153,10 +153,13 @@ Properties worth knowing:
   reports the committed object's size, not the discarded retry's.
 - **A truncated file is refused before it is ever committed.** `Store.put/3`
   checks `Store.validate_parquet/1` — the `PAR1` magic at both ends of the
-  staged file — right after the encoder returns and before the upload or
-  rename. This is a floor, not a footer parse: it catches a write that died
-  partway through, not corruption that leaves both magic markers intact
-  (T-309).
+  staged file, plus the 12-byte structural minimum — right after the encoder
+  returns and before the upload or link. The dispatcher wraps the encoder,
+  so every implementation gets the check; none can forget it. This is a
+  floor, not a footer parse: it catches a write that died partway through,
+  not corruption that leaves both magic markers intact. A file the validator
+  cannot read reports its posix reason, never `:truncated_parquet` — an
+  environment fault is not a corruption verdict (T-309).
 - **Registration is idempotent.** `register_segments/3` diffs against the paths
   the catalog already holds. DuckLake itself would register a path twice and
   double-count its rows. A sealer that crashed mid-handoff can retry safely.

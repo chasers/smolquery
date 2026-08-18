@@ -87,7 +87,9 @@ defmodule Smolquery.Segments.Store do
 
   @extension ".parquet"
   @parquet_magic "PAR1"
-  @min_parquet_bytes 8
+  @magic_bytes byte_size(@parquet_magic)
+  @footer_length_bytes 4
+  @min_parquet_bytes @magic_bytes * 2 + @footer_length_bytes
 
   @callback put(config :: term(), key(), encoder()) :: {:ok, put_result()} | {:error, term()}
   @callback location(config :: term(), key()) :: String.t()
@@ -107,11 +109,23 @@ defmodule Smolquery.Segments.Store do
   The key is validated here, not only in `key/2` — a key recovered from a log,
   a catalog row, or a wire message gets the same traversal check as one this
   module built.
+
+  The staged bytes are validated here too: the encoder every implementation
+  receives is wrapped so `validate_parquet/1` runs on the staged file the
+  moment the encode returns, before any implementation commits it (T-309).
+  Enforcing it in this dispatcher rather than per implementation means a new
+  backend cannot forget the check.
   """
   @spec put(t(), key(), encoder()) :: {:ok, put_result()} | {:error, term()}
   def put(%__MODULE__{} = store, key, encoder) do
     with {:ok, key} <- validate_key(key) do
-      store.impl.put(store.config, key, encoder)
+      store.impl.put(store.config, key, validating(encoder))
+    end
+  end
+
+  defp validating(encoder) do
+    fn staged ->
+      with :ok <- encoder.(staged), do: validate_parquet(staged)
     end
   end
 
@@ -207,30 +221,44 @@ defmodule Smolquery.Segments.Store do
   truncated write.
 
   Checks the `PAR1` magic at the start and the end of the file — a Parquet
-  reader's own definition of "this is a Parquet file" — and a size floor big
-  enough that the two checks cannot both read the same four bytes. This
-  catches a truncated encode or a truncated crash-recovery retry before
-  either store commits it (T-309); it is not a full footer parse, so it
-  cannot catch corruption that leaves both magic markers intact.
+  reader's own definition of "this is a Parquet file" — and the structural
+  size floor of #{@min_parquet_bytes} bytes: two magic markers plus the
+  mandatory 4-byte footer length between them. This catches a truncated
+  encode or a truncated crash-recovery retry before any store commits it
+  (T-309); it is not a full footer parse, so it cannot catch corruption that
+  leaves both magic markers intact.
 
-  Shared by every implementation, the same way `staged_at/1` is: both stores
-  stage through a local file before committing, so the file this checks is
-  always on disk, never a stream.
+  A failure to read the file at all — `:enoent`, `:eacces`, `:emfile` —
+  returns that posix reason as-is, never `:truncated_parquet`: an
+  environment fault must not be reported as data corruption, because the
+  compactor quarantines on corruption verdicts (T-310).
+
+  `put/3` runs this on every staged file for every implementation; it stays
+  public for a caller that wants to check a file of its own.
   """
-  @spec validate_parquet(Path.t()) :: :ok | {:error, :truncated_parquet}
+  @spec validate_parquet(Path.t()) :: :ok | {:error, :truncated_parquet | File.posix()}
   def validate_parquet(path) do
-    with {:ok, %File.Stat{size: size}} when size >= @min_parquet_bytes <- File.stat(path),
-         {:ok, fd} <- :file.open(path, [:read, :raw, :binary]) do
-      valid? = magic?(fd, 0) and magic?(fd, size - 4)
-      :file.close(fd)
-      if valid?, do: :ok, else: {:error, :truncated_parquet}
-    else
-      _not_a_parquet_file -> {:error, :truncated_parquet}
+    case File.stat(path) do
+      {:ok, %File.Stat{size: size}} when size >= @min_parquet_bytes -> check_magic(path, size)
+      {:ok, %File.Stat{}} -> {:error, :truncated_parquet}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp magic?(fd, offset) do
-    match?({:ok, @parquet_magic}, :file.pread(fd, offset, 4))
+  defp check_magic(path, size) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, fd} ->
+        reads = :file.pread(fd, [{0, @magic_bytes}, {size - @magic_bytes, @magic_bytes}])
+        :file.close(fd)
+
+        case reads do
+          {:ok, [@parquet_magic, @parquet_magic]} -> :ok
+          _missing_magic -> {:error, :truncated_parquet}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """

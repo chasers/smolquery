@@ -40,10 +40,10 @@ defmodule Smolquery.Segments.Store.S3 do
   as "retry the upload", so `upload/5` retries once — by then the winner has
   committed and the retry resolves to the `412` no-op above.
 
-  `put/3` also runs `Store.validate_parquet/1` on the staged file before
-  upload — the `If-None-Match` guard stops a bad retry from overwriting a
-  good object, and this stops a bad file from being uploaded in the first
-  place (T-309).
+  `Store.put/3` also runs `Store.validate_parquet/1` on the staged file
+  before this module ever sees it — the `If-None-Match` guard stops a bad
+  retry from overwriting a good object, and the dispatcher-level check stops
+  a bad file from being uploaded at all (T-309).
 
   ## Reading sealed segments back needs credentials DuckDB has, not just Elixir
 
@@ -209,7 +209,6 @@ defmodule Smolquery.Segments.Store.S3 do
     with :ok <- File.mkdir_p(Path.dirname(staged)),
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
-         :ok <- Store.validate_parquet(staged),
          {:ok, committed_size} <- upload(config, key, staged, size) do
       File.rm(staged)
       {:ok, %{location: location(config, key), byte_size: committed_size}}

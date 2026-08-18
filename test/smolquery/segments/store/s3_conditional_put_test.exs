@@ -78,7 +78,8 @@ defmodule Smolquery.Segments.Store.S3ConditionalPutTest do
   @moduletag :tmp_dir
 
   setup context do
-    %{store: stub_store(context, FirstWriteWinsStub)}
+    {store, table} = stub_store(context, FirstWriteWinsStub)
+    %{store: store, table: table}
   end
 
   defp stub_store(context, plug_module) do
@@ -92,13 +93,16 @@ defmodule Smolquery.Segments.Store.S3ConditionalPutTest do
 
     {:ok, {_address, port}} = ThousandIsland.listener_info(server)
 
-    S3.new(
-      bucket: "sealed",
-      access_key_id: "test",
-      secret_access_key: "test-secret",
-      staging_dir: Path.join(context.tmp_dir, "staging"),
-      endpoint: "http://127.0.0.1:#{port}"
-    )
+    store =
+      S3.new(
+        bucket: "sealed",
+        access_key_id: "test",
+        secret_access_key: "test-secret",
+        staging_dir: Path.join(context.tmp_dir, "staging"),
+        endpoint: "http://127.0.0.1:#{port}"
+      )
+
+    {store, table}
   end
 
   test "the first put/3 for a key succeeds", %{store: store} do
@@ -122,8 +126,15 @@ defmodule Smolquery.Segments.Store.S3ConditionalPutTest do
     assert retry.byte_size == first.byte_size
   end
 
+  test "a truncated encode never sends a PUT to the bucket", %{store: store, table: table} do
+    assert Store.put(store, "table/one.parquet", &File.write(&1, "truncated bytes")) ==
+             {:error, {:put_failed, "table/one.parquet", :truncated_parquet}}
+
+    assert :ets.tab2list(table) == []
+  end
+
   test "a put that loses a conditional-write race retries into the 412 no-op", context do
-    store = stub_store(context, LostRaceStub)
+    {store, _table} = stub_store(context, LostRaceStub)
 
     assert {:ok, put} =
              Store.put(store, "table/one.parquet", &File.write!(&1, FakeParquet.bytes("loser")))
