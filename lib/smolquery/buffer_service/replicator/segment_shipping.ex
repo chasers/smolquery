@@ -54,6 +54,21 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   double-commit at the next retire, so that divergence fails the claim
   loudly instead.
 
+  A follower that answers a *release* with `:claim_mismatch` heals the same
+  way (T-297): the refusal names the live claim the follower actually holds,
+  the owner releases that claim on the follower first — release moves
+  entries to pending, the pre-claim state, so nothing seals from it without
+  a new claim only the owner can freeze — and then re-applies its own
+  release, which the now-claimless follower absorbs as `:ok`. Without this,
+  an owner releasing an oversized claim against a follower that froze a
+  different set retries the identical release every tick forever, and
+  sealing stalls with no path that heals it. One case stays out of the
+  heal: a follower live claim holding ids the owner has already *sealed*.
+  Releasing those to pending on the follower would set up a double-commit
+  after a ring change, so that divergence fails loudly instead, naming the
+  sealed ids — the same asymmetry the claim heal draws (T-291 owns the
+  reconcile).
+
   Two divergences sit outside the heal's reach, deliberately documented
   rather than silently covered. A follower recreated *empty* never answers
   `:partial_claim` at all — `Smolquery.BufferService.Endpoint` acks a
@@ -109,6 +124,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   require Logger
 
   alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Routing
@@ -170,8 +186,45 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
       when mutation.op == :claim ->
         heal_then_retry(target, mutation, args, epoch, missing)
 
+      {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}}
+      when mutation.op == :release ->
+        release_diverged_then_retry(target, mutation, args, epoch, live_ids)
+
       outcome ->
         outcome
+    end
+  end
+
+  defp release_diverged_then_retry(
+         {_transport, node, _instance} = target,
+         mutation,
+         args,
+         epoch,
+         live_ids
+       ) do
+    case Enum.filter(live_ids, &sealed_on_owner?(mutation, &1)) do
+      [] ->
+        released = [mutation.table_ref, :release, %{ids: live_ids}, epoch]
+
+        with :ok <- ship([target], mutation.name, :apply_replica_mutation, released),
+             :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
+          Logger.warning(
+            "healed a diverged release on #{inspect(mutation.table_ref)}: released " <>
+              "#{node}'s own live claim (#{inspect(live_ids)}) before the owner's (T-297)"
+          )
+
+          :ok
+        end
+
+      sealed ->
+        {:error, {:replication_failed, node, {:diverged_claim_sealed_on_owner, sealed}}}
+    end
+  end
+
+  defp sealed_on_owner?(mutation, id) do
+    case HotManifest.entry(mutation.manifest, mutation.table_ref, id) do
+      {:ok, entry} -> Entry.sealed?(entry)
+      :error -> false
     end
   end
 

@@ -151,7 +151,9 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       other = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
 
-      assert HotManifest.release(manifest, @table, [other.id]) == {:error, :claim_mismatch}
+      assert HotManifest.release(manifest, @table, [other.id]) ==
+               {:error, {:claim_mismatch, %{live_ids: [entry.id]}}}
+
       assert {:ok, _still_live} = HotManifest.live_claim(manifest, @table)
     end
 

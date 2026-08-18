@@ -104,6 +104,26 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_query_jobs_total", ~s({state="done"})) == before_done + 1
   end
 
+  test "counts stuck seal attempts and failed oversized releases" do
+    before_stuck = value("smolquery_seal_stuck_attempts_total")
+    before_releases = value("smolquery_seal_release_failures_total")
+
+    :telemetry.execute(
+      [:smolquery, :seal, :stuck],
+      %{consecutive: 5},
+      %{table_ref: {"analytics", "events"}}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :release_failure],
+      %{consecutive: 1},
+      %{table_ref: {"analytics", "events"}}
+    )
+
+    assert value("smolquery_seal_stuck_attempts_total") == before_stuck + 1
+    assert value("smolquery_seal_release_failures_total") == before_releases + 1
+  end
+
   test "renders HELP and TYPE lines for every series it holds" do
     :telemetry.execute([:smolquery, :seal, :attempt], %{}, %{result: :ok})
 

@@ -43,7 +43,10 @@ defmodule Smolquery.StorageService.Sealer do
   per table, cleared the moment one succeeds, and the log escalates from a warning
   to an error once a table has failed enough times in a row to stop being plausibly
   transient. Distinguishing "retrying" from "stuck" is the part that was missing;
-  stopping is not.
+  stopping is not. Every failed attempt at or past that threshold also emits
+  `[:smolquery, :seal, :stuck]`, which `Smolquery.Telemetry` counts as
+  `smolquery_seal_stuck_attempts_total` — a stuck claim should page on a
+  nonzero rate, not wait to be found in the logs (T-293).
   """
 
   use GenServer
@@ -202,6 +205,14 @@ defmodule Smolquery.StorageService.Sealer do
 
   defp failed(state, table_ref, description) do
     consecutive = Map.get(state.failures, table_ref, 0) + 1
+
+    if consecutive >= @stuck_after do
+      :telemetry.execute(
+        [:smolquery, :seal, :stuck],
+        %{consecutive: consecutive},
+        %{table_ref: table_ref}
+      )
+    end
 
     log_failure(table_ref, description, consecutive)
 

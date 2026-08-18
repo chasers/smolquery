@@ -359,9 +359,13 @@ defmodule Smolquery.BufferService.HotManifest do
   re-derives from the pending tail under the valves, with a key the new
   subset names. `ids` must match the live claim's, the same whole-or-nothing
   rule `claim/5` freezes under; a different live set is
-  `{:error, :claim_mismatch}`. No live claim absorbs as `:ok` — a replica
-  re-applying a release it already holds, or one whose claim never froze,
-  has nothing to release and nothing wrong.
+  `{:error, {:claim_mismatch, %{live_ids: ids}}}`, naming the live claim this
+  manifest actually holds — the same reason `:partial_claim` names its diff
+  (T-289): a replica refusing an owner's release is describing a claim the
+  owner does not hold, and without the ids the owner can neither reconcile
+  the divergence nor say more than "failed" in its log (T-297). No live claim
+  absorbs as `:ok` — a replica re-applying a release it already holds, or one
+  whose claim never froze, has nothing to release and nothing wrong.
   """
   @spec release(t(), Store.table_ref(), [String.t()], log() | nil) :: :ok | {:error, term()}
   def release(%__MODULE__{} = manifest, table_ref, ids, log \\ nil) do
@@ -381,7 +385,7 @@ defmodule Smolquery.BufferService.HotManifest do
         |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
       end
     else
-      {:error, :claim_mismatch}
+      {:error, {:claim_mismatch, %{live_ids: live.ids}}}
     end
   end
 

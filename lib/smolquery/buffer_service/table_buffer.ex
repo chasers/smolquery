@@ -117,11 +117,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   existed (T-294): a claim over the current valves is released whole,
   replicated like any mutation, and the ids return to pending, where the
   very next claim re-freezes the oldest valve-sized batch under a new key.
-  A release that cannot replicate — a diverged follower answering
-  `:claim_mismatch` — re-signals the oversized claim and retries the
-  release next tick: signalling the doomed claim is the pre-valve behavior,
-  while signalling nothing would stall the table's sealing silently with no
-  path that ever heals it. An attempt already running for a released claim
+  A diverged follower answering `:claim_mismatch` heals inside the
+  replication itself — see
+  `Smolquery.BufferService.Replicator.SegmentShipping` (T-297). A release
+  that still cannot replicate re-signals the oversized claim and retries
+  the release once per `seal_retry_ms`, counting consecutive failures: the
+  count feeds `[:smolquery, :buffer, :release_failure]` and the log
+  escalates to error at five, because a release failing identically
+  forever is a stalled seal pipeline, not a retry loop (T-293).
+  An attempt already running for a released claim
   is refused at three gates on the storage side — see
   `Smolquery.StorageService.Handoff.Seal`.
   Within a claim, calls are bounded too: `Smolquery.StorageService.Merge`
@@ -168,6 +172,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Writer
 
   @claim_valve_factor 16
+  @release_stuck_after 5
 
   defstruct [
     :runtime,
@@ -186,7 +191,8 @@ defmodule Smolquery.BufferService.TableBuffer do
     byte_size: 0,
     in_flight: 0,
     in_flight_inserts: 0,
-    in_flight_ids: MapSet.new()
+    in_flight_ids: MapSet.new(),
+    release_failures: 0
   ]
 
   # `segment_id` is `nil` for a commit that produced no rows: the flush deletes
@@ -655,10 +661,18 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp resignal_or_resize(state, claim, reclaim) do
-    if claim_oversized?(state, claim) and released?(state, claim) do
-      reclaim.(state)
-    else
-      resignal(state, claim)
+    cond do
+      not claim_oversized?(state, claim) ->
+        resignal(state, claim)
+
+      not due?(state) ->
+        state
+
+      true ->
+        case release_oversized(state, claim) do
+          {:released, state} -> reclaim.(state)
+          {:failed, state} -> signal(state, claim)
+        end
     end
   end
 
@@ -690,7 +704,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     end)
   end
 
-  defp released?(state, claim) do
+  defp release_oversized(state, claim) do
     result =
       Committer.with_log(state.committer, fn log ->
         with :ok <- append_replicas(state, :release, %{ids: claim.ids}) do
@@ -705,15 +719,40 @@ defmodule Smolquery.BufferService.TableBuffer do
             "#{length(claim.ids)} inputs return to pending and re-claim under the valves (T-294)"
         )
 
-        true
+        {:released, %{state | release_failures: 0}}
 
       {:error, reason} ->
-        Logger.warning(
-          "releasing oversized claim on #{inspect(state.table_ref)} failed: #{inspect(reason)}"
-        )
-
-        false
+        {:failed, release_failed(state, reason)}
     end
+  end
+
+  defp release_failed(state, reason) do
+    consecutive = state.release_failures + 1
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :release_failure],
+      %{consecutive: consecutive},
+      %{table_ref: state.table_ref}
+    )
+
+    log_release_failure(state.table_ref, reason, consecutive)
+
+    %{state | release_failures: consecutive}
+  end
+
+  defp log_release_failure(table_ref, reason, consecutive)
+       when consecutive >= @release_stuck_after do
+    Logger.error(
+      "releasing oversized claim on #{inspect(table_ref)} failed: #{inspect(reason)} — " <>
+        "#{consecutive} consecutive failures, sealing on this table is stalled (T-297)"
+    )
+  end
+
+  defp log_release_failure(table_ref, reason, consecutive) do
+    Logger.warning(
+      "releasing oversized claim on #{inspect(table_ref)} failed: #{inspect(reason)} " <>
+        "(#{consecutive} consecutive)"
+    )
   end
 
   defp resignal(state, claim) do
@@ -745,8 +784,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp force_signal_or_resize(state, claim) do
-    if claim_oversized?(state, claim) and released?(state, claim) do
-      force_claim(state)
+    if claim_oversized?(state, claim) do
+      case release_oversized(state, claim) do
+        {:released, state} -> force_claim(state)
+        {:failed, state} -> signal(state, claim)
+      end
     else
       signal(state, claim)
     end
