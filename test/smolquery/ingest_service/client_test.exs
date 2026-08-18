@@ -47,7 +47,7 @@ defmodule Smolquery.IngestService.ClientTest do
 
     on_exit(fn -> Runtime.delete(name) end)
 
-    %{name: name, buffer: buffer}
+    %{name: name, buffer: buffer, catalog: catalog}
   end
 
   test "acked rows are durable and queryable in the hot tier", context do
@@ -150,6 +150,28 @@ defmodule Smolquery.IngestService.ClientTest do
         |> Enum.sum_by(& &1.row_count)
 
       assert total == 2
+    end
+  end
+
+  describe "catalog partition count (T-304)" do
+    test "a table's catalog count spreads writes past the deployment default", context do
+      %{name: name, buffer: buffer, catalog: catalog} = start_stack(context)
+
+      :ok = Catalog.put_partitions(catalog, @table, 2)
+
+      for i <- 1..8 do
+        assert {:ok, %{inserted: 1, errors: []}} =
+                 IngestService.Client.insert(name, @table, [%{"id" => i}])
+      end
+
+      counts =
+        for ref <- Smolquery.Partitions.refs(@table, 2) do
+          {:ok, entries} = BufferService.Client.hot_manifest(buffer, ref)
+          Enum.sum(Enum.map(entries, & &1.row_count))
+        end
+
+      assert Enum.sum(counts) == 8
+      assert Enum.all?(counts, &(&1 > 0))
     end
   end
 

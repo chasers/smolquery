@@ -194,8 +194,17 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp hot_partitions(runtime, table_ref) do
-    for {_dataset, partition} = ref <- Partitions.refs(table_ref, write_partitions(runtime)) do
+    count = Partitions.count(catalog_partitions(runtime, table_ref), write_partitions(runtime))
+
+    for {_dataset, partition} = ref <- Partitions.refs(table_ref, count) do
       %{ref: ref, label: partition, stages: hot_stages(runtime.buffer_name, ref)}
+    end
+  end
+
+  defp catalog_partitions(runtime, table_ref) do
+    case Catalog.partitions(runtime.catalog, table_ref) do
+      {:ok, count} -> count
+      {:error, _reason} -> nil
     end
   end
 
