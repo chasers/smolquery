@@ -41,15 +41,21 @@ defmodule Smolquery.Partitions do
   maps it to a parent it never had. Audit the catalog for `__p<N>` names and
   rename them before deploying partitioned writes.
 
-  ## The count is deployment-wide, and changing it has a window
+  ## Where the count comes from
 
-  The ingest and query runtimes must agree on the count: a reader expanding
-  fewer partitions than a writer filled would answer short. Change
-  `write_partitions` only with the fleet at rest (a rollout applies it
-  everywhere at once), and expect `insertId` retries that straddle a count
-  change to be at-least-once, exactly like a retry that straddles a ring
-  join. A count in a table's own catalog metadata is the follow-up that
-  removes both caveats.
+  `write_partitions` is the deployment-wide default. A table can carry its
+  own count in catalog metadata (T-304, `Smolquery.Catalog.partitions/2`),
+  which rides `Smolquery.Schema` to every reader; `count/2` resolves the two
+  by taking the maximum, so an effective count only ever rises.
+
+  Raising a count is safe online because the lag runs in one direction: the
+  query planner reads the catalog on every plan, while a writer's cached
+  schema may trail by one `schema_cache_ttl_ms` — a reader expanding more
+  partitions than a writer fills answers long, never short, and an unfilled
+  partition's manifest is empty. Lowering is not supported: partitions past
+  the count still hold hot rows a reader would no longer expand. Expect
+  `insertId` retries that straddle a count change to be at-least-once,
+  exactly like a retry that straddles a ring join.
   """
 
   alias Smolquery.Segments.Store
@@ -87,6 +93,19 @@ defmodule Smolquery.Partitions do
 
   def write_ref(table_ref, count, batch_id),
     do: at(table_ref, :erlang.phash2(batch_id, count))
+
+  @doc """
+  The partition count in effect for a table: its own catalog count when one
+  is set, never below the deployment's `write_partitions`.
+
+  The maximum keeps the count raise-only from every direction — a table with
+  no catalog count follows the deployment default, and neither a low catalog
+  count nor a lowered default can shrink a table below what writers may
+  already have filled.
+  """
+  @spec count(pos_integer() | nil, pos_integer()) :: pos_integer()
+  def count(nil, configured), do: configured
+  def count(table_count, configured), do: max(table_count, configured)
 
   @doc """
   The table `ref` carries rows for: itself, unless it names a partition.

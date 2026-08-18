@@ -137,6 +137,27 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     on_exit(fn -> Runtime.delete(partitioned.name) end)
   end
 
+  test "a table's catalog count expands the hot tier without a config change (T-304)", %{
+    catalog: catalog,
+    buffer: buffer,
+    runtime: runtime,
+    tmp_dir: tmp
+  } do
+    seal_rows(catalog, Path.join(tmp, "segments"), 1..2)
+
+    :ok = Catalog.put_partitions(catalog, @table, 3)
+
+    for {ref, base} <- Enum.zip(Smolquery.Partitions.refs(@table, 3), [10, 20, 30]) do
+      rows = for i <- base..(base + 1), do: %{"id" => i, "name" => "hot-#{i}"}
+      {:ok, _ack} = Client.write_batch(buffer, ref, %{schema: schema(), rows: rows})
+    end
+
+    {:ok, plan} =
+      Planner.plan(runtime, Engine.connection_name(@job), "SELECT count(*) FROM analytics.events")
+
+    assert run(plan).rows == [[8]]
+  end
+
   test "the view shadows the lake rather than replacing it", %{
     catalog: catalog,
     runtime: runtime,

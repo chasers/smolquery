@@ -27,6 +27,13 @@ defmodule Smolquery.PartitionsTest do
     assert Enum.sort(targets) == Enum.sort(Partitions.refs(@table, 4))
   end
 
+  test "count takes the catalog's value, never below the deployment default" do
+    assert Partitions.count(nil, 1) == 1
+    assert Partitions.count(nil, 3) == 3
+    assert Partitions.count(6, 3) == 6
+    assert Partitions.count(2, 3) == 3
+  end
+
   test "parent inverts every partition ref, and leaves real tables alone" do
     for ref <- Partitions.refs(@table, 5) do
       assert Partitions.parent(ref) == @table

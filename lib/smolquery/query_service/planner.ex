@@ -144,7 +144,8 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
-         {:ok, manifests} <- Trace.span(:manifests, fn -> manifests(runtime, refs) end) do
+         {:ok, manifests} <-
+           Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
       {:ok,
        Trace.span(:build, fn ->
          build(
@@ -282,18 +283,21 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp manifests(_runtime, []), do: {:ok, %{}}
+  defp manifests(_runtime, [], _tables), do: {:ok, %{}}
 
   # A partitioned table's hot tier lives under several buffer refs
   # (Smolquery.Partitions), so each table expands into its partition refs for
   # the fetch and every page gathers under the parent — the rest of the plan
-  # keeps seeing one hot tier per table.
-  defp manifests(runtime, refs) do
+  # keeps seeing one hot tier per table. The count is the table's own where
+  # the catalog holds one (T-304), already read by resolve/3.
+  defp manifests(runtime, refs, tables) do
     urls = manifest_urls(runtime)
 
     pairs =
       Enum.flat_map(refs, fn ref ->
-        for partition <- Partitions.refs(ref, runtime.write_partitions), url <- urls do
+        count = Partitions.count(tables[ref].schema.partitions, runtime.write_partitions)
+
+        for partition <- Partitions.refs(ref, count), url <- urls do
           {ref, partition, url}
         end
       end)

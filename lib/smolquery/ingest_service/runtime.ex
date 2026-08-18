@@ -28,8 +28,10 @@ defmodule Smolquery.IngestService.Runtime do
   identities (`Smolquery.Partitions`) — across the ring, so across nodes. The
   storage ring places the same partitions the same way, so the count also
   sets one table's seal parallelism: `min(P, N)` storage nodes at
-  `max_concurrent_seals` each (T-301). The query service's `write_partitions`
-  must match; see the caveats there and in `Smolquery.Partitions`.
+  `max_concurrent_seals` each (T-301). This is the deployment-wide *default*:
+  a table's own catalog count can raise it online, per table (T-304,
+  `Smolquery.Partitions.count/2`). The query service's `write_partitions`
+  must match this one; see the caveats in `Smolquery.Partitions`.
 
   `ndjson_passthrough` forwards an `application/x-ndjson` body to the owning
   buffer as the bytes the client sent, so this node spends no CPU per row. It
