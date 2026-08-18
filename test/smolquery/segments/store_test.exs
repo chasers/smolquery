@@ -3,6 +3,9 @@ defmodule Smolquery.Segments.StoreTest do
 
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
+  alias Smolquery.Test.FakeParquet
+
+  @moduletag :tmp_dir
 
   @id "01KYWPEEGAM8FQVQS5S2QF26SV"
 
@@ -58,6 +61,58 @@ defmodule Smolquery.Segments.StoreTest do
     test "reports a key that does not name a segment" do
       assert Store.id("analytics/events/manifest.log") == :error
       assert Store.id("") == :error
+    end
+  end
+
+  describe "validate_parquet/1" do
+    defp file(dir, name, contents) do
+      path = Path.join(dir, name)
+      File.write!(path, contents)
+      path
+    end
+
+    test "accepts a file with PAR1 at both ends", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", FakeParquet.bytes("row groups here"))
+
+      assert Store.validate_parquet(path) == :ok
+    end
+
+    test "refuses a file missing the header magic", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", "junk" <> "footer" <> "PAR1")
+
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+    end
+
+    test "refuses a file missing the footer magic", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", "PAR1" <> "header" <> "junk")
+
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+    end
+
+    test "refuses a file truncated mid-write, footer magic and all", %{tmp_dir: dir} do
+      full = FakeParquet.bytes("row groups here")
+      truncated = binary_part(full, 0, div(byte_size(full), 2))
+      path = file(dir, "segment.parquet", truncated)
+
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+    end
+
+    test "refuses a file too small to hold both magic markers", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", "PAR1")
+
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+    end
+
+    test "accepts a file that is exactly the two magic markers back to back", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", "PAR1PAR1")
+
+      assert Store.validate_parquet(path) == :ok
+    end
+
+    test "refuses a file that does not exist", %{tmp_dir: dir} do
+      path = Path.join(dir, "missing.parquet")
+
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
     end
   end
 end

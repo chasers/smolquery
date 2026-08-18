@@ -86,6 +86,8 @@ defmodule Smolquery.Segments.Store do
   @type put_result :: %{location: String.t(), byte_size: non_neg_integer()}
 
   @extension ".parquet"
+  @parquet_magic "PAR1"
+  @min_parquet_bytes 8
 
   @callback put(config :: term(), key(), encoder()) :: {:ok, put_result()} | {:error, term()}
   @callback location(config :: term(), key()) :: String.t()
@@ -198,6 +200,37 @@ defmodule Smolquery.Segments.Store do
       {:ok, %File.Stat{mtime: mtime}} -> mtime
       {:error, _reason} -> :infinity
     end
+  end
+
+  @doc """
+  Whether a staged file is a Parquet file large enough to be one, or a
+  truncated write.
+
+  Checks the `PAR1` magic at the start and the end of the file — a Parquet
+  reader's own definition of "this is a Parquet file" — and a size floor big
+  enough that the two checks cannot both read the same four bytes. This
+  catches a truncated encode or a truncated crash-recovery retry before
+  either store commits it (T-309); it is not a full footer parse, so it
+  cannot catch corruption that leaves both magic markers intact.
+
+  Shared by every implementation, the same way `staged_at/1` is: both stores
+  stage through a local file before committing, so the file this checks is
+  always on disk, never a stream.
+  """
+  @spec validate_parquet(Path.t()) :: :ok | {:error, :truncated_parquet}
+  def validate_parquet(path) do
+    with {:ok, %File.Stat{size: size}} when size >= @min_parquet_bytes <- File.stat(path),
+         {:ok, fd} <- :file.open(path, [:read, :raw, :binary]) do
+      valid? = magic?(fd, 0) and magic?(fd, size - 4)
+      :file.close(fd)
+      if valid?, do: :ok, else: {:error, :truncated_parquet}
+    else
+      _not_a_parquet_file -> {:error, :truncated_parquet}
+    end
+  end
+
+  defp magic?(fd, offset) do
+    match?({:ok, @parquet_magic}, :file.pread(fd, offset, 4))
   end
 
   @doc """

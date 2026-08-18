@@ -34,6 +34,11 @@ defmodule Smolquery.Segments.Store.S3 do
   treats that as success, since the object already there is the correct one
   and there is nothing left to do.
 
+  `put/3` also runs `Store.validate_parquet/1` on the staged file before
+  upload — the `If-None-Match` guard stops a bad retry from overwriting a
+  good object, and this stops a bad file from being uploaded in the first
+  place (T-309).
+
   ## Reading sealed segments back needs credentials DuckDB has, not just Elixir
 
   This module reads and writes bytes over HTTP; it says nothing about how the
@@ -198,6 +203,7 @@ defmodule Smolquery.Segments.Store.S3 do
     with :ok <- File.mkdir_p(Path.dirname(staged)),
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
+         :ok <- Store.validate_parquet(staged),
          {:ok, ^size} <- upload(config, key, staged, size) do
       File.rm(staged)
       {:ok, %{location: location(config, key), byte_size: size}}

@@ -11,6 +11,7 @@ defmodule Smolquery.Segments.Store.S3ConditionalPutTest do
 
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.S3
+  alias Smolquery.Test.FakeParquet
 
   defmodule FirstWriteWinsStub do
     @moduledoc false
@@ -64,15 +65,20 @@ defmodule Smolquery.Segments.Store.S3ConditionalPutTest do
 
   test "the first put/3 for a key succeeds", %{store: store} do
     assert {:ok, %{location: "s3://sealed/table/one.parquet"}} =
-             Store.put(store, "table/one.parquet", &File.write!(&1, "hello"))
+             Store.put(store, "table/one.parquet", &File.write!(&1, FakeParquet.bytes("hello")))
   end
 
   test "a retry to an already-committed key gets 412 and is treated as success", %{
     store: store
   } do
-    assert {:ok, _put} = Store.put(store, "table/one.parquet", &File.write!(&1, "hello"))
+    assert {:ok, _put} =
+             Store.put(store, "table/one.parquet", &File.write!(&1, FakeParquet.bytes("hello")))
 
     assert {:ok, %{location: "s3://sealed/table/one.parquet"}} =
-             Store.put(store, "table/one.parquet", &File.write!(&1, "truncated-retry"))
+             Store.put(
+               store,
+               "table/one.parquet",
+               &File.write!(&1, FakeParquet.bytes("truncated-retry"))
+             )
   end
 end

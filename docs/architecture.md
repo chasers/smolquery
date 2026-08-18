@@ -150,6 +150,12 @@ Properties worth knowing:
   rejected (a `412` on S3, `:eexist` locally) and treats it as a no-op instead
   of re-uploading — so a retry that itself dies mid-write can never clobber a
   fully-committed segment with truncated bytes (T-308).
+- **A truncated file is refused before it is ever committed.** `Store.put/3`
+  checks `Store.validate_parquet/1` — the `PAR1` magic at both ends of the
+  staged file — right after the encoder returns and before the upload or
+  rename. This is a floor, not a footer parse: it catches a write that died
+  partway through, not corruption that leaves both magic markers intact
+  (T-309).
 - **Registration is idempotent.** `register_segments/3` diffs against the paths
   the catalog already holds. DuckLake itself would register a path twice and
   double-count its rows. A sealer that crashed mid-handoff can retry safely.
