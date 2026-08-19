@@ -164,6 +164,62 @@ defmodule SmolqueryApi.Docs do
             "insertId; a retry re-inserts. 413 past the load size cap."
       },
       %{
+        "method" => "GET",
+        "path" => "/v1/connections",
+        "auth" => "bearer",
+        "summary" =>
+          "Every registered federated Postgres connection. Passwords are " <>
+            "never returned, on this or any other route."
+      },
+      %{
+        "method" => "POST",
+        "path" => "/v1/connections",
+        "auth" => "bearer",
+        "summary" =>
+          "Register a connection, replacing one of the same name. 201 for a " <>
+            "new name, 200 for a replacement. The name becomes the catalog a " <>
+            "federated query qualifies with, so it must be an identifier.",
+        "request" => %{
+          "name" => "identifier; the catalog alias a query uses",
+          "host" => "hostname or address",
+          "port" => "integer, default 5432",
+          "database" => "database name",
+          "username" => "role to connect as",
+          "password" => "sealed before storage, never returned",
+          "sslmode" => "libpq sslmode, default require"
+        }
+      },
+      %{
+        "method" => "GET",
+        "path" => "/v1/connections/:name",
+        "auth" => "bearer",
+        "summary" => "One connection, without its password."
+      },
+      %{
+        "method" => "PATCH",
+        "path" => "/v1/connections/:name",
+        "auth" => "bearer",
+        "summary" =>
+          "Change the fields the body names. An absent password leaves the " <>
+            "stored one untouched, which is what lets a caller edit a host " <>
+            "without re-entering a credential it cannot read back."
+      },
+      %{
+        "method" => "DELETE",
+        "path" => "/v1/connections/:name",
+        "auth" => "bearer",
+        "summary" => "Remove a connection. Removing an absent one is a 200."
+      },
+      %{
+        "method" => "POST",
+        "path" => "/v1/connections/:name/test",
+        "auth" => "bearer",
+        "summary" =>
+          "Attach the connection in a throwaway engine and read one row " <>
+            "through it. 422 when the remote database does not answer; the " <>
+            "reason never quotes the connection string."
+      },
+      %{
         "method" => "POST",
         "path" => "/v1/queries",
         "auth" => "bearer",

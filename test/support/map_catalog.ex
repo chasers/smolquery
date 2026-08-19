@@ -7,21 +7,70 @@ defmodule Smolquery.Test.MapCatalog do
   answers `:ok`), listings sort, and a missing table is
   `{:error, {:unknown_table, ref}}`. Segment callbacks are unsupported — this
   catalog exists for the dataset/table surface.
+
+  Federated connections are supported here (T-323), because the API's
+  connection routes are the CRUD surface this double exists to exercise. It
+  mirrors DuckLake's semantics: a put replaces by name and keeps the original
+  `created_at`, listings sort by name, a missing name is
+  `{:error, {:unknown_connection, name}}`, and deleting an absent name is `:ok`.
   """
 
   @behaviour Smolquery.Catalog
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Connection
   alias Smolquery.Schema
 
   @spec new() :: Catalog.t()
   def new do
     {:ok, agent} =
       Agent.start_link(fn ->
-        %{datasets: MapSet.new(), tables: %{}, retention: %{}, clustering: %{}, partitions: %{}}
+        %{
+          datasets: MapSet.new(),
+          tables: %{},
+          retention: %{},
+          clustering: %{},
+          partitions: %{},
+          connections: %{}
+        }
       end)
 
     %Catalog{impl: __MODULE__, config: agent}
+  end
+
+  @impl Catalog
+  def put_connection(agent, %Connection{} = connection) do
+    now = System.system_time(:millisecond)
+
+    Agent.update(agent, fn state ->
+      created_at =
+        case Map.fetch(state.connections, connection.name) do
+          {:ok, existing} -> existing.created_at
+          :error -> now
+        end
+
+      stored = %{connection | created_at: created_at, updated_at: now}
+
+      %{state | connections: Map.put(state.connections, connection.name, stored)}
+    end)
+  end
+
+  @impl Catalog
+  def connection(agent, name) do
+    case Agent.get(agent, &Map.fetch(&1.connections, name)) do
+      {:ok, connection} -> {:ok, connection}
+      :error -> {:error, {:unknown_connection, name}}
+    end
+  end
+
+  @impl Catalog
+  def list_connections(agent) do
+    {:ok, agent |> Agent.get(& &1.connections) |> Map.values() |> Enum.sort_by(& &1.name)}
+  end
+
+  @impl Catalog
+  def delete_connection(agent, name) do
+    Agent.update(agent, &%{&1 | connections: Map.delete(&1.connections, name)})
   end
 
   @impl Catalog

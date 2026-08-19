@@ -138,6 +138,36 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
+  def from_reason(conn, {:unknown_connection, name}) do
+    send_error(conn, 404, "NOT_FOUND", "connection #{name} does not exist")
+  end
+
+  def from_reason(conn, :no_credential_key) do
+    send_error(
+      conn,
+      503,
+      "UNAVAILABLE",
+      "this node has no SMOLQUERY_CREDENTIAL_KEY, so it cannot seal or open a connection password"
+    )
+  end
+
+  def from_reason(conn, :invalid_secret) do
+    send_error(
+      conn,
+      422,
+      "FAILED_PRECONDITION",
+      "the stored password cannot be opened with this node's credential key; re-register the connection"
+    )
+  end
+
+  def from_reason(conn, :connections_unsupported) do
+    send_error(conn, 501, "UNIMPLEMENTED", "this catalog does not store federated connections")
+  end
+
+  def from_reason(conn, {:federation_error, name, _reason}) do
+    send_error(conn, 422, "FAILED_PRECONDITION", "connection #{name} could not be opened")
+  end
+
   def from_reason(conn, :commit_conflict) do
     send_error(
       conn,
