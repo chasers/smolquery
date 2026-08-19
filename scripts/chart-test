@@ -34,6 +34,15 @@ def docs(text):
     return [doc for doc in yaml.safe_load_all(text) if doc]
 
 
+def test_hook(rendered):
+    return next(
+        doc
+        for doc in rendered
+        if doc.get("kind") == "Pod"
+        and doc["metadata"].get("annotations", {}).get("helm.sh/hook") == "test"
+    )
+
+
 def assert_images(rendered, expected_image, expected_pull_policy="IfNotPresent"):
     statefulsets = [doc for doc in rendered if doc.get("kind") == "StatefulSet"]
     images = [
@@ -47,12 +56,7 @@ def assert_images(rendered, expected_image, expected_pull_policy="IfNotPresent")
         for statefulset in statefulsets
         for container in statefulset["spec"]["template"]["spec"]["containers"]
     )
-    hook = next(
-        doc
-        for doc in rendered
-        if doc.get("kind") == "Pod"
-        and doc["metadata"].get("annotations", {}).get("helm.sh/hook") == "test"
-    )
+    hook = test_hook(rendered)
     assert hook["spec"]["automountServiceAccountToken"] is False
     assert hook["spec"]["containers"][0]["image"] == expected_image
     assert hook["spec"]["containers"][0]["imagePullPolicy"] == expected_pull_policy
@@ -315,6 +319,22 @@ repository = assert_profile(
     ["--set-string", f"image.repository={configured_repository}"], "split"
 )
 assert_images(repository, f"{configured_repository}@{RELEASE_DIGEST}")
+hardened = assert_profile(
+    [
+        "--set",
+        "imagePullSecrets[0].name=registry,securityContext.runAsNonRoot=true,containerSecurityContext.runAsNonRoot=true",
+    ],
+    "split",
+)
+hook = test_hook(hardened)
+workload = next(doc for doc in hardened if doc.get("kind") == "StatefulSet")
+workload_pod = workload["spec"]["template"]["spec"]
+assert hook["spec"]["imagePullSecrets"] == workload_pod["imagePullSecrets"]
+assert hook["spec"]["securityContext"] == workload_pod["securityContext"]
+assert (
+    hook["spec"]["containers"][0]["securityContext"]
+    == workload_pod["containers"][0]["securityContext"]
+)
 invalid_digest = run("template", "smolquery", str(chart), "--set-string", "image.digest=sha256:ABC", check=False)
 assert invalid_digest.returncode != 0 and "digest" in invalid_digest.stderr
 
@@ -382,10 +402,8 @@ assert_rbac(rbac, "smolquery-smolquery", create=True)
 for statefulset in [doc for doc in rbac if doc.get("kind") == "StatefulSet"]:
     role = statefulset["metadata"]["name"].rsplit("-", 1)[-1]
     pod = statefulset["spec"]["template"]["spec"]
-    if role == "api":
-        assert pod["serviceAccountName"] == "smolquery-smolquery" and pod["automountServiceAccountToken"] is True
-    else:
-        assert "serviceAccountName" not in pod and pod["automountServiceAccountToken"] is False
+    assert pod["serviceAccountName"] == "smolquery-smolquery"
+    assert pod["automountServiceAccountToken"] is (role == "api")
 existing_sa = docs(
     run(
         "template",
@@ -398,8 +416,23 @@ existing_sa = docs(
     ).stdout
 )
 assert_rbac(existing_sa, "runtime", create=False)
-api = next(doc for doc in existing_sa if doc.get("kind") == "StatefulSet" and doc["metadata"]["name"].endswith("-api"))
-assert api["spec"]["template"]["spec"]["serviceAccountName"] == "runtime"
+for statefulset in [doc for doc in existing_sa if doc.get("kind") == "StatefulSet"]:
+    role = statefulset["metadata"]["name"].rsplit("-", 1)[-1]
+    pod = statefulset["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "runtime"
+    assert pod["automountServiceAccountToken"] is (role == "api")
+workload_identity = assert_profile(
+    ["--set", "serviceAccount.name=workload-identity"], "split"
+)
+for statefulset in [doc for doc in workload_identity if doc.get("kind") == "StatefulSet"]:
+    pod = statefulset["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "workload-identity"
+    assert pod["automountServiceAccountToken"] is False
+assert not {doc["kind"] for doc in workload_identity} & {
+    "Role",
+    "RoleBinding",
+    "ServiceAccount",
+}
 symmetric_rbac = docs(
     run(
         "template",
@@ -433,6 +466,17 @@ for values, expected in [
     (["--set", "env.SMOLQUERY_API_PORT=9999"], "reserved"),
     (["--set", "commonExtraEnv[0].name=GEN_RPC_TLS,commonExtraEnv[0].value=false"], "reserved"),
     (["--set", "roleExtraEnv.api[0].name=SMOLQUERY_ROLES,roleExtraEnv.api[0].value=all"], "reserved"),
+    (["--set", "service.ports.web=4000"], "front-door Service ports"),
+    (["--set", "service.ports.metrics=4369"], "headless Service ports"),
+    (["--set", "service.ports.genRpcTls=5369"], "headless Service ports"),
+    (["--set", "topology=symmetric,service.ports.hotServer=4000"], "server pod ports"),
+    (
+        [
+            "--set",
+            "tls.enabled=true,tls.secretName=tls,service.ports.genRpcTls=4000",
+        ],
+        "api pod ports",
+    ),
     (["--set", "probes.apu.readiness.httpGet.path=/healthz"], "apu"),
     (["--set", "fullnameOverride=Invalid_Name"], "fullnameOverride"),
 ]:

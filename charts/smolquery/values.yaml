@@ -10,6 +10,7 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
+# Install-time identity only; changing either value on an existing release is rejected.
 nameOverride: ""
 fullnameOverride: ""
 
@@ -52,6 +53,8 @@ persistence:
   storageClass: ""
   annotations: {}
 
+# A configured ServiceAccount applies to every role so workload identity reaches
+# both query and storage pods. API/server token automount remains pod-operations-only.
 serviceAccount:
   create: false
   name: ""

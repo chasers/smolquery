@@ -32,7 +32,7 @@ spec:
     spec:
       enableServiceLinks: false
       terminationGracePeriodSeconds: 60
-      {{- if and (or (eq $role "api") (eq $role "server")) (or $root.Values.podOperations.enabled $root.Values.serviceAccount.create $root.Values.serviceAccount.name) }}
+      {{- if or $root.Values.serviceAccount.create $root.Values.serviceAccount.name }}
       serviceAccountName: {{ include "smolquery.serviceAccountName" $root }}
       {{- end }}
       automountServiceAccountToken: {{ if and $root.Values.podOperations.enabled (or (eq $role "api") (eq $role "server")) }}true{{ else }}false{{ end }}

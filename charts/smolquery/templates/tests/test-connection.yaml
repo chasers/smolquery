@@ -10,9 +10,21 @@ metadata:
 spec:
   automountServiceAccountToken: false
   restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.securityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   containers:
     - name: curl
       image: {{ include "smolquery.image" . | quote }}
       imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- with .Values.containerSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       command: ["curl"]
       args: ["--fail", "--silent", "--show-error", "--retry", "10", "--retry-delay", "3", "http://{{ include "smolquery.fullname" . }}:{{ .Values.service.ports.http }}/healthz"]
