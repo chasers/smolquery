@@ -327,11 +327,14 @@ defmodule Smolquery.BufferService.HotManifestTest do
       handler = "index-size-#{:erlang.unique_integer([:positive])}"
       test = self()
 
+      # Handlers are global and this module is async, so a concurrent test's drop
+      # would land in this mailbox. Every manifest call under test runs inline in
+      # the test process, so the emitting pid is the filter.
       :telemetry.attach(
         handler,
         [:smolquery, :hot_manifest, :change],
         fn _event, measurements, meta, _config ->
-          send(test, {:change, meta.change, measurements.entries})
+          if self() == test, do: send(test, {:change, meta.change, measurements.entries})
         end,
         nil
       )

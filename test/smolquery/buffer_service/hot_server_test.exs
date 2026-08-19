@@ -420,11 +420,13 @@ defmodule Smolquery.BufferService.HotServerTest do
       handler = "hot-server-test-#{:erlang.unique_integer([:positive])}"
       test = self()
 
+      # Handlers are global and this module is async. Every request under test is
+      # a `Plug.Test` call running inline here, so the emitting pid is the filter.
       :telemetry.attach(
         handler,
         [:smolquery, :hot_server, :request],
         fn _event, measurements, meta, _config ->
-          send(test, {:hot_server_request, measurements, meta})
+          if self() == test, do: send(test, {:hot_server_request, measurements, meta})
         end,
         nil
       )
@@ -440,7 +442,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       response = get(name, @manifest_path)
 
       assert_receive {:hot_server_request, measurements, meta}
-      assert meta == %{route: :manifest, method: "GET", status: 200}
+      assert meta == %{route: :manifest, table_ref: @table, method: "GET", status: 200}
       assert measurements.entries == 2
       assert measurements.response_bytes == byte_size(response.resp_body)
       assert measurements.duration_us >= 0
@@ -486,7 +488,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       HotServer.call(authed(conn(:head, @manifest_path)), name)
 
       assert_receive {:hot_server_request, measurements, meta}
-      assert meta == %{route: :manifest, method: "HEAD", status: 200}
+      assert meta == %{route: :manifest, table_ref: @table, method: "HEAD", status: 200}
       assert measurements.entries == 2
       assert measurements.response_bytes == 0
     end

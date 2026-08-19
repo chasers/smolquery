@@ -70,7 +70,7 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :hot_server, :request] %{duration_us, response_bytes, entries},
                                           meta %{route: :manifest | :manifest_scoped |
                                           :segment | :unknown, method: String.t(),
-                                          status: integer}
+                                          status: integer, table_ref: ref | nil}
                                           — one hot-tier read served to a sealer or a
                                           query planner (T-315). The method is the raw
                                           request method; this module narrows it to a

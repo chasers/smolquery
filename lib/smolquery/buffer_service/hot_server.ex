@@ -123,17 +123,20 @@ defmodule Smolquery.BufferService.HotServer do
       when method in ["GET", "HEAD"] ->
         conn
         |> put_private(:hot_server_route, :manifest)
+        |> put_private(:hot_server_table, {dataset, table})
         |> manifest(name, {dataset, table}, :all, stats: true)
 
       {"POST", ["v1", "datasets", dataset, "tables", table, "manifest"]} ->
         conn
         |> put_private(:hot_server_route, :manifest_scoped)
+        |> put_private(:hot_server_table, {dataset, table})
         |> scoped_manifest(name, {dataset, table})
 
       {method, ["v1", "datasets", dataset, "tables", table, "segments", filename]}
       when method in ["GET", "HEAD"] ->
         conn
         |> put_private(:hot_server_route, :segment)
+        |> put_private(:hot_server_table, {dataset, table})
         |> segment(name, {dataset, table}, filename)
 
       _unmatched ->
@@ -154,6 +157,7 @@ defmodule Smolquery.BufferService.HotServer do
       },
       %{
         route: conn.private[:hot_server_route] || :unknown,
+        table_ref: conn.private[:hot_server_table],
         method: conn.method,
         status: conn.status
       }
