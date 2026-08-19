@@ -40,6 +40,7 @@ defmodule SmolqueryWeb.Router do
       live "/", TableLive.Index, :index
       live "/tables", TableLive.Index, :index
       live "/tables/:dataset/:table", TableLive.Show, :show
+      live "/connections", ConnectionLive.Index, :index
       live "/query", QueryLive.Index, :index
       live "/cluster", ClusterLive.Index, :index
     end
