@@ -115,6 +115,7 @@ defmodule Smolquery.Catalog.DuckLake do
   import Bitwise
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -197,7 +198,8 @@ defmodule Smolquery.Catalog.DuckLake do
     bootstrap = [
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
       create_clustering_statement(catalog),
-      create_partitions_statement(catalog)
+      create_partitions_statement(catalog),
+      create_connections_statement(catalog)
     ]
 
     config
@@ -859,6 +861,112 @@ defmodule Smolquery.Catalog.DuckLake do
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
       "partition_count INTEGER NOT NULL, " <>
       "PRIMARY KEY (dataset, table_name))"
+  end
+
+  defp connections_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_connections"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its federated-connection
+  side table (T-322).
+
+  Bootstrap SQL like `create_clustering_statement/1`, and for the same reason:
+  the planner reads connections per query, to decide whether a
+  catalog-qualified reference names a registered database or is the error it
+  has always been. Creating the table lazily would put DDL on that read.
+
+  The primary key on `name` is the replica identity for a published Postgres
+  metadata database — see `create_clustering_statement/1` — and it is also the
+  uniqueness the name needs on its own terms, since it becomes a DuckDB
+  catalog alias.
+
+  `secret` holds what `Smolquery.Secrets` sealed. The column never contains a
+  password, so a metadata database that is dumped, replicated, or read by an
+  operator yields ciphertext whose key lives only in the environment.
+  """
+  @spec create_connections_statement(String.t()) :: String.t()
+  def create_connections_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{connections_table(catalog)} (" <>
+      "name VARCHAR NOT NULL, host VARCHAR NOT NULL, port INTEGER NOT NULL, " <>
+      "database_name VARCHAR NOT NULL, username VARCHAR NOT NULL, " <>
+      "secret VARCHAR NOT NULL, sslmode VARCHAR NOT NULL, " <>
+      "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, " <>
+      "PRIMARY KEY (name))"
+  end
+
+  @impl Catalog
+  def put_connection(%__MODULE__{} = config, %Connection{} = connection) do
+    now = System.system_time(:millisecond)
+    created_at = connection.created_at || now
+
+    Engine.transaction(config.engine, [
+      delete_connection_sql(config, connection.name),
+      "INSERT INTO #{connections_table(config.catalog)} " <>
+        "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at) " <>
+        "VALUES (#{Identifier.sql_string(connection.name)}, " <>
+        "#{Identifier.sql_string(connection.host)}, #{connection.port}, " <>
+        "#{Identifier.sql_string(connection.database)}, " <>
+        "#{Identifier.sql_string(connection.username)}, " <>
+        "#{Identifier.sql_string(connection.secret)}, " <>
+        "#{Identifier.sql_string(connection.sslmode)}, #{created_at}, #{now})"
+    ])
+  end
+
+  @impl Catalog
+  def connection(%__MODULE__{} = config, name) do
+    sql =
+      "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
+        "FROM #{connections_table(config.catalog)} WHERE name = #{Identifier.sql_string(name)}"
+
+    case query(config, sql) do
+      {:ok, %{rows: [row]}} -> {:ok, connection_from_row(row)}
+      {:ok, %{rows: []}} -> {:error, {:unknown_connection, name}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl Catalog
+  def list_connections(%__MODULE__{} = config) do
+    sql =
+      "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
+        "FROM #{connections_table(config.catalog)} ORDER BY name"
+
+    with {:ok, %{rows: rows}} <- query(config, sql) do
+      {:ok, Enum.map(rows, &connection_from_row/1)}
+    end
+  end
+
+  @impl Catalog
+  def delete_connection(%__MODULE__{} = config, name) do
+    with {:ok, _result} <- query(config, delete_connection_sql(config, name)), do: :ok
+  end
+
+  defp delete_connection_sql(config, name) do
+    "DELETE FROM #{connections_table(config.catalog)} " <>
+      "WHERE name = #{Identifier.sql_string(name)}"
+  end
+
+  defp connection_from_row([
+         name,
+         host,
+         port,
+         database,
+         username,
+         secret,
+         sslmode,
+         created_at,
+         updated_at
+       ]) do
+    %Connection{
+      name: name,
+      host: host,
+      port: port,
+      database: database,
+      username: username,
+      secret: secret,
+      sslmode: sslmode,
+      created_at: created_at,
+      updated_at: updated_at
+    }
   end
 
   defp delete_partitions_below_sql(config, dataset, table, count) do

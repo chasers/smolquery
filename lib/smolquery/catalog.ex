@@ -13,6 +13,15 @@ defmodule Smolquery.Catalog do
   module with its configuration, so a caller holds one handle and passes it
   around.
 
+  ## Federated connections
+
+  A catalog also holds the Postgres databases a federated query may reach
+  (T-322). They sit here rather than in configuration for the reason the
+  partition count does: every node must read one answer. The four callbacks
+  are optional, so a catalog implementation that stores no connections needs
+  no stub — the wrappers answer `{:error, :connections_unsupported}` and a
+  caller learns that rather than crashing on an undefined function.
+
   ## Snapshots
 
   Every mutation returns the snapshot it committed at, and `segments/3` reads
@@ -31,6 +40,7 @@ defmodule Smolquery.Catalog do
 
   """
 
+  alias Smolquery.Catalog.Connection
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
 
@@ -148,8 +158,17 @@ defmodule Smolquery.Catalog do
               :ok | {:error, term()}
   @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
+  @callback put_connection(config :: term(), Connection.t()) :: :ok | {:error, term()}
+  @callback connection(config :: term(), name :: String.t()) ::
+              {:ok, Connection.t()} | {:error, term()}
+  @callback list_connections(config :: term()) :: {:ok, [Connection.t()]} | {:error, term()}
+  @callback delete_connection(config :: term(), name :: String.t()) :: :ok | {:error, term()}
 
-  @optional_callbacks put_table_options: 3
+  @optional_callbacks put_table_options: 3,
+                      put_connection: 2,
+                      connection: 2,
+                      list_connections: 1,
+                      delete_connection: 2
 
   @doc """
   Creates a dataset, if it does not already exist.
@@ -418,6 +437,41 @@ defmodule Smolquery.Catalog do
     do: put_partitions(catalog, table, count)
 
   defp sequential_put(_catalog, _table, _options, _key), do: :ok
+
+  @doc """
+  Registers `connection`, replacing any connection of the same name.
+  """
+  @spec put_connection(t(), Connection.t()) :: :ok | {:error, term()}
+  def put_connection(%__MODULE__{} = catalog, %Connection{} = connection),
+    do: dispatch(catalog, :put_connection, [connection])
+
+  @doc """
+  The connection named `name`, or `{:error, {:unknown_connection, name}}`.
+  """
+  @spec connection(t(), String.t()) :: {:ok, Connection.t()} | {:error, term()}
+  def connection(%__MODULE__{} = catalog, name), do: dispatch(catalog, :connection, [name])
+
+  @doc """
+  Every registered connection, by name.
+  """
+  @spec list_connections(t()) :: {:ok, [Connection.t()]} | {:error, term()}
+  def list_connections(%__MODULE__{} = catalog), do: dispatch(catalog, :list_connections, [])
+
+  @doc """
+  Removes the connection named `name`. Removing one that does not exist is
+  `:ok` — the caller asked for its absence, and it is absent.
+  """
+  @spec delete_connection(t(), String.t()) :: :ok | {:error, term()}
+  def delete_connection(%__MODULE__{} = catalog, name),
+    do: dispatch(catalog, :delete_connection, [name])
+
+  defp dispatch(catalog, function, args) do
+    if function_exported?(catalog.impl, function, length(args) + 1) do
+      apply(catalog.impl, function, [catalog.config | args])
+    else
+      {:error, :connections_unsupported}
+    end
+  end
 
   @doc """
   Expires snapshots older than `older_than_ms`, returning how many expired.

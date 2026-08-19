@@ -20,6 +20,10 @@ if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
   config :smolquery, :internal_secret, internal_secret
 end
 
+if credential_key = System.get_env("SMOLQUERY_CREDENTIAL_KEY") do
+  config :smolquery, :credential_key, credential_key
+end
+
 if api_port = System.get_env("SMOLQUERY_API_PORT") do
   config :smolquery, SmolqueryApi.Endpoint,
     http: [port: Smolquery.RuntimeConfig.port!("SMOLQUERY_API_PORT", api_port)]
