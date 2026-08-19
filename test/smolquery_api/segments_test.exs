@@ -70,6 +70,21 @@ defmodule SmolqueryApi.SegmentControllerTest do
 
     assert first.status == 200
     assert second.status == 200
+
+    body = JSON.decode!(first.resp_body)
+    assert body["dropped"] == []
+    assert body["notFound"] == ["analytics/events/never-existed.parquet"]
+  end
+
+  test "the response separates what matched from what did not", %{name: name, agent: agent} do
+    PathCatalog.register(agent, "analytics/events/a.parquet")
+
+    response = drop(name, ["analytics/events/a.parquet", "analytics/events/typo.parquet"])
+
+    assert response.status == 200
+    body = JSON.decode!(response.resp_body)
+    assert body["dropped"] == ["analytics/events/a.parquet"]
+    assert body["notFound"] == ["analytics/events/typo.parquet"]
   end
 
   test "a missing paths field is a 400", %{name: name} do

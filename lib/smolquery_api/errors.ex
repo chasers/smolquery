@@ -138,6 +138,15 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
+  def from_reason(conn, :commit_conflict) do
+    send_error(
+      conn,
+      409,
+      "ABORTED",
+      "the catalog commit lost a race with a concurrent write; retry the request"
+    )
+  end
+
   def from_reason(conn, _reason) do
     send_error(conn, 500, "INTERNAL", "internal error")
   end

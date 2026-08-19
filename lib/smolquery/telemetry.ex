@@ -48,10 +48,11 @@ defmodule Smolquery.Telemetry do
                                           replicate (T-294, T-297)
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
                                           meta %{result: :ok | :error, table_ref: ref}
-      [:smolquery, :compact, :quarantine] meta %{table_ref: ref, paths: [String.t()]}
+      [:smolquery, :compact, :quarantine] %{count}, meta %{table_ref: ref, paths: [String.t()]}
                                           — a compaction group that failed identically
-                                          compact_quarantine_after times and stopped
-                                          being planned; alert on rate > 0 (T-310)
+                                          5 times (a Compactor module constant, not a
+                                          runtime setting) and stopped being planned on
+                                          this node; alert on rate > 0 (T-310)
 
       [:smolquery, :lifecycle, :broadcast] %{count},
                                           meta %{kind: :commit | :seal | :compaction}

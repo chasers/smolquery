@@ -173,7 +173,7 @@ defmodule Smolquery.StorageService.Compactor do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, row_caps: %{}, quarantine: %{}, quarantined_paths: MapSet.new()]
+  defstruct [:runtime, row_caps: %{}, quarantine: %{}, quarantined_groups: MapSet.new()]
 
   @group_max_staging_chunks 64
   @stage_chunk_target_bytes 67_108_864
@@ -196,8 +196,10 @@ defmodule Smolquery.StorageService.Compactor do
   @doc """
   Sweeps now, without waiting for the interval.
 
-  Reports what was compacted and what failed, per table — the observable form
-  of the policy above, and what tests assert on.
+  Reports what was compacted and what failed, per table, plus the groups this
+  node currently quarantines — the observable form of the policy above, and
+  what tests assert on. A wedged table shows up as a non-empty `quarantined`
+  even on a sweep where nothing else happens.
   """
   @spec sweep(atom(), timeout()) :: {:ok, map()} | {:error, term()}
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
@@ -209,26 +211,32 @@ defmodule Smolquery.StorageService.Compactor do
       outcomes =
         Enum.map(
           tables,
-          &compact_table(runtime, state.row_caps, state.quarantined_paths, &1)
+          &compact_table(runtime, state.row_caps, state.quarantined_groups, &1)
         )
-
-      report = %{
-        compacted: for({:ok, swap} <- outcomes, do: swap),
-        failed: for({:failed, failure} <- outcomes, do: failure)
-      }
 
       row_caps = adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
 
-      {quarantine, quarantined_paths} =
+      {quarantine, quarantined_groups} =
         adjusted_quarantine(
           state.quarantine,
-          state.quarantined_paths,
+          state.quarantined_groups,
           outcomes,
           @quarantine_after
         )
 
+      report = %{
+        compacted: for({:ok, swap} <- outcomes, do: swap),
+        failed: for({:failed, failure} <- outcomes, do: failure),
+        quarantined: quarantined_groups |> MapSet.to_list() |> Enum.sort()
+      }
+
       {:ok, report,
-       %{state | row_caps: row_caps, quarantine: quarantine, quarantined_paths: quarantined_paths}}
+       %{
+         state
+         | row_caps: row_caps,
+           quarantine: quarantine,
+           quarantined_groups: quarantined_groups
+       }}
     end
   end
 
@@ -387,38 +395,46 @@ defmodule Smolquery.StorageService.Compactor do
   defp merge_oom?(_reason), do: false
 
   @doc """
-  The quarantine state after a sweep — segments a permanently-failing group
-  is made of, and the map is stopped from planning again (T-310).
+  The quarantine state after a sweep — the groups this node has stopped
+  planning, because their inputs read as corrupt sweep after sweep (T-310).
 
-  A failure counts toward quarantine only when it carries the input paths
-  that failed (`plan/2`'s sizing and `swap/4`'s merge both attach them) and
-  is neither an OOM nor an engine call exit — both already have their own
-  recovery (`adjusted_row_caps/3`, `recycle_on_exit/2`) and can legitimately
-  repeat identically for several sweeps while calibrating. What is left is
-  the signature of a segment that is actually corrupt: the same group, the
-  same non-OOM, non-exit error, sweep after sweep.
+  A failure counts toward quarantine only when all three hold: it carries
+  the input paths that failed (`plan/2`'s sizing and `swap/4`'s merge both
+  attach them); its reason is corruption-shaped — a DuckDB error reading
+  the inputs during sizing or merging, never a store put failure, a catalog
+  conflict, or an invariant check, which say nothing about the input bytes;
+  and it is neither an OOM nor an engine call exit — both already have
+  their own recovery (`adjusted_row_caps/3`, `recycle_on_exit/2`) and can
+  legitimately repeat while calibrating.
 
   The streak is keyed by the group's sorted paths, not the table, because
   `plan/2` can regroup a table's candidates differently sweep to sweep as
-  segments arrive; a group reaching `threshold` quarantines every path in
-  it and its streak entry is dropped — quarantine does not decay, so a
-  quarantined path stays out of every future plan on this node until an
-  operator drops or replaces it (`Catalog.drop_segments/3`) and it stops
-  being a candidate at all.
+  segments arrive — and it advances only on the *same* reason: a group
+  failing five different ways is an unstable environment, not a corrupt
+  segment, so a changed reason restarts the streak. A group reaching
+  `threshold` quarantines and its streak entry is dropped.
+
+  Quarantine is this node's in-memory state, nothing more: a restart
+  forgets it, and the group re-earns it over `threshold` sweeps. A
+  quarantined group stays out of this node's plans while every member is
+  still listed in the table's current snapshot; the moment any member
+  leaves — the operator drops the corrupt path (`Catalog.drop_segments/3`),
+  retention retires it — the group no longer matches and its surviving
+  members return to planning (`active_quarantined_paths/2`).
   """
   @spec adjusted_quarantine(
-          %{[String.t()] => pos_integer()},
-          MapSet.t(String.t()),
+          %{[String.t()] => %{reason: term(), streak: pos_integer()}},
+          MapSet.t([String.t()]),
           [term()],
           pos_integer()
-        ) :: {%{[String.t()] => pos_integer()}, MapSet.t(String.t())}
-  def adjusted_quarantine(quarantine, quarantined_paths, outcomes, threshold) do
-    Enum.reduce(outcomes, {quarantine, quarantined_paths}, fn
+        ) :: {%{[String.t()] => %{reason: term(), streak: pos_integer()}}, MapSet.t([String.t()])}
+  def adjusted_quarantine(quarantine, quarantined_groups, outcomes, threshold) do
+    Enum.reduce(outcomes, {quarantine, quarantined_groups}, fn
       {:failed, %{table: table_ref, reason: reason, paths: [_ | _] = paths}}, acc ->
-        if merge_oom?(reason) or engine_call_exited?(reason) do
-          acc
+        if counts_toward_quarantine?(reason) do
+          quarantine_step(acc, table_ref, reason, paths, threshold)
         else
-          quarantine_step(acc, table_ref, paths, threshold)
+          acc
         end
 
       _other, acc ->
@@ -426,9 +442,25 @@ defmodule Smolquery.StorageService.Compactor do
     end)
   end
 
-  defp quarantine_step({quarantine, quarantined_paths}, table_ref, paths, threshold) do
+  defp counts_toward_quarantine?(reason) do
+    corruption_shaped?(reason) and not merge_oom?(reason) and not engine_call_exited?(reason)
+  end
+
+  defp corruption_shaped?({:put_failed, _key, reason}), do: corruption_shaped?(reason)
+
+  defp corruption_shaped?({step, %Adbc.Error{}}) when step in [:sizing_failed, :merge_failed],
+    do: true
+
+  defp corruption_shaped?(_environmental_or_invariant), do: false
+
+  defp quarantine_step({quarantine, quarantined_groups}, table_ref, reason, paths, threshold) do
     key = Enum.sort(paths)
-    streak = Map.get(quarantine, key, 0) + 1
+
+    streak =
+      case quarantine do
+        %{^key => %{reason: ^reason, streak: streak}} -> streak + 1
+        _new_group_or_changed_reason -> 1
+      end
 
     if streak >= threshold do
       Logger.warning(
@@ -438,19 +470,40 @@ defmodule Smolquery.StorageService.Compactor do
 
       :telemetry.execute(
         [:smolquery, :compact, :quarantine],
-        %{},
+        %{count: length(paths)},
         %{table_ref: table_ref, paths: paths}
       )
 
-      {Map.delete(quarantine, key), Enum.into(paths, quarantined_paths)}
+      {Map.delete(quarantine, key), MapSet.put(quarantined_groups, key)}
     else
-      {Map.put(quarantine, key, streak), quarantined_paths}
+      {Map.put(quarantine, key, %{reason: reason, streak: streak}), quarantined_groups}
     end
   end
 
-  defp compact_table(runtime, row_caps, quarantined_paths, table_ref) do
+  @doc """
+  The paths a table's plan must skip, given its current segment listing —
+  the read side of `adjusted_quarantine/4`.
+
+  A quarantined group binds only while the listing still holds every one of
+  its members. Once any member is gone — dropped by an operator, retired by
+  retention — the group's verdict no longer describes what the table holds,
+  so its surviving members become plannable again instead of staying
+  excluded forever.
+  """
+  @spec active_quarantined_paths(MapSet.t([String.t()]), [String.t()]) :: MapSet.t(String.t())
+  def active_quarantined_paths(quarantined_groups, listed) do
+    listed = MapSet.new(listed)
+
+    for group <- quarantined_groups,
+        Enum.all?(group, &MapSet.member?(listed, &1)),
+        path <- group,
+        into: MapSet.new(),
+        do: path
+  end
+
+  defp compact_table(runtime, row_caps, quarantined_groups, table_ref) do
     runtime = table_capped(runtime, row_caps, table_ref)
-    compact_table(runtime, quarantined_paths, table_ref)
+    compact_table(runtime, quarantined_groups, table_ref)
   end
 
   defp table_capped(runtime, row_caps, table_ref) do
@@ -463,13 +516,13 @@ defmodule Smolquery.StorageService.Compactor do
     %{runtime | compact_max_rows: cap}
   end
 
-  defp compact_table(runtime, quarantined_paths, table_ref) do
+  defp compact_table(runtime, quarantined_groups, table_ref) do
     started_at = System.monotonic_time(:microsecond)
     routing = Routing.resolve(runtime.name)
 
     with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
-         [_ | _] = plannable <- Enum.reject(owned, &MapSet.member?(quarantined_paths, &1)),
+         [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths),
          {:ok, group} <- plan(runtime, plannable) do
       swap(runtime, table_ref, group, started_at)
     else
@@ -485,6 +538,12 @@ defmodule Smolquery.StorageService.Compactor do
       {:error, reason, failed_paths} ->
         failed(runtime, table_ref, reason, started_at, paths: failed_paths)
     end
+  end
+
+  defp reject_quarantined(quarantined_groups, owned, listed) do
+    active = active_quarantined_paths(quarantined_groups, listed)
+
+    Enum.reject(owned, &MapSet.member?(active, &1))
   end
 
   defp owned_paths(runtime, routing, table_ref, paths) do
@@ -564,7 +623,17 @@ defmodule Smolquery.StorageService.Compactor do
         )
 
       {:error, reason} ->
-        {:halt, {:error, reason, chunk}}
+        {:halt, {:error, reason, attribute_sizing_failure(runtime, reason, chunk)}}
+    end
+  end
+
+  defp attribute_sizing_failure(_runtime, _reason, [_single] = chunk), do: chunk
+
+  defp attribute_sizing_failure(runtime, reason, chunk) do
+    if engine_call_exited?(reason) do
+      chunk
+    else
+      Enum.filter(chunk, &match?({:error, _}, sizes_chunk(runtime, [&1])))
     end
   end
 
