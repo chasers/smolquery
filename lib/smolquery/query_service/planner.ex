@@ -19,6 +19,29 @@ defmodule Smolquery.QueryService.Planner do
   rather than silently given different consistency semantics than the view
   would have.
 
+  ## Federated references attach, they do not become views (T-324)
+
+  A `catalog.schema.table` reference used to be refused outright. It now
+  resolves against the catalog's registered connections: a catalog name that
+  matches one attaches that Postgres into the job engine, and the user's SQL
+  reaches it directly. A name matching nothing keeps the old error, so a typo
+  is still a typo rather than a connection attempt.
+
+  Federated tables get no view and no snapshot. There is nothing to pin — the
+  remote database moves on its own, and pretending otherwise by naming a
+  version would promise a consistency this cannot deliver. A query joining a
+  smolquery table against a federated one therefore reads the local side at a
+  pinned snapshot and the remote side as of whenever DuckDB scans it.
+
+  A connection attaches once per plan however many of its tables the query
+  names: DuckDB refuses a second `ATTACH` under a name already in use, so the
+  dedupe is by connection name rather than by reference.
+
+  The catalog is only asked about connections when a catalog-qualified
+  reference actually appears. `table_schema/2` is already the hottest read in
+  the system, and adding an unconditional connection lookup to every query
+  would tax the queries that never federate to serve the few that do.
+
   ## One snapshot, and the membership rule
 
   The plan pins the catalog's current snapshot `S` once. Each view's sealed
@@ -155,6 +178,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster
   alias Smolquery.Engine.Connection
+  alias Smolquery.Federation
   alias Smolquery.Identifier
   alias Smolquery.Partitions
   alias Smolquery.QueryService.Plan
@@ -179,7 +203,8 @@ defmodule Smolquery.QueryService.Planner do
     with {:ok, ast, canonical} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
          {:ok, statement} <- gate(ast),
          :ok <- gate_table_functions(statement, runtime.lockdown),
-         {:ok, refs} <- refs(statement),
+         {:ok, refs, federated} <- classified(statement),
+         {:ok, attaches} <- Trace.span(:federated, fn -> federated(runtime, federated) end),
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
@@ -194,11 +219,47 @@ defmodule Smolquery.QueryService.Planner do
            refs,
            tables,
            manifests,
-           Pruner.conjuncts(statement, refs)
+           Pruner.conjuncts(statement, refs),
+           attaches
          )
        end)}
     end
   end
+
+  defp federated(_runtime, []), do: {:ok, []}
+
+  defp federated(%Runtime{} = runtime, names) do
+    Enum.reduce_while(names, {:ok, []}, fn {name, reference}, {:ok, acc} ->
+      with {:ok, connection} <- connection(runtime, name, reference),
+           {:ok, statement} <- Federation.attach_statement(connection) do
+        {:cont, {:ok, [statement | acc]}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, statements} -> {:ok, Enum.reverse(statements)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp connection(%Runtime{} = runtime, name, reference) do
+    case Catalog.connection(runtime.catalog, name) do
+      {:ok, connection} ->
+        {:ok, connection}
+
+      {:error, reason} when reason in [:connections_unsupported] ->
+        {:error, {:catalog_qualified_reference, reference}}
+
+      {:error, {:unknown_connection, ^name}} ->
+        {:error, {:catalog_qualified_reference, reference}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reference(node), do: "#{node["catalog_name"]}.#{node["table_name"]}"
 
   @doc """
   The `{dataset, table}` references in `sql`, via DuckDB's own parser.
@@ -250,21 +311,35 @@ defmodule Smolquery.QueryService.Planner do
   defp gate(ast), do: {:error, {:invalid_query, ast}}
 
   defp refs(statement) do
+    with {:ok, refs, federated} <- classified(statement) do
+      case federated do
+        [] -> {:ok, refs}
+        [{_name, reference} | _rest] -> {:error, {:catalog_qualified_reference, reference}}
+      end
+    end
+  end
+
+  defp classified(statement) do
     ctes = collect(statement, &cte_names/1)
 
     statement
     |> collect(&base_table/1)
     |> Enum.uniq()
-    |> Enum.reduce_while({:ok, []}, fn node, {:ok, acc} ->
+    |> Enum.reduce_while({:ok, [], []}, fn node, {:ok, refs, federated} ->
       case classify(node, ctes) do
-        {:ok, ref} -> {:cont, {:ok, [ref | acc]}}
-        :cte -> {:cont, {:ok, acc}}
+        {:ok, ref} -> {:cont, {:ok, [ref | refs], federated}}
+        {:federated, name, reference} -> {:cont, {:ok, refs, [{name, reference} | federated]}}
+        :cte -> {:cont, {:ok, refs, federated}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, refs} -> {:ok, refs |> Enum.reverse() |> Enum.uniq()}
-      {:error, reason} -> {:error, reason}
+      {:ok, refs, federated} ->
+        {:ok, refs |> Enum.reverse() |> Enum.uniq(),
+         federated |> Enum.reverse() |> Enum.uniq_by(&elem(&1, 0))}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -309,8 +384,12 @@ defmodule Smolquery.QueryService.Planner do
   defp classify(%{"at_clause" => at} = node, _ctes) when not is_nil(at),
     do: {:error, {:unsupported_at_clause, node["table_name"]}}
 
-  defp classify(%{"catalog_name" => catalog} = node, _ctes) when catalog != "",
-    do: {:error, {:catalog_qualified_reference, "#{catalog}.#{node["table_name"]}"}}
+  defp classify(%{"catalog_name" => catalog} = node, _ctes) when catalog != "" do
+    case Identifier.validate(catalog) do
+      {:ok, name} -> {:federated, name, reference(node)}
+      {:error, _invalid} -> {:error, {:catalog_qualified_reference, reference(node)}}
+    end
+  end
 
   defp classify(%{"schema_name" => "", "table_name" => name}, ctes) do
     if name in ctes, do: :cte, else: {:error, {:unknown_table, name}}
@@ -444,7 +523,7 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, canonical, snapshot, refs, tables, manifests, conjuncts) do
+  defp build(sql, canonical, snapshot, refs, tables, manifests, conjuncts, attaches) do
     members =
       Map.new(refs, fn ref ->
         {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
@@ -462,7 +541,8 @@ defmodule Smolquery.QueryService.Planner do
       canonical_sql: canonical,
       snapshot: snapshot,
       tables: refs,
-      statements: statements,
+      statements: attaches ++ statements,
+      federated: attaches != [],
       hot: hot,
       statistics: statistics(members, hot, tables)
     }

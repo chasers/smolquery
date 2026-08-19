@@ -78,6 +78,20 @@ defmodule Smolquery.Test.FixedCatalog do
   end
 
   @impl Catalog
+  def connection(%{connections: connections}, name) do
+    case Map.fetch(connections, name) do
+      {:ok, connection} -> {:ok, connection}
+      :error -> {:error, {:unknown_connection, name}}
+    end
+  end
+
+  def connection(_answers, name), do: {:error, {:unknown_connection, name}}
+
+  @impl Catalog
+  def list_connections(%{connections: connections}), do: {:ok, Map.values(connections)}
+  def list_connections(_answers), do: {:ok, []}
+
+  @impl Catalog
   def create_dataset(_answers, _dataset), do: {:error, :fixed}
 
   @impl Catalog
