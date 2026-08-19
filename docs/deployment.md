@@ -9,6 +9,97 @@ This document covers three topics:
 For the full environment-variable reference, see
 [configuration.md](configuration.md).
 
+## Kubernetes with Helm
+
+The supported production application chart is `charts/smolquery` (Helm 3,
+chart 0.1.0, smolquery 0.13.0). PostgreSQL, S3-compatible storage, and
+certificate issuance are intentionally external dependencies. Create the
+runtime Secret before installing; the chart requires `existingSecret.name`,
+passes that Secret through to every pod, and never renders a Secret object:
+
+```sh
+kubectl create namespace smolquery --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n smolquery create secret generic smolquery-env \
+  --from-literal=SMOLQUERY_API_KEY=change-me \
+  --from-literal=SMOLQUERY_INTERNAL_SECRET=change-me-too \
+  --from-literal=CATALOG_DATABASE_URL=postgres://user:password@postgres/smolquery \
+  --from-literal=SMOLQUERY_S3_BUCKET=smolquery \
+  --from-literal=SMOLQUERY_WEB_USERNAME=smolquery \
+  --from-literal=SMOLQUERY_WEB_PASSWORD=change-me-web \
+  --from-literal=SMOLQUERY_SECRET_KEY_BASE=smolquery-secret-key-base-01234567890123456789012345678901234567890123456789 \
+  --from-literal=RELEASE_COOKIE=smolquery-release-cookie
+helm upgrade --install smolquery ./charts/smolquery \
+  --namespace smolquery --wait --timeout 10m
+# Optional: add --set-string image.digest="$DIGEST" to pin another release digest.
+helm test smolquery --namespace smolquery
+```
+
+The default `split` topology creates release-qualified `api`, `buffer`, and
+`storage` StatefulSets. `symmetric` creates a `server` StatefulSet with
+`SMOLQUERY_ROLES=all`. StatefulSets share one headless Service because stable
+pod DNS and per-pod TLS filenames are required by cluster membership. The
+front-door Service selects API in split mode and server in symmetric mode.
+The chart preserves the 60-second termination grace period, disabled service
+links, downward API identity (`POD_NAME` and `POD_NAMESPACE`), buffer replica
+and replication-factor environment, and buffer/server preStop handoff.
+
+### PVC and scaling rules
+
+Only split buffer and symmetric server StatefulSets use `data` PVCs. API and
+storage data is `emptyDir`; sealed segments and the catalog must be durable in
+the configured object store and PostgreSQL. Set `persistence.accessModes`,
+`persistence.size`, `persistence.storageClass`, and `persistence.annotations`
+before installation. `replicationFactor` cannot exceed active buffer replicas
+in split mode or server replicas in symmetric mode. Drain before scaling down
+a buffer/server fleet, and ensure the replication factor remains satisfiable.
+
+The replica environment bootstraps `ExpectedNodes` only on first install;
+later changes to that environment alone do nothing. To scale up in place, make
+the new pods live first, then use an `ExpectedNodes.current`/`resize` CAS. To
+scale down, drain nodes, remove them with CAS, wait for propagation, and only
+then lower the Helm replica count. Changing between split and symmetric is not
+an in-place upgrade: expected identities and PVCs change, so use a fresh
+release and migrate deliberately.
+
+PVCs retain by default after scale-down and uninstall. Removing them is a
+deliberate cleanup operation after confirming that durable data is safe.
+
+### Secrets and TLS
+
+`existingSecret.name` defaults to `smolquery-env` and must refer to a
+pre-created Secret containing all credentials/configuration required by the
+roles. The chart does not inspect it with `lookup`, copy it into a ConfigMap, or
+create a replacement. Rotating the external Secret does not change the pod
+template; explicitly roll the release or use a Secret reloader.
+
+Set `tls.enabled=true` and `tls.secretName` to mount a pre-created TLS Secret.
+It must contain `ca.pem` plus each StatefulSet pod's
+`<POD_NAME>.pem` and `<POD_NAME>.key` files. Enabling chart TLS also sets
+`GEN_RPC_TLS=true` and `DIST_TLS=true` in the rendered ConfigMap. The Secret is mounted at
+`/etc/smolquery/gen-rpc-tls`. The chart does not issue certificates. TLS Secret
+rotation needs a coordinated rollout so every member receives matching
+certificates and trust material.
+
+Pod-operations RBAC is disabled by default. Enabling `podOperations.enabled`
+with `serviceAccount.create=true` creates only a namespaced Role for pod
+get/list/delete and its binding. Because this can delete any pod in the
+namespace, use a dedicated namespace for the release. Token automount remains
+disabled unless pod operations is enabled. PDBs are independently configurable
+and off by default, so a one-replica API is not made undeployable.
+
+The API and web Service traffic is HTTP. Operators must provide TLS at an
+ingress or gateway, isolate the network appropriately, and avoid exposing
+these Services directly to untrusted clients.
+
+### Production boundaries
+
+The current v0.13 image runs as root and requests do not have universal
+resource limits. Restricted Pod Security requires a compatible non-root image
+and security context. Operators must set resource limits and align the
+smolquery engine and pool environment with the workload capacity. These are
+operational boundaries; this chart does not modify the image, runtime, ingress,
+or network policy.
+
 ## How a release is published
 
 Every merge to `main` publishes an image. A **version bump** also creates a

@@ -1,0 +1,23 @@
+{{ include "smolquery.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "smolquery.fullname" . }}-config
+  labels:
+    {{- include "smolquery.labels" . | nindent 4 }}
+data:
+  HEADLESS_SERVICE: {{ include "smolquery.headless" . | quote }}
+  SMOLQUERY_BUFFER_REPLICATION: {{ .Values.replicationFactor | quote }}
+  SMOLQUERY_BUFFER_REPLICAS: {{ if eq .Values.topology "split" }}{{ .Values.replicas.buffer | quote }}{{ else }}{{ .Values.replicas.server | quote }}{{ end }}
+  SMOLQUERY_BUFFER_STATEFULSET: {{ if eq .Values.topology "split" }}{{ include "smolquery.roleName" (dict "root" . "role" "buffer") | quote }}{{ else }}{{ include "smolquery.roleName" (dict "root" . "role" "server") | quote }}{{ end }}
+  SMOLQUERY_API_PORT: {{ .Values.service.ports.http | quote }}
+  SMOLQUERY_WEB_PORT: {{ .Values.service.ports.web | quote }}
+  SMOLQUERY_HOT_SERVER_PORT: {{ .Values.service.ports.hotServer | quote }}
+  SMOLQUERY_METRICS_PORT: {{ .Values.service.ports.metrics | quote }}
+  GEN_RPC_PORT: {{ .Values.service.ports.genRpc | quote }}
+  GEN_RPC_SSL_PORT: {{ .Values.service.ports.genRpcTls | quote }}
+{{- range $key, $value := .Values.env }}
+  {{ $key }}: {{ $value | toString | quote }}
+{{- end }}
+  GEN_RPC_TLS: {{ ternary "true" "false" .Values.tls.enabled | quote }}
+  DIST_TLS: {{ ternary "true" "false" .Values.tls.enabled | quote }}

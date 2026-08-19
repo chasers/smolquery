@@ -1,0 +1,154 @@
+# smolquery requires an existing Secret containing runtime credentials and configuration.
+existingSecret:
+  name: smolquery-env
+
+image:
+  repository: ghcr.io/chasers/smolquery
+  tag: v0.13.0
+  # The released v0.13.0 digest is the reproducible default; override deliberately.
+  digest: sha256:20d87cdafd0fcc4e35d571a1d16186c6da94bf4d7162c72485e8c734ced65dea
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# split creates api, buffer, and storage StatefulSets. symmetric creates one server StatefulSet.
+topology: split
+replicas:
+  api: 1
+  buffer: 3
+  storage: 2
+  server: 3
+replicationFactor: 2
+
+service:
+  type: ClusterIP
+  annotations: {}
+  ports:
+    http: 4000
+    web: 4002
+    hotServer: 4001
+    metrics: 4003
+    # EPMD is fixed at 4369; the runtime does not support a chart override.
+    genRpc: 5369
+    genRpcTls: 5870
+metricsService:
+  enabled: false
+  annotations: {}
+  type: ClusterIP
+  port: 4003
+
+# The TLS Secret is made outside this chart. It contains ca.pem and per-pod
+# <POD_NAME>.pem and <POD_NAME>.key entries.
+tls:
+  enabled: false
+  secretName: ""
+
+persistence:
+  accessModes:
+    - ReadWriteOnce
+  size: 2Gi
+  storageClass: ""
+  annotations: {}
+
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+podOperations:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+affinity: {}
+tolerations: []
+topologySpreadConstraints: []
+priorityClassName: ""
+podAnnotations: {}
+podLabels: {}
+
+probes:
+  api:
+    readiness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 30
+      periodSeconds: 30
+  buffer:
+    readiness:
+      tcpSocket:
+        port: hot-server
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      tcpSocket:
+        port: hot-server
+      initialDelaySeconds: 30
+      periodSeconds: 30
+  server:
+    readiness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 30
+      periodSeconds: 30
+
+# Values here are rendered into the Helm-managed ConfigMap and may not contain secrets.
+# Listener ports and chart-managed cluster keys are reserved and configured by the chart.
+env:
+  SMOLQUERY_API_IP: 0.0.0.0
+  SMOLQUERY_HOT_SERVER_IP: 0.0.0.0
+  SMOLQUERY_METRICS_IP: 0.0.0.0
+  SMOLQUERY_WEB_IP: 0.0.0.0
+  SMOLQUERY_DATA_DIR: /data
+commonExtraEnv: []
+roleExtraEnv:
+  api: []
+  buffer: []
+  storage: []
+  server: []
+extraVolumes: []
+extraVolumeMounts: []
+initContainers: []
+
+pdb:
+  api:
+    enabled: false
+    minAvailable: 0
+  buffer:
+    enabled: false
+    minAvailable: 2
+  storage:
+    enabled: false
+    minAvailable: 1
+  server:
+    enabled: false
+    minAvailable: 2
+

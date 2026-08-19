@@ -5,6 +5,33 @@ project. `config/runtime.exs` resolves the environment variables at boot. The
 environment variables are the deployment surface. The application config is the
 full set of settings behind them.
 
+## Helm chart values and environment
+
+The production Helm chart at `charts/smolquery` renders non-secret values into
+one release-qualified ConfigMap and imports it with `envFrom`. Its
+`existingSecret.name` is imported separately into every pod, so credentials,
+PostgreSQL URLs, S3 keys, and other sensitive runtime settings remain external.
+Use `env` for non-secret environment values and `commonExtraEnv` or
+`roleExtraEnv` for explicit per-pod entries, including `valueFrom` references.
+The chart rejects listener, topology, TLS, role, and pod-identity names in all
+three inputs because it owns those values. The Secret is imported before the
+ConfigMap, so ConfigMap keys win any remaining collision; keep each setting in
+one source. The chart derives these load-bearing values from topology and replica settings:
+
+| chart value | rendered environment |
+|---|---|
+| `topology` | `SMOLQUERY_ROLES` (`api,ingest,query,web`, `buffer`, `storage`, or `all`) |
+| `replicas.buffer` / `replicas.server` | `SMOLQUERY_BUFFER_REPLICAS` and `SMOLQUERY_BUFFER_STATEFULSET` |
+| `replicationFactor` | `SMOLQUERY_BUFFER_REPLICATION` |
+| `tls.enabled` | Sets both `GEN_RPC_TLS=true` and `DIST_TLS=true`; `tls.secretName` supplies mounted certificates |
+| release name | `POD_NAME`, `POD_NAMESPACE`, and `HEADLESS_SERVICE` use stable StatefulSet/headless DNS |
+| `env` | ConfigMap-backed non-secret environment values |
+
+The chart applies a deterministic ConfigMap checksum to pod templates. An
+external Secret rotation does not change that checksum; roll the release or
+use a reloader after rotating the Secret. See [deployment.md](deployment.md)
+for topology, PVC, TLS, and upgrade procedures.
+
 The release validates environment values before any service subtree starts:
 
 - A numeric operational value must be a positive decimal integer. The exception

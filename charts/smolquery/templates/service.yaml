@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smolquery.headless" . }}
+  labels:
+    {{- include "smolquery.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "smolquery.selector" . | nindent 4 }}
+  ports:
+    - name: epmd
+      port: 4369
+      targetPort: epmd
+    - name: gen-rpc
+      port: {{ .Values.service.ports.genRpc }}
+      targetPort: gen-rpc
+    - name: gen-rpc-tls
+      port: {{ .Values.service.ports.genRpcTls }}
+      targetPort: gen-rpc-tls
+    - name: hot-server
+      port: {{ .Values.service.ports.hotServer }}
+      targetPort: hot-server
+    - name: metrics
+      port: {{ .Values.service.ports.metrics }}
+      targetPort: metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smolquery.fullname" . }}
+  labels:
+    {{- include "smolquery.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "smolquery.selector" . | nindent 4 }}
+    app.kubernetes.io/component: {{ if eq .Values.topology "split" }}api{{ else }}server{{ end }}
+  ports:
+    - name: http
+      port: {{ .Values.service.ports.http }}
+      targetPort: http
+    - name: web
+      port: {{ .Values.service.ports.web }}
+      targetPort: web
+---
+{{- if .Values.metricsService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "smolquery.fullname" . }}-metrics
+  labels:
+    {{- include "smolquery.labels" . | nindent 4 }}
+  {{- with .Values.metricsService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.metricsService.type }}
+  selector:
+    {{- include "smolquery.selector" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metricsService.port }}
+      targetPort: metrics
+{{- end }}
