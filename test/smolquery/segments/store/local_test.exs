@@ -3,10 +3,11 @@ defmodule Smolquery.Segments.Store.LocalTest do
 
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.Local
+  alias Smolquery.Test.FakeParquet
 
   @moduletag :tmp_dir
 
-  defp write(contents), do: fn path -> File.write(path, contents) end
+  defp write(contents), do: fn path -> File.write(path, FakeParquet.bytes(contents)) end
 
   describe "put/3" do
     test "commits the encoded bytes at the key and reports them", %{tmp_dir: dir} do
@@ -15,8 +16,8 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert {:ok, put} = Store.put(store, "a/b/one.parquet", write("hello"))
 
       assert put.location == Path.join(dir, "a/b/one.parquet")
-      assert put.byte_size == 5
-      assert File.read!(put.location) == "hello"
+      assert put.byte_size == byte_size(FakeParquet.bytes("hello"))
+      assert File.read!(put.location) == FakeParquet.bytes("hello")
     end
 
     test "creates the key's directories", %{tmp_dir: dir} do
@@ -77,7 +78,7 @@ defmodule Smolquery.Segments.Store.LocalTest do
       store = Local.new(dir: dir, fsync: false)
 
       assert {:ok, put} = Store.put(store, "one.parquet", write("x"))
-      assert File.read!(put.location) == "x"
+      assert File.read!(put.location) == FakeParquet.bytes("x")
     end
 
     test "cleans up after an encoder that raises, and lets the raise through", %{tmp_dir: dir} do
@@ -103,7 +104,7 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert {:ok, retry} = Store.put(store, "one.parquet", write("truncated-retry"))
 
       assert retry.location == first.location
-      assert File.read!(first.location) == "original"
+      assert File.read!(first.location) == FakeParquet.bytes("original")
     end
 
     test "a retry to a committed key leaves nothing staged behind", %{tmp_dir: dir} do

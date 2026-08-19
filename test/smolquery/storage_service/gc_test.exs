@@ -5,6 +5,7 @@ defmodule Smolquery.StorageService.GCTest do
   alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Runtime
   alias Smolquery.Test.Eventually
+  alias Smolquery.Test.FakeParquet
   alias Smolquery.Test.PathCatalog
 
   @moduletag :tmp_dir
@@ -29,7 +30,7 @@ defmodule Smolquery.StorageService.GCTest do
   defp put(runtime, id) do
     {:ok, prefix} = Store.prefix({"analytics", "events"})
     {:ok, key} = Store.key(prefix, id)
-    {:ok, _put} = Store.put(runtime.store, key, &File.write(&1, "segment"))
+    {:ok, _put} = Store.put(runtime.store, key, &File.write(&1, FakeParquet.bytes("segment")))
 
     key
   end
@@ -154,8 +155,8 @@ defmodule Smolquery.StorageService.GCTest do
       {:ok, first} = Store.key(events, "01KYWPEEGAM8FQVQS5S2QF26SV")
       {:ok, second} = Store.key(clicks, "01KYWPEEGAM8FQVQS5S2QF26SW")
 
-      {:ok, _} = Store.put(runtime.store, first, &File.write(&1, "a"))
-      {:ok, _} = Store.put(runtime.store, second, &File.write(&1, "b"))
+      {:ok, _} = Store.put(runtime.store, first, &File.write(&1, FakeParquet.bytes("a")))
+      {:ok, _} = Store.put(runtime.store, second, &File.write(&1, FakeParquet.bytes("b")))
 
       assert {:ok, report} = GC.sweep(name)
       assert Enum.sort(report.swept) == Enum.sort([first, second])

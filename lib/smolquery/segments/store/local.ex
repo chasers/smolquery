@@ -30,6 +30,11 @@ defmodule Smolquery.Segments.Store.Local do
   discards its own staged bytes, and reports success without touching the
   file that is already there.
 
+  `put/3` also runs `Store.validate_parquet/1` on the staged file before the
+  rename — the exclusive-create guard stops a bad retry from overwriting a
+  good file, and this stops a bad file from being committed in the first
+  place (T-309).
+
   `fsync: false` trades that guarantee for speed. It is for a store whose
   contents are re-derivable, like a sealer's scratch space, and never for the
   buffer's hot tier.
@@ -82,6 +87,7 @@ defmodule Smolquery.Segments.Store.Local do
          :ok <- File.mkdir_p(Path.dirname(staged)),
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
+         :ok <- Store.validate_parquet(staged),
          :ok <- sync(staged, config.fsync),
          :ok <- commit(staged, target) do
       {:ok, %{location: target, byte_size: size}}

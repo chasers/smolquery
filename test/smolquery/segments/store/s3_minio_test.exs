@@ -30,6 +30,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
   alias Smolquery.Segments.Writer
   alias Smolquery.StorageService
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.FakeParquet
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -62,33 +63,38 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     key = unique_key()
 
     assert {:ok, %{location: location, byte_size: size}} =
-             Store.put(store, key, &File.write!(&1, "hello"))
+             Store.put(store, key, &File.write!(&1, FakeParquet.bytes("hello")))
 
     assert location == "s3://#{@bucket}/#{key}"
-    assert size == byte_size("hello")
+    assert size == byte_size(FakeParquet.bytes("hello"))
   end
 
   test "put/3 never overwrites a key already committed (T-308)", %{store: store} do
     key = unique_key()
-    {:ok, first} = Store.put(store, key, &File.write!(&1, "original"))
+    {:ok, first} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("original")))
 
-    assert {:ok, retry} = Store.put(store, key, &File.write!(&1, "truncated-retry"))
+    assert {:ok, retry} =
+             Store.put(store, key, &File.write!(&1, FakeParquet.bytes("truncated-retry")))
+
     assert retry.location == first.location
-    assert {:ok, %{status: 200, body: "original"}} = get_object(store, key)
+    assert {:ok, %{status: 200, body: body}} = get_object(store, key)
+    assert body == FakeParquet.bytes("original")
   end
 
   test "location/2 round-trips through a real read", %{store: store} do
     key = unique_key()
-    {:ok, _put} = Store.put(store, key, &File.write!(&1, "abc123"))
+    {:ok, _put} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("abc123")))
 
-    assert {:ok, %{status: 200, body: "abc123"}} = get_object(store, key)
+    assert {:ok, %{status: 200, body: body}} = get_object(store, key)
+    assert body == FakeParquet.bytes("abc123")
   end
 
   test "list/2 returns every key under a prefix, sorted", %{store: store} do
     prefix = "listing-#{:erlang.unique_integer([:positive])}"
     keys = for i <- 1..3, do: "#{prefix}/#{i}.parquet"
 
-    for key <- keys, do: {:ok, _} = Store.put(store, key, &File.write!(&1, "x"))
+    for key <- keys,
+        do: {:ok, _} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("x")))
 
     assert {:ok, ^keys} = Store.list(store, prefix)
   end
@@ -97,7 +103,8 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     prefix = "paging-#{:erlang.unique_integer([:positive])}"
     keys = for i <- 1..3, do: "#{prefix}/#{i}.parquet"
 
-    for key <- keys, do: {:ok, _} = Store.put(store, key, &File.write!(&1, "x"))
+    for key <- keys,
+        do: {:ok, _} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("x")))
 
     %Store{config: config} = store
     paged = %Store{store | config: %S3{config | list_max_keys: 1}}
@@ -107,15 +114,19 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
 
   test "list/2 scopes a prefix as a directory, not a string prefix", %{store: store} do
     base = "scoping-#{:erlang.unique_integer([:positive])}"
-    {:ok, _} = Store.put(store, "#{base}/events/1.parquet", &File.write!(&1, "x"))
-    {:ok, _} = Store.put(store, "#{base}/events_v2/1.parquet", &File.write!(&1, "x"))
+
+    {:ok, _} =
+      Store.put(store, "#{base}/events/1.parquet", &File.write!(&1, FakeParquet.bytes("x")))
+
+    {:ok, _} =
+      Store.put(store, "#{base}/events_v2/1.parquet", &File.write!(&1, FakeParquet.bytes("x")))
 
     assert Store.list(store, "#{base}/events") == {:ok, ["#{base}/events/1.parquet"]}
   end
 
   test "list/2 returns only parquet keys — foreign objects are not segments", %{store: store} do
     prefix = "foreign-#{:erlang.unique_integer([:positive])}"
-    {:ok, _} = Store.put(store, "#{prefix}/1.parquet", &File.write!(&1, "x"))
+    {:ok, _} = Store.put(store, "#{prefix}/1.parquet", &File.write!(&1, FakeParquet.bytes("x")))
 
     %Store{config: config} = store
 
@@ -128,7 +139,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
 
   test "delete/2 removes the object, and is :ok on a key that never existed", %{store: store} do
     key = unique_key()
-    {:ok, _put} = Store.put(store, key, &File.write!(&1, "x"))
+    {:ok, _put} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("x")))
 
     assert Store.delete(store, key) == :ok
     assert {:ok, %{status: 404}} = get_object(store, key)
