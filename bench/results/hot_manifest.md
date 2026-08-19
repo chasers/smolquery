@@ -113,3 +113,100 @@ offering 20 reads/s.
   no reader running at all. That is `TableBuffer`'s maintenance tick, not
   `HotServer`, and it closes the same loop from the other side. Filed as T-317;
   see `bench/results/buffer.md`'s `backlog_drag` section.
+
+---
+
+## `index_cost` and `index_size` — the manifest index itself (T-318)
+
+| | |
+|---|---|
+| Run | 2026-08-19 |
+| Commit | `0080ca2` + working tree (ETS audit) |
+| Command | `BENCH_SECTION=index_cost mix run --no-start bench/hot_manifest.exs`, same for `index_size` |
+| Machine | Apple M1 Max · 10 cores · 64 GiB · macOS 26.6.1 |
+| Runtime | Elixir 1.20.2 / OTP 29 · 10 online schedulers |
+
+### What every index read costs, against depth
+
+32 columns, every entry pending. The maintenance tick reads `live_claim` and
+`retired_before` on **every commit**, so those two must not move with depth.
+`entries` is the whole-manifest HTTP route and is expected to.
+
+```
+  depth    entry us   entries us   claimable us   live_claim us   reap us   empty? us
+   1024           1         3050           3120               0         2           1
+   4096           1        16747           2744               0         2           1
+  16384           1        88401           2383               0         2           1
+  65536           1       324412           3110               0         2           1
+```
+
+### How big the index gets, and what `:compressed` buys
+
+```
+  entries   columns      MiB   B/entry   compressed MiB   B/entry
+     1024         4      2.0      2034              1.0      1034
+     1024        32      7.0      7186              2.8      2898
+     1024        63     13.4     13698              4.9      4978
+    16384         4     31.8      2032             16.1      1032
+    16384        32    112.3      7184             45.3      2896
+    16384        63    214.0     13696             77.8      4976
+```
+
+### Two options, measured rather than assumed
+
+`write_concurrency` on an `ordered_set`, 8 processes inserting under distinct
+table refs:
+
+```
+  option                     total insert ms   inserts/s
+  read_concurrency only                434.2     73705.0
+  read + write_concurrency              35.2    909556.0
+```
+
+`:compressed`, 16,384 entries at 32 columns:
+
+```
+  option        MiB     lookup us   pending(1024) us
+  plain         112.3           1               2919
+  compressed     45.3           2               5274
+```
+
+Projecting the claim read to the three fields the claim path uses, 1,024 entries:
+
+```
+  spec                  pending(1024) us   bytes returned
+  full entries                      3060          7151616
+  id/byte_size/added_at             2522            98304
+```
+
+### What this settles
+
+- **Everything on the per-commit path is now constant.** `live_claim` 0 µs,
+  `retired_before` 2 µs, `entry` 1 µs, `empty?` 1 µs — flat from 1,024 entries to
+  65,536. `claimable` is ~3 ms and also flat, because the claim valve bounds it
+  rather than the backlog. The only read that grows is `entries`, and it grows
+  because it returns everything: it is the whole-manifest HTTP route the query
+  planner uses, and the sealer no longer calls it (T-316).
+
+- **`write_concurrency` is worth 12.3× and was missing.** 73,705 inserts/s
+  against 909,556. A single-process benchmark shows nothing — insert went 2 µs to
+  3 µs — which is exactly why one is not evidence. Every commit inserts, and a
+  node owns many table refs at once, so the contention is real.
+
+- **Projecting the claim read cuts copied bytes 73×.** 7,151,616 bytes to 98,304
+  for the same 1,024 entries. Wall time barely moves, because the traversal costs
+  the same either way; what changes is the garbage the buffer process then has to
+  collect on its own write path.
+
+- **The index is the memory ceiling, and it is a per-column cost.** 13,696 bytes
+  per entry at 63 columns, so 16,384 entries is 214 MiB for one table on one
+  node. A 4 GiB pod holding several wide tables runs out of index before it runs
+  out of anything else. `:compressed` buys 2.5× for about 1.8× on reads — a lever
+  to reach for when memory binds, not a default, because the read path is where
+  both the sealer and the query planner sit.
+
+- **`entries/2` was sorting what ETS had already sorted.** It used
+  `:ets.match_object/2`, mapped the tuples, then `Enum.sort_by(& &1.id)`. An
+  `ordered_set` is traversed in key order, and the key is `{table_ref, ulid}`, so
+  key order is already age order. The sort was an O(n log n) term over the whole
+  backlog, on the route that already copies the whole backlog.
