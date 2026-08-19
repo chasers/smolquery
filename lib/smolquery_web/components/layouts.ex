@@ -48,6 +48,9 @@ defmodule SmolqueryWeb.Layouts do
             <a href={~p"/tables"} class="btn btn-ghost">Tables</a>
           </li>
           <li>
+            <a href={~p"/connections"} class="btn btn-ghost">Connections</a>
+          </li>
+          <li>
             <a href={~p"/query"} class="btn btn-ghost">Query</a>
           </li>
           <li>

@@ -71,7 +71,8 @@ curl -H "$auth" -H "$json" \
 
 The full surface is in [`docs/api.md`](docs/api.md); a LiveView UI for the same
 thing is on [`localhost:4002`](http://localhost:4002), behind the basic-auth
-credential you just set.
+credential you just set. Federated Postgres connections have their own page
+there, at `/connections`.
 
 Releases are created automatically for a merged stable `mix.exs` version bump
 only after the successful main-push Kind workflow and the exact-SHA CI run. The
