@@ -26,6 +26,7 @@ defmodule SmolqueryApi.Router do
       POST /v1/datasets/:ds/tables                 create a table
       GET  /v1/datasets/:ds/tables/:table          a table's schema + retention
       PATCH /v1/datasets/:ds/tables/:table         set/clear retention policy
+      DELETE /v1/datasets/:ds/tables/:table/segments  drop segments by path
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
       POST /v1/datasets/:ds/tables/:table/load     batch load (NDJSON/CSV/Parquet body)
       POST /v1/queries                             sync query, first page inline
@@ -65,6 +66,7 @@ defmodule SmolqueryApi.Router do
     post "/v1/datasets/:dataset/tables", TableController, :create
     get "/v1/datasets/:dataset/tables/:table", TableController, :show
     patch "/v1/datasets/:dataset/tables/:table", TableController, :update
+    delete "/v1/datasets/:dataset/tables/:table/segments", SegmentController, :delete
     post "/v1/datasets/:dataset/tables/:table/insert", InsertController, :create
     post "/v1/datasets/:dataset/tables/:table/load", LoadController, :create
     post "/v1/queries", QueryController, :create

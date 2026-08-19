@@ -242,6 +242,25 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(context.storage)
   end
 
+  test "quarantines a segment that fails compaction identically, then stops replanning it (T-310)",
+       context do
+    runtime = start_compactor(context, [])
+    good = seal(runtime, context.catalog, 1, 1..10)
+    bad = seal(runtime, context.catalog, 2, 11..20)
+
+    File.write!(bad.path, "not a parquet file")
+
+    for _sweep <- 1..5 do
+      assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+      assert %{table: @table, reason: {:sizing_failed, %Adbc.Error{}}} = failure
+    end
+
+    assert Compactor.sweep(context.storage) == {:ok, %{compacted: [], failed: []}}
+
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([good.path, bad.path])
+  end
+
   test "rows cap a group the byte ceiling would admit (T-260)", context do
     runtime = start_compactor(context, compact_max_rows: 20)
     a = seal(runtime, context.catalog, 1, 1..10)
@@ -468,6 +487,101 @@ defmodule Smolquery.StorageService.CompactorTest do
       sizing = {:failed, %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "x"}}}}
 
       assert Compactor.adjusted_row_caps(%{}, [timeout, sizing, :skip], @resolved) == %{}
+    end
+  end
+
+  describe "adjusted_quarantine/4 (T-310)" do
+    @paths ["analytics/events/a.parquet", "analytics/events/b.parquet"]
+
+    defp corrupt_failure(table, paths) do
+      {:failed,
+       %{table: table, reason: {:sizing_failed, %Adbc.Error{message: "bad footer"}}, paths: paths}}
+    end
+
+    test "a failure below the threshold only counts, it does not quarantine" do
+      {quarantine, quarantined} =
+        Compactor.adjusted_quarantine(%{}, MapSet.new(), [corrupt_failure(@table, @paths)], 3)
+
+      assert quarantine == %{Enum.sort(@paths) => 1}
+      assert quarantined == MapSet.new()
+    end
+
+    test "the Nth identical failure quarantines every path and drops the streak" do
+      {quarantine, quarantined} =
+        Enum.reduce(1..3, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
+          Compactor.adjusted_quarantine(
+            quarantine,
+            quarantined,
+            [corrupt_failure(@table, @paths)],
+            3
+          )
+        end)
+
+      assert quarantine == %{}
+      assert quarantined == MapSet.new(@paths)
+    end
+
+    test "a merge OOM never counts toward quarantine, however often it repeats" do
+      {quarantine, quarantined} =
+        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
+          {:failed, failure} = oom_failure(@table)
+          failure = Map.put(failure, :paths, @paths)
+
+          Compactor.adjusted_quarantine(quarantine, quarantined, [{:failed, failure}], 3)
+        end)
+
+      assert quarantine == %{}
+      assert quarantined == MapSet.new()
+    end
+
+    test "an engine call exit never counts toward quarantine, however often it repeats" do
+      exited =
+        {:failed,
+         %{
+           table: @table,
+           reason: {:sizing_failed, %CallExited{reason: :timeout}},
+           paths: @paths
+         }}
+
+      {quarantine, quarantined} =
+        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
+          Compactor.adjusted_quarantine(quarantine, quarantined, [exited], 3)
+        end)
+
+      assert quarantine == %{}
+      assert quarantined == MapSet.new()
+    end
+
+    test "a failure with no known paths never counts toward quarantine" do
+      unattributed = {:failed, %{table: @table, reason: :mystery, paths: []}}
+
+      {quarantine, quarantined} =
+        Compactor.adjusted_quarantine(%{}, MapSet.new(), [unattributed], 1)
+
+      assert quarantine == %{}
+      assert quarantined == MapSet.new()
+    end
+
+    test "a success or skip changes nothing" do
+      assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [compacted(@table, 100)], 3) ==
+               {%{}, MapSet.new()}
+
+      assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [{:skip, @table}], 3) ==
+               {%{}, MapSet.new()}
+    end
+
+    test "quarantine is keyed by the exact path set, not the table" do
+      other_paths = ["analytics/events/c.parquet"]
+
+      {quarantine, _quarantined} =
+        Compactor.adjusted_quarantine(
+          %{},
+          MapSet.new(),
+          [corrupt_failure(@table, @paths), corrupt_failure(@table, other_paths)],
+          3
+        )
+
+      assert quarantine == %{Enum.sort(@paths) => 1, other_paths => 1}
     end
   end
 

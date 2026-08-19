@@ -48,6 +48,10 @@ defmodule Smolquery.Telemetry do
                                           replicate (T-294, T-297)
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
                                           meta %{result: :ok | :error, table_ref: ref}
+      [:smolquery, :compact, :quarantine] meta %{table_ref: ref, paths: [String.t()]}
+                                          — a compaction group that failed identically
+                                          compact_quarantine_after times and stopped
+                                          being planned; alert on rate > 0 (T-310)
 
       [:smolquery, :lifecycle, :broadcast] %{count},
                                           meta %{kind: :commit | :seal | :compaction}
@@ -82,6 +86,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :seal, :stuck],
     [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
+    [:smolquery, :compact, :quarantine],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
     [:smolquery, :query, :job],
@@ -123,6 +128,9 @@ defmodule Smolquery.Telemetry do
       "Time compaction attempts ran, by result; divide by compactions for the mean (T-244).",
     "smolquery_compaction_segments_replaced_total" =>
       "Sealed segments replaced by compaction merges.",
+    "smolquery_compaction_quarantined_segments_total" =>
+      "Sealed segments quarantined after repeated compaction failures; a nonzero rate " <>
+        "means a table needs an operator to drop or replace a segment (T-310).",
     "smolquery_retention_segments_dropped_total" => "Sealed segments dropped past their TTL.",
     "smolquery_snapshots_expired_total" => "Catalog snapshots expired by retention sweeps.",
     "smolquery_gc_segments_swept_total" => "Uncommitted sealed segments GC deleted.",
@@ -301,6 +309,13 @@ defmodule Smolquery.Telemetry do
     bump(
       {"smolquery_compaction_segments_replaced_total", []},
       Map.get(measurements, :replaced, 0)
+    )
+  end
+
+  def handle_event([:smolquery, :compact, :quarantine], _measurements, meta, nil) do
+    bump(
+      {"smolquery_compaction_quarantined_segments_total", []},
+      length(Map.get(meta, :paths, []))
     )
   end
 

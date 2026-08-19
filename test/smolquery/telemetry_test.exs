@@ -96,6 +96,18 @@ defmodule Smolquery.TelemetryTest do
              before_us + 4_200
   end
 
+  test "counts every quarantined path (T-310)" do
+    before_quarantined = value("smolquery_compaction_quarantined_segments_total")
+
+    :telemetry.execute(
+      [:smolquery, :compact, :quarantine],
+      %{},
+      %{table_ref: {"analytics", "events"}, paths: ["a.parquet", "b.parquet"]}
+    )
+
+    assert value("smolquery_compaction_quarantined_segments_total") == before_quarantined + 2
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 
