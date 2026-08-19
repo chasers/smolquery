@@ -32,7 +32,13 @@ defmodule Smolquery.Segments.Store.S3 do
   fully-committed original with garbage bytes no reader can then parse
   (T-308). With it, that retry gets a `412 Precondition Failed` back; `put/3`
   treats that as success, since the object already there is the correct one
-  and there is nothing left to do.
+  and there is nothing left to do — and it reports the *committed* object's
+  size (a `HEAD` on the key), not the size of the staged bytes it discards.
+
+  Two conditional writes racing the same key are not a failure either: S3
+  answers the loser `409 ConditionalRequestConflict` and documents the remedy
+  as "retry the upload", so `upload/5` retries once — by then the winner has
+  committed and the retry resolves to the `412` no-op above.
 
   `put/3` also runs `Store.validate_parquet/1` on the staged file before
   upload — the `If-None-Match` guard stops a bad retry from overwriting a
@@ -204,9 +210,9 @@ defmodule Smolquery.Segments.Store.S3 do
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          :ok <- Store.validate_parquet(staged),
-         {:ok, ^size} <- upload(config, key, staged, size) do
+         {:ok, committed_size} <- upload(config, key, staged, size) do
       File.rm(staged)
-      {:ok, %{location: location(config, key), byte_size: size}}
+      {:ok, %{location: location(config, key), byte_size: committed_size}}
     else
       {:error, reason} ->
         File.rm(staged)
@@ -345,7 +351,7 @@ defmodule Smolquery.Segments.Store.S3 do
   defp url_style(%__MODULE__{url_style: nil}), do: "path"
   defp url_style(%__MODULE__{url_style: style}), do: style
 
-  defp upload(config, key, staged, size) do
+  defp upload(config, key, staged, size, conflict_retries \\ 1) do
     case Req.put(request(config),
            url: "s3://#{config.bucket}/#{key}",
            headers: [
@@ -355,9 +361,26 @@ defmodule Smolquery.Segments.Store.S3 do
            body: File.stream!(staged, @chunk_bytes)
          ) do
       {:ok, %{status: status}} when status in 200..299 -> {:ok, size}
-      {:ok, %{status: 412}} -> {:ok, size}
+      {:ok, %{status: 412}} -> {:ok, committed_size(config, key, size)}
+      {:ok, %{status: 409}} when conflict_retries > 0 -> upload(config, key, staged, size, 0)
       {:ok, %{status: status, body: body}} -> {:error, {:s3_status, status, body}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp committed_size(config, key, fallback) do
+    case Req.head(request(config), url: "s3://#{config.bucket}/#{key}") do
+      {:ok, %{status: 200, headers: headers}} -> content_length(headers, fallback)
+      _head_unavailable -> fallback
+    end
+  end
+
+  defp content_length(headers, fallback) do
+    with [value | _rest] <- Map.get(headers, "content-length", []),
+         {size, ""} <- Integer.parse(value) do
+      size
+    else
+      _missing_or_unparsable -> fallback
     end
   end
 

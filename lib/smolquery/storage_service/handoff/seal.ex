@@ -27,7 +27,10 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   So the interesting crashes cost a `seal_retry_ms` delay and nothing else:
 
     * *before the commit* — nothing is registered, so the next attempt merges
-      again, overwriting its own half-written output at the same key
+      again and writes the same key; if an earlier attempt already committed
+      the key, the store's conditional write refuses the re-upload and the
+      committed segment stands (T-308) — a half-written output never reaches
+      a key at all, since both stores stage and commit atomically
     * *after the commit, before retirement* — the rows are in the sealed tier and
       the micro-segments are still unretired, which is exactly the window the
       catalog-membership dedup rule is built for: a query at any snapshot counts

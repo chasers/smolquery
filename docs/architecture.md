@@ -134,22 +134,23 @@ Properties worth knowing:
   returns only when the segment is durable *by that store's definition*.
   Everything above the store writes against that one contract. That includes
   the buffer service's "acked means durable" promise. No layer above the store
-  names a storage medium. `Store.Local` fsyncs the file, then renames it into
-  place, both under one root. A reader therefore sees nothing or a complete
-  segment. The store fsyncs the contents, not the directory entry. Erlang
-  cannot fsync a directory without a NIF (Native Implemented Function). An
-  acked segment survives a process, BEAM, or node crash. A hard power cut can
-  lose the rename. That window is strictly smaller than this store's
+  names a storage medium. `Store.Local` fsyncs the file, then hard-links it
+  into place, both under one root. A reader therefore sees nothing or a
+  complete segment. The store fsyncs the contents, not the directory entry.
+  Erlang cannot fsync a directory without a NIF (Native Implemented
+  Function). An acked segment survives a process, BEAM, or node crash. A hard
+  power cut can lose the link. That window is strictly smaller than this store's
   single-copy exposure to a lost disk. `Store.shared?/1` says whether a
   segment's location means anything from another node. That answer decides
   whether the segment needs an HTTP serving path.
 - **A committed key can never be blind-overwritten.** `Store.put/3` writes are
-  conditional: `Store.S3` sends `If-None-Match: *`, `Store.Local` claims the
-  key with an `O_EXCL`-style exclusive create before its rename. A retry that
-  targets a key an earlier, successful attempt already committed gets that
-  rejected (a `412` on S3, `:eexist` locally) and treats it as a no-op instead
-  of re-uploading — so a retry that itself dies mid-write can never clobber a
-  fully-committed segment with truncated bytes (T-308).
+  conditional: `Store.S3` sends `If-None-Match: *`, `Store.Local` publishes the
+  key with `link(2)`, which is create-if-absent in one atomic step. A retry
+  that targets a key an earlier, successful attempt already committed gets
+  that rejected (a `412` on S3, `:eexist` locally) and treats it as a no-op
+  instead of re-uploading — so a retry that itself dies mid-write can never
+  clobber a fully-committed segment with truncated bytes (T-308). The no-op
+  reports the committed object's size, not the discarded retry's.
 - **A truncated file is refused before it is ever committed.** `Store.put/3`
   checks `Store.validate_parquet/1` — the `PAR1` magic at both ends of the
   staged file — right after the encoder returns and before the upload or

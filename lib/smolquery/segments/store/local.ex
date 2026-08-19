@@ -3,19 +3,21 @@ defmodule Smolquery.Segments.Store.Local do
   `Smolquery.Segments.Store` on a local filesystem.
 
   The default store, and the one the hot tier runs on today: a put costs an
-  fsync and a rename rather than a network round trip, which is what keeps ack
-  latency a fraction of the group-commit cadence.
+  fsync and a hard link rather than a network round trip, which is what keeps
+  ack latency a fraction of the group-commit cadence.
 
   ## What durable means here, exactly
 
   `put/3` writes into a `.tmp` directory under the store root, fsyncs that file,
-  and renames it to its key. Both are under the same root, so the rename is
+  and hard-links it to its key. Both are under the same root, so the link is
   within one filesystem and therefore atomic: a reader listing a table's prefix,
-  or a crash mid-encode, sees either nothing or a complete segment.
+  or a crash mid-encode, sees either nothing or a complete segment. The key
+  never exists in any partial state — `link(2)` publishes the complete staged
+  bytes or nothing.
 
   The fsync covers the file's *contents*, not its directory entry — Erlang cannot
   fsync a directory without a NIF. So an acked segment survives a process, BEAM,
-  or node crash, and a hard power cut can in principle lose the rename even
+  or node crash, and a hard power cut can in principle lose the link even
   though the bytes reached the platter. That window is strictly smaller than the
   one this store already has by being single-copy — losing the disk loses the
   data outright — so it is accepted and documented rather than worked around. A
@@ -23,15 +25,16 @@ defmodule Smolquery.Segments.Store.Local do
 
   ## A committed key can never be blind-overwritten
 
-  The rename lands only if `put/3` first claims the key with an `O_EXCL`-style
-  exclusive create (`:file.open(target, [:write, :exclusive])`). A retry to a
-  key this store already holds — the same crash-recovery retry `Store.S3`
-  guards against with `If-None-Match: *` (T-308) — finds the claim taken,
-  discards its own staged bytes, and reports success without touching the
-  file that is already there.
+  `link(2)` is also the exclusive-create guard: it fails with `:eexist` when
+  the key already exists. A retry to a key this store already holds — the
+  same crash-recovery retry `Store.S3` guards against with `If-None-Match: *`
+  (T-308) — discards its own staged bytes and reports success with the
+  *committed* file's size, without touching the file that is already there.
+  One syscall both claims and publishes the key, so no crash can ever leave
+  an empty claim at a committed path.
 
   `put/3` also runs `Store.validate_parquet/1` on the staged file before the
-  rename — the exclusive-create guard stops a bad retry from overwriting a
+  link — the exclusive-create guard stops a bad retry from overwriting a
   good file, and this stops a bad file from being committed in the first
   place (T-309).
 
@@ -64,7 +67,7 @@ defmodule Smolquery.Segments.Store.Local do
   ## Options
 
     * `:dir` (required) — directory the store's keys resolve beneath
-    * `:fsync` — whether `put/3` fsyncs before the rename. Defaults to `true`;
+    * `:fsync` — whether `put/3` fsyncs before the link. Defaults to `true`;
       see the durability note above before switching it off.
 
   """
@@ -89,8 +92,8 @@ defmodule Smolquery.Segments.Store.Local do
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          :ok <- Store.validate_parquet(staged),
          :ok <- sync(staged, config.fsync),
-         :ok <- commit(staged, target) do
-      {:ok, %{location: target, byte_size: size}}
+         {:ok, committed_size} <- commit(staged, target, size) do
+      {:ok, %{location: target, byte_size: committed_size}}
     else
       {:error, reason} ->
         File.rm(staged)
@@ -139,18 +142,25 @@ defmodule Smolquery.Segments.Store.Local do
     {:ok, Enum.map(swept, &Path.basename/1)}
   end
 
-  defp commit(staged, target) do
-    case :file.open(target, [:write, :exclusive, :raw]) do
-      {:ok, fd} ->
-        :file.close(fd)
-        File.rename(staged, target)
+  defp commit(staged, target, size) do
+    case :file.make_link(staged, target) do
+      :ok ->
+        File.rm(staged)
+        {:ok, size}
 
       {:error, :eexist} ->
         File.rm(staged)
-        :ok
+        committed_size(target, size)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp committed_size(target, fallback) do
+    case File.stat(target) do
+      {:ok, %File.Stat{size: size}} -> {:ok, size}
+      {:error, _reason} -> {:ok, fallback}
     end
   end
 
