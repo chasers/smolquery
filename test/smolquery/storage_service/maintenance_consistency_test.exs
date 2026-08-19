@@ -39,6 +39,7 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
+  alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime, as: StorageRuntime
   alias Smolquery.Test.Eventually
@@ -144,13 +145,19 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
     ack.segment_id
   end
 
+  defp merge(runtime, table_ref, claim) do
+    {:ok, entries} = HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false)
+
+    Merge.run(runtime, table_ref, claim, entries)
+  end
+
   defp seal(context, range, sealed_key_seed) do
     id = write(context.buffer, range)
     {:ok, prefix} = Store.prefix(@table)
     {:ok, key} = Store.key(prefix, Id.generate(sealed_key_seed))
     {:ok, claim} = HotManifest.claim(context.buffer_runtime.manifest, @table, [id], [key])
 
-    {:ok, segment} = Merge.run(context.storage_runtime, @table, claim)
+    {:ok, segment} = merge(context.storage_runtime, @table, claim)
     {:ok, snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
     :ok = BufferService.Client.retire(context.buffer, @table, claim.ids, snapshot)
 

@@ -212,12 +212,16 @@ defmodule Smolquery.StorageService.Merge do
   before any byte moves: a bad key would fail after the merge already ran, and a
   defaulted row count would be committed to the catalog as though it were true.
   So is an input column the catalog does not declare — see the moduledoc.
+
+  `entries` are the claim's manifest entries, read by the caller rather than
+  here. The handoff reads them to check the claim is still live before it merges,
+  and reading them a second time made every seal attempt cost the buffer node two
+  passes over its whole backlog (T-316).
   """
-  @spec run(Runtime.t(), Store.table_ref(), SealConsumer.claim()) ::
+  @spec run(Runtime.t(), Store.table_ref(), SealConsumer.claim(), [HotTier.entry()]) ::
           {:ok, Segment.t()} | {:error, term()}
-  def run(%Runtime{} = runtime, table_ref, claim) do
+  def run(%Runtime{} = runtime, table_ref, claim, entries) do
     with {:ok, key} <- output_key(claim),
-         {:ok, entries} <- HotTier.manifest(runtime, table_ref, claim[:origin]),
          {:ok, inputs} <- inputs(entries, claim) do
       merge(runtime, table_ref, key, inputs)
     end

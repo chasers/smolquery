@@ -29,13 +29,26 @@ defmodule Smolquery.BufferService.HotClient do
   """
   @type entry :: %{optional(String.t()) => term()}
 
-  @type option :: {:timeout_ms, timeout()}
+  @type option :: {:timeout_ms, timeout()} | {:ids, [String.t()]} | {:stats, boolean()}
 
   @doc """
   Every micro-segment the buffer node at `base_url` holds for `table_ref`.
 
   An empty list is a real answer: a table whose tail has already been swept has
   an empty manifest, and so does a table that node never wrote to.
+
+  ## Options
+
+    * `:ids` — read only these micro-segments. The whole manifest costs the
+      serving node an amount that grows with its unsealed backlog, so a caller
+      that already knows what it wants should say so (T-316). An id the node no
+      longer holds is absent from the answer, exactly as it is from a full read.
+    * `:stats` — `false` leaves out the flush-time bounds. They are most of an
+      entry's bytes and only a pruning caller reads them. Ignored without `:ids`.
+    * `:timeout_ms` — how long to wait for the response.
+
+  A scoped read goes out as a `POST`, because 1,024 ULIDs do not fit in a URL.
+  It is still a read.
   """
   @spec manifest(String.t(), Store.table_ref(), [option()]) ::
           {:ok, [entry()]} | {:error, term()}
@@ -43,16 +56,27 @@ defmodule Smolquery.BufferService.HotClient do
     with {:ok, _prefix} <- Store.prefix(table_ref) do
       base_url
       |> url("/v1/datasets/#{dataset}/tables/#{table}/manifest")
-      |> get(Keyword.get(opts, :timeout_ms, @default_timeout_ms))
+      |> fetch(scope(opts), Keyword.get(opts, :timeout_ms, @default_timeout_ms))
+    end
+  end
+
+  defp scope(opts) do
+    case Keyword.get(opts, :ids) do
+      nil -> nil
+      ids -> %{"ids" => ids, "stats" => Keyword.get(opts, :stats, true)}
     end
   end
 
   defp url(base, path), do: String.trim_trailing(base, "/") <> path
 
-  defp get(url, timeout_ms) do
+  defp fetch(url, scope, timeout_ms) do
     headers = [{Smolquery.InternalSecret.header(), Smolquery.InternalSecret.value()}]
+    common = [url: url, headers: headers, receive_timeout: timeout_ms, retry: false]
 
-    case Req.get(url, headers: headers, receive_timeout: timeout_ms, retry: false) do
+    request =
+      if scope, do: [method: :post, json: scope] ++ common, else: [method: :get] ++ common
+
+    case Req.request(request) do
       {:ok, %Req.Response{status: 200, body: entries}} when is_list(entries) -> {:ok, entries}
       {:ok, %Req.Response{status: 200, body: body}} -> {:error, {:manifest_malformed, body}}
       {:ok, %Req.Response{status: status}} -> {:error, {:manifest_status, status}}

@@ -50,6 +50,13 @@ defmodule Smolquery.BufferService.HotServerTest do
 
   defp get(name, path), do: HotServer.call(authed(conn(:get, path)), name)
 
+  defp post(name, path, body) do
+    conn(:post, path, JSON.encode!(body))
+    |> Plug.Conn.put_req_header("content-type", "application/json")
+    |> authed()
+    |> HotServer.call(name)
+  end
+
   defp segment_path(id), do: "/v1/datasets/analytics/tables/events/segments/#{id}.parquet"
 
   defp parse_rfc7231(value) do
@@ -125,6 +132,94 @@ defmodule Smolquery.BufferService.HotServerTest do
       response = get(:"not_a_buffer_#{:erlang.unique_integer([:positive])}", @manifest_path)
 
       assert response.status == 503
+    end
+  end
+
+  describe "scoped manifest (T-316)" do
+    test "answers only the ids asked for, whatever else the node holds", context do
+      name = start_buffer_service(context)
+      {:ok, wanted} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _rest} = Client.write_batch(name, @table, batch(2..2))
+      {:ok, _more} = Client.write_batch(name, @table, batch(3..3))
+
+      response = post(name, @manifest_path, %{"ids" => [wanted.segment_id]})
+
+      assert response.status == 200
+      assert [entry] = JSON.decode!(response.resp_body)
+      assert entry["id"] == wanted.segment_id
+      assert entry["url"] =~ segment_path(wanted.segment_id)
+    end
+
+    test "carries the stats a pruning caller asks for", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
+
+      [entry] =
+        post(name, @manifest_path, %{"ids" => [ack.segment_id]}).resp_body |> JSON.decode!()
+
+      assert entry["stats"]["id"]["min"] == 1
+      assert entry["stats"]["id"]["max"] == 3
+    end
+
+    test "leaves the stats out for a caller that does not prune", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
+
+      body = %{"ids" => [ack.segment_id], "stats" => false}
+      [entry] = post(name, @manifest_path, body).resp_body |> JSON.decode!()
+
+      refute Map.has_key?(entry, "stats")
+      assert entry["row_count"] == 3
+      assert entry["claim_keys"] == []
+      assert entry["url"] =~ segment_path(ack.segment_id)
+    end
+
+    test "an id the node no longer holds is absent, not an error", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+
+      body = %{"ids" => [ack.segment_id, "01KYWPEEGAM8FQVQS5S2QF26SV"]}
+      response = post(name, @manifest_path, body)
+
+      assert response.status == 200
+      assert [entry] = JSON.decode!(response.resp_body)
+      assert entry["id"] == ack.segment_id
+    end
+
+    test "an empty id list is an empty manifest", context do
+      name = start_buffer_service(context)
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      response = post(name, @manifest_path, %{"ids" => []})
+
+      assert response.status == 200
+      assert JSON.decode!(response.resp_body) == []
+    end
+
+    test "400s a body that names no ids, rather than reading the whole backlog", context do
+      name = start_buffer_service(context)
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert post(name, @manifest_path, %{}).status == 400
+      assert post(name, @manifest_path, %{"ids" => "01KYWPEEGAM8FQVQS5S2QF26SV"}).status == 400
+      assert post(name, @manifest_path, %{"ids" => [1, 2]}).status == 400
+    end
+
+    test "401s without the internal secret", context do
+      name = start_buffer_service(context)
+
+      response =
+        conn(:post, @manifest_path, JSON.encode!(%{"ids" => []}))
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> HotServer.call(name)
+
+      assert response.status == 401
+    end
+
+    test "503s when no buffer service runs under that name" do
+      name = :"not_a_buffer_#{:erlang.unique_integer([:positive])}"
+
+      assert post(name, @manifest_path, %{"ids" => []}).status == 503
     end
   end
 
@@ -318,6 +413,117 @@ defmodule Smolquery.BufferService.HotServerTest do
     name = start_buffer_service(context)
 
     assert get(name, "/").status == 404
+  end
+
+  describe "metrics (T-315)" do
+    setup do
+      handler = "hot-server-test-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :hot_server, :request],
+        fn _event, measurements, meta, _config ->
+          send(test, {:hot_server_request, measurements, meta})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "prices a whole manifest read by its bytes and its entries", context do
+      name = start_buffer_service(context)
+      {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _second} = Client.write_batch(name, @table, batch(2..2))
+
+      response = get(name, @manifest_path)
+
+      assert_receive {:hot_server_request, measurements, meta}
+      assert meta == %{route: :manifest, method: "GET", status: 200}
+      assert measurements.entries == 2
+      assert measurements.response_bytes == byte_size(response.resp_body)
+      assert measurements.duration_us >= 0
+    end
+
+    test "prices a scoped read against the whole one it replaces", context do
+      name = start_buffer_service(context)
+      {:ok, wanted} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _rest} = Client.write_batch(name, @table, batch(2..2))
+
+      get(name, @manifest_path)
+      assert_receive {:hot_server_request, whole, %{route: :manifest}}
+
+      post(name, @manifest_path, %{"ids" => [wanted.segment_id], "stats" => false})
+      assert_receive {:hot_server_request, scoped, %{route: :manifest_scoped, status: 200}}
+
+      assert scoped.entries == 1
+      assert whole.entries == 2
+      assert scoped.response_bytes < whole.response_bytes
+    end
+
+    test "counts a segment read's bytes, and a HEAD's as none", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
+      {:ok, runtime} = Runtime.fetch(name)
+      {:ok, entry} = HotManifest.entry(runtime.manifest, @table, ack.segment_id)
+      size = File.stat!(Store.location(runtime.store, entry.key)).size
+
+      get(name, segment_path(ack.segment_id))
+      assert_receive {:hot_server_request, whole, %{route: :segment, method: "GET", status: 200}}
+      assert whole.response_bytes == size
+
+      HotServer.call(authed(conn(:head, segment_path(ack.segment_id))), name)
+      assert_receive {:hot_server_request, head, %{route: :segment, method: "HEAD"}}
+      assert head.response_bytes == 0
+    end
+
+    test "a HEAD on the manifest builds every entry and sends none of them", context do
+      name = start_buffer_service(context)
+      {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _second} = Client.write_batch(name, @table, batch(2..2))
+
+      HotServer.call(authed(conn(:head, @manifest_path)), name)
+
+      assert_receive {:hot_server_request, measurements, meta}
+      assert meta == %{route: :manifest, method: "HEAD", status: 200}
+      assert measurements.entries == 2
+      assert measurements.response_bytes == 0
+    end
+
+    test "names the method a scoped read arrives on", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+
+      post(name, @manifest_path, %{"ids" => [ack.segment_id]})
+
+      assert_receive {:hot_server_request, _measurements,
+                      %{route: :manifest_scoped, method: "POST", status: 200}}
+    end
+
+    test "labels a range read 206, so an input's round trips are countable", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
+
+      conn(:get, segment_path(ack.segment_id))
+      |> Plug.Conn.put_req_header("range", "bytes=0-3")
+      |> authed()
+      |> HotServer.call(name)
+
+      assert_receive {:hot_server_request, measurements,
+                      %{route: :segment, method: "GET", status: 206}}
+
+      assert measurements.response_bytes == 4
+    end
+
+    test "counts a request it never routed as unknown", context do
+      name = start_buffer_service(context)
+
+      HotServer.call(conn(:get, @manifest_path), name)
+
+      assert_receive {:hot_server_request, _measurements,
+                      %{route: :unknown, method: "GET", status: 401}}
+    end
   end
 
   describe "read-your-writes, end to end" do

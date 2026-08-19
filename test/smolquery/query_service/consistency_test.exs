@@ -34,6 +34,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
   alias Smolquery.QueryService.Planner
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime, as: StorageRuntime
 
@@ -138,6 +139,12 @@ defmodule Smolquery.QueryService.ConsistencyTest do
     claim
   end
 
+  defp merge(runtime, table_ref, claim) do
+    {:ok, entries} = HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false)
+
+    Merge.run(runtime, table_ref, claim, entries)
+  end
+
   defp visible_ids(context) do
     {:ok, job, frame} =
       Client.query(context.query, "SELECT id FROM analytics.events ORDER BY id")
@@ -157,7 +164,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
     claim = freeze_claim(context, [first, second])
     assert visible_ids(context) == expected
 
-    {:ok, segment} = Merge.run(context.storage_runtime, @table, claim)
+    {:ok, segment} = merge(context.storage_runtime, @table, claim)
     assert visible_ids(context) == expected
 
     {:ok, snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
@@ -173,7 +180,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
     claim = freeze_claim(context, [first])
     _late = write(context.buffer, 3..4)
 
-    {:ok, segment} = Merge.run(context.storage_runtime, @table, claim)
+    {:ok, segment} = merge(context.storage_runtime, @table, claim)
     {:ok, snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
 
     assert visible_ids(context) == [1, 2, 3, 4]
@@ -186,7 +193,7 @@ defmodule Smolquery.QueryService.ConsistencyTest do
   test "a plan pinned before the commit still reads the micro-segments after it", context do
     first = write(context.buffer, 1..2)
     claim = freeze_claim(context, [first])
-    {:ok, segment} = Merge.run(context.storage_runtime, @table, claim)
+    {:ok, segment} = merge(context.storage_runtime, @table, claim)
 
     reader = __MODULE__.PinnedReader
 

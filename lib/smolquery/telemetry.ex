@@ -53,6 +53,14 @@ defmodule Smolquery.Telemetry do
                                           5 times (a Compactor module constant, not a
                                           runtime setting) and stopped being planned on
                                           this node; alert on rate > 0 (T-310)
+      [:smolquery, :hot_server, :request] %{duration_us, response_bytes, entries},
+                                          meta %{route: :manifest | :manifest_scoped |
+                                          :segment | :unknown, method: String.t(),
+                                          status: integer}
+                                          — one hot-tier read served to a sealer or a
+                                          query planner (T-315). The method is the raw
+                                          request method; this module narrows it to a
+                                          closed set, the way it narrows the status
 
       [:smolquery, :lifecycle, :broadcast] %{count},
                                           meta %{kind: :commit | :seal | :compaction}
@@ -88,6 +96,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
+    [:smolquery, :hot_server, :request],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
     [:smolquery, :query, :job],
@@ -132,6 +141,22 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_quarantined_segments_total" =>
       "Sealed segments quarantined after repeated compaction failures; a nonzero rate " <>
         "means a table needs an operator to drop or replace a segment (T-310).",
+    "smolquery_hot_server_requests_total" =>
+      "Hot-tier reads served, by route, method and status class (T-315).",
+    "smolquery_hot_server_microseconds_total" =>
+      "Time spent serving hot-tier reads, by route and method; divide by requests for " <>
+        "the mean. Its rate is also the mean concurrency, which is why there is no " <>
+        "in-flight gauge.",
+    "smolquery_hot_server_response_bytes_total" =>
+      "Bytes hot-tier reads produced, by route and method; a HEAD counts none, though " <>
+        "it still pays the duration. The series that prices a manifest read against a " <>
+        "segment read (T-315).",
+    "smolquery_hot_manifest_entries_total" =>
+      "Micro-segment entries hot-tier manifest reads answered with, by route and " <>
+        "method; divide by those requests for the mean. On the unscoped route that " <>
+        "mean is the unsealed backlog depth (T-315).",
+    "smolquery_hot_server_range_responses_total" =>
+      "Hot-tier segment reads answered with a 206; one DuckDB input is several (T-315).",
     "smolquery_retention_segments_dropped_total" => "Sealed segments dropped past their TTL.",
     "smolquery_snapshots_expired_total" => "Catalog snapshots expired by retention sweeps.",
     "smolquery_gc_segments_swept_total" => "Uncommitted sealed segments GC deleted.",
@@ -320,6 +345,32 @@ defmodule Smolquery.Telemetry do
     )
   end
 
+  def handle_event([:smolquery, :hot_server, :request], measurements, meta, nil) do
+    labels = [route: Map.get(meta, :route, :unknown), method: hot_method(meta)]
+
+    bump(
+      {"smolquery_hot_server_requests_total", labels ++ [class: hot_class(meta)]},
+      1
+    )
+
+    bump(
+      {"smolquery_hot_server_microseconds_total", labels},
+      Map.get(measurements, :duration_us, 0)
+    )
+
+    bump(
+      {"smolquery_hot_server_response_bytes_total", labels},
+      Map.get(measurements, :response_bytes, 0)
+    )
+
+    bump(
+      {"smolquery_hot_manifest_entries_total", labels},
+      Map.get(measurements, :entries, 0)
+    )
+
+    bump({"smolquery_hot_server_range_responses_total", []}, ranged(meta))
+  end
+
   def handle_event([:smolquery, :retention, :sweep], measurements, _meta, nil) do
     bump({"smolquery_retention_segments_dropped_total", []}, Map.get(measurements, :dropped, 0))
     bump({"smolquery_snapshots_expired_total", []}, Map.get(measurements, :expired_snapshots, 0))
@@ -358,6 +409,17 @@ defmodule Smolquery.Telemetry do
 
   defp status_class(status) when is_integer(status), do: "#{div(status, 100)}xx"
   defp status_class(_status), do: "unknown"
+
+  defp hot_class(%{status: status}), do: status_class(status)
+  defp hot_class(_meta), do: status_class(nil)
+
+  defp hot_method(%{method: "GET"}), do: :get
+  defp hot_method(%{method: "HEAD"}), do: :head
+  defp hot_method(%{method: "POST"}), do: :post
+  defp hot_method(_meta), do: :other
+
+  defp ranged(%{status: 206}), do: 1
+  defp ranged(_meta), do: 0
 
   defp format_labels([]), do: ""
 

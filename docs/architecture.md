@@ -320,12 +320,13 @@ through RPC (remote procedure call) would put every segment on the BEAM heap.
 It would also lose that pushdown.
 
 `Smolquery.BufferService.HotServer` is where DuckDB opens them. It is a Bandit
-listener, one per instance. It serves two routes behind the internal secret
+listener, one per instance. It serves three routes behind the internal secret
 (`Smolquery.InternalSecret`, sent as `x-smolquery-internal`):
 
 ```
-GET /v1/datasets/:dataset/tables/:table/manifest                  # JSON entries
-GET /v1/datasets/:dataset/tables/:table/segments/:id.parquet      # segment bytes
+GET  /v1/datasets/:dataset/tables/:table/manifest                 # JSON entries
+POST /v1/datasets/:dataset/tables/:table/manifest                 # named entries only
+GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment bytes
 ```
 
 - **A manifest entry's `url` is built from the request that fetched it**, not
@@ -335,6 +336,14 @@ GET /v1/datasets/:dataset/tables/:table/segments/:id.parquet      # segment byte
   reports that store's own location instead. A shared store is one where
   `Smolquery.Segments.Store.shared?/1` is `true`, for example a future S3 hot
   tier. Such an entry never round-trips through this route at all.
+- **The `GET` costs the serving node its whole unsealed backlog.** It scans
+  the table's entries out of ETS, sorts them, builds a record each, and encodes
+  the lot as one JSON document. The query planner wants exactly that, because it
+  prunes on each entry's flush-time bounds. The sealer does not: it holds a
+  claim of at most 1,024 ids. So the sealer `POST`s the ids it wants, with
+  `{"ids": [...], "stats": false}`, and pays for its claim rather than for the
+  backlog it is draining (T-316). It is a `POST` because 1,024 ULIDs are about
+  28 KB of request line. Nothing about the node's state changes either way.
 - **A segment id is validated and resolved through the manifest**, never by a
   join of request input into a path. `Smolquery.Segments.Id.valid?/1` rejects
   anything that is not a well-formed ULID before it gets near the filesystem.
@@ -475,7 +484,8 @@ TO staged
   for the same reason.
 - **The inputs come over HTTP**, from `HotServer`. The bytes have to travel
   that way regardless: `httpfs` speaks HTTP and nothing else. The manifest
-  comes the same way. A remote buffer node needs nothing new in a cluster.
+  comes the same way, scoped to the claim's ids. A remote buffer node needs
+  nothing new in a cluster.
 - **`union_by_name` is what makes additive schema evolution work.**
   Micro-segments written before and after a column was added merge into one
   segment that carries the union.
@@ -883,6 +893,7 @@ Every service emits plain `:telemetry` events at its seams. The events cover:
 - batch-dedup hits
 - seal attempts
 - compaction swaps
+- hot-tier reads, by route
 - retention drops
 - snapshot expiry
 - GC sweeps
@@ -900,6 +911,21 @@ site.
 The metrics are counters only, with paired totals for means
 (`smolquery_buffer_commit_microseconds_total / smolquery_buffer_commits_total`).
 Labels come from closed sets, so code bounds cardinality, not traffic.
+
+Hot-tier reads count their *bytes*, not only their requests (T-315). The two
+manifest routes and the segment route differ by orders of magnitude, so a
+request count alone cannot say which one is spending a buffer node.
+`smolquery_hot_manifest_entries_total{route="manifest",method="get"}` divided by
+that series' request count is the unsealed backlog depth, which is the pass or
+fail criterion for any sustained-rate measurement.
+
+They also carry a `method` label, narrowed to `get`, `head`, `post` or `other`.
+A `HEAD` counts zero bytes, because `httpfs` sends one before every segment read
+and counting the size it asked about would double every segment. But a `HEAD`
+still pays for the work: one on the manifest route builds the whole document
+before discarding it. The label is what keeps those two facts readable together
+— duration and entries are real on a `HEAD`, bytes are zero — so the pair says
+how much of a route's cost never reaches the wire.
 
 `Smolquery.Lifecycle` is the second consumer of the same events (T-295). It
 rebroadcasts the per-table events (commits, seal attempts, compaction swaps)

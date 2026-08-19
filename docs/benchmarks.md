@@ -9,6 +9,7 @@ mix run bench/planner.exs                         # scan DuckLake, or plan aroun
 mix run bench/adbc.exs                            # what ADBC costs to connect, fetch, and share
 mix run bench/buffer.exs                          # what group commit costs, and where it bends
 mix run bench/sealer.exs                          # what a seal costs, and how far behind it runs
+mix run bench/hot_manifest.exs                    # can HotServer serve manifests as fast as the buffer commits?
 mix run bench/query.exs                           # what a query job costs, and the hot tier's read path
 mix run bench/ingest_transport.exs                # ingest→buffer: gen_rpc terms vs Arrow IPC over HTTP
 mix run bench/ack_budget.exs                      # does the ack budget bound overload latency?
@@ -23,6 +24,7 @@ ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurr
 CALLS=50 MAX_WRITERS=128 mix run bench/buffer.exs   # more samples, more concurrency
 BENCH_SECTION=replication_delta mix run bench/buffer.exs   # one section by name
 INPUTS=64 ROWS=20000 mix run bench/sealer.exs       # bigger claims, bigger merges
+COLUMNS=63 BACKLOGS=64,4096 mix run bench/hot_manifest.exs   # a wide table, a deep backlog
 NODES=4 WRITERS=16 mix run bench/cluster_ingest.exs # a wider fleet, more load per node
 WRITERS=8,32 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null   # a different sweep and offered rate
 POOL=20000 ROWS=100000 mix run bench/load.exs 2>/dev/null         # higher-cardinality rows, bigger files
@@ -262,6 +264,27 @@ The script also does three things:
 - It compares the two merge implementations.
 - It measures merge throughput against input count and rows.
 - It times the whole handoff.
+
+## Hot-tier reads — `bench/hot_manifest.exs`
+
+`HotServer` runs on the pod that commits. A manifest read that costs more than
+a commit steals the throughput it exists to serve (PL-45). This script asks
+whether the route keeps up.
+
+It answers four questions:
+
+- what a manifest read costs against unsealed backlog depth, `GET` whole
+  against `POST` claim-scoped,
+- how many reads a node serves per second, and the seal rate that buys — a seal
+  attempt is two scoped reads (T-316),
+- what the reads cost the commits: commit throughput and ack latency with no
+  readers, under `GET` load, and under `POST` load,
+- where an entry's bytes go, against table width. The flush-time stats block is
+  per column, so a wide table is what makes an entry expensive.
+
+Column count is the variable a 4-column fixture hides — the soak behind PL-45
+ran 63 columns. Knobs: `COLUMNS`, `WIDTHS`, `BACKLOGS`, `CONTENDED_BACKLOG`,
+`READERS`, `WRITERS`, `SECONDS`, `ROWS`.
 
 ## Clustering — `bench/clustering.exs`
 
