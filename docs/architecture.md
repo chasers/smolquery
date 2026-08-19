@@ -919,6 +919,16 @@ request count alone cannot say which one is spending a buffer node.
 that series' request count is the unsealed backlog depth, which is the pass or
 fail criterion for any sustained-rate measurement.
 
+`smolquery_hot_manifest_index_entries_total{change}` is the one series that says
+whether a node's hot manifest index is in steady state or growing (T-320).
+`added + recovered - reaped` is the resident entry count, which nothing else
+reports. `retired` falling behind `added` means sealing is not keeping up — the
+one condition under which nothing is ever reaped, because an entry is only
+droppable `retire_grace_ms` after a sealer retires it. Even when sealing keeps
+up, the grace window holds a floor of roughly `flush_rate x retire_grace_ms`
+entries, and nothing bounds the index: `max_buffered_rows` and
+`max_buffered_bytes` bound the accumulator, not this.
+
 They also carry a `method` label, narrowed to `get`, `head`, `post` or `other`.
 A `HEAD` counts zero bytes, because `httpfs` sends one before every segment read
 and counting the size it asked about would double every segment. But a `HEAD`

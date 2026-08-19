@@ -53,6 +53,15 @@ defmodule Smolquery.Telemetry do
                                           5 times (a Compactor module constant, not a
                                           runtime setting) and stopped being planned on
                                           this node; alert on rate > 0 (T-310)
+      [:smolquery, :hot_manifest, :change] %{entries},
+                                          meta %{change: :added | :retired | :reaped |
+                                          :recovered}
+                                          — entries entering or leaving a node's manifest
+                                          index; `added + recovered - reaped` is what it
+                                          holds (T-320). Distinct from the two counters
+                                          named for entries *served*
+                                          (`..._entries_total{route}`) and entries *read*
+                                          (`..._read_entries_total{op}`)
       [:smolquery, :hot_manifest, :read]  %{duration_us, entries},
                                           meta %{op: :entries | :pending | :claimable |
                                           :live_claim | :retired_before}
@@ -101,6 +110,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
+    [:smolquery, :hot_manifest, :change],
     [:smolquery, :hot_manifest, :read],
     [:smolquery, :hot_server, :request],
     [:smolquery, :retention, :sweep],
@@ -147,6 +157,12 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_quarantined_segments_total" =>
       "Sealed segments quarantined after repeated compaction failures; a nonzero rate " <>
         "means a table needs an operator to drop or replace a segment (T-310).",
+    "smolquery_hot_manifest_index_entries_total" =>
+      "Entries entering and leaving a node's manifest index, by change. " <>
+        "`added + recovered - reaped` is the resident entry count — the index's real " <>
+        "size, and nothing else reports it. `retired` below `added` means sealing is " <>
+        "not keeping up, which is the one condition under which nothing is ever reaped " <>
+        "(T-320).",
     "smolquery_hot_manifest_reads_total" =>
       "Scanning reads of a node's manifest index, by op (T-318).",
     "smolquery_hot_manifest_read_microseconds_total" =>
@@ -360,6 +376,13 @@ defmodule Smolquery.Telemetry do
     bump(
       {"smolquery_compaction_quarantined_segments_total", []},
       length(Map.get(meta, :paths, []))
+    )
+  end
+
+  def handle_event([:smolquery, :hot_manifest, :change], measurements, meta, nil) do
+    bump(
+      {"smolquery_hot_manifest_index_entries_total", [change: Map.get(meta, :change, :unknown)]},
+      Map.get(measurements, :entries, 0)
     )
   end
 

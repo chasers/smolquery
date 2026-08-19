@@ -177,6 +177,14 @@ every tick to an O(1) lookup, and because every mutation re-derives it there is 
 incremental-update rule to get wrong. The test that keeps it honest asserts the
 cached value equals a fresh derivation at every step of the lifecycle.
 
+**Know how a table *shrinks*, not just how it grows.** Trace the delete path
+before you trust a bound. The hot manifest index has exactly one steady-state
+shrink path — a reaper that runs `retire_grace_ms` after a *successful* seal — so
+it grows without limit whenever sealing stalls, and it holds a resident floor of
+`flush_rate x retire_grace_ms` entries even when sealing is healthy. Emit enough
+counters to tell those two states apart
+(`smolquery_hot_manifest_index_entries_total{change}`).
+
 **Know how big the table can get, and write it down.** A row holding a per-column
 stats map costs about 13.7 KB at 63 columns, so 16,384 entries is 214 MiB for one
 table's index. `:compressed` cuts that to 77.8 MiB but costs ~1.8× on reads —
