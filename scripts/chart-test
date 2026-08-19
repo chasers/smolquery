@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Lint and assert the supported smolquery Helm profiles."""
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    print("chart-test requires PyYAML", file=sys.stderr)
+    raise SystemExit(2)
+
+root = Path(__file__).resolve().parents[1]
+chart = root / "charts" / "smolquery"
+env = os.environ.copy()
+helm = env.get("HELM", "helm")
+RELEASE_DIGEST = "sha256:20d87cdafd0fcc4e35d571a1d16186c6da94bf4d7162c72485e8c734ced65dea"
+
+
+def run(*args, check=True):
+    return subprocess.run([helm, *args], cwd=root, env=env, text=True, capture_output=True, check=check)
+
+
+def docs(text):
+    return [doc for doc in yaml.safe_load_all(text) if doc]
+
+
+def assert_profile(args, topology, expected_ports=None):
+    result = run("template", "smolquery", str(chart), "--namespace", "smolquery", *args)
+    rendered = docs(result.stdout)
+    assert not [doc for doc in rendered if doc.get("kind") == "Secret"], "chart rendered a Secret"
+    statefulsets = [doc for doc in rendered if doc.get("kind") == "StatefulSet"]
+    expected = {"api", "buffer", "storage"} if topology == "split" else {"server"}
+    roles = {doc["metadata"]["name"].rsplit("-", 1)[-1] for doc in statefulsets}
+    assert roles == expected
+    assert len({doc["metadata"]["name"] for doc in statefulsets}) == len(statefulsets)
+    config = next(doc for doc in rendered if doc.get("kind") == "ConfigMap")
+    expected_ports = expected_ports or {
+        "SMOLQUERY_API_PORT": "4000",
+        "SMOLQUERY_WEB_PORT": "4002",
+        "SMOLQUERY_HOT_SERVER_PORT": "4001",
+        "SMOLQUERY_METRICS_PORT": "4003",
+        "GEN_RPC_PORT": "5369",
+        "GEN_RPC_SSL_PORT": "5870",
+    }
+    assert {key: config["data"][key] for key in expected_ports} == expected_ports
+    assert config["data"]["GEN_RPC_TLS"] == "false"
+    assert config["data"]["DIST_TLS"] == "false"
+    for statefulset in statefulsets:
+        spec = statefulset["spec"]
+        labels = spec["template"]["metadata"]["labels"]
+        role = statefulset["metadata"]["name"].rsplit("-", 1)[-1]
+        assert spec["serviceName"] == "smolquery-smolquery-headless"
+        assert spec["template"]["spec"]["automountServiceAccountToken"] is False
+        assert spec["selector"]["matchLabels"] == {
+            "app.kubernetes.io/name": "smolquery",
+            "app.kubernetes.io/instance": "smolquery",
+            "app.kubernetes.io/component": labels["app.kubernetes.io/component"],
+        }
+        assert not any(doc.get("kind") == "Secret" for doc in rendered)
+        env_from = spec["template"]["spec"]["containers"][0]["envFrom"]
+        assert env_from == [
+            {"secretRef": {"name": "smolquery-env"}},
+            {"configMapRef": {"name": "smolquery-smolquery-config"}},
+        ]
+        ports = spec["template"]["spec"]["containers"][0]["ports"]
+        expected_container_ports = {
+            "http": int(expected_ports["SMOLQUERY_API_PORT"]),
+            "web": int(expected_ports["SMOLQUERY_WEB_PORT"]),
+            "hot-server": int(expected_ports["SMOLQUERY_HOT_SERVER_PORT"]),
+            "metrics": int(expected_ports["SMOLQUERY_METRICS_PORT"]),
+            "epmd": 4369,
+            "gen-rpc": int(expected_ports["GEN_RPC_PORT"]),
+            "gen-rpc-tls": int(expected_ports["GEN_RPC_SSL_PORT"]),
+        }
+        assert all(port["containerPort"] == expected_container_ports[port["name"]] for port in ports)
+    pvc_sets = [doc for doc in statefulsets if doc.get("spec", {}).get("volumeClaimTemplates")]
+    assert {doc["metadata"]["name"].rsplit("-", 1)[-1] for doc in pvc_sets} == (
+        {"buffer"} if topology == "split" else {"server"}
+    )
+    for statefulset in statefulsets:
+        role = statefulset["metadata"]["name"].rsplit("-", 1)[-1]
+        volumes = statefulset["spec"]["template"]["spec"].get("volumes", [])
+        data_volumes = [volume for volume in volumes if volume["name"] == "data"]
+        assert bool(data_volumes) == (role in ({"api", "storage"} if topology == "split" else set()))
+    front = next(doc for doc in rendered if doc.get("kind") == "Service" and doc["metadata"]["name"] == "smolquery-smolquery")
+    assert front["spec"]["selector"]["app.kubernetes.io/component"] == ("api" if topology == "split" else "server")
+    assert {port["name"]: port["port"] for port in front["spec"]["ports"]} == {
+        "http": int(expected_ports["SMOLQUERY_API_PORT"]),
+        "web": int(expected_ports["SMOLQUERY_WEB_PORT"]),
+    }
+    headless = next(doc for doc in rendered if doc.get("kind") == "Service" and doc["metadata"]["name"].endswith("-headless"))
+    expected_headless_ports = {
+        "epmd": 4369,
+        "gen-rpc": int(expected_ports["GEN_RPC_PORT"]),
+        "gen-rpc-tls": int(expected_ports["GEN_RPC_SSL_PORT"]),
+        "hot-server": int(expected_ports["SMOLQUERY_HOT_SERVER_PORT"]),
+        "metrics": int(expected_ports["SMOLQUERY_METRICS_PORT"]),
+    }
+    assert {port["name"]: port["port"] for port in headless["spec"]["ports"]} == expected_headless_ports
+    return rendered
+
+
+run("lint", "--strict", str(chart))
+default = assert_profile([], "split")
+symmetric = assert_profile(["--set", "topology=symmetric,probes.server.readiness.httpGet.path=/server-ready"], "symmetric")
+server = next(doc for doc in symmetric if doc.get("kind") == "StatefulSet")
+server_probe = server["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]
+assert server_probe["httpGet"]["path"] == "/server-ready"
+annotated = docs(run("template", "smolquery", str(chart), "--set", "podAnnotations.checksum/config=user-value").stdout)
+annotated_pod = next(doc for doc in annotated if doc.get("kind") == "StatefulSet")["spec"]["template"]
+assert annotated_pod["metadata"]["annotations"]["checksum/config"] != "user-value"
+
+images = [container["image"] for doc in default if doc.get("kind") == "StatefulSet" for container in doc["spec"]["template"]["spec"]["containers"]]
+assert images and all(image.endswith("@" + RELEASE_DIGEST) for image in images)
+hook = next(doc for doc in default if doc.get("kind") == "Pod" and doc["metadata"].get("annotations", {}).get("helm.sh/hook") == "test")
+assert hook["spec"]["automountServiceAccountToken"] is False
+assert hook["spec"]["containers"][0]["image"] == images[0]
+assert hook["spec"]["containers"][0]["imagePullPolicy"] == "IfNotPresent"
+tagged = assert_profile(["--set-string", "image.digest="], "split")
+tagged_images = [
+    container["image"]
+    for doc in tagged
+    if doc.get("kind") == "StatefulSet"
+    for container in doc["spec"]["template"]["spec"]["containers"]
+]
+assert tagged_images and all(image.endswith(":v0.13.0") for image in tagged_images)
+
+configured_digest = "sha256:" + "a" * 64
+digest = assert_profile(["--set-string", f"image.digest={configured_digest}"], "split")
+images = [container["image"] for doc in digest if doc.get("kind") == "StatefulSet" for container in doc["spec"]["template"]["spec"]["containers"]]
+assert images and all(image.endswith("@" + configured_digest) for image in images)
+invalid_digest = run("template", "smolquery", str(chart), "--set-string", "image.digest=sha256:ABC", check=False)
+assert invalid_digest.returncode != 0 and "digest" in invalid_digest.stderr
+
+port_args = [
+    "--set",
+    "service.ports.http=4100,service.ports.web=4102,service.ports.hotServer=4101,service.ports.metrics=4103,service.ports.genRpc=5370,service.ports.genRpcTls=5871",
+]
+ports = assert_profile(
+    port_args,
+    "split",
+    {
+        "SMOLQUERY_API_PORT": "4100",
+        "SMOLQUERY_WEB_PORT": "4102",
+        "SMOLQUERY_HOT_SERVER_PORT": "4101",
+        "SMOLQUERY_METRICS_PORT": "4103",
+        "GEN_RPC_PORT": "5370",
+        "GEN_RPC_SSL_PORT": "5871",
+    },
+)
+config = next(doc for doc in ports if doc.get("kind") == "ConfigMap")["data"]
+assert {config[key] for key in ("SMOLQUERY_API_PORT", "SMOLQUERY_WEB_PORT", "SMOLQUERY_HOT_SERVER_PORT", "SMOLQUERY_METRICS_PORT", "GEN_RPC_PORT", "GEN_RPC_SSL_PORT")} == {"4100", "4102", "4101", "4103", "5370", "5871"}
+front = next(doc for doc in ports if doc.get("kind") == "Service" and doc["metadata"]["name"] == "smolquery-smolquery")
+assert {port["name"]: port["port"] for port in front["spec"]["ports"]} == {"http": 4100, "web": 4102}
+metrics = docs(run("template", "smolquery", str(chart), "--set", "metricsService.enabled=true,metricsService.port=4010").stdout)
+metrics_service = next(doc for doc in metrics if doc.get("kind") == "Service" and doc["metadata"]["name"].endswith("-metrics"))
+assert metrics_service["spec"]["ports"] == [{"name": "metrics", "port": 4010, "targetPort": "metrics"}]
+
+pdb = docs(
+    run(
+        "template",
+        "smolquery",
+        str(chart),
+        "--set",
+        "pdb.api.enabled=true,pdb.api.minAvailable=50%,pdb.buffer.enabled=true,pdb.storage.enabled=true",
+    ).stdout
+)
+split_pdbs = {
+    doc["metadata"]["labels"]["app.kubernetes.io/component"]: doc["spec"]["minAvailable"]
+    for doc in pdb
+    if doc.get("kind") == "PodDisruptionBudget"
+}
+assert split_pdbs == {"api": "50%", "buffer": 2, "storage": 1}
+symmetric_pdb = docs(
+    run("template", "smolquery", str(chart), "--set", "topology=symmetric,pdb.server.enabled=true").stdout
+)
+server_pdb = next(doc for doc in symmetric_pdb if doc.get("kind") == "PodDisruptionBudget")
+assert server_pdb["metadata"]["labels"]["app.kubernetes.io/component"] == "server"
+assert server_pdb["spec"]["minAvailable"] == 2
+
+rbac = docs(run("template", "smolquery", str(chart), "--set", "podOperations.enabled=true,serviceAccount.create=true").stdout)
+assert {doc["kind"] for doc in rbac} >= {"ServiceAccount", "Role", "RoleBinding"}
+for statefulset in [doc for doc in rbac if doc.get("kind") == "StatefulSet"]:
+    role = statefulset["metadata"]["name"].rsplit("-", 1)[-1]
+    pod = statefulset["spec"]["template"]["spec"]
+    if role == "api":
+        assert pod["serviceAccountName"] == "smolquery-smolquery" and pod["automountServiceAccountToken"] is True
+    else:
+        assert "serviceAccountName" not in pod and pod["automountServiceAccountToken"] is False
+existing_sa = docs(run("template", "smolquery", str(chart), "--set", "podOperations.enabled=true,serviceAccount.name=runtime").stdout)
+assert {doc["kind"] for doc in existing_sa} >= {"Role", "RoleBinding"}
+api = next(doc for doc in existing_sa if doc.get("kind") == "StatefulSet" and doc["metadata"]["name"].endswith("-api"))
+assert api["spec"]["template"]["spec"]["serviceAccountName"] == "runtime"
+symmetric_rbac = docs(
+    run(
+        "template",
+        "smolquery",
+        str(chart),
+        "--set",
+        "topology=symmetric,podOperations.enabled=true,serviceAccount.create=true",
+    ).stdout
+)
+server = next(doc for doc in symmetric_rbac if doc.get("kind") == "StatefulSet")
+server_pod = server["spec"]["template"]["spec"]
+assert server_pod["serviceAccountName"] == "smolquery-smolquery"
+assert server_pod["automountServiceAccountToken"] is True
+o_rbac = docs(run("template", "smolquery", str(chart)).stdout)
+assert not {doc["kind"] for doc in o_rbac} & {"Role", "RoleBinding", "ServiceAccount"}
+
+for values, expected in [
+    (["--set", "replicationFactor=4"], "cannot exceed"),
+    (["--set", "tls.enabled=true,tls.secretName="], "secretName"),
+    (["--set", "existingSecret.name="], "existingSecret"),
+    (["--set", "podOperations.enabled=true"], "podOperations requires"),
+    (["--set", "env.SMOLQUERY_API_PORT=9999"], "reserved"),
+    (["--set", "commonExtraEnv[0].name=GEN_RPC_TLS,commonExtraEnv[0].value=false"], "reserved"),
+    (["--set", "roleExtraEnv.api[0].name=SMOLQUERY_ROLES,roleExtraEnv.api[0].value=all"], "reserved"),
+    (["--set", "probes.apu.readiness.httpGet.path=/healthz"], "apu"),
+    (["--set", "fullnameOverride=Invalid_Name"], "fullnameOverride"),
+]:
+    result = run("template", "smolquery", str(chart), *values, check=False)
+    assert result.returncode != 0 and expected in result.stderr, (values, result.stderr)
+
+tls = docs(run("template", "smolquery", str(chart), "--set", "tls.enabled=true,tls.secretName=smolquery-tls").stdout)
+tls_config = next(doc for doc in tls if doc.get("kind") == "ConfigMap")
+assert tls_config["data"]["GEN_RPC_TLS"] == "true" and tls_config["data"]["DIST_TLS"] == "true"
+for statefulset in [doc for doc in tls if doc.get("kind") == "StatefulSet"]:
+    pod = statefulset["spec"]["template"]["spec"]
+    assert {volume["name"] for volume in pod["volumes"]} >= {"gen-rpc-tls"}
+    assert next(volume for volume in pod["volumes"] if volume["name"] == "gen-rpc-tls")["secret"]["secretName"] == "smolquery-tls"
+    assert any(mount["name"] == "gen-rpc-tls" for mount in pod["containers"][0]["volumeMounts"])
+symmetric_tls = docs(
+    run(
+        "template",
+        "smolquery",
+        str(chart),
+        "--set",
+        "topology=symmetric,tls.enabled=true,tls.secretName=smolquery-tls",
+    ).stdout
+)
+symmetric_tls_config = next(doc for doc in symmetric_tls if doc.get("kind") == "ConfigMap")
+assert symmetric_tls_config["data"]["GEN_RPC_TLS"] == "true"
+server = next(doc for doc in symmetric_tls if doc.get("kind") == "StatefulSet")
+assert any(volume["name"] == "gen-rpc-tls" for volume in server["spec"]["template"]["spec"]["volumes"])
+
+
+def assert_long_names(rendered):
+    names = [doc["metadata"]["name"] for doc in rendered if doc.get("metadata", {}).get("name")]
+    assert names and all(len(name) <= 63 for name in names)
+    long_sets = [doc for doc in rendered if doc.get("kind") == "StatefulSet"]
+    assert len({doc["metadata"]["name"] for doc in long_sets}) == len(long_sets)
+    long_config = next(doc for doc in rendered if doc.get("kind") == "ConfigMap")
+    long_base = long_config["metadata"]["name"][:-len("-config")]
+    assert long_config["data"]["HEADLESS_SERVICE"] == long_base + "-headless"
+    assert long_config["data"]["SMOLQUERY_BUFFER_STATEFULSET"] == long_base + "-buffer"
+    assert all(len(value) <= 63 for value in long_config["data"].values())
+
+
+long_name = "release-name-that-is-valid-and-long-enough"
+assert_long_names(docs(run("template", long_name, str(chart)).stdout))
+assert_long_names(
+    docs(
+        run(
+            "template",
+            "smolquery",
+            str(chart),
+            "--set",
+            "fullnameOverride=application-name-that-is-valid-and-long-enough",
+        ).stdout
+    )
+)
+
+print("chart lint and split/symmetric semantic assertions passed")

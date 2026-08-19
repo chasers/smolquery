@@ -33,6 +33,29 @@ jobs:
       - name: Compile, format, lint, audit & architecture
         run: mix ci
 
+      - name: Install Helm 3.21.3
+        run: |
+          set -euo pipefail
+          version=3.21.3
+          archive=/tmp/helm.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://get.helm.sh/helm-v${version}-linux-amd64.tar.gz"
+          echo "15e041a93a590dce8100f39385cd98c84a765c9e36aeeb9e2dc6ff9e4769e2e0  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          helm version --short
+
+      - name: Provision chart assertion dependencies
+        run: |
+          python3 -m venv /tmp/smolquery-chart-venv
+          /tmp/smolquery-chart-venv/bin/pip install --quiet PyYAML==6.0.2
+          echo "/tmp/smolquery-chart-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Lint and validate Helm chart
+        run: scripts/chart-test
+
   tests:
     name: Tests
     runs-on: ubuntu-latest
