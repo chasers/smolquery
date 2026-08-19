@@ -2,14 +2,52 @@ defmodule Smolquery.BufferService.HotServer do
   @moduledoc """
   Serves a buffer node's hot tier to DuckDB over HTTP.
 
-  Two routes, both read-only, both requiring the internal secret
+  Three routes, all read-only, all requiring the internal secret
   (`Smolquery.InternalSecret` — PL-8 D6 closed PL-3 D12's unauthenticated
-  window). Both answer `HEAD` as well as `GET` — `httpfs` sends a `HEAD`
+  window). The two `GET`s answer `HEAD` as well — `httpfs` sends a `HEAD`
   first, to learn a segment's size before it starts issuing ranged reads
   against it:
 
-      GET /v1/datasets/:dataset/tables/:table/manifest
-      GET /v1/datasets/:dataset/tables/:table/segments/:id.parquet
+      GET  /v1/datasets/:dataset/tables/:table/manifest
+      POST /v1/datasets/:dataset/tables/:table/manifest
+      GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet
+
+  ## The scoped manifest read, and why it is a POST
+
+  The `GET` answers with every micro-segment the node holds for the table. Its
+  cost grows with the unsealed backlog at every step: a full scan of the table's
+  ETS entries, a sort, a record per entry, and one `JSON.encode!` over the lot
+  held in memory. The query planner wants exactly that, because it prunes on
+  each entry's flush-time bounds.
+
+  The sealer does not. It holds a claim — at most 1,024 ids — and threw the rest
+  away after paying for it, on the same pod that is committing, while the
+  backlog it is trying to drain makes each attempt more expensive than the last
+  (T-316). The `POST` takes the ids it actually wants:
+
+      {"ids": ["01J...", "01J..."], "stats": false}
+
+  It is a `POST` because the ids do not fit in a URL: 1,024 ULIDs are about
+  28 KB of request line, and a caller that has to chunk its own read is a caller
+  that will read the backlog twice again. It is still a read — nothing about the
+  node's state changes — and `stats: false` skips building the bounds a
+  non-pruning caller does not use, which is most of an entry's bytes.
+
+  ## Metrics
+
+  Every request emits `[:smolquery, :hot_server, :request]` with its duration,
+  the bytes it produced, and the entries a manifest read answered with, labelled
+  by route and method (T-315). Bytes are the series that matters: the routes
+  differ by orders of magnitude, so a request count alone hides which one is
+  spending the node.
+
+  A `HEAD` counts zero bytes. `httpfs` sends one before every segment read, and
+  counting the size it asked about would double every segment. The method label
+  is what keeps that honest rather than confusing: a `HEAD` still pays for the
+  work — a `HEAD` on the manifest route builds the whole document and then
+  discards it — so its duration and its entry count are real while its bytes are
+  zero. Reading the two together says how much of a route's cost never reaches
+  the wire.
 
   The segment route honors single-part `Range` requests with a `206` — that is
   the whole reason httpfs is worth serving: DuckDB reads a Parquet footer and
@@ -61,26 +99,61 @@ defmodule Smolquery.BufferService.HotServer do
 
   @impl Plug
   def call(conn, name) do
-    if Smolquery.InternalSecret.proven?(conn) do
-      conn |> Plug.RewriteOn.call(@rewrite_on) |> route(name)
-    else
-      send_resp(conn, 401, "missing or invalid internal secret")
-    end
+    started_at = System.monotonic_time()
+
+    conn =
+      if Smolquery.InternalSecret.proven?(conn) do
+        conn |> Plug.RewriteOn.call(@rewrite_on) |> route(name)
+      else
+        respond(conn, 401, "missing or invalid internal secret")
+      end
+
+    measure(conn, started_at)
   end
 
   defp route(conn, name) do
     case {conn.method, conn.path_info} do
       {method, ["v1", "datasets", dataset, "tables", table, "manifest"]}
       when method in ["GET", "HEAD"] ->
-        manifest(conn, name, {dataset, table})
+        conn
+        |> put_private(:hot_server_route, :manifest)
+        |> manifest(name, {dataset, table}, :all, stats: true)
+
+      {"POST", ["v1", "datasets", dataset, "tables", table, "manifest"]} ->
+        conn
+        |> put_private(:hot_server_route, :manifest_scoped)
+        |> scoped_manifest(name, {dataset, table})
 
       {method, ["v1", "datasets", dataset, "tables", table, "segments", filename]}
       when method in ["GET", "HEAD"] ->
-        segment(conn, name, {dataset, table}, filename)
+        conn
+        |> put_private(:hot_server_route, :segment)
+        |> segment(name, {dataset, table}, filename)
 
       _unmatched ->
-        send_resp(conn, 404, "not found")
+        respond(conn, 404, "not found")
     end
+  end
+
+  defp measure(conn, started_at) do
+    duration_us =
+      System.convert_time_unit(System.monotonic_time() - started_at, :native, :microsecond)
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{
+        duration_us: duration_us,
+        response_bytes: conn.private[:hot_server_bytes] || 0,
+        entries: conn.private[:hot_server_entries] || 0
+      },
+      %{
+        route: conn.private[:hot_server_route] || :unknown,
+        method: conn.method,
+        status: conn.status
+      }
+    )
+
+    conn
   end
 
   @doc """
@@ -107,18 +180,41 @@ defmodule Smolquery.BufferService.HotServer do
     "http://127.0.0.1:#{port}"
   end
 
-  defp manifest(conn, name, table_ref) do
+  defp manifest(conn, name, table_ref, ids, opts) do
     case runtime(name) do
       {:ok, runtime} ->
-        entries = HotManifest.entries(runtime.manifest, table_ref)
-        body = entries |> Enum.map(&entry_json(&1, conn, runtime, table_ref)) |> JSON.encode!()
+        entries = HotManifest.entries(runtime.manifest, table_ref, ids)
+
+        body =
+          entries
+          |> Enum.map(&entry_json(&1, conn, runtime, table_ref, opts))
+          |> JSON.encode!()
 
         conn
+        |> put_private(:hot_server_entries, length(entries))
         |> put_resp_content_type("application/json")
-        |> send_resp(200, body)
+        |> respond(200, body)
 
       {:error, :unavailable} ->
-        send_resp(conn, 503, "buffer service unavailable")
+        respond(conn, 503, "buffer service unavailable")
+    end
+  end
+
+  defp scoped_manifest(conn, name, table_ref) do
+    case read_scope(conn) do
+      {:ok, conn, ids, opts} -> manifest(conn, name, table_ref, ids, opts)
+      {:error, conn} -> respond(conn, 400, ~s(expected a JSON body with an "ids" array))
+    end
+  end
+
+  defp read_scope(conn) do
+    with {:ok, body, conn} <- read_body(conn),
+         {:ok, %{"ids" => ids} = scope} when is_list(ids) <- JSON.decode(body),
+         true <- Enum.all?(ids, &is_binary/1) do
+      {:ok, conn, ids, stats: scope["stats"] != false}
+    else
+      {:more, _partial, conn} -> {:error, conn}
+      _malformed -> {:error, conn}
     end
   end
 
@@ -128,10 +224,19 @@ defmodule Smolquery.BufferService.HotServer do
          {:ok, entry} <- HotManifest.entry(runtime.manifest, table_ref, id) do
       serve_segment(conn, Store.location(runtime.store, entry.key))
     else
-      {:error, :unavailable} -> send_resp(conn, 503, "buffer service unavailable")
-      _not_found -> send_resp(conn, 404, "not found")
+      {:error, :unavailable} -> respond(conn, 503, "buffer service unavailable")
+      _not_found -> respond(conn, 404, "not found")
     end
   end
+
+  defp respond(conn, status, body) do
+    conn |> record_bytes(IO.iodata_length(body)) |> send_resp(status, body)
+  end
+
+  defp record_bytes(%Plug.Conn{method: "HEAD"} = conn, _bytes),
+    do: put_private(conn, :hot_server_bytes, 0)
+
+  defp record_bytes(conn, bytes), do: put_private(conn, :hot_server_bytes, bytes)
 
   defp runtime(name) do
     case Runtime.fetch(name) do
@@ -143,7 +248,7 @@ defmodule Smolquery.BufferService.HotServer do
   defp serve_segment(conn, path) do
     case File.stat(path, time: :posix) do
       {:ok, %File.Stat{size: size, mtime: mtime}} -> serve_bytes(conn, path, size, mtime)
-      {:error, _reason} -> send_resp(conn, 404, "not found")
+      {:error, _reason} -> respond(conn, 404, "not found")
     end
   end
 
@@ -156,24 +261,27 @@ defmodule Smolquery.BufferService.HotServer do
 
     case requested_range(conn, size) do
       :whole ->
-        send_file_or_gone(conn, 200, path, 0, :all)
+        conn
+        |> record_bytes(size)
+        |> send_file_or_gone(200, path, 0, :all)
 
       {:partial, offset, length} ->
         conn
+        |> record_bytes(length)
         |> put_resp_header("content-range", "bytes #{offset}-#{offset + length - 1}/#{size}")
         |> send_file_or_gone(206, path, offset, length)
 
       :unsatisfiable ->
         conn
         |> put_resp_header("content-range", "bytes */#{size}")
-        |> send_resp(416, "")
+        |> respond(416, "")
     end
   end
 
   defp send_file_or_gone(conn, status, path, offset, length) do
     send_file(conn, status, path, offset, length)
   rescue
-    File.Error -> send_resp(conn, 404, "not found")
+    File.Error -> respond(conn, 404, "not found")
   end
 
   defp rfc7231(posix_seconds) do
@@ -239,10 +347,9 @@ defmodule Smolquery.BufferService.HotServer do
     end
   end
 
-  defp entry_json(%Entry{} = entry, conn, runtime, table_ref) do
+  defp entry_json(%Entry{} = entry, conn, runtime, table_ref, opts) do
     entry
-    |> Entry.to_record()
-    |> Map.drop(["op", "key"])
+    |> Entry.to_manifest(opts)
     |> Map.put("url", url(entry, conn, runtime, table_ref))
   end
 

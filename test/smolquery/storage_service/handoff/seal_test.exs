@@ -10,7 +10,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
 
   Partial states are staged by running the steps directly rather than by killing a
   process mid-flight: a kill lands wherever the scheduler happens to be, which
-  tests one arbitrary interleaving and cannot name which one. Calling `Merge.run/3`
+  tests one arbitrary interleaving and cannot name which one. Calling `Merge.run/4`
   and `register_segments/3` by hand puts the system in exactly the state a crash at
   a named point would leave, deterministically.
 
@@ -32,6 +32,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
   alias Smolquery.StorageService
   alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Handoff
+  alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime
   alias Smolquery.Test.Eventually
@@ -110,8 +111,38 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
     claim
   end
 
+  defp merge(runtime, table_ref, claim) do
+    {:ok, entries} = HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false)
+
+    Merge.run(runtime, table_ref, claim, entries)
+  end
+
   defp seal(context, claim),
     do: Handoff.seal(context.runtime.handoff, context.runtime, @table, claim)
+
+  defp watch_hot_reads do
+    handler = "seal-hot-reads-#{:erlang.unique_integer([:positive])}"
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :hot_server, :request],
+      fn _event, measurements, meta, _config ->
+        send(test, {:hot_read, meta.route, measurements.entries})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp hot_reads(acc \\ []) do
+    receive do
+      {:hot_read, route, entries} -> hot_reads([{route, entries} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
 
   defp add_column(context, definition) do
     context.runtime.name
@@ -211,6 +242,21 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       assert {:ok, entry} = HotManifest.entry(context.buffer_runtime.manifest, @table, later)
       assert entry.sealed_at == nil
     end
+
+    test "reads its claim, never the backlog behind it (T-316)", context do
+      claimed = write(context.buffer, 1..2)
+      claim = freeze_claim(context, [claimed])
+
+      for range <- [7..8, 9..10, 11..12], do: write(context.buffer, range)
+
+      watch_hot_reads()
+
+      assert seal(context, claim) == :ok
+
+      manifest_reads = Enum.reject(hot_reads(), &(elem(&1, 0) == :segment))
+
+      assert manifest_reads == [{:manifest_scoped, 1}, {:manifest_scoped, 1}]
+    end
   end
 
   describe "a column added after the claim's inputs were written" do
@@ -250,7 +296,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2), write(context.buffer, 3..3)]
       claim = freeze_claim(context, ids)
 
-      assert {:ok, _segment} = Merge.run(context.runtime, @table, claim)
+      assert {:ok, _segment} = merge(context.runtime, @table, claim)
       assert sealed_count(context) == 0
       assert visible_ids(context) == [1, 2, 3]
 
@@ -265,7 +311,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2), write(context.buffer, 3..3)]
       claim = freeze_claim(context, ids)
 
-      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, segment} = merge(context.runtime, @table, claim)
       {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
 
       assert {:ok, entries} = Client.hot_manifest(context.buffer, @table)
@@ -277,7 +323,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2)]
       claim = freeze_claim(context, ids)
 
-      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, segment} = merge(context.runtime, @table, claim)
       {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
 
       assert Handoff.Seal.committed?(context.runtime, @table, claim) == {:ok, true}
@@ -317,7 +363,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2)]
       claim = freeze_claim(context, ids)
 
-      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, segment} = merge(context.runtime, @table, claim)
       {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
 
       _next = release_and_reclaim(context, claim, ids)
@@ -333,7 +379,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2)]
       claim = freeze_claim(context, ids)
 
-      {:ok, segment} = Merge.run(context.runtime, @table, claim)
+      {:ok, segment} = merge(context.runtime, @table, claim)
       {:ok, _snapshot} = Catalog.register_segments(context.catalog, @table, [segment])
 
       next = release_and_reclaim(context, claim, ids)
@@ -353,7 +399,7 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       ids = [write(context.buffer, 1..2)]
       claim = freeze_claim(context, ids)
 
-      assert {:ok, orphan} = Merge.run(context.runtime, @table, claim)
+      assert {:ok, orphan} = merge(context.runtime, @table, claim)
       assert sealed_count(context) == 0
 
       start_supervised!({GC, %{context.runtime | gc_grace_ms: 0}}, id: :gc_orphan)

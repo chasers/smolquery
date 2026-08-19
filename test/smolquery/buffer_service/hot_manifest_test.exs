@@ -103,6 +103,43 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "entries/3" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "reads the whole table, oldest first", %{manifest: manifest} do
+      first = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(2))
+
+      assert HotManifest.entries(manifest, @table) == [first, second]
+    end
+
+    test "narrows to the ids a claim names, in the same order (T-316)", %{manifest: manifest} do
+      first = add(manifest, @table, rows(1))
+      _second = add(manifest, @table, rows(2))
+      third = add(manifest, @table, rows(3))
+
+      assert HotManifest.entries(manifest, @table, [third.id, first.id]) == [first, third]
+    end
+
+    test "an id the table no longer holds is absent, not an error", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+
+      assert HotManifest.entries(manifest, @table, [entry.id, Id.generate()]) == [entry]
+    end
+
+    test "an empty id list reads nothing, whatever the table holds", %{manifest: manifest} do
+      add(manifest, @table, rows(1))
+
+      assert HotManifest.entries(manifest, @table, []) == []
+    end
+
+    test "does not leak an id across tables", %{manifest: manifest} do
+      entry = add(manifest, @other, rows(1))
+
+      assert HotManifest.entries(manifest, @table, [entry.id]) == []
+    end
+  end
+
   describe "entry/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

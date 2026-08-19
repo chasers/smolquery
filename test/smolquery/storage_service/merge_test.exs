@@ -40,6 +40,7 @@ defmodule Smolquery.StorageService.MergeTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.MergeTest.ManifestStub
   alias Smolquery.StorageService.Runtime
@@ -99,6 +100,13 @@ defmodule Smolquery.StorageService.MergeTest do
 
   defp claim(ids, keys \\ @keys), do: %{ids: ids, keys: keys}
 
+  defp merge(runtime, table_ref, claim) do
+    with {:ok, entries} <-
+           HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false) do
+      Merge.run(runtime, table_ref, claim, entries)
+    end
+  end
+
   defp columns_in(runtime, segment, projection) do
     Runtime.engine(runtime.name)
     |> Engine.query!("SELECT #{projection} FROM read_parquet($1) ORDER BY id", [
@@ -150,7 +158,7 @@ defmodule Smolquery.StorageService.MergeTest do
 
     ids = seal_many(buffer, @table, [1..1000, 1001..2000, 2001..3000, 3001..4000, 4001..5000])
 
-    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert {:ok, segment} = merge(runtime, @table, claim(ids))
     assert segment.row_count == 5000
     assert row_group_count(runtime, segment) > 1
   end
@@ -164,7 +172,7 @@ defmodule Smolquery.StorageService.MergeTest do
 
     ids = seal_many(buffer, @table, [1..1000, 1001..2000, 2001..3000, 3001..4000, 4001..5000])
 
-    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert {:ok, segment} = merge(runtime, @table, claim(ids))
     assert segment.row_count == 5000
     assert row_group_count(runtime, segment) > 1
   end
@@ -218,7 +226,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, second} = Client.write_batch(buffer, @table, second_batch)
 
     assert {:ok, segment} =
-             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+             merge(runtime, @table, claim([first.segment_id, second.segment_id]))
 
     assert clustered_rows_in(runtime, segment) == [
              [1, 50],
@@ -236,7 +244,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, second} = Client.write_batch(buffer, @table, batch(3..4))
 
     assert {:ok, %Segment{} = segment} =
-             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+             merge(runtime, @table, claim([first.segment_id, second.segment_id]))
 
     assert segment.key == hd(@keys)
     assert segment.id == "01KYWPEEGAM8FQVQS5S2QF26SV"
@@ -251,8 +259,8 @@ defmodule Smolquery.StorageService.MergeTest do
   } do
     {:ok, ack} = Client.write_batch(buffer, @table, batch(1..2))
 
-    assert {:ok, first} = Merge.run(runtime, @table, claim([ack.segment_id]))
-    assert {:ok, again} = Merge.run(runtime, @table, claim([ack.segment_id]))
+    assert {:ok, first} = merge(runtime, @table, claim([ack.segment_id]))
+    assert {:ok, again} = merge(runtime, @table, claim([ack.segment_id]))
 
     assert again.key == first.key
     assert again.row_count == first.row_count
@@ -267,7 +275,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, claimed} = Client.write_batch(buffer, @table, batch(1..2))
     {:ok, _later} = Client.write_batch(buffer, @table, batch(90..91))
 
-    assert {:ok, segment} = Merge.run(runtime, @table, claim([claimed.segment_id]))
+    assert {:ok, segment} = merge(runtime, @table, claim([claimed.segment_id]))
     assert rows_in(runtime, segment) == [1, 2]
   end
 
@@ -284,7 +292,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, second} = Client.write_batch(buffer, @table, wide)
 
     assert {:ok, segment} =
-             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+             merge(runtime, @table, claim([first.segment_id, second.segment_id]))
 
     assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, "two"]]
   end
@@ -298,7 +306,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, second} = Client.write_batch(buffer, @table, batch(2..2))
 
     assert {:ok, segment} =
-             Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+             merge(runtime, @table, claim([first.segment_id, second.segment_id]))
 
     assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, nil]]
   end
@@ -315,7 +323,7 @@ defmodule Smolquery.StorageService.MergeTest do
 
     {:ok, ack} = Client.write_batch(buffer, @table, batch)
 
-    assert {:ok, segment} = Merge.run(runtime, @table, claim([ack.segment_id]))
+    assert {:ok, segment} = merge(runtime, @table, claim([ack.segment_id]))
     assert columns_in(runtime, segment, "*") == [["one", 1]]
   end
 
@@ -330,7 +338,7 @@ defmodule Smolquery.StorageService.MergeTest do
 
     {:ok, ack} = Client.write_batch(buffer, @table, undeclared)
 
-    assert Merge.run(runtime, @table, claim([ack.segment_id])) ==
+    assert merge(runtime, @table, claim([ack.segment_id])) ==
              {:error, {:undeclared_columns, ["name"]}}
 
     assert {:ok, []} = Store.list(runtime.store, "analytics/events")
@@ -340,7 +348,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, ack} = Client.write_batch(buffer, {"analytics", "absent"}, batch(1..1))
 
     assert {:error, _reason} =
-             Merge.run(
+             merge(
                runtime,
                {"analytics", "absent"},
                claim([ack.segment_id], [
@@ -353,7 +361,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, present} = Client.write_batch(buffer, @table, batch(1..2))
 
     assert {:ok, segment} =
-             Merge.run(
+             merge(
                runtime,
                @table,
                claim([present.segment_id, "01KYWPEEGAM8FQVQS5S2QF26SV"])
@@ -377,7 +385,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, entries} = Client.hot_manifest(buffer, @table)
     input_bytes = Enum.sum_by(entries, & &1.byte_size)
 
-    assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+    assert {:ok, segment} = merge(runtime, @table, claim(ids))
     assert segment.byte_size < input_bytes
   end
 
@@ -388,19 +396,19 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, ack} = Client.write_batch(buffer, @table, batch(1..1))
 
     assert_raise FunctionClauseError, fn ->
-      Merge.run(%{runtime | compression: :"zstd) --"}, @table, claim([ack.segment_id]))
+      merge(%{runtime | compression: :"zstd) --"}, @table, claim([ack.segment_id]))
     end
   end
 
   test "refuses a claim key that names no segment, before any merge runs", %{runtime: runtime} do
     key = "analytics/events/not-a-ulid.parquet"
 
-    assert Merge.run(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"], [key])) ==
+    assert merge(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"], [key])) ==
              {:error, {:invalid_claim_key, key}}
   end
 
   test "refuses a claim with none of its inputs left", %{runtime: runtime} do
-    assert Merge.run(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"])) ==
+    assert merge(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"])) ==
              {:error, :no_inputs}
   end
 
@@ -415,7 +423,7 @@ defmodule Smolquery.StorageService.MergeTest do
     :ok = File.rm!(Store.location(buffer_runtime.store, entry.key))
 
     assert {:error, {:merge_failed, error}} =
-             Merge.run(runtime, @table, claim([ack.segment_id]))
+             merge(runtime, @table, claim([ack.segment_id]))
 
     assert Exception.message(error) =~ "404"
     assert {:ok, []} = Store.list(runtime.store, "analytics/events")
@@ -429,14 +437,14 @@ defmodule Smolquery.StorageService.MergeTest do
     keys = @keys ++ ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SW.parquet"]
 
     assert {:error, {:unsupported_claim_keys, ^keys}} =
-             Merge.run(runtime, @table, claim([ack.segment_id], keys))
+             merge(runtime, @table, claim([ack.segment_id], keys))
   end
 
   test "refuses a manifest entry without a url", context do
     entry = %{"id" => "01KYWPEEGAM8FQVQS5S2QF26SW", "row_count" => 3}
     runtime = stubbed_runtime(context, [entry])
 
-    assert Merge.run(runtime, @table, claim([entry["id"]])) ==
+    assert merge(runtime, @table, claim([entry["id"]])) ==
              {:error, {:invalid_manifest_entry, entry}}
   end
 
@@ -449,7 +457,7 @@ defmodule Smolquery.StorageService.MergeTest do
 
     runtime = stubbed_runtime(context, [entry])
 
-    assert Merge.run(runtime, @table, claim([entry["id"]])) ==
+    assert merge(runtime, @table, claim([entry["id"]])) ==
              {:error, {:invalid_manifest_entry, entry}}
   end
 
@@ -464,18 +472,6 @@ defmodule Smolquery.StorageService.MergeTest do
     )
   end
 
-  test "reports an unreachable buffer node", context do
-    runtime =
-      Runtime.new(
-        name: :"merge_unreachable_#{:erlang.unique_integer([:positive])}",
-        dir: Path.join(context.tmp_dir, "sealed"),
-        buffer_base_url: "http://127.0.0.1:1"
-      )
-
-    assert {:error, {:manifest_unreachable, _reason}} =
-             Merge.run(runtime, @table, claim(["01KYWPEEGAM8FQVQS5S2QF26SV"]))
-  end
-
   test "merges a claim the buffer actually froze", %{buffer: buffer, runtime: runtime} do
     {:ok, first} = Client.write_batch(buffer, @table, batch(1..2))
     {:ok, second} = Client.write_batch(buffer, @table, batch(3..3))
@@ -486,7 +482,7 @@ defmodule Smolquery.StorageService.MergeTest do
     {:ok, key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
     {:ok, frozen} = HotManifest.claim(buffer_runtime.manifest, @table, ids, [key])
 
-    assert {:ok, segment} = Merge.run(runtime, @table, frozen)
+    assert {:ok, segment} = merge(runtime, @table, frozen)
     assert segment.key == key
     assert rows_in(runtime, segment) == [1, 2, 3]
   end
@@ -496,7 +492,7 @@ defmodule Smolquery.StorageService.MergeTest do
       runtime = %{runtime | merge_inputs_per_call: 2}
       ids = seal_many(buffer, @table, [1..2, 3..4, 5..6, 7..8, 9..10])
 
-      assert {:ok, segment} = Merge.run(runtime, @table, claim(ids))
+      assert {:ok, segment} = merge(runtime, @table, claim(ids))
       assert segment.row_count == 10
       assert rows_in(runtime, segment) == Enum.to_list(1..10)
     end
@@ -508,8 +504,8 @@ defmodule Smolquery.StorageService.MergeTest do
       runtime = %{runtime | merge_inputs_per_call: 1}
       ids = seal_many(buffer, @table, [1..1, 2..2, 3..3])
 
-      assert {:ok, first} = Merge.run(runtime, @table, claim(ids))
-      assert {:ok, again} = Merge.run(runtime, @table, claim(ids))
+      assert {:ok, first} = merge(runtime, @table, claim(ids))
+      assert {:ok, again} = merge(runtime, @table, claim(ids))
 
       assert again.key == first.key
       assert rows_in(runtime, again) == [1, 2, 3]
@@ -531,7 +527,7 @@ defmodule Smolquery.StorageService.MergeTest do
       {:ok, second} = Client.write_batch(buffer, @table, wide)
 
       assert {:ok, segment} =
-               Merge.run(runtime, @table, claim([first.segment_id, second.segment_id]))
+               merge(runtime, @table, claim([first.segment_id, second.segment_id]))
 
       assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, "two"]]
     end
@@ -548,7 +544,7 @@ defmodule Smolquery.StorageService.MergeTest do
       {:ok, first} = Client.write_batch(buffer, @table, declared)
       {:ok, second} = Client.write_batch(buffer, @table, undeclared)
 
-      assert Merge.run(runtime, @table, claim([first.segment_id, second.segment_id])) ==
+      assert merge(runtime, @table, claim([first.segment_id, second.segment_id])) ==
                {:error, {:undeclared_columns, ["name"]}}
 
       assert {:ok, []} = Store.list(runtime.store, "analytics/events")
@@ -565,7 +561,7 @@ defmodule Smolquery.StorageService.MergeTest do
             ] do
           ids = seal_many(buffer, @table, [range])
           {:ok, key} = Store.key(prefix, id)
-          {:ok, segment} = Merge.run(runtime, @table, claim(ids, [key]))
+          {:ok, segment} = merge(runtime, @table, claim(ids, [key]))
           segment
         end
 

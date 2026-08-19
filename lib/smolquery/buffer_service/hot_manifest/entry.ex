@@ -109,19 +109,40 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   """
   @spec to_record(t()) :: map()
   def to_record(%__MODULE__{} = entry) do
-    %{
-      "op" => "add",
+    entry
+    |> to_manifest()
+    |> Map.merge(%{"op" => "add", "key" => entry.key})
+  end
+
+  @doc """
+  The entry as a manifest reader receives it: the log record without the two
+  fields only the log needs (`"op"`, `"key"`).
+
+  `stats: false` leaves the flush-time bounds out instead of building them and
+  dropping them later. Encoding min, max and null_count for every column is most
+  of what an entry costs — a 63-column table spends roughly 6.4 KB of a 6.7 KB
+  entry there — and a caller that does not prune pays it for nothing. The sealer
+  pulling its claim's inputs is that caller; the query planner is not, and asks
+  for the stats.
+  """
+  @spec to_manifest(t(), [{:stats, boolean()}]) :: map()
+  def to_manifest(%__MODULE__{} = entry, opts \\ []) do
+    record = %{
       "id" => entry.id,
-      "key" => entry.key,
       "row_count" => entry.row_count,
       "byte_size" => entry.byte_size,
       "added_at" => entry.added_at,
       "sealed_at" => entry.sealed_at,
       "retired_at" => entry.retired_at,
       "claim_keys" => entry.claim_keys,
-      "batch_ids" => entry.batch_ids,
-      "stats" => encode_stats(entry.stats)
+      "batch_ids" => entry.batch_ids
     }
+
+    if Keyword.get(opts, :stats, true) do
+      Map.put(record, "stats", encode_stats(entry.stats))
+    else
+      record
+    end
   end
 
   @doc """

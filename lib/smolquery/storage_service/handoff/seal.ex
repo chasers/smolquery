@@ -47,7 +47,10 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   claims cover the same rows under other keys, so both landing would commit
   the rows twice. Three gates hold that line. The attempt checks the claim
   is still live against the origin's served manifest before it merges — a
-  stale attempt costs one manifest read, not hours of merge. It checks
+  stale attempt costs one manifest read, not hours of merge. That read names
+  the claim's ids and skips the stats, so it costs the buffer node the size
+  of the claim rather than the size of its backlog, and the merge reuses the
+  entries instead of asking again (T-316). It checks
   again between merge and register, which narrows the remaining window to
   the moments between two calls — the same narrowing standard as the
   stale-owner gate above. And retirement carries the claim's keys, so the
@@ -113,8 +116,9 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   @impl Handoff
   def seal(_config, %Runtime{} = runtime, table_ref, claim) do
     result =
-      with :ok <- claim_live(runtime, table_ref, claim),
-           {:ok, snapshot} <- commit(runtime, table_ref, claim) do
+      with {:ok, entries} <- claim_manifest(runtime, table_ref, claim),
+           :ok <- claim_live(entries, claim),
+           {:ok, snapshot} <- commit(runtime, table_ref, claim, entries) do
         retire(runtime, table_ref, claim, snapshot)
       end
 
@@ -164,41 +168,45 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     :ok
   end
 
-  defp claim_live(runtime, table_ref, %{ids: ids, keys: keys} = claim)
-       when is_list(ids) and is_list(keys) do
-    with {:ok, entries} <- HotTier.manifest(runtime, table_ref, claim[:origin]) do
-      claimed = MapSet.new(ids)
+  defp claim_manifest(runtime, table_ref, %{ids: ids} = claim) when is_list(ids) do
+    HotTier.manifest(runtime, table_ref, claim[:origin], ids: ids, stats: false)
+  end
 
-      entries
-      |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
-      |> Enum.reject(&(&1["sealed_at"] || &1["claim_keys"] == keys))
-      |> case do
-        [] -> :ok
-        stale -> {:error, {:stale_claim, Enum.map(stale, & &1["id"])}}
-      end
+  defp claim_manifest(_runtime, _table_ref, _claim), do: {:ok, []}
+
+  defp claim_live(entries, %{ids: ids, keys: keys}) when is_list(ids) and is_list(keys) do
+    claimed = MapSet.new(ids)
+
+    entries
+    |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
+    |> Enum.reject(&(&1["sealed_at"] || &1["claim_keys"] == keys))
+    |> case do
+      [] -> :ok
+      stale -> {:error, {:stale_claim, Enum.map(stale, & &1["id"])}}
     end
   end
 
-  defp claim_live(_runtime, _table_ref, _claim), do: :ok
+  defp claim_live(_entries, _claim), do: :ok
 
   # The hot tier speaks partition refs; the catalog knows only real tables
   # (Smolquery.Partitions). Every catalog operation here maps to the parent,
   # while the retire — buffer-facing — keeps the partition ref it came from.
-  defp commit(runtime, table_ref, claim) do
+  defp commit(runtime, table_ref, claim, entries) do
     with {:ok, paths} <- sealed_paths(runtime, claim),
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       if committed?(paths, registered) do
         Catalog.current_snapshot(runtime.catalog)
       else
-        merge_and_register(runtime, table_ref, claim)
+        merge_and_register(runtime, table_ref, claim, entries)
       end
     end
   end
 
-  defp merge_and_register(runtime, table_ref, claim) do
-    with {:ok, segment} <- Merge.run(runtime, table_ref, claim),
-         :ok <- claim_live(runtime, table_ref, claim) do
+  defp merge_and_register(runtime, table_ref, claim, entries) do
+    with {:ok, segment} <- Merge.run(runtime, table_ref, claim, entries),
+         {:ok, fresh} <- claim_manifest(runtime, table_ref, claim),
+         :ok <- claim_live(fresh, claim) do
       Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
     end
   end

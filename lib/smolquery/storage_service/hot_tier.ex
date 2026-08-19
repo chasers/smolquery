@@ -27,13 +27,17 @@ defmodule Smolquery.StorageService.HotTier do
   Every micro-segment the buffer node holding `table_ref`'s claim has for it.
 
   `origin` is the claim's signalling node, or `nil` to fall back to the
-  configured `buffer_base_url`.
+  configured `buffer_base_url`. `opts` are `Smolquery.BufferService.HotClient`'s
+  — a sealer passes `ids:` and `stats: false`, so its read costs the buffer node
+  the size of its claim rather than the size of the backlog (T-316).
   """
-  @spec manifest(Runtime.t(), Store.table_ref(), node() | nil) ::
+  @spec manifest(Runtime.t(), Store.table_ref(), node() | nil, [HotClient.option()]) ::
           {:ok, [entry()]} | {:error, term()}
-  def manifest(%Runtime{} = runtime, table_ref, origin \\ nil) do
-    HotClient.manifest(base_url(runtime, origin), table_ref,
-      timeout_ms: runtime.buffer_timeout_ms
+  def manifest(%Runtime{} = runtime, table_ref, origin \\ nil, opts \\ []) do
+    HotClient.manifest(
+      base_url(runtime, origin),
+      table_ref,
+      Keyword.put_new(opts, :timeout_ms, runtime.buffer_timeout_ms)
     )
   end
 

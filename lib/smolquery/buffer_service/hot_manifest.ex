@@ -275,12 +275,32 @@ defmodule Smolquery.BufferService.HotManifest do
 
   ULIDs sort lexicographically by creation time, so ordering by id is ordering by
   when the segment was written.
+
+  `ids` narrows the read to a known set, and that is the difference between a
+  read that costs the same every time and one that grows with the unsealed
+  backlog. `:all` scans the table and copies every entry out of ETS; a list of
+  ids resolves each one through the `:ordered_set`'s index instead. A sealer
+  holds its claim's ids and wants nothing else, so it asks for them by name
+  (T-316).
+
+  An id the table no longer holds is absent from the result rather than an
+  error. The caller's set is a claim, and an entry can retire between the claim
+  and the read — the same answer a full read gives.
   """
-  @spec entries(t(), Store.table_ref()) :: [Entry.t()]
-  def entries(%__MODULE__{table: table}, table_ref) do
+  @spec entries(t(), Store.table_ref(), [String.t()] | :all) :: [Entry.t()]
+  def entries(manifest, table_ref, ids \\ :all)
+
+  def entries(%__MODULE__{table: table}, table_ref, :all) do
     table
     |> :ets.match_object({{table_ref, :_}, :_})
     |> Enum.map(&elem(&1, 1))
+    |> Enum.sort_by(& &1.id)
+  end
+
+  def entries(%__MODULE__{} = manifest, table_ref, ids) when is_list(ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup(manifest, table_ref, &1))
     |> Enum.sort_by(& &1.id)
   end
 

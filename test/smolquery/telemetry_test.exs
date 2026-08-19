@@ -20,6 +20,93 @@ defmodule Smolquery.TelemetryTest do
     end
   end
 
+  test "prices a hot-tier read by route, in requests, time, bytes and entries (T-315)" do
+    labels = ~s({route="manifest",method="get"})
+    counted = ~s({route="manifest",method="get",class="2xx"})
+    before_requests = value("smolquery_hot_server_requests_total", counted)
+    before_us = value("smolquery_hot_server_microseconds_total", labels)
+    before_bytes = value("smolquery_hot_server_response_bytes_total", labels)
+    before_entries = value("smolquery_hot_manifest_entries_total", labels)
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 900, response_bytes: 45_000, entries: 6_738},
+      %{route: :manifest, method: "GET", status: 200}
+    )
+
+    assert value("smolquery_hot_server_requests_total", counted) == before_requests + 1
+    assert value("smolquery_hot_server_microseconds_total", labels) == before_us + 900
+    assert value("smolquery_hot_server_response_bytes_total", labels) == before_bytes + 45_000
+    assert value("smolquery_hot_manifest_entries_total", labels) == before_entries + 6_738
+  end
+
+  test "a HEAD counts its cost but none of its bytes, and stays its own series" do
+    head = ~s({route="manifest",method="head"})
+    get = ~s({route="manifest",method="get"})
+    before_us = value("smolquery_hot_server_microseconds_total", head)
+    before_bytes = value("smolquery_hot_server_response_bytes_total", head)
+    before_entries = value("smolquery_hot_manifest_entries_total", head)
+    before_get_us = value("smolquery_hot_server_microseconds_total", get)
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 900, response_bytes: 0, entries: 6_738},
+      %{route: :manifest, method: "HEAD", status: 200}
+    )
+
+    assert value("smolquery_hot_server_microseconds_total", head) == before_us + 900
+    assert value("smolquery_hot_manifest_entries_total", head) == before_entries + 6_738
+    assert value("smolquery_hot_server_response_bytes_total", head) == before_bytes
+    assert value("smolquery_hot_server_microseconds_total", get) == before_get_us
+  end
+
+  test "narrows a method it does not serve, rather than labelling with it" do
+    other = ~s({route="unknown",method="other",class="4xx"})
+    before_other = value("smolquery_hot_server_requests_total", other)
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 5, response_bytes: 9, entries: 0},
+      %{route: :unknown, method: "FROBNICATE", status: 404}
+    )
+
+    assert value("smolquery_hot_server_requests_total", other) == before_other + 1
+  end
+
+  test "counts a scoped manifest read apart from a whole one" do
+    scoped = ~s({route="manifest_scoped",method="post"})
+    whole = ~s({route="manifest",method="get"})
+    before_scoped = value("smolquery_hot_manifest_entries_total", scoped)
+    before_whole = value("smolquery_hot_manifest_entries_total", whole)
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 30, response_bytes: 400, entries: 8},
+      %{route: :manifest_scoped, method: "POST", status: 200}
+    )
+
+    assert value("smolquery_hot_manifest_entries_total", scoped) == before_scoped + 8
+    assert value("smolquery_hot_manifest_entries_total", whole) == before_whole
+  end
+
+  test "counts a 206 as its own series, because one input is several of them" do
+    before_ranged = value("smolquery_hot_server_range_responses_total")
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 10, response_bytes: 8_192, entries: 0},
+      %{route: :segment, method: "GET", status: 206}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :hot_server, :request],
+      %{duration_us: 10, response_bytes: 8_192, entries: 0},
+      %{route: :segment, method: "GET", status: 200}
+    )
+
+    assert value("smolquery_hot_server_range_responses_total") == before_ranged + 1
+  end
+
   test "counts commit events with their result label" do
     before_ok = value("smolquery_buffer_commits_total", ~s({result="ok"}))
     before_rows = value("smolquery_buffer_rows_committed_total")
