@@ -809,14 +809,28 @@ Properties worth knowing:
   registration.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.
-- **User SQL is locked down.** After planning, each job engine disables
-  DuckDB's external access for the user's SQL. Readable is exactly the
-  runtime's `allowed_directories` (the data dir and catalog paths by default)
-  plus the plan's own micro-segment URLs. `read_csv('/etc/passwd')` is a
-  permission error. The configuration is locked, so SQL cannot turn it back
-  on. `lockdown: false` restores the trusted posture. A deployment whose
-  sealed segments live outside the data dir names them in
-  `allowed_directories`.
+- **User SQL is locked down, in two places.** The planner allowlists the table
+  functions a FROM clause may name — pure generators (`range`,
+  `generate_series`, `repeat`, `unnest`) and nothing that reads a file, a
+  catalog, or a socket. After planning, each job engine also disables DuckDB's
+  external access. Readable is exactly the runtime's `allowed_directories`
+  (the data dir and catalog paths by default) plus the plan's own
+  micro-segment URLs. The configuration is locked, so SQL cannot turn it back
+  on. `lockdown: false` restores the trusted posture, and drops both gates
+  together. A deployment whose sealed segments live outside the data dir names
+  them in `allowed_directories`.
+
+  The parser gate is not redundant with the engine's (T-321). `refs/1`
+  collects `BASE_TABLE` nodes, and a table function is not one, so table
+  functions used to reach the engine unclassified — safe for `read_csv`, which
+  external access stops, and not safe for DuckDB's `postgres` extension, which
+  connects regardless of that setting. That extension is already loaded
+  wherever catalog metadata is Postgres, because the job engine's `ATTACH
+  'ducklake:postgres:...'` autoloads it before lockdown applies. Under full
+  lockdown, `duckdb_databases()` returned the catalog's own connection string
+  with its password, and `postgres_scan` accepted that string and read the
+  catalog. Both are table functions. An allowlist, not a denylist, because the
+  unaudited surface is large and the next extension ships its own readers.
 
 ### Clustered fan-out
 
@@ -961,10 +975,12 @@ Three layers protect the system. Each layer fails closed:
   engines via an http `CREATE SECRET`. A single node generates one at boot. A
   cluster sets `SMOLQUERY_INTERNAL_SECRET` everywhere, or reads fail with
   401s.
-- **User SQL** runs with DuckDB's external access disabled and locked after
-  planning. Readable is exactly `allowed_directories`, the micro-segment URLs
-  the plan itself produced, and the sealed tier's `s3://<bucket>/` prefix when
-  the sealed tier is an object store.
+- **User SQL** passes the planner's table-function allowlist, then runs with
+  DuckDB's external access disabled and locked. Readable is exactly
+  `allowed_directories`, the micro-segment URLs the plan itself produced, and
+  the sealed tier's `s3://<bucket>/` prefix when the sealed tier is an object
+  store. The allowlist covers the readers external access does not — DuckDB's
+  `postgres` extension connects with that setting off (T-321).
 
 Single-tenant remains the model. Auth says *whether* you may query, not *which
 tables*. Inter-node traffic can switch to mutual TLS (`GEN_RPC_TLS`,

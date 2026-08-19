@@ -133,6 +133,80 @@ defmodule Smolquery.QueryService.PlannerTest do
     end
   end
 
+  describe "table function allowlist (T-321)" do
+    test "postgres_scan is refused before it can open a connection" do
+      sql = "SELECT * FROM postgres_scan('host=10.0.0.1 user=u password=p', 'public', 't')"
+
+      assert Planner.table_refs(@conn, sql) ==
+               {:error, {:unsupported_table_function, "postgres_scan"}}
+    end
+
+    test "postgres_scan_pushdown is refused too" do
+      sql = "SELECT * FROM postgres_scan_pushdown('host=10.0.0.1', 'public', 't')"
+
+      assert Planner.table_refs(@conn, sql) ==
+               {:error, {:unsupported_table_function, "postgres_scan_pushdown"}}
+    end
+
+    test "duckdb_databases is refused: it returns the catalog's connection string" do
+      assert Planner.table_refs(@conn, "SELECT path FROM duckdb_databases()") ==
+               {:error, {:unsupported_table_function, "duckdb_databases"}}
+    end
+
+    test "a file reader is refused here, not left to lockdown" do
+      assert Planner.table_refs(@conn, "SELECT * FROM read_csv('/etc/passwd')") ==
+               {:error, {:unsupported_table_function, "read_csv"}}
+
+      assert Planner.table_refs(@conn, "SELECT * FROM read_parquet('/data/x.parquet')") ==
+               {:error, {:unsupported_table_function, "read_parquet"}}
+    end
+
+    test "the allowed generators pass" do
+      assert Planner.table_refs(@conn, "SELECT * FROM range(10)") == {:ok, []}
+      assert Planner.table_refs(@conn, "SELECT * FROM generate_series(1, 10)") == {:ok, []}
+      assert Planner.table_refs(@conn, "SELECT * FROM repeat('a', 3)") == {:ok, []}
+    end
+
+    test "unnest passes despite the list_value function under its arguments" do
+      assert Planner.table_refs(@conn, "SELECT * FROM unnest([1, 2, 3])") == {:ok, []}
+    end
+
+    test "a refused function hidden in a CTE or subquery is still refused" do
+      cte = "WITH c AS (SELECT * FROM duckdb_databases()) SELECT * FROM c"
+
+      assert Planner.table_refs(@conn, cte) ==
+               {:error, {:unsupported_table_function, "duckdb_databases"}}
+
+      subquery = "SELECT * FROM (SELECT path FROM duckdb_databases()) d"
+
+      assert Planner.table_refs(@conn, subquery) ==
+               {:error, {:unsupported_table_function, "duckdb_databases"}}
+    end
+
+    test "a refused function joined against a real table is refused" do
+      sql = """
+      SELECT e.id
+        FROM analytics.events e
+        JOIN postgres_scan('host=10.0.0.1', 'public', 'u') u ON u.id = e.id
+      """
+
+      assert Planner.table_refs(@conn, sql) ==
+               {:error, {:unsupported_table_function, "postgres_scan"}}
+    end
+
+    test "plan/3 refuses it as well, so no job engine ever runs it" do
+      runtime = runtime([])
+
+      assert Planner.plan(runtime, @conn, "SELECT path FROM duckdb_databases()") ==
+               {:error, {:unsupported_table_function, "duckdb_databases"}}
+    end
+
+    test "a scalar function in the projection is untouched" do
+      assert Planner.table_refs(@conn, "SELECT upper(name) FROM analytics.events") ==
+               {:ok, [{"analytics", "events"}]}
+    end
+  end
+
   describe "plan/3" do
     test "pins the snapshot and reads the sealed side AT that version" do
       runtime = runtime([entry("01A")])

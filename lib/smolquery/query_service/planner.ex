@@ -109,6 +109,42 @@ defmodule Smolquery.QueryService.Planner do
   segment shipping replicates claims, retires, and drops to followers for
   exactly that reason (T-96), and the ranking covers the one-round-trip lag
   while a mutation propagates.
+
+  ## Table functions are allowlisted (T-321)
+
+  `refs/1` collects `BASE_TABLE` nodes. A FROM-clause table function is not
+  one: `postgres_scan(...)` serializes as a `TABLE_FUNCTION` wrapping a
+  `FUNCTION`, so it was never collected, never classified, and never refused.
+  `Runner.lockdown/2` is what caught the rest — `SET enable_external_access =
+  false` stops `read_csv('/etc/passwd')` at execution, which is why the gap
+  went unnoticed.
+
+  It does not stop every reader. DuckDB's `postgres` extension connects
+  regardless of that setting, and the extension is already loaded on any
+  deployment whose catalog metadata is Postgres, because the job engine's
+  `ATTACH 'ducklake:postgres:...'` autoloads it before lockdown applies. Under
+  full lockdown, `duckdb_databases()` then hands the user the catalog's own
+  connection string — password included — and `postgres_scan` takes that
+  string and reads the catalog. Both are table functions, so both sailed
+  through here.
+
+  So the parser gate, not the engine, decides which table functions may appear
+  in a FROM clause. An allowlist rather than a denylist: `duckdb_databases`
+  was found by looking for a credential leak, roughly thirty other `duckdb_*`
+  introspection functions are unaudited, and a denylist passes whatever the
+  next extension ships. `@allowed_table_functions` holds pure generators only
+  — nothing that reads a file, a catalog, or a socket. A query needing more
+  is asking for data, and data arrives as a table.
+
+  The name comes from the `TABLE_FUNCTION` node's own `function` child, never
+  from a nested one: `unnest([1, 2])` carries a `list_value` `FUNCTION` under
+  `children`, and reading every function in the subtree would refuse it.
+
+  The allowlist follows `Runtime.lockdown`, the flag that already answers "is
+  the SQL reaching this node trusted". A deployment that turned lockdown off
+  chose the trusted posture and keeps `read_csv`; it keeps this too. One flag
+  for one question — a second, independent knob would let an operator set a
+  contradictory pair and believe the stricter half.
   """
 
   require Logger
@@ -127,6 +163,8 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.Trace
 
+  @allowed_table_functions ~w(generate_series range repeat unnest)
+
   @doc """
   Plans `sql` against the catalog and the hot tier, as one consistent read.
 
@@ -140,6 +178,7 @@ defmodule Smolquery.QueryService.Planner do
   def plan(%Runtime{} = runtime, connection, sql) do
     with {:ok, ast, canonical} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
          {:ok, statement} <- gate(ast),
+         :ok <- gate_table_functions(statement, runtime.lockdown),
          {:ok, refs} <- refs(statement),
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
@@ -169,12 +208,17 @@ defmodule Smolquery.QueryService.Planner do
   `{:error, :multiple_statements}`. CTE names are not references; a bare table
   name that is no CTE, a catalog-qualified name, and a reference carrying its
   own `AT` clause are each refused with a reason naming the offender.
+
+  This applies the table-function allowlist unconditionally, where `plan/3`
+  follows the runtime's `lockdown` flag: there is no runtime here to ask, and
+  a caller parsing SQL in isolation wants the strict answer.
   """
   @spec table_refs(GenServer.server(), String.t()) ::
           {:ok, [Catalog.table_ref()]} | {:error, term()}
   def table_refs(connection, sql) do
     with {:ok, ast, _canonical} <- serialize(connection, sql),
-         {:ok, statement} <- gate(ast) do
+         {:ok, statement} <- gate(ast),
+         :ok <- gate_table_functions(statement, true) do
       refs(statement)
     end
   end
@@ -244,6 +288,23 @@ defmodule Smolquery.QueryService.Planner do
 
   defp base_table(%{"type" => "BASE_TABLE"} = node), do: [node]
   defp base_table(_node), do: []
+
+  defp gate_table_functions(_statement, false), do: :ok
+
+  defp gate_table_functions(statement, true) do
+    statement
+    |> collect(&table_function_name/1)
+    |> Enum.find(&(&1 not in @allowed_table_functions))
+    |> case do
+      nil -> :ok
+      name -> {:error, {:unsupported_table_function, name}}
+    end
+  end
+
+  defp table_function_name(%{"type" => "TABLE_FUNCTION", "function" => function}),
+    do: List.wrap(function["function_name"])
+
+  defp table_function_name(_node), do: []
 
   defp classify(%{"at_clause" => at} = node, _ctes) when not is_nil(at),
     do: {:error, {:unsupported_at_clause, node["table_name"]}}
