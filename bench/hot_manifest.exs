@@ -76,6 +76,8 @@ defmodule Bench.HotManifest do
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotClient
+  alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.HotServer
   alias Smolquery.Schema
 
@@ -88,6 +90,8 @@ defmodule Bench.HotManifest do
     schedulers()
 
     sections = [
+      index_cost: &index_cost/1,
+      index_size: &index_size/1,
       read_cost: &read_cost/1,
       entry_width: &entry_width/1,
       serve_rate: &serve_rate/1,
@@ -107,6 +111,108 @@ defmodule Bench.HotManifest do
         section.(dir)
       end
     end)
+  end
+
+  defp index_cost(_dir) do
+    heading("what every manifest index read costs, against depth (T-318)")
+
+    columns = env("COLUMNS", 32)
+    depths = sweep_env("INDEX_DEPTHS", [1_024, 4_096, 16_384, 65_536])
+
+    IO.puts(
+      "\n  #{columns} columns, every entry pending. The tick reads live_claim and " <>
+        "retired_before on\n  every commit, so those two must not move with depth. " <>
+        "`entries` is the whole-manifest\n  HTTP route and is expected to.\n"
+    )
+
+    IO.puts(
+      "  depth    entry us   entries us   claimable us   live_claim us   reap us   empty? us"
+    )
+
+    for depth <- depths do
+      name = :"index_cost_#{depth}_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = HotManifest.start_link(name: name)
+      manifest = HotManifest.new(name: name, log_dir: "/tmp/#{name}", store: nil)
+      ids = index_ids(depth)
+
+      for id <- ids, do: :ets.insert(name, {{@table, id}, index_entry(id, columns)})
+
+      mid = Enum.at(ids, div(depth, 2))
+
+      IO.puts(
+        "  #{pad(depth, 5)}    #{pad(reps(fn -> HotManifest.entry(manifest, @table, mid) end, 51), 8)}   " <>
+          "#{pad(reps(fn -> HotManifest.entries(manifest, @table) end, 11), 10)}   " <>
+          "#{pad(reps(fn -> HotManifest.claimable(manifest, @table, 1_024) end, 21), 12)}   " <>
+          "#{pad(reps(fn -> HotManifest.live_claim(manifest, @table) end, 51), 13)}   " <>
+          "#{pad(reps(fn -> HotManifest.retired_before(manifest, @table, 2_000_000) end, 51), 7)}   " <>
+          "#{pad(reps(fn -> HotManifest.empty?(manifest, @table) end, 51), 9)}"
+      )
+
+      :ets.delete_all_objects(name)
+    end
+  end
+
+  defp index_size(_dir) do
+    heading("how big the manifest index gets, and what :compressed buys")
+
+    words = :erlang.system_info(:wordsize)
+    depths = sweep_env("INDEX_DEPTHS", [1_024, 16_384])
+    widths = sweep_env("WIDTHS", [4, 32, 63])
+
+    IO.puts("\n  One node's index for one table. :compressed is a lever, not a default.\n")
+    IO.puts("  entries   columns      MiB   B/entry   compressed MiB   B/entry")
+
+    for depth <- depths, columns <- widths do
+      plain = :ets.new(:plain, [:ordered_set, :public, write_concurrency: true])
+      packed = :ets.new(:packed, [:ordered_set, :public, :compressed, write_concurrency: true])
+
+      for id <- index_ids(depth) do
+        entry = index_entry(id, columns)
+        :ets.insert(plain, {{@table, id}, entry})
+        :ets.insert(packed, {{@table, id}, entry})
+      end
+
+      plain_bytes = :ets.info(plain, :memory) * words
+      packed_bytes = :ets.info(packed, :memory) * words
+
+      IO.puts(
+        "  #{pad(depth, 7)}   #{pad(columns, 7)}   #{pad(Float.round(plain_bytes / 1_048_576, 1), 6)}   " <>
+          "#{pad(div(plain_bytes, depth), 7)}   #{pad(Float.round(packed_bytes / 1_048_576, 1), 14)}   " <>
+          "#{pad(div(packed_bytes, depth), 7)}"
+      )
+
+      :ets.delete(plain)
+      :ets.delete(packed)
+    end
+  end
+
+  defp reps(fun, count) do
+    fun.()
+
+    Enum.at(Enum.sort(for _ <- 1..count, do: elem(:timer.tc(fun), 0)), div(count, 2))
+  end
+
+  defp index_ids(count),
+    do: for(i <- 1..count, do: "01M" <> String.pad_leading(to_string(i), 23, "0"))
+
+  defp index_entry(id, columns) do
+    stats =
+      Map.new(1..columns, fn c ->
+        {"col_#{c}", %{min: "value-000000-#{c}", max: "value-999999-#{c}", null_count: 0}}
+      end)
+
+    %Entry{
+      id: id,
+      key: "analytics/events/#{id}.parquet",
+      row_count: 5_000,
+      byte_size: 250_000,
+      added_at: 1_000_000,
+      sealed_at: nil,
+      retired_at: nil,
+      claim_keys: [],
+      batch_ids: for(i <- 1..10, do: "batch-#{id}-#{i}"),
+      stats: stats
+    }
   end
 
   defp read_cost(dir) do

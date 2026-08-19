@@ -785,7 +785,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   # already over `seal_max_files`, a byte total already over `seal_max_bytes`,
   # or the oldest entry — which is the first one (T-317).
   defp claimable(state) do
-    HotManifest.pending(
+    HotManifest.claimable(
       state.runtime.manifest,
       state.table_ref,
       state.runtime.seal_max_files * @claim_valve_factor

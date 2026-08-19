@@ -21,7 +21,7 @@ defmodule Smolquery.Telemetry do
   table or job id, so cardinality is bounded by this file rather than by
   traffic.
 
-  Handlers run in the emitting process, so they are two ETS
+  Handlers run in the emitting process, so they are a handful of ETS
   `update_counter`s at most and can never crash the caller: `:telemetry`
   detaches a handler that raises, which would silently stop counting — the
   one failure mode a metrics pipe must not have. Unknown shapes are counted
@@ -53,6 +53,11 @@ defmodule Smolquery.Telemetry do
                                           5 times (a Compactor module constant, not a
                                           runtime setting) and stopped being planned on
                                           this node; alert on rate > 0 (T-310)
+      [:smolquery, :hot_manifest, :read]  %{duration_us, entries},
+                                          meta %{op: :entries | :pending | :claimable |
+                                          :live_claim | :retired_before}
+                                          — one scanning read of a node's manifest index,
+                                          whoever made it (T-318)
       [:smolquery, :hot_server, :request] %{duration_us, response_bytes, entries},
                                           meta %{route: :manifest | :manifest_scoped |
                                           :segment | :unknown, method: String.t(),
@@ -96,6 +101,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
+    [:smolquery, :hot_manifest, :read],
     [:smolquery, :hot_server, :request],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
@@ -141,6 +147,18 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_quarantined_segments_total" =>
       "Sealed segments quarantined after repeated compaction failures; a nonzero rate " <>
         "means a table needs an operator to drop or replace a segment (T-310).",
+    "smolquery_hot_manifest_reads_total" =>
+      "Scanning reads of a node's manifest index, by op (T-318).",
+    "smolquery_hot_manifest_read_microseconds_total" =>
+      "Time spent in scanning manifest reads, by op; divide by reads for the mean. " <>
+        "`live_claim` and `retired_before` run on every maintenance tick, so their rate " <>
+        "is what the buffer's write path pays to consult its own index.",
+    "smolquery_hot_manifest_read_entries_total" =>
+      "Entries scanning manifest reads answered with, by op; divide by that op's reads " <>
+        "for the mean. At op=\"entries\" that mean is the unsealed backlog depth; at " <>
+        "op=\"live_claim\" it is the mean claim size. `live_claim` and `retired_before` " <>
+        "are constant-time — a rising duration there means the index changed shape, not " <>
+        "that it grew.",
     "smolquery_hot_server_requests_total" =>
       "Hot-tier reads served, by route, method and status class (T-315).",
     "smolquery_hot_server_microseconds_total" =>
@@ -342,6 +360,22 @@ defmodule Smolquery.Telemetry do
     bump(
       {"smolquery_compaction_quarantined_segments_total", []},
       length(Map.get(meta, :paths, []))
+    )
+  end
+
+  def handle_event([:smolquery, :hot_manifest, :read], measurements, meta, nil) do
+    labels = [op: Map.get(meta, :op, :unknown)]
+
+    bump({"smolquery_hot_manifest_reads_total", labels}, 1)
+
+    bump(
+      {"smolquery_hot_manifest_read_microseconds_total", labels},
+      Map.get(measurements, :duration_us, 0)
+    )
+
+    bump(
+      {"smolquery_hot_manifest_read_entries_total", labels},
+      Map.get(measurements, :entries, 0)
     )
   end
 

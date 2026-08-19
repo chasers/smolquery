@@ -201,6 +201,127 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "live_claim/2 (T-318)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "names the claim's ids oldest first, from the index's own order", %{manifest: manifest} do
+      entries = for _ <- 1..4, do: add(manifest, @table, rows(1))
+      ids = Enum.map(entries, & &1.id)
+      {:ok, claim} = HotManifest.claim(manifest, @table, ids, ["analytics/events/sealed.parquet"])
+
+      assert HotManifest.live_claim(manifest, @table) == {:ok, claim}
+      assert claim.ids == Enum.sort(ids)
+    end
+
+    test "ignores entries the claim does not hold", %{manifest: manifest} do
+      claimed = add(manifest, @table, rows(1))
+      _unclaimed = add(manifest, @table, rows(1))
+      keys = ["analytics/events/sealed.parquet"]
+
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [claimed.id], keys)
+
+      assert HotManifest.live_claim(manifest, @table) == {:ok, %{ids: [claimed.id], keys: keys}}
+    end
+
+    test "a fully sealed claim is no longer live", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      keys = ["analytics/events/sealed.parquet"]
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], keys)
+
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 4, keys)
+
+      assert HotManifest.live_claim(manifest, @table) == :error
+    end
+
+    test "does not answer with a sibling table's claim", %{manifest: manifest} do
+      entry = add(manifest, @other, rows(1))
+      keys = ["analytics/clicks/sealed.parquet"]
+      {:ok, _claim} = HotManifest.claim(manifest, @other, [entry.id], keys)
+
+      assert HotManifest.live_claim(manifest, @table) == :error
+      assert HotManifest.live_claim(manifest, @other) == {:ok, %{ids: [entry.id], keys: keys}}
+    end
+  end
+
+  describe "live_claim/2 is cached but never stale (T-318)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    defp derived_claim(manifest, table_ref) do
+      manifest
+      |> HotManifest.entries(table_ref)
+      |> Enum.reject(&(Entry.sealed?(&1) or not Entry.claimed?(&1)))
+      |> case do
+        [] -> :error
+        claimed -> {:ok, %{ids: Enum.map(claimed, & &1.id), keys: hd(claimed).claim_keys}}
+      end
+    end
+
+    defp assert_matches_derivation(manifest, table_ref) do
+      assert HotManifest.live_claim(manifest, table_ref) == derived_claim(manifest, table_ref)
+    end
+
+    test "matches a fresh derivation through claim, drop and retire", %{manifest: manifest} do
+      keys = ["analytics/events/sealed.parquet"]
+      entries = for _ <- 1..4, do: add(manifest, @table, rows(1))
+      [first, second, third, fourth] = Enum.map(entries, & &1.id)
+
+      assert_matches_derivation(manifest, @table)
+
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [first, second, third], keys)
+      assert_matches_derivation(manifest, @table)
+      assert {:ok, %{ids: [^first, ^second, ^third]}} = HotManifest.live_claim(manifest, @table)
+
+      :ok = HotManifest.drop(manifest, @table, [second])
+      assert_matches_derivation(manifest, @table)
+      assert {:ok, %{ids: [^first, ^third]}} = HotManifest.live_claim(manifest, @table)
+
+      # Retiring any member seals the whole claim — the input set never moves.
+      :ok = HotManifest.retire(manifest, @table, [first], 7, keys)
+      assert HotManifest.live_claim(manifest, @table) == :error
+      assert_matches_derivation(manifest, @table)
+
+      refute Entry.claimed?(elem(HotManifest.entry(manifest, @table, fourth), 1))
+    end
+
+    test "matches a fresh derivation after a release", %{manifest: manifest} do
+      keys = ["analytics/events/sealed.parquet"]
+      entries = for _ <- 1..3, do: add(manifest, @table, rows(1))
+      ids = Enum.map(entries, & &1.id)
+
+      {:ok, _claim} = HotManifest.claim(manifest, @table, ids, keys)
+      assert {:ok, _live} = HotManifest.live_claim(manifest, @table)
+
+      :ok = HotManifest.release(manifest, @table, ids)
+
+      assert HotManifest.live_claim(manifest, @table) == :error
+      assert_matches_derivation(manifest, @table)
+    end
+
+    test "is rebuilt by recovery, not carried over", %{manifest: manifest} do
+      keys = ["analytics/events/sealed.parquet"]
+      entries = for _ <- 1..3, do: add(manifest, @table, rows(1))
+      ids = Enum.map(entries, & &1.id)
+      {:ok, _claim} = HotManifest.claim(manifest, @table, ids, keys)
+
+      :ets.delete_all_objects(manifest.table)
+      assert HotManifest.live_claim(manifest, @table) == {:ok, %{ids: ids, keys: keys}}
+
+      assert {:ok, _report} = HotManifest.recover(manifest, @table)
+
+      assert HotManifest.live_claim(manifest, @table) == {:ok, %{ids: ids, keys: keys}}
+      assert_matches_derivation(manifest, @table)
+    end
+
+    test "does not answer with a sibling table's claim", %{manifest: manifest} do
+      entry = add(manifest, @other, rows(1))
+      keys = ["analytics/clicks/sealed.parquet"]
+      {:ok, _claim} = HotManifest.claim(manifest, @other, [entry.id], keys)
+
+      assert HotManifest.live_claim(manifest, @table) == :error
+      assert HotManifest.live_claim(manifest, @other) == {:ok, %{ids: [entry.id], keys: keys}}
+    end
+  end
+
   describe "entry/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

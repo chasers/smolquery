@@ -90,6 +90,40 @@ defmodule Smolquery.BufferService.HotManifest do
   never nothing. Clearing first would let a query plan against an empty hot tier
   while a buffer restarted and quietly return incomplete results.
 
+  ## What a scanning read costs, and how to see it
+
+  Three reads walk a table's index rather than resolving one key: `entries/2`
+  serving the whole manifest over HTTP, `pending/3` deciding what to claim, and
+  `retired_before/3` on every reap. Each emits
+  `[:smolquery, :hot_manifest, :read]` with its duration and the entries it
+  answered with, labelled by `op`, and so does the O(1) `live_claim/2` (T-318).
+
+  That is the seam because it is caller-agnostic. The same index backs the
+  sealer, the query planner and the buffer's own write path, and "which read is
+  spending the node" is not answerable from any one of them.
+  `read_entries_total{op="entries"}` over that op's read count is the mean
+  unsealed backlog depth; the same ratio at `op="live_claim"` is the mean claim
+  size.
+
+  `entry/3` and `batch_ack/3` are single-key lookups and are not instrumented —
+  they run per segment request, and a counter per lookup would cost more than
+  the lookup.
+
+  ## The live claim is cached, because the maintenance tick asks every commit
+
+  `live_claim/2` used to derive its answer by scanning the table. It runs on
+  every maintenance tick, which runs on every commit, so its cost grew with the
+  unsealed backlog — and a deeper backlog is exactly when a buffer can least
+  afford it (T-318). The answer now lives in a second ETS table, read by key.
+
+  The cache is **re-derived, never patched**. Every mutation that can change
+  which entries are claimed — `freeze/5`, `release_live/5`, `seal_all/5`,
+  `delete_and_forget/4`, and recovery's `replace/3` — recomputes it from the
+  entries table in full. So the stored value is always the same value a scan
+  would produce, and the only thing that changed is *when* the scan runs: once
+  per claim, release, retire or drop, rather than once per commit. There is no
+  incremental-update rule to get wrong.
+
   ## Usage
 
       manifest =
@@ -126,6 +160,19 @@ defmodule Smolquery.BufferService.HotManifest do
   @log "manifest.log"
   @staged "manifest.log.staged"
 
+  # `write_concurrency` is not optional here, it is the difference between a
+  # node that keeps up and one that does not: every commit inserts, and a node
+  # owns many table refs at once. Measured on an `ordered_set` holding 16,384
+  # 32-column entries, 8 processes inserting under distinct table refs — 73,705
+  # inserts/s without it against 909,556 with it, 12.3x (T-318). A single-writer
+  # microbenchmark shows nothing, which is why one is not the evidence here.
+  #
+  # `:compressed` is deliberately absent. It is a real lever — the same table
+  # measures 112.3 MiB plain against 45.3 MiB compressed — but it costs about
+  # 1.8x on reads (a 1,024-entry claim read goes 2.9 ms to 5.3 ms), and the read
+  # path is what the sealer and the query planner both sit on.
+  @index_options [:public, read_concurrency: true, write_concurrency: true]
+
   @doc """
   A child spec identified by the manifest's name rather than the module.
 
@@ -153,8 +200,9 @@ defmodule Smolquery.BufferService.HotManifest do
 
   @impl GenServer
   def init(name) do
-    :ets.new(name, [:ordered_set, :public, :named_table, read_concurrency: true])
-    :ets.new(batches(name), [:set, :public, :named_table, read_concurrency: true])
+    :ets.new(name, @index_options ++ [:ordered_set, :named_table])
+    :ets.new(batches(name), @index_options ++ [:set, :named_table])
+    :ets.new(claims(name), @index_options ++ [:set, :named_table])
 
     {:ok, name}
   end
@@ -291,10 +339,7 @@ defmodule Smolquery.BufferService.HotManifest do
   def entries(manifest, table_ref, ids \\ :all)
 
   def entries(%__MODULE__{table: table}, table_ref, :all) do
-    table
-    |> :ets.match_object({{table_ref, :_}, :_})
-    |> Enum.map(&elem(&1, 1))
-    |> Enum.sort_by(& &1.id)
+    measured(:entries, fn -> :ets.select(table, entry_spec(table_ref)) end)
   end
 
   def entries(%__MODULE__{} = manifest, table_ref, ids) when is_list(ids) do
@@ -329,11 +374,41 @@ defmodule Smolquery.BufferService.HotManifest do
   def pending(manifest, table_ref, limit \\ :infinity)
 
   def pending(%__MODULE__{table: table}, table_ref, :infinity),
-    do: :ets.select(table, pending_spec(table_ref))
+    do: measured(:pending, fn -> :ets.select(table, pending_spec(table_ref)) end)
 
   def pending(%__MODULE__{table: table}, table_ref, limit)
       when is_integer(limit) and limit > 0,
-      do: select_limited(table, pending_spec(table_ref), limit)
+      do: measured(:pending, fn -> select_limited(table, pending_spec(table_ref), limit) end)
+
+  @doc """
+  Up to `limit` unsealed entries as the claim path sees them: id, size, and age.
+
+  The three fields `Smolquery.BufferService.TableBuffer` actually reads to decide
+  whether and what to claim. Returning whole entries makes the read copy every
+  entry's flush-time stats block out of ETS for nothing — measured at 7,151,616
+  bytes against 98,304 for the same 1,024 entries, 73x (T-318). The garbage that
+  is not created is the point; the traversal costs the same either way.
+  """
+  @spec claimable(t(), Store.table_ref(), pos_integer()) :: [
+          %{id: String.t(), byte_size: non_neg_integer(), added_at: integer()}
+        ]
+  def claimable(%__MODULE__{table: table}, table_ref, limit)
+      when is_integer(limit) and limit > 0 do
+    spec = [
+      {{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}],
+       [
+         {{{:map_get, :id, :"$1"}, {:map_get, :byte_size, :"$1"}, {:map_get, :added_at, :"$1"}}}
+       ]}
+    ]
+
+    measured(:claimable, fn ->
+      table
+      |> select_limited(spec, limit)
+      |> Enum.map(fn {id, byte_size, added_at} ->
+        %{id: id, byte_size: byte_size, added_at: added_at}
+      end)
+    end)
+  end
 
   @doc """
   Whether the table's hot tier holds nothing at all.
@@ -445,6 +520,8 @@ defmodule Smolquery.BufferService.HotManifest do
         live.ids
         |> Enum.flat_map(&lookup(manifest, table_ref, &1))
         |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
+
+        refresh_claim(manifest, table_ref)
       end
     else
       {:error, {:claim_mismatch, %{live_ids: live.ids}}}
@@ -459,14 +536,13 @@ defmodule Smolquery.BufferService.HotManifest do
   rather than remembered state.
   """
   @spec live_claim(t(), Store.table_ref()) :: {:ok, claim()} | :error
-  def live_claim(%__MODULE__{} = manifest, table_ref) do
-    manifest
-    |> entries(table_ref)
-    |> Enum.reject(&(Entry.sealed?(&1) or not Entry.claimed?(&1)))
-    |> case do
-      [] -> :error
-      claimed -> {:ok, %{ids: Enum.map(claimed, & &1.id), keys: hd(claimed).claim_keys}}
-    end
+  def live_claim(%__MODULE__{table: table}, table_ref) do
+    measured(:live_claim, fn ->
+      case :ets.lookup(claims(table), table_ref) do
+        [{_ref, claim}] -> {:ok, claim}
+        [] -> :error
+      end
+    end)
   end
 
   @doc """
@@ -546,15 +622,32 @@ defmodule Smolquery.BufferService.HotManifest do
   """
   @spec retired_before(t(), Store.table_ref(), integer()) :: [Entry.t()]
   def retired_before(%__MODULE__{table: table}, table_ref, cutoff) do
-    spec = [
-      {{{table_ref, :_}, :"$1"},
-       [
-         {:andalso, {:"/=", {:map_get, :retired_at, :"$1"}, nil},
-          {:<, {:map_get, :retired_at, :"$1"}, cutoff}}
-       ], [:"$1"]}
-    ]
+    measured(:retired_before, fn -> reapable(table, table_ref, {table_ref, ""}, cutoff, []) end)
+  end
 
-    :ets.select(table, spec)
+  # Walks the retired prefix rather than scanning the table, because the reaper
+  # runs on every maintenance tick and a scan there costs the unsealed backlog
+  # (T-318). Entries retire oldest-first — a claim freezes the oldest pending
+  # entries and `retire/6` stamps the whole claim at once — so in key order the
+  # reapable entries are a prefix, and the first entry that is not reapable ends
+  # the walk. Should that ever not hold, the walk under-reaps rather than
+  # over-reaps, and it self-corrects: the entry it stopped at is older than
+  # whatever it skipped, so it becomes reapable first.
+  defp reapable(table, table_ref, key, cutoff, acc) do
+    case :ets.next(table, key) do
+      {^table_ref, _id} = next -> take_reapable(table, table_ref, next, cutoff, acc)
+      _end_or_other_table -> Enum.reverse(acc)
+    end
+  end
+
+  defp take_reapable(table, table_ref, key, cutoff, acc) do
+    case :ets.lookup(table, key) do
+      [{_key, %Entry{retired_at: at} = entry}] when is_integer(at) and at < cutoff ->
+        reapable(table, table_ref, key, cutoff, [entry | acc])
+
+      _not_reapable ->
+        Enum.reverse(acc)
+    end
   end
 
   @doc """
@@ -680,6 +773,7 @@ defmodule Smolquery.BufferService.HotManifest do
 
     with :ok <- append(manifest, table_ref, record, log) do
       Enum.each(entries, &insert(manifest, table_ref, Entry.claim(&1, keys)))
+      refresh_claim(manifest, table_ref)
 
       {:ok, %{ids: ids, keys: keys}}
     end
@@ -711,6 +805,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
     with :ok <- append(manifest, table_ref, record, log) do
       Enum.each(pending, &insert(manifest, table_ref, Entry.seal(&1, snapshot, retired_at)))
+
+      refresh_claim(manifest, table_ref)
     end
   end
 
@@ -725,6 +821,8 @@ defmodule Smolquery.BufferService.HotManifest do
         with :ok <- delete_all(manifest, Enum.map(entries, & &1.key)),
              :ok <- append(manifest, table_ref, record, log) do
           Enum.each(entries, &forget(manifest, table_ref, &1))
+
+          refresh_claim(manifest, table_ref)
         end
     end
   end
@@ -743,6 +841,8 @@ defmodule Smolquery.BufferService.HotManifest do
       {:ok, %{entries: length(live), orphans: orphans, missing: Enum.map(missing, & &1.id)}}
     end
   end
+
+  defp entry_spec(table_ref), do: [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}]
 
   defp pending_spec(table_ref) do
     [{{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}], [:"$1"]}]
@@ -770,6 +870,56 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp batches(table), do: Module.concat(table, Batches)
 
+  defp claims(table), do: Module.concat(table, Claims)
+
+  defp refresh_claim(%__MODULE__{table: table} = manifest, table_ref) do
+    case derive_claim(manifest, table_ref) do
+      {:ok, claim} -> :ets.insert(claims(table), {table_ref, claim})
+      :error -> :ets.delete(claims(table), table_ref)
+    end
+
+    :ok
+  end
+
+  defp derive_claim(%__MODULE__{table: table}, table_ref) do
+    spec = [
+      {{{table_ref, :_}, :"$1"},
+       [
+         {:andalso, {:==, {:map_get, :sealed_at, :"$1"}, nil},
+          {:"/=", {:map_get, :claim_keys, :"$1"}, {:const, []}}}
+       ], [{{{:map_get, :id, :"$1"}, {:map_get, :claim_keys, :"$1"}}}]}
+    ]
+
+    case :ets.select(table, spec) do
+      [] ->
+        :error
+
+      [{_id, keys} | _rest] = claimed ->
+        {:ok, %{ids: Enum.map(claimed, &elem(&1, 0)), keys: keys}}
+    end
+  end
+
+  defp measured(op, fun) do
+    started_at = System.monotonic_time()
+    result = fun.()
+
+    :telemetry.execute(
+      [:smolquery, :hot_manifest, :read],
+      %{
+        duration_us:
+          System.convert_time_unit(System.monotonic_time() - started_at, :native, :microsecond),
+        entries: read_entries(result)
+      },
+      %{op: op}
+    )
+
+    result
+  end
+
+  defp read_entries(entries) when is_list(entries), do: length(entries)
+  defp read_entries({:ok, %{ids: ids}}), do: length(ids)
+  defp read_entries(_none), do: 0
+
   defp index_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry) do
     ack = %{segment_id: entry.id, row_count: entry.row_count}
 
@@ -789,13 +939,14 @@ defmodule Smolquery.BufferService.HotManifest do
 
     Enum.each(entries, &insert(manifest, table_ref, &1))
 
-    manifest
-    |> entries(table_ref)
+    table
+    |> :ets.select(entry_spec(table_ref))
     |> Enum.reject(&MapSet.member?(keep, &1.id))
     |> Enum.each(&:ets.delete(table, {table_ref, &1.id}))
 
     :ets.match_delete(batches(table), {{table_ref, :_}, :_})
     Enum.each(entries, &index_batches(manifest, table_ref, &1))
+    refresh_claim(manifest, table_ref)
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok

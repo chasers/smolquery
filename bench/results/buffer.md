@@ -390,14 +390,16 @@ oversized answer:
   4,096** (135.0 → 225.9). Filling 4,096 entries drops from 136.7 s to 93.6 s,
   a 32% cut, and it is the same work in both runs. p99 ack at 4,096 falls from
   73.1 ms to 44.9 ms.
-- **The drag is not gone, only bounded lower, and the remainder is
-  unattributed.** 465.8 → 225.9 across depth is still a 2.1× fall. This section
-  deliberately names no cause for it: attributing the remainder needs a phase
-  counter on the maintenance tick, and
-  `smolquery_buffer_commit_phase_microseconds_total` has no term for it. Its
-  phases are accumulate, queue, encode, manifest and replicate. A cause read off
-  the shape of the curve rather than measured is a guess, and this file does not
-  record guesses as findings.
+- **The drag is not gone, only bounded lower — and the remainder is now
+  attributed.** 465.8 → 225.9 across depth is still a 2.1× fall, and the section
+  above deliberately named no cause for it. Measured: it is the maintenance
+  tick, which a probe put at **86% of wall-clock at depth 4,096** —
+  `live_claim/2` still scanned and copied every entry on every tick, which is
+  what T-318 fixes. Two candidates that the shape of the curve made plausible
+  were tested and **refuted**: appending to the manifest log gets *faster* as it
+  grows (917 → 257 µs from depth 0 to 16,384, a warm held fd), and
+  `Store.Local.put` is flat to decreasing into a directory of 16,384 files
+  (2,761 → 1,948 µs). See the `backlog_drag` re-run below.
 - **Depth 0 is a control, and it is noise-dominated.** Four repeats per build
   span 347–552 batches/s *in both*, so the single-sample 521 → 466 reading is
   variance, not a regression. Only the depth-scaled rows carry signal here.
@@ -406,3 +408,41 @@ oversized answer:
   the group-commit measurements. That also stops the claim valve from binding,
   so the tick read the whole backlog on every commit throughout. The numbers
   above the divider are therefore floors, not ceilings.
+
+### Re-run after the ETS audit (T-318)
+
+| | |
+|---|---|
+| Run | 2026-08-19 |
+| Commit | `0080ca2` + the ETS audit working tree |
+| Command | `DEPTHS=0,4096,16384,65536 BENCH_SECTION=backlog_drag mix run bench/buffer.exs` |
+
+```
+  depth     fill s    batches/s      rows/s      p50     p95     p99  (ms)
+      0        0.0        605.9     30295.8     12.5    21.0    21.5
+   4096       48.6        539.7     26986.1     13.4    38.2    38.3
+  16384      198.0        596.7     29835.4     13.4    14.6    14.7
+  65536      813.7        498.6     24928.6     13.9    52.4    53.6
+```
+
+Against `main` in the same fixture: 521.1 / 345.0 / 135.0 at depths 0 / 1,024 /
+4,096 — a 3.9× fall by depth 4,096.
+
+- **Fill time is linear in depth**, and that is the sharpest evidence here:
+  48.6 s → 198.0 s → 813.7 s across three 4× steps, so 4.07× then 4.11×. A
+  linear fill *is* a constant per-commit cost, stated another way. It was
+  superlinear in both earlier builds.
+- **Ack latency does not move.** p50 of 12.5 / 13.4 / 13.4 / 13.9 ms from an
+  empty table to 65,536 entries.
+- **Throughput falls 1.22× over a 65,536-entry sweep, against 3.9× over a
+  4,096-entry one on `main`.** Read that as bounded rather than as flat: 4,096
+  (539.7) reads lower than 16,384 (596.7), so the ordering inside the band is
+  noise, and the band is roughly 500–606 against a depth-0 spread of 347–552
+  measured over four repeats. 65,536 sits at the bottom of the band. With
+  per-commit cost constant and latency flat, what is left is most likely memory
+  pressure from the index itself — 65,536 entries of the huge schema is a few
+  hundred MiB of ETS — rather than any per-operation term.
+- **What made it flat was the tick, all three terms.** Bounding the claim read
+  (T-317) took depth 4,096 from 135.0 to 225.9. Making `live_claim/2` a keyed
+  read, walking the retired prefix instead of scanning, and dropping the
+  redundant sort in `entries/2` (T-318) took it from 225.9 to ~540.

@@ -127,6 +127,79 @@ Slop gates enforced by CI (don't disable them to get green — fix the code):
 - Migrations (when they exist) are immutable once applied; new migration, not
   edits.
 
+## ETS: keep every read bounded
+
+`Smolquery.BufferService.HotManifest` is the node's hot-tier index and it sits on
+the write path — the maintenance tick reads it on **every commit**. A read whose
+cost grows with the table is therefore a read whose cost grows with the backlog,
+and a deeper backlog is exactly when a buffer can least afford it. That bug has
+been found twice (T-317, T-318). The rules below are what stops a third.
+
+**Bound every read, and say what bounds it.** A read is acceptable if its cost is
+constant, bounded by a configured valve, or proportional to what it returns.
+"Proportional to the table" is only acceptable on a path that already costs that
+much — serving the whole manifest over HTTP, or recovery.
+
+| pattern | use |
+|---|---|
+| `:ets.lookup/2` on a full key | always preferred; O(1) in `set`, O(log N) in `ordered_set` |
+| `:ets.select/2` with a match spec | when you must filter; the guard runs in C and non-matching rows are never copied out |
+| `:ets.select/3` with a limit | when you only need the first N — pair it with a continuation loop, a chunk can return fewer than the limit |
+| `:ets.next/2` walking a prefix | when the rows you want are contiguous in key order |
+| `:ets.match_object/2` | **avoid** — the Erlang docs say to prefer `ets:select/2` |
+| `:ets.tab2list/1` | never on a table that grows with traffic |
+
+**Never re-sort what ETS already ordered.** An `ordered_set` is traversed in term
+order of the key, so `select`, `match_object` and `foldl` return rows already
+sorted by key. If the key is `{table_ref, ulid}`, key order *is* age order.
+`|> Enum.sort_by(& &1.id)` after a scan is pure waste and it hid an O(n log n)
+term in `entries/2` until it was measured.
+
+**Project in the match spec; do not copy rows you will discard.** ETS copies every
+term it returns into the calling process. Returning whole rows to read three
+fields off them is garbage the collector then has to chase. Measured on 1,024
+32-column entries: 7,151,616 bytes returned whole against 98,304 projected, 73×.
+
+**Bind as much of the key as you can.** A fully bound key turns a select into a
+single lookup with no traversal. On an `ordered_set` a *partially* bound key
+limits the traversal to a subset by term order — which is why every spec here
+binds `table_ref` and leaves only the id open.
+
+**Set `write_concurrency: true` on anything written on the request path.** It is
+not a micro-optimisation. Measured on an `ordered_set` with 8 processes inserting
+under distinct keys: 73,705 inserts/s without it, 909,556 with it — 12.3×. A
+single-process microbenchmark shows nothing, so do not use one as evidence.
+
+**Cache a derivation rather than an incremental update.** When a read is hot and
+the underlying state changes rarely, recompute the answer in full on mutation and
+store it, instead of patching it. `live_claim/2` does this: it went from a scan on
+every tick to an O(1) lookup, and because every mutation re-derives it there is no
+incremental-update rule to get wrong. The test that keeps it honest asserts the
+cached value equals a fresh derivation at every step of the lifecycle.
+
+**Know how big the table can get, and write it down.** A row holding a per-column
+stats map costs about 13.7 KB at 63 columns, so 16,384 entries is 214 MiB for one
+table's index. `:compressed` cuts that to 77.8 MiB but costs ~1.8× on reads —
+a lever, not a default. Anything unbounded in a table needs a documented ceiling
+or a documented reaper.
+
+**Measure at depth, not at zero.** Every one of these was invisible on an empty
+table. `bench/hot_manifest.exs` and `bench/buffer.exs`'s `backlog_drag` section
+exist to sweep depth; `[:smolquery, :hot_manifest, :read]` reports the same in
+production, labelled by op.
+
+References: the Erlang [Tables and Databases](https://www.erlang.org/doc/system/tablesdatabases.html)
+efficiency guide (select/match "usually need to scan the complete table";
+`ets:select/2` "to be preferred over" `ets:match_object/2`; bound-key traversal
+limits) and [The New Scalable ETS ordered_set](https://www.erlang.org/blog/the-new-scalable-ets-ordered_set/).
+[Cachex](https://hexdocs.pm/cachex) is the reference for ETS-backed caching in
+Elixir — it creates its table with `read_concurrency: true, write_concurrency: true`,
+and exposes `:compressed` and `:ordered` as explicit trade-offs rather than
+defaults, which is the posture taken here. For the storage-engine thinking behind
+the manifest log — an append-only log with a compaction step, and indexes that must
+not turn a write into a scan — see Kleppmann, *Designing Data-Intensive
+Applications*, ch. 3 ("Storage and Retrieval").
+
 ## Tests
 
 ```sh
