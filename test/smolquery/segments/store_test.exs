@@ -4,6 +4,7 @@ defmodule Smolquery.Segments.StoreTest do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Test.FakeParquet
+  alias Smolquery.Test.MemoryStore
 
   @moduletag :tmp_dir
 
@@ -103,16 +104,34 @@ defmodule Smolquery.Segments.StoreTest do
       assert Store.validate_parquet(path) == {:error, :truncated_parquet}
     end
 
-    test "accepts a file that is exactly the two magic markers back to back", %{tmp_dir: dir} do
+    test "refuses back-to-back magic markers with no room for the footer length", %{tmp_dir: dir} do
       path = file(dir, "segment.parquet", "PAR1PAR1")
 
+      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+    end
+
+    test "accepts the structural minimum: magic, footer length, magic", %{tmp_dir: dir} do
+      path = file(dir, "segment.parquet", FakeParquet.bytes())
+
+      assert byte_size(FakeParquet.bytes()) == 12
       assert Store.validate_parquet(path) == :ok
     end
 
-    test "refuses a file that does not exist", %{tmp_dir: dir} do
+    test "reports a file it cannot read as the posix reason, not as corruption", %{tmp_dir: dir} do
       path = Path.join(dir, "missing.parquet")
 
-      assert Store.validate_parquet(path) == {:error, :truncated_parquet}
+      assert Store.validate_parquet(path) == {:error, :enoent}
+    end
+  end
+
+  describe "put/3 validation" do
+    test "every implementation refuses a truncated encode through the dispatcher" do
+      store = MemoryStore.new()
+
+      assert Store.put(store, "a/b/one.parquet", &File.write(&1, "not parquet")) ==
+               {:error, {:put_failed, "a/b/one.parquet", :truncated_parquet}}
+
+      assert Store.list(store, "a/b") == {:ok, []}
     end
   end
 end

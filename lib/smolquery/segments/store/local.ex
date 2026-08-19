@@ -33,10 +33,10 @@ defmodule Smolquery.Segments.Store.Local do
   One syscall both claims and publishes the key, so no crash can ever leave
   an empty claim at a committed path.
 
-  `put/3` also runs `Store.validate_parquet/1` on the staged file before the
-  link — the exclusive-create guard stops a bad retry from overwriting a
-  good file, and this stops a bad file from being committed in the first
-  place (T-309).
+  `Store.put/3` also runs `Store.validate_parquet/1` on the staged file
+  before this module ever sees it — the exclusive-create guard stops a bad
+  retry from overwriting a good file, and the dispatcher-level check stops a
+  bad file from being committed at all (T-309).
 
   `fsync: false` trades that guarantee for speed. It is for a store whose
   contents are re-derivable, like a sealer's scratch space, and never for the
@@ -90,7 +90,6 @@ defmodule Smolquery.Segments.Store.Local do
          :ok <- File.mkdir_p(Path.dirname(staged)),
          :ok <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
-         :ok <- Store.validate_parquet(staged),
          :ok <- sync(staged, config.fsync),
          {:ok, committed_size} <- commit(staged, target, size) do
       {:ok, %{location: target, byte_size: committed_size}}

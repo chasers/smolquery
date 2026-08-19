@@ -46,6 +46,16 @@ defmodule Smolquery.Segments.Store.LocalTest do
       assert File.ls!(Path.join(dir, ".tmp")) == []
     end
 
+    test "refuses an encode whose bytes are not Parquet, leaving nothing behind", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert Store.put(store, "one.parquet", &File.write(&1, "truncated bytes")) ==
+               {:error, {:put_failed, "one.parquet", :truncated_parquet}}
+
+      refute File.exists?(Path.join(dir, "one.parquet"))
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+    end
+
     test "cleans up a partially written staged file", %{tmp_dir: dir} do
       store = Local.new(dir: dir)
 
