@@ -101,14 +101,20 @@ defmodule Smolquery.BufferService.HotServer do
   def call(conn, name) do
     started_at = System.monotonic_time()
 
-    conn =
+    try do
       if Smolquery.InternalSecret.proven?(conn) do
         conn |> Plug.RewriteOn.call(@rewrite_on) |> route(name)
       else
         respond(conn, 401, "missing or invalid internal secret")
       end
+    catch
+      kind, reason ->
+        measure(%{conn | status: 500}, started_at)
 
-    measure(conn, started_at)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    else
+      answered -> measure(answered, started_at)
+    end
   end
 
   defp route(conn, name) do
@@ -207,13 +213,23 @@ defmodule Smolquery.BufferService.HotServer do
     end
   end
 
+  # The body is read before the `with`, not inside it: `with` does not export a
+  # clause binding into `else`, so an `else` returning `conn` would hand back the
+  # pre-read connection. Bandit then tries to drain a body that is already off
+  # the wire and blocks the connection process until its read timeout.
   defp read_scope(conn) do
-    with {:ok, body, conn} <- read_body(conn),
-         {:ok, %{"ids" => ids} = scope} when is_list(ids) <- JSON.decode(body),
+    case read_body(conn) do
+      {:ok, body, conn} -> decode_scope(conn, body)
+      {:more, _partial, conn} -> {:error, conn}
+      {:error, _reason} -> {:error, conn}
+    end
+  end
+
+  defp decode_scope(conn, body) do
+    with {:ok, %{"ids" => ids} = scope} when is_list(ids) <- JSON.decode(body),
          true <- Enum.all?(ids, &is_binary/1) do
       {:ok, conn, ids, stats: scope["stats"] != false}
     else
-      {:more, _partial, conn} -> {:error, conn}
       _malformed -> {:error, conn}
     end
   end

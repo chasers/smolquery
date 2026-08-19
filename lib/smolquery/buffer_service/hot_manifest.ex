@@ -105,24 +105,46 @@ defmodule Smolquery.BufferService.HotManifest do
   unsealed backlog depth; the same ratio at `op="live_claim"` is the mean claim
   size.
 
-  `entry/3` and `batch_ack/3` are single-key lookups and are not instrumented —
-  they run per segment request, and a counter per lookup would cost more than
-  the lookup.
+  `entry/3`, `batch_ack/3` and `live_claim/2` are single-key lookups and are not
+  instrumented — they run per segment request or per maintenance tick, and a
+  counter per lookup would cost more than the lookup.
+
+  ## The reaper reads its own index
+
+  `retired_before/3` answers from a second `:ordered_set` keyed
+  `{table_ref, retired_at, id}`, walked from the front and stopped at the first
+  key at or past the cutoff. Because the key *is* what the query filters on, the
+  matching entries are a prefix by construction — there is no invariant about
+  entry ordering to hold or break.
+
+  An earlier version walked the entries table instead and stopped at the first
+  entry that was not reapable, on the argument that entries retire oldest-first.
+  That argument only holds on the node that claims. A follower or ex-owner that
+  missed a best-effort `claim` fan-out keeps an entry unsealed forever, and the
+  walk stopped there permanently, leaking the index, the segments and the batch
+  index behind it (T-318 review).
 
   ## How the index shrinks, and how to tell whether it is
 
-  One path: an entry leaves through `drop/4`, and the only caller that runs in
-  steady state is the buffer's reaper, which drops entries whose `retired_at` is
-  older than `retire_grace_ms`. So the lifecycle is
+  In steady state an entry leaves through `drop/4`, whose only routine caller is
+  the buffer's reaper — it drops entries whose `retired_at` is older than
+  `retire_grace_ms`. So the lifecycle is
 
       add -> claim -> sealer retires -> wait retire_grace_ms -> reap -> deleted
+
+  Two other paths remove entries, and neither is steady state: `drop/4` is also
+  called by a replica mirroring its owner and by the committer compensating a
+  failed replication, and `replace/3` drops what recovery no longer finds in the
+  log. All of them are counted.
 
   Two things follow, and `[:smolquery, :hot_manifest, :change]` is how an
   operator sees both (T-320). It carries the entries added, retired, reaped and
   recovered, so:
 
-    * `added - reaped` is the resident entry count — the index's real size, and
-      `recovered` is what keeps that arithmetic honest across a restart
+    * `added + recovered - reaped` is the resident entry count — the index's real
+      size. `recovered` counts only what a recovery actually restored, because
+      the index outlives the `TableBuffer` and a restart re-runs `recover/2` over
+      a table that is usually still populated
     * `retired` falling behind `added` means sealing is not keeping up, which is
       the one condition under which nothing is ever reaped and the index grows
       without bound
@@ -130,7 +152,8 @@ defmodule Smolquery.BufferService.HotManifest do
       window makes normal for `retire_grace_ms` and abnormal after
 
   Even when sealing keeps up there is a resident floor of roughly
-  `flush_rate x retire_grace_ms` entries, because the grace window holds them.
+  `flush_rate x retire_grace_ms / 1000` entries — the flush rate times the
+  grace window in seconds, because the grace window holds them.
   Nothing bounds the index; `max_buffered_rows` and `max_buffered_bytes` bound
   the accumulator, not this.
 
@@ -228,6 +251,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.new(name, @index_options ++ [:ordered_set, :named_table])
     :ets.new(batches(name), @index_options ++ [:set, :named_table])
     :ets.new(claims(name), @index_options ++ [:set, :named_table])
+    :ets.new(retired(name), @index_options ++ [:ordered_set, :named_table])
 
     {:ok, name}
   end
@@ -310,9 +334,14 @@ defmodule Smolquery.BufferService.HotManifest do
           {:ok, Entry.t()} | {:error, term()}
   def put_entry(%__MODULE__{} = manifest, table_ref, %Entry{} = entry, log \\ nil) do
     with :ok <- append(manifest, table_ref, Entry.to_record(entry), log) do
+      held = entry(manifest, table_ref, entry.id)
+
+      unindex_retired(manifest, table_ref, held)
       insert(manifest, table_ref, entry)
+      index_retired(manifest, table_ref, entry)
       index_batches(manifest, table_ref, entry)
-      count(:added, 1)
+      refresh_claim_for(manifest, table_ref, entry, held)
+      count(:added, if(held == :error, do: 1, else: 0))
 
       {:ok, entry}
     end
@@ -556,12 +585,10 @@ defmodule Smolquery.BufferService.HotManifest do
   """
   @spec live_claim(t(), Store.table_ref()) :: {:ok, claim()} | :error
   def live_claim(%__MODULE__{table: table}, table_ref) do
-    measured(:live_claim, fn ->
-      case :ets.lookup(claims(table), table_ref) do
-        [{_ref, claim}] -> {:ok, claim}
-        [] -> :error
-      end
-    end)
+    case :ets.lookup(claims(table), table_ref) do
+      [{_ref, claim}] -> {:ok, claim}
+      [] -> :error
+    end
   end
 
   @doc """
@@ -640,31 +667,20 @@ defmodule Smolquery.BufferService.HotManifest do
   could still be reading it remains in flight.
   """
   @spec retired_before(t(), Store.table_ref(), integer()) :: [Entry.t()]
-  def retired_before(%__MODULE__{table: table}, table_ref, cutoff) do
-    measured(:retired_before, fn -> reapable(table, table_ref, {table_ref, ""}, cutoff, []) end)
+  def retired_before(%__MODULE__{} = manifest, table_ref, cutoff) do
+    measured(:retired_before, fn ->
+      manifest
+      |> reapable(table_ref, {table_ref, 0, ""}, cutoff, [])
+      |> Enum.flat_map(&lookup(manifest, table_ref, &1))
+    end)
   end
 
-  # Walks the retired prefix rather than scanning the table, because the reaper
-  # runs on every maintenance tick and a scan there costs the unsealed backlog
-  # (T-318). Entries retire oldest-first — a claim freezes the oldest pending
-  # entries and `retire/6` stamps the whole claim at once — so in key order the
-  # reapable entries are a prefix, and the first entry that is not reapable ends
-  # the walk. Should that ever not hold, the walk under-reaps rather than
-  # over-reaps, and it self-corrects: the entry it stopped at is older than
-  # whatever it skipped, so it becomes reapable first.
-  defp reapable(table, table_ref, key, cutoff, acc) do
-    case :ets.next(table, key) do
-      {^table_ref, _id} = next -> take_reapable(table, table_ref, next, cutoff, acc)
-      _end_or_other_table -> Enum.reverse(acc)
-    end
-  end
+  defp reapable(%__MODULE__{table: table} = manifest, table_ref, key, cutoff, acc) do
+    case :ets.next(retired(table), key) do
+      {^table_ref, at, id} when at < cutoff ->
+        reapable(manifest, table_ref, {table_ref, at, id}, cutoff, [id | acc])
 
-  defp take_reapable(table, table_ref, key, cutoff, acc) do
-    case :ets.lookup(table, key) do
-      [{_key, %Entry{retired_at: at} = entry}] when is_integer(at) and at < cutoff ->
-        reapable(table, table_ref, key, cutoff, [entry | acc])
-
-      _not_reapable ->
+      _past_the_cutoff_or_table ->
         Enum.reverse(acc)
     end
   end
@@ -823,7 +839,12 @@ defmodule Smolquery.BufferService.HotManifest do
     }
 
     with :ok <- append(manifest, table_ref, record, log) do
-      Enum.each(pending, &insert(manifest, table_ref, Entry.seal(&1, snapshot, retired_at)))
+      Enum.each(pending, fn entry ->
+        sealed = Entry.seal(entry, snapshot, retired_at)
+
+        insert(manifest, table_ref, sealed)
+        index_retired(manifest, table_ref, sealed)
+      end)
 
       refresh_claim(manifest, table_ref)
       count(:retired, length(pending))
@@ -857,8 +878,10 @@ defmodule Smolquery.BufferService.HotManifest do
 
     with :ok <- delete_all(manifest, orphans),
          :ok <- forget_missing(manifest, table_ref, missing) do
-      replace(manifest, table_ref, live)
-      count(:recovered, length(live))
+      %{recovered: recovered, reaped: reaped} = replace(manifest, table_ref, live)
+
+      count(:recovered, recovered)
+      count(:reaped, reaped)
 
       {:ok, %{entries: length(live), orphans: orphans, missing: Enum.map(missing, & &1.id)}}
     end
@@ -893,6 +916,42 @@ defmodule Smolquery.BufferService.HotManifest do
   defp batches(table), do: Module.concat(table, Batches)
 
   defp claims(table), do: Module.concat(table, Claims)
+
+  defp retired(table), do: Module.concat(table, Retired)
+
+  defp id_spec(table_ref), do: [{{{table_ref, :"$1"}, :_}, [], [:"$1"]}]
+
+  defp index_retired(%__MODULE__{table: table}, table_ref, %Entry{retired_at: at, id: id})
+       when is_integer(at),
+       do: :ets.insert(retired(table), {{table_ref, at, id}, id})
+
+  defp index_retired(_manifest, _table_ref, _unretired), do: true
+
+  defp unindex_retired(
+         %__MODULE__{table: table},
+         table_ref,
+         {:ok, %Entry{retired_at: at, id: id}}
+       )
+       when is_integer(at),
+       do: :ets.delete(retired(table), {table_ref, at, id})
+
+  defp unindex_retired(_manifest, _table_ref, _absent_or_unretired), do: true
+
+  # An `add` carries neither claim keys nor a seal, so it cannot change which
+  # entries are claimed — and `put_entry/4` is the flush path, where a derivation
+  # per commit would be the very cost T-318 removed. A replicated entry can carry
+  # both, so it refreshes.
+  defp refresh_claim_for(manifest, table_ref, entry, held) do
+    if claim_bearing?(entry) or claim_bearing?(held) do
+      refresh_claim(manifest, table_ref)
+    else
+      :ok
+    end
+  end
+
+  defp claim_bearing?({:ok, %Entry{} = entry}), do: claim_bearing?(entry)
+  defp claim_bearing?(%Entry{claim_keys: keys, sealed_at: nil}), do: keys != []
+  defp claim_bearing?(_other), do: false
 
   defp refresh_claim(%__MODULE__{table: table} = manifest, table_ref) do
     case derive_claim(manifest, table_ref) do
@@ -958,6 +1017,7 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp forget(%__MODULE__{} = manifest, table_ref, %Entry{} = entry) do
     :ets.delete(manifest.table, {table_ref, entry.id})
+    unindex_retired(manifest, table_ref, {:ok, entry})
     forget_batches(manifest, table_ref, entry)
   end
 
@@ -966,17 +1026,27 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp replace(%__MODULE__{table: table} = manifest, table_ref, entries) do
     keep = MapSet.new(entries, & &1.id)
+    present = MapSet.new(:ets.select(table, id_spec(table_ref)))
 
     Enum.each(entries, &insert(manifest, table_ref, &1))
 
-    table
-    |> :ets.select(entry_spec(table_ref))
-    |> Enum.reject(&MapSet.member?(keep, &1.id))
-    |> Enum.each(&:ets.delete(table, {table_ref, &1.id}))
+    removed =
+      table
+      |> :ets.select(entry_spec(table_ref))
+      |> Enum.reject(&MapSet.member?(keep, &1.id))
+
+    Enum.each(removed, &:ets.delete(table, {table_ref, &1.id}))
 
     :ets.match_delete(batches(table), {{table_ref, :_}, :_})
+    :ets.match_delete(retired(table), {{table_ref, :_, :_}, :_})
     Enum.each(entries, &index_batches(manifest, table_ref, &1))
+    Enum.each(entries, &index_retired(manifest, table_ref, &1))
     refresh_claim(manifest, table_ref)
+
+    %{
+      recovered: Enum.count(entries, &(not MapSet.member?(present, &1.id))),
+      reaped: length(removed)
+    }
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok

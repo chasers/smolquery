@@ -124,7 +124,7 @@ defmodule Bench.Sealer do
       for {label, cap} <- [{"direct", count}, {"chunked", per_call}] do
         runtime = %{stack.runtime | merge_inputs_per_call: cap}
 
-        {us, {:ok, segment}} = :timer.tc(fn -> Merge.run(runtime, @table, claim) end)
+        {us, {:ok, segment}} = :timer.tc(fn -> merge(runtime, @table, claim) end)
 
         calls = if cap >= count, do: 2, else: 2 * ceil(count / cap) + 2
 
@@ -156,7 +156,7 @@ defmodule Bench.Sealer do
     ids = fill(stack, inputs, rows)
     claim = freeze(stack, ids)
 
-    copy = measure_merge(fn -> Merge.run(stack.runtime, @table, claim) end)
+    copy = measure_merge(fn -> merge(stack.runtime, @table, claim) end)
     explorer = measure_merge(fn -> explorer_merge(stack, claim) end)
 
     for {label, result} <- [{"DuckDB COPY", copy}, {"Explorer concat", explorer}] do
@@ -186,7 +186,7 @@ defmodule Bench.Sealer do
       warm(stack)
       claim = freeze(stack, ids)
 
-      {us, {:ok, segment}} = :timer.tc(fn -> Merge.run(stack.runtime, @table, claim) end)
+      {us, {:ok, segment}} = :timer.tc(fn -> merge(stack.runtime, @table, claim) end)
 
       stop_stack(stack)
 
@@ -244,7 +244,7 @@ defmodule Bench.Sealer do
       input_bytes = Enum.sum_by(entries, & &1.byte_size)
 
       claim = freeze(stack, ids)
-      {:ok, segment} = Merge.run(stack.runtime, @table, claim)
+      {:ok, segment} = merge(stack.runtime, @table, claim)
 
       stop_stack(stack)
 
@@ -256,6 +256,12 @@ defmodule Bench.Sealer do
 
     IO.puts("\n  a ratio under 1 is Parquet doing better on one large file than on many")
     IO.puts("  small ones — the compaction win, before the compactor exists.")
+  end
+
+  defp merge(runtime, table_ref, claim) do
+    {:ok, entries} = HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false)
+
+    Merge.run(runtime, table_ref, claim, entries)
   end
 
   defp explorer_merge(stack, claim) do
