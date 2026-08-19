@@ -176,7 +176,8 @@ defmodule Bench.Buffer do
       fsyncs_at_the_ceiling: &fsyncs_at_the_ceiling/1,
       byte_bound: &byte_bound/1,
       partition_proxy: &partition_proxy/1,
-      replication_delta: &replication_delta/1
+      replication_delta: &replication_delta/1,
+      backlog_drag: &backlog_drag/1
     ]
 
     only = System.get_env("BENCH_SECTION")
@@ -192,6 +193,72 @@ defmodule Bench.Buffer do
         section.(dir)
       end
     end)
+  end
+
+  defp backlog_drag(dir) do
+    heading(
+      "commit rate against unsealed backlog depth (T-317) — every commit runs a " <>
+        "maintenance tick, so anything the tick reads per commit is a cost that grows " <>
+        "with the depth it reads"
+    )
+
+    IO.puts(
+      "\n  Production-like seal thresholds, unlike the rest of this file: the tick is " <>
+        "the subject here,\n  and the claim valve is what bounds what the tick reads. " <>
+        "No sealer answers, so the claim stays\n  live and the backlog behind it grows.\n" <>
+        "  The huge schema, because what the tick copies per entry is a stats block " <>
+        "per column."
+    )
+
+    writers = env("WRITERS", 8)
+    calls = env("CALLS", 20)
+    size = env("BATCH", 50)
+    depths = sweep_env("DEPTHS", [0, 1_024, 4_096])
+    weight = :huge
+
+    IO.puts("\n  depth     fill s    batches/s      rows/s      p50     p95     p99  (ms)")
+
+    for depth <- depths do
+      {name, pid} =
+        start_buffer(dir,
+          flush_interval_ms: 25,
+          flush_max_rows: 1_000_000,
+          seal_max_bytes: 67_108_864,
+          seal_max_files: 64,
+          seal_max_age_ms: 5_000,
+          retire_grace_ms: 600_000
+        )
+
+      try do
+        {fill_us, :ok} = :timer.tc(fn -> prefill(name, depth, size, weight) end)
+
+        {wall_us, latencies} = hammer(name, [table()], writers, calls, size, weight)
+
+        seconds = wall_us / 1_000_000
+        sorted = Enum.sort(latencies)
+        batches = length(latencies)
+
+        IO.puts(
+          "  #{pad(depth, 5)}  #{pad(Float.round(fill_us / 1_000_000, 1), 9)}  " <>
+            "#{pad(Float.round(batches / seconds, 1), 11)}  " <>
+            "#{pad(Float.round(batches * size / seconds, 1), 10)}  " <>
+            "#{pad(ms(percentile(sorted, 0.50)), 7)}  #{pad(ms(percentile(sorted, 0.95)), 6)}  " <>
+            "#{pad(ms(percentile(sorted, 0.99)), 6)}"
+        )
+      after
+        stop_buffer(name, pid)
+      end
+    end
+  end
+
+  defp prefill(_name, 0, _size, _weight), do: :ok
+
+  defp prefill(name, depth, size, weight) do
+    for i <- 1..depth do
+      {:ok, _ack} = Client.write_batch(name, table(), batch(size, i * size * 10, weight))
+    end
+
+    :ok
   end
 
   defp replication_delta(dir) do

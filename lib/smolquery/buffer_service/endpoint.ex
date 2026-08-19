@@ -213,7 +213,7 @@ defmodule Smolquery.BufferService.Endpoint do
   end
 
   defp holds_nothing?(runtime, table_ref) do
-    HotManifest.entries(runtime.manifest, table_ref) == [] and
+    HotManifest.empty?(runtime.manifest, table_ref) and
       running_buffer(runtime, table_ref) == {:error, :noproc} and
       not log_on_disk?(runtime, table_ref)
   end

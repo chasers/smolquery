@@ -339,3 +339,70 @@ machine as the tables above.
 - **D3 still holds.** The two extra fsyncs on the follower are the same
   ~sub-millisecond pair D3 priced locally; the visible delta is dominated
   by the read-back and the extra hop, not the fsyncs.
+
+---
+
+## `backlog_drag` — commit rate against unsealed backlog depth (T-317)
+
+| | |
+|---|---|
+| Run | 2026-08-19 |
+| Commit | `dd16a12` + working tree, against `dd16a12` alone |
+| Command | `BENCH_SECTION=backlog_drag mix run bench/buffer.exs` (`WRITERS=8`, `CALLS=20`, `BATCH=50`, `DEPTHS=0,1024,4096`, `huge` schema) |
+| Machine | Apple M1 Max · 10 cores · 64 GiB · macOS 26.6.1 |
+| Runtime | Elixir 1.20.2 / OTP 29 · 10 online schedulers |
+
+This section alone was re-run; the rest of this file is the 2026-08-01 run.
+
+Unlike every other section here, this one uses **production-like seal
+thresholds** (`seal_max_files: 64`, `seal_max_bytes: 64 MiB`,
+`seal_max_age_ms: 5000`). The maintenance tick is the subject, and the claim
+valve is what bounds what the tick reads. No sealer answers, so the claim stays
+live and the backlog behind it grows.
+
+Before — `run_maintenance/1` reads the whole manifest on every commit:
+
+```
+  depth     fill s    batches/s      rows/s      p50     p95     p99  (ms)
+      0        0.0        521.1     26056.6     13.8    40.0    40.5
+   1024       18.5        345.0     17251.9     21.9    42.2    42.4
+   4096      136.7        135.0      6747.9     59.0    72.7    73.1
+```
+
+After — bounded `pending/3`, a match-spec `retired_before/3`, and a cached
+oversized answer:
+
+```
+  depth     fill s    batches/s      rows/s      p50     p95     p99  (ms)
+      0        0.0        465.8     23290.3     15.5    27.0    27.5
+   1024       16.1        422.5     21126.5     18.3    24.1    24.3
+   4096       93.6        225.9     11297.5     34.8    44.8    44.9
+```
+
+### What this settles
+
+- **Commit throughput was falling with backlog depth, with no reader involved
+  at all.** 521 → 345 → 135 batches/s across depths 0, 1,024 and 4,096. The
+  workload is identical in all three cells; only the depth of the unsealed
+  backlog differs. That is the maintenance tick, which runs on every commit and
+  read state proportional to the backlog.
+- **The fix recovers most of it.** +22% at 1,024 (345.0 → 422.5) and **+67% at
+  4,096** (135.0 → 225.9). Filling 4,096 entries drops from 136.7 s to 93.6 s,
+  a 32% cut, and it is the same work in both runs. p99 ack at 4,096 falls from
+  73.1 ms to 44.9 ms.
+- **The drag is not gone, only bounded lower, and the remainder is
+  unattributed.** 465.8 → 225.9 across depth is still a 2.1× fall. This section
+  deliberately names no cause for it: attributing the remainder needs a phase
+  counter on the maintenance tick, and
+  `smolquery_buffer_commit_phase_microseconds_total` has no term for it. Its
+  phases are accumulate, queue, encode, manifest and replicate. A cause read off
+  the shape of the curve rather than measured is a guess, and this file does not
+  record guesses as findings.
+- **Depth 0 is a control, and it is noise-dominated.** Four repeats per build
+  span 347–552 batches/s *in both*, so the single-sample 521 → 466 reading is
+  variance, not a regression. Only the depth-scaled rows carry signal here.
+- **Every other section in this file has been paying the un-bounded cost.**
+  `start_buffer/2` sets `seal_max_files: 1_000_000_000` to take sealing out of
+  the group-commit measurements. That also stops the claim valve from binding,
+  so the tick read the whole backlog on every commit throughout. The numbers
+  above the divider are therefore floors, not ceilings.

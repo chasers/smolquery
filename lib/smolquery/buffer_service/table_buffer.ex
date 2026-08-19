@@ -182,6 +182,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     :schema,
     :timer,
     :signaled_at,
+    :oversized,
     :load,
     :opened_at,
     chunks: [],
@@ -661,24 +662,34 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp resignal_or_resize(state, claim, reclaim) do
+    {state, oversized?} = claim_oversized?(state, claim)
+
     cond do
-      not claim_oversized?(state, claim) ->
-        resignal(state, claim)
-
-      not due?(state) ->
-        state
-
-      true ->
-        case release_oversized(state, claim) do
-          {:released, state} -> reclaim.(state)
-          {:failed, state} -> signal(state, claim)
-        end
+      not oversized? -> resignal(state, claim)
+      not due?(state) -> state
+      true -> resize(state, claim, reclaim)
     end
   end
 
-  defp claim_oversized?(_state, %{ids: []}), do: false
+  defp resize(state, claim, reclaim) do
+    case release_oversized(state, claim) do
+      {:released, state} -> reclaim.(state)
+      {:failed, state} -> signal(state, claim)
+    end
+  end
+
+  defp claim_oversized?(state, %{ids: []}), do: {state, false}
+
+  defp claim_oversized?(%__MODULE__{oversized: %{ids: ids, answer: answer}} = state, %{ids: ids}),
+    do: {state, answer}
 
   defp claim_oversized?(state, claim) do
+    answer = derive_oversized(state, claim)
+
+    {%{state | oversized: %{ids: claim.ids, answer: answer}}, answer}
+  end
+
+  defp derive_oversized(state, claim) do
     case claim_entries(state, claim) do
       [] ->
         false
@@ -760,16 +771,25 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp claim_when_sealable(state) do
-    unsealed =
-      state.runtime.manifest
-      |> HotManifest.entries(state.table_ref)
-      |> Enum.reject(&Entry.sealed?/1)
+    unsealed = claimable(state)
 
     cond do
       unsealed == [] -> %{state | signaled_at: nil}
       not sealable?(state, unsealed) -> state
       true -> claim_and_signal(state, unsealed)
     end
+  end
+
+  # The valve is what a claim can hold, so entries past it decide nothing here:
+  # `claim_batch/3` stops at the same count, and `sealable?/2` reads a count
+  # already over `seal_max_files`, a byte total already over `seal_max_bytes`,
+  # or the oldest entry — which is the first one (T-317).
+  defp claimable(state) do
+    HotManifest.pending(
+      state.runtime.manifest,
+      state.table_ref,
+      state.runtime.seal_max_files * @claim_valve_factor
+    )
   end
 
   defp force_signal(state) do
@@ -784,23 +804,17 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp force_signal_or_resize(state, claim) do
-    if claim_oversized?(state, claim) do
-      case release_oversized(state, claim) do
-        {:released, state} -> force_claim(state)
-        {:failed, state} -> signal(state, claim)
-      end
-    else
-      signal(state, claim)
+    case claim_oversized?(state, claim) do
+      {state, true} -> resize(state, claim, &force_claim/1)
+      {state, false} -> signal(state, claim)
     end
   end
 
   defp force_claim(state) do
-    unsealed =
-      state.runtime.manifest
-      |> HotManifest.entries(state.table_ref)
-      |> Enum.reject(&Entry.sealed?/1)
-
-    if unsealed == [], do: state, else: claim_and_signal(state, unsealed)
+    case claimable(state) do
+      [] -> state
+      unsealed -> claim_and_signal(state, unsealed)
+    end
   end
 
   defp claim_and_signal(state, unsealed) do

@@ -305,6 +305,48 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
+  Up to `limit` unsealed entries, oldest first.
+
+  The read the owning `TableBuffer` makes on every commit, so it is bounded
+  twice over (T-317).
+
+  It filters *inside* ETS rather than in the caller. An entry carries a
+  flush-time stats map — kilobytes on a wide table — and `entries/2` copies
+  every one of them out to the calling process so the caller can throw most
+  away. That copy is what made commit cost grow with the unsealed backlog: a
+  deeper backlog made every commit's maintenance tick more expensive, which
+  deepened the backlog.
+
+  And it stops at `limit`. A claim never holds more than the count valve allows,
+  so a caller deciding whether to claim, and what to claim, learns nothing from
+  the entries past it. `:infinity` reads them all.
+
+  Ordering is the `:ordered_set`'s own. Keys are `{table_ref, id}` and ULIDs
+  sort lexicographically by creation time, so key order is age order and nothing
+  needs sorting.
+  """
+  @spec pending(t(), Store.table_ref(), pos_integer() | :infinity) :: [Entry.t()]
+  def pending(manifest, table_ref, limit \\ :infinity)
+
+  def pending(%__MODULE__{table: table}, table_ref, :infinity),
+    do: :ets.select(table, pending_spec(table_ref))
+
+  def pending(%__MODULE__{table: table}, table_ref, limit)
+      when is_integer(limit) and limit > 0,
+      do: select_limited(table, pending_spec(table_ref), limit)
+
+  @doc """
+  Whether the table's hot tier holds nothing at all.
+
+  A bounded existence check: it stops at the first entry rather than copying
+  every one out to compare a list against `[]`.
+  """
+  @spec empty?(t(), Store.table_ref()) :: boolean()
+  def empty?(%__MODULE__{table: table}, table_ref) do
+    :ets.select(table, [{{{table_ref, :_}, :_}, [], [true]}], 1) == :"$end_of_table"
+  end
+
+  @doc """
   One entry, if the table's hot tier holds it.
 
   This is how a segment id from an HTTP request becomes a key — resolved through
@@ -503,10 +545,16 @@ defmodule Smolquery.BufferService.HotManifest do
   could still be reading it remains in flight.
   """
   @spec retired_before(t(), Store.table_ref(), integer()) :: [Entry.t()]
-  def retired_before(%__MODULE__{} = manifest, table_ref, cutoff) do
-    manifest
-    |> entries(table_ref)
-    |> Enum.filter(&(not is_nil(&1.retired_at) and &1.retired_at < cutoff))
+  def retired_before(%__MODULE__{table: table}, table_ref, cutoff) do
+    spec = [
+      {{{table_ref, :_}, :"$1"},
+       [
+         {:andalso, {:"/=", {:map_get, :retired_at, :"$1"}, nil},
+          {:<, {:map_get, :retired_at, :"$1"}, cutoff}}
+       ], [:"$1"]}
+    ]
+
+    :ets.select(table, spec)
   end
 
   @doc """
@@ -693,6 +741,27 @@ defmodule Smolquery.BufferService.HotManifest do
       replace(manifest, table_ref, live)
 
       {:ok, %{entries: length(live), orphans: orphans, missing: Enum.map(missing, & &1.id)}}
+    end
+  end
+
+  defp pending_spec(table_ref) do
+    [{{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}], [:"$1"]}]
+  end
+
+  defp select_limited(table, spec, limit),
+    do: table |> :ets.select(spec, limit) |> collect(limit, 0, [])
+
+  defp collect(:"$end_of_table", _limit, _taken, chunks),
+    do: chunks |> Enum.reverse() |> Enum.concat()
+
+  defp collect({entries, continuation}, limit, taken, chunks) do
+    taken = taken + length(entries)
+    chunks = [entries | chunks]
+
+    if taken >= limit do
+      chunks |> Enum.reverse() |> Enum.concat() |> Enum.take(limit)
+    else
+      collect(:ets.select(continuation), limit, taken, chunks)
     end
   end
 
