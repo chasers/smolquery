@@ -13,8 +13,8 @@ one release-qualified ConfigMap and imports it with `envFrom`. Its
 PostgreSQL URLs, S3 keys, and other sensitive runtime settings remain external.
 Use `env` for non-secret environment values and `commonExtraEnv` or
 `roleExtraEnv` for explicit per-pod entries, including `valueFrom` references.
-The chart rejects listener, topology, TLS, role, and pod-identity names in all
-three inputs because it owns those values. The Secret is imported before the
+The chart rejects listener-port, topology, TLS, role, and pod-identity names in
+all three inputs because it owns those values. The Secret is imported before the
 ConfigMap, so ConfigMap keys win any remaining collision; keep each setting in
 one source. The chart derives these load-bearing values from topology and replica settings:
 
@@ -29,8 +29,12 @@ one source. The chart derives these load-bearing values from topology and replic
 
 The chart applies a deterministic ConfigMap checksum to pod templates. An
 external Secret rotation does not change that checksum; roll the release or
-use a reloader after rotating the Secret. See [deployment.md](deployment.md)
-for topology, PVC, TLS, and upgrade procedures.
+use a reloader after rotating the Secret. A created or externally named
+`serviceAccount` applies to every role so the AWS credential chain can use
+pod-scoped workload identity from both query and storage pods. Token automount
+remains disabled except on API/server pods when `podOperations.enabled=true`.
+See [deployment.md](deployment.md) for topology, PVC, TLS, and upgrade
+procedures.
 
 The release validates environment values before any service subtree starts:
 

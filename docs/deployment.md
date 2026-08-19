@@ -58,8 +58,10 @@ later changes to that environment alone do nothing. To scale up in place, make
 the new pods live first, then use an `ExpectedNodes.current`/`resize` CAS. To
 scale down, drain nodes, remove them with CAS, wait for propagation, and only
 then lower the Helm replica count. Changing between split and symmetric is not
-an in-place upgrade: expected identities and PVCs change, so use a fresh
-release and migrate deliberately.
+an in-place upgrade: expected identities and PVCs change, so the chart rejects
+that switch for an existing release. `nameOverride` and `fullnameOverride`
+also define StatefulSet and PVC identities, so the chart rejects changing them
+on an existing release. Install a fresh release and migrate deliberately.
 
 PVCs retain by default after scale-down and uninstall. Removing them is a
 deliberate cleanup operation after confirming that durable data is safe.
@@ -80,12 +82,17 @@ It must contain `ca.pem` plus each StatefulSet pod's
 rotation needs a coordinated rollout so every member receives matching
 certificates and trust material.
 
+Set `serviceAccount.create=true` or name an existing account with
+`serviceAccount.name` to apply one ServiceAccount to every role. This keeps
+pod-scoped workload identity available to both the query and storage roles that
+access S3. Token automount remains disabled by default.
+
 Pod-operations RBAC is disabled by default. Enabling `podOperations.enabled`
-with `serviceAccount.create=true` creates only a namespaced Role for pod
-get/list/delete and its binding. Because this can delete any pod in the
-namespace, use a dedicated namespace for the release. Token automount remains
-disabled unless pod operations is enabled. PDBs are independently configurable
-and off by default, so a one-replica API is not made undeployable.
+creates only a namespaced Role for pod get/list/delete and its binding, and
+enables token automount only on API/server pods. Because this can delete any pod
+in the namespace, use a dedicated namespace for the release. PDBs are
+independently configurable and off by default, so a one-replica API is not made
+undeployable.
 
 The API and web Service traffic is HTTP. Operators must provide TLS at an
 ingress or gateway, isolate the network appropriately, and avoid exposing
