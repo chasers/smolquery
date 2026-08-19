@@ -420,11 +420,13 @@ defmodule Smolquery.BufferService.HotServerTest do
       handler = "hot-server-test-#{:erlang.unique_integer([:positive])}"
       test = self()
 
+      # Handlers are global and this module is async. Every request under test is
+      # a `Plug.Test` call running inline here, so the emitting pid is the filter.
       :telemetry.attach(
         handler,
         [:smolquery, :hot_server, :request],
         fn _event, measurements, meta, _config ->
-          send(test, {:hot_server_request, measurements, meta})
+          if self() == test, do: send(test, {:hot_server_request, measurements, meta})
         end,
         nil
       )
@@ -440,7 +442,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       response = get(name, @manifest_path)
 
       assert_receive {:hot_server_request, measurements, meta}
-      assert meta == %{route: :manifest, method: "GET", status: 200}
+      assert meta == %{route: :manifest, table_ref: @table, method: "GET", status: 200}
       assert measurements.entries == 2
       assert measurements.response_bytes == byte_size(response.resp_body)
       assert measurements.duration_us >= 0
@@ -486,7 +488,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       HotServer.call(authed(conn(:head, @manifest_path)), name)
 
       assert_receive {:hot_server_request, measurements, meta}
-      assert meta == %{route: :manifest, method: "HEAD", status: 200}
+      assert meta == %{route: :manifest, table_ref: @table, method: "HEAD", status: 200}
       assert measurements.entries == 2
       assert measurements.response_bytes == 0
     end
@@ -523,6 +525,57 @@ defmodule Smolquery.BufferService.HotServerTest do
 
       assert_receive {:hot_server_request, _measurements,
                       %{route: :unknown, method: "GET", status: 401}}
+    end
+  end
+
+  describe "a malformed scoped read over a real socket (T-316 review)" do
+    @describetag :integration
+
+    setup context do
+      name = start_buffer_service(context)
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      %{name: name, port: bandit_port(name)}
+    end
+
+    defp bandit_port(name) do
+      {:ok, {_address, port}} =
+        name |> HotServer.listener() |> ThousandIsland.listener_info()
+
+      port
+    end
+
+    defp request(socket, method, body) do
+      :gen_tcp.send(socket, [
+        "#{method} #{@manifest_path} HTTP/1.1\r\n",
+        "host: 127.0.0.1\r\n",
+        "content-type: application/json\r\n",
+        "#{Smolquery.InternalSecret.header()}: #{Smolquery.InternalSecret.value()}\r\n",
+        "content-length: #{byte_size(body)}\r\n\r\n"
+      ])
+
+      Process.sleep(120)
+      :gen_tcp.send(socket, body)
+    end
+
+    test "answers 400 and leaves the connection usable", %{port: port} do
+      {:ok, socket} =
+        :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw])
+
+      request(socket, "POST", JSON.encode!(%{"ids" => [1, 2, 3]}))
+
+      assert {:ok, response} = :gen_tcp.recv(socket, 0, 5_000)
+      assert response =~ "400 Bad Request"
+
+      # The bug this pins: the 400 path returned a pre-read conn, so Bandit tried
+      # to drain a body already off the wire and held the connection until its
+      # read timeout. A second request on the same socket is the proof it did not.
+      request(socket, "POST", JSON.encode!(%{"ids" => []}))
+
+      assert {:ok, second} = :gen_tcp.recv(socket, 0, 5_000)
+      assert second =~ "200 OK"
+
+      :gen_tcp.close(socket)
     end
   end
 

@@ -788,7 +788,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     HotManifest.claimable(
       state.runtime.manifest,
       state.table_ref,
-      state.runtime.seal_max_files * @claim_valve_factor
+      max(state.runtime.seal_max_files * @claim_valve_factor, 1)
     )
   end
 

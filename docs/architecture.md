@@ -925,8 +925,8 @@ whether a node's hot manifest index is in steady state or growing (T-320).
 reports. `retired` falling behind `added` means sealing is not keeping up — the
 one condition under which nothing is ever reaped, because an entry is only
 droppable `retire_grace_ms` after a sealer retires it. Even when sealing keeps
-up, the grace window holds a floor of roughly `flush_rate x retire_grace_ms`
-entries, and nothing bounds the index: `max_buffered_rows` and
+up, the grace window holds a floor of roughly `flush_rate x retire_grace_ms / 1000`
+entries — the flush rate times the grace window in seconds, and nothing bounds the index: `max_buffered_rows` and
 `max_buffered_bytes` bound the accumulator, not this.
 
 They also carry a `method` label, narrowed to `get`, `head`, `post` or `other`.

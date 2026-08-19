@@ -103,7 +103,7 @@ defmodule Bench.Clustering do
     assert_sorted!(micro_path, "flushed micro-segment #{ack.segment_id}")
 
     claim = freeze(stack, @clustered, [ack.segment_id])
-    {:ok, segment} = Merge.run(stack.runtime, @clustered, claim)
+    {:ok, segment} = merge(stack.runtime, @clustered, claim)
     sealed_path = Store.location(stack.runtime.store, segment.key)
     assert_sorted!(sealed_path, "sealed segment #{segment.id}")
 
@@ -369,7 +369,7 @@ defmodule Bench.Clustering do
       entries |> Enum.filter(&MapSet.member?(id_set, &1.id)) |> Enum.sum_by(& &1.row_count)
 
     {us, {:ok, segment}, rss} =
-      with_rss_peak(fn -> Merge.run(stack.runtime, table, claim) end)
+      with_rss_peak(fn -> merge(stack.runtime, table, claim) end)
 
     path = Store.location(stack.runtime.store, segment.key)
     row_groups = row_group_count(stack, path)
@@ -499,6 +499,12 @@ defmodule Bench.Clustering do
       {:memory, bytes} -> bytes
       nil -> 0
     end
+  end
+
+  defp merge(runtime, table_ref, claim) do
+    {:ok, entries} = HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false)
+
+    Merge.run(runtime, table_ref, claim, entries)
   end
 
   defp with_rss_peak(fun) do

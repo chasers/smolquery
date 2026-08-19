@@ -327,11 +327,14 @@ defmodule Smolquery.BufferService.HotManifestTest do
       handler = "index-size-#{:erlang.unique_integer([:positive])}"
       test = self()
 
+      # Handlers are global and this module is async, so a concurrent test's drop
+      # would land in this mailbox. Every manifest call under test runs inline in
+      # the test process, so the emitting pid is the filter.
       :telemetry.attach(
         handler,
         [:smolquery, :hot_manifest, :change],
         fn _event, measurements, meta, _config ->
-          send(test, {:change, meta.change, measurements.entries})
+          if self() == test, do: send(test, {:change, meta.change, measurements.entries})
         end,
         nil
       )
@@ -358,14 +361,98 @@ defmodule Smolquery.BufferService.HotManifestTest do
       refute_received {:change, :reaped, _entries}
     end
 
-    test "recovery reports what it restored, so the arithmetic survives a restart", %{
-      manifest: manifest
-    } do
+    test "recovering over a populated index counts nothing — the index outlives the buffer",
+         %{manifest: manifest} do
+      for _ <- 1..3, do: add(manifest, @table, rows(1))
+
+      assert {:ok, %{entries: 3}} = HotManifest.recover(manifest, @table)
+
+      refute_received {:change, :recovered, _entries}
+      refute_received {:change, :reaped, _entries}
+    end
+
+    test "recovery counts only what it actually restored", %{manifest: manifest} do
       for _ <- 1..3, do: add(manifest, @table, rows(1))
       :ets.delete_all_objects(manifest.table)
 
       assert {:ok, %{entries: 3}} = HotManifest.recover(manifest, @table)
       assert_received {:change, :recovered, 3}
+    end
+
+    test "recovery counts an entry whose object vanished as reaped", %{manifest: manifest} do
+      entries = for _ <- 1..3, do: add(manifest, @table, rows(1))
+      gone = List.first(entries)
+      File.rm!(Store.location(manifest.store, gone.key))
+
+      assert {:ok, %{entries: 2}} = HotManifest.recover(manifest, @table)
+
+      refute_received {:change, :recovered, _entries}
+      assert_received {:change, :reaped, 1}
+    end
+  end
+
+  describe "retired_before/3 against a hole (T-318 review)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "an unsealed entry does not hide the retired entries behind it", %{manifest: manifest} do
+      unsealed = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(1))
+      third = add(manifest, @table, rows(1))
+
+      :ok = HotManifest.retire(manifest, @table, [second.id], 1)
+      :ok = HotManifest.retire(manifest, @table, [third.id], 2)
+
+      future = System.os_time(:millisecond) + 10_000
+      reaped = manifest |> HotManifest.retired_before(@table, future) |> Enum.map(& &1.id)
+
+      assert reaped == [second.id, third.id]
+      refute unsealed.id in reaped
+    end
+
+    test "reads nothing before the cutoff, everything after", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 1)
+
+      past = System.os_time(:millisecond) - 10_000
+      future = System.os_time(:millisecond) + 10_000
+
+      assert HotManifest.retired_before(manifest, @table, past) == []
+      assert [%Entry{id: id}] = HotManifest.retired_before(manifest, @table, future)
+      assert id == entry.id
+    end
+
+    test "a dropped entry leaves the reap index", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 1)
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+
+      future = System.os_time(:millisecond) + 10_000
+
+      assert HotManifest.retired_before(manifest, @table, future) == []
+    end
+
+    test "recovery rebuilds the reap index", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 1)
+      :ets.delete_all_objects(manifest.table)
+
+      assert {:ok, _report} = HotManifest.recover(manifest, @table)
+
+      future = System.os_time(:millisecond) + 10_000
+      assert [%Entry{id: id}] = HotManifest.retired_before(manifest, @table, future)
+      assert id == entry.id
+    end
+
+    test "does not answer with a sibling table's retired entries", %{manifest: manifest} do
+      mine = add(manifest, @table, rows(1))
+      theirs = add(manifest, @other, rows(1))
+      :ok = HotManifest.retire(manifest, @table, [mine.id], 1)
+      :ok = HotManifest.retire(manifest, @other, [theirs.id], 1)
+
+      future = System.os_time(:millisecond) + 10_000
+
+      assert [%Entry{id: id}] = HotManifest.retired_before(manifest, @table, future)
+      assert id == mine.id
     end
   end
 

@@ -128,7 +128,11 @@ defmodule Smolquery.StorageService.Handoff.SealTest do
       handler,
       [:smolquery, :hot_server, :request],
       fn _event, measurements, meta, _config ->
-        send(test, {:hot_read, meta.route, measurements.entries})
+        # Handlers are global and these events come from Bandit processes, not
+        # this one, so the served table is the only filter available.
+        if meta.table_ref == @table do
+          send(test, {:hot_read, meta.route, measurements.entries})
+        end
       end,
       nil
     )

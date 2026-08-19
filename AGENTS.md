@@ -145,7 +145,7 @@ much — serving the whole manifest over HTTP, or recovery.
 | `:ets.lookup/2` on a full key | always preferred; O(1) in `set`, O(log N) in `ordered_set` |
 | `:ets.select/2` with a match spec | when you must filter; the guard runs in C and non-matching rows are never copied out |
 | `:ets.select/3` with a limit | when you only need the first N — pair it with a continuation loop, a chunk can return fewer than the limit |
-| `:ets.next/2` walking a prefix | when the rows you want are contiguous in key order |
+| `:ets.next/2` walking a prefix | when the rows are contiguous in key order **because the key says so** — not because of an invariant held elsewhere; also slower per step under `write_concurrency` on an `ordered_set`, and two ops per row with no isolation between them |
 | `:ets.match_object/2` | **avoid** — the Erlang docs say to prefer `ets:select/2` |
 | `:ets.tab2list/1` | never on a table that grows with traffic |
 
@@ -170,6 +170,14 @@ not a micro-optimisation. Measured on an `ordered_set` with 8 processes insertin
 under distinct keys: 73,705 inserts/s without it, 909,556 with it — 12.3×. A
 single-process microbenchmark shows nothing, so do not use one as evidence.
 
+**Index on what you filter by.** If a read selects rows by a field, put that
+field in the key of a second table rather than walking the primary one and
+stopping at the first miss. A walk that relies on "the rows I want happen to be
+contiguous" is relying on an invariant maintained somewhere else, and it fails
+silently and permanently when that invariant does not hold — `retired_before/3`
+stopped forever on any node that missed a best-effort replication, leaking
+everything behind the hole.
+
 **Cache a derivation rather than an incremental update.** When a read is hot and
 the underlying state changes rarely, recompute the answer in full on mutation and
 store it, instead of patching it. `live_claim/2` does this: it went from a scan on
@@ -181,7 +189,8 @@ cached value equals a fresh derivation at every step of the lifecycle.
 before you trust a bound. The hot manifest index has exactly one steady-state
 shrink path — a reaper that runs `retire_grace_ms` after a *successful* seal — so
 it grows without limit whenever sealing stalls, and it holds a resident floor of
-`flush_rate x retire_grace_ms` entries even when sealing is healthy. Emit enough
+`flush_rate x retire_grace_ms / 1000` entries — the flush rate times the
+  grace window in seconds even when sealing is healthy. Emit enough
 counters to tell those two states apart
 (`smolquery_hot_manifest_index_entries_total{change}`).
 
