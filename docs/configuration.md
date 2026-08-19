@@ -34,6 +34,7 @@ received value, and the accepted shape.
 | `SMOLQUERY_WEB_CHECK_ORIGIN` | Set `false` to accept any websocket origin. Or set a comma-separated origin list (default: the `SMOLQUERY_WEB_HOST` value). Each entry needs a scheme or a leading `//`, for example `https://ui.example.com` |
 | `SMOLQUERY_SECRET_KEY_BASE` | Signs the web UI session that guards the LiveView socket. **Required** on a node with the `:web` role. The value must be at least 64 bytes (`mix phx.gen.secret`). Set the same value on every `:web` node |
 | `SMOLQUERY_INTERNAL_SECRET` | The secret that internal HTTP uses to prove itself. A single node generates it per boot. A cluster requires a non-empty shared value before it boots |
+| `SMOLQUERY_CREDENTIAL_KEY` | The key that seals the passwords of federated Postgres connections (T-322). The value is 32 bytes, base64 encoded (`openssl rand -base64 32`). Set the same value on every node. The catalog stores only ciphertext, so the key never reaches the metadata database; a lost key invalidates every stored connection and the operator re-enters the passwords. A deployment that registers no connection needs no key |
 
 ### Storage and the catalog
 
