@@ -1005,9 +1005,7 @@ defmodule Smolquery.BufferService.HotManifest do
     })
   end
 
-  defp read_entries(entries) when is_list(entries), do: length(entries)
-  defp read_entries({:ok, %{ids: ids}}), do: length(ids)
-  defp read_entries(_none), do: 0
+  defp read_entries(entries), do: length(entries)
 
   defp index_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry) do
     ack = %{segment_id: entry.id, row_count: entry.row_count}
