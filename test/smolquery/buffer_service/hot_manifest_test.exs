@@ -322,6 +322,53 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "index size events (T-320)" do
+    setup context do
+      handler = "index-size-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :hot_manifest, :change],
+        fn _event, measurements, meta, _config ->
+          send(test, {:change, meta.change, measurements.entries})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      %{manifest: start_manifest(context, context.local)}
+    end
+
+    test "reports an entry entering, retiring, and being reaped", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      assert_received {:change, :added, 1}
+
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 5)
+      assert_received {:change, :retired, 1}
+
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+      assert_received {:change, :reaped, 1}
+    end
+
+    test "a drop of an id it never held reports nothing", %{manifest: manifest} do
+      :ok = HotManifest.drop(manifest, @table, [Id.generate()])
+
+      refute_received {:change, :reaped, _entries}
+    end
+
+    test "recovery reports what it restored, so the arithmetic survives a restart", %{
+      manifest: manifest
+    } do
+      for _ <- 1..3, do: add(manifest, @table, rows(1))
+      :ets.delete_all_objects(manifest.table)
+
+      assert {:ok, %{entries: 3}} = HotManifest.recover(manifest, @table)
+      assert_received {:change, :recovered, 3}
+    end
+  end
+
   describe "entry/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

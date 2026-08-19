@@ -109,6 +109,31 @@ defmodule Smolquery.BufferService.HotManifest do
   they run per segment request, and a counter per lookup would cost more than
   the lookup.
 
+  ## How the index shrinks, and how to tell whether it is
+
+  One path: an entry leaves through `drop/4`, and the only caller that runs in
+  steady state is the buffer's reaper, which drops entries whose `retired_at` is
+  older than `retire_grace_ms`. So the lifecycle is
+
+      add -> claim -> sealer retires -> wait retire_grace_ms -> reap -> deleted
+
+  Two things follow, and `[:smolquery, :hot_manifest, :change]` is how an
+  operator sees both (T-320). It carries the entries added, retired, reaped and
+  recovered, so:
+
+    * `added - reaped` is the resident entry count — the index's real size, and
+      `recovered` is what keeps that arithmetic honest across a restart
+    * `retired` falling behind `added` means sealing is not keeping up, which is
+      the one condition under which nothing is ever reaped and the index grows
+      without bound
+    * `reaped` falling behind `retired` means the reaper is, which the grace
+      window makes normal for `retire_grace_ms` and abnormal after
+
+  Even when sealing keeps up there is a resident floor of roughly
+  `flush_rate x retire_grace_ms` entries, because the grace window holds them.
+  Nothing bounds the index; `max_buffered_rows` and `max_buffered_bytes` bound
+  the accumulator, not this.
+
   ## The live claim is cached, because the maintenance tick asks every commit
 
   `live_claim/2` used to derive its answer by scanning the table. It runs on
@@ -268,14 +293,7 @@ defmodule Smolquery.BufferService.HotManifest do
   @spec add(t(), Store.table_ref(), Segment.t(), log() | nil, [String.t()]) ::
           {:ok, Entry.t()} | {:error, term()}
   def add(%__MODULE__{} = manifest, table_ref, %Segment{} = segment, log \\ nil, batch_ids \\ []) do
-    entry = Entry.from_segment(segment, now(), batch_ids)
-
-    with :ok <- append(manifest, table_ref, Entry.to_record(entry), log) do
-      insert(manifest, table_ref, entry)
-      index_batches(manifest, table_ref, entry)
-
-      {:ok, entry}
-    end
+    put_entry(manifest, table_ref, Entry.from_segment(segment, now(), batch_ids), log)
   end
 
   @doc """
@@ -294,6 +312,7 @@ defmodule Smolquery.BufferService.HotManifest do
     with :ok <- append(manifest, table_ref, Entry.to_record(entry), log) do
       insert(manifest, table_ref, entry)
       index_batches(manifest, table_ref, entry)
+      count(:added, 1)
 
       {:ok, entry}
     end
@@ -807,6 +826,7 @@ defmodule Smolquery.BufferService.HotManifest do
       Enum.each(pending, &insert(manifest, table_ref, Entry.seal(&1, snapshot, retired_at)))
 
       refresh_claim(manifest, table_ref)
+      count(:retired, length(pending))
     end
   end
 
@@ -823,6 +843,7 @@ defmodule Smolquery.BufferService.HotManifest do
           Enum.each(entries, &forget(manifest, table_ref, &1))
 
           refresh_claim(manifest, table_ref)
+          count(:reaped, length(entries))
         end
     end
   end
@@ -837,6 +858,7 @@ defmodule Smolquery.BufferService.HotManifest do
     with :ok <- delete_all(manifest, orphans),
          :ok <- forget_missing(manifest, table_ref, missing) do
       replace(manifest, table_ref, live)
+      count(:recovered, length(live))
 
       {:ok, %{entries: length(live), orphans: orphans, missing: Enum.map(missing, & &1.id)}}
     end
@@ -914,6 +936,14 @@ defmodule Smolquery.BufferService.HotManifest do
     )
 
     result
+  end
+
+  defp count(_change, 0), do: :ok
+
+  defp count(change, entries) do
+    :telemetry.execute([:smolquery, :hot_manifest, :change], %{entries: entries}, %{
+      change: change
+    })
   end
 
   defp read_entries(entries) when is_list(entries), do: length(entries)

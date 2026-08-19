@@ -20,6 +20,27 @@ defmodule Smolquery.TelemetryTest do
     end
   end
 
+  test "tracks whether the manifest index is in steady state or growing (T-320)" do
+    added = ~s({change="added"})
+    reaped = ~s({change="reaped"})
+    before_added = value("smolquery_hot_manifest_index_entries_total", added)
+    before_reaped = value("smolquery_hot_manifest_index_entries_total", reaped)
+
+    for {change, entries} <- [added: 64, retired: 64, reaped: 40, recovered: 12] do
+      :telemetry.execute(
+        [:smolquery, :hot_manifest, :change],
+        %{entries: entries},
+        %{change: change}
+      )
+    end
+
+    assert value("smolquery_hot_manifest_index_entries_total", added) == before_added + 64
+    assert value("smolquery_hot_manifest_index_entries_total", reaped) == before_reaped + 40
+
+    assert value("smolquery_hot_manifest_index_entries_total", ~s({change="retired"})) > 0
+    assert value("smolquery_hot_manifest_index_entries_total", ~s({change="recovered"})) > 0
+  end
+
   test "prices a hot-tier read by route, in requests, time, bytes and entries (T-315)" do
     labels = ~s({route="manifest",method="get"})
     counted = ~s({route="manifest",method="get",class="2xx"})
