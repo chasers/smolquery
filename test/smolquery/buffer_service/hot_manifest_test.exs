@@ -140,6 +140,67 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "pending/3 and empty?/2 (T-317)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "reads the unsealed entries, oldest first", %{manifest: manifest} do
+      first = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(2))
+
+      assert HotManifest.pending(manifest, @table) == [first, second]
+    end
+
+    test "leaves a sealed entry out, without copying it", %{manifest: manifest} do
+      sealed = add(manifest, @table, rows(1))
+      unsealed = add(manifest, @table, rows(2))
+      :ok = HotManifest.retire(manifest, @table, [sealed.id], 9)
+
+      assert HotManifest.pending(manifest, @table) == [unsealed]
+    end
+
+    test "stops at the limit, taking the oldest", %{manifest: manifest} do
+      entries = for _ <- 1..5, do: add(manifest, @table, rows(1))
+
+      assert HotManifest.pending(manifest, @table, 2) == Enum.take(entries, 2)
+      assert HotManifest.pending(manifest, @table, 1) == Enum.take(entries, 1)
+      assert HotManifest.pending(manifest, @table, 99) == entries
+    end
+
+    test "answers a limit against an empty table without a continuation", %{manifest: manifest} do
+      assert HotManifest.pending(manifest, @table, 4) == []
+    end
+
+    test "does not leak entries across tables", %{manifest: manifest} do
+      mine = add(manifest, @table, rows(1))
+      add(manifest, @other, rows(1))
+
+      assert HotManifest.pending(manifest, @table) == [mine]
+    end
+
+    test "empty? is true only while the table holds nothing", %{manifest: manifest} do
+      assert HotManifest.empty?(manifest, @table)
+
+      entry = add(manifest, @table, rows(1))
+
+      refute HotManifest.empty?(manifest, @table)
+
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 3)
+
+      refute HotManifest.empty?(manifest, @table)
+
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+
+      assert HotManifest.empty?(manifest, @table)
+    end
+
+    test "empty? does not answer for a sibling table", %{manifest: manifest} do
+      add(manifest, @other, rows(1))
+
+      assert HotManifest.empty?(manifest, @table)
+      refute HotManifest.empty?(manifest, @other)
+    end
+  end
+
   describe "entry/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 
@@ -316,6 +377,18 @@ defmodule Smolquery.BufferService.HotManifestTest do
 
       assert HotManifest.retired_before(manifest, @table, past) == []
       refute Entry.sealed?(unretired)
+    end
+
+    test "does not leak a sibling table's retired entries", %{manifest: manifest} do
+      mine = add(manifest, @table, rows(1))
+      theirs = add(manifest, @other, rows(1))
+
+      :ok = HotManifest.retire(manifest, @table, [mine.id], 1)
+      :ok = HotManifest.retire(manifest, @other, [theirs.id], 1)
+
+      future = System.os_time(:millisecond) + 1_000
+
+      assert Enum.map(HotManifest.retired_before(manifest, @table, future), & &1.id) == [mine.id]
     end
   end
 

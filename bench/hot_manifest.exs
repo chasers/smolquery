@@ -22,10 +22,14 @@ defmodule Bench.HotManifest do
       `flush_interval_ms` needs the route to sustain that rate while the node
       commits. This measures served rate at each backlog depth and reports the
       seal rate it supports.
-    * **What the reads cost the commits.** Commit throughput and ack latency with
-      no readers, then under `GET` load, then under `POST` load. This is the
-      contention itself: the plan's collapse was commit concurrency falling while
-      commit service time held flat.
+    * **What the reads cost the commits.** Commit throughput and ack latency at a
+      fixed *offered* read rate, with no readers, under `GET` load, and under
+      `POST` load. The rate is offered rather than saturated on purpose: a real
+      sealer makes two reads per attempt, so saturating readers measures a load
+      nothing generates and prices the two routes as though they were asked for
+      the same work. A route that cannot meet the offered rate shows it in the
+      achieved column. This is the contention itself: the plan's collapse was
+      commit concurrency falling while commit service time held flat.
     * **Where the bytes go.** Response size per entry, with and without the
       flush-time stats, against column count. The stats block is what makes an
       entry expensive, and it scales with the table's width rather than its rows.
@@ -36,12 +40,35 @@ defmodule Bench.HotManifest do
       mix run bench/hot_manifest.exs
       COLUMNS=63 BACKLOGS=64,1024,4096 mix run bench/hot_manifest.exs
       READERS=8 SECONDS=10 mix run bench/hot_manifest.exs
+      BENCH_SECTION=contention READ_RATE=40 mix run bench/hot_manifest.exs
 
-  ## What this measures, and what it settles
+  ## What this measured, and what it settled
 
-  Nothing yet — this script is new with the T-315/T-316 fix and has not been run
-  on a recorded machine. `bench/results/hot_manifest.md` gets the numbers and the
-  conclusions on the first recorded run.
+  On the machine this was last run on (`bench/results/hot_manifest.md`):
+
+  - **The whole-manifest read cannot keep up with the buffer; the scoped read has
+    an order of magnitude of headroom.** At a 1,024-entry backlog the `GET` route
+    sustains 15.3 reads/s — 7.6 seal attempts a second — while the same node
+    commits about 150 batches/s. At 4,096 it sustains 2.4 reads/s, so 1.2 seal
+    attempts a second. Sealing cannot drain a backlog it takes a second per
+    attempt to read. The `POST` route sustains 2,866-3,455 reads/s at every depth
+    measured. That is PL-45's feedback loop closed.
+  - **The scoped read is flat and the whole read is flat on nothing.** 1.1 ms and
+    16.9 KiB from 64 entries to 4,096, against 8.3 ms/183 KiB rising to
+    970 ms/11.9 MiB — 880x the latency and 700x the bytes at the top, for an
+    answer the sealer discards all but 64 entries of.
+  - **The stats block is the entry, once a table is real.** 53.9% of an entry at
+    4 columns, 94.8% at 63 — the width the soak behind PL-45 ran. A stats-free
+    entry is 270 bytes and does not move with width, because nothing else in the
+    record is per column.
+  - **Contention is a throughput loss, not a latency loss.** At 20 offered
+    reads/s against a 1,024 backlog the `GET` route costs 25% of commit
+    throughput *and still misses the offered rate*, achieving 11.9 of 20. The
+    `POST` route meets the full rate at no measurable commit cost.
+  - **Filling the fixture found a second O(backlog) term, on the write path.**
+    Commit rate fell with backlog depth with no reader running at all — the
+    buffer's own maintenance tick (T-317). See `bench/buffer.exs`'s
+    `backlog_drag` section.
   """
 
   import Bench.Support
@@ -60,11 +87,25 @@ defmodule Bench.HotManifest do
   def run do
     schedulers()
 
+    sections = [
+      read_cost: &read_cost/1,
+      entry_width: &entry_width/1,
+      serve_rate: &serve_rate/1,
+      contention: &contention/1
+    ]
+
+    only = System.get_env("BENCH_SECTION")
+    known = Enum.map(sections, fn {name, _section} -> Atom.to_string(name) end)
+
+    if only != nil and only not in known do
+      raise ArgumentError,
+            "BENCH_SECTION=#{only} matches no section; known: #{Enum.join(known, ", ")}"
+    end
+
     with_tmp_dir("hot-manifest", fn dir ->
-      read_cost(dir)
-      entry_width(dir)
-      serve_rate(dir)
-      contention(dir)
+      for {name, section} <- sections, only in [nil, Atom.to_string(name)] do
+        section.(dir)
+      end
     end)
   end
 
@@ -183,29 +224,30 @@ defmodule Bench.HotManifest do
     backlog = env("CONTENDED_BACKLOG", 1_024)
     writers = env("WRITERS", 8)
     readers = env("READERS", 4)
+    read_rate = env("READ_RATE", 20)
     seconds = env("SECONDS", 5)
     rows = env("ROWS", 200)
 
     IO.puts(
       "\n  #{writers} writers of #{rows} rows against a #{backlog}-entry backlog, " <>
-        "#{columns} columns, #{seconds}s\n"
+        "#{columns} columns, #{seconds}s; #{readers} readers offering #{read_rate} reads/s\n"
     )
 
-    IO.puts("  read load        commits/s      rows/s     ack p50     ack p99")
+    IO.puts("  read load        commits/s      rows/s     ack p50     ack p99     reads/s")
 
-    for {label, reader} <- [
+    for {name, reader} <- [
           {"none", nil},
           {"GET whole", :whole},
           {"POST claim", :scoped}
         ] do
-      stack = start_stack(dir, "contend-#{label}", columns)
+      stack = start_stack(dir, "contend-#{name}", columns)
 
       try do
         ids = fill(stack, backlog)
         claim = Enum.take(ids, @claim_size)
         read = reader_fun(stack, reader, claim)
 
-        report_contention(label, writers, readers, seconds, rows, columns, stack, read)
+        report_contention(name, writers, readers, read_rate, seconds, rows, columns, stack, read)
       after
         stop_stack(stack)
       end
@@ -216,13 +258,15 @@ defmodule Bench.HotManifest do
   defp reader_fun(stack, :whole, _claim), do: fn -> whole(stack) end
   defp reader_fun(stack, :scoped, claim), do: fn -> scoped(stack, claim) end
 
-  defp report_contention(label, writers, readers, seconds, rows, columns, stack, read) do
+  defp report_contention(name, writers, readers, read_rate, seconds, rows, columns, stack, read) do
     stop = make_ref()
     parent = self()
+    interval_us = round(1_000_000 / max(read_rate, 1) * readers)
 
     reading =
       if read do
-        for _ <- 1..readers, do: spawn_link(fn -> read_until(parent, stop, read) end)
+        for _ <- 1..readers,
+            do: spawn_link(fn -> read_at_rate(parent, stop, read, interval_us, 0) end)
       else
         []
       end
@@ -231,26 +275,37 @@ defmodule Bench.HotManifest do
       saturate(writers, seconds, fn -> commit(stack, rows, columns) end)
 
     for pid <- reading, do: send(pid, {stop, :halt})
-    for _ <- reading, do: receive(do: ({^stop, :halted} -> :ok))
+    served = Enum.sum(for _ <- reading, do: receive(do: ({^stop, :halted, count} -> count)))
 
-    per_second = acks / (wall_us / 1_000_000)
+    seconds_run = wall_us / 1_000_000
+    per_second = acks / seconds_run
 
     IO.puts(
-      "  #{label(label, 14)}   #{pad(Float.round(per_second, 1), 9)}  " <>
+      "  #{label(name, 14)}   #{pad(Float.round(per_second, 1), 9)}  " <>
         "#{pad(Float.round(per_second * rows, 1), 10)}  " <>
-        "#{pad(ms(percentile(times, 0.50)), 10)}  #{pad(ms(percentile(times, 0.99)), 10)}"
+        "#{pad(ms(percentile(times, 0.50)), 10)}  #{pad(ms(percentile(times, 0.99)), 10)}  " <>
+        "#{pad(Float.round(served / seconds_run, 1), 10)}"
     )
   end
 
-  defp read_until(parent, stop, fun) do
+  # Offered, not saturated: a sealer makes two reads per attempt, so a reader
+  # spinning flat out prices a load nothing generates. A route that cannot meet
+  # the offered rate answers with a lower achieved rate instead of stealing more.
+  defp read_at_rate(parent, stop, fun, interval_us, count) do
     receive do
-      {^stop, :halt} -> send(parent, {stop, :halted})
+      {^stop, :halt} ->
+        send(parent, {stop, :halted, count})
     after
       0 ->
-        fun.()
-        read_until(parent, stop, fun)
+        {us, _result} = :timer.tc(fun)
+        sleep_for(interval_us - us)
+
+        read_at_rate(parent, stop, fun, interval_us, count + 1)
     end
   end
+
+  defp sleep_for(us) when us > 1_000, do: Process.sleep(div(us, 1000))
+  defp sleep_for(_us), do: :ok
 
   defp saturate(workers, seconds, fun) do
     deadline = System.monotonic_time(:microsecond) + seconds * 1_000_000

@@ -48,7 +48,6 @@ defmodule Smolquery.BufferService.Drain do
   require Logger
 
   alias Smolquery.BufferService.HotManifest
-  alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Cluster.PgGroup
@@ -196,9 +195,7 @@ defmodule Smolquery.BufferService.Drain do
 
   defp unretired(runtime, tables) do
     Enum.filter(tables, fn table_ref ->
-      runtime.manifest
-      |> HotManifest.entries(table_ref)
-      |> Enum.any?(&(not Entry.sealed?(&1)))
+      HotManifest.pending(runtime.manifest, table_ref, 1) != []
     end)
   end
 end
