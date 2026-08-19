@@ -68,6 +68,15 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     assert size == byte_size("hello")
   end
 
+  test "put/3 never overwrites a key already committed (T-308)", %{store: store} do
+    key = unique_key()
+    {:ok, first} = Store.put(store, key, &File.write!(&1, "original"))
+
+    assert {:ok, retry} = Store.put(store, key, &File.write!(&1, "truncated-retry"))
+    assert retry.location == first.location
+    assert {:ok, %{status: 200, body: "original"}} = get_object(store, key)
+  end
+
   test "location/2 round-trips through a real read", %{store: store} do
     key = unique_key()
     {:ok, _put} = Store.put(store, key, &File.write!(&1, "abc123"))

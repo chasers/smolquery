@@ -95,6 +95,27 @@ defmodule Smolquery.Segments.Store.LocalTest do
     end
   end
 
+  describe "put/3 write-once guarantee" do
+    test "a retry to a committed key never overwrites it", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert {:ok, first} = Store.put(store, "one.parquet", write("original"))
+      assert {:ok, retry} = Store.put(store, "one.parquet", write("truncated-retry"))
+
+      assert retry.location == first.location
+      assert File.read!(first.location) == "original"
+    end
+
+    test "a retry to a committed key leaves nothing staged behind", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+      {:ok, _first} = Store.put(store, "one.parquet", write("original"))
+
+      {:ok, _retry} = Store.put(store, "one.parquet", write("truncated-retry"))
+
+      assert File.ls!(Path.join(dir, ".tmp")) == []
+    end
+  end
+
   describe "key validation" do
     test "every operation refuses a key that could climb out of the store", %{tmp_dir: dir} do
       store = Local.new(dir: dir)

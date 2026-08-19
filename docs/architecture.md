@@ -143,6 +143,13 @@ Properties worth knowing:
   single-copy exposure to a lost disk. `Store.shared?/1` says whether a
   segment's location means anything from another node. That answer decides
   whether the segment needs an HTTP serving path.
+- **A committed key can never be blind-overwritten.** `Store.put/3` writes are
+  conditional: `Store.S3` sends `If-None-Match: *`, `Store.Local` claims the
+  key with an `O_EXCL`-style exclusive create before its rename. A retry that
+  targets a key an earlier, successful attempt already committed gets that
+  rejected (a `412` on S3, `:eexist` locally) and treats it as a no-op instead
+  of re-uploading — so a retry that itself dies mid-write can never clobber a
+  fully-committed segment with truncated bytes (T-308).
 - **Registration is idempotent.** `register_segments/3` diffs against the paths
   the catalog already holds. DuckLake itself would register a path twice and
   double-count its rows. A sealer that crashed mid-handoff can retry safely.
@@ -496,7 +503,11 @@ attempt then skips to retirement. A crash therefore costs a `seal_retry_ms`
 delay and nothing more, at every point:
 
 - **before the commit** — nothing is registered. The next attempt merges
-  again. It overwrites its own half-written output at the same key.
+  again, writing to the same output key. If the earlier attempt's upload
+  never landed, the retry's write lands normally. If it did land, the
+  store's conditional write rejects the retry's re-upload instead of
+  overwriting it — a truncated retry can never clobber a fully-committed
+  segment (T-308).
 - **after the commit, before retirement** — the rows are in the sealed tier.
   The micro-segments are still unretired. This is exactly the window the
   catalog-membership rule is built for: a query at any snapshot counts the
