@@ -56,7 +56,21 @@ defmodule Smolquery.QueryService.ClientTest do
       {:ok, job, nil} = Client.query(name, "SELECT * FROM read_csv('/etc/passwd')")
 
       assert job.state == :error
-      assert inspect(job.error) =~ "Permission Error"
+      assert job.error == {:unsupported_table_function, "read_csv"}
+    end
+
+    test "lockdown denies the readers that engine settings never covered (T-321)" do
+      name = start_service()
+
+      for {sql, function} <- [
+            {"SELECT path FROM duckdb_databases()", "duckdb_databases"},
+            {"SELECT * FROM postgres_scan('host=10.0.0.1', 'public', 't')", "postgres_scan"}
+          ] do
+        {:ok, job, nil} = Client.query(name, sql)
+
+        assert job.state == :error
+        assert job.error == {:unsupported_table_function, function}
+      end
     end
 
     test "lockdown: false restores the trusted posture" do
