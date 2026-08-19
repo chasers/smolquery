@@ -87,6 +87,35 @@ defmodule Smolquery.Federation do
     end
   end
 
+  @doc """
+  Redacts an `ATTACH`'s own connection string out of the error it produced.
+
+  The runner holds the statement that failed but not the connection it came
+  from, so the credential is recovered from the statement itself: the string
+  literal an `attach_statement/1` puts between the first pair of quotes.
+  Anything else passes through untouched, so this is safe to run over every
+  failed statement rather than only the ones a caller believes are attaches.
+  """
+  @spec redact_statement(term(), String.t()) :: term()
+  def redact_statement(reason, "ATTACH '" <> rest) do
+    case literal(rest, "") do
+      {:ok, string} -> redact(reason, string)
+      :error -> reason
+    end
+  end
+
+  def redact_statement(reason, _statement), do: reason
+
+  defp literal("\\" <> <<escaped::binary-size(1), rest::binary>>, acc),
+    do: literal(rest, acc <> escaped)
+
+  defp literal("''" <> rest, acc), do: literal(rest, acc <> "'")
+  defp literal("'" <> _rest, acc), do: {:ok, acc}
+
+  defp literal(<<char::binary-size(1), rest::binary>>, acc), do: literal(rest, acc <> char)
+
+  defp literal("", _acc), do: :error
+
   defp redact(reason, string) do
     reason
     |> inspect(limit: :infinity, printable_limit: :infinity)

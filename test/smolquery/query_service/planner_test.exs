@@ -1,6 +1,7 @@
 defmodule Smolquery.QueryService.PlannerTest do
   use ExUnit.Case, async: false
 
+  alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Planner
@@ -130,6 +131,122 @@ defmodule Smolquery.QueryService.PlannerTest do
     test "a dataset name that is not an identifier is refused" do
       assert Planner.table_refs(@conn, ~s|SELECT * FROM "bad ds"."t"|) ==
                {:error, {:invalid_identifier, "bad ds"}}
+    end
+  end
+
+  describe "federated references (T-324)" do
+    setup do
+      previous = Application.get_env(:smolquery, :credential_key)
+
+      Application.put_env(
+        :smolquery,
+        :credential_key,
+        Base.encode64(:crypto.strong_rand_bytes(32))
+      )
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:smolquery, :credential_key, previous)
+        else
+          Application.delete_env(:smolquery, :credential_key)
+        end
+      end)
+
+      :ok
+    end
+
+    defp federated_runtime(names) do
+      connections =
+        Map.new(names, fn name ->
+          {:ok, connection} =
+            Connection.new(%{
+              "name" => name,
+              "host" => "db.internal",
+              "database" => "app",
+              "username" => "reader",
+              "password" => "hunter2"
+            })
+
+          {name, connection}
+        end)
+
+      runtime([], answers: [connections: connections])
+    end
+
+    test "a reference to a registered connection attaches it" do
+      runtime = federated_runtime(["warehouse"])
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM warehouse.public.users")
+
+      assert plan.federated
+      assert [attach] = plan.statements
+      assert attach =~ ~s|AS "warehouse"|
+      assert attach =~ "READ_ONLY"
+      assert plan.tables == []
+    end
+
+    test "the attach carries the opened password, and the plan says it federates" do
+      runtime = federated_runtime(["warehouse"])
+
+      {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM warehouse.public.users")
+
+      assert hd(plan.statements) =~ "password=hunter2"
+    end
+
+    test "an unregistered catalog is still refused, naming the reference" do
+      runtime = federated_runtime(["warehouse"])
+
+      assert Planner.plan(runtime, @conn, "SELECT * FROM lake.public.users") ==
+               {:error, {:catalog_qualified_reference, "lake.users"}}
+    end
+
+    test "a catalog that stores no connections refuses every catalog-qualified name" do
+      runtime = runtime([])
+
+      assert Planner.plan(runtime, @conn, "SELECT * FROM warehouse.public.users") ==
+               {:error, {:catalog_qualified_reference, "warehouse.users"}}
+    end
+
+    test "each connection attaches once, however many tables it names" do
+      runtime = federated_runtime(["warehouse"])
+
+      sql = """
+      SELECT * FROM warehouse.public.users u
+        JOIN warehouse.public.orders o ON o.user_id = u.id
+      """
+
+      {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert [_one] = plan.statements
+    end
+
+    test "two connections both attach" do
+      runtime = federated_runtime(["warehouse", "billing"])
+
+      sql = """
+      SELECT * FROM warehouse.public.users u
+        JOIN billing.public.invoices i ON i.user_id = u.id
+      """
+
+      {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert [_first, _second] = plan.statements
+    end
+
+    test "a plan touching no connection does not federate" do
+      runtime = runtime([])
+
+      {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      refute plan.federated
+    end
+
+    test "a name that is not an identifier is refused before any catalog read" do
+      runtime = federated_runtime([])
+
+      assert {:error, {:catalog_qualified_reference, _reference}} =
+               Planner.plan(runtime, @conn, ~s|SELECT * FROM "bad cat"."public"."users"|)
     end
   end
 

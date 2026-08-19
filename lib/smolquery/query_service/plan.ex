@@ -18,6 +18,11 @@ defmodule Smolquery.QueryService.Plan do
   statement's text as DuckDB's parser re-emits it — no comments, no
   trailing semicolon — which is what makes the runner's result-budget wrap
   safe to parenthesize.
+
+  `federated` says whether `statements` opens with `ATTACH`es for registered
+  Postgres connections (T-324). The runner reads it to decide whether the job
+  engine needs DuckDB's `postgres` extension — loading that extension is not
+  free, and on a SQLite-metadata deployment nothing else would pull it in.
   """
 
   alias Smolquery.BufferService.HotClient
@@ -25,7 +30,16 @@ defmodule Smolquery.QueryService.Plan do
   alias Smolquery.QueryService.Statistics
 
   @enforce_keys [:sql, :snapshot]
-  defstruct [:sql, :canonical_sql, :snapshot, :statistics, tables: [], statements: [], hot: %{}]
+  defstruct [
+    :sql,
+    :canonical_sql,
+    :snapshot,
+    :statistics,
+    tables: [],
+    statements: [],
+    hot: %{},
+    federated: false
+  ]
 
   @type t :: %__MODULE__{
           sql: String.t(),
@@ -34,6 +48,7 @@ defmodule Smolquery.QueryService.Plan do
           tables: [Catalog.table_ref()],
           statements: [String.t()],
           hot: %{Catalog.table_ref() => [HotClient.entry()]},
-          statistics: Statistics.t() | nil
+          statistics: Statistics.t() | nil,
+          federated: boolean()
         }
 end

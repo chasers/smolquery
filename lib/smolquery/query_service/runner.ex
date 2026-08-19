@@ -50,6 +50,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
+  alias Smolquery.Federation
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
@@ -259,6 +260,7 @@ defmodule Smolquery.QueryService.Runner do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
+         :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan))
@@ -324,6 +326,31 @@ defmodule Smolquery.QueryService.Runner do
 
   defp store_prefixes(_store), do: []
 
+  @doc """
+  Loads DuckDB's `postgres` extension into the job engine when the plan
+  federates, and does nothing otherwise.
+
+  It runs after planning, not in the engine's bootstrap extension list,
+  because only a plan knows whether this query touches a registered
+  connection. A deployment whose catalog metadata is Postgres already has the
+  extension loaded by its own `ATTACH`; one on SQLite does not, and paying for
+  the load on every query to serve the few that federate is the cost this
+  avoids.
+
+  It also runs before `lockdown/2`. `LOAD` is external access, so an engine
+  that has already locked down cannot install or load anything.
+  """
+  @spec federated_extension(GenServer.server(), Smolquery.QueryService.Plan.t()) ::
+          :ok | {:error, term()}
+  def federated_extension(_connection, %{federated: false}), do: :ok
+
+  def federated_extension(connection, %{federated: true}) do
+    with {:ok, _installed} <- Connection.query(connection, "INSTALL postgres", [], :infinity),
+         {:ok, _loaded} <- Connection.query(connection, "LOAD postgres", [], :infinity) do
+      :ok
+    end
+  end
+
   defp lockdown(%Runtime{lockdown: false}, _plan), do: []
 
   defp lockdown(%Runtime{} = runtime, plan) do
@@ -361,7 +388,11 @@ defmodule Smolquery.QueryService.Runner do
   unreachable, not the query being wrong: the API answers it 503 with the
   same retry contract as a planning-time absence (T-94), and the retry
   plans afresh against the survivors. Every other statement failure passes
-  through untouched.
+  through `Smolquery.Federation.redact_statement/2`, which strips a federated
+  `ATTACH`'s connection string — password and all — out of the reason DuckDB
+  quotes it back in. A statement that is not an attach is untouched, so the
+  scrub is safe to run over every failure rather than only the ones a caller
+  believes carry a credential.
   """
   @spec classify(Smolquery.QueryService.Plan.t(), String.t(), term()) :: term()
   def classify(plan, statement, reason) do
@@ -372,7 +403,11 @@ defmodule Smolquery.QueryService.Runner do
         |> List.flatten()
         |> Enum.any?(fn entry -> String.contains?(statement, entry["url"]) end)
 
-    if hot_attach?, do: {:hot_tier_unavailable, reason}, else: reason
+    if hot_attach? do
+      {:hot_tier_unavailable, reason}
+    else
+      Federation.redact_statement(reason, statement)
+    end
   end
 
   defp halt(%{task: nil} = state), do: state

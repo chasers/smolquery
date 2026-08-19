@@ -809,6 +809,16 @@ Properties worth knowing:
   registration.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.
+- **A `catalog.schema.table` reference federates** (T-324). A catalog name
+  matching a connection registered through `/v1/connections` attaches that
+  Postgres into the job engine, read-only, and the user's SQL reaches it
+  directly. A name matching nothing keeps the error it has always been, so a
+  typo stays a typo. Federated tables get no view and no snapshot: the remote
+  database moves on its own, so a query joining a smolquery table against a
+  federated one reads the local side at a pinned snapshot and the remote side
+  as of whenever DuckDB scans it. The catalog is asked about connections only
+  when a catalog-qualified reference actually appears, so a query that never
+  federates pays nothing for the feature.
 - **User SQL is locked down, in two places.** The planner allowlists the table
   functions a FROM clause may name — pure generators (`range`,
   `generate_series`, `repeat`, `unnest`) and nothing that reads a file, a

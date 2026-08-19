@@ -96,6 +96,11 @@ without them refuses to boot.
 - **Two tiers, one query plan.** DuckDB unions a pinned catalog snapshot with
   the hot tier's unsealed micro-segments, and a row counts exactly once while
   sealing and compaction run underneath it.
+- **Federated Postgres joins.** Register a database once
+  (`POST /v1/connections`) and query it by name — `SELECT ... FROM
+  analytics.events e JOIN warehouse.public.users u ON u.id = e.id`. The
+  password is sealed with `SMOLQUERY_CREDENTIAL_KEY` before it reaches the
+  catalog and never comes back out of the API. The attachment is read-only.
 - **Exactly-once inserts.** A retried batch carrying the same `insertId` lands
   once, through a lost ack, a transport timeout, or a crash before reply.
 - **Parquet is the storage of record.** Write-once segments plus a DuckLake
