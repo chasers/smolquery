@@ -61,6 +61,22 @@ defmodule Smolquery.StorageService.SealerTest do
   end
 
   @tag :tmp_dir
+  test "runs two distinct claims of one table concurrently (T-339)", %{name: name} do
+    Sealer.seal_ready(name, @events, %{ids: ["a"], keys: ["analytics/events/one.parquet"]})
+    assert_receive {:sealing, @events, %{ids: ["a"]}, first}
+
+    Sealer.seal_ready(name, @events, %{ids: ["b"], keys: ["analytics/events/two.parquet"]})
+    assert_receive {:sealing, @events, %{ids: ["b"]}, second}
+
+    assert Sealer.sealing(name) == [@events, @events]
+
+    HandoffProbe.release(first)
+    HandoffProbe.release(second)
+
+    assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+  end
+
+  @tag :tmp_dir
   test "coalesces a second signal for a table already sealing", %{name: name} do
     Sealer.seal_ready(name, @events, claim(["a"]))
     assert_receive {:sealing, @events, %{ids: ["a"]}, attempt}

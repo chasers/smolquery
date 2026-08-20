@@ -206,6 +206,63 @@ defmodule Smolquery.BufferService.SealingTest do
       assert remainder.ids == Enum.drop(backlog, 16)
     end
 
+    test "max_live_claims freezes concurrent claims and tops back up (T-339)", context do
+      %{name: name} =
+        start_buffer_service(context,
+          seal_max_files: 1,
+          max_live_claims: 3,
+          seal_retry_ms: 60_000
+        )
+
+      acks =
+        for n <- 1..4 do
+          {:ok, ack} = Client.write_batch(name, @table, batch(n..n))
+          ack.segment_id
+        end
+
+      assert_receive {:seal_ready, @table, one}, 500
+      assert_receive {:seal_ready, @table, two}, 500
+      assert_receive {:seal_ready, @table, three}, 500
+      refute_receive {:seal_ready, @table, _fourth}, 100
+
+      claims = [one, two, three]
+      assert claims |> Enum.map(& &1.keys) |> Enum.uniq() |> length() == 3
+      assert claims |> Enum.flat_map(& &1.ids) |> Enum.sort() == Enum.sort(Enum.take(acks, 3))
+
+      :ok = Client.retire(name, @table, two.ids, 2)
+      :ok = TableBuffer.maintain(buffer(name))
+
+      assert_receive {:seal_ready, @table, four}, 500
+      assert four.ids == [Enum.at(acks, 3)]
+      refute four.keys in Enum.map(claims, & &1.keys)
+    end
+
+    test "out-of-order retire drains every claim (T-339)", context do
+      %{name: name} =
+        start_buffer_service(context,
+          seal_max_files: 1,
+          max_live_claims: 3,
+          seal_retry_ms: 60_000
+        )
+
+      for n <- 1..3 do
+        {:ok, _ack} = Client.write_batch(name, @table, batch(n..n))
+      end
+
+      assert_receive {:seal_ready, @table, one}, 500
+      assert_receive {:seal_ready, @table, two}, 500
+      assert_receive {:seal_ready, @table, three}, 500
+
+      for {claim, snapshot} <- [{three, 3}, {one, 1}, {two, 2}] do
+        assert :ok = Client.retire(name, @table, claim.ids, snapshot)
+      end
+
+      :ok = TableBuffer.maintain(buffer(name))
+      flush_messages()
+
+      refute_receive {:seal_ready, _table, _claim}, 100
+    end
+
     test "claim_valve_factor sizes the count valve (T-335)", context do
       %{name: name} =
         start_buffer_service(context,

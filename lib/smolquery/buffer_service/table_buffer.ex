@@ -686,22 +686,34 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp signal_when_ready(state) do
     if RingEpoch.owner?(state.runtime.name, state.table_ref) do
-      case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-        {:ok, claim} -> resignal_or_resize(state, claim, &claim_when_sealable/1)
-        :error -> claim_when_sealable(state)
-      end
+      state
+      |> service_live_claims(due?(state))
+      |> claim_up_to_max()
     else
       state
     end
   end
 
-  defp resignal_or_resize(state, claim, reclaim) do
+  # Re-signals every live claim in one due-gated batch (T-339): `signaled_at`
+  # is per ref, so the gate is evaluated once before the fold — stamping it
+  # inside the loop would let the first claim's signal starve the rest of
+  # theirs forever. An oversized claim releases instead of signalling; its ids
+  # return to pending and the top-up re-freezes them under the current valves.
+  defp service_live_claims(state, due?) do
+    claims = HotManifest.live_claims(state.runtime.manifest, state.table_ref)
+
+    state = Enum.reduce(claims, state, &service_claim(&2, &1, due?))
+
+    if due? and claims != [], do: %{state | signaled_at: now()}, else: state
+  end
+
+  defp service_claim(state, claim, due?) do
     {state, oversized?} = claim_oversized?(state, claim)
 
     cond do
-      not oversized? -> resignal(state, claim)
-      not due?(state) -> state
-      true -> resize(state, claim, reclaim)
+      not oversized? -> if due?, do: push_signal(state, claim), else: state
+      not due? -> state
+      true -> resize(state, claim, & &1)
     end
   end
 
@@ -714,13 +726,21 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp claim_oversized?(state, %{ids: []}), do: {state, false}
 
-  defp claim_oversized?(%__MODULE__{oversized: %{ids: ids, answer: answer}} = state, %{ids: ids}),
-    do: {state, answer}
+  # Memoized per claim, keyed by its frozen ids: the answer is a pure function
+  # of the ids and the boot-static valves, so an entry never goes stale — the
+  # map is pruned in `service_live_claims/2`'s fold only by claims retiring.
+  defp claim_oversized?(%__MODULE__{oversized: memo} = state, claim) do
+    memo = memo || %{}
 
-  defp claim_oversized?(state, claim) do
-    answer = derive_oversized(state, claim)
+    case Map.fetch(memo, claim.ids) do
+      {:ok, answer} ->
+        {state, answer}
 
-    {%{state | oversized: %{ids: claim.ids, answer: answer}}, answer}
+      :error ->
+        answer = derive_oversized(state, claim)
+
+        {%{state | oversized: Map.put(memo, claim.ids, answer)}, answer}
+    end
   end
 
   defp derive_oversized(state, claim) do
@@ -800,17 +820,35 @@ defmodule Smolquery.BufferService.TableBuffer do
     )
   end
 
-  defp resignal(state, claim) do
-    if due?(state), do: signal(state, claim), else: state
+  # Freezes additional claims from the unclaimed tail until `max_live_claims`
+  # are outstanding or the tail stops being sealable (T-339). Each new claim
+  # signals immediately, exactly as a first claim always has. The unclaimed
+  # tail crossing the seal thresholds is what gates every extra claim, so a
+  # quiet table still forms one claim at a time and `max_live_claims: 1` is
+  # today's behavior unchanged.
+  defp claim_up_to_max(state) do
+    live = length(HotManifest.live_claims(state.runtime.manifest, state.table_ref))
+
+    claim_up_to_max(state, live)
   end
 
-  defp claim_when_sealable(state) do
+  defp claim_up_to_max(state, live) when live >= state.runtime.max_live_claims, do: state
+
+  defp claim_up_to_max(state, live) do
     unsealed = claimable(state)
 
     cond do
-      unsealed == [] -> %{state | signaled_at: nil}
-      not sealable?(state, unsealed) -> state
-      true -> claim_and_signal(state, unsealed)
+      unsealed == [] ->
+        if live == 0, do: %{state | signaled_at: nil}, else: state
+
+      not sealable?(state, unsealed) ->
+        state
+
+      true ->
+        case try_claim_and_signal(state, unsealed) do
+          {:ok, state} -> claim_up_to_max(state, live + 1)
+          {:error, state} -> state
+        end
     end
   end
 
@@ -828,10 +866,10 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp force_signal(state) do
     if RingEpoch.owner?(state.runtime.name, state.table_ref) do
-      case HotManifest.live_claim(state.runtime.manifest, state.table_ref) do
-        {:ok, claim} -> force_signal_or_resize(state, claim)
-        :error -> force_claim(state)
-      end
+      state.runtime.manifest
+      |> HotManifest.live_claims(state.table_ref)
+      |> Enum.reduce(state, &force_signal_or_resize(&2, &1))
+      |> force_claim()
     else
       state
     end
@@ -839,19 +877,28 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp force_signal_or_resize(state, claim) do
     case claim_oversized?(state, claim) do
-      {state, true} -> resize(state, claim, &force_claim/1)
+      {state, true} -> resize(state, claim, & &1)
       {state, false} -> signal(state, claim)
     end
   end
 
+  # The drain claims everything unsealed, in valve-sized claims, however many
+  # that takes — a drain's point-in-time force-seal must leave nothing
+  # unclaimed, so `max_live_claims` does not apply here.
   defp force_claim(state) do
     case claimable(state) do
-      [] -> state
-      unsealed -> claim_and_signal(state, unsealed)
+      [] ->
+        state
+
+      unsealed ->
+        case try_claim_and_signal(state, unsealed) do
+          {:ok, state} -> force_claim(state)
+          {:error, state} -> state
+        end
     end
   end
 
-  defp claim_and_signal(state, unsealed) do
+  defp try_claim_and_signal(state, unsealed) do
     ids =
       unsealed
       |> claim_batch(claim_byte_valve(state), claim_count_valve(state))
@@ -864,12 +911,12 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     case result do
       {:ok, claim} ->
-        signal(state, claim)
+        {:ok, signal(state, claim)}
 
       {:error, reason} ->
         Logger.warning("claiming #{inspect(state.table_ref)} failed: #{inspect(reason)}")
 
-        state
+        {:error, state}
     end
   end
 
@@ -930,9 +977,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp due?(state), do: now() - state.signaled_at >= state.runtime.seal_retry_ms
 
   defp signal(state, claim) do
+    state
+    |> push_signal(claim)
+    |> Map.put(:signaled_at, now())
+  end
+
+  defp push_signal(state, claim) do
     SealConsumer.seal_ready(state.runtime.seal_consumer, state.table_ref, claim)
 
-    %{state | signaled_at: now()}
+    state
   end
 
   defp schedule_maintenance(state) do

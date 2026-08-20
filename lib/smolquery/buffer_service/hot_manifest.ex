@@ -443,7 +443,11 @@ defmodule Smolquery.BufferService.HotManifest do
   def claimable(%__MODULE__{table: table}, table_ref, limit)
       when is_integer(limit) and limit > 0 do
     spec = [
-      {{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}],
+      {{{table_ref, :_}, :"$1"},
+       [
+         {:andalso, {:==, {:map_get, :sealed_at, :"$1"}, nil},
+          {:==, {:map_get, :claim_keys, :"$1"}, {:const, []}}}
+       ],
        [
          {{{:map_get, :id, :"$1"}, {:map_get, :byte_size, :"$1"}, {:map_get, :added_at, :"$1"}}}
        ]}
@@ -516,23 +520,25 @@ defmodule Smolquery.BufferService.HotManifest do
   @spec claim(t(), Store.table_ref(), [String.t()], [String.t()], log() | nil) ::
           {:ok, claim()} | {:error, term()}
   def claim(%__MODULE__{} = manifest, table_ref, ids, keys, log \\ nil) do
-    case live_claim(manifest, table_ref) do
+    case find_identical_claim(manifest, table_ref, ids, keys) do
       {:ok, live} ->
-        absorb_identical_claim(live, ids, keys)
+        {:ok, live}
 
       :error ->
-        with {:ok, entries} <- freezable(manifest, table_ref, ids) do
+        with {:ok, entries} <- freezable(manifest, table_ref, ids, keys) do
           freeze(manifest, table_ref, entries, keys, log)
         end
     end
   end
 
-  defp absorb_identical_claim(live, ids, keys) do
-    if live.keys == keys and Enum.sort(live.ids) == ids |> Enum.uniq() |> Enum.sort() do
-      {:ok, live}
-    else
-      {:error, :claim_outstanding}
-    end
+  defp find_identical_claim(manifest, table_ref, ids, keys) do
+    sorted = ids |> Enum.uniq() |> Enum.sort()
+
+    manifest
+    |> live_claims(table_ref)
+    |> Enum.find_value(:error, fn live ->
+      if live.keys == keys and Enum.sort(live.ids) == sorted, do: {:ok, live}
+    end)
   end
 
   @doc """
@@ -554,41 +560,62 @@ defmodule Smolquery.BufferService.HotManifest do
   """
   @spec release(t(), Store.table_ref(), [String.t()], log() | nil) :: :ok | {:error, term()}
   def release(%__MODULE__{} = manifest, table_ref, ids, log \\ nil) do
-    case live_claim(manifest, table_ref) do
-      :error -> :ok
-      {:ok, live} -> release_live(manifest, table_ref, live, ids, log)
+    case live_claims(manifest, table_ref) do
+      [] -> :ok
+      live -> release_matching(manifest, table_ref, live, ids, log)
     end
   end
 
-  defp release_live(manifest, table_ref, live, ids, log) do
-    if Enum.sort(live.ids) == ids |> Enum.uniq() |> Enum.sort() do
-      record = %{"op" => "release", "ids" => live.ids}
+  defp release_matching(manifest, table_ref, live, ids, log) do
+    sorted = ids |> Enum.uniq() |> Enum.sort()
 
-      with :ok <- append(manifest, table_ref, record, log) do
-        live.ids
-        |> Enum.flat_map(&lookup(manifest, table_ref, &1))
-        |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
+    case Enum.find(live, &(Enum.sort(&1.ids) == sorted)) do
+      nil ->
+        {:error, {:claim_mismatch, %{live_ids: live |> Enum.flat_map(& &1.ids) |> Enum.sort()}}}
 
-        refresh_claim(manifest, table_ref)
-      end
-    else
-      {:error, {:claim_mismatch, %{live_ids: live.ids}}}
+      claim ->
+        record = %{"op" => "release", "ids" => claim.ids}
+
+        with :ok <- append(manifest, table_ref, record, log) do
+          claim.ids
+          |> Enum.flat_map(&lookup(manifest, table_ref, &1))
+          |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
+
+          refresh_claim(manifest, table_ref)
+        end
     end
   end
 
   @doc """
-  The table's outstanding claim, if a sealer still owes one.
+  The table's oldest outstanding claim, if a sealer still owes one.
 
-  A claim is live until every entry in it is sealed — which is what limits a table
-  to one at a time, and what makes the signal to re-send after a crash a lookup
-  rather than remembered state.
+  A claim is live until every entry in it is sealed. With `max_live_claims`
+  above one there can be several at once (T-339); this returns the oldest by
+  claim key so single-claim callers keep an honest answer, and
+  `live_claims/2` returns them all.
   """
   @spec live_claim(t(), Store.table_ref()) :: {:ok, claim()} | :error
-  def live_claim(%__MODULE__{table: table}, table_ref) do
-    case :ets.lookup(claims(table), table_ref) do
-      [{_ref, claim}] -> {:ok, claim}
+  def live_claim(%__MODULE__{} = manifest, table_ref) do
+    case live_claims(manifest, table_ref) do
       [] -> :error
+      [oldest | _rest] -> {:ok, oldest}
     end
+  end
+
+  @doc """
+  Every live claim of the table, oldest first by claim key.
+
+  The read is the claims cache, not a scan: one row per live claim, keyed
+  `{table_ref, first_key}`, rebuilt in full on every claim-bearing mutation
+  — the same cache-a-derivation rule `live_claim/2` has always followed, so
+  the cost is bounded by the live-claim count, never the manifest.
+  """
+  @spec live_claims(t(), Store.table_ref()) :: [claim()]
+  def live_claims(%__MODULE__{table: table}, table_ref) do
+    claims(table)
+    |> :ets.select([{{{table_ref, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
   end
 
   @doc """
@@ -776,18 +803,42 @@ defmodule Smolquery.BufferService.HotManifest do
     not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
   end
 
-  defp freezable(manifest, table_ref, ids) do
+  defp freezable(manifest, table_ref, ids, keys) do
     requested = Enum.uniq(ids)
 
     case unsealed(manifest, table_ref, requested) do
       [] ->
         {:error, :nothing_to_claim}
 
-      entries when length(entries) == length(requested) ->
-        {:ok, entries}
-
       entries ->
-        {:error, {:partial_claim, divergence(manifest, table_ref, requested, entries)}}
+        freezable_entries(manifest, table_ref, requested, entries, keys)
+    end
+  end
+
+  # An entry can join the freeze if no claim holds it, or if this exact claim
+  # already does — a replica replaying a claim whose first apply crashed
+  # partway must complete it, not refuse it. An entry held by a *different*
+  # live claim is a conflict the divergence names (T-339): freezing it again
+  # would move a frozen input set, the one thing a claim promises never
+  # happens.
+  defp freezable_entries(manifest, table_ref, requested, entries, keys) do
+    {free, conflicting} = Enum.split_with(entries, &(&1.claim_keys in [[], keys]))
+
+    cond do
+      conflicting != [] ->
+        conflicting_ids = Enum.map(conflicting, & &1.id)
+
+        {:error,
+         {:partial_claim,
+          manifest
+          |> divergence(table_ref, requested -- conflicting_ids, free)
+          |> Map.put(:claimed, conflicting_ids)}}
+
+      length(free) == length(requested) ->
+        {:ok, free}
+
+      true ->
+        {:error, {:partial_claim, divergence(manifest, table_ref, requested, free)}}
     end
   end
 
@@ -954,15 +1005,15 @@ defmodule Smolquery.BufferService.HotManifest do
   defp claim_bearing?(_other), do: false
 
   defp refresh_claim(%__MODULE__{table: table} = manifest, table_ref) do
-    case derive_claim(manifest, table_ref) do
-      {:ok, claim} -> :ets.insert(claims(table), {table_ref, claim})
-      :error -> :ets.delete(claims(table), table_ref)
-    end
+    derived = derive_claims(manifest, table_ref)
+
+    :ets.match_delete(claims(table), {{table_ref, :_}, :_})
+    Enum.each(derived, &:ets.insert(claims(table), {{table_ref, hd(&1.keys)}, &1}))
 
     :ok
   end
 
-  defp derive_claim(%__MODULE__{table: table}, table_ref) do
+  defp derive_claims(%__MODULE__{table: table}, table_ref) do
     spec = [
       {{{table_ref, :_}, :"$1"},
        [
@@ -971,13 +1022,10 @@ defmodule Smolquery.BufferService.HotManifest do
        ], [{{{:map_get, :id, :"$1"}, {:map_get, :claim_keys, :"$1"}}}]}
     ]
 
-    case :ets.select(table, spec) do
-      [] ->
-        :error
-
-      [{_id, keys} | _rest] = claimed ->
-        {:ok, %{ids: Enum.map(claimed, &elem(&1, 0)), keys: keys}}
-    end
+    table
+    |> :ets.select(spec)
+    |> Enum.group_by(&elem(&1, 1), &elem(&1, 0))
+    |> Enum.map(fn {keys, ids} -> %{ids: ids, keys: keys} end)
   end
 
   defp measured(op, fun) do

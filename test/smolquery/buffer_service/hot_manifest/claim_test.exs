@@ -60,7 +60,7 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
              |> Enum.all?(&(&1.claim_keys == @keys))
     end
 
-    test "refuses a second claim while one is live, so a claim cannot be grown", %{
+    test "refuses a claim that overlaps a live one, naming the held ids (T-339)", %{
       manifest: manifest
     } do
       first = add(manifest, @table)
@@ -70,13 +70,28 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       grown = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SW.parquet"]
 
       assert HotManifest.claim(manifest, @table, [first.id, second.id], grown) ==
-               {:error, :claim_outstanding}
+               {:error, {:partial_claim, %{missing: [], sealed: [], claimed: [first.id]}}}
 
       assert {:ok, first_entry} = HotManifest.entry(manifest, @table, first.id)
       assert first_entry.claim_keys == @keys
 
       assert {:ok, second_entry} = HotManifest.entry(manifest, @table, second.id)
       assert second_entry.claim_keys == []
+    end
+
+    test "freezes a second, disjoint claim while one is live (T-339)", %{manifest: manifest} do
+      first = add(manifest, @table)
+      {:ok, one} = HotManifest.claim(manifest, @table, [first.id], @keys)
+
+      second = add(manifest, @table)
+      other = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SW.parquet"]
+
+      assert {:ok, two} = HotManifest.claim(manifest, @table, [second.id], other)
+
+      assert HotManifest.live_claims(manifest, @table) |> Enum.sort_by(& &1.keys) ==
+               Enum.sort_by([one, two], & &1.keys)
+
+      assert HotManifest.live_claim(manifest, @table) in [{:ok, one}, {:ok, two}]
     end
 
     test "absorbs an identical re-claim of the live claim", %{manifest: manifest} do
@@ -93,7 +108,10 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       other = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
 
       assert HotManifest.claim(manifest, @table, [entry.id], other) ==
-               {:error, :claim_outstanding}
+               {:error, {:partial_claim, %{missing: [], sealed: [], claimed: [entry.id]}}}
+
+      assert {:ok, held} = HotManifest.entry(manifest, @table, entry.id)
+      assert held.claim_keys == @keys
     end
 
     test "refuses a set it can only partially freeze, naming the divergence", %{
