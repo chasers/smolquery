@@ -158,7 +158,7 @@ defmodule Smolquery.TelemetryTest do
       %{result: :ok}
     )
 
-    assert value("smolquery_buffer_commit_bytes_total") == before_bytes + 1_000
+    assert value("smolquery_buffer_commit_bytes_total") >= before_bytes + 1_000
   end
 
   test "buckets a commit's row count cumulatively, so the mean cannot hide a split" do
@@ -174,12 +174,16 @@ defmodule Smolquery.TelemetryTest do
     end
 
     # 800 lands in every bucket; 10,000 only from 16000 up. A mean of 5,400
-    # would have looked identical to two commits of 5,400.
-    assert delta(before, "1000") == 1
-    assert delta(before, "4000") == 1
-    assert delta(before, "16000") == 2
-    assert delta(before, "64000") == 2
-    assert delta(before, "+Inf") == 2
+    # would have looked identical to two commits of 5,400. The assertions are
+    # differences between buckets, not absolute deltas: the counter table is
+    # node-wide and the suite is async, so concurrent buffer tests land their
+    # own small commits in every bucket — which cancels in a difference and
+    # broke the exact form on CI.
+    assert delta(before, "16000") - delta(before, "4000") == 1
+    assert delta(before, "4000") - delta(before, "1000") == 0
+    assert delta(before, "+Inf") - delta(before, "16000") == 0
+    assert delta(before, "1000") >= 1
+    assert delta(before, "+Inf") >= 2
   end
 
   test "a failed commit is neither bucketed nor counted in bytes" do
