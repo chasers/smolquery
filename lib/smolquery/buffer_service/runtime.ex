@@ -144,6 +144,22 @@ defmodule Smolquery.BufferService.Runtime do
   how long a retired micro-segment stays readable after a sealer committed it, and
   deleting one out from under an in-flight scan is exactly what it prevents.
 
+  `fullsweep_after` is the spawn option that `TableBuffer` and its `Committer`
+  start under (T-330). Both processes are long lived and both take a whole
+  payload onto their heap per group commit, so the OTP default of 65,535 keeps
+  every payload they ever handled resident: the garbage sits on the old heap,
+  and only a fullsweep collects an old heap. A loaded buffer pod measured
+  1,892 MB in process heaps against a live set of 0.0 MB, and one forced
+  collection freed 2,394 MB in 70 ms. `0` therefore makes every collection a
+  fullsweep. A small non-zero value does not help here: the same profile found
+  one minor collection against 825 MB of garbage, so the sweep would still
+  arrive gigabytes late. The cost is proportional to the live set, which is
+  what makes `0` affordable on exactly these two processes.
+
+  `fullsweep_after` only decides what a collection does, not that one happens,
+  so both processes also hibernate at their idle points — see
+  `Smolquery.BufferService.TableBuffer`.
+
   `hot_server_ip` / `hot_server_port` are where `HotServer` binds to serve
   micro-segments to DuckDB over `httpfs`. They say nothing about how a segment's
   URL is built — `HotServer` composes that from each request's own host and port,
@@ -191,6 +207,7 @@ defmodule Smolquery.BufferService.Runtime do
     write_engine_memory_limit: nil,
     write_engine_threads: nil,
     row_validator: nil,
+    fullsweep_after: 0,
     hot_server_ip: {127, 0, 0, 1},
     hot_server_port: 4001
   ]
@@ -226,6 +243,7 @@ defmodule Smolquery.BufferService.Runtime do
           write_engine_memory_limit: String.t() | nil,
           write_engine_threads: pos_integer() | nil,
           row_validator: {module(), atom()} | nil,
+          fullsweep_after: non_neg_integer(),
           hot_server_ip: :inet.ip_address(),
           hot_server_port: :inet.port_number()
         }
@@ -255,6 +273,7 @@ defmodule Smolquery.BufferService.Runtime do
     :write_engine_memory_limit,
     :write_engine_threads,
     :row_validator,
+    :fullsweep_after,
     :hot_server_ip,
     :hot_server_port
   ]
@@ -331,6 +350,7 @@ defmodule Smolquery.BufferService.Runtime do
     validate_encode_concurrency!(Keyword.fetch!(config, :encode_concurrency))
     validate_commit_siblings!(Keyword.get(config, :commit_siblings, 5))
     validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
+    validate_fullsweep_after!(Keyword.get(config, :fullsweep_after, 0))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -361,6 +381,13 @@ defmodule Smolquery.BufferService.Runtime do
 
     runtime
   end
+
+  @doc """
+  The `spawn_opt` that a table's long-lived processes start under (T-330).
+  """
+  @spec spawn_opt(t()) :: [{:fullsweep_after, non_neg_integer()}]
+  def spawn_opt(%__MODULE__{fullsweep_after: after_gcs}),
+    do: [fullsweep_after: after_gcs]
 
   @doc """
   The `:write_pool_size` a node comes up on when nothing configures one.
@@ -521,6 +548,15 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable idle flush interval: #{inspect(interval)} " <>
             "(expected a non-negative integer of milliseconds)"
+  end
+
+  defp validate_fullsweep_after!(after_gcs) when is_integer(after_gcs) and after_gcs >= 0,
+    do: :ok
+
+  defp validate_fullsweep_after!(after_gcs) do
+    raise ArgumentError,
+          "unusable fullsweep_after: #{inspect(after_gcs)} " <>
+            "(expected a non-negative integer of minor collections)"
   end
 
   defp warn_inverted_capacity(%__MODULE__{} = runtime) do

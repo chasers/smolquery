@@ -52,6 +52,21 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   schema-change flush, a drain's force-seal, an in-flight duplicate, a
   graceful shutdown. It replies once every queued and encoding commit has
   finished.
+
+  ## The heap goes back down (T-330)
+
+  A commit arrives here as a copy, so this process's heap grows to hold every
+  payload it accepts. The heap does not shrink on its own: the garbage lands
+  on the old heap, and only a fullsweep collects an old heap. So this process
+  starts under `Smolquery.BufferService.Runtime`'s `fullsweep_after` — `0` by
+  default, which makes every collection a fullsweep — and hibernates whenever
+  it settles idle, with an empty queue and no encode in flight. That is the
+  moment it releases the commit map, and a hibernate fullsweeps the heap down
+  to the live set.
+
+  Without both, a buffer pod ratchets to its cgroup ceiling and is OOM-killed
+  holding garbage. One measurement on a loaded pod: 1,892 MB of process heaps,
+  a live set of 0.0 MB, and 2,394 MB freed by a single forced collection.
   """
 
   use GenServer
@@ -106,7 +121,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, {self(), opts}, name: Keyword.fetch!(opts, :name))
+    GenServer.start_link(__MODULE__, {self(), opts},
+      name: Keyword.fetch!(opts, :name),
+      spawn_opt: Runtime.spawn_opt(Keyword.fetch!(opts, :runtime))
+    )
   end
 
   @doc """
@@ -193,7 +211,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     |> finish(commit, result, started)
     |> start_queued()
     |> settle_syncers()
-    |> then(&{:noreply, &1})
+    |> noreply()
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state)
@@ -204,7 +222,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     |> finish(commit, {:error, {:encode_crashed, reason}}, started)
     |> start_queued()
     |> settle_syncers()
-    |> then(&{:noreply, &1})
+    |> noreply()
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -218,6 +236,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       {:EXIT, ^buffer, _reason} -> true
     after
       0 -> false
+    end
+  end
+
+  defp noreply(state) do
+    if idle?(state) do
+      {:noreply, state, :hibernate}
+    else
+      {:noreply, state}
     end
   end
 
