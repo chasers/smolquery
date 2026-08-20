@@ -199,6 +199,80 @@ if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
     flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)
 end
 
+# T-335: claim sizing was the one seal input fixed in code while every limit it
+# has to fit inside — engine memory, spill, and the merge's call budgets — is
+# set per deployment. A 488-segment claim exhausted all three in turn and no
+# variable could shrink it. The four below are the seal triggers; the valve
+# factor multiplies the byte and file triggers into what one claim may freeze.
+if bytes = System.get_env("SMOLQUERY_SEAL_MAX_BYTES") do
+  config :smolquery, Smolquery.BufferService,
+    seal_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_MAX_BYTES", bytes)
+end
+
+if files = System.get_env("SMOLQUERY_SEAL_MAX_FILES") do
+  config :smolquery, Smolquery.BufferService,
+    seal_max_files: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_MAX_FILES", files)
+end
+
+if ms = System.get_env("SMOLQUERY_SEAL_MAX_AGE_MS") do
+  config :smolquery, Smolquery.BufferService,
+    seal_max_age_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_MAX_AGE_MS", ms)
+end
+
+if ms = System.get_env("SMOLQUERY_SEAL_RETRY_MS") do
+  config :smolquery, Smolquery.BufferService,
+    seal_retry_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_RETRY_MS", ms)
+end
+
+if factor = System.get_env("SMOLQUERY_CLAIM_VALVE_FACTOR") do
+  config :smolquery, Smolquery.BufferService,
+    claim_valve_factor:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_CLAIM_VALVE_FACTOR", factor)
+end
+
+if seals = System.get_env("SMOLQUERY_MAX_CONCURRENT_SEALS") do
+  config :smolquery, Smolquery.StorageService,
+    max_concurrent_seals:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_CONCURRENT_SEALS", seals)
+end
+
+# T-299: the base takes `0`, the documented switch that disables the per-table
+# cooldown. The ceiling does not. `backoff_ms/2` is
+# `min(base * 2^n, max)`, so a `0` ceiling returns `0` at every failure count
+# and disables the cooldown whatever the base says — a typo in the ceiling
+# would silently drop the protection instead of failing the boot.
+if ms = System.get_env("SMOLQUERY_SEAL_BACKOFF_BASE_MS") do
+  config :smolquery, Smolquery.StorageService,
+    seal_backoff_base_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_SEAL_BACKOFF_BASE_MS", ms)
+end
+
+if ms = System.get_env("SMOLQUERY_SEAL_BACKOFF_MAX_MS") do
+  config :smolquery, Smolquery.StorageService,
+    seal_backoff_max_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_BACKOFF_MAX_MS", ms)
+end
+
+# The merge's three call budgets (T-261, T-288). A timed-out merge re-stages
+# its whole claim, so a budget the claim cannot fit inside never completes.
+if ms = System.get_env("SMOLQUERY_MERGE_COPY_TIMEOUT_MS") do
+  config :smolquery, Smolquery.StorageService,
+    merge_copy_timeout_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_COPY_TIMEOUT_MS", ms)
+end
+
+if ms = System.get_env("SMOLQUERY_MERGE_STAGING_TIMEOUT_MS") do
+  config :smolquery, Smolquery.StorageService,
+    merge_staging_timeout_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_STAGING_TIMEOUT_MS", ms)
+end
+
+if ms = System.get_env("SMOLQUERY_MERGE_DESCRIBE_TIMEOUT_MS") do
+  config :smolquery, Smolquery.StorageService,
+    merge_describe_timeout_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MERGE_DESCRIBE_TIMEOUT_MS", ms)
+end
+
 # T-246/T-247/T-248: `merge_inputs_per_call` bounds every `read_parquet` list
 # one engine call carries — per-input cost over httpfs is what outruns the
 # call timeout — so a seal claim or a compaction group of any size merges in

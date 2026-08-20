@@ -206,7 +206,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_buffer_shape_info" =>
       "The buffer path this node resolved at boot; always 1, read the labels.",
     "smolquery_ingest_shape_info" =>
-      "The ingest path this node resolved at boot; always 1, read the labels."
+      "The ingest path this node resolved at boot; always 1, read the labels.",
+    "smolquery_storage_shape_info" =>
+      "The seal and merge budgets this node resolved at boot; always 1, read the labels."
   }
 
   @doc """

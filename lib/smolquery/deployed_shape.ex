@@ -28,6 +28,8 @@ defmodule Smolquery.DeployedShape do
 
   alias Smolquery.BufferService.Runtime, as: BufferRuntime
   alias Smolquery.IngestService.Runtime, as: IngestRuntime
+  alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.Runtime, as: StorageRuntime
   alias Smolquery.Telemetry
 
   @doc """
@@ -36,14 +38,16 @@ defmodule Smolquery.DeployedShape do
   Takes the runtime struct the service actually booted with, not the
   configuration it was asked for — the two differ exactly when it matters.
   """
-  @spec announce(BufferRuntime.t() | IngestRuntime.t()) :: :ok
+  @spec announce(BufferRuntime.t() | StorageRuntime.t() | IngestRuntime.t()) :: :ok
   def announce(%BufferRuntime{} = runtime) do
     # The pool's per-member budget is stated resolved, not as configured: the
     # thread count is usually a division nothing wrote down, and the memory
     # limit is usually an inheritance from `Smolquery.Engine` that multiplies
     # by the pool size. Those are exactly the two values an operator cannot
     # read off their own configuration, which is this module's whole test for
-    # what belongs on the shape line.
+    # what belongs on the shape line. The claim valves pass the same test: what
+    # one seal claim may freeze is a product of two settings, and T-335 spent a
+    # day reading it out of failure messages.
     budget = BufferRuntime.write_engine_budget(runtime)
 
     labels = [
@@ -57,6 +61,11 @@ defmodule Smolquery.DeployedShape do
       write_pool_size: runtime.write_pool_size,
       write_engine_threads: budget[:threads],
       write_engine_memory_limit: budget[:memory_limit] || engine_memory_limit(),
+      seal_max_bytes: runtime.seal_max_bytes,
+      seal_max_files: runtime.seal_max_files,
+      claim_valve_factor: runtime.claim_valve_factor,
+      claim_max_bytes: runtime.seal_max_bytes * runtime.claim_valve_factor,
+      claim_max_files: runtime.seal_max_files * runtime.claim_valve_factor,
       transport_tls: transport_tls?()
     ]
 
@@ -76,6 +85,36 @@ defmodule Smolquery.DeployedShape do
         "Intended for production; if this is a dev or benchmark deployment, " <>
         "check GEN_RPC_TLS."
     )
+
+    :ok
+  end
+
+  # The seal side's counterpart to the buffer's claim valves: what one claim
+  # may freeze is stated over there, and what this node can merge it inside is
+  # stated here. T-335 needed both, and read all of it out of failure
+  # messages. The two engine limits are stated resolved, like the write pool's
+  # budget above — each derives from the cgroup limit when nothing configures
+  # one, so neither reads off an operator's own configuration (T-250).
+  def announce(%StorageRuntime{} = runtime) do
+    labels = [
+      store: store_impl(runtime.store),
+      compression: runtime.compression,
+      seal_row_group_size: runtime.seal_row_group_size,
+      max_concurrent_seals: runtime.max_concurrent_seals,
+      seal_backoff_base_ms: runtime.seal_backoff_base_ms,
+      seal_backoff_max_ms: runtime.seal_backoff_max_ms,
+      merge_engine_memory_limit:
+        StorageRuntime.engine_memory_limit(runtime) || engine_memory_limit(),
+      compact_engine_memory_limit:
+        StorageRuntime.compact_engine_memory_limit(runtime) || engine_memory_limit(),
+      merge_inputs_per_call: runtime.merge_inputs_per_call,
+      merge_copy_timeout_ms: runtime.merge_copy_timeout_ms,
+      merge_staging_timeout_ms: runtime.merge_staging_timeout_ms,
+      merge_describe_timeout_ms: runtime.merge_describe_timeout_ms
+    ]
+
+    Logger.info("storage shape: #{describe(labels)}")
+    Telemetry.put_info("smolquery_storage_shape_info", labels)
 
     :ok
   end
@@ -119,6 +158,12 @@ defmodule Smolquery.DeployedShape do
     |> Application.get_env(Smolquery.Engine, [])
     |> Keyword.get(:memory_limit, :duckdb_default)
   end
+
+  # Which store the sealed tier came up on, by module rather than by the
+  # configuration that selected it: `SMOLQUERY_S3_BUCKET` decides it, and a
+  # deployment that meant to be on S3 and is quietly on local disk is the
+  # same class of invisible mistake as the rest of this module.
+  defp store_impl(%Store{impl: impl}), do: inspect(impl)
 
   defp warn_slow(false, _message), do: :ok
   defp warn_slow(true, message), do: Logger.warning("slow path: " <> message)

@@ -56,6 +56,21 @@ defmodule Smolquery.BufferService.RuntimeTest do
                32
     end
 
+    test "claim valve factor defaults to 16 and takes an override", %{tmp_dir: dir} do
+      assert Runtime.new(name: unique_name(), dir: dir).claim_valve_factor == 16
+
+      assert Runtime.new(name: unique_name(), dir: dir, claim_valve_factor: 2).claim_valve_factor ==
+               2
+    end
+
+    test "refuses a claim valve factor that would freeze empty claims", %{tmp_dir: dir} do
+      for factor <- [0, -1, "2", 1.5] do
+        assert_raise ArgumentError, ~r/unusable claim valve factor/, fn ->
+          Runtime.new(name: unique_name(), dir: dir, claim_valve_factor: factor)
+        end
+      end
+    end
+
     test "application config still wins over the host-derived defaults", %{tmp_dir: dir} do
       pinned = Application.fetch_env!(:smolquery, Smolquery.BufferService)
       runtime = Runtime.new(name: unique_name(), dir: dir)
