@@ -274,6 +274,7 @@ defmodule Bench.Otel do
       ).body
 
     for name <- ~w(smolquery_buffer_commits_total smolquery_buffer_rows_committed_total
+                   smolquery_buffer_commit_bytes_total smolquery_seal_segment_bytes_total
                    smolquery_buffer_admission_refused_rows_total smolquery_seal_attempts_total
                    smolquery_ingest_rows_rejected_total smolquery_query_jobs_total) do
       IO.puts(

@@ -17,7 +17,12 @@ defmodule Smolquery.Telemetry do
   `rate()` in whatever scrapes this, and paired totals answer averages
   (`_microseconds_total / _total` is a mean duration) — the shapes operators
   actually alert on — without this module growing histogram buckets to keep
-  honest. Labels are closed sets (a result atom, a status class), never a
+  honest. `smolquery_buffer_commit_rows_bucket` bends that rule as far as it
+  goes: it borrows the `le` convention for cumulative buckets, but every series
+  is still a plain counter, with no `_sum`/`_count` pair and no
+  `# TYPE histogram`. A mean commit size cannot distinguish a steady 5,292 rows
+  from half at 800 and half at 10,000, and the seal path's cost is not linear
+  in segment size, so the distribution is the measurement (T-333). Labels are closed sets (a result atom, a status class), never a
   table or job id, so cardinality is bounded by this file rather than by
   traffic.
 
@@ -36,10 +41,19 @@ defmodule Smolquery.Telemetry do
                                             queue_us, encode_us, manifest_us,
                                             replicate_us},
                                           meta %{result: :ok | :error, table_ref: ref}
+      [:smolquery, :buffer, :flush_trigger] %{rows, bytes},
+                                          meta %{reason: :rows | :bytes | :interval | :idle |
+                                          :schema | :kind | :flush | :drain | :shutdown,
+                                          table_ref: ref}
+                                          — why a group-commit window closed; the one
+                                          fact that says which knob is in control (T-333)
       [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused}
       [:smolquery, :buffer, :dedup]       %{rows}
       [:smolquery, :seal, :attempt]       %{duration_us, segments},
                                           meta %{result: :ok | :error | :crashed, table_ref: ref}
+      [:smolquery, :seal, :segment]       %{bytes, rows}, meta %{table_ref: ref}
+                                          — one sealed segment as written, after the
+                                          merge and before registration (T-333)
       [:smolquery, :seal, :stuck]         %{consecutive}, meta %{table_ref: ref}
                                           — a failed attempt at or past the sealer's
                                           stuck threshold; alert on rate > 0 (T-293)
@@ -103,9 +117,11 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :wire],
+    [:smolquery, :buffer, :flush_trigger],
     [:smolquery, :buffer, :admission],
     [:smolquery, :buffer, :dedup],
     [:smolquery, :seal, :attempt],
+    [:smolquery, :seal, :segment],
     [:smolquery, :seal, :stuck],
     [:smolquery, :buffer, :release_failure],
     [:smolquery, :compact, :swap],
@@ -199,8 +215,27 @@ defmodule Smolquery.Telemetry do
     "smolquery_lifecycle_broadcasts_total" =>
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
-      "Time query jobs ran; divide by jobs for the mean."
+      "Time query jobs ran; divide by jobs for the mean.",
+    "smolquery_buffer_commit_bytes_total" =>
+      "Wire bytes in committed group commits; what flush_max_bytes gates on (T-333).",
+    "smolquery_buffer_commit_rows_bucket" =>
+      "Committed group commits by row count, cumulative in le; counters, not a histogram.",
+    "smolquery_buffer_flush_trigger_total" =>
+      "Group-commit windows closed, by which threshold or event closed them (T-333).",
+    "smolquery_seal_segment_bytes_total" =>
+      "Compressed Parquet bytes the seal merge wrote; divide by segments for the mean.",
+    "smolquery_seal_segment_rows_total" => "Rows the seal merge wrote into sealed segments."
   }
+
+  # Bounds for `smolquery_buffer_commit_rows_bucket`, ascending. A closed list
+  # here is what bounds the family's cardinality, the same rule every label in
+  # this module follows.
+  @commit_row_buckets [1_000, 4_000, 16_000, 64_000]
+
+  # The closed set of window-close reasons `TableBuffer` names. An unrecognised
+  # one counts as `:unknown` rather than creating a series, so the label can
+  # never be widened by anything but this list.
+  @flush_reasons ~w(rows bytes interval idle schema kind flush drain shutdown)a
 
   @info %{
     "smolquery_buffer_shape_info" =>
@@ -247,6 +282,15 @@ defmodule Smolquery.Telemetry do
   @impl GenServer
   def init(nil) do
     :ets.new(@table, [:ordered_set, :public, :named_table, write_concurrency: true])
+
+    # Detach before attaching, so a restart works. `terminate/2` runs only on a
+    # graceful stop — this process does not trap exits, so a supervisor
+    # shutdown or a crash leaves the handler attached. `attach_many/4` then
+    # answers `{:error, :already_exists}`, the `:ok =` raises, and the restart
+    # fails identically forever: one crash here would end this node's metrics
+    # for good, and take the application down with it once the supervisor ran
+    # out of restart intensity. Detaching an absent handler is a no-op.
+    :telemetry.detach(@handler_id)
     :ok = :telemetry.attach_many(@handler_id, @events, &__MODULE__.handle_event/4, nil)
 
     {:ok, nil}
@@ -316,6 +360,8 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :buffer, :commit], measurements, meta, nil) do
     bump({"smolquery_buffer_commits_total", [result: result(meta)]}, 1)
     bump({"smolquery_buffer_rows_committed_total", []}, committed_rows(measurements, meta))
+    bump({"smolquery_buffer_commit_bytes_total", []}, committed_bytes(measurements, meta))
+    bucket_commit_rows(measurements, meta)
 
     bump(
       {"smolquery_buffer_commit_microseconds_total", []},
@@ -328,6 +374,10 @@ defmodule Smolquery.Telemetry do
         Map.get(measurements, :"#{phase}_us", 0)
       )
     end
+  end
+
+  def handle_event([:smolquery, :buffer, :flush_trigger], _measurements, meta, nil) do
+    bump({"smolquery_buffer_flush_trigger_total", [reason: flush_reason(meta)]}, 1)
   end
 
   def handle_event([:smolquery, :buffer, :admission], measurements, _meta, nil) do
@@ -350,6 +400,11 @@ defmodule Smolquery.Telemetry do
       {"smolquery_seal_segments_total", [result: result(meta)]},
       Map.get(measurements, :segments, 0)
     )
+  end
+
+  def handle_event([:smolquery, :seal, :segment], measurements, _meta, nil) do
+    bump({"smolquery_seal_segment_bytes_total", []}, Map.get(measurements, :bytes, 0))
+    bump({"smolquery_seal_segment_rows_total", []}, Map.get(measurements, :rows, 0))
   end
 
   def handle_event([:smolquery, :seal, :stuck], _measurements, _meta, nil) do
@@ -462,6 +517,31 @@ defmodule Smolquery.Telemetry do
 
   defp committed_rows(measurements, %{result: :ok}), do: Map.get(measurements, :rows, 0)
   defp committed_rows(_measurements, _meta), do: 0
+
+  defp committed_bytes(measurements, %{result: :ok}), do: Map.get(measurements, :bytes, 0)
+  defp committed_bytes(_measurements, _meta), do: 0
+
+  # Cumulative buckets, the Prometheus `le` convention, but each series is a
+  # plain counter rather than a histogram family: there is no `_sum`/`_count`
+  # pair and no `# TYPE histogram`. That keeps the module's counters-only rule
+  # while answering the one question a mean cannot — a mean of 5,292 rows is
+  # equally consistent with every commit being 5,292 and with half being 800
+  # and half 10,000, and the seal path's cost is not linear in segment size
+  # (T-333).
+  defp bucket_commit_rows(measurements, %{result: :ok} = meta) do
+    rows = committed_rows(measurements, meta)
+
+    for bound <- @commit_row_buckets, rows <= bound do
+      bump({"smolquery_buffer_commit_rows_bucket", [le: bound]}, 1)
+    end
+
+    bump({"smolquery_buffer_commit_rows_bucket", [le: "+Inf"]}, 1)
+  end
+
+  defp bucket_commit_rows(_measurements, _meta), do: :ok
+
+  defp flush_reason(%{reason: reason}) when reason in @flush_reasons, do: reason
+  defp flush_reason(_meta), do: :unknown
 
   defp result(%{result: result}) when is_atom(result), do: result
   defp result(_meta), do: :unknown

@@ -514,7 +514,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   def handle_call(:flush, from, state) do
     state =
       %{state | pending: [{from, :flush} | state.pending]}
-      |> handoff()
+      |> handoff(:flush)
 
     {:noreply, run_maintenance(state)}
   end
@@ -554,14 +554,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   def handle_call(:maintain, _from, state), do: {:reply, :ok, run_maintenance(state)}
 
   def handle_call(:force_seal, _from, state) do
-    state = state |> handoff() |> await_in_flight()
+    state = state |> handoff(:drain) |> await_in_flight()
 
     {:reply, :ok, state |> reap() |> force_signal()}
   end
 
   @impl GenServer
-  def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag, _interval}} = state) do
-    {:noreply, %{state | timer: nil} |> handoff() |> run_maintenance()}
+  def handle_info({:flush, tag}, %__MODULE__{timer: {_timer, tag, interval}} = state) do
+    {:noreply,
+     %{state | timer: nil} |> handoff(timer_reason(state, interval)) |> run_maintenance()}
   end
 
   def handle_info({:flush, _stale}, state), do: {:noreply, state}
@@ -593,7 +594,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   def terminate(_crash, state), do: state
 
   defp shutdown_commit(state) do
-    state = state |> handoff() |> await_in_flight()
+    state = state |> handoff(:shutdown) |> await_in_flight()
 
     GenServer.stop(state.committer, :normal, 5_000)
 
@@ -1066,7 +1067,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp flush_on_schema_change(%__MODULE__{chunks: []} = state, _schema), do: state
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
-  defp flush_on_schema_change(state, _schema), do: handoff(state)
+  defp flush_on_schema_change(state, _schema), do: handoff(state, :schema)
 
   # An NDJSON passthrough chunk cannot share a commit with rows or a frame:
   # the committer encodes a commit one way, decided by its chunks' kind. Mixing
@@ -1075,7 +1076,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_kind_change(%__MODULE__{chunks: []} = state, _chunk), do: state
 
   defp flush_on_kind_change(%__MODULE__{chunks: [head | _rest]} = state, chunk) do
-    if chunk_kind(head) == chunk_kind(chunk), do: state, else: handoff(state)
+    if chunk_kind(head) == chunk_kind(chunk), do: state, else: handoff(state, :kind)
   end
 
   defp chunk_kind({:ndjson, _body, _count}), do: :ndjson
@@ -1098,13 +1099,27 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp track_batch(batch_ids, nil), do: batch_ids
   defp track_batch(batch_ids, batch_id), do: [batch_id | batch_ids]
 
+  # `rows` wins a tie, matching the `or` this replaced: both thresholds can be
+  # over at once, and the metric has to name one. A tie means either knob is
+  # binding, so which one it names does not change the tuning answer.
   defp handoff_when_full(state) do
-    if state.row_count >= state.runtime.flush_max_rows or
-         state.byte_size >= state.runtime.flush_max_bytes do
-      handoff(state)
-    else
-      state
+    cond do
+      state.row_count >= state.runtime.flush_max_rows -> handoff(state, :rows)
+      state.byte_size >= state.runtime.flush_max_bytes -> handoff(state, :bytes)
+      true -> state
     end
+  end
+
+  # The armed interval says which window this was: `flush_after/1` picks the
+  # idle one when fewer than `commit_siblings` inserts are in flight, and the
+  # two are equal only when an operator configured them that way — in which
+  # case there is no adaptive window to attribute and `interval` is the honest
+  # name for both.
+  defp timer_reason(state, interval) do
+    if interval == state.runtime.flush_idle_interval_ms and
+         interval != state.runtime.flush_interval_ms,
+       do: :idle,
+       else: :interval
   end
 
   defp chunk_count(rows) when is_list(rows), do: length(rows)
@@ -1114,9 +1129,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   # pass over bytes this node is deliberately not reading.
   defp chunk_count({:ndjson, _body, count}), do: count
 
-  defp handoff(%__MODULE__{chunks: []} = state), do: state
+  defp handoff(%__MODULE__{chunks: []} = state, _reason), do: state
 
-  defp handoff(state) do
+  defp handoff(state, reason) do
+    :telemetry.execute(
+      [:smolquery, :buffer, :flush_trigger],
+      %{rows: state.row_count, bytes: state.byte_size},
+      %{reason: reason, table_ref: state.table_ref}
+    )
+
     batch_ids = Enum.reverse(state.batch_ids)
     inserts = Enum.count(state.pending, fn {_from, kind} -> kind != :flush end)
 

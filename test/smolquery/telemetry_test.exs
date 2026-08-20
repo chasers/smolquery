@@ -11,6 +11,11 @@ defmodule Smolquery.TelemetryTest do
 
   alias Smolquery.Telemetry
 
+  defp le(bound), do: ~s({le="#{bound}"})
+
+  defp delta(before, bound),
+    do: value("smolquery_buffer_commit_rows_bucket", le(bound)) - Map.fetch!(before, bound)
+
   defp value(name, labels \\ "") do
     pattern = ~r/^#{Regex.escape(name <> labels)} (\d+)$/m
 
@@ -142,6 +147,100 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_buffer_commits_total", ~s({result="ok"})) == before_ok + 1
     assert value("smolquery_buffer_rows_committed_total") == before_rows + 40
     assert value("smolquery_buffer_commit_microseconds_total") == before_us + 1_500
+  end
+
+  test "counts a commit's wire bytes, which is what flush_max_bytes gates on (T-333)" do
+    before_bytes = value("smolquery_buffer_commit_bytes_total")
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: 40, bytes: 1_000, duration_us: 1_500},
+      %{result: :ok}
+    )
+
+    assert value("smolquery_buffer_commit_bytes_total") == before_bytes + 1_000
+  end
+
+  test "buckets a commit's row count cumulatively, so the mean cannot hide a split" do
+    bounds = ~w(1000 4000 16000 64000 +Inf)
+    before = Map.new(bounds, &{&1, value("smolquery_buffer_commit_rows_bucket", le(&1))})
+
+    for rows <- [800, 10_000] do
+      :telemetry.execute(
+        [:smolquery, :buffer, :commit],
+        %{rows: rows, bytes: 1, duration_us: 1},
+        %{result: :ok}
+      )
+    end
+
+    # 800 lands in every bucket; 10,000 only from 16000 up. A mean of 5,400
+    # would have looked identical to two commits of 5,400.
+    assert delta(before, "1000") == 1
+    assert delta(before, "4000") == 1
+    assert delta(before, "16000") == 2
+    assert delta(before, "64000") == 2
+    assert delta(before, "+Inf") == 2
+  end
+
+  test "a failed commit is neither bucketed nor counted in bytes" do
+    before_bytes = value("smolquery_buffer_commit_bytes_total")
+    before_inf = value("smolquery_buffer_commit_rows_bucket", le("+Inf"))
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: 7, bytes: 10, duration_us: 3},
+      %{result: :error}
+    )
+
+    assert value("smolquery_buffer_commit_bytes_total") == before_bytes
+    assert value("smolquery_buffer_commit_rows_bucket", le("+Inf")) == before_inf
+  end
+
+  test "names which threshold closed a group-commit window (T-333)" do
+    before_bytes = value("smolquery_buffer_flush_trigger_total", ~s({reason="bytes"}))
+    before_idle = value("smolquery_buffer_flush_trigger_total", ~s({reason="idle"}))
+
+    for reason <- [:bytes, :bytes, :idle] do
+      :telemetry.execute(
+        [:smolquery, :buffer, :flush_trigger],
+        %{rows: 10, bytes: 20},
+        %{reason: reason}
+      )
+    end
+
+    assert value("smolquery_buffer_flush_trigger_total", ~s({reason="bytes"})) ==
+             before_bytes + 2
+
+    assert value("smolquery_buffer_flush_trigger_total", ~s({reason="idle"})) == before_idle + 1
+  end
+
+  test "an unrecognised close reason cannot widen the label set" do
+    before_unknown = value("smolquery_buffer_flush_trigger_total", ~s({reason="unknown"}))
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :flush_trigger],
+      %{rows: 1, bytes: 1},
+      %{reason: :something_new}
+    )
+
+    assert value("smolquery_buffer_flush_trigger_total", ~s({reason="unknown"})) ==
+             before_unknown + 1
+
+    refute Telemetry.render() =~ ~s(reason="something_new")
+  end
+
+  test "counts sealed segment bytes and rows as written (T-333)" do
+    before_bytes = value("smolquery_seal_segment_bytes_total")
+    before_rows = value("smolquery_seal_segment_rows_total")
+
+    :telemetry.execute(
+      [:smolquery, :seal, :segment],
+      %{bytes: 4_194_304, rows: 250_000},
+      %{table_ref: {"analytics", "events"}}
+    )
+
+    assert value("smolquery_seal_segment_bytes_total") == before_bytes + 4_194_304
+    assert value("smolquery_seal_segment_rows_total") == before_rows + 250_000
   end
 
   test "a failed commit counts the attempt but never its rows" do
