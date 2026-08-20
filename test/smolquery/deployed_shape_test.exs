@@ -121,6 +121,13 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "claim_valve_factor=2"
       assert log =~ "claim_max_files=128"
       assert log =~ "claim_max_bytes=2000"
+      assert log =~ "max_live_claims=1"
+    end
+
+    test "states how many claims a ref may hold open (T-339)" do
+      log = capture_log(fn -> DeployedShape.announce(buffer_runtime(max_live_claims: 3)) end)
+
+      assert log =~ "max_live_claims=3"
     end
 
     test "states an explicit member budget over the derived one" do
