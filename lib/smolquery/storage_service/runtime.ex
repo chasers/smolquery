@@ -28,6 +28,9 @@ defmodule Smolquery.StorageService.Runtime do
         compact_min_inputs: 2,
         compact_max_bytes: 134_217_728,
         merge_inputs_per_call: 12,
+        merge_copy_timeout_ms: 300_000,
+        merge_staging_timeout_ms: 120_000,
+        merge_describe_timeout_ms: 120_000,
         retention_interval_ms: 3_600_000,
         snapshot_keep_ms: 86_400_000,
         handoff: {Smolquery.StorageService.Handoff.Seal, []},
@@ -155,6 +158,22 @@ defmodule Smolquery.StorageService.Runtime do
   removed the need for one. Sizing stops once the undersized bytes found
   reach `compact_max_bytes`, because the group cannot grow past it.
 
+  `merge_copy_timeout_ms`, `merge_staging_timeout_ms` and
+  `merge_describe_timeout_ms` are the merge's three call budgets — the final
+  `COPY`, one staging chunk, and the schema `DESCRIBE` that precedes a
+  projection. `Smolquery.StorageService.Merge` states why each one is longer
+  than the engine's 30 s default (T-261, T-288). They were module attributes
+  until T-335, where a 488-segment claim on a 63-column table exhausted engine
+  memory, then spill, and then this budget — `%Smolquery.Engine.CallExited{}`
+  with 625 MB of a 32 GiB spill in use and 89 GB of disk free. That last
+  failure is not a resource limit at all, and no configuration could move it.
+
+  A merge that times out re-stages its whole claim on the next attempt, so a
+  budget below what the claim needs never completes and never shrinks. Raise
+  these to seal a backlog that a bounded claim still cannot finish; the
+  cheaper lever is a smaller claim (`claim_valve_factor` on
+  `Smolquery.BufferService.Runtime`).
+
   `handoff` names what one seal attempt does; see
   `Smolquery.StorageService.Handoff`.
 
@@ -241,6 +260,9 @@ defmodule Smolquery.StorageService.Runtime do
     compact_engine_memory_limit: nil,
     merge_engine: nil,
     merge_inputs_per_call: 12,
+    merge_copy_timeout_ms: 300_000,
+    merge_staging_timeout_ms: 120_000,
+    merge_describe_timeout_ms: 120_000,
     retention_interval_ms: 3_600_000,
     snapshot_keep_ms: 86_400_000,
     handoff: {Smolquery.StorageService.Handoff.Seal, []}
@@ -275,6 +297,9 @@ defmodule Smolquery.StorageService.Runtime do
           compact_engine_memory_limit: String.t() | nil,
           merge_engine: Smolquery.Engine.handle() | nil,
           merge_inputs_per_call: pos_integer(),
+          merge_copy_timeout_ms: pos_integer(),
+          merge_staging_timeout_ms: pos_integer(),
+          merge_describe_timeout_ms: pos_integer(),
           retention_interval_ms: pos_integer(),
           snapshot_keep_ms: pos_integer(),
           handoff: {module(), term()}
@@ -303,6 +328,9 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_bucket_ms,
     :compact_engine_memory_limit,
     :merge_inputs_per_call,
+    :merge_copy_timeout_ms,
+    :merge_staging_timeout_ms,
+    :merge_describe_timeout_ms,
     :retention_interval_ms,
     :snapshot_keep_ms,
     :handoff
@@ -346,6 +374,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compact_inputs()
     |> validate_compact_max_rows()
     |> validate_merge_inputs_per_call()
+    |> validate_merge_timeouts()
   end
 
   use Smolquery.Runtime
@@ -582,6 +611,26 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported merge_inputs_per_call: #{inspect(runtime.merge_inputs_per_call)} " <>
             "(expected a positive integer)"
+  end
+
+  defp validate_merge_timeouts(%__MODULE__{} = runtime) do
+    Enum.each(
+      [:merge_copy_timeout_ms, :merge_staging_timeout_ms, :merge_describe_timeout_ms],
+      &validate_merge_timeout(runtime, &1)
+    )
+
+    runtime
+  end
+
+  defp validate_merge_timeout(runtime, key) do
+    case Map.fetch!(runtime, key) do
+      ms when is_integer(ms) and ms > 0 ->
+        :ok
+
+      ms ->
+        raise ArgumentError,
+              "unsupported #{key}: #{inspect(ms)} (expected a positive integer of milliseconds)"
+    end
   end
 
   defp build_store(config) do

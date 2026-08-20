@@ -53,6 +53,21 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "write_engine_memory_limit=512MB"
     end
 
+    # What one seal claim may freeze is a product of two settings, so neither
+    # one alone reads off the configuration (T-335).
+    test "states the claim valves the seal triggers multiply out to" do
+      log =
+        capture_log(fn ->
+          DeployedShape.announce(
+            buffer_runtime(seal_max_files: 64, seal_max_bytes: 1_000, claim_valve_factor: 2)
+          )
+        end)
+
+      assert log =~ "claim_valve_factor=2"
+      assert log =~ "claim_max_files=128"
+      assert log =~ "claim_max_bytes=2000"
+    end
+
     test "states an explicit member budget over the derived one" do
       log =
         capture_log(fn ->

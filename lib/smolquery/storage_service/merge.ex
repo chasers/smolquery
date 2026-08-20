@@ -36,8 +36,8 @@ defmodule Smolquery.StorageService.Merge do
   hop's cost is memory: the claim's rows live in the engine, spilling to the
   connection's `temp_directory` past its limit, until the final `COPY`.
 
-  The final `COPY` gets five minutes rather than the engine's 30 s default —
-  on both paths (T-261). The staged variant reads local data, so its duration
+  The final `COPY` gets `merge_copy_timeout_ms` — five minutes by default —
+  rather than the engine's 30 s default, on both paths (T-261). The staged variant reads local data, so its duration
   scales with the backlog's bytes, not with per-input `httpfs` latency; a
   30 s ceiling would decide how large a backlog may seal — the T-244 trap
   with the bound moved. The direct variant earns the same budget the other
@@ -47,10 +47,12 @@ defmodule Smolquery.StorageService.Merge do
   and re-planned identically every sweep — while a larger group of the same
   data succeeded, purely because its input count pushed it onto the chunked
   path whose budgets were real. A staging chunk
-  gets two minutes for a similar reason: the count cap bounds its inputs, not
+  gets `merge_staging_timeout_ms` — two minutes by default — for a similar
+  reason: the count cap bounds its inputs, not
   its bytes, and twelve compaction inputs near `compact_below_bytes` move
   hundreds of megabytes on a slow link. The schema `DESCRIBE` that precedes
-  a projection takes the same two minutes, not the 30 s default (T-288): its
+  a projection gets `merge_describe_timeout_ms`, the same two minutes rather
+  than the 30 s default (T-288): its
   own work is bounded — it reads the footers the projected read is about to
   read anyway — but its budget is spent on a serialized connection, where
   every other merge's staging call is this call's queue time. On the 30 s
@@ -67,6 +69,11 @@ defmodule Smolquery.StorageService.Merge do
   once the connection drains, so the cleanup is not lost with the wait. A
   drop that itself fails logs a warning, and a seal retry's
   `CREATE OR REPLACE` clears what the drop could not.
+
+  All three budgets are `Smolquery.StorageService.Runtime` fields, so a
+  deployment whose claims outgrow them can say so (T-335). A timed-out merge
+  re-stages its whole claim, so a budget the claim cannot fit inside is a
+  merge that never finishes rather than one that finishes late.
 
   Every engine call here goes through `Smolquery.Engine.try_query/4`, so a
   call that exits — timed out against a connection wedged by an OOM, or busy
@@ -193,8 +200,6 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Runtime
 
-  @staged_copy_timeout_ms 300_000
-  @stage_chunk_timeout_ms 120_000
   @drop_staging_timeout_ms 5_000
 
   @doc """
@@ -335,7 +340,8 @@ defmodule Smolquery.StorageService.Merge do
             "INSERT INTO #{table} SELECT #{projection} FROM #{scan(urls)}"
         end
 
-      with {:ok, _result} <- query(runtime, sql, urls, @stage_chunk_timeout_ms), do: :ok
+      with {:ok, _result} <- query(runtime, sql, urls, runtime.merge_staging_timeout_ms),
+           do: :ok
     end
   end
 
@@ -345,7 +351,8 @@ defmodule Smolquery.StorageService.Merge do
     TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
     """
 
-    with {:ok, _result} <- query(runtime, sql, [staged], @staged_copy_timeout_ms), do: :ok
+    with {:ok, _result} <- query(runtime, sql, [staged], runtime.merge_copy_timeout_ms),
+         do: :ok
   end
 
   defp drop_staging(runtime, table) do
@@ -444,7 +451,7 @@ defmodule Smolquery.StorageService.Merge do
   defp input_columns(runtime, urls) do
     sql = "DESCRIBE SELECT * FROM #{scan(urls)}"
 
-    with {:ok, result} <- query(runtime, sql, urls, @stage_chunk_timeout_ms) do
+    with {:ok, result} <- query(runtime, sql, urls, runtime.merge_describe_timeout_ms) do
       {:ok, Enum.map(result.rows, &hd/1)}
     end
   end
@@ -455,7 +462,7 @@ defmodule Smolquery.StorageService.Merge do
     TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
     """
 
-    with {:ok, _result} <- query(runtime, sql, urls ++ [staged], @staged_copy_timeout_ms),
+    with {:ok, _result} <- query(runtime, sql, urls ++ [staged], runtime.merge_copy_timeout_ms),
          do: :ok
   end
 

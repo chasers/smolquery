@@ -371,15 +371,22 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   sealer therefore merges the same inputs into the same output, no matter how
   many times it is told or which side crashed. That is what makes a retry safe
   instead of a source of duplicate rows.
-- **A claim holds the oldest unsealed entries up to 16 × `seal_max_bytes`
-  and 16 × `seal_max_files`** (T-246, T-247, T-288). The byte valve bounds one
+- **A claim holds the oldest unsealed entries up to `claim_valve_factor` ×
+  `seal_max_bytes` and `claim_valve_factor` × `seal_max_files`** (T-246,
+  T-247, T-288). The factor is `16` by default, and
+  `SMOLQUERY_CLAIM_VALVE_FACTOR` moves it (T-335): the claim is what the
+  merge must swallow in one go, and every limit it has to fit inside is a
+  separate setting. The byte valve bounds one
   sealed segment and the bytes the merge stages. The count valve bounds the
   merge's per-input footer round trips. Tiny micro-segments raise that count
   without a move of the byte valve. An outage's backlog must freeze as several
   sealable claims, not one unsealable claim. Within a claim, the merge bounds
   its own engine calls: it reads an input list over `merge_inputs_per_call` in
   capped chunks into a temp table. One `COPY` then writes the segment. No
-  `read_parquet` call is unbounded. A backlog past either valve retires in
+  `read_parquet` call is unbounded. Each of those calls has its own budget —
+  `merge_staging_timeout_ms` per chunk, `merge_describe_timeout_ms` per schema
+  read, and `merge_copy_timeout_ms` for the final `COPY`. A merge that outruns
+  one re-stages its whole claim on the next attempt. A backlog past either valve retires in
   valve-sized claims, back to back. A table under sustained ingest therefore
   self-corrects. A custom `seal_consumer` receives claims up to the valves. It
   must bound its own engine calls the same way. The valves also reach a claim

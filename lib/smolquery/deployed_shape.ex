@@ -43,7 +43,9 @@ defmodule Smolquery.DeployedShape do
     # limit is usually an inheritance from `Smolquery.Engine` that multiplies
     # by the pool size. Those are exactly the two values an operator cannot
     # read off their own configuration, which is this module's whole test for
-    # what belongs on the shape line.
+    # what belongs on the shape line. The claim valves pass the same test: what
+    # one seal claim may freeze is a product of two settings, and T-335 spent a
+    # day reading it out of failure messages.
     budget = BufferRuntime.write_engine_budget(runtime)
 
     labels = [
@@ -57,6 +59,11 @@ defmodule Smolquery.DeployedShape do
       write_pool_size: runtime.write_pool_size,
       write_engine_threads: budget[:threads],
       write_engine_memory_limit: budget[:memory_limit] || engine_memory_limit(),
+      seal_max_bytes: runtime.seal_max_bytes,
+      seal_max_files: runtime.seal_max_files,
+      claim_valve_factor: runtime.claim_valve_factor,
+      claim_max_bytes: runtime.seal_max_bytes * runtime.claim_valve_factor,
+      claim_max_files: runtime.seal_max_files * runtime.claim_valve_factor,
       transport_tls: transport_tls?()
     ]
 
