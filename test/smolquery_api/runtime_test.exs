@@ -41,6 +41,30 @@ defmodule SmolqueryApi.RuntimeTest do
     end
   end
 
+  describe "max_ndjson_bytes (T-329)" do
+    test "defaults to one 8 MB body" do
+      assert Runtime.new(name: :api_ndjson_default, api_key: "k").max_ndjson_bytes == 8_000_000
+    end
+
+    test "takes a configured cap" do
+      runtime = Runtime.new(name: :api_ndjson_configured, api_key: "k", max_ndjson_bytes: 1024)
+
+      assert runtime.max_ndjson_bytes == 1024
+    end
+
+    test "a non-positive cap refuses to boot" do
+      assert_raise ArgumentError, ~r/max_ndjson_bytes/, fn ->
+        Runtime.new(name: :api_ndjson_zero, api_key: "k", max_ndjson_bytes: 0)
+      end
+    end
+
+    test "a non-integer cap refuses to boot" do
+      assert_raise ArgumentError, ~r/max_ndjson_bytes/, fn ->
+        Runtime.new(name: :api_ndjson_string, api_key: "k", max_ndjson_bytes: "8MB")
+      end
+    end
+  end
+
   describe "insert_max_in_flight_bytes/2 (T-245)" do
     test "an explicit limit wins over the cgroup" do
       runtime =
@@ -59,6 +83,13 @@ defmodule SmolqueryApi.RuntimeTest do
       runtime = Runtime.new(name: :api_admission_floor, api_key: "k")
 
       assert Runtime.insert_max_in_flight_bytes(runtime, {:ok, 1_000_000}) == 8_000_000
+    end
+
+    test "the floor follows a configured NDJSON cap" do
+      runtime =
+        Runtime.new(name: :api_admission_floor_config, api_key: "k", max_ndjson_bytes: 16_000_000)
+
+      assert Runtime.insert_max_in_flight_bytes(runtime, {:ok, 1_000_000}) == 16_000_000
     end
 
     test "without a cgroup limit the fallback applies" do

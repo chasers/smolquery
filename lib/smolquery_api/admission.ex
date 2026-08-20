@@ -137,7 +137,10 @@ defmodule SmolqueryApi.Admission do
     end
   end
 
-  defp ceiling("insert", _instance), do: SmolqueryApi.InsertController.max_ndjson_bytes()
+  defp ceiling("insert", instance) do
+    {:ok, runtime} = Runtime.fetch(instance)
+    runtime.max_ndjson_bytes
+  end
 
   defp ceiling("load", instance) do
     {:ok, runtime} = Runtime.fetch(instance)

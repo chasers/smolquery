@@ -16,15 +16,6 @@ defmodule SmolqueryApi.InsertController do
   alias SmolqueryApi.Json
   alias SmolqueryApi.Runtime
 
-  @max_ndjson_bytes 8_000_000
-
-  @doc """
-  The NDJSON body ceiling — what `SmolqueryApi.Admission` reserves for an
-  insert that declares no `content-length`.
-  """
-  @spec max_ndjson_bytes() :: pos_integer()
-  def max_ndjson_bytes, do: @max_ndjson_bytes
-
   @doc """
   Inserts the body's rows into a table.
 
@@ -71,9 +62,12 @@ defmodule SmolqueryApi.InsertController do
   end
 
   defp create_ndjson(conn, table_ref) do
+    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
+    max_bytes = runtime.max_ndjson_bytes
+
     with {:ok, batch_id} <- insert_id(conn.query_params),
-         {:ok, body, conn} <- read_ndjson(conn),
-         {:ok, result} <- insert_ndjson(conn, table_ref, body, batch_id) do
+         {:ok, body, conn} <- read_ndjson(conn, max_bytes),
+         {:ok, result} <- insert_ndjson(runtime, table_ref, body, batch_id) do
       respond(conn, result)
     else
       {:error, :too_large} ->
@@ -81,7 +75,7 @@ defmodule SmolqueryApi.InsertController do
           conn,
           413,
           "PAYLOAD_TOO_LARGE",
-          "NDJSON insert bodies are limited to #{@max_ndjson_bytes} bytes; use /load for files"
+          "NDJSON insert bodies are limited to #{max_bytes} bytes; use /load for files"
         )
 
       {:error, reason} ->
@@ -96,26 +90,24 @@ defmodule SmolqueryApi.InsertController do
     })
   end
 
-  defp read_ndjson(conn, acc \\ []) do
-    case Plug.Conn.read_body(conn, length: @max_ndjson_bytes) do
+  defp read_ndjson(conn, max_bytes, acc \\ []) do
+    case Plug.Conn.read_body(conn, length: max_bytes) do
       {:ok, chunk, conn} ->
         body = IO.iodata_to_binary(Enum.reverse([chunk | acc]))
 
-        if byte_size(body) > @max_ndjson_bytes,
+        if byte_size(body) > max_bytes,
           do: {:error, :too_large},
           else: {:ok, body, conn}
 
       {:more, chunk, conn} ->
         case Enum.reduce(acc, byte_size(chunk), &(byte_size(&1) + &2)) do
-          over when over > @max_ndjson_bytes -> {:error, :too_large}
-          _within -> read_ndjson(conn, [chunk | acc])
+          over when over > max_bytes -> {:error, :too_large}
+          _within -> read_ndjson(conn, max_bytes, [chunk | acc])
         end
     end
   end
 
-  defp insert_ndjson(conn, table_ref, body, batch_id) do
-    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
-
+  defp insert_ndjson(runtime, table_ref, body, batch_id) do
     IngestService.Client.insert_ndjson(runtime.ingest_name, table_ref, body, batch_id: batch_id)
   end
 

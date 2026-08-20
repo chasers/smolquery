@@ -23,6 +23,12 @@ defmodule SmolqueryApi.Runtime do
   land there, and the ip still defaults to loopback: exposing the listener
   beyond the node is a deliberate act, not a default.
 
+  `max_ndjson_bytes` caps a `POST .../insert` body and `load_max_bytes` caps a
+  `POST .../load` body. A larger body is a 413. Each cap is also what
+  `SmolqueryApi.Admission` reserves for its route when a request declares no
+  `content-length`. `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` and
+  `SMOLQUERY_LOAD_MAX_BYTES` set them in a release.
+
   `catalog` is where the CRUD routes resolve datasets, tables, and schemas —
   the same seam `Smolquery.QueryService` uses. Given options (or nothing), the
   API starts its own `Smolquery.Catalog.DuckLake` engine; given a
@@ -41,6 +47,7 @@ defmodule SmolqueryApi.Runtime do
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
     load_max_bytes: 268_435_456,
+    max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil
   ]
 
@@ -52,6 +59,7 @@ defmodule SmolqueryApi.Runtime do
           ingest_name: atom(),
           query_name: atom(),
           load_max_bytes: pos_integer(),
+          max_ndjson_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil
         }
 
@@ -87,10 +95,21 @@ defmodule SmolqueryApi.Runtime do
         :ingest_name,
         :query_name,
         :load_max_bytes,
+        :max_ndjson_bytes,
         :insert_max_in_flight_bytes
       ])
     )
+    |> validate_max_ndjson_bytes()
     |> validate_insert_max_in_flight_bytes()
+  end
+
+  defp validate_max_ndjson_bytes(%__MODULE__{max_ndjson_bytes: bytes} = runtime)
+       when is_integer(bytes) and bytes > 0,
+       do: runtime
+
+  defp validate_max_ndjson_bytes(%__MODULE__{max_ndjson_bytes: bytes}) do
+    raise ArgumentError,
+          "unsupported max_ndjson_bytes: #{inspect(bytes)} (expected a positive integer)"
   end
 
   defp validate_insert_max_in_flight_bytes(
@@ -114,7 +133,7 @@ defmodule SmolqueryApi.Runtime do
   An explicit `insert_max_in_flight_bytes` wins. Left `nil`, the limit
   derives as a quarter of the container's cgroup memory limit — in-flight
   bodies are resident heap, and the write path needs the rest of the budget
-  for encode buffers and the accumulators — floored at one NDJSON body so a
+  for encode buffers and the accumulators — floored at `max_ndjson_bytes` so a
   small container still ingests. Without a cgroup limit the fallback is
   #{@in_flight_fallback} bytes.
   """
@@ -125,8 +144,8 @@ defmodule SmolqueryApi.Runtime do
       when is_integer(bytes),
       do: bytes
 
-  def insert_max_in_flight_bytes(%__MODULE__{}, {:ok, bytes}),
-    do: max(div(bytes, 4), SmolqueryApi.InsertController.max_ndjson_bytes())
+  def insert_max_in_flight_bytes(%__MODULE__{max_ndjson_bytes: ndjson}, {:ok, bytes}),
+    do: max(div(bytes, 4), ndjson)
 
   def insert_max_in_flight_bytes(%__MODULE__{}, :none), do: @in_flight_fallback
 
