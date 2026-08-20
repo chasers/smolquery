@@ -150,6 +150,26 @@ defmodule Smolquery.BufferService.TableBuffer do
   already be half committed — the log record fsynced, the ETS insert not yet done
   — and committing it again would write the batch twice with no client retry
   involved. Only a shutdown-class exit flushes the tail.
+
+  ## The heap goes back down (T-330)
+
+  This process accumulates a payload per write and holds it until the handoff,
+  so its heap grows to the largest batch it has ever taken. That heap does not
+  shrink on its own. The garbage lands on the old heap, and only a fullsweep
+  collects an old heap, so under OTP's default `fullsweep_after` of 65,535 a
+  long-lived buffer never fullsweeps in practice. A loaded pod measured
+  1,892 MB of process heaps against a live set of 0.0 MB, and the tier was
+  OOM-killed holding that garbage rather than needing the memory.
+
+  Two things keep the heap down. This process and its committer start under
+  `Smolquery.BufferService.Runtime`'s `fullsweep_after`, `0` by default, so
+  every collection is a fullsweep and no garbage survives one. And the
+  maintenance tick hibernates the process when it is fully idle — no chunks,
+  no pending callers, nothing in flight, no armed timer — because
+  `fullsweep_after` decides what a collection does, not that one happens, and
+  a buffer that takes a burst and then goes quiet would otherwise sit at its
+  high-water mark. The tick is `maintenance_interval_ms`, so a table
+  hibernates at most once per tick rather than once per message.
   """
 
   use GenServer
@@ -230,7 +250,10 @@ defmodule Smolquery.BufferService.TableBuffer do
     runtime = Keyword.fetch!(opts, :runtime)
     table_ref = Keyword.fetch!(opts, :table_ref)
 
-    GenServer.start_link(__MODULE__, {runtime, table_ref}, name: Runtime.via(runtime, table_ref))
+    GenServer.start_link(__MODULE__, {runtime, table_ref},
+      name: Runtime.via(runtime, table_ref),
+      spawn_opt: Runtime.spawn_opt(runtime)
+    )
   end
 
   @doc """
@@ -549,7 +572,13 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_info(:maintain, state) do
-    {:noreply, state |> run_maintenance() |> schedule_maintenance()}
+    state = state |> run_maintenance() |> schedule_maintenance()
+
+    if idle?(state) do
+      {:noreply, state, :hibernate}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_info({:EXIT, committer, reason}, %__MODULE__{committer: committer} = state) do
@@ -572,6 +601,11 @@ defmodule Smolquery.BufferService.TableBuffer do
     state
   catch
     :exit, _reason -> state
+  end
+
+  defp idle?(%__MODULE__{} = state) do
+    state.chunks == [] and state.pending == [] and state.in_flight == 0 and
+      state.timer == nil
   end
 
   defp settle(state, batch_ids, inserts) do

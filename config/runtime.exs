@@ -188,6 +188,12 @@ if concurrency = System.get_env("SMOLQUERY_ENCODE_CONCURRENCY") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_ENCODE_CONCURRENCY", concurrency)
 end
 
+if after_gcs = System.get_env("SMOLQUERY_BUFFER_FULLSWEEP_AFTER") do
+  config :smolquery, Smolquery.BufferService,
+    fullsweep_after:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_BUFFER_FULLSWEEP_AFTER", after_gcs)
+end
+
 if bytes = System.get_env("SMOLQUERY_FLUSH_MAX_BYTES") do
   config :smolquery, Smolquery.BufferService,
     flush_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_FLUSH_MAX_BYTES", bytes)

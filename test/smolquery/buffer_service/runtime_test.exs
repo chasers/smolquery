@@ -198,6 +198,31 @@ defmodule Smolquery.BufferService.RuntimeTest do
     end
   end
 
+  describe "fullsweep_after (T-330)" do
+    test "defaults to a fullsweep on every collection", %{tmp_dir: dir} do
+      assert Runtime.new(name: unique_name(), dir: dir).fullsweep_after == 0
+    end
+
+    test "spawn_opt/1 carries the configured value", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir, fullsweep_after: 25)
+
+      assert runtime.fullsweep_after == 25
+      assert Runtime.spawn_opt(runtime) == [fullsweep_after: 25]
+    end
+
+    test "refuses a negative value at boot", %{tmp_dir: dir} do
+      assert_raise ArgumentError, ~r/unusable fullsweep_after/, fn ->
+        Runtime.new(name: unique_name(), dir: dir, fullsweep_after: -1)
+      end
+    end
+
+    test "refuses a non-integer value at boot", %{tmp_dir: dir} do
+      assert_raise ArgumentError, ~r/unusable fullsweep_after/, fn ->
+        Runtime.new(name: unique_name(), dir: dir, fullsweep_after: :never)
+      end
+    end
+  end
+
   describe "capacity and replication gates" do
     test "warns on a byte ceiling at or below the flush trigger", %{tmp_dir: dir} do
       log =
