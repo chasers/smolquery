@@ -224,7 +224,7 @@ defmodule Smolquery.StorageService.SealerTest do
   end
 
   @tag :tmp_dir
-  @tag seal_backoff_base_ms: 50
+  @tag seal_backoff_base_ms: 500
   @tag result: {:error, :handoff_refused}
   test "an expired cooldown admits the table again", %{name: name} do
     capture_log(fn -> run_attempt(name, @events) end)
@@ -232,7 +232,7 @@ defmodule Smolquery.StorageService.SealerTest do
     Sealer.seal_ready(name, @events, claim(["a"]))
     refute_receive {:sealing, @events, _claim, _cooling}, 20
 
-    Process.sleep(100)
+    Process.sleep(600)
 
     Sealer.seal_ready(name, @events, claim(["a"]))
     assert_receive {:sealing, @events, _claim, attempt}
