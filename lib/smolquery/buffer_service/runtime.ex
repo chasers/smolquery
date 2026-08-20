@@ -31,6 +31,7 @@ defmodule Smolquery.BufferService.Runtime do
         seal_max_age_ms: 60_000,
         seal_retry_ms: 30_000,
         claim_valve_factor: 16,
+        max_live_claims: 1,
         retire_grace_ms: 600_000,
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
@@ -157,6 +158,15 @@ defmodule Smolquery.BufferService.Runtime do
   blocked by its one live claim. Raise it to amortize the merge's fixed cost
   over more inputs on a table the engine can comfortably hold.
 
+  `max_live_claims` is how many claims a ref may hold open at once (T-339,
+  PL-47 phase 1). It defaults to `1`, the historical shape: one frozen claim,
+  sealed serially. Above one, the maintenance pass keeps freezing valve-sized
+  claims from the unclaimed tail while earlier claims are still merging, so a
+  ref's seal work can occupy that many storage slots concurrently and its
+  unsealed backlog drains toward zero instead of accumulating behind one
+  merge. Sealed segments may then land out of input order within the ref;
+  every consumer of the manifest is per-entry, so nothing reads that order.
+
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
   deleting one out from under an in-flight scan is exactly what it prevents.
@@ -215,6 +225,7 @@ defmodule Smolquery.BufferService.Runtime do
     seal_max_age_ms: 60_000,
     seal_retry_ms: 30_000,
     claim_valve_factor: 16,
+    max_live_claims: 1,
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
     seal_consumer: {Smolquery.BufferService.SealLog, []},
@@ -252,6 +263,7 @@ defmodule Smolquery.BufferService.Runtime do
           seal_max_age_ms: pos_integer(),
           seal_retry_ms: pos_integer(),
           claim_valve_factor: pos_integer(),
+          max_live_claims: pos_integer(),
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
           seal_consumer: {module(), term()},
@@ -283,6 +295,7 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_max_age_ms,
     :seal_retry_ms,
     :claim_valve_factor,
+    :max_live_claims,
     :retire_grace_ms,
     :maintenance_interval_ms,
     :seal_consumer,
@@ -376,6 +389,7 @@ defmodule Smolquery.BufferService.Runtime do
     validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
     validate_fullsweep_after!(Keyword.get(config, :fullsweep_after, 0))
     validate_claim_valve_factor!(Keyword.get(config, :claim_valve_factor, 16))
+    validate_max_live_claims!(Keyword.get(config, :max_live_claims, 1))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -582,6 +596,13 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable fullsweep_after: #{inspect(after_gcs)} " <>
             "(expected a non-negative integer of minor collections)"
+  end
+
+  defp validate_max_live_claims!(count) when is_integer(count) and count > 0, do: :ok
+
+  defp validate_max_live_claims!(count) do
+    raise ArgumentError,
+          "unusable max_live_claims: #{inspect(count)} (expected a positive integer)"
   end
 
   defp validate_claim_valve_factor!(factor) when is_integer(factor) and factor > 0, do: :ok

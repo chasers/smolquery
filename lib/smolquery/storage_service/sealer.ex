@@ -151,7 +151,7 @@ defmodule Smolquery.StorageService.Sealer do
   def handle_cast({:seal_ready, table_ref, claim}, state) do
     cond do
       not owner?(state, table_ref) -> {:noreply, ignore_foreign(state, table_ref)}
-      sealing?(state, table_ref) -> {:noreply, state}
+      sealing?(state, table_ref, claim) -> {:noreply, state}
       cooling_down?(state, table_ref) -> {:noreply, shed_cooling(state, table_ref)}
       at_capacity?(state) -> {:noreply, shed(state, table_ref)}
       true -> {:noreply, start_attempt(state, table_ref, claim)}
@@ -294,8 +294,16 @@ defmodule Smolquery.StorageService.Sealer do
     state
   end
 
-  defp sealing?(state, table_ref),
-    do: Enum.any?(state.attempts, fn {_ref, attempt} -> attempt.table_ref == table_ref end)
+  # Coalesces per claim, not per table (T-339): a buffer running
+  # `max_live_claims` above one signals several distinct claims for one ref,
+  # and each deserves its own slot. A re-signal of a claim already being
+  # attempted still coalesces, which is what makes level-triggered signalling
+  # free — the claim's keys are its identity, frozen with its input set.
+  defp sealing?(state, table_ref, claim) do
+    Enum.any?(state.attempts, fn {_ref, attempt} ->
+      attempt.table_ref == table_ref and attempt.keys == claim[:keys]
+    end)
+  end
 
   defp at_capacity?(state),
     do: map_size(state.attempts) >= state.runtime.max_concurrent_seals
@@ -320,6 +328,7 @@ defmodule Smolquery.StorageService.Sealer do
 
     attempt = %{
       table_ref: table_ref,
+      keys: claim[:keys],
       segments: claim_segments(claim),
       started_at: System.monotonic_time(:microsecond),
       slot: slot

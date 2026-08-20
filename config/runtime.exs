@@ -230,6 +230,15 @@ if factor = System.get_env("SMOLQUERY_CLAIM_VALVE_FACTOR") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_CLAIM_VALVE_FACTOR", factor)
 end
 
+# T-339: how many claims one table ref may hold open at once. Above 1, the
+# buffer keeps freezing valve-sized claims while earlier ones merge, so one
+# ref's backlog can occupy several storage seal slots concurrently.
+if claims = System.get_env("SMOLQUERY_MAX_LIVE_CLAIMS") do
+  config :smolquery, Smolquery.BufferService,
+    max_live_claims:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_LIVE_CLAIMS", claims)
+end
+
 if seals = System.get_env("SMOLQUERY_MAX_CONCURRENT_SEALS") do
   config :smolquery, Smolquery.StorageService,
     max_concurrent_seals:

@@ -499,7 +499,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
 
     other = %{ids: [entry.id], keys: ["other-key"]}
 
-    assert {:error, :claim_outstanding} =
+    assert {:error, {:partial_claim, %{claimed: [_id]}}} =
              Endpoint.apply_replica_mutation(follower, @table, :claim, other, nil)
   end
 
