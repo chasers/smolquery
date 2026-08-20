@@ -72,6 +72,50 @@ defmodule Smolquery.BufferService.TableBufferTest do
     start_buffer_service(context, [])
   end
 
+  describe "heap hygiene (T-330)" do
+    defp buffer_pid(runtime), do: GenServer.whereis(Runtime.via(runtime, @table))
+    defp committer_pid(runtime), do: GenServer.whereis(Runtime.committer_via(runtime, @table))
+
+    defp fullsweep_after(pid) do
+      {:garbage_collection, info} = Process.info(pid, :garbage_collection)
+
+      Keyword.fetch!(info, :fullsweep_after)
+    end
+
+    test "both processes start under the runtime's fullsweep_after", context do
+      %{name: name, runtime: runtime} = start_buffer_service(context, fullsweep_after: 3)
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..2))
+
+      assert fullsweep_after(buffer_pid(runtime)) == 3
+      assert fullsweep_after(committer_pid(runtime)) == 3
+    end
+
+    test "the default is a fullsweep on every collection", %{name: name, runtime: runtime} do
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..2))
+
+      assert fullsweep_after(buffer_pid(runtime)) == 0
+      assert fullsweep_after(committer_pid(runtime)) == 0
+    end
+
+    test "a large payload does not stay resident on the buffer's heap", context do
+      %{name: name, runtime: runtime} =
+        start_buffer_service(context, maintenance_interval_ms: 25)
+
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..50_000))
+
+      buffer = buffer_pid(runtime)
+
+      assert Eventually.until(fn -> heap_bytes(buffer) < 1_000_000 end)
+    end
+
+    defp heap_bytes(pid) do
+      {:total_heap_size, words} = Process.info(pid, :total_heap_size)
+
+      words * :erlang.system_info(:wordsize)
+    end
+  end
+
   describe "group commit" do
     test "acks only after the rows are in the manifest", %{name: name, runtime: runtime} do
       assert {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
