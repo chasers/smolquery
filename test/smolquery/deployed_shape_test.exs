@@ -218,10 +218,25 @@ defmodule Smolquery.DeployedShapeTest do
   end
 
   describe "put_info/2" do
+    # The table is node-wide and this test destroys it, so it has to put the
+    # aggregator back. Without the restart, every later test that renders or
+    # bumps a counter raises on a table that no longer exists — and the
+    # metrics handler detaches itself on the way, silently stopping every
+    # count for the rest of the run. ExUnit shuffles within a module, so which
+    # tests that hits is a function of the seed.
     test "never raises when no aggregator is running" do
+      on_exit(&restart_aggregator/0)
+
       :ets.whereis(Smolquery.Telemetry) != :undefined && :ets.delete(Smolquery.Telemetry)
 
       assert Smolquery.Telemetry.put_info("smolquery_buffer_shape_info", a: 1) == :ok
+    end
+
+    defp restart_aggregator do
+      Supervisor.terminate_child(Smolquery.Supervisor, Smolquery.Telemetry)
+      {:ok, _pid} = Supervisor.restart_child(Smolquery.Supervisor, Smolquery.Telemetry)
+
+      :ok
     end
   end
 end

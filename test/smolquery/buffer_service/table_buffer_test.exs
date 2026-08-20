@@ -72,6 +72,144 @@ defmodule Smolquery.BufferService.TableBufferTest do
     start_buffer_service(context, [])
   end
 
+  describe "flush trigger reason (T-333)" do
+    defp attach_triggers do
+      handler = "flush-trigger-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :buffer, :flush_trigger],
+        fn _event, measurements, meta, _config ->
+          send(test, {:flush_trigger, meta.table_ref, meta.reason, measurements})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    # The handler is node-wide, so every buffer in the suite reports into this
+    # test's mailbox. Each test therefore writes to a table ref of its own and
+    # matches on it — without that, a `refute_receive` fails on a window some
+    # other async test closed.
+    defp own_table, do: {"analytics", "events_#{:erlang.unique_integer([:positive])}"}
+
+    setup do
+      attach_triggers()
+
+      %{ref: own_table()}
+    end
+
+    # Every threshold far out of reach and the timer effectively off, so the
+    # only thing that closes a window is the event under test.
+    defp held_open do
+      [
+        flush_max_rows: 1_000_000,
+        flush_max_bytes: 1_000_000_000,
+        max_buffered_rows: 2_000_000,
+        max_buffered_bytes: 2_000_000_000,
+        commit_siblings: 0,
+        flush_interval_ms: 60_000,
+        flush_idle_interval_ms: 60_000
+      ]
+    end
+
+    defp accumulating?(name, ref) do
+      {:ok, runtime} = Runtime.fetch(name)
+
+      case GenServer.whereis(Runtime.via(runtime, ref)) do
+        nil -> false
+        pid -> :sys.get_state(pid).row_count > 0
+      end
+    end
+
+    test "a commit over flush_max_rows is named rows", %{ref: ref} = context do
+      %{name: name} =
+        start_buffer_service(context, flush_max_rows: 4, flush_interval_ms: 60_000)
+
+      {:ok, _ack} = Client.write_batch(name, ref, batch(1..8))
+
+      assert_receive {:flush_trigger, ^ref, :rows, %{rows: 8}}, 500
+    end
+
+    test "a commit over flush_max_bytes is named bytes", %{ref: ref} = context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_max_rows: 1_000_000,
+          flush_max_bytes: 1,
+          flush_interval_ms: 60_000
+        )
+
+      {:ok, _ack} = Client.write_batch(name, ref, batch(1..2))
+
+      assert_receive {:flush_trigger, ^ref, :bytes, %{bytes: bytes}}, 500
+      assert bytes > 0
+    end
+
+    # `commit_siblings: 0` puts every window on the full interval, so this
+    # separates the two timer reasons rather than letting the idle path claim
+    # both.
+    test "a window the timer closes is named for the interval that armed it",
+         %{ref: ref} = context do
+      %{name: name} =
+        start_buffer_service(context,
+          flush_max_rows: 1_000_000,
+          flush_max_bytes: 1_000_000_000,
+          commit_siblings: 0,
+          flush_interval_ms: 25
+        )
+
+      {:ok, _ack} = Client.write_batch(name, ref, batch(1..2))
+
+      assert_receive {:flush_trigger, ^ref, :interval, _measurements}, 500
+    end
+
+    # A write blocks until its own group commit settles, so a test that holds
+    # the window open cannot await the ack. It starts the write and asserts on
+    # the trigger the *next* action provokes.
+    defp write_async(name, ref, batch) do
+      {:ok, pid} = Task.start(fn -> Client.write_batch(name, ref, batch) end)
+
+      pid
+    end
+
+    test "a schema change is named schema, not a threshold", %{ref: ref} = context do
+      %{name: name} = start_buffer_service(context, held_open())
+
+      wider = Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}, {"n", :int64}])
+
+      write_async(name, ref, batch(1..2))
+      assert Eventually.until(fn -> accumulating?(name, ref) end, 5_000, 10)
+
+      write_async(name, ref, %{
+        schema: wider,
+        rows: [%{"id" => 9, "ts" => ~N[2026-07-31 12:00:00], "n" => 1}]
+      })
+
+      assert_receive {:flush_trigger, ^ref, :schema, %{rows: 2}}, 5_000
+    end
+
+    test "an explicit flush is named flush", %{ref: ref} = context do
+      %{name: name} = start_buffer_service(context, held_open())
+
+      write_async(name, ref, batch(1..2))
+      assert Eventually.until(fn -> accumulating?(name, ref) end, 5_000, 10)
+
+      :ok = Client.flush(name, ref)
+
+      assert_receive {:flush_trigger, ^ref, :flush, %{rows: 2}}, 5_000
+    end
+
+    test "an empty accumulator emits nothing at all", %{ref: ref} = context do
+      %{name: name} = start_buffer_service(context, held_open())
+
+      :ok = Client.flush(name, ref)
+
+      refute_receive {:flush_trigger, ^ref, _reason, _measurements}, 100
+    end
+  end
+
   describe "heap hygiene (T-330)" do
     defp buffer_pid(runtime), do: GenServer.whereis(Runtime.via(runtime, @table))
     defp committer_pid(runtime), do: GenServer.whereis(Runtime.committer_via(runtime, @table))

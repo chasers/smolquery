@@ -945,6 +945,27 @@ The metrics are counters only, with paired totals for means
 (`smolquery_buffer_commit_microseconds_total / smolquery_buffer_commits_total`).
 Labels come from closed sets, so code bounds cardinality, not traffic.
 
+Commit **size** and **frequency** are first-class, not derived (T-333). Tuning
+the group commit needs both, and a mean answers neither on its own.
+
+- `smolquery_buffer_flush_trigger_total{reason}` says *why* a window closed:
+  `rows`, `bytes`, `interval`, `idle`, `schema`, `kind`, `flush`, `drain`, or
+  `shutdown`. This is the single fact that names the knob in control. Raising
+  `flush_max_bytes` from 2 MB to 48 MB once changed nothing at 2-8 virtual
+  users, because the 1 s interval was closing every window. That took a
+  before-and-after latency comparison to establish. This counter says it
+  outright.
+- `smolquery_buffer_commit_rows_bucket{le}` is the size distribution. A mean of
+  5,292 rows is equally consistent with every commit being 5,292 and with half
+  being 800 and half 10,000. Seal cost scales as roughly `segments^1.21`, so
+  those two have very different consequences. The buckets are cumulative
+  counters, not a histogram family.
+- `smolquery_buffer_commit_bytes_total` is the unit `flush_max_bytes` gates on.
+  Row width varies by table, so rows do not substitute for bytes.
+- `smolquery_seal_segment_bytes_total` is compressed Parquet as written, which
+  is what seal and compaction actually pay for. `smolquery_seal_segments_total`
+  counts segments, not their size.
+
 Hot-tier reads count their *bytes*, not only their requests (T-315). The two
 manifest routes and the segment route differ by orders of magnitude, so a
 request count alone cannot say which one is spending a buffer node.

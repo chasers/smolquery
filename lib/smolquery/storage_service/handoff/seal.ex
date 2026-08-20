@@ -207,8 +207,21 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     with {:ok, segment} <- Merge.run(runtime, table_ref, claim, entries),
          {:ok, fresh} <- claim_manifest(runtime, table_ref, claim),
          :ok <- claim_live(fresh, claim) do
+      record_segment(table_ref, segment)
+
       Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
     end
+  end
+
+  # Emitted once the merge produced a file, before registration decides whether
+  # it lands: the bytes describe what the merge cost to write, which is true
+  # whether or not the commit that follows succeeds.
+  defp record_segment(table_ref, segment) do
+    :telemetry.execute(
+      [:smolquery, :seal, :segment],
+      %{bytes: segment.byte_size, rows: segment.row_count},
+      %{table_ref: table_ref}
+    )
   end
 
   defp retire(runtime, table_ref, claim, snapshot) do
