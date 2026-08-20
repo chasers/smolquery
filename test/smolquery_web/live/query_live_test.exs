@@ -36,6 +36,65 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
   end
 
+  describe "editor state in the URL" do
+    test "the sql param repopulates the editor", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/query?#{[sql: "SELECT 7 AS seven"]}")
+
+      assert html =~ "SELECT 7 AS seven"
+    end
+
+    test "the sql param survives into a run", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/query?#{[sql: "SELECT 7 AS seven"]}")
+
+      refute render_click(lv, "explain", %{"mode" => "plan"}) =~ "Write some SQL first"
+    end
+
+    test "trace=false unchecks the toggle", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false"]}")
+
+      refute html =~ "checked"
+    end
+
+    test "typing patches the sql into the URL", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_change(lv, "sql_changed", %{"query" => %{"sql" => "SELECT 1", "trace" => "true"}})
+
+      assert assert_patch(lv) == ~p"/query?#{[sql: "SELECT 1", trace: "true"]}"
+    end
+
+    test "clearing the editor drops the sql from the URL", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/query?#{[sql: "SELECT 1"]}")
+
+      render_change(lv, "sql_changed", %{"query" => %{"sql" => "", "trace" => "true"}})
+
+      assert assert_patch(lv) == ~p"/query?#{[trace: "true"]}"
+    end
+
+    test "a query too long for the link stays out of it and says so", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      long = "SELECT " <> String.duplicate("a", 5000)
+
+      html = render_change(lv, "sql_changed", %{"query" => %{"sql" => long, "trace" => "true"}})
+
+      assert assert_patch(lv) == ~p"/query?#{[trace: "true"]}"
+      assert html =~ "too long for the link"
+    end
+  end
+
   describe "with a query service" do
     setup do
       query = :"web_query_#{:erlang.unique_integer([:positive])}"
