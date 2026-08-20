@@ -93,6 +93,21 @@ defmodule SmolqueryApi.InsertControllerTest do
     assert response.status == 404
   end
 
+  test "a body over the configured cap is a 413 naming it (T-329)", %{name: name} do
+    {:ok, runtime} = Runtime.fetch(name)
+    Runtime.put(%{runtime | max_ndjson_bytes: 10})
+
+    response = post_rows(name, [%{"id" => 1}, %{"id" => 2}])
+
+    assert response.status == 413
+
+    assert %{"error" => %{"status" => "PAYLOAD_TOO_LARGE", "message" => message}} =
+             JSON.decode!(response.resp_body)
+
+    assert message =~ "10 bytes"
+    assert message =~ "/load"
+  end
+
   test "a JSON array body is a 415 that names the header to send (T-190)", %{name: name} do
     response =
       conn(:post, @path, JSON.encode!(%{"rows" => [%{"id" => 1}]}))
