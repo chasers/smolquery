@@ -386,7 +386,9 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   `read_parquet` call is unbounded. Each of those calls has its own budget —
   `merge_staging_timeout_ms` per chunk, `merge_describe_timeout_ms` per schema
   read, and `merge_copy_timeout_ms` for the final `COPY`. A merge that outruns
-  one re-stages its whole claim on the next attempt. A backlog past either valve retires in
+  one re-stages its whole claim on the next attempt. All three print on the
+  `storage shape:` line at boot, beside the merge engine's resolved memory
+  limit and the seal concurrency. A backlog past either valve retires in
   valve-sized claims, back to back. A table under sustained ingest therefore
   self-corrects. A custom `seal_consumer` receives claims up to the valves. It
   must bound its own engine calls the same way. The valves also reach a claim

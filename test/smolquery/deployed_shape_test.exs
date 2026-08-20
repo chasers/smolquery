@@ -6,6 +6,7 @@ defmodule Smolquery.DeployedShapeTest do
   alias Smolquery.BufferService.Runtime, as: BufferRuntime
   alias Smolquery.DeployedShape
   alias Smolquery.IngestService.Runtime, as: IngestRuntime
+  alias Smolquery.StorageService.Runtime, as: StorageRuntime
 
   # The shape lines are info, and the test environment runs Logger at :warning.
   # The point of this module is that the lines exist, so the tests have to be
@@ -25,6 +26,50 @@ defmodule Smolquery.DeployedShapeTest do
     BufferRuntime.new(
       [name: :"shape_#{System.unique_integer([:positive])}", dir: dir] ++ overrides
     )
+  end
+
+  defp storage_runtime(overrides) do
+    StorageRuntime.new(
+      [name: :"storage_shape_#{System.unique_integer([:positive])}"] ++ overrides
+    )
+  end
+
+  describe "announce/1 for storage" do
+    test "states the seal concurrency and the merge's call budgets (T-335)" do
+      log = capture_log(fn -> DeployedShape.announce(storage_runtime([])) end)
+
+      assert log =~ "storage shape:"
+      assert log =~ "max_concurrent_seals=2"
+      assert log =~ "merge_inputs_per_call=12"
+      assert log =~ "merge_copy_timeout_ms=300000"
+      assert log =~ "merge_staging_timeout_ms=120000"
+      assert log =~ "merge_describe_timeout_ms=120000"
+      assert log =~ "seal_backoff_base_ms=30000"
+      assert log =~ "seal_backoff_max_ms=600000"
+    end
+
+    # The two limits an operator cannot read off their own configuration: each
+    # derives from the cgroup limit when nothing configures one (T-250).
+    test "states both engine memory limits resolved" do
+      log =
+        capture_log(fn ->
+          DeployedShape.announce(
+            storage_runtime(
+              engine_memory_limit: "6GiB",
+              compact_engine_memory_limit: "1GiB"
+            )
+          )
+        end)
+
+      assert log =~ "merge_engine_memory_limit=6GiB"
+      assert log =~ "compact_engine_memory_limit=1GiB"
+    end
+
+    test "names the store the sealed tier came up on" do
+      log = capture_log(fn -> DeployedShape.announce(storage_runtime(dir: "/tmp/sealed")) end)
+
+      assert log =~ "store=Smolquery.Segments.Store.Local"
+    end
   end
 
   describe "announce/1 for the buffer" do
