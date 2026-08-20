@@ -13,6 +13,17 @@ defmodule SmolqueryWeb.QueryLive.Index do
   `trace: true` and renders the job's phase spans as a
   `SmolqueryWeb.Waterfall`; it starts enabled — the waterfall is what the
   page is for — while the API keeps tracing opt-in.
+
+  The editor's state lives in the URL. Each change patches `sql` and `trace`
+  into the query string, so a reload, a restored tab, or a pasted link brings
+  the editor back with the same SQL. The patch replaces the history entry
+  rather than pushing one, so Back leaves the page instead of walking the
+  keystrokes.
+
+  A query longer than `@max_url_sql_bytes` once encoded stays out of the URL.
+  The web server rejects a request line over its own limit, so a link that
+  carries a very long query would fail to load at all. The page says so under
+  the editor when it drops the SQL from the link.
   """
 
   use SmolqueryWeb, :live_view
@@ -25,6 +36,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   @page_size 100
   @poll_ms 200
+  @max_url_sql_bytes 4096
 
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
@@ -36,6 +48,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:runtime, runtime)
       |> assign(:sql, "")
       |> assign(:trace, true)
+      |> assign(:sql_in_url, true)
       |> assign(:job, nil)
       |> assign(:frame, nil)
       |> assign(:page, 0)
@@ -47,12 +60,21 @@ defmodule SmolqueryWeb.QueryLive.Index do
   end
 
   @impl Phoenix.LiveView
+  def handle_params(params, _uri, socket) do
+    {:noreply,
+     socket
+     |> assign(:sql, Map.get(params, "sql", socket.assigns.sql))
+     |> assign(:trace, params_trace(params, socket.assigns.trace))
+     |> assign_sql_in_url()}
+  end
+
+  @impl Phoenix.LiveView
   def handle_event("sql_changed", %{"query" => query}, socket) do
-    {:noreply, editor(socket, query)}
+    {:noreply, socket |> editor(query) |> patch_editor()}
   end
 
   def handle_event("run", %{"query" => query}, socket) do
-    socket |> editor(query) |> submit_or_warn([])
+    socket |> editor(query) |> patch_editor() |> submit_or_warn([])
   end
 
   def handle_event("explain", %{"mode" => mode}, socket) do
@@ -92,6 +114,38 @@ defmodule SmolqueryWeb.QueryLive.Index do
     socket
     |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
     |> assign(:trace, Map.get(query, "trace") == "true")
+    |> assign_sql_in_url()
+  end
+
+  defp params_trace(params, current) do
+    case Map.fetch(params, "trace") do
+      {:ok, trace} -> trace == "true"
+      :error -> current
+    end
+  end
+
+  defp assign_sql_in_url(socket) do
+    assign(socket, :sql_in_url, url_sql?(socket.assigns.sql))
+  end
+
+  defp url_sql?(sql), do: byte_size(URI.encode_www_form(sql)) <= @max_url_sql_bytes
+
+  defp patch_editor(socket) do
+    push_patch(socket, to: editor_path(socket.assigns), replace: true)
+  end
+
+  defp editor_path(assigns) do
+    ~p"/query?#{editor_params(assigns)}"
+  end
+
+  defp editor_params(%{sql: sql, trace: trace, sql_in_url: sql_in_url}) do
+    trace_params = [trace: to_string(trace)]
+
+    if sql == "" or not sql_in_url do
+      trace_params
+    else
+      [{:sql, sql} | trace_params]
+    end
   end
 
   defp explain_mode("analyze"), do: :analyze
@@ -218,6 +272,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
           name="query[sql]"
           rows="6"
           placeholder="SELECT ..."
+          phx-debounce="250"
           phx-hook=".SubmitOnMetaEnter"
           class="textarea textarea-bordered w-full font-mono"
         >{@sql}</textarea>
@@ -261,6 +316,10 @@ defmodule SmolqueryWeb.QueryLive.Index do
           </span>
         </div>
       </form>
+
+      <div :if={not @sql_in_url} class="text-sm opacity-70">
+        This query is too long for the link — a reload will not bring it back.
+      </div>
 
       <div :if={@run_error} class="alert alert-error text-sm">{@run_error}</div>
 
