@@ -99,8 +99,8 @@ defmodule Smolquery.BufferService.TableBuffer do
   The claim also names its output, derived from its inputs, so a table's sealed
   segment has a stable identity before any bytes exist. One key per claim, and
   the claim takes the oldest unsealed entries up to two valves: a byte valve
-  of 16 × `seal_max_bytes`, and a count valve of 16 × `seal_max_files`
-  (T-288). The byte valve bounds how large one sealed segment can get and how
+  of `claim_valve_factor` × `seal_max_bytes`, and a count valve of
+  `claim_valve_factor` × `seal_max_files` (T-288). The byte valve bounds how large one sealed segment can get and how
   many bytes the merge stages in its temp table — engine memory and spill are
   finite, and a claim past them would fail the same way on every retry. The
   count valve bounds what the byte valve cannot see: per-input footer round
@@ -191,7 +191,6 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
 
-  @claim_valve_factor 16
   @release_stuck_after 5
 
   defstruct [
@@ -732,8 +731,8 @@ defmodule Smolquery.BufferService.TableBuffer do
         batch =
           claim_batch(
             entries,
-            state.runtime.seal_max_bytes * @claim_valve_factor,
-            state.runtime.seal_max_files * @claim_valve_factor
+            claim_byte_valve(state),
+            claim_count_valve(state)
           )
 
         length(batch) < length(entries)
@@ -822,7 +821,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     HotManifest.claimable(
       state.runtime.manifest,
       state.table_ref,
-      max(state.runtime.seal_max_files * @claim_valve_factor, 1)
+      claim_count_valve(state)
     )
   end
 
@@ -854,10 +853,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp claim_and_signal(state, unsealed) do
     ids =
       unsealed
-      |> claim_batch(
-        state.runtime.seal_max_bytes * @claim_valve_factor,
-        state.runtime.seal_max_files * @claim_valve_factor
-      )
+      |> claim_batch(claim_byte_valve(state), claim_count_valve(state))
       |> Enum.map(& &1.id)
 
     result =
@@ -875,6 +871,12 @@ defmodule Smolquery.BufferService.TableBuffer do
         state
     end
   end
+
+  defp claim_byte_valve(state),
+    do: max(state.runtime.seal_max_bytes * state.runtime.claim_valve_factor, 1)
+
+  defp claim_count_valve(state),
+    do: max(state.runtime.seal_max_files * state.runtime.claim_valve_factor, 1)
 
   defp claim_batch([first | rest], byte_valve, count_valve) do
     {batch, _total, _count} =

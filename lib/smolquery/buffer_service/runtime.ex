@@ -30,6 +30,7 @@ defmodule Smolquery.BufferService.Runtime do
         seal_max_files: 64,
         seal_max_age_ms: 60_000,
         seal_retry_ms: 30_000,
+        claim_valve_factor: 16,
         retire_grace_ms: 600_000,
         maintenance_interval_ms: 5_000,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
@@ -127,10 +128,11 @@ defmodule Smolquery.BufferService.Runtime do
   the short window off. See `Smolquery.BufferService.TableBuffer` for what
   counts as in flight and when the choice is made.
 
-  A claim freezes the oldest unsealed entries up to 16 × `seal_max_bytes`
-  and 16 × `seal_max_files` — the byte valve bounds one sealed segment and
-  the merge's staged bytes, the count valve bounds the merge's per-input
-  footer round trips (T-288; see `Smolquery.BufferService.TableBuffer`).
+  A claim freezes the oldest unsealed entries up to `claim_valve_factor` ×
+  `seal_max_bytes` and `claim_valve_factor` × `seal_max_files` — the byte
+  valve bounds one sealed segment and the merge's staged bytes, the count
+  valve bounds the merge's per-input footer round trips (T-288; see
+  `Smolquery.BufferService.TableBuffer`).
   The storage side's merge bounds its own engine calls
   (`merge_inputs_per_call` on `Smolquery.StorageService.Runtime`), so a
   valve-sized claim is always safe to seal. A backlog past either valve
@@ -139,6 +141,21 @@ defmodule Smolquery.BufferService.Runtime do
   same contract: a claim can hold up to the valves' bytes and file count, so
   a consumer that merges must bound its own calls the way
   `Smolquery.StorageService.Merge` does.
+
+  `claim_valve_factor` is that multiplier, `16` by default. It was a module
+  attribute until T-335, where a 488-segment claim on a 63-column table
+  exhausted the merge engine's memory at 1 GiB, then its spill at 8 GiB, and
+  then the merge's own call budget at 32 GiB — with no configuration that
+  could shrink the claim. The factor is what sizes a claim against limits
+  that live on the other side of the seal handoff, so it belongs with them:
+  the merge's memory limit, its spill limit, and its call timeouts are all
+  set per deployment, and the claim they must swallow was not.
+
+  Lower it to seal a wide table in smaller pieces. Seal cost measured as
+  roughly `segments^1.21`, so a claim four times smaller costs more than four
+  times less, and a shorter merge shortens the window in which a table ref is
+  blocked by its one live claim. Raise it to amortize the merge's fixed cost
+  over more inputs on a table the engine can comfortably hold.
 
   `retire_grace_ms` must exceed the longest query a planner can hold open. It is
   how long a retired micro-segment stays readable after a sealer committed it, and
@@ -197,6 +214,7 @@ defmodule Smolquery.BufferService.Runtime do
     seal_max_files: 64,
     seal_max_age_ms: 60_000,
     seal_retry_ms: 30_000,
+    claim_valve_factor: 16,
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
     seal_consumer: {Smolquery.BufferService.SealLog, []},
@@ -233,6 +251,7 @@ defmodule Smolquery.BufferService.Runtime do
           seal_max_files: pos_integer(),
           seal_max_age_ms: pos_integer(),
           seal_retry_ms: pos_integer(),
+          claim_valve_factor: pos_integer(),
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
           seal_consumer: {module(), term()},
@@ -263,6 +282,7 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_max_files,
     :seal_max_age_ms,
     :seal_retry_ms,
+    :claim_valve_factor,
     :retire_grace_ms,
     :maintenance_interval_ms,
     :seal_consumer,
@@ -325,6 +345,10 @@ defmodule Smolquery.BufferService.Runtime do
   idle interval detonates in `Process.send_after/3` at a table's first
   accumulation, far from the config that set it.
 
+  `:claim_valve_factor` is gated because a `0` multiplies both seal valves to
+  zero: `claim_batch/3` would take no entries and the table would freeze empty
+  claims forever, never sealing a row.
+
   `:max_buffered_bytes` and `:max_buffered_rows` are checked against their
   flush triggers. An inverted pair parks the accumulator below the trigger
   and refuses writes with `buffer_full` until a timed flush drains it, so
@@ -351,6 +375,7 @@ defmodule Smolquery.BufferService.Runtime do
     validate_commit_siblings!(Keyword.get(config, :commit_siblings, 5))
     validate_flush_idle_interval!(Keyword.get(config, :flush_idle_interval_ms, 5))
     validate_fullsweep_after!(Keyword.get(config, :fullsweep_after, 0))
+    validate_claim_valve_factor!(Keyword.get(config, :claim_valve_factor, 16))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -557,6 +582,14 @@ defmodule Smolquery.BufferService.Runtime do
     raise ArgumentError,
           "unusable fullsweep_after: #{inspect(after_gcs)} " <>
             "(expected a non-negative integer of minor collections)"
+  end
+
+  defp validate_claim_valve_factor!(factor) when is_integer(factor) and factor > 0, do: :ok
+
+  defp validate_claim_valve_factor!(factor) do
+    raise ArgumentError,
+          "unusable claim valve factor: #{inspect(factor)} " <>
+            "(expected a positive integer)"
   end
 
   defp warn_inverted_capacity(%__MODULE__{} = runtime) do

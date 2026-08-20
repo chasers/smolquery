@@ -102,6 +102,35 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
+    test "the merge's three call budgets default, and take an override each" do
+      runtime = Runtime.new(name: __MODULE__.MergeBudgets)
+
+      assert runtime.merge_copy_timeout_ms == 300_000
+      assert runtime.merge_staging_timeout_ms == 120_000
+      assert runtime.merge_describe_timeout_ms == 120_000
+
+      raised =
+        Runtime.new(
+          name: __MODULE__.RaisedMergeBudgets,
+          merge_copy_timeout_ms: 900_000,
+          merge_staging_timeout_ms: 600_000,
+          merge_describe_timeout_ms: 300_000
+        )
+
+      assert raised.merge_copy_timeout_ms == 900_000
+      assert raised.merge_staging_timeout_ms == 600_000
+      assert raised.merge_describe_timeout_ms == 300_000
+    end
+
+    test "refuses an unusable merge call budget at boot, naming the key (T-335)" do
+      for key <- [:merge_copy_timeout_ms, :merge_staging_timeout_ms, :merge_describe_timeout_ms],
+          ms <- [0, -1, "300000", nil] do
+        assert_raise ArgumentError, ~r/unsupported #{key}/, fn ->
+          Runtime.new([{:name, __MODULE__.BadMergeBudget}, {key, ms}])
+        end
+      end
+    end
+
     test "refuses a non-string engine_memory_limit at boot, not at engine start" do
       for limit <- [512, :"2GiB"] do
         assert_raise ArgumentError, ~r/unsupported engine_memory_limit/, fn ->

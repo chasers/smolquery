@@ -206,6 +206,33 @@ defmodule Smolquery.BufferService.SealingTest do
       assert remainder.ids == Enum.drop(backlog, 16)
     end
 
+    test "claim_valve_factor sizes the count valve (T-335)", context do
+      %{name: name} =
+        start_buffer_service(context,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000,
+          claim_valve_factor: 2,
+          seal_retry_ms: 1
+        )
+
+      {:ok, first} = Client.write_batch(name, @table, batch(0..0))
+
+      assert_receive {:seal_ready, @table, live}, 500
+      assert live.ids == [first.segment_id]
+
+      backlog =
+        for n <- 1..6 do
+          {:ok, ack} = Client.write_batch(name, @table, batch(n..n))
+          ack.segment_id
+        end
+
+      :ok = Client.retire(name, @table, live.ids, 1)
+      flush_messages()
+
+      assert_receive {:seal_ready, @table, claim}, 500
+      assert claim.ids == Enum.take(backlog, 2)
+    end
+
     test "an oversized claim frozen under old valves releases and drains (T-294)", context do
       name = :"resize_#{:erlang.unique_integer([:positive])}"
 

@@ -93,6 +93,7 @@ defmodule Smolquery.StorageService.Supervisor do
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
     runtime = Runtime.new(opts)
+    Smolquery.DeployedShape.announce(runtime)
 
     Supervisor.start_link(__MODULE__, runtime, name: Runtime.supervisor(runtime.name))
   end

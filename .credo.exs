@@ -150,11 +150,19 @@
           {Credo.Check.Warning.OperationWithConstantResult, []},
           {Credo.Check.Warning.RaiseInsideRescue, []},
           {Credo.Check.Warning.SpecWithStruct, []},
-          # `BufferService.Runtime` is a resolved-configuration record: one
-          # field per operator-facing setting is its whole design, and the
-          # 31-field ceiling exists to catch data clumps, not config records.
+          # The two service `Runtime` structs are resolved-configuration
+          # records: one field per operator-facing setting is their whole
+          # design, and the 31-field ceiling exists to catch data clumps, not
+          # config records. The storage side joined the buffer side in T-335,
+          # which moved the merge's three call budgets out of module
+          # attributes and into settings an operator can reach.
           {Credo.Check.Warning.StructFieldAmount,
-           files: %{excluded: ["lib/smolquery/buffer_service/runtime.ex"]}},
+           files: %{
+             excluded: [
+               "lib/smolquery/buffer_service/runtime.ex",
+               "lib/smolquery/storage_service/runtime.ex"
+             ]
+           }},
           {Credo.Check.Warning.UnsafeExec, []},
           {Credo.Check.Warning.UnusedEnumOperation, []},
           {Credo.Check.Warning.UnusedFileOperation, []},
