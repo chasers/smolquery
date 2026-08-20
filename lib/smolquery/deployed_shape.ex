@@ -79,6 +79,7 @@ defmodule Smolquery.DeployedShape do
       claim_max_files: runtime.seal_max_files * runtime.claim_valve_factor,
       backlog_max_entries: runtime.backlog_max_entries,
       backlog_max_bytes: runtime.backlog_max_bytes,
+      max_live_claims: runtime.max_live_claims,
       transport_tls: transport_tls?()
     ]
 
