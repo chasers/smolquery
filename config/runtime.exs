@@ -236,8 +236,11 @@ if seals = System.get_env("SMOLQUERY_MAX_CONCURRENT_SEALS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_CONCURRENT_SEALS", seals)
 end
 
-# T-299: `0` is the documented switch that disables the per-table cooldown, so
-# both take a non-negative integer rather than a positive one.
+# T-299: the base takes `0`, the documented switch that disables the per-table
+# cooldown. The ceiling does not. `backoff_ms/2` is
+# `min(base * 2^n, max)`, so a `0` ceiling returns `0` at every failure count
+# and disables the cooldown whatever the base says — a typo in the ceiling
+# would silently drop the protection instead of failing the boot.
 if ms = System.get_env("SMOLQUERY_SEAL_BACKOFF_BASE_MS") do
   config :smolquery, Smolquery.StorageService,
     seal_backoff_base_ms:
@@ -247,7 +250,7 @@ end
 if ms = System.get_env("SMOLQUERY_SEAL_BACKOFF_MAX_MS") do
   config :smolquery, Smolquery.StorageService,
     seal_backoff_max_ms:
-      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_SEAL_BACKOFF_MAX_MS", ms)
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_BACKOFF_MAX_MS", ms)
 end
 
 # The merge's three call budgets (T-261, T-288). A timed-out merge re-stages

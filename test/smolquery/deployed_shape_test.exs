@@ -70,6 +70,16 @@ defmodule Smolquery.DeployedShapeTest do
 
       assert log =~ "store=Smolquery.Segments.Store.Local"
     end
+
+    test "renders as a gauge pinned at 1, with the shape in the labels" do
+      capture_log(fn -> DeployedShape.announce(storage_runtime([])) end)
+
+      rendered = Smolquery.Telemetry.render()
+
+      assert rendered =~ "# TYPE smolquery_storage_shape_info gauge"
+      assert rendered =~ ~s(max_concurrent_seals="2")
+      assert rendered =~ "smolquery_storage_shape_info{"
+    end
   end
 
   describe "announce/1 for the buffer" do
