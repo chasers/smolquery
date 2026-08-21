@@ -100,6 +100,8 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
+      [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
+                                          — one per query the distributed path answered (PL-49)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
                                           — one per query phase (Smolquery.QueryService.Trace);
                                           not aggregated here, collected per job when tracing.
@@ -132,6 +134,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
     [:smolquery, :query, :job],
+    [:smolquery, :query, :scatter],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -216,6 +219,12 @@ defmodule Smolquery.Telemetry do
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean.",
+    "smolquery_query_scattered_total" =>
+      "Queries answered by the distributed scatter/gather path (PL-49).",
+    "smolquery_query_scatter_shards_total" =>
+      "Shards executed by scattered queries; divide by scattered for the mean fan-out.",
+    "smolquery_query_scatter_partial_bytes_total" =>
+      "Partial-result bytes scattered queries merged; the network bill once workers are remote.",
     "smolquery_buffer_commit_bytes_total" =>
       "Wire bytes in committed group commits; what flush_max_bytes gates on (T-333).",
     "smolquery_buffer_commit_rows_bucket" =>
@@ -498,6 +507,16 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :query, :job], measurements, meta, nil) do
     bump({"smolquery_query_jobs_total", [state: Map.get(meta, :state, :unknown)]}, 1)
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
+  end
+
+  def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
+    bump({"smolquery_query_scattered_total", []}, 1)
+    bump({"smolquery_query_scatter_shards_total", []}, Map.get(measurements, :shards, 0))
+
+    bump(
+      {"smolquery_query_scatter_partial_bytes_total", []},
+      Map.get(measurements, :partial_bytes, 0)
+    )
   end
 
   def handle_event([:smolquery, :lifecycle, :broadcast], _measurements, meta, nil) do

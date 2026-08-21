@@ -99,6 +99,14 @@ defmodule Smolquery.QueryService.Runtime do
   segments live elsewhere on disk must say so here, or its queries will
   honestly fail to read them.
 
+  `distributed` (PL-49, PoC) is whether a job may scatter across several
+  DuckDB instances — `enabled: false` by default. `min_files` is the
+  smallest shardable file count worth the fixed costs; `local_workers` is
+  how many instances run on this node when clustering is off (with
+  clustering on, the workers are the connected nodes that run this query
+  service). Decomposition, dispatch, and fallback live in
+  `Smolquery.QueryService.Scatter`.
+
   `store` names nothing this service writes through — the query path never
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
   8 L3), every job engine still needs the same credentials to
@@ -135,7 +143,8 @@ defmodule Smolquery.QueryService.Runtime do
     read_engine_threads: nil,
     result_ttl_ms: 300_000,
     result_max_rows: 10_000,
-    write_partitions: 1
+    write_partitions: 1,
+    distributed: %{enabled: false, min_files: 8, local_workers: 4}
   ]
 
   @type t :: %__MODULE__{
@@ -158,7 +167,12 @@ defmodule Smolquery.QueryService.Runtime do
           result_ttl_ms: pos_integer(),
           result_max_rows: pos_integer() | :infinity,
           write_partitions: pos_integer(),
-          store: Store.t() | nil
+          store: Store.t() | nil,
+          distributed: %{
+            enabled: boolean(),
+            min_files: pos_integer(),
+            local_workers: pos_integer()
+          }
         }
 
   @limits [
@@ -200,9 +214,18 @@ defmodule Smolquery.QueryService.Runtime do
       history_metadata:
         Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
       allowed_directories:
-        Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end)
+        Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end),
+      distributed: distributed(Keyword.get(config, :distributed, []))
     }
     |> struct!(Keyword.take(config, @limits))
+  end
+
+  defp distributed(opts) do
+    %{
+      enabled: Keyword.get(opts, :enabled, false),
+      min_files: Keyword.get(opts, :min_files, 8),
+      local_workers: Keyword.get(opts, :local_workers, 4)
+    }
   end
 
   defp build_store(config) do
