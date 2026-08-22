@@ -53,10 +53,10 @@ defmodule SmolqueryWeb.QueryLiveTest do
       refute render_click(lv, "explain", %{"mode" => "plan"}) =~ "Write some SQL first"
     end
 
-    test "trace=false unchecks the toggle", %{conn: conn} do
+    test "trace=false and distributed=false uncheck the toggles", %{conn: conn} do
       start_web!()
 
-      {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false"]}")
+      {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false", distributed: "false"]}")
 
       refute html =~ "checked"
     end
@@ -66,9 +66,12 @@ defmodule SmolqueryWeb.QueryLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/query")
 
-      render_change(lv, "sql_changed", %{"query" => %{"sql" => "SELECT 1", "trace" => "true"}})
+      render_change(lv, "sql_changed", %{
+        "query" => %{"sql" => "SELECT 1", "trace" => "true", "distributed" => "true"}
+      })
 
-      assert assert_patch(lv) == ~p"/query?#{[sql: "SELECT 1", trace: "true"]}"
+      assert assert_patch(lv) ==
+               ~p"/query?#{[sql: "SELECT 1", trace: "true", distributed: "true"]}"
     end
 
     test "clearing the editor drops the sql from the URL", %{conn: conn} do
@@ -76,9 +79,11 @@ defmodule SmolqueryWeb.QueryLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/query?#{[sql: "SELECT 1"]}")
 
-      render_change(lv, "sql_changed", %{"query" => %{"sql" => "", "trace" => "true"}})
+      render_change(lv, "sql_changed", %{
+        "query" => %{"sql" => "", "trace" => "true", "distributed" => "true"}
+      })
 
-      assert assert_patch(lv) == ~p"/query?#{[trace: "true"]}"
+      assert assert_patch(lv) == ~p"/query?#{[trace: "true", distributed: "true"]}"
     end
 
     test "a query too long for the link stays out of it and says so", %{conn: conn} do
@@ -88,9 +93,12 @@ defmodule SmolqueryWeb.QueryLiveTest do
 
       long = "SELECT " <> String.duplicate("a", 5000)
 
-      html = render_change(lv, "sql_changed", %{"query" => %{"sql" => long, "trace" => "true"}})
+      html =
+        render_change(lv, "sql_changed", %{
+          "query" => %{"sql" => long, "trace" => "true", "distributed" => "true"}
+        })
 
-      assert assert_patch(lv) == ~p"/query?#{[trace: "true"]}"
+      assert assert_patch(lv) == ~p"/query?#{[trace: "true", distributed: "true"]}"
       assert html =~ "too long for the link"
     end
   end
@@ -177,6 +185,15 @@ defmodule SmolqueryWeb.QueryLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/query")
 
       assert html =~ ~s|name="query[trace]"|
+      assert html =~ "checked"
+    end
+
+    test "the distribute toggle starts enabled", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false"]}")
+
+      assert html =~ ~s|name="query[distributed]"|
       assert html =~ "checked"
     end
 

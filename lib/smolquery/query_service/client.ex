@@ -39,9 +39,12 @@ defmodule Smolquery.QueryService.Client do
   alias Smolquery.QueryService.Runtime
 
   @type option ::
-          {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze} | {:trace, boolean()}
+          {:timeout_ms, pos_integer()}
+          | {:explain, :plan | :analyze}
+          | {:trace, boolean()}
+          | {:distributed, boolean()}
 
-  @submit_option_keys [:timeout_ms, :explain, :trace]
+  @submit_option_keys [:timeout_ms, :explain, :trace, :distributed]
 
   @doc """
   Runs `sql` and waits for its result.
@@ -50,6 +53,9 @@ defmodule Smolquery.QueryService.Client do
   engine's plan text on `job.explain` and no result frame — see
   `Smolquery.QueryService.Job.explained/5`. With `trace: true` it settles
   with its phase spans on `job.trace` (`Smolquery.QueryService.Trace`).
+  `distributed: true | false` overrides the runtime's distributed default
+  for this job only (PL-49); a distributed answer settles with the shard
+  count on `job.scatter`, and a refusal or failure falls back silently.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which

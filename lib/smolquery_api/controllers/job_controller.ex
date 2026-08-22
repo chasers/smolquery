@@ -121,10 +121,16 @@ defmodule SmolqueryApi.JobController do
       "statistics" => statistics_json(job.statistics),
       "explain" => job.explain,
       "trace" => trace_json(job.trace),
+      "scatter" => scatter_json(job.scatter),
       "error" => error_json(job.error),
       "resultsAvailable" => results_available
     }
   end
+
+  defp scatter_json(nil), do: nil
+
+  defp scatter_json(%{shards: shards, partial_bytes: partial_bytes}),
+    do: %{"shards" => shards, "partialBytes" => partial_bytes}
 
   defp trace_json(nil), do: nil
 
@@ -226,8 +232,9 @@ defmodule SmolqueryApi.JobController do
   @spec submit_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_param, String.t()}}
   def submit_opts(body) do
     with {:ok, explain} <- explain_opt(body),
-         {:ok, trace} <- trace_opt(body) do
-      {:ok, timeout_opt(body) ++ explain ++ trace}
+         {:ok, trace} <- trace_opt(body),
+         {:ok, distributed} <- distributed_opt(body) do
+      {:ok, timeout_opt(body) ++ explain ++ trace ++ distributed}
     end
   end
 
@@ -246,6 +253,13 @@ defmodule SmolqueryApi.JobController do
   defp trace_opt(%{"trace" => value}) when value in [false, nil], do: {:ok, []}
   defp trace_opt(%{"trace" => _other}), do: {:error, {:invalid_param, "trace"}}
   defp trace_opt(_body), do: {:ok, []}
+
+  defp distributed_opt(%{"distributed" => value}) when is_boolean(value),
+    do: {:ok, [distributed: value]}
+
+  defp distributed_opt(%{"distributed" => nil}), do: {:ok, []}
+  defp distributed_opt(%{"distributed" => _other}), do: {:error, {:invalid_param, "distributed"}}
+  defp distributed_opt(_body), do: {:ok, []}
 
   @doc """
   The body's `query` field.

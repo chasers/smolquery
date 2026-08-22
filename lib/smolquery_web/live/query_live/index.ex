@@ -14,9 +14,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
   `SmolqueryWeb.Waterfall`; it starts enabled — the waterfall is what the
   page is for — while the API keeps tracing opt-in.
 
-  The editor's state lives in the URL. Each change patches `sql` and `trace`
-  into the query string, so a reload, a restored tab, or a pasted link brings
-  the editor back with the same SQL. The patch replaces the history entry
+  The Distribute toggle submits with `distributed: true` (PL-49) and starts
+  enabled — the editor is where the distributed path gets exercised, while
+  the API and the deployment flag keep it opt-in. A distributed answer shows
+  a shard badge from `job.scatter`; no badge means the ordinary scan
+  answered, including every silent fallback.
+
+  The editor's state lives in the URL. Each change patches `sql`, `trace`,
+  and `distributed` into the query string, so a reload, a restored tab, or
+  a pasted link brings the editor back with the same SQL. The patch replaces the history entry
   rather than pushing one, so Back leaves the page instead of walking the
   keystrokes.
 
@@ -48,6 +54,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:runtime, runtime)
       |> assign(:sql, "")
       |> assign(:trace, true)
+      |> assign(:distributed, true)
       |> assign(:sql_in_url, true)
       |> assign(:job, nil)
       |> assign(:frame, nil)
@@ -64,7 +71,8 @@ defmodule SmolqueryWeb.QueryLive.Index do
     {:noreply,
      socket
      |> assign(:sql, Map.get(params, "sql", socket.assigns.sql))
-     |> assign(:trace, params_trace(params, socket.assigns.trace))
+     |> assign(:trace, params_flag(params, "trace", socket.assigns.trace))
+     |> assign(:distributed, params_flag(params, "distributed", socket.assigns.distributed))
      |> assign_sql_in_url()}
   end
 
@@ -114,12 +122,13 @@ defmodule SmolqueryWeb.QueryLive.Index do
     socket
     |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
     |> assign(:trace, Map.get(query, "trace") == "true")
+    |> assign(:distributed, Map.get(query, "distributed") == "true")
     |> assign_sql_in_url()
   end
 
-  defp params_trace(params, current) do
-    case Map.fetch(params, "trace") do
-      {:ok, trace} -> trace == "true"
+  defp params_flag(params, name, current) do
+    case Map.fetch(params, name) do
+      {:ok, value} -> value == "true"
       :error -> current
     end
   end
@@ -138,13 +147,18 @@ defmodule SmolqueryWeb.QueryLive.Index do
     ~p"/query?#{editor_params(assigns)}"
   end
 
-  defp editor_params(%{sql: sql, trace: trace, sql_in_url: sql_in_url}) do
-    trace_params = [trace: to_string(trace)]
+  defp editor_params(%{
+         sql: sql,
+         trace: trace,
+         distributed: distributed,
+         sql_in_url: sql_in_url
+       }) do
+    flag_params = [trace: to_string(trace), distributed: to_string(distributed)]
 
     if sql == "" or not sql_in_url do
-      trace_params
+      flag_params
     else
-      [{:sql, sql} | trace_params]
+      [{:sql, sql} | flag_params]
     end
   end
 
@@ -165,6 +179,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
   end
 
   defp submit(socket, opts) do
+    opts = [{:distributed, socket.assigns.distributed} | opts]
     opts = if socket.assigns.trace, do: [{:trace, true} | opts], else: opts
 
     case QueryService.Client.submit(socket.assigns.runtime.query_name, socket.assigns.sql, opts) do
@@ -299,6 +314,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
               class="checkbox checkbox-sm"
             /> Trace
           </label>
+          <label class="label cursor-pointer gap-1 text-sm">
+            <input
+              type="checkbox"
+              name="query[distributed]"
+              value="true"
+              checked={@distributed}
+              class="checkbox checkbox-sm"
+            /> Distribute
+          </label>
           <button
             :if={running?(@job)}
             type="button"
@@ -308,6 +332,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
             Cancel
           </button>
           <span :if={@job} class={["badge", state_badge(@job.state)]}>{@job.state}</span>
+          <span :if={@job && @job.scatter} class="badge badge-accent">
+            scattered × {@job.scatter.shards}
+          </span>
           <span :if={@job && @job.duration_ms} class="text-sm opacity-70">
             {@job.duration_ms} ms
           </span>

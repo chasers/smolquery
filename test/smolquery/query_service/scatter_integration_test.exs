@@ -63,7 +63,12 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     ]
 
     control = :"scatter_control_#{:erlang.unique_integer([:positive])}"
-    start_supervised!({QueryService.Supervisor, [name: control] ++ shared}, id: control)
+
+    start_supervised!(
+      {QueryService.Supervisor,
+       [name: control, distributed: [enabled: false, min_files: 4, local_workers: 3]] ++ shared},
+      id: control
+    )
 
     distributed = :"scatter_distributed_#{:erlang.unique_integer([:positive])}"
 
@@ -165,6 +170,38 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert bytes > 0
   end
 
+  test "a distributed answer lands on the job as scatter", %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events")
+
+    assert %{shards: 3, partial_bytes: bytes} = job.scatter
+    assert bytes > 0
+  end
+
+  test "the per-job option turns scatter on against the deployment default", %{
+    control: control
+  } do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(control, "SELECT count(*) AS n FROM analytics.events",
+               distributed: true
+             )
+
+    assert %{shards: 3} = job.scatter
+    assert_received {:scatter, _measurements, _meta}
+  end
+
+  test "the per-job option turns scatter off against an enabled deployment", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events",
+               distributed: false
+             )
+
+    assert job.scatter == nil
+    refute_received {:scatter, _measurements, _meta}
+  end
+
   test "a grouped top-k scatters and answers exactly", %{
     control: control,
     distributed: distributed
@@ -200,10 +237,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do
-    assert {:ok, %{state: :done}, frame} =
+    assert {:ok, %{state: :done} = job, frame} =
              Client.query(distributed, "SELECT id, name FROM analytics.events ORDER BY id")
 
     assert DataFrame.to_columns(frame)["id"] == Enum.to_list(1..15)
+    assert job.scatter == nil
     refute_received {:scatter, _measurements, _meta}
   end
 end
