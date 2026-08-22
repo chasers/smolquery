@@ -15,6 +15,13 @@ defmodule Smolquery.Cluster.Topology do
   Storage has no epoch/drain analog (`Smolquery.StorageService.Routing` is
   `PgGroup` + `RingCache` only), so a row carries only membership for it.
 
+  `roles` is what the node *runs* — its own `Smolquery.Roles.enabled/0`,
+  read over the same RPC as the epoch — which is not the same as ring
+  membership: a drained buffer node still holds the `buffer` role, and a
+  node can run `query` without belonging to any ring. The page shows roles;
+  the membership fields drive the drain button and the expected-node check.
+  A node that is not alive has no roles to report, so it carries `[]`.
+
   Degrades to a single row for `node()` — alive, no ring/storage membership
   claimed unless this node's own roles say so, nil epoch, not draining —
   wherever clustering is disabled, the same way every other reader in this
@@ -38,6 +45,7 @@ defmodule Smolquery.Cluster.Topology do
           node: node(),
           pod: String.t(),
           alive: boolean(),
+          roles: [Roles.t()],
           buffer_member: boolean(),
           storage_member: boolean(),
           expected_buffer: boolean(),
@@ -72,6 +80,7 @@ defmodule Smolquery.Cluster.Topology do
       node: node,
       pod: Pods.pod_of_node(node),
       alive: is_alive,
+      roles: if(is_alive, do: rpc(node, Roles, :enabled, []) || [], else: []),
       buffer_member: node in buffer_members,
       storage_member: node in storage_members,
       expected_buffer: node in expected_buffer,
