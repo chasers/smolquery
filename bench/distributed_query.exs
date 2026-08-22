@@ -192,6 +192,7 @@ defmodule Bench.DistributedQuery do
     partial_paths =
       workers
       |> Enum.with_index()
+      |> Enum.filter(fn {_worker, index} -> Map.has_key?(shard_files, index) end)
       |> Task.async_stream(
         fn {{name, _pid}, index} ->
           path = Path.join(partials_dir, "partial-#{index}.parquet")

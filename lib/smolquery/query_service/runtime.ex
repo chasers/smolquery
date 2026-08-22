@@ -99,12 +99,17 @@ defmodule Smolquery.QueryService.Runtime do
   segments live elsewhere on disk must say so here, or its queries will
   honestly fail to read them.
 
-  `distributed` (PL-49, PoC) is whether a job may scatter across several
-  DuckDB instances — `enabled: false` by default. `min_files` is the
-  smallest shardable file count worth the fixed costs; `local_workers` is
-  how many instances run on this node when clustering is off (with
-  clustering on, the workers are the connected nodes that run this query
-  service). Decomposition, dispatch, and fallback live in
+  `distributed` (PL-49) is whether a job may scatter across several DuckDB
+  instances — `enabled: true` by default; the flag is the kill switch, and
+  a job's own `distributed:` option overrides it either way. `min_files` is
+  the smallest shardable file count worth the fixed costs. `local_workers`
+  is how many instances run on this node when clustering is off; with
+  clustering on, the workers are the group's member nodes. Each worker
+  engine takes `worker_memory_limit` (default: `job_memory_limit`, whole)
+  and `worker_threads` (default: `read_engine_threads`) — like the write
+  pool, nothing divides a size string for you, so a node's declared scatter
+  budget is `local_workers ×` the worker limit *on top of* the job engine's
+  own. Decomposition, dispatch, and fallback live in
   `Smolquery.QueryService.Scatter`.
 
   `store` names nothing this service writes through — the query path never
@@ -144,7 +149,13 @@ defmodule Smolquery.QueryService.Runtime do
     result_ttl_ms: 300_000,
     result_max_rows: 10_000,
     write_partitions: 1,
-    distributed: %{enabled: false, min_files: 8, local_workers: 4}
+    distributed: %{
+      enabled: true,
+      min_files: 8,
+      local_workers: 4,
+      worker_memory_limit: nil,
+      worker_threads: nil
+    }
   ]
 
   @type t :: %__MODULE__{
@@ -171,7 +182,9 @@ defmodule Smolquery.QueryService.Runtime do
           distributed: %{
             enabled: boolean(),
             min_files: pos_integer(),
-            local_workers: pos_integer()
+            local_workers: pos_integer(),
+            worker_memory_limit: String.t() | nil,
+            worker_threads: pos_integer() | nil
           }
         }
 
@@ -222,9 +235,11 @@ defmodule Smolquery.QueryService.Runtime do
 
   defp distributed(opts) do
     %{
-      enabled: Keyword.get(opts, :enabled, false),
+      enabled: Keyword.get(opts, :enabled, true),
       min_files: Keyword.get(opts, :min_files, 8),
-      local_workers: Keyword.get(opts, :local_workers, 4)
+      local_workers: Keyword.get(opts, :local_workers, 4),
+      worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
+      worker_threads: Keyword.get(opts, :worker_threads)
     }
   end
 

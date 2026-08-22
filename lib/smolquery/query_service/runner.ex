@@ -57,17 +57,16 @@ defmodule Smolquery.QueryService.Runner do
   use GenServer, restart: :temporary
 
   alias Explorer.DataFrame
-  alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Federation
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
+  alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Scatter
   alias Smolquery.QueryService.Trace
-  alias Smolquery.Segments.Store
 
   @type option ::
           {:timeout_ms, pos_integer()}
@@ -112,14 +111,12 @@ defmodule Smolquery.QueryService.Runner do
   def init({runtime, job, opts}) do
     Process.flag(:trap_exit, true)
 
-    Process.send_after(
-      self(),
-      :deadline,
-      Keyword.get(opts, :timeout_ms, runtime.default_timeout_ms)
-    )
+    timeout_ms = Keyword.get(opts, :timeout_ms, runtime.default_timeout_ms)
+    Process.send_after(self(), :deadline, timeout_ms)
 
     state = %{
       runtime: override_distributed(runtime, Keyword.get(opts, :distributed)),
+      timeout_ms: timeout_ms,
       job: job,
       explain: Keyword.get(opts, :explain),
       trace: Keyword.get(opts, :trace, false),
@@ -149,7 +146,10 @@ defmodule Smolquery.QueryService.Runner do
         explain = state.explain
         connection = engine.connection
         job_id = state.job.id
-        task = Task.async(fn -> execute(runtime, connection, sql, explain, job_id) end)
+        timeout_ms = state.timeout_ms
+
+        task =
+          Task.async(fn -> execute(runtime, connection, sql, explain, job_id, timeout_ms) end)
 
         {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
 
@@ -244,21 +244,12 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp start_engine(runtime) do
-    with {:ok, database} <- DuckDB.start_link() do
-      connection =
-        Connection.start_link(
-          database: database,
-          extensions: extensions(runtime),
-          settings: engine_settings(runtime),
-          statements: engine_secrets(runtime) ++ runtime.job_bootstrap,
-          max_rows: :infinity
-        )
-
-      case connection do
-        {:ok, connection} -> {:ok, %{database: database, connection: connection}}
-        {:error, reason} -> stop_and_report(database, reason)
-      end
-    end
+    JobEngine.start(
+      extensions: extensions(runtime),
+      settings: engine_settings(runtime),
+      statements: engine_secrets(runtime) ++ runtime.job_bootstrap,
+      max_rows: :infinity
+    )
   end
 
   defp engine_settings(%Runtime{read_engine_threads: nil} = runtime),
@@ -267,19 +258,13 @@ defmodule Smolquery.QueryService.Runner do
   defp engine_settings(%Runtime{read_engine_threads: threads} = runtime),
     do: [memory_limit: runtime.job_memory_limit, threads: threads]
 
-  defp stop_and_report(database, reason) do
-    Process.exit(database, :kill)
-
-    {:error, reason}
-  end
-
   defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, extensions)
 
   defp extensions(%Runtime{engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
 
-  defp execute(runtime, connection, sql, explain, job_id) do
+  defp execute(runtime, connection, sql, explain, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
@@ -290,7 +275,15 @@ defmodule Smolquery.QueryService.Runner do
            end),
          {:ok, {result, scatter}} <-
            Trace.span(:execute, fn ->
-             outcome(runtime, connection, plan, runtime.result_max_rows, explain, job_id)
+             outcome(
+               runtime,
+               connection,
+               plan,
+               runtime.result_max_rows,
+               explain,
+               job_id,
+               timeout_ms
+             )
            end) do
       duration = System.monotonic_time(:millisecond) - started
 
@@ -305,8 +298,8 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp outcome(runtime, connection, plan, max_rows, nil, job_id) do
-    case Scatter.execute(runtime, connection, plan, job_id) do
+  defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
+    case Scatter.execute(runtime, connection, plan, job_id, timeout_ms) do
       {:ok, frame, scatter} ->
         checked(frame, max_rows, scatter)
 
@@ -317,7 +310,7 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id) do
+  defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id, _timeout_ms) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
       {:ok, {{:explain, explain_text(result)}, nil}}
@@ -355,11 +348,6 @@ defmodule Smolquery.QueryService.Runner do
       EngineSecrets.sealed_tier(runtime.store)
   end
 
-  defp store_prefixes(%Store{impl: Store.S3, config: config}),
-    do: [Store.S3.location_prefix(config)]
-
-  defp store_prefixes(_store), do: []
-
   @doc """
   Loads DuckDB's `postgres` extension into the job engine when the plan
   federates, and does nothing otherwise.
@@ -392,7 +380,7 @@ defmodule Smolquery.QueryService.Runner do
 
     directories =
       runtime.allowed_directories ++
-        store_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
+        EngineSecrets.sealed_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
 
     [
       "SET allowed_directories = #{sql_list(directories)}",
@@ -470,6 +458,7 @@ defmodule Smolquery.QueryService.Runner do
   defp settle(state, job) do
     job = traced(state, job)
     stop_engine(state.engine)
+    remove_partials(state.runtime, job)
     record_history(state.runtime, job)
 
     :telemetry.execute(
@@ -491,14 +480,12 @@ defmodule Smolquery.QueryService.Runner do
     %{state | job: job, engine: nil, waiters: [], collector: nil}
   end
 
-  defp stop_engine(nil), do: :ok
+  defp stop_engine(engine), do: JobEngine.stop(engine)
 
-  defp stop_engine(%{database: database, connection: connection}) do
-    Process.exit(connection, :kill)
-    Process.exit(database, :kill)
+  defp remove_partials(%Runtime{distributed: %{enabled: true}}, job),
+    do: File.rm_rf(Scatter.dir(job.id))
 
-    :ok
-  end
+  defp remove_partials(_runtime, _job), do: :ok
 
   defp record_history(%Runtime{history_metadata: nil}, _job), do: :ok
   defp record_history(%Runtime{name: name}, job), do: History.record(name, job)

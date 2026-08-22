@@ -16,7 +16,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
   @engine __MODULE__.Engine
   @conn Engine.connection_name(@engine)
-  @columns ~w(id name bucket ts value)
+  @columns ~w(id name bucket ts value big)
 
   setup_all do
     start_supervised!({Engine, name: @engine, extensions: []})
@@ -35,7 +35,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
              'u-' || (n % 7) AS name,
              CAST(n % 3 AS INTEGER) AS bucket,
              TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (n) SECOND AS ts,
-             CAST(n % 97 AS DOUBLE) / 7 AS value
+             CAST(n % 97 AS DOUBLE) / 7 AS value,
+             9007199254740993 + n AS big
       FROM range(1000) t(n)
       WHERE #{predicate}
       """
@@ -161,6 +162,13 @@ defmodule Smolquery.QueryService.DecomposerTest do
         tmp_dir
       )
     end
+
+    test "integer sums past 2^53 stay exact through parquet partials", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip("SELECT sum(big) AS s, avg(big) AS a FROM analytics.events", tmp_dir)
+
+      assert decomposition.partial_sql =~ "DECIMAL(38,0)"
+    end
   end
 
   describe "the gate refuses what it cannot split exactly" do
@@ -251,6 +259,16 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
     test "anything but a single SELECT" do
       assert :not_a_single_select = refused("INSERT INTO analytics.events VALUES (1)")
+    end
+
+    test "volatile functions" do
+      assert {:volatile_function, _now} =
+               refused(
+                 "SELECT count(*) FROM analytics.events WHERE ts >= now() - INTERVAL 1 HOUR"
+               )
+
+      assert {:volatile_function, "random"} =
+               refused("SELECT count(*) FROM analytics.events WHERE value > random()")
     end
   end
 end

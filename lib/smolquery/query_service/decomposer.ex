@@ -33,7 +33,19 @@ defmodule Smolquery.QueryService.Decomposer do
   OFFSET, and ORDER BY on anything but an output column's name. A select
   item must be a supported aggregate or match a group expression. Table
   columns prefixed `__pq_` would collide with the generated aliases, so
-  they refuse too.
+  they refuse too. Volatile functions — `now()`, `random()`, and their
+  kin — refuse as well: each worker would bind them on its own clock or
+  seed, and the shards would disagree with the single-engine answer.
+
+  ## Integer exactness
+
+  DuckDB types `sum(BIGINT)` as HUGEINT, and parquet has no int128 — a
+  HUGEINT column COPYed to parquet degrades to DOUBLE, which would make a
+  distributed integer sum silently wrong past 2^53. So the partial is
+  `DESCRIBE`d and any HUGEINT aggregate column is cast to `DECIMAL(38,0)`,
+  which parquet stores exactly; the final's cast restores the original
+  type. A HUGEINT *group key* cannot take that cast without changing the
+  result schema, so it refuses instead.
 
   ## Output names and types come from `DESCRIBE`
 
@@ -51,6 +63,9 @@ defmodule Smolquery.QueryService.Decomposer do
   @aggregates ["avg" | @mergeable]
   @prefix "__pq_"
   @refused_classes ~w(SUBQUERY WINDOW STAR)
+  @volatile ~w(now get_current_timestamp current_date current_localtime
+               current_localtimestamp today random uuid uuidv4 uuidv7
+               gen_random_uuid setseed nextval currval)
 
   @enforce_keys [:partial_sql, :final_select, :final_group, :final_tail]
   defstruct [:partial_sql, :final_select, :final_group, :final_tail]
@@ -68,8 +83,10 @@ defmodule Smolquery.QueryService.Decomposer do
   Decomposes `sql` for a table whose columns are `table_columns`, given the
   `DESCRIBE` outputs of the original statement.
 
-  `connection` is only used to serialize and deserialize — two round trips,
-  no data touched.
+  `connection` is used to serialize, to deserialize, and to `DESCRIBE` the
+  partial for the integer-exactness cast — three round trips, no data
+  touched. The partial references the planned view name, so the connection
+  must already hold the plan's views.
   """
   @spec decompose(GenServer.server(), String.t(), [output()], [String.t()]) ::
           {:ok, t()} | {:error, term()}
@@ -78,6 +95,7 @@ defmodule Smolquery.QueryService.Decomposer do
          {:ok, node} <- select_node(connection, sql),
          :ok <- gate_shape(node),
          :ok <- gate_classes(node),
+         :ok <- gate_volatile(node),
          {:ok, keys} <- group_keys(node, table_columns),
          {:ok, items} <- classified_items(node, keys),
          :ok <- gate_outputs(items, outputs),
@@ -183,6 +201,19 @@ defmodule Smolquery.QueryService.Decomposer do
     case refused do
       nil -> :ok
       class -> {:error, {:unsupported_expression, class}}
+    end
+  end
+
+  defp gate_volatile(node) do
+    volatile =
+      node
+      |> Map.take(["select_list", "where_clause", "group_expressions"])
+      |> collect_values("function_name", [])
+      |> Enum.find(&(&1 in @volatile))
+
+    case volatile do
+      nil -> :ok
+      name -> {:error, {:volatile_function, name}}
     end
   end
 
@@ -325,7 +356,35 @@ defmodule Smolquery.QueryService.Decomposer do
       |> Map.put("group_sets", group_sets(keys))
       |> Map.put("modifiers", [])
 
-    deserialize(connection, partial_node)
+    with {:ok, sql} <- deserialize(connection, partial_node) do
+      exact(connection, sql)
+    end
+  end
+
+  defp exact(connection, partial_sql) do
+    with {:ok, result} <- Connection.query(connection, "DESCRIBE " <> partial_sql, [], :infinity) do
+      columns = Enum.map(result.rows, fn [name, type | _rest] -> {name, type} end)
+
+      cond do
+        Enum.any?(columns, fn {name, type} ->
+          type == "HUGEINT" and not String.starts_with?(name, "#{@prefix}a")
+        end) ->
+          {:error, :hugeint_group_key}
+
+        Enum.any?(columns, fn {_name, type} -> type == "HUGEINT" end) ->
+          {:ok, "SELECT #{exact_select(columns)} FROM (#{partial_sql})"}
+
+        true ->
+          {:ok, partial_sql}
+      end
+    end
+  end
+
+  defp exact_select(columns) do
+    Enum.map_join(columns, ", ", fn
+      {name, "HUGEINT"} -> "CAST(#{quoted(name)} AS DECIMAL(38,0)) AS #{quoted(name)}"
+      {name, _type} -> quoted(name)
+    end)
   end
 
   defp partial_aggregates({:group, _index}, _position), do: []
@@ -386,8 +445,8 @@ defmodule Smolquery.QueryService.Decomposer do
   defp merged({:group, index}, _position, _type), do: quoted("#{@prefix}g#{index}")
 
   defp merged({:aggregate, "avg", _item}, position, type) do
-    "CAST(sum(#{quoted("#{@prefix}a#{position}_s")}) / " <>
-      "sum(#{quoted("#{@prefix}a#{position}_c")}) AS #{type})"
+    "CAST(CAST(sum(#{quoted("#{@prefix}a#{position}_s")}) AS DOUBLE) / " <>
+      "CAST(sum(#{quoted("#{@prefix}a#{position}_c")}) AS DOUBLE) AS #{type})"
   end
 
   defp merged({:aggregate, name, _item}, position, type) when name in @mergeable do

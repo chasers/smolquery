@@ -54,6 +54,17 @@ defmodule Smolquery.EngineSecrets do
   def sealed_tier(_store), do: []
 
   @doc """
+  The sealed tier's object-store location prefix, for an engine's
+  `allowed_directories` — `[]` when the store is local disk, whose
+  directories the caller already names.
+  """
+  @spec sealed_prefixes(Store.t() | nil) :: [String.t()]
+  def sealed_prefixes(%Store{impl: Store.S3, config: config}),
+    do: [Store.S3.location_prefix(config)]
+
+  def sealed_prefixes(_store), do: []
+
+  @doc """
   Extensions an engine must load before `sealed_tier/1`'s statement will run,
   merged into whatever the service already loads.
 

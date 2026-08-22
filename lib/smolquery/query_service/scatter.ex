@@ -23,10 +23,11 @@ defmodule Smolquery.QueryService.Scatter do
      (engine start per worker, partial transfer) outweigh a small scan
      (PL-48).
   3. Units go round-robin across the workers. With clustering on, the
-     workers are this node plus every connected node whose
-     `Smolquery.QueryService.PartialWorker` answers `available?`; without,
-     `local_workers` instances on this node. Dispatch is `:erpc.call/4`
-     either way, so the local path and the remote path are the same code.
+     workers are the query service's own `Smolquery.Cluster.PgGroup`
+     members — the nodes whose supervisors joined the group, no probing;
+     without, `local_workers` instances on this node. Dispatch is
+     `:erpc.call/4` either way, so the local path and the remote path are
+     the same code, each call bounded by the job's own deadline.
   4. Each worker's parquet bytes land in the job's partials directory —
      `Runner` put it inside `allowed_directories` before lockdown — and the
      final query reads them back with `read_parquet` on the job's own
@@ -41,18 +42,24 @@ defmodule Smolquery.QueryService.Scatter do
   `:erpc`; production wants Arrow over the segment HTTP routes. Remote
   workers must reach the same sealed store, which in practice means S3 or
   a shared disk.
+
+  Cleanup is layered: the `after` here removes the partials directory on
+  every path it can see, and `Runner`'s settle removes it again — a
+  cancelled or timed-out job brutal-kills this task, which skips `after`
+  blocks, and `:erpc` kills the in-flight workers when their caller dies.
   """
 
   require Logger
 
   alias Smolquery.Catalog
   alias Smolquery.Cluster
+  alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine.Connection
-  alias Smolquery.Identifier
   alias Smolquery.QueryService.Decomposer
   alias Smolquery.QueryService.PartialWorker
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Views
 
   @default_spill_root ".tmp"
 
@@ -79,15 +86,15 @@ defmodule Smolquery.QueryService.Scatter do
   distributed answer carries its shard count and merged partial bytes, so
   the job can say how it was served.
   """
-  @spec execute(Runtime.t(), GenServer.server(), Plan.t(), String.t()) ::
+  @spec execute(Runtime.t(), GenServer.server(), Plan.t(), String.t(), timeout()) ::
           {:ok, Explorer.DataFrame.t(),
            %{shards: pos_integer(), partial_bytes: non_neg_integer()}}
           | :fallback
-  def execute(%Runtime{distributed: %{enabled: false}}, _connection, _plan, _job_id),
+  def execute(%Runtime{distributed: %{enabled: false}}, _connection, _plan, _job_id, _timeout_ms),
     do: :fallback
 
-  def execute(%Runtime{} = runtime, connection, plan, job_id) do
-    attempt(runtime, connection, plan, job_id)
+  def execute(%Runtime{} = runtime, connection, plan, job_id, timeout_ms) do
+    attempt(runtime, connection, plan, job_id, timeout_ms)
   catch
     kind, reason ->
       Logger.warning("distributed query fell back: #{inspect({kind, reason})}")
@@ -95,14 +102,14 @@ defmodule Smolquery.QueryService.Scatter do
       :fallback
   end
 
-  defp attempt(runtime, connection, plan, job_id) do
+  defp attempt(runtime, connection, plan, job_id, timeout_ms) do
     with {:ok, ref} <- single_table(plan),
          {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
          {:ok, outputs} <- describe(connection, plan.canonical_sql),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
-      run(runtime, connection, decomposition, ref, schema, shards, job_id)
+      run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
     else
       {:refused, reason} ->
         Logger.debug(fn -> "distributed query refused: #{inspect(reason)}" end)
@@ -175,24 +182,19 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp workers(%Runtime{} = runtime) do
     if Cluster.enabled?() do
-      Enum.filter([node() | Node.list()], &worker_available?(&1, runtime.name))
+      PgGroup.nodes(Smolquery.QueryService, runtime.name, [node()])
     else
       List.duplicate(node(), runtime.distributed.local_workers)
     end
   end
 
-  defp worker_available?(peer, name) do
-    :erpc.call(peer, PartialWorker, :available?, [name], 5_000) == true
-  catch
-    _kind, _reason -> false
-  end
-
-  defp run(runtime, connection, decomposition, ref, schema, shards, job_id) do
+  defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
 
     try do
-      with {:ok, paths} <- gather(runtime, decomposition, ref, schema, shards, partials_dir),
+      with {:ok, paths} <-
+             gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
         measurements = %{
           shards: length(shards),
@@ -220,17 +222,18 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp gather(runtime, decomposition, ref, schema, shards, partials_dir) do
+  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms) do
     shards
     |> Enum.with_index()
     |> Task.async_stream(
       fn {{peer, files}, index} ->
         request = %{
-          statements: view_statements(ref, schema, files),
-          partial_sql: decomposition.partial_sql
+          statements: Views.table_view(ref, schema, Views.parquet_select(files)),
+          partial_sql: decomposition.partial_sql,
+          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http"))
         }
 
-        {index, dispatch(peer, runtime, request)}
+        {index, dispatch(peer, runtime, request, timeout_ms)}
       end,
       max_concurrency: length(shards),
       ordered: true,
@@ -258,28 +261,14 @@ defmodule Smolquery.QueryService.Scatter do
   defp bounded(final, :infinity), do: final
   defp bounded(final, max_rows), do: "SELECT * FROM (#{final}) LIMIT #{max_rows + 1}"
 
-  defp dispatch(peer, runtime, request) do
-    :erpc.call(peer, PartialWorker, :run, [runtime.name, request], runtime.default_timeout_ms)
+  defp dispatch(peer, runtime, request, timeout_ms) do
+    :erpc.call(peer, PartialWorker, :run, [runtime.name, request], timeout_ms)
   catch
     kind, reason -> {:error, {:worker_unreachable, peer, {kind, reason}}}
   end
 
-  defp view_statements({dataset, table}, schema, files) do
-    ds = Identifier.quote_name!(dataset)
-    t = Identifier.quote_name!(table)
-    columns = Enum.map_join(schema.fields, ", ", &Identifier.quote_name!(&1.name))
-    parquet = Enum.map_join(files, ", ", &Identifier.sql_string/1)
-
-    [
-      "CREATE SCHEMA IF NOT EXISTS #{ds}",
-      "CREATE VIEW #{ds}.#{t} AS SELECT #{columns} FROM " <>
-        "(SELECT * FROM read_parquet([#{parquet}], union_by_name := true))"
-    ]
-  end
-
   defp merge(runtime, connection, decomposition, paths) do
-    parquet = Enum.map_join(paths, ", ", &Identifier.sql_string/1)
-    final = Decomposer.final_sql(decomposition, "read_parquet([#{parquet}])")
+    final = Decomposer.final_sql(decomposition, Views.read_parquet(paths))
 
     case Connection.frame(connection, bounded(final, runtime.result_max_rows), [], :infinity) do
       {:ok, frame} ->
