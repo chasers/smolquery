@@ -173,7 +173,7 @@ The API is on [`localhost:4000`](http://localhost:4000) (dev Bearer key:
 `smolquery`) — browse datasets and tables, create
 both, edit a table's retention policy, preview rows, run SQL through the query
 service's job lifecycle (submit, live state, paged results, cancel), and watch
-the fleet on `/cluster` — every node's alive/ring-epoch/drain state, live, with
+the fleet on `/cluster` — every node's roles and alive/ring-epoch/drain state, live, with
 three ways to disturb one on purpose: **kill** (ungraceful pod force-delete —
 watches `RingEpoch`'s fencing actually earn its keep), **restart** (a plain
 pod delete — also what un-sticks a drained node), and **drain** (a genuinely

@@ -14,6 +14,30 @@ defmodule SmolqueryWeb.ClusterLiveTest do
       assert html =~ "up"
     end
 
+    test "renders the node name in a truncating cell with the full name as a title", %{
+      conn: conn
+    } do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/cluster")
+
+      assert html =~ ~s|class="block max-w-56 truncate" title="#{node()}">#{node()}</span>|
+    end
+
+    test "lists every role this node runs in one Roles column", %{conn: conn} do
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/cluster")
+
+      assert html =~ "<th>Roles</th>"
+      refute html =~ "<th>Buffer</th>"
+      refute html =~ "<th>Storage</th>"
+
+      for role <- Smolquery.Roles.enabled() do
+        assert html =~ ~s|badge-outline badge-sm mr-1">#{role}</span>|
+      end
+    end
+
     test "disables the kill and restart buttons without a kind cluster", %{conn: conn} do
       start_web!()
 

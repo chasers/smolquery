@@ -200,8 +200,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
               <th>Node</th>
               <th>Pod</th>
               <th>Alive</th>
-              <th>Buffer</th>
-              <th>Storage</th>
+              <th>Roles</th>
               <th>Expected</th>
               <th>Epoch</th>
               <th>Draining</th>
@@ -210,11 +209,12 @@ defmodule SmolqueryWeb.ClusterLive.Index do
           </thead>
           <tbody>
             <tr :for={row <- @fleet} class={[!row.alive && "opacity-60"]}>
-              <td class="font-mono whitespace-nowrap">{row.node}</td>
+              <td class="font-mono">
+                <span class="block max-w-56 truncate" title={row.node}>{row.node}</span>
+              </td>
               <td class="font-mono whitespace-nowrap">{row.pod}</td>
               <td>{status_badge(row.alive, "up", "down")}</td>
-              <td>{boolean_badge(row.buffer_member)}</td>
-              <td>{boolean_badge(row.storage_member)}</td>
+              <td class="whitespace-nowrap">{roles_badges(row.roles)}</td>
               <td>{mismatch_badge(row.expected_buffer, row.buffer_member)}</td>
               <td class="font-mono">{row.buffer_epoch || "—"}</td>
               <td>{boolean_badge(row.draining or draining?(@draining, row.node))}</td>
@@ -272,6 +272,22 @@ defmodule SmolqueryWeb.ClusterLive.Index do
 
     ~H"""
     <span class="badge badge-ghost badge-sm">{@label}</span>
+    """
+  end
+
+  defp roles_badges([]) do
+    assigns = %{}
+
+    ~H"""
+    <span class="opacity-60">—</span>
+    """
+  end
+
+  defp roles_badges(roles) do
+    assigns = %{roles: roles}
+
+    ~H"""
+    <span :for={role <- @roles} class="badge badge-outline badge-sm mr-1">{role}</span>
     """
   end
 

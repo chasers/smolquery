@@ -10,6 +10,7 @@ defmodule Smolquery.Cluster.TopologyTest do
 
       assert row.node == node()
       assert row.alive
+      assert row.roles == Smolquery.Roles.enabled()
       refute row.buffer_member
       refute row.storage_member
       refute row.expected_buffer
