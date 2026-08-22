@@ -1,0 +1,20 @@
+smolquery {{ .Chart.AppVersion }} is installed.
+
+Front-door Service:
+  {{ include "smolquery.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.ports.http }}
+
+Topology: {{ .Values.topology }}
+{{- if eq .Values.topology "split" }}
+StatefulSets: {{ include "smolquery.fullname" . }}-api, {{ include "smolquery.fullname" . }}-buffer, {{ include "smolquery.fullname" . }}-storage
+{{- else }}
+StatefulSet: {{ include "smolquery.fullname" . }}-server
+{{- end }}
+
+The chart consumes the existing Secret {{ .Values.existingSecret.name | quote }}; it never creates credentials.
+{{- if .Values.tls.enabled }}
+TLS is mounted from {{ .Values.tls.secretName | quote }}. Ensure it contains ca.pem and per-pod certificate/key files.
+{{- end }}
+Secret rotation does not change the pod template. Roll the release or use a reloader after rotating the external Secret.
+
+Run the installed health check with:
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}

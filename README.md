@@ -208,6 +208,37 @@ of a deployment:
   catalog onto Postgres and turns on node discovery; that is the whole cluster
   setup.
 
+### Production Kubernetes (Helm)
+
+The production chart is at [`charts/smolquery`](charts/smolquery). It consumes
+an existing runtime Secret and does not bundle PostgreSQL, S3-compatible
+storage, or certificate issuance:
+
+```sh
+kubectl create namespace smolquery --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n smolquery create secret generic smolquery-env \
+  --from-literal=SMOLQUERY_API_KEY=change-me \
+  --from-literal=SMOLQUERY_INTERNAL_SECRET=change-me-too \
+  --from-literal=CATALOG_DATABASE_URL=postgres://user:password@postgres/smolquery \
+  --from-literal=SMOLQUERY_S3_BUCKET=smolquery \
+  --from-literal=SMOLQUERY_WEB_USERNAME=smolquery \
+  --from-literal=SMOLQUERY_WEB_PASSWORD=change-me-web \
+  --from-literal=SMOLQUERY_SECRET_KEY_BASE=smolquery-secret-key-base-01234567890123456789012345678901234567890123456789 \
+  --from-literal=RELEASE_COOKIE=smolquery-release-cookie
+helm upgrade --install smolquery ./charts/smolquery \
+  --namespace smolquery --wait --timeout 10m
+helm test smolquery --namespace smolquery
+```
+
+The default split chart runs API, buffer, and storage StatefulSets; set
+`--set topology=symmetric` for the all-role server topology. Only split buffer
+or symmetric server pods receive durable PVCs; API and storage use `emptyDir`.
+The chart defaults to the released v0.13.0 image digest. TLS uses a pre-created
+Secret with `ca.pem` and per-pod certificate/key files; enabling chart TLS sets
+`GEN_RPC_TLS=true` and `DIST_TLS=true`. External Secret rotation needs a rollout
+or reloader. Full values, upgrade, PVC, Secret, and TLS guidance is
+in [`docs/deployment.md`](docs/deployment.md) and [`charts/smolquery/README.md`](charts/smolquery/README.md).
+
 ### Local cluster (kind)
 
 `deploy/` holds kustomize manifests: `base/` is the smolquery fleet itself,
