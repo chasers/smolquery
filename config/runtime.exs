@@ -387,6 +387,31 @@ if threads = System.get_env("SMOLQUERY_READ_ENGINE_THREADS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_READ_ENGINE_THREADS", threads)
 end
 
+# `SMOLQUERY_DISTRIBUTED_QUERY` (PL-49, PoC, default off) lets a decomposable
+# aggregate query scatter its file list across several DuckDB instances —
+# connected query nodes when clustering is on, `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS`
+# local instances when it is off. A query under `SMOLQUERY_DISTRIBUTED_MIN_FILES`
+# shardable files, or one that does not decompose, runs the normal single-engine
+# path; so does any distributed failure.
+if enabled = System.get_env("SMOLQUERY_DISTRIBUTED_QUERY") do
+  distributed =
+    [enabled: Smolquery.RuntimeConfig.boolean!("SMOLQUERY_DISTRIBUTED_QUERY", enabled)] ++
+      Enum.flat_map(
+        [
+          {"SMOLQUERY_DISTRIBUTED_MIN_FILES", :min_files},
+          {"SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS", :local_workers}
+        ],
+        fn {variable, key} ->
+          case System.get_env(variable) do
+            nil -> []
+            value -> [{key, Smolquery.RuntimeConfig.positive_integer!(variable, value)}]
+          end
+        end
+      )
+
+  config :smolquery, Smolquery.QueryService, distributed: distributed
+end
+
 # `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` is the one that cannot be derived: a
 # DuckDB memory limit is a size string with its own grammar, so the pool cannot
 # divide it the way it divides threads. Left unset, every member inherits

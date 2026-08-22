@@ -33,6 +33,16 @@ defmodule Smolquery.QueryService.Runner do
   materializes, which is the point. The `+ 1` is how a truncated result is
   told apart from one that exactly fits.
 
+  ## The distributed detour (PL-49, PoC)
+
+  With `runtime.distributed.enabled`, a planned query first offers itself to
+  `Smolquery.QueryService.Scatter`, which either answers with the merged
+  frame or says `:fallback` — never an error — and the job continues on the
+  path below as if nothing happened. The runner's part is one directory:
+  the job's partials land under `Scatter.dir/1`, so `lockdown/3` includes it
+  in `allowed_directories` and the merge can read them after external
+  access closes.
+
   The SQL inside the wrap is the statement's canonical text, carried on the
   plan (`Smolquery.QueryService.Plan.canonical_sql` — the planner derives it
   in the same round trip that parses the query), not the user's bytes: a
@@ -55,6 +65,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Scatter
   alias Smolquery.QueryService.Trace
   alias Smolquery.Segments.Store
 
@@ -129,7 +140,8 @@ defmodule Smolquery.QueryService.Runner do
         sql = state.job.sql
         explain = state.explain
         connection = engine.connection
-        task = Task.async(fn -> execute(runtime, connection, sql, explain) end)
+        job_id = state.job.id
+        task = Task.async(fn -> execute(runtime, connection, sql, explain, job_id) end)
 
         {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
 
@@ -256,18 +268,18 @@ defmodule Smolquery.QueryService.Runner do
   defp extensions(%Runtime{engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
 
-  defp execute(runtime, connection, sql, explain) do
+  defp execute(runtime, connection, sql, explain, job_id) do
     started = System.monotonic_time(:millisecond)
 
     with {:ok, plan} <- Planner.plan(runtime, connection, sql),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
-             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan))
+             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
            end),
          {:ok, result} <-
            Trace.span(:execute, fn ->
-             outcome(connection, plan, runtime.result_max_rows, explain)
+             outcome(runtime, connection, plan, runtime.result_max_rows, explain, job_id)
            end) do
       duration = System.monotonic_time(:millisecond) - started
 
@@ -281,20 +293,30 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp outcome(connection, plan, max_rows, nil) do
-    with {:ok, frame} <- Connection.frame(connection, bounded(plan, max_rows), [], :infinity) do
-      if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
-        {:error, {:result_too_large, max_rows}}
-      else
-        {:ok, {:frame, frame}}
-      end
+  defp outcome(runtime, connection, plan, max_rows, nil, job_id) do
+    case Scatter.execute(runtime, connection, plan, job_id) do
+      {:ok, frame} ->
+        checked(frame, max_rows)
+
+      :fallback ->
+        with {:ok, frame} <- Connection.frame(connection, bounded(plan, max_rows), [], :infinity) do
+          checked(frame, max_rows)
+        end
     end
   end
 
-  defp outcome(connection, plan, _max_rows, explain) do
+  defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
       {:ok, {:explain, explain_text(result)}}
+    end
+  end
+
+  defp checked(frame, max_rows) do
+    if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
+      {:error, {:result_too_large, max_rows}}
+    else
+      {:ok, {:frame, frame}}
     end
   end
 
@@ -351,18 +373,27 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp lockdown(%Runtime{lockdown: false}, _plan), do: []
+  defp lockdown(%Runtime{lockdown: false}, _plan, _job_id), do: []
 
-  defp lockdown(%Runtime{} = runtime, plan) do
+  defp lockdown(%Runtime{} = runtime, plan, job_id) do
     urls = plan.hot |> Map.values() |> List.flatten() |> Enum.map(& &1["url"])
 
+    directories =
+      runtime.allowed_directories ++
+        store_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
+
     [
-      "SET allowed_directories = #{sql_list(runtime.allowed_directories ++ store_prefixes(runtime.store))}",
+      "SET allowed_directories = #{sql_list(directories)}",
       "SET allowed_paths = #{sql_list(urls)}",
       "SET enable_external_access = false",
       "SET lock_configuration = true"
     ]
   end
+
+  defp partial_directories(%Runtime{distributed: %{enabled: true}}, job_id),
+    do: [Scatter.dir(job_id)]
+
+  defp partial_directories(_runtime, _job_id), do: []
 
   defp sql_list(values) do
     "[" <> Enum.map_join(values, ", ", &Smolquery.Identifier.sql_string/1) <> "]"
