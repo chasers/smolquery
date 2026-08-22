@@ -37,6 +37,16 @@ defmodule Smolquery.QueryService.Decomposer do
   kin — refuse as well: each worker would bind them on its own clock or
   seed, and the shards would disagree with the single-engine answer.
 
+  ## `GROUP BY ALL`
+
+  DuckDB serializes `GROUP BY ALL` as `aggregate_handling: FORCE_AGGREGATES`
+  with no group expressions — the keys are resolved later, in binding. So
+  the keys are resolved here the same way DuckDB does: every select item
+  that contains no aggregate is a group key. The partial then names those
+  keys explicitly under standard handling. `select count(key), key ... group
+  by all` was the first production query to hit the distributed path, and
+  it silently fell back until this case existed (T-356).
+
   ## Integer exactness
 
   DuckDB types `sum(BIGINT)` as HUGEINT, and parquet has no int128 — a
@@ -172,11 +182,20 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp gate_grouping(node) do
     cond do
-      node["qualify"] != nil -> {:error, :qualify}
-      node["having"] != nil -> {:error, :having}
-      node["aggregate_handling"] != "STANDARD_HANDLING" -> {:error, :aggregate_handling}
-      match?([_first, _second | _rest], node["group_sets"]) -> {:error, :grouping_sets}
-      true -> :ok
+      node["qualify"] != nil ->
+        {:error, :qualify}
+
+      node["having"] != nil ->
+        {:error, :having}
+
+      node["aggregate_handling"] not in ["STANDARD_HANDLING", "FORCE_AGGREGATES"] ->
+        {:error, {:aggregate_handling, node["aggregate_handling"]}}
+
+      match?([_first, _second | _rest], node["group_sets"]) ->
+        {:error, :grouping_sets}
+
+      true ->
+        :ok
     end
   end
 
@@ -233,6 +252,15 @@ defmodule Smolquery.QueryService.Decomposer do
     do: Enum.reduce(node, acc, &collect_values(&1, key, &2))
 
   defp collect_values(_leaf, _key, acc), do: acc
+
+  defp group_keys(%{"aggregate_handling" => "FORCE_AGGREGATES"} = node, _table_columns) do
+    keys =
+      node["select_list"]
+      |> Enum.reject(&nested_aggregate?([&1]))
+      |> Enum.map(&Map.put(&1, "alias", ""))
+
+    {:ok, keys}
+  end
 
   defp group_keys(node, table_columns) do
     node["group_expressions"]
@@ -354,6 +382,7 @@ defmodule Smolquery.QueryService.Decomposer do
         Enum.with_index(keys, fn _key, i -> column_ref("#{@prefix}g#{i}") end)
       )
       |> Map.put("group_sets", group_sets(keys))
+      |> Map.put("aggregate_handling", "STANDARD_HANDLING")
       |> Map.put("modifiers", [])
 
     with {:ok, sql} <- deserialize(connection, partial_node) do

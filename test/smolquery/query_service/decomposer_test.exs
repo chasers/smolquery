@@ -163,6 +163,36 @@ defmodule Smolquery.QueryService.DecomposerTest do
       )
     end
 
+    test "GROUP BY ALL resolves its keys from the select list", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT count(name) AS count, name FROM analytics.events " <>
+            "GROUP BY ALL ORDER BY count DESC, name LIMIT 3",
+          tmp_dir
+        )
+
+      assert decomposition.partial_sql =~ "GROUP BY __pq_g0"
+      refute decomposition.partial_sql =~ "ALL"
+    end
+
+    test "GROUP BY ALL with an expression key and an avg", %{tmp_dir: tmp_dir} do
+      round_trip(
+        "SELECT bucket + 1 AS b, avg(value) AS a, count(*) AS n FROM analytics.events " <>
+          "GROUP BY ALL ORDER BY b",
+        tmp_dir
+      )
+    end
+
+    test "GROUP BY ALL over aggregates only groups nothing", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT count(*) AS n, sum(value) AS s FROM analytics.events GROUP BY ALL",
+          tmp_dir
+        )
+
+      refute decomposition.partial_sql =~ "GROUP BY"
+    end
+
     test "integer sums past 2^53 stay exact through parquet partials", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip("SELECT sum(big) AS s, avg(big) AS a FROM analytics.events", tmp_dir)
@@ -221,6 +251,11 @@ defmodule Smolquery.QueryService.DecomposerTest do
     test "arithmetic over an aggregate" do
       assert {:unsupported_aggregate_shape, "+"} =
                refused("SELECT sum(value) + 1 FROM analytics.events")
+    end
+
+    test "arithmetic over an aggregate under GROUP BY ALL is not a key" do
+      assert {:unsupported_aggregate_shape, "+"} =
+               refused("SELECT name, sum(value) + 1 FROM analytics.events GROUP BY ALL")
     end
 
     test "window functions" do
