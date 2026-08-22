@@ -171,6 +171,35 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert File.exists?(Store.location(follower_runtime.store, key))
   end
 
+  test "a claim heals a follower that holds none of its entries (T-344)", context do
+    {owner, follower} = start_pair(context)
+
+    {:ok, first} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-44"))
+    {:ok, second} = Client.write_batch(owner, @table, batch([%{"id" => 2}], "b-45"))
+    ids = [first.segment_id, second.segment_id]
+
+    :ok = Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: ids}, nil)
+
+    {:ok, follower_runtime} = Runtime.fetch(follower)
+    assert HotManifest.entries(follower_runtime.manifest, @table) == []
+
+    [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = GenServer.call(buffer, :force_seal)
+      end)
+
+    assert log =~ "healed a partial claim"
+    refute log =~ ":nothing_to_claim"
+
+    {:ok, owner_runtime} = Runtime.fetch(owner)
+    assert {:ok, claim} = HotManifest.live_claim(owner_runtime.manifest, @table)
+    assert Enum.sort(claim.ids) == Enum.sort(ids)
+    assert {:ok, ^claim} = HotManifest.live_claim(follower_runtime.manifest, @table)
+    assert [_, _] = HotManifest.entries(follower_runtime.manifest, @table)
+  end
+
   test "a heal larger than one batch converges across attempts", context do
     {owner, follower} =
       start_pair(context,
