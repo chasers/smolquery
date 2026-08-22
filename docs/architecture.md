@@ -884,6 +884,46 @@ To shrink the fleet:
 2. Stop the node.
 3. Remove the node from the configuration.
 
+### Distributed execution (PL-49)
+
+DuckDB parallelizes one query across threads inside one instance, and no
+further. A query that decomposes — `count`, `sum`, `min`, `max`, `avg`,
+with or without `GROUP BY`, ordered and limited only at the end — can go
+wider than one instance (`Smolquery.QueryService.Scatter`):
+
+1. `Smolquery.QueryService.Decomposer` splits the SQL into a *partial*
+   query and a *final* query, by surgery on DuckDB's own AST (abstract
+   syntax tree). A query it cannot split exactly refuses, and the job runs
+   the single-engine path above. Refusal is the common case and costs
+   nothing.
+2. The job's file list — the sealed segments at the pinned snapshot, plus
+   the pruned hot-tier URLs — is sharded round-robin across the workers.
+3. Each worker (`Smolquery.QueryService.PartialWorker`) starts its own
+   private DuckDB engine, defines the table view over its shard, runs the
+   partial, and returns the result as parquet bytes.
+4. The job engine merges the partials with the final query, inside the
+   same result bound as any other query.
+
+Any worker failure falls back to the single-engine path, so distribution
+never fails a query that works without it. A distributed answer carries
+`scatter` on the job (shard count, partial bytes); `null` means the ordinary
+scan answered, fallbacks included. It is on by default;
+`SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch, and a job's own
+`distributed` option overrides either way.
+
+**Where the workers are.** Without clustering, `local_workers` engines run
+on the node itself. With clustering on, the workers are the nodes that hold
+the `:query` role — the members of the query service's own `:pg` group, the
+same membership mechanism the buffer and storage rings use, with no per-query
+probing. The split is the scan only: the coordinator is always the node that
+received the request, because `Smolquery.QueryService.Client` is node-local.
+
+What the spike measured (PL-48, `bench/results/distributed_query.md`): at a
+constant thread budget, K instances match one instance on every shape and
+beat it by 1.3–1.4× on a high-cardinality group-by. The cost is the partial
+size — kilobytes for global aggregates, ~10 MiB per shard when the partial
+is a ~500k-group group-by.
+
 ## Roles
 
 One release holds four services plus two edges: the HTTP front door and the
@@ -903,7 +943,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 | `ingest` | `Smolquery.IngestService` — schema lookup and batching; validation is deferred to flush/salvage |
 | `buffer` | `Smolquery.BufferService` — the hot tier and `HotServer` |
 | `storage` | `Smolquery.StorageService` — seal, compact, retention, GC |
-| `query` | `Smolquery.QueryService` — query jobs |
+| `query` | `Smolquery.QueryService` — query jobs, and a scatter worker for every other query node's jobs |
 | `web` | `SmolqueryWeb` — the LiveView UI |
 
 Unknown role names fail the boot. They do not silently start nothing. See

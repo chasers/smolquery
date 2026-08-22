@@ -50,6 +50,44 @@ items before you deploy it:
 - the Postgres catalog and discovery database,
 - the sealed-store dependencies.
 
+## Where queries run
+
+Query jobs run on the nodes that hold the `query` role. In `deploy/base`,
+that is the **API pod**: `smolquery-api` runs `api,ingest,query,web`, so
+every query job's private DuckDB engine starts in the same pod as the HTTP
+endpoint that received the request. Buffer and storage pods run no query
+engines.
+
+The link between the API edge and the query service is node-local.
+`Smolquery.QueryService.Client` starts the job on the node it is called on.
+A node with `api` but without `query` refuses queries with
+`query_service_unavailable`.
+
+### Adding query capacity
+
+A distributed query (PL-49, on by default) shards its scan across every
+node in the cluster that holds the `query` role. To add scan capacity
+without adding HTTP replicas, deploy pods with `SMOLQUERY_ROLES=query`:
+
+- They join the query service's `:pg` group on boot and take shard work
+  from the API pods' jobs, with no configuration change elsewhere.
+- They need the same secrets the API pod has for reading data: the
+  catalog URL, the object-store credentials, and `SMOLQUERY_BUFFER_REPLICAS`
+  (a query node's planner fails a read when an expected buffer node does
+  not answer, T-94).
+- They expose no HTTP listener. The API pods keep the `query` role, so they
+  still coordinate every job and serve shards of their own.
+
+`deploy/base` ships no such StatefulSet yet. A `query`-only pod is a scan
+worker, not a coordinator: nothing routes a request from an API pod to it
+as the job's owner. Taking the `query` role off the API pods would need
+that forwarding step first.
+
+Size the worker engines with `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`
+and `SMOLQUERY_DISTRIBUTED_WORKER_THREADS`. A scattered query's declared
+budget on one node is the worker count `×` the worker limit, on top of the
+job engine's own `job_memory_limit`.
+
 ## Upgrade notes
 
 One note per release, newest first.

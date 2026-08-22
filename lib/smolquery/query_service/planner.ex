@@ -186,6 +186,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.Trace
+  alias Smolquery.QueryService.Views
 
   @allowed_table_functions ~w(generate_series range repeat unnest)
 
@@ -588,30 +589,19 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp view({dataset, table}, snapshot, %{schema: schema}, entries) do
+  defp view({dataset, table} = ref, snapshot, %{schema: schema}, entries) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
     lake = Identifier.quote_name!(DuckLake.default_catalog())
-    columns = Enum.map_join(schema.fields, ", ", &Identifier.quote_name!(&1.name))
 
     sealed = "SELECT * FROM #{lake}.#{ds}.#{t} AT (VERSION => #{snapshot})"
 
     union =
       case Enum.map(entries, & &1["url"]) do
-        [] ->
-          sealed
-
-        urls ->
-          parquet = Enum.map_join(urls, ", ", &Identifier.sql_string/1)
-
-          sealed <>
-            " UNION ALL BY NAME " <>
-            "SELECT * FROM read_parquet([#{parquet}], union_by_name := true)"
+        [] -> sealed
+        urls -> sealed <> " UNION ALL BY NAME SELECT * FROM " <> Views.read_parquet(urls)
       end
 
-    [
-      "CREATE SCHEMA IF NOT EXISTS #{ds}",
-      "CREATE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{union})"
-    ]
+    Views.table_view(ref, schema, union)
   end
 end

@@ -387,29 +387,47 @@ if threads = System.get_env("SMOLQUERY_READ_ENGINE_THREADS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_READ_ENGINE_THREADS", threads)
 end
 
-# `SMOLQUERY_DISTRIBUTED_QUERY` (PL-49, PoC, default off) lets a decomposable
-# aggregate query scatter its file list across several DuckDB instances —
-# connected query nodes when clustering is on, `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS`
-# local instances when it is off. A query under `SMOLQUERY_DISTRIBUTED_MIN_FILES`
-# shardable files, or one that does not decompose, runs the normal single-engine
-# path; so does any distributed failure.
-if enabled = System.get_env("SMOLQUERY_DISTRIBUTED_QUERY") do
-  distributed =
-    [enabled: Smolquery.RuntimeConfig.boolean!("SMOLQUERY_DISTRIBUTED_QUERY", enabled)] ++
-      Enum.flat_map(
-        [
-          {"SMOLQUERY_DISTRIBUTED_MIN_FILES", :min_files},
-          {"SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS", :local_workers}
-        ],
-        fn {variable, key} ->
-          case System.get_env(variable) do
-            nil -> []
-            value -> [{key, Smolquery.RuntimeConfig.positive_integer!(variable, value)}]
-          end
-        end
-      )
+# Distributed queries (PL-49) are on by default: a decomposable aggregate
+# query scatters its file list across several DuckDB instances — the query
+# service's group members when clustering is on,
+# `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS` local instances when it is off.
+# `SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch; a job's own
+# `distributed` option overrides either way. A query under
+# `SMOLQUERY_DISTRIBUTED_MIN_FILES` shardable files, or one that does not
+# decompose, runs the normal single-engine path; so does any distributed
+# failure. Each worker engine takes `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`
+# (default: the job memory limit, whole) and
+# `SMOLQUERY_DISTRIBUTED_WORKER_THREADS` (default: the read engine threads) —
+# a node's declared scatter budget is workers x that limit on top of the job
+# engine's own, and nothing divides a size string for you.
+distributed_query =
+  Enum.flat_map(
+    [
+      {"SMOLQUERY_DISTRIBUTED_QUERY", :enabled, :boolean},
+      {"SMOLQUERY_DISTRIBUTED_MIN_FILES", :min_files, :positive_integer},
+      {"SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS", :local_workers, :positive_integer},
+      {"SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT", :worker_memory_limit, :string},
+      {"SMOLQUERY_DISTRIBUTED_WORKER_THREADS", :worker_threads, :positive_integer}
+    ],
+    fn {variable, key, kind} ->
+      case {kind, System.get_env(variable)} do
+        {_kind, nil} ->
+          []
 
-  config :smolquery, Smolquery.QueryService, distributed: distributed
+        {:boolean, value} ->
+          [{key, Smolquery.RuntimeConfig.boolean!(variable, value)}]
+
+        {:positive_integer, value} ->
+          [{key, Smolquery.RuntimeConfig.positive_integer!(variable, value)}]
+
+        {:string, value} ->
+          [{key, value}]
+      end
+    end
+  )
+
+if distributed_query != [] do
+  config :smolquery, Smolquery.QueryService, distributed: distributed_query
 end
 
 # `SMOLQUERY_WRITE_ENGINE_MEMORY_LIMIT` is the one that cannot be derived: a

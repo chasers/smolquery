@@ -35,6 +35,7 @@ defmodule Smolquery.QueryService.Supervisor do
 
   alias Smolquery.BufferService.ExpectedNodes
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Cluster.PgGroup
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Runtime
 
@@ -56,7 +57,8 @@ defmodule Smolquery.QueryService.Supervisor do
     Runtime.put(runtime)
 
     children =
-      DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
+      [{PgGroup.Member, {Smolquery.QueryService, runtime.name}}] ++
+        DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name)) ++
         [
           {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
           {PartitionSupervisor,

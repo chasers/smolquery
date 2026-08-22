@@ -233,6 +233,11 @@ mix test --only cluster # ingest, fan-out, seal, drain, kill
 | `smolquery-storage` | 2 | `storage` | none — sealed segments in MinIO, catalog in Postgres |
 | `postgres` / `minio` | 1 each | — | kind-overlay only |
 
+Query jobs run on the API pod — it holds the `query` role. A distributed
+query shards its scan across every `query`-role node in the cluster, so
+adding `SMOLQUERY_ROLES=query` pods adds scan capacity without adding HTTP
+replicas (see [deployment.md](docs/deployment.md#where-queries-run)).
+
 `SMOLQUERY_KIND_OVERLAY=kind-symmetric ./scripts/kind-up.sh` deploys the same
 release as three identical all-role servers instead (`smolquery-server`, 3
 replicas, `SMOLQUERY_ROLES=all`, PVC each) — the ClickHouse-replica shape,
