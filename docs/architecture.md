@@ -754,8 +754,13 @@ is `Smolquery.QueryService.Client`:
 
 Each job runs in its own process with its own private DuckDB engine. Two jobs'
 views never collide. Cancellation kills the engine, and the query dies with
-it. `job_memory_limit` binds one job, not the node. The engine costs ~50 ms to
-start. An async job never notices that cost.
+it. `job_memory_limit` binds one job, not the node. The engine's bootstrap
+costs ~50 ms locally and ~650 ms on a production node — three extension
+loads and an `ATTACH` to a catalog in another availability zone — so
+`Smolquery.QueryService.EnginePool` keeps `warm_engines` of them built
+ahead of demand (PL-50). A job takes one warm and owns it from then on;
+the pool starts a replacement in the background and never blocks a job.
+`[:smolquery, :query, :engine]` reports which path served each job.
 
 ```mermaid
 sequenceDiagram

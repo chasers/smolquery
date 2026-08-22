@@ -3,7 +3,9 @@ defmodule Smolquery.QueryService.Runner do
   One job, as a process: plan, execute, hold the result, die on schedule.
 
   The runner owns a private engine — an `Adbc.Database` and a bootstrapped
-  `Smolquery.Engine.Connection`, both linked, neither registered under a name.
+  `Smolquery.Engine.Connection`, both linked, neither registered under a name
+  — taken warm from `Smolquery.QueryService.EnginePool` when one is ready,
+  started cold otherwise (`Smolquery.QueryService.JobEngine.acquire/1`).
   That privacy is the point (see PL-7 D8): two jobs' views never collide
   because they live in different in-memory catalogs, cancellation is killing
   the engine processes — DuckDB's work dies with its connection — and the
@@ -139,8 +141,8 @@ defmodule Smolquery.QueryService.Runner do
   def handle_continue(:run, state) do
     state = %{state | collector: collector(state)}
 
-    case Trace.span(:engine_start, fn -> start_engine(state.runtime) end) do
-      {:ok, engine} ->
+    case Trace.span(:engine_start, fn -> JobEngine.acquire(state.runtime) end) do
+      {:ok, engine, _source} ->
         runtime = state.runtime
         sql = state.job.sql
         explain = state.explain
@@ -243,27 +245,6 @@ defmodule Smolquery.QueryService.Runner do
     :ok
   end
 
-  defp start_engine(runtime) do
-    JobEngine.start(
-      extensions: extensions(runtime),
-      settings: engine_settings(runtime),
-      statements: engine_secrets(runtime) ++ runtime.job_bootstrap,
-      max_rows: :infinity
-    )
-  end
-
-  defp engine_settings(%Runtime{read_engine_threads: nil} = runtime),
-    do: [memory_limit: runtime.job_memory_limit]
-
-  defp engine_settings(%Runtime{read_engine_threads: threads} = runtime),
-    do: [memory_limit: runtime.job_memory_limit, threads: threads]
-
-  defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
-    do: EngineSecrets.sealed_tier_extensions(runtime.store, extensions)
-
-  defp extensions(%Runtime{engine_extensions: extensions} = runtime),
-    do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
-
   defp execute(runtime, connection, sql, explain, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
@@ -341,11 +322,6 @@ defmodule Smolquery.QueryService.Runner do
       |> Map.fetch!("explain_value")
       |> to_string()
     end)
-  end
-
-  defp engine_secrets(%Runtime{} = runtime) do
-    EngineSecrets.hot_tier(runtime.engine_extensions, runtime.buffer_base_url) ++
-      EngineSecrets.sealed_tier(runtime.store)
   end
 
   @doc """

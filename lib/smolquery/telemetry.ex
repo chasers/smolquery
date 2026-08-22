@@ -100,6 +100,8 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
+      [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold}
+                                          — one per job or shard engine acquired (PL-50)
       [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
                                           — one per query the distributed path answered (PL-49)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
@@ -135,6 +137,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :gc, :sweep],
     [:smolquery, :query, :job],
     [:smolquery, :query, :scatter],
+    [:smolquery, :query, :engine],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -219,6 +222,10 @@ defmodule Smolquery.Telemetry do
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean.",
+    "smolquery_query_engines_total" =>
+      "Job engines acquired, by source: warm from the pool or started cold (PL-50).",
+    "smolquery_query_engine_microseconds_total" =>
+      "Time spent acquiring job engines; divide by engines for the mean.",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
     "smolquery_query_scatter_shards_total" =>
@@ -507,6 +514,15 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :query, :job], measurements, meta, nil) do
     bump({"smolquery_query_jobs_total", [state: Map.get(meta, :state, :unknown)]}, 1)
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
+  end
+
+  def handle_event([:smolquery, :query, :engine], measurements, meta, nil) do
+    bump({"smolquery_query_engines_total", [source: Map.get(meta, :source, :unknown)]}, 1)
+
+    bump(
+      {"smolquery_query_engine_microseconds_total", []},
+      Map.get(measurements, :duration_us, 0)
+    )
   end
 
   def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do

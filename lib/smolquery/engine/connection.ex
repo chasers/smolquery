@@ -179,6 +179,7 @@ defmodule Smolquery.Engine.Connection do
     max_rows = Keyword.get(opts, :max_rows, :infinity)
 
     with {:ok, adbc} <- Adbc.Connection.start_link(database: database),
+         :ok <- apply_settings(adbc, extension_directory()),
          :ok <- load_extensions(adbc, extensions),
          :ok <- apply_settings(adbc, settings),
          :ok <- run_statements(adbc, statements) do
@@ -283,6 +284,13 @@ defmodule Smolquery.Engine.Connection do
 
   defp apply_settings(adbc, settings) do
     bootstrap(settings, fn {key, value} -> apply_setting(adbc, key, value) end)
+  end
+
+  defp extension_directory do
+    case Application.get_env(:smolquery, :extension_directory) do
+      nil -> []
+      directory -> [extension_directory: directory]
+    end
   end
 
   # DuckDB refuses to switch temp_directory once the current one has been
