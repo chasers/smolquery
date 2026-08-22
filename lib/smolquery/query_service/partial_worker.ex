@@ -13,8 +13,10 @@ defmodule Smolquery.QueryService.PartialWorker do
   same hot-tier and sealed-tier secrets a job engine gets.
 
   The engine is private and disposable
-  (`Smolquery.QueryService.JobEngine`), sized by the runtime's
-  `distributed.worker_memory_limit` and `worker_threads`. The partial
+  (`Smolquery.QueryService.JobEngine.acquire/1` — warm from the node's
+  pool when one is ready), then sized by the runtime's
+  `distributed.worker_memory_limit` and `worker_threads`, which DuckDB
+  accepts before `lock_configuration`. The partial
   result leaves DuckDB as a parquet file (`COPY`), not through Arrow →
   Polars — DuckDB intermittently fails to read Polars-written parquet
   (PL-48) — and returns to the coordinator as the file's bytes.
@@ -70,21 +72,14 @@ defmodule Smolquery.QueryService.PartialWorker do
       )
 
     statements =
-      secrets(runtime) ++ request.statements ++ lockdown(runtime, path, request.allowed_paths)
+      settings(runtime) ++ request.statements ++ lockdown(runtime, path, request.allowed_paths)
 
-    engine =
-      JobEngine.start(
-        extensions:
-          EngineSecrets.sealed_tier_extensions(runtime.store, runtime.engine_extensions),
-        settings: settings(runtime),
-        statements: statements,
-        max_rows: :infinity
-      )
-
-    case engine do
-      {:ok, engine} ->
+    case JobEngine.acquire(runtime) do
+      {:ok, engine, _source} ->
         try do
-          copy_out(engine.connection, request.partial_sql, path)
+          with :ok <- apply_statements(engine.connection, statements) do
+            copy_out(engine.connection, request.partial_sql, path)
+          end
         after
           JobEngine.stop(engine)
           File.rm(path)
@@ -97,16 +92,21 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   defp settings(%Runtime{} = runtime) do
     memory_limit = runtime.distributed.worker_memory_limit || runtime.job_memory_limit
+    limit = ["SET memory_limit = #{Identifier.sql_string(memory_limit)}"]
 
     case runtime.distributed.worker_threads || runtime.read_engine_threads do
-      nil -> [memory_limit: memory_limit]
-      threads -> [memory_limit: memory_limit, threads: threads]
+      nil -> limit
+      threads -> limit ++ ["SET threads = #{threads}"]
     end
   end
 
-  defp secrets(%Runtime{} = runtime) do
-    EngineSecrets.hot_tier(runtime.engine_extensions, runtime.buffer_base_url) ++
-      EngineSecrets.sealed_tier(runtime.store)
+  defp apply_statements(connection, statements) do
+    Enum.reduce_while(statements, :ok, fn statement, :ok ->
+      case Connection.query(connection, statement, [], :infinity) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:statement_failed, reason}}}
+      end
+    end)
   end
 
   defp lockdown(%Runtime{lockdown: false}, _path, _allowed_paths), do: []

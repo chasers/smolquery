@@ -37,6 +37,19 @@ defmodule Smolquery.Engine.ConnectionTest do
       assert {:ok, result} = Connection.query(conn, "SELECT current_setting('threads')")
       assert Result.one!(result) == 3
     end
+
+    @tag :tmp_dir
+    test "points DuckDB at the configured extension directory first", %{tmp_dir: tmp_dir} do
+      Application.put_env(:smolquery, :extension_directory, tmp_dir)
+      on_exit(fn -> Application.delete_env(:smolquery, :extension_directory) end)
+
+      {:ok, conn} = Connection.start_link(database: @database)
+
+      assert {:ok, result} =
+               Connection.query(conn, "SELECT current_setting('extension_directory')")
+
+      assert Result.one!(result) == tmp_dir
+    end
   end
 
   describe "bootstrap statements" do

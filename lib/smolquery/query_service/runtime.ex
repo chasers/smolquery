@@ -99,6 +99,16 @@ defmodule Smolquery.QueryService.Runtime do
   segments live elsewhere on disk must say so here, or its queries will
   honestly fail to read them.
 
+  `warm_engines` (PL-50) is how many job engines
+  `Smolquery.QueryService.EnginePool` keeps bootstrapped ahead of demand —
+  `2` by default, `0` to start every engine cold on the request path. A
+  warm engine is recycled after `warm_engine_max_age_ms` (5 minutes) and
+  probed with `warm_probe` at checkout — one DuckLake metadata read when
+  the catalog configuration names a lake, `SELECT 1` otherwise — so a
+  stale catalog connection falls back to a cold start rather than failing
+  the job. Each warm engine holds one catalog connection and its DuckDB
+  baseline memory while it waits.
+
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
   a job's own `distributed:` option overrides it either way. `min_files` is
@@ -149,6 +159,9 @@ defmodule Smolquery.QueryService.Runtime do
     result_ttl_ms: 300_000,
     result_max_rows: 10_000,
     write_partitions: 1,
+    warm_engines: 2,
+    warm_engine_max_age_ms: 300_000,
+    warm_probe: "SELECT 1",
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -178,6 +191,9 @@ defmodule Smolquery.QueryService.Runtime do
           result_ttl_ms: pos_integer(),
           result_max_rows: pos_integer() | :infinity,
           write_partitions: pos_integer(),
+          warm_engines: non_neg_integer(),
+          warm_engine_max_age_ms: pos_integer(),
+          warm_probe: String.t(),
           store: Store.t() | nil,
           distributed: %{
             enabled: boolean(),
@@ -201,7 +217,9 @@ defmodule Smolquery.QueryService.Runtime do
     :read_engine_threads,
     :result_ttl_ms,
     :result_max_rows,
-    :write_partitions
+    :write_partitions,
+    :warm_engines,
+    :warm_engine_max_age_ms
   ]
 
   @doc """
@@ -228,9 +246,26 @@ defmodule Smolquery.QueryService.Runtime do
         Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
       allowed_directories:
         Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end),
+      warm_probe: Keyword.get_lazy(config, :warm_probe, fn -> warm_probe(catalog_opts) end),
       distributed: distributed(Keyword.get(config, :distributed, []))
     }
     |> struct!(Keyword.take(config, @limits))
+  end
+
+  defp warm_probe(nil), do: "SELECT 1"
+
+  defp warm_probe(catalog_opts) do
+    merged =
+      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
+
+    if Keyword.has_key?(merged, :metadata) and Keyword.has_key?(merged, :data_path) do
+      lake = Keyword.get(merged, :catalog, Catalog.DuckLake.default_catalog())
+
+      "SELECT snapshot_id FROM ducklake_snapshots(#{Smolquery.Identifier.sql_string(lake)}) " <>
+        "ORDER BY snapshot_id DESC LIMIT 1"
+    else
+      "SELECT 1"
+    end
   end
 
   defp distributed(opts) do
@@ -286,6 +321,12 @@ defmodule Smolquery.QueryService.Runtime do
   """
   @spec history(atom()) :: atom()
   def history(name), do: Module.concat(name, "History")
+
+  @doc """
+  The pool of warm job engines (`Smolquery.QueryService.EnginePool`).
+  """
+  @spec engine_pool(atom()) :: atom()
+  def engine_pool(name), do: Module.concat(name, "EnginePool")
 
   defp bootstrap(nil), do: []
 

@@ -387,6 +387,21 @@ if threads = System.get_env("SMOLQUERY_READ_ENGINE_THREADS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_READ_ENGINE_THREADS", threads)
 end
 
+# `SMOLQUERY_EXTENSION_DIRECTORY` (PL-50) is where DuckDB finds and installs
+# its extensions. The image sets it to a directory it ships pre-installed —
+# off `/data`, which is an emptyDir that a pod roll wipes, so a fresh pod
+# never downloads an extension on its first query.
+if directory = System.get_env("SMOLQUERY_EXTENSION_DIRECTORY") do
+  config :smolquery, :extension_directory, directory
+end
+
+# `SMOLQUERY_WARM_ENGINES` (PL-50) is how many job engines the query service
+# keeps bootstrapped ahead of demand; `0` starts every engine cold.
+if count = System.get_env("SMOLQUERY_WARM_ENGINES") do
+  config :smolquery, Smolquery.QueryService,
+    warm_engines: Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_WARM_ENGINES", count)
+end
+
 # Distributed queries (PL-49) are on by default: a decomposable aggregate
 # query scatters its file list across several DuckDB instances — the query
 # service's group members when clustering is on,
