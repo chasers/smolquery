@@ -3,8 +3,10 @@ defmodule SmolqueryWeb.TableLive.Show do
   One table — its schema, its clustering key, its retention policy, its
   lifecycle, and a peek at its rows.
 
-  The clustering card is read-only: `Catalog.table_schema/2` attaches the
-  key to the schema, and the table PATCH route is the way to set it.
+  The clustering card edits the key the same way the API's table PATCH
+  route does: a comma-separated column list, each column on the schema,
+  no repeats. `Catalog.table_schema/2` attaches the key to the schema, so
+  a save re-reads the schema rather than tracking the key on its own.
 
   Retention is the catalog's one mutable table property today (PL-12 D5), so
   editing here means editing that. The row preview runs through
@@ -95,6 +97,32 @@ defmodule SmolqueryWeb.TableLive.Show do
     else
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not save retention: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("save_clustering", %{"clustering" => %{"columns" => columns}}, socket) do
+    with {:ok, clustering} <- parse_clustering(columns, socket.assigns.schema),
+         :ok <- put_clustering(socket, clustering) do
+      {:noreply,
+       socket
+       |> put_flash(:info, "Clustering saved")
+       |> reload_schema()}
+    else
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not save clustering: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("clear_clustering", _params, socket) do
+    case put_clustering(socket, []) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Clustering cleared")
+         |> reload_schema()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not clear clustering: #{inspect(reason)}")}
     end
   end
 
@@ -302,6 +330,46 @@ defmodule SmolqueryWeb.TableLive.Show do
     end
   end
 
+  defp reload_schema(socket) do
+    runtime = socket.assigns.runtime
+
+    case Catalog.table_schema(runtime.catalog, {socket.assigns.dataset, socket.assigns.table}) do
+      {:ok, schema} -> assign(socket, :schema, schema)
+      {:error, _reason} -> socket
+    end
+  end
+
+  defp put_clustering(socket, clustering) do
+    runtime = socket.assigns.runtime
+
+    Catalog.put_clustering(
+      runtime.catalog,
+      {socket.assigns.dataset, socket.assigns.table},
+      clustering
+    )
+  end
+
+  defp parse_clustering(text, schema) do
+    columns =
+      text
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    cond do
+      columns == [] -> {:error, :empty_clustering}
+      columns != Enum.uniq(columns) -> {:error, :repeated_clustering_column}
+      true -> check_clustering_columns(columns, schema)
+    end
+  end
+
+  defp check_clustering_columns(columns, schema) do
+    case Enum.find(columns, &(Schema.field(schema, &1) == :error)) do
+      nil -> {:ok, columns}
+      unknown -> {:error, {:unknown_clustering_column, unknown}}
+    end
+  end
+
   defp put_retention(socket, retention) do
     runtime = socket.assigns.runtime
 
@@ -434,6 +502,24 @@ defmodule SmolqueryWeb.TableLive.Show do
           <div :if={@schema.clustering == []} class="text-sm opacity-70">
             No clustering key; writes are unsorted.
           </div>
+          <form id="clustering" phx-submit="save_clustering" class="flex gap-2 items-center">
+            <input
+              type="text"
+              name="clustering[columns]"
+              value={Enum.join(@schema.clustering, ", ")}
+              placeholder="column, column"
+              class="input input-bordered input-sm w-64 font-mono"
+            />
+            <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            <button
+              :if={@schema.clustering != []}
+              type="button"
+              phx-click="clear_clustering"
+              class="btn btn-sm"
+            >
+              Clear
+            </button>
+          </form>
         </div>
       </div>
 
