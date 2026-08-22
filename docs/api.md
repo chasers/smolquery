@@ -101,6 +101,10 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
 
 Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `trace` option only decides whether this job collects them. A job that failed or was cancelled still settles with the spans it got: the partial trace is exactly what explains the failure. History does not persist the trace, the same as `statistics` and `explain`. A non-boolean `trace` value is a 400.
 
+## Distributed execution (PL-49, PoC)
+
+`"distributed": true | false` overrides the deployment's `SMOLQUERY_DISTRIBUTED_QUERY` default for this job only. `POST /v1/queries` and `POST /v1/jobs` both take it. A distributed answer carries a **`scatter`** object on the job — `{"shards": 3, "partialBytes": 41210}` — and `"scatter": null` means the ordinary single-engine scan answered, including every fallback. A query that does not decompose, or any distributed failure, falls back silently and answers the same rows. History does not persist `scatter`. A non-boolean `distributed` value is a 400.
+
 ## Query statistics
 
 A finished job carries a **`statistics`** object. It appears on the `job` in a `POST /v1/queries` response. It also appears on `GET /v1/jobs/:id` while the runner holds the job. History does not persist it, so an expired job answers `"statistics": null`:

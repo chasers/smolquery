@@ -75,10 +75,14 @@ defmodule Smolquery.QueryService.Scatter do
 
   `:fallback` is not an error: the flag is off, the query does not
   decompose, the scan is too small, or something along the distributed
-  path failed and was logged. The caller runs the normal path.
+  path failed and was logged. The caller runs the normal path. A
+  distributed answer carries its shard count and merged partial bytes, so
+  the job can say how it was served.
   """
   @spec execute(Runtime.t(), GenServer.server(), Plan.t(), String.t()) ::
-          {:ok, Explorer.DataFrame.t()} | :fallback
+          {:ok, Explorer.DataFrame.t(),
+           %{shards: pos_integer(), partial_bytes: non_neg_integer()}}
+          | :fallback
   def execute(%Runtime{distributed: %{enabled: false}}, _connection, _plan, _job_id),
     do: :fallback
 
@@ -190,16 +194,18 @@ defmodule Smolquery.QueryService.Scatter do
     try do
       with {:ok, paths} <- gather(runtime, decomposition, ref, schema, shards, partials_dir),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
+        measurements = %{
+          shards: length(shards),
+          partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
+        }
+
         :telemetry.execute(
           [:smolquery, :query, :scatter],
-          %{
-            shards: length(shards),
-            partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
-          },
+          measurements,
           %{workers: shards |> Enum.map(fn {peer, _files} -> peer end) |> Enum.uniq()}
         )
 
-        {:ok, frame}
+        {:ok, frame, measurements}
       else
         {:error, reason} ->
           Logger.warning("distributed query fell back: #{inspect(reason)}")

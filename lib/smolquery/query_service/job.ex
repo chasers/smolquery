@@ -11,6 +11,12 @@ defmodule Smolquery.QueryService.Job do
   `trace: true` settles with its phase spans on `trace`
   (`Smolquery.QueryService.Trace`) whatever state it settled in — a failed
   or cancelled job's partial trace is exactly what explains it.
+
+  `scatter` says the distributed path answered this job (PL-49): the shard
+  count and the partial bytes it merged. `nil` means the ordinary
+  single-engine scan — including every fallback, so a caller can tell a
+  distributed answer from a quiet refusal. Like `statistics`, history does
+  not persist it.
   """
 
   alias Smolquery.Catalog
@@ -31,6 +37,7 @@ defmodule Smolquery.QueryService.Job do
     :statistics,
     :explain,
     :trace,
+    :scatter,
     :error
   ]
 
@@ -48,6 +55,7 @@ defmodule Smolquery.QueryService.Job do
           statistics: Statistics.t() | nil,
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
+          scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
           error: term()
         }
 

@@ -70,7 +70,10 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.Segments.Store
 
   @type option ::
-          {:timeout_ms, pos_integer()} | {:explain, :plan | :analyze} | {:trace, boolean()}
+          {:timeout_ms, pos_integer()}
+          | {:explain, :plan | :analyze}
+          | {:trace, boolean()}
+          | {:distributed, boolean()}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -116,7 +119,7 @@ defmodule Smolquery.QueryService.Runner do
     )
 
     state = %{
-      runtime: runtime,
+      runtime: override_distributed(runtime, Keyword.get(opts, :distributed)),
       job: job,
       explain: Keyword.get(opts, :explain),
       trace: Keyword.get(opts, :trace, false),
@@ -129,6 +132,11 @@ defmodule Smolquery.QueryService.Runner do
 
     {:ok, state, {:continue, :run}}
   end
+
+  defp override_distributed(runtime, nil), do: runtime
+
+  defp override_distributed(%Runtime{} = runtime, enabled) when is_boolean(enabled),
+    do: %{runtime | distributed: %{runtime.distributed | enabled: enabled}}
 
   @impl GenServer
   def handle_continue(:run, state) do
@@ -181,13 +189,16 @@ defmodule Smolquery.QueryService.Runner do
           {Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, text), nil}
 
         {:ok, %{result: {:frame, frame}} = done} ->
-          {Job.done(
-             state.job,
-             done.snapshot,
-             DataFrame.n_rows(frame),
-             done.duration_ms,
-             done.statistics
-           ), frame}
+          job =
+            Job.done(
+              state.job,
+              done.snapshot,
+              DataFrame.n_rows(frame),
+              done.duration_ms,
+              done.statistics
+            )
+
+          {%{job | scatter: done.scatter}, frame}
 
         {:error, reason} ->
           {Job.failed(state.job, reason), nil}
@@ -277,7 +288,7 @@ defmodule Smolquery.QueryService.Runner do
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
            end),
-         {:ok, result} <-
+         {:ok, {result, scatter}} <-
            Trace.span(:execute, fn ->
              outcome(runtime, connection, plan, runtime.result_max_rows, explain, job_id)
            end) do
@@ -286,6 +297,7 @@ defmodule Smolquery.QueryService.Runner do
       {:ok,
        %{
          result: result,
+         scatter: scatter,
          snapshot: plan.snapshot,
          duration_ms: duration,
          statistics: plan.statistics
@@ -295,12 +307,12 @@ defmodule Smolquery.QueryService.Runner do
 
   defp outcome(runtime, connection, plan, max_rows, nil, job_id) do
     case Scatter.execute(runtime, connection, plan, job_id) do
-      {:ok, frame} ->
-        checked(frame, max_rows)
+      {:ok, frame, scatter} ->
+        checked(frame, max_rows, scatter)
 
       :fallback ->
         with {:ok, frame} <- Connection.frame(connection, bounded(plan, max_rows), [], :infinity) do
-          checked(frame, max_rows)
+          checked(frame, max_rows, nil)
         end
     end
   end
@@ -308,15 +320,15 @@ defmodule Smolquery.QueryService.Runner do
   defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
-      {:ok, {:explain, explain_text(result)}}
+      {:ok, {{:explain, explain_text(result)}, nil}}
     end
   end
 
-  defp checked(frame, max_rows) do
+  defp checked(frame, max_rows, scatter) do
     if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
       {:error, {:result_too_large, max_rows}}
     else
-      {:ok, {:frame, frame}}
+      {:ok, {{:frame, frame}, scatter}}
     end
   end
 
