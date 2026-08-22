@@ -125,8 +125,21 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert html =~ "INT64"
       assert html =~ "TIMESTAMP"
       assert html =~ "No retention policy"
+      assert html =~ "No clustering key"
 
       assert render_async(lv) =~ "query service is not running"
+    end
+
+    test "renders the clustering key", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+      :ok = Catalog.put_clustering(runtime.catalog, {"analytics", "events"}, ["name", "ts"])
+
+      {:ok, _lv, html} = live(conn, ~p"/tables/analytics/events")
+
+      assert html =~ "sort writes by"
+      assert html =~ ~r/name.*ts/s
+      refute html =~ "No clustering key"
     end
 
     test "saves and clears retention", %{conn: conn} do

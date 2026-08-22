@@ -1,7 +1,10 @@
 defmodule SmolqueryWeb.TableLive.Show do
   @moduledoc """
-  One table — its schema, its retention policy, its lifecycle, and a peek at
-  its rows.
+  One table — its schema, its clustering key, its retention policy, its
+  lifecycle, and a peek at its rows.
+
+  The clustering card is read-only: `Catalog.table_schema/2` attaches the
+  key to the schema, and the table PATCH route is the way to set it.
 
   Retention is the catalog's one mutable table property today (PL-12 D5), so
   editing here means editing that. The row preview runs through
@@ -416,6 +419,21 @@ defmodule SmolqueryWeb.TableLive.Show do
               </tr>
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="card bg-base-200 border border-base-300">
+        <div class="card-body py-4">
+          <h2 class="card-title text-base">Clustering</h2>
+          <div :if={@schema.clustering != []} class="flex gap-2 items-center text-sm">
+            <span class="opacity-70">sort writes by</span>
+            <span :for={column <- @schema.clustering} class="badge badge-outline font-mono">
+              {column}
+            </span>
+          </div>
+          <div :if={@schema.clustering == []} class="text-sm opacity-70">
+            No clustering key; writes are unsorted.
+          </div>
         </div>
       </div>
 
