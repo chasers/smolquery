@@ -13,8 +13,14 @@ defmodule Smolquery.TelemetryTest do
 
   defp le(bound), do: ~s({le="#{bound}"})
 
-  defp delta(before, bound),
-    do: value("smolquery_buffer_commit_rows_bucket", le(bound)) - Map.fetch!(before, bound)
+  defp stable_buckets(bounds) do
+    snapshot = buckets(bounds)
+
+    if snapshot == buckets(bounds), do: snapshot, else: stable_buckets(bounds)
+  end
+
+  defp buckets(bounds),
+    do: Map.new(bounds, &{&1, value("smolquery_buffer_commit_rows_bucket", le(&1))})
 
   defp value(name, labels \\ "") do
     pattern = ~r/^#{Regex.escape(name <> labels)} (\d+)$/m
@@ -163,7 +169,7 @@ defmodule Smolquery.TelemetryTest do
 
   test "buckets a commit's row count cumulatively, so the mean cannot hide a split" do
     bounds = ~w(1000 4000 16000 64000 +Inf)
-    before = Map.new(bounds, &{&1, value("smolquery_buffer_commit_rows_bucket", le(&1))})
+    before = stable_buckets(bounds)
 
     for rows <- [800, 10_000] do
       :telemetry.execute(
@@ -177,13 +183,20 @@ defmodule Smolquery.TelemetryTest do
     # would have looked identical to two commits of 5,400. The assertions are
     # differences between buckets, not absolute deltas: the counter table is
     # node-wide and the suite is async, so concurrent buffer tests land their
-    # own small commits in every bucket — which cancels in a difference and
-    # broke the exact form on CI.
-    assert delta(before, "16000") - delta(before, "4000") == 1
-    assert delta(before, "4000") - delta(before, "1000") == 0
-    assert delta(before, "+Inf") - delta(before, "16000") == 0
-    assert delta(before, "1000") >= 1
-    assert delta(before, "+Inf") >= 2
+    # own small commits in every bucket — which cancels in a difference. The
+    # cancellation only holds inside an internally consistent snapshot, so
+    # both sides read through stable_buckets/1: a commit landing between two
+    # bucket reads broke the difference by one on CI.
+    deltas =
+      Map.new(stable_buckets(bounds), fn {bound, count} ->
+        {bound, count - Map.fetch!(before, bound)}
+      end)
+
+    assert deltas["16000"] - deltas["4000"] == 1
+    assert deltas["4000"] - deltas["1000"] == 0
+    assert deltas["+Inf"] - deltas["16000"] == 0
+    assert deltas["1000"] >= 1
+    assert deltas["+Inf"] >= 2
   end
 
   test "a failed commit is neither bucketed nor counted in bytes" do
