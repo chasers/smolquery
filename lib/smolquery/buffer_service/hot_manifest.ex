@@ -513,7 +513,12 @@ defmodule Smolquery.BufferService.HotManifest do
   being behind, which re-shipping must not paper over. The split is what this
   manifest can still see: an id that was sealed and then reaped reports as
   `missing`, because the drop erased the record — `missing` means "no entry
-  now", not "never held" (T-291). `keys` are recorded rather
+  now", not "never held" (T-291). A set this manifest can freeze *none* of is
+  the same `:partial_claim`, with every id in one of the two lists (T-344):
+  a replica that holds nothing for the table still owes the owner the split,
+  because an all-missing set is the one re-shipping repairs outright, and a
+  bare refusal would leave the owner retrying it forever. Only an empty
+  request is `{:error, :nothing_to_claim}`. `keys` are recorded rather
   than recomputed at seal time, which is what keeps the output name stable even
   if one of the inputs later goes missing from the store.
   """
@@ -803,16 +808,12 @@ defmodule Smolquery.BufferService.HotManifest do
     not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
   end
 
+  defp freezable(_manifest, _table_ref, [], _keys), do: {:error, :nothing_to_claim}
+
   defp freezable(manifest, table_ref, ids, keys) do
     requested = Enum.uniq(ids)
-
-    case unsealed(manifest, table_ref, requested) do
-      [] ->
-        {:error, :nothing_to_claim}
-
-      entries ->
-        freezable_entries(manifest, table_ref, requested, entries, keys)
-    end
+    entries = unsealed(manifest, table_ref, requested)
+    freezable_entries(manifest, table_ref, requested, entries, keys)
   end
 
   # An entry can join the freeze if no claim holds it, or if this exact claim

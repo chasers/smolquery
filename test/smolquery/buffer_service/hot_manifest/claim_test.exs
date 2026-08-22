@@ -129,17 +129,25 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       assert entry.claim_keys == []
     end
 
-    test "refuses a sealed id", %{manifest: manifest} do
+    test "refuses a sealed id, naming it as the owner being behind", %{manifest: manifest} do
       entry = add(manifest, @table)
       :ok = HotManifest.retire(manifest, @table, [entry.id], 7)
 
       assert HotManifest.claim(manifest, @table, [entry.id], @keys) ==
-               {:error, :nothing_to_claim}
+               {:error, {:partial_claim, %{missing: [], sealed: [entry.id]}}}
     end
 
-    test "refuses an id the node never held", %{manifest: manifest} do
-      assert HotManifest.claim(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SV"], @keys) ==
-               {:error, :nothing_to_claim}
+    test "refuses a set it holds none of, naming every id as missing (T-344)", %{
+      manifest: manifest
+    } do
+      absent = ["01KYWPEEGAM8FQVQS5S2QF26SV", "01KYWPEEGAM8FQVQS5S2QF26SW"]
+
+      assert HotManifest.claim(manifest, @table, absent, @keys) ==
+               {:error, {:partial_claim, %{missing: absent, sealed: []}}}
+    end
+
+    test "refuses an empty set", %{manifest: manifest} do
+      assert HotManifest.claim(manifest, @table, [], @keys) == {:error, :nothing_to_claim}
     end
   end
 
