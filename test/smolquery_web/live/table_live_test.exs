@@ -125,8 +125,66 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert html =~ "INT64"
       assert html =~ "TIMESTAMP"
       assert html =~ "No retention policy"
+      assert html =~ "No clustering key"
 
       assert render_async(lv) =~ "query service is not running"
+    end
+
+    test "renders the clustering key", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+      :ok = Catalog.put_clustering(runtime.catalog, {"analytics", "events"}, ["name", "ts"])
+
+      {:ok, _lv, html} = live(conn, ~p"/tables/analytics/events")
+
+      assert html =~ "sort writes by"
+      assert html =~ ~r/name.*ts/s
+      refute html =~ "No clustering key"
+    end
+
+    test "saves and clears clustering", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+
+      html =
+        lv
+        |> form("#clustering", clustering: %{columns: "ts, id"})
+        |> render_submit()
+
+      assert html =~ "Clustering saved"
+      assert html =~ ~r/ts.*id/s
+      assert {:ok, ["ts", "id"]} = Catalog.clustering(runtime.catalog, {"analytics", "events"})
+
+      html = lv |> element("button", "Clear") |> render_click()
+
+      assert html =~ "Clustering cleared"
+      assert html =~ "No clustering key"
+      assert {:ok, []} = Catalog.clustering(runtime.catalog, {"analytics", "events"})
+    end
+
+    test "rejects an unknown or repeated clustering column", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+
+      html =
+        lv
+        |> form("#clustering", clustering: %{columns: "ts, nope"})
+        |> render_submit()
+
+      assert html =~ "unknown_clustering_column"
+      assert html =~ "No clustering key"
+
+      html =
+        lv
+        |> form("#clustering", clustering: %{columns: "ts, ts"})
+        |> render_submit()
+
+      assert html =~ "repeated_clustering_column"
+      assert {:ok, []} = Catalog.clustering(runtime.catalog, {"analytics", "events"})
     end
 
     test "saves and clears retention", %{conn: conn} do
