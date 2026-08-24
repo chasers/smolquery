@@ -117,6 +117,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
   alias Smolquery.Catalog.Dataset
+  alias Smolquery.Catalog.DuckLake.Attachments
   alias Smolquery.Engine
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -126,9 +127,15 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Segments.Store
 
   @enforce_keys [:engine, :catalog]
-  defstruct [:engine, :catalog]
+  defstruct [:engine, :catalog, :default]
 
-  @type t :: %__MODULE__{engine: atom(), catalog: String.t()}
+  @typedoc """
+  `catalog` is the lake an operation runs against; `default` is the default
+  lake, where the dataset and connection registries live. They differ only
+  inside an operation on a dataset with its own catalog, after `for_dataset/2`
+  has rebound `catalog` to that dataset's lake (PL-51).
+  """
+  @type t :: %__MODULE__{engine: atom(), catalog: String.t(), default: String.t() | nil}
 
   @type option ::
           {:name, atom()}
@@ -137,8 +144,14 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:catalog, String.t()}
           | {:automatic_migration, boolean()}
           | {:store, Store.t()}
+          | {:attach_limit, pos_integer()}
 
   @default_catalog "lake"
+  @dataset_columns ~w(name catalog_host catalog_port catalog_database catalog_username
+    catalog_secret catalog_sslmode catalog_version storage_bucket storage_prefix storage_endpoint
+    storage_region storage_url_style storage_access_key_id storage_secret
+    created_at updated_at)
+  @dataset_column_list Enum.join(@dataset_columns, ", ")
   @commit_attempts 5
   @retryable_markers [
     "Transaction conflict",
@@ -173,9 +186,14 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:automatic_migration` — passed to `attach_statement/4`
     * `:store` — the sealed-tier store; a credential-chain S3 store adds
       the extensions its `CREATE SECRET` statement needs
+    * `:attach_limit` — most dataset lakes the engine keeps attached at
+      once (`Smolquery.Catalog.DuckLake.Attachments`)
     * any `Smolquery.Engine` option — `:extensions` is extended with
       `:ducklake` rather than replaced
 
+  The engine and its `Attachments` server start under one `rest_for_one`
+  supervisor, so a restarted engine — which has lost every dataset lake it
+  attached — restarts the record of them too.
   """
   @spec start_link([option()]) :: Supervisor.on_start()
   def start_link(opts) do
@@ -184,6 +202,8 @@ defmodule Smolquery.Catalog.DuckLake do
     {metadata, config} = Keyword.pop!(config, :metadata)
     {data_path, config} = Keyword.pop!(config, :data_path)
     {automatic_migration, config} = Keyword.pop(config, :automatic_migration, false)
+    {attach_limit, config} = Keyword.pop(config, :attach_limit)
+    name = Keyword.get(config, :name, __MODULE__)
 
     :ok = ensure_metadata_dir(metadata)
 
@@ -204,10 +224,109 @@ defmodule Smolquery.Catalog.DuckLake do
       create_datasets_statement(catalog)
     ]
 
-    config
-    |> Keyword.put(:extensions, Enum.uniq(required ++ extensions))
-    |> Keyword.put(:statements, bootstrap ++ statements)
-    |> Engine.start_link()
+    engine_config =
+      config
+      |> Keyword.put(:extensions, Enum.uniq(required ++ extensions))
+      |> Keyword.put(:statements, bootstrap ++ statements)
+
+    attachments =
+      [engine: name, data_path: data_path] ++
+        if(attach_limit, do: [limit: attach_limit], else: [])
+
+    Supervisor.start_link(
+      [
+        %{id: :engine, start: {Engine, :start_link, [engine_config]}, type: :supervisor},
+        {Attachments, attachments}
+      ],
+      strategy: :rest_for_one,
+      name: Module.concat(name, "LakeSupervisor")
+    )
+  end
+
+  @doc """
+  The statements that make a dataset with its own catalog or storage
+  reachable on an engine that already holds the default lake (PL-51):
+
+  1. `CREATE SECRET IF NOT EXISTS smolquery_ds_<name> ...`, scoped to the
+     dataset's bucket and prefix, when it has its own storage. DuckDB picks
+     a secret by longest matching scope, so this never shadows the default
+     store's secret, and it comes first because the attach below may need it.
+  2. `ATTACH IF NOT EXISTS 'ducklake:postgres:...' AS ds_<name>`, when it
+     has its own catalog, with `DATA_PATH` at its storage location or, for
+     a dataset on the default store, a directory under `data_path`.
+  3. The lake's clustering and partitions side tables, and
+     `CREATE SCHEMA IF NOT EXISTS ds_<name>.<name>` — the schema the
+     dataset's tables live in, created here rather than in
+     `create_dataset/2` so a re-attach anywhere finds it.
+
+  Every statement is idempotent, so running the list on an engine that
+  already holds the dataset changes nothing. The metadata string carries
+  the opened password; it is built here and passed straight into the
+  statement, never stored.
+
+  A dataset on the defaults for both axes needs nothing: `{:ok, []}`.
+  """
+  @spec dataset_statements(Dataset.t(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def dataset_statements(%Dataset{catalog: nil, storage: nil}, _data_path), do: {:ok, []}
+
+  def dataset_statements(%Dataset{} = dataset, data_path) do
+    with {:ok, store_options} <- Dataset.store_options(dataset),
+         {:ok, metadata} <- Dataset.metadata(dataset) do
+      store = store_options && struct(Store.S3, store_options)
+
+      {:ok, secret_statements(store) ++ lake_statements(dataset, metadata, store, data_path)}
+    end
+  end
+
+  defp secret_statements(nil), do: []
+  defp secret_statements(%Store.S3{} = store), do: [Store.S3.create_secret_statement(store)]
+
+  defp lake_statements(_dataset, nil, _store, _data_path), do: []
+
+  defp lake_statements(%Dataset{name: name} = dataset, metadata, store, data_path) do
+    lake = Dataset.lake(dataset)
+
+    [
+      attach_statement(lake, metadata, lake_data_path(lake, store, data_path)),
+      create_clustering_statement(lake),
+      create_partitions_statement(lake),
+      "CREATE SCHEMA IF NOT EXISTS #{Identifier.quote_name!(lake)}.#{Identifier.quote_name!(name)}"
+    ]
+  end
+
+  defp lake_data_path(_lake, %Store.S3{} = store, _data_path), do: Store.S3.location_prefix(store)
+  defp lake_data_path(lake, nil, data_path), do: Path.join(data_path, lake)
+
+  @doc """
+  The `INSTALL`/`LOAD` statements an engine runs before
+  `dataset_statements/2`: `postgres` for a dataset with its own catalog,
+  and `aws` for one whose store authenticates through the credential chain.
+  Both are no-ops on an engine that already loaded them.
+  """
+  @spec dataset_extension_statements(Dataset.t()) :: [String.t()]
+  def dataset_extension_statements(%Dataset{} = dataset) do
+    postgres = if dataset.catalog, do: [:postgres], else: []
+
+    aws =
+      case dataset.storage do
+        %Dataset.Storage{access_key_id: nil} -> [:aws]
+        _static_or_none -> []
+      end
+
+    Enum.flat_map(postgres ++ aws, &["INSTALL #{&1}", "LOAD #{&1}"])
+  end
+
+  @doc """
+  The statements that release a dataset from an engine: its lake detached
+  and its secret dropped, each `IF EXISTS` so the pair applies whatever
+  axes the dataset had.
+  """
+  @spec dataset_detach_statements(String.t()) :: [String.t()]
+  def dataset_detach_statements(name) do
+    [
+      "DETACH DATABASE IF EXISTS #{Identifier.quote_name!(Dataset.lake(name))}",
+      "DROP SECRET IF EXISTS #{Dataset.secret_name(name)}"
+    ]
   end
 
   @doc """
@@ -221,9 +340,12 @@ defmodule Smolquery.Catalog.DuckLake do
   """
   @spec new(keyword()) :: Catalog.t()
   def new(opts) do
+    catalog = Keyword.get(opts, :catalog, @default_catalog)
+
     config = %__MODULE__{
       engine: Keyword.get(opts, :engine, __MODULE__),
-      catalog: Keyword.get(opts, :catalog, @default_catalog)
+      catalog: catalog,
+      default: catalog
     }
 
     %Catalog{impl: __MODULE__, config: config}
@@ -315,6 +437,7 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, existing} <- find_dataset(config, dataset.name),
          :ok <- creatable(existing, dataset),
          :ok <- catalog_unclaimed(config, dataset),
+         :ok <- Attachments.ensure(config.engine, dataset),
          :ok <- create_schema(config, name, dataset) do
       insert_dataset(config, dataset, existing)
     end
@@ -323,7 +446,8 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def list_datasets(%__MODULE__{} = config) do
     with {:ok, schemata} <- schemata(config),
-         {:ok, recorded} <- column(config, "SELECT name FROM #{datasets_table(config.catalog)}") do
+         {:ok, recorded} <-
+           column(config, "SELECT name FROM #{datasets_table(default_lake(config))}") do
       {:ok, Enum.sort(Enum.uniq(schemata ++ recorded))}
     end
   end
@@ -348,9 +472,12 @@ defmodule Smolquery.Catalog.DuckLake do
     column(
       config,
       "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1",
-      [config.catalog]
+      [default_lake(config)]
     )
   end
+
+  defp default_lake(%__MODULE__{default: nil, catalog: catalog}), do: catalog
+  defp default_lake(%__MODULE__{default: default}), do: default
 
   defp find_dataset(config, name) do
     with {:ok, %{rows: rows}} <- query(config, select_dataset_sql(config, name)) do
@@ -379,7 +506,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp catalog_unclaimed(config, %Dataset{name: name, catalog: catalog}) do
     sql =
-      "SELECT name FROM #{datasets_table(config.catalog)} " <>
+      "SELECT name FROM #{datasets_table(default_lake(config))} " <>
         "WHERE name <> #{Identifier.sql_string(name)} " <>
         "AND catalog_host = #{Identifier.sql_string(catalog.host)} " <>
         "AND catalog_port = #{catalog.port} " <>
@@ -405,8 +532,9 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def create_table(%__MODULE__{} = config, table, %Schema{} = schema) do
-    with {:ok, name} <- table_name(config, table),
+  def create_table(%__MODULE__{} = config, {dataset, _table} = table, %Schema{} = schema) do
+    with {:ok, config} <- for_dataset(config, dataset),
+         {:ok, name} <- table_name(config, table),
          {:ok, columns} <- Schema.column_definitions(schema),
          {:ok, _result} <- query(config, "CREATE TABLE IF NOT EXISTS #{name} (#{columns})") do
       :ok
@@ -415,7 +543,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @impl Catalog
   def list_tables(%__MODULE__{} = config, dataset) do
-    with {:ok, dataset} <- Identifier.validate(dataset) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, config} <- for_dataset(config, dataset) do
       column(
         config,
         "SELECT table_name FROM information_schema.tables " <>
@@ -429,6 +558,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def table_schema(%__MODULE__{} = config, {dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -471,13 +601,14 @@ defmodule Smolquery.Catalog.DuckLake do
 
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          :ok <- with_commit_retries(fn -> add_missing(config, {dataset, table}, paths) end) do
-      current_snapshot(config)
+      lake_snapshot(config)
     end
   end
 
   defp add_missing(config, ref, paths) do
-    with {:ok, registered} <- segments(config, ref, :current) do
+    with {:ok, registered} <- lake_files(config, ref, :current) do
       case paths -- registered do
         [] -> {:ok, :already_registered}
         pending -> query(config, add_statement(config, ref, pending))
@@ -488,19 +619,24 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def segments(%__MODULE__{} = config, {dataset, table}, snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
-         {:ok, table} <- Identifier.validate(table) do
-      arguments =
-        [
-          Identifier.sql_string(config.catalog),
-          Identifier.sql_string(table),
-          "schema => #{Identifier.sql_string(dataset)}"
-        ] ++ snapshot_argument(snapshot)
-
-      column(
-        config,
-        "SELECT data_file FROM ducklake_list_files(#{Enum.join(arguments, ", ")})"
-      )
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset) do
+      lake_files(config, {dataset, table}, snapshot)
     end
+  end
+
+  defp lake_files(config, {dataset, table}, snapshot) do
+    arguments =
+      [
+        Identifier.sql_string(config.catalog),
+        Identifier.sql_string(table),
+        "schema => #{Identifier.sql_string(dataset)}"
+      ] ++ snapshot_argument(snapshot)
+
+    column(
+      config,
+      "SELECT data_file FROM ducklake_list_files(#{Enum.join(arguments, ", ")})"
+    )
   end
 
   @impl Catalog
@@ -508,6 +644,7 @@ defmodule Smolquery.Catalog.DuckLake do
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -529,6 +666,7 @@ defmodule Smolquery.Catalog.DuckLake do
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -559,6 +697,7 @@ defmodule Smolquery.Catalog.DuckLake do
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -598,12 +737,14 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def drop_segments(%__MODULE__{} = config, _table, []), do: current_snapshot(config)
+  def drop_segments(%__MODULE__{} = config, {dataset, _table}, []),
+    do: current_snapshot(config, dataset)
 
-  def drop_segments(%__MODULE__{} = config, table, paths) do
-    with {:ok, name} <- table_name(config, table),
+  def drop_segments(%__MODULE__{} = config, {dataset, _table} = table, paths) do
+    with {:ok, config} <- for_dataset(config, dataset),
+         {:ok, name} <- table_name(config, table),
          :ok <- commit(config, delete_statement(name, paths)) do
-      current_snapshot(config)
+      lake_snapshot(config)
     end
   end
 
@@ -616,13 +757,14 @@ defmodule Smolquery.Catalog.DuckLake do
 
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          :ok <- with_commit_retries(fn -> swap_missing(config, {dataset, table}, add, drop) end) do
-      current_snapshot(config)
+      lake_snapshot(config)
     end
   end
 
   defp swap_missing(config, ref, add, drop) do
-    with {:ok, registered} <- segments(config, ref, :current) do
+    with {:ok, registered} <- lake_files(config, ref, :current) do
       case add -- registered do
         [] -> {:ok, :already_swapped}
         pending -> swap(config, ref, pending, drop)
@@ -644,7 +786,17 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def current_snapshot(%__MODULE__{} = config) do
+  def current_snapshot(%__MODULE__{} = config), do: lake_snapshot(config)
+
+  @impl Catalog
+  def current_snapshot(%__MODULE__{} = config, dataset) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, config} <- for_dataset(config, dataset) do
+      lake_snapshot(config)
+    end
+  end
+
+  defp lake_snapshot(config) do
     with {:ok, result} <-
            query(
              config,
@@ -659,6 +811,31 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @impl Catalog
   def known_segments(%__MODULE__{} = config) do
+    with {:ok, own} <- lake_segments(config),
+         {:ok, datasets} <- own_catalog_datasets(config) do
+      every_lake_segments(config, datasets, own)
+    end
+  end
+
+  defp every_lake_segments(config, datasets, own) do
+    datasets
+    |> Enum.reduce_while({:ok, [own]}, fn dataset, {:ok, acc} ->
+      case dataset_segments(config, dataset) do
+        {:ok, paths} -> {:cont, {:ok, [paths | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, chunks} -> {:ok, chunks |> Enum.reverse() |> Enum.concat()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp dataset_segments(config, dataset) do
+    with {:ok, config} <- resolve_lake(config, dataset), do: lake_segments(config)
+  end
+
+  defp lake_segments(config) do
     with {:ok, result} <-
            query(
              config,
@@ -666,6 +843,16 @@ defmodule Smolquery.Catalog.DuckLake do
                "#{metadata_schema(config.catalog)}.ducklake_data_file"
            ) do
       absolute_paths(result.rows)
+    end
+  end
+
+  defp own_catalog_datasets(config) do
+    sql =
+      "SELECT #{@dataset_column_list} FROM #{datasets_table(default_lake(config))} " <>
+        "WHERE catalog_host IS NOT NULL ORDER BY name"
+
+    with {:ok, %{rows: rows}} <- query(config, sql) do
+      {:ok, Enum.map(rows, &dataset_from_row/1)}
     end
   end
 
@@ -677,6 +864,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def retention(%__MODULE__{} = config, {dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          :ok <- ensure_retention_table(config),
          {:ok, result} <-
            query(
@@ -701,6 +889,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def clustering(%__MODULE__{} = config, {dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -720,6 +909,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def partitions(%__MODULE__{} = config, {dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          {:ok, result} <-
            query(
              config,
@@ -749,6 +939,7 @@ defmodule Smolquery.Catalog.DuckLake do
     with :ok <- validate_options(options),
          {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
+         {:ok, config} <- for_dataset(config, dataset),
          :ok <- maybe_ensure_retention_table(config, options) do
       case option_statements(config, dataset, table, options) do
         [] -> :ok
@@ -979,7 +1170,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
     Engine.transaction(config.engine, [
       delete_connection_sql(config, connection.name),
-      "INSERT INTO #{connections_table(config.catalog)} " <>
+      "INSERT INTO #{connections_table(default_lake(config))} " <>
         "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at) " <>
         "VALUES (#{Identifier.sql_string(connection.name)}, " <>
         "#{Identifier.sql_string(connection.host)}, #{connection.port}, " <>
@@ -994,7 +1185,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def connection(%__MODULE__{} = config, name) do
     sql =
       "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
-        "FROM #{connections_table(config.catalog)} WHERE name = #{Identifier.sql_string(name)}"
+        "FROM #{connections_table(default_lake(config))} WHERE name = #{Identifier.sql_string(name)}"
 
     case query(config, sql) do
       {:ok, %{rows: [row]}} -> {:ok, connection_from_row(row)}
@@ -1007,7 +1198,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def list_connections(%__MODULE__{} = config) do
     sql =
       "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
-        "FROM #{connections_table(config.catalog)} ORDER BY name"
+        "FROM #{connections_table(default_lake(config))} ORDER BY name"
 
     with {:ok, %{rows: rows}} <- query(config, sql) do
       {:ok, Enum.map(rows, &connection_from_row/1)}
@@ -1020,7 +1211,7 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp delete_connection_sql(config, name) do
-    "DELETE FROM #{connections_table(config.catalog)} " <>
+    "DELETE FROM #{connections_table(default_lake(config))} " <>
       "WHERE name = #{Identifier.sql_string(name)}"
   end
 
@@ -1049,11 +1240,6 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp datasets_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_datasets"
-
-  @dataset_columns ~w(name catalog_host catalog_port catalog_database catalog_username
-    catalog_secret catalog_sslmode catalog_version storage_bucket storage_prefix storage_endpoint
-    storage_region storage_url_style storage_access_key_id storage_secret
-    created_at updated_at)
 
   @doc """
   The `CREATE TABLE IF NOT EXISTS` that gives a lake its dataset side table
@@ -1088,15 +1274,13 @@ defmodule Smolquery.Catalog.DuckLake do
       "PRIMARY KEY (name))"
   end
 
-  @dataset_column_list Enum.join(@dataset_columns, ", ")
-
   defp select_dataset_sql(config, name) do
-    "SELECT #{@dataset_column_list} FROM #{datasets_table(config.catalog)} " <>
+    "SELECT #{@dataset_column_list} FROM #{datasets_table(default_lake(config))} " <>
       "WHERE name = #{Identifier.sql_string(name)}"
   end
 
   defp delete_dataset_sql(config, name) do
-    "DELETE FROM #{datasets_table(config.catalog)} WHERE name = #{Identifier.sql_string(name)}"
+    "DELETE FROM #{datasets_table(default_lake(config))} WHERE name = #{Identifier.sql_string(name)}"
   end
 
   defp insert_dataset_sql(config, %Dataset{} = dataset, created_at) do
@@ -1126,7 +1310,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
     row = Enum.join(values, ", ")
 
-    "INSERT INTO #{datasets_table(config.catalog)} (#{@dataset_column_list}) VALUES (#{row})"
+    "INSERT INTO #{datasets_table(default_lake(config))} (#{@dataset_column_list}) VALUES (#{row})"
   end
 
   defp nullable_string(nil), do: "NULL"
@@ -1289,6 +1473,19 @@ defmodule Smolquery.Catalog.DuckLake do
     |> case do
       {:ok, fields} -> Schema.new(Enum.reverse(fields))
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp for_dataset(config, dataset) do
+    with {:ok, found} <- find_dataset(config, dataset), do: resolve_lake(config, found)
+  end
+
+  defp resolve_lake(config, nil), do: {:ok, config}
+  defp resolve_lake(config, %Dataset{catalog: nil, storage: nil}), do: {:ok, config}
+
+  defp resolve_lake(config, %Dataset{} = dataset) do
+    with :ok <- Attachments.ensure(config.engine, dataset) do
+      {:ok, %{config | catalog: Dataset.lake(dataset) || config.catalog}}
     end
   end
 

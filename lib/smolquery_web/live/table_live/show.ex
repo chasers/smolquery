@@ -262,8 +262,8 @@ defmodule SmolqueryWeb.TableLive.Show do
     }
   end
 
-  defp sealed_tier(runtime, table_ref) do
-    with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
+  defp sealed_tier(runtime, {dataset, _table} = table_ref) do
+    with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog, dataset),
          {:ok, stats} <- Catalog.segment_stats(runtime.catalog, table_ref, snapshot),
          {:ok, files} <- Catalog.segment_files(runtime.catalog, table_ref, snapshot) do
       %{stats: stats, files: files}

@@ -46,6 +46,7 @@ received value, and the accepted shape.
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | Splits a tier onto its own disk (default: under the data dir) |
 | `SMOLQUERY_CATALOG` | The DuckLake metadata database, for example `postgres:dbname=smolquery` (default: the data dir's SQLite) |
 | `SMOLQUERY_DUCKLAKE_VERSION` | The DuckLake format a dataset's own catalog is pinned to when its creation request names none (`1.0`, PL-51 D7). A dataset records its version and every attach names it, so a lake is served at exactly that format and is never migrated on first touch. The value must look like `1.0` |
+| `SMOLQUERY_DATASET_ATTACH_LIMIT` | The most dataset lakes one catalog engine keeps attached at once (`64`, PL-51 D6). A dataset with its own catalog is attached on first touch, and every attached Postgres lake holds a connection to that Postgres; past the limit the least recently used lake is detached and re-attached on its next touch. See `Smolquery.Catalog.DuckLake.Attachments` |
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format (`false`). The migration is one-way. Nodes on the old extension cannot read the result. See [deployment.md](deployment.md#catalog-format-upgrades) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | The time-travel promise (`86400000`). The value must exceed the longest pinned query. It must also exceed `retire_grace_ms` |
 | `SMOLQUERY_SEAL_ROW_GROUP_SIZE` | Sets `ROW_GROUP_SIZE` on every sealed Parquet `COPY`, for seal and compaction alike (`1048576`, T-280). A sealed-tier scan over `httpfs` pays roughly one range request per row group. This value thus sets a query's request count per segment. Smaller groups buy finer clustered-key pruning at that cost. The setting applies to newly written segments only. Compaction never revisits a healthy-sized segment, so old data keeps its old row groups. The seal path has no OOM adaptation. A claim's inputs are frozen. A seal `COPY` that deterministically OOMs at this size therefore retries forever. On a memory-tight node, lower this value or raise `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
@@ -360,9 +361,14 @@ the Postgres username and password, and the S3 key pair. Secrets are sealed
 with `SMOLQUERY_CREDENTIAL_KEY`, the same key federated connections use, so a
 node that creates such a dataset needs that key set.
 
-Layers 3 and 4 of PL-51 — the engines attaching a dataset's lake and the
-storage service writing to its bucket — are in progress. Until they land, the
-settings are stored and shown but not yet honored.
+A dataset's own catalog is honored from creation: the create attaches the
+lake once (so a wrong host or password fails the request), every catalog
+operation and every query reaches it, and a query pins one snapshot per
+dataset it touches. The attach happens on first touch on each engine, never
+at boot, and is bounded by `SMOLQUERY_DATASET_ATTACH_LIMIT`. Two things are
+still layer 4 of PL-51: sealed segments land in the deployment's default
+store rather than the dataset's bucket, and snapshot expiry runs on the
+default lake only.
 
 ### The query service
 

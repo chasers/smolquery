@@ -1,8 +1,15 @@
 defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
   @moduledoc """
-  Dataset records stored in a real DuckLake catalog (PL-51 L1).
+  Dataset records stored in a real DuckLake catalog (PL-51 L1), and, since
+  L3, a dataset's own lake attached on first touch.
 
-  Tagged `:integration` for the reason `Smolquery.Catalog.DuckLakeTest` is.
+  Tagged `:integration` for the reason `Smolquery.Catalog.DuckLakeTest` is,
+  and it also needs the suite's Postgres (`Smolquery.Test.Postgres`): a
+  dataset with its own catalog is attached at creation, so a fake host is
+  refused, which is the behavior an operator with a typo in a Supabase host
+  should get. Storage-only datasets need no store to answer: a `CREATE
+  SECRET` connects to nothing.
+
   What it pins: a dataset on the defaults still creates a schema and reads
   back as one; a dataset with its own catalog or storage round-trips through
   the side table with no secret in the clear; re-creating with the same
@@ -18,11 +25,14 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.Identifier
+  alias Smolquery.Test.Postgres
 
   @moduletag :integration
   @moduletag :tmp_dir
 
   @engine __MODULE__.Lake
+  @database "smolquery_test"
+  @second_database "smolquery_test_dataset2"
 
   setup context do
     previous = Application.get_env(:smolquery, :credential_key)
@@ -36,6 +46,9 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
       end
     end)
 
+    Postgres.ensure_database!(@database)
+    Postgres.reset_lake!(@database)
+
     start_supervised!(
       {DuckLake,
        name: @engine,
@@ -46,17 +59,7 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
     %{catalog: DuckLake.new(engine: @engine)}
   end
 
-  defp catalog_params(overrides \\ %{}) do
-    Map.merge(
-      %{
-        "host" => "db.abc.supabase.co",
-        "database" => "postgres",
-        "username" => "postgres",
-        "password" => "hunter2"
-      },
-      overrides
-    )
-  end
+  defp catalog_params(overrides \\ []), do: Postgres.catalog_params(overrides)
 
   defp storage_params(overrides \\ %{}) do
     Map.merge(
@@ -88,6 +91,19 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
     "#{schema}.#{table}"
   end
 
+  defp schemata(lake) do
+    {:ok, result} =
+      Engine.query(
+        @engine,
+        "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1",
+        [lake]
+      )
+
+    List.flatten(result.rows)
+  end
+
+  defp original_password, do: catalog_params()["password"]
+
   test "a dataset on the defaults creates a schema and reads back as one", %{catalog: catalog} do
     assert :ok = Catalog.create_dataset(catalog, "plain")
 
@@ -113,11 +129,11 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
     assert {:ok, stored} = Catalog.dataset(catalog, "analytics")
 
     assert stored.name == "analytics"
-    assert stored.catalog.host == "db.abc.supabase.co"
-    assert stored.catalog.port == 5432
-    assert stored.catalog.database == "postgres"
-    assert stored.catalog.username == "postgres"
-    assert stored.catalog.sslmode == "require"
+    assert stored.catalog.host == original.catalog.host
+    assert stored.catalog.port == original.catalog.port
+    assert stored.catalog.database == @database
+    assert stored.catalog.username == original.catalog.username
+    assert stored.catalog.sslmode == "disable"
     assert stored.catalog.version == "1.0"
     assert stored.catalog.secret == original.catalog.secret
     assert stored.storage.bucket == "lake"
@@ -131,26 +147,20 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
     assert stored.updated_at == stored.created_at
 
     assert {:ok, metadata} = Dataset.metadata(stored)
-    assert metadata =~ "password='hunter2'"
+    assert metadata =~ "password='#{original_password()}'"
     assert {:ok, options} = Dataset.store_options(stored)
     assert options[:secret_access_key] == "shh"
   end
 
-  test "a dataset with its own catalog lists without a schema in the default lake",
+  test "a dataset with its own catalog is attached and lives in its own lake",
        %{catalog: catalog} do
     :ok = Catalog.create_dataset(catalog, dataset(%{"storage" => nil}))
     :ok = Catalog.create_dataset(catalog, "plain")
 
     assert {:ok, ["analytics", "main", "plain"]} = Catalog.list_datasets(catalog)
-
-    {:ok, schemata} =
-      Engine.query(
-        @engine,
-        "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1",
-        [DuckLake.default_catalog()]
-      )
-
-    refute ["analytics"] in schemata.rows
+    assert DuckLake.Attachments.attached(@engine) == ["analytics"]
+    refute "analytics" in schemata(DuckLake.default_catalog())
+    assert "analytics" in schemata("ds_analytics")
   end
 
   test "a dataset with only its own storage still creates a schema", %{catalog: catalog} do
@@ -165,27 +175,39 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
                {"analytics", "events"},
                Smolquery.Schema.new!([{"id", :int64}])
              )
+
+    assert "analytics" in schemata(DuckLake.default_catalog())
+    assert DuckLake.Attachments.attached(@engine) == ["analytics"]
+  end
+
+  test "a catalog that cannot be reached refuses the create", %{catalog: catalog} do
+    unreachable = dataset(%{"catalog" => catalog_params(port: 1), "storage" => nil})
+
+    assert {:error, _reason} = Catalog.create_dataset(catalog, unreachable)
+    assert Catalog.dataset(catalog, "analytics") == {:error, {:unknown_dataset, "analytics"}}
   end
 
   test "the metadata database holds no plaintext secret", %{catalog: catalog} do
     :ok = Catalog.create_dataset(catalog, dataset())
 
-    {:ok, result} = Engine.query(@engine, "SELECT * FROM #{metadata_table("smolquery_datasets")}")
+    {:ok, result} =
+      Engine.query(
+        @engine,
+        "SELECT catalog_secret, storage_secret FROM #{metadata_table("smolquery_datasets")}"
+      )
 
-    refute inspect(result.rows) =~ "hunter2"
-    refute inspect(result.rows) =~ "shh"
+    assert [[catalog_secret, storage_secret]] = result.rows
+    refute catalog_secret == original_password()
+    refute catalog_secret =~ original_password()
+    refute storage_secret == "shh"
+    refute storage_secret =~ "shh"
   end
 
   test "re-creating with the same settings is a no-op", %{catalog: catalog} do
     :ok = Catalog.create_dataset(catalog, dataset())
     {:ok, first} = Catalog.dataset(catalog, "analytics")
 
-    assert :ok =
-             Catalog.create_dataset(
-               catalog,
-               dataset(%{"catalog" => catalog_params(%{"password" => "other"})})
-             )
-
+    assert :ok = Catalog.create_dataset(catalog, dataset())
     assert {:ok, ^first} = Catalog.dataset(catalog, "analytics")
 
     assert :ok = Catalog.create_dataset(catalog, "plain")
@@ -217,14 +239,19 @@ defmodule Smolquery.Catalog.DuckLakeDatasetsTest do
     assert Catalog.create_dataset(catalog, dataset(%{"name" => "other"})) ==
              {:error, {:catalog_in_use, "analytics"}}
 
+    Postgres.ensure_database!(@second_database)
+    Postgres.reset_lake!(@second_database)
+
     assert :ok =
              Catalog.create_dataset(
                catalog,
                dataset(%{
                  "name" => "other",
-                 "catalog" => catalog_params(%{"database" => "second"})
+                 "catalog" => catalog_params(database: @second_database)
                })
              )
+
+    assert DuckLake.Attachments.attached(@engine) == ["other", "analytics"]
   end
 
   test "a schema from before the side table answers as a default dataset", %{catalog: catalog} do

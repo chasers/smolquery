@@ -146,6 +146,9 @@ defmodule Smolquery.Test.PathCatalog do
   def current_snapshot(_agent), do: {:ok, 1}
 
   @impl Catalog
+  def current_snapshot(agent, _dataset), do: current_snapshot(agent)
+
+  @impl Catalog
   def create_dataset(_agent, _dataset), do: :ok
 
   @impl Catalog

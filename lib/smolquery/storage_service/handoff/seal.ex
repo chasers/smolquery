@@ -196,7 +196,8 @@ defmodule Smolquery.StorageService.Handoff.Seal do
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       if committed?(paths, registered) do
-        Catalog.current_snapshot(runtime.catalog)
+        {dataset, _table} = Partitions.parent(table_ref)
+        Catalog.current_snapshot(runtime.catalog, dataset)
       else
         merge_and_register(runtime, table_ref, claim, entries)
       end

@@ -75,6 +75,19 @@ defmodule Smolquery.FederationTest do
     end
   end
 
+  describe "redact_statement/2" do
+    test "scrubs the literal of an ATTACH IF NOT EXISTS as it does a plain ATTACH (PL-51)" do
+      literal = "ducklake:postgres:dbname=x host=h user=u password=hunter2"
+      reason = {:statement_failed, "could not connect: #{literal}"}
+
+      for prefix <- ["ATTACH '", "ATTACH IF NOT EXISTS '"] do
+        redacted = Federation.redact_statement(reason, prefix <> literal <> "' AS ds_x")
+
+        refute inspect(redacted) =~ "hunter2"
+      end
+    end
+  end
+
   describe "scrub/2" do
     test "replaces the connection string wherever it appears" do
       conn = connection()

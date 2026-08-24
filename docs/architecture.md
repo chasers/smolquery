@@ -184,6 +184,23 @@ One table in `Smolquery.Schema` maps the types: logical type ↔ Explorer
 dtype ↔ DuckDB type (`:int64`/`{:s, 64}`/`BIGINT`, `{:numeric, p, s}` ↔
 `DECIMAL(p,s)`, and so on).
 
+### A dataset with its own catalog (PL-51)
+
+A dataset is a record in the default lake (`Smolquery.Catalog.Dataset`,
+table `smolquery_datasets`). A dataset that names its own Postgres is its own
+DuckLake: every engine that touches it attaches that database under
+`ds_<name>`, next to the default `lake`, and the dataset's tables live at
+`ds_<name>.<name>.<table>`. One resolver in `Smolquery.Catalog.DuckLake`
+rebinds an operation from `lake` to the dataset's alias, so the rest of the
+catalog code is unchanged. The attach is lazy — first touch, per engine — and
+bounded by an LRU in `Smolquery.Catalog.DuckLake.Attachments`, because the
+target is tens of thousands of datasets and an attached Postgres lake holds a
+connection. A snapshot belongs to a lake, so the planner pins one per dataset
+a query touches (`Plan.snapshots`), and a job engine runs the dataset's
+`ATTACH` and `CREATE SECRET` from `Plan.statements` before it locks down.
+`known_segments/1` unions every lake, so garbage collection never mistakes an
+owned dataset's segment for an orphan.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:

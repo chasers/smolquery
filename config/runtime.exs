@@ -561,6 +561,12 @@ if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end
 
+if limit = System.get_env("SMOLQUERY_DATASET_ATTACH_LIMIT") do
+  config :smolquery, Smolquery.Catalog.DuckLake,
+    attach_limit:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_DATASET_ATTACH_LIMIT", limit)
+end
+
 if migrate = System.get_env("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION") do
   config :smolquery, Smolquery.Catalog.DuckLake,
     automatic_migration:

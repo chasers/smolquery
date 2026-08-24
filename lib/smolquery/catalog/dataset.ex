@@ -207,9 +207,10 @@ defmodule Smolquery.Catalog.Dataset do
   name, and the `ds_` prefix keeps it clear of the default lake's own alias
   and of any name a dataset could take.
   """
-  @spec lake(t()) :: String.t() | nil
+  @spec lake(t() | String.t()) :: String.t() | nil
   def lake(%__MODULE__{catalog: nil}), do: nil
-  def lake(%__MODULE__{name: name}), do: @lake_prefix <> name
+  def lake(%__MODULE__{name: name}), do: lake(name)
+  def lake(name) when is_binary(name), do: @lake_prefix <> name
 
   @doc """
   The DuckLake metadata string for a dataset's own catalog, with the
@@ -238,14 +239,15 @@ defmodule Smolquery.Catalog.Dataset do
   @doc """
   The options `Smolquery.Segments.Store.S3.new/1` takes for a dataset's own
   store, with the secret key opened — everything but `:staging_dir`, which
-  is the node's to supply.
+  is the node's to supply. The DuckDB secret is named after the dataset
+  (`secret_name/1`), so it never collides with the default store's.
 
   `nil` for a dataset on the default store.
   """
   @spec store_options(t()) :: {:ok, keyword() | nil} | {:error, term()}
   def store_options(%__MODULE__{storage: nil}), do: {:ok, nil}
 
-  def store_options(%__MODULE__{storage: %Storage{} = storage}) do
+  def store_options(%__MODULE__{storage: %Storage{} = storage} = dataset) do
     with {:ok, credentials} <- store_credentials(storage) do
       {:ok,
        Enum.reject(
@@ -254,12 +256,22 @@ defmodule Smolquery.Catalog.Dataset do
            prefix: storage.prefix,
            endpoint: storage.endpoint,
            region: storage.region,
-           url_style: storage.url_style
+           url_style: storage.url_style,
+           secret_name: secret_name(dataset)
          ] ++ credentials,
          fn {_option, value} -> is_nil(value) end
        )}
     end
   end
+
+  @doc """
+  The name of the DuckDB secret a dataset's own store creates:
+  `smolquery_ds_<name>`. Derived, like `lake/1`, so it never disagrees with
+  the name.
+  """
+  @spec secret_name(t() | String.t()) :: String.t()
+  def secret_name(%__MODULE__{name: name}), do: secret_name(name)
+  def secret_name(name) when is_binary(name), do: "smolquery_" <> lake(name)
 
   @doc """
   Whether two datasets carry the same identity: the same name, catalog, and

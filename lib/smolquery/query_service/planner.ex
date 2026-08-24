@@ -175,6 +175,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster
   alias Smolquery.Engine.Connection
@@ -187,6 +188,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.Views
+  alias Smolquery.Segments.Store
 
   @allowed_table_functions ~w(generate_series range repeat unnest)
 
@@ -206,9 +208,13 @@ defmodule Smolquery.QueryService.Planner do
          :ok <- gate_table_functions(statement, runtime.lockdown),
          {:ok, refs, federated} <- classified(statement),
          {:ok, attaches} <- Trace.span(:federated, fn -> federated(runtime, federated) end),
+         {:ok, datasets} <- Trace.span(:datasets, fn -> datasets(runtime, refs) end),
+         {:ok, lakes} <- Trace.span(:lakes, fn -> lakes(runtime, datasets) end),
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
-         {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
+         {:ok, snapshots} <-
+           Trace.span(:snapshots, fn -> pins(runtime, refs, datasets, snapshot) end),
+         {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshots) end),
          {:ok, manifests} <-
            Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
       {:ok,
@@ -216,7 +222,7 @@ defmodule Smolquery.QueryService.Planner do
          build(
            sql,
            canonical,
-           snapshot,
+           %{snapshot: snapshot, snapshots: snapshots, datasets: datasets, lakes: lakes},
            refs,
            tables,
            manifests,
@@ -226,6 +232,70 @@ defmodule Smolquery.QueryService.Planner do
        end)}
     end
   end
+
+  defp datasets(runtime, refs) do
+    refs
+    |> Enum.map(fn {dataset, _table} -> dataset end)
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, acc} ->
+      case Catalog.dataset(runtime.catalog, name) do
+        {:ok, %Dataset{catalog: nil, storage: nil}} -> {:cont, {:ok, acc}}
+        {:ok, %Dataset{} = dataset} -> {:cont, {:ok, Map.put(acc, name, dataset)}}
+        {:error, :datasets_unsupported} -> {:cont, {:ok, acc}}
+        {:error, {:unknown_dataset, _name}} -> {:cont, {:ok, acc}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp lakes(_runtime, datasets) when map_size(datasets) == 0,
+    do: {:ok, %{statements: [], prefixes: []}}
+
+  defp lakes(runtime, datasets) do
+    datasets
+    |> Enum.reduce_while({:ok, []}, fn {_name, dataset}, {:ok, acc} ->
+      case lake_bootstrap(runtime, dataset) do
+        {:ok, statements, prefixes} -> {:cont, {:ok, [{statements, prefixes} | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, bootstraps} ->
+        {statements, prefixes} = bootstraps |> Enum.reverse() |> Enum.unzip()
+        {:ok, %{statements: Enum.concat(statements), prefixes: Enum.concat(prefixes)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp lake_bootstrap(runtime, dataset) do
+    with {:ok, statements} <- DuckLake.dataset_statements(dataset, runtime.data_path),
+         {:ok, store_options} <- Dataset.store_options(dataset) do
+      {:ok, DuckLake.dataset_extension_statements(dataset) ++ statements,
+       store_prefixes(store_options)}
+    end
+  end
+
+  defp store_prefixes(nil), do: []
+  defp store_prefixes(options), do: [Store.S3.location_prefix(struct(Store.S3, options))]
+
+  defp pins(runtime, refs, datasets, snapshot) do
+    refs
+    |> Enum.map(fn {dataset, _table} -> dataset end)
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, %{}}, fn name, {:ok, acc} ->
+      case pin(runtime, name, Map.get(datasets, name), snapshot) do
+        {:ok, pinned} -> {:cont, {:ok, Map.put(acc, name, pinned)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp pin(runtime, name, %Dataset{catalog: %Dataset.Catalog{}}, _default),
+    do: Catalog.current_snapshot(runtime.catalog, name)
+
+  defp pin(_runtime, _name, _default_lake, snapshot), do: {:ok, snapshot}
 
   defp federated(_runtime, []), do: {:ok, []}
 
@@ -403,8 +473,10 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp resolve(runtime, refs, snapshot) do
-    Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
+  defp resolve(runtime, refs, snapshots) do
+    Enum.reduce_while(refs, {:ok, %{}}, fn {dataset, _table} = ref, {:ok, acc} ->
+      snapshot = Map.fetch!(snapshots, dataset)
+
       with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
            {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot) do
         sealed = MapSet.new(paths, &Path.basename/1)
@@ -524,7 +596,7 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, canonical, snapshot, refs, tables, manifests, conjuncts, attaches) do
+  defp build(sql, canonical, pinned, refs, tables, manifests, conjuncts, attaches) do
     members =
       Map.new(refs, fn ref ->
         {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
@@ -535,18 +607,37 @@ defmodule Smolquery.QueryService.Planner do
         {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || []))}
       end)
 
-    statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
+    statements =
+      Enum.flat_map(refs, fn {dataset, _table} = ref ->
+        view(
+          ref,
+          lake(pinned.datasets, dataset),
+          pinned.snapshots[dataset],
+          tables[ref],
+          hot[ref]
+        )
+      end)
 
     %Plan{
       sql: sql,
       canonical_sql: canonical,
-      snapshot: snapshot,
+      snapshot: pinned.snapshot,
+      snapshots: pinned.snapshots,
+      datasets: pinned.datasets,
+      prefixes: pinned.lakes.prefixes,
       tables: refs,
-      statements: attaches ++ statements,
+      statements: pinned.lakes.statements ++ attaches ++ statements,
       federated: attaches != [],
       hot: hot,
       statistics: statistics(members, hot, tables)
     }
+  end
+
+  defp lake(datasets, dataset) do
+    case Map.get(datasets, dataset) do
+      %Dataset{catalog: %Dataset.Catalog{}} = owned -> Dataset.lake(owned)
+      _default -> DuckLake.default_catalog()
+    end
   end
 
   defp statistics(members, hot, tables) do
@@ -589,10 +680,10 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp view({dataset, table} = ref, snapshot, %{schema: schema}, entries) do
+  defp view({dataset, table} = ref, lake, snapshot, %{schema: schema}, entries) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
-    lake = Identifier.quote_name!(DuckLake.default_catalog())
+    lake = Identifier.quote_name!(lake)
 
     sealed = "SELECT * FROM #{lake}.#{ds}.#{t} AT (VERSION => #{snapshot})"
 

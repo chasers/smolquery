@@ -116,12 +116,14 @@ defmodule Smolquery.Segments.Store.S3 do
     prefix: "",
     region: "us-east-1",
     url_style: nil,
-    list_max_keys: nil
+    list_max_keys: nil,
+    secret_name: "smolquery_sealed_tier"
   ]
 
   @type t :: %__MODULE__{
           bucket: String.t(),
           prefix: String.t(),
+          secret_name: String.t(),
           access_key_id: String.t() | nil,
           secret_access_key: String.t() | nil,
           staging_dir: String.t(),
@@ -141,10 +143,10 @@ defmodule Smolquery.Segments.Store.S3 do
           | {:region, String.t()}
           | {:url_style, String.t()}
           | {:list_max_keys, pos_integer()}
+          | {:secret_name, String.t()}
 
   @staging ".tmp"
   @chunk_bytes 1_048_576
-  @secret_name "smolquery_sealed_tier"
 
   @doc """
   A store over `:bucket`.
@@ -175,6 +177,10 @@ defmodule Smolquery.Segments.Store.S3 do
       (1000). `list/2` follows continuation tokens either way, so this only
       shapes how many round trips a listing costs — and gives tests a page
       size small enough to prove the pagination loop against a real store.
+    * `:secret_name` — the name `create_secret_statement/1` gives the DuckDB
+      secret (`"smolquery_sealed_tier"`). A dataset's own store names its
+      secret after the dataset (PL-51), so several stores can hold secrets
+      in one engine; DuckDB picks the one whose `SCOPE` matches longest.
 
   """
   @spec new([option()]) :: Store.t()
@@ -188,7 +194,8 @@ defmodule Smolquery.Segments.Store.S3 do
       endpoint: Keyword.get(opts, :endpoint),
       region: Keyword.get(opts, :region, "us-east-1"),
       url_style: Keyword.get(opts, :url_style),
-      list_max_keys: Keyword.get(opts, :list_max_keys)
+      list_max_keys: Keyword.get(opts, :list_max_keys),
+      secret_name: secret_name!(Keyword.get(opts, :secret_name, "smolquery_sealed_tier"))
     }
 
     validate_credentials!(config)
@@ -196,6 +203,16 @@ defmodule Smolquery.Segments.Store.S3 do
     if credential_chain?(config), do: AwsCredentials.ensure_started()
 
     %Store{impl: __MODULE__, config: config}
+  end
+
+  defp secret_name!(name) do
+    case Identifier.validate(name) do
+      {:ok, name} ->
+        name
+
+      {:error, _reason} ->
+        raise ArgumentError, "S3 :secret_name must be an identifier, got: #{inspect(name)}"
+    end
   end
 
   defp validate_credentials!(%__MODULE__{access_key_id: nil, secret_access_key: nil}), do: :ok
@@ -344,7 +361,7 @@ defmodule Smolquery.Segments.Store.S3 do
           "SCOPE #{Identifier.sql_string(scope(config))}"
         ] ++ endpoint_options(config)
 
-    "CREATE SECRET IF NOT EXISTS #{@secret_name} (#{Enum.join(options, ", ")})"
+    "CREATE SECRET IF NOT EXISTS #{config.secret_name} (#{Enum.join(options, ", ")})"
   end
 
   defp credential_options(%__MODULE__{access_key_id: nil}),

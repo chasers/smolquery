@@ -27,6 +27,7 @@ defmodule Smolquery.QueryService.Plan do
 
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.QueryService.Statistics
 
   @enforce_keys [:sql, :snapshot]
@@ -35,16 +36,32 @@ defmodule Smolquery.QueryService.Plan do
     :canonical_sql,
     :snapshot,
     :statistics,
+    snapshots: %{},
+    datasets: %{},
+    prefixes: [],
     tables: [],
     statements: [],
     hot: %{},
     federated: false
   ]
 
+  @typedoc """
+  `snapshot` is the default lake's pin — the one scalar a job records and
+  the API reports. `snapshots` is the pin per dataset the plan touches
+  (PL-51): a dataset with its own catalog is its own lake, with its own
+  snapshot counter, so a reader must ask per dataset; a dataset on the
+  default lake maps to `snapshot`. `datasets` holds the records of the
+  datasets that own a catalog or a store, keyed by name, for the runner to
+  attach and to allow before lockdown; `prefixes` is their stores' `s3://`
+  prefixes.
+  """
   @type t :: %__MODULE__{
           sql: String.t(),
           canonical_sql: String.t() | nil,
           snapshot: Catalog.snapshot(),
+          snapshots: %{String.t() => Catalog.snapshot()},
+          datasets: %{String.t() => Dataset.t()},
+          prefixes: [String.t()],
           tables: [Catalog.table_ref()],
           statements: [String.t()],
           hot: %{Catalog.table_ref() => [HotClient.entry()]},

@@ -144,6 +144,7 @@ defmodule Smolquery.QueryService.Runtime do
     :catalog_opts,
     :history_metadata,
     :allowed_directories,
+    :data_path,
     :store,
     lockdown: true,
     buffer_name: Smolquery.BufferService,
@@ -177,6 +178,7 @@ defmodule Smolquery.QueryService.Runtime do
           catalog_opts: keyword() | nil,
           history_metadata: String.t() | nil,
           allowed_directories: [String.t()],
+          data_path: String.t(),
           lockdown: boolean(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
@@ -246,6 +248,7 @@ defmodule Smolquery.QueryService.Runtime do
         Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
       allowed_directories:
         Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end),
+      data_path: Keyword.get_lazy(config, :data_path, fn -> data_path(catalog_opts) end),
       warm_probe: Keyword.get_lazy(config, :warm_probe, fn -> warm_probe(catalog_opts) end),
       distributed: distributed(Keyword.get(config, :distributed, []))
     }
@@ -347,6 +350,13 @@ defmodule Smolquery.QueryService.Runtime do
     else
       :error -> []
     end
+  end
+
+  defp data_path(catalog_opts) do
+    merged =
+      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts || [])
+
+    Keyword.get(merged, :data_path) || Application.get_env(:smolquery, :data_dir, "priv/data")
   end
 
   defp history_metadata(nil), do: nil

@@ -97,14 +97,17 @@ defmodule Smolquery.Federation do
   failed statement rather than only the ones a caller believes are attaches.
   """
   @spec redact_statement(term(), String.t()) :: term()
-  def redact_statement(reason, "ATTACH '" <> rest) do
+  def redact_statement(reason, "ATTACH '" <> rest), do: redact_literal(reason, rest)
+  def redact_statement(reason, "ATTACH IF NOT EXISTS '" <> rest), do: redact_literal(reason, rest)
+
+  def redact_statement(reason, _statement), do: reason
+
+  defp redact_literal(reason, rest) do
     case literal(rest, "") do
       {:ok, string} -> redact(reason, string)
       :error -> reason
     end
   end
-
-  def redact_statement(reason, _statement), do: reason
 
   defp literal("\\" <> <<escaped::binary-size(1), rest::binary>>, acc),
     do: literal(rest, acc <> escaped)

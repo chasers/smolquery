@@ -152,6 +152,8 @@ defmodule Smolquery.Catalog do
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
+  @callback current_snapshot(config :: term(), dataset :: String.t()) ::
+              {:ok, snapshot()} | {:error, term()}
   @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback put_retention(config :: term(), table_ref(), retention() | nil) ::
               :ok | {:error, term()}
@@ -367,6 +369,18 @@ defmodule Smolquery.Catalog do
   @spec current_snapshot(t()) :: {:ok, snapshot()} | {:error, term()}
   def current_snapshot(%__MODULE__{} = catalog),
     do: catalog.impl.current_snapshot(catalog.config)
+
+  @doc """
+  The current snapshot of the lake `dataset` lives in.
+
+  A snapshot is a property of a lake, and a dataset with its own catalog is
+  its own lake (PL-51), so a reader that pins a snapshot per dataset must
+  ask per dataset. For a dataset on the default lake this is
+  `current_snapshot/1`.
+  """
+  @spec current_snapshot(t(), String.t()) :: {:ok, snapshot()} | {:error, term()}
+  def current_snapshot(%__MODULE__{} = catalog, dataset),
+    do: catalog.impl.current_snapshot(catalog.config, dataset)
 
   @doc """
   Every segment path the catalog has ever referenced, at any snapshot.

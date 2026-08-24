@@ -33,6 +33,7 @@ defmodule Smolquery.Catalog.DuckLakeConnectionsTest do
     def drop_segments(_config, _table, _paths), do: {:error, :connectionless}
     def replace_segments(_config, _table, _segments, _paths), do: {:error, :connectionless}
     def current_snapshot(_config), do: {:error, :connectionless}
+    def current_snapshot(_config, _dataset), do: {:error, :connectionless}
     def known_segments(_config), do: {:error, :connectionless}
     def put_retention(_config, _table, _policy), do: {:error, :connectionless}
     def retention(_config, _table), do: {:error, :connectionless}

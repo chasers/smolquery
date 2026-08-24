@@ -35,6 +35,9 @@ defmodule Smolquery.Test.FixedCatalog do
   def current_snapshot(%{snapshot: snapshot}), do: {:ok, snapshot}
 
   @impl Catalog
+  def current_snapshot(answers, _dataset), do: current_snapshot(answers)
+
+  @impl Catalog
   def table_schema(%{schemas: schemas}, table) do
     case Map.fetch(schemas, table) do
       {:ok, schema} -> {:ok, schema}

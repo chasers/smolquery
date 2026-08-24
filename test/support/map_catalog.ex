@@ -241,5 +241,8 @@ defmodule Smolquery.Test.MapCatalog do
   def current_snapshot(_agent), do: {:error, :not_supported}
 
   @impl Catalog
+  def current_snapshot(agent, _dataset), do: current_snapshot(agent)
+
+  @impl Catalog
   def known_segments(_agent), do: {:error, :not_supported}
 end

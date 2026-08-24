@@ -356,7 +356,8 @@ defmodule Smolquery.QueryService.Runner do
 
     directories =
       runtime.allowed_directories ++
-        EngineSecrets.sealed_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
+        EngineSecrets.sealed_prefixes(runtime.store) ++
+        plan.prefixes ++ partial_directories(runtime, job_id)
 
     [
       "SET allowed_directories = #{sql_list(directories)}",

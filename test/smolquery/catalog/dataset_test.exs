@@ -287,6 +287,7 @@ defmodule Smolquery.Catalog.DatasetTest do
                   endpoint: "https://abc.storage.supabase.co/storage/v1/s3",
                   region: "eu-west-1",
                   url_style: "path",
+                  secret_name: "smolquery_ds_analytics",
                   access_key_id: "AKIA",
                   secret_access_key: "shh"
                 ]}
@@ -296,7 +297,13 @@ defmodule Smolquery.Catalog.DatasetTest do
       {:ok, dataset} = Dataset.new(%{"name" => "analytics", "storage" => %{"bucket" => "lake"}})
 
       assert Dataset.store_options(dataset) ==
-               {:ok, [bucket: "lake", prefix: "", region: "us-east-1"]}
+               {:ok,
+                [
+                  bucket: "lake",
+                  prefix: "",
+                  region: "us-east-1",
+                  secret_name: "smolquery_ds_analytics"
+                ]}
     end
 
     test "are nil for a dataset on the default store" do

@@ -148,8 +148,10 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp units(runtime, plan, ref) do
-    with {:ok, sealed} <- Catalog.segments(runtime.catalog, ref, plan.snapshot) do
+  defp units(runtime, plan, {dataset, _table} = ref) do
+    snapshot = Map.get(plan.snapshots, dataset, plan.snapshot)
+
+    with {:ok, sealed} <- Catalog.segments(runtime.catalog, ref, snapshot) do
       hot = plan.hot |> Map.get(ref, []) |> Enum.map(& &1["url"])
       units = sealed ++ hot
 
