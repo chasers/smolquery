@@ -40,6 +40,21 @@ defmodule Smolquery.Segments.Store.S3 do
   as "retry the upload", so `upload/5` retries once — by then the winner has
   committed and the retry resolves to the `412` no-op above.
 
+  Not every S3-compatible store honors `If-None-Match` on a `PUT`. Supabase
+  Storage documents conditional headers for `GetObject` and `HeadObject`
+  only, and its `PutObject` overwrites (PL-51; found against a local
+  Supabase stack). So `put/3` first asks `HEAD` whether the key exists, and
+  a key that does is the committed original: the staged bytes are dropped
+  and the committed size reported, exactly as the `412` path does. That
+  closes the T-308 case — a truncated retry of an already committed seal —
+  on any store, because the original was committed before the retry began.
+  What the `HEAD` cannot close is two writers racing the same key on a store
+  without the conditional guard; `Smolquery.StorageService.Routing` keeps
+  that a narrow window, and a seal's bytes are deterministic per claim, so
+  the loser writes the same file the winner did. On S3, MinIO, and any store
+  with the guard, the conditional `PUT` still stands behind the `HEAD` as
+  the atomic backstop.
+
   `Store.put/3` also runs `Store.validate_parquet/1` on the staged file
   before this module ever sees it — the `If-None-Match` guard stops a bad
   retry from overwriting a good object, and the dispatcher-level check stops
@@ -98,6 +113,7 @@ defmodule Smolquery.Segments.Store.S3 do
     :secret_access_key,
     :staging_dir,
     :endpoint,
+    prefix: "",
     region: "us-east-1",
     url_style: nil,
     list_max_keys: nil
@@ -105,6 +121,7 @@ defmodule Smolquery.Segments.Store.S3 do
 
   @type t :: %__MODULE__{
           bucket: String.t(),
+          prefix: String.t(),
           access_key_id: String.t() | nil,
           secret_access_key: String.t() | nil,
           staging_dir: String.t(),
@@ -116,6 +133,7 @@ defmodule Smolquery.Segments.Store.S3 do
 
   @type option ::
           {:bucket, String.t()}
+          | {:prefix, String.t()}
           | {:access_key_id, String.t()}
           | {:secret_access_key, String.t()}
           | {:staging_dir, String.t()}
@@ -134,6 +152,11 @@ defmodule Smolquery.Segments.Store.S3 do
   ## Options
 
     * `:bucket` (required)
+    * `:prefix` — a key namespace inside the bucket, for a bucket that holds
+      more than this store (a dataset's own Supabase Storage bucket, PL-51).
+      Every key is read and written under it, `list/2` answers keys relative
+      to it, and `location_prefix/1` includes it. Defaults to `""`, the
+      bucket root.
     * `:access_key_id`, `:secret_access_key` — static keys. Set both, or
       neither: leaving both out puts the store in credential-chain mode
       (`Smolquery.AwsCredentials`), which is how a deployment runs with no
@@ -158,6 +181,7 @@ defmodule Smolquery.Segments.Store.S3 do
   def new(opts) do
     config = %__MODULE__{
       bucket: Keyword.fetch!(opts, :bucket),
+      prefix: opts |> Keyword.get(:prefix, "") |> String.trim("/"),
       access_key_id: Keyword.get(opts, :access_key_id),
       secret_access_key: Keyword.get(opts, :secret_access_key),
       staging_dir: Keyword.fetch!(opts, :staging_dir),
@@ -220,11 +244,12 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   @impl Store
-  def location(%__MODULE__{bucket: bucket}, key), do: "s3://#{bucket}/#{key}"
+  def location(%__MODULE__{bucket: bucket} = config, key),
+    do: "s3://#{bucket}/#{object_key(config, key)}"
 
   @impl Store
   def list(%__MODULE__{} = config, prefix) do
-    list_pages(config, directory_prefix(prefix), nil, [])
+    list_pages(config, directory_prefix(object_key(config, prefix)), nil, [])
   end
 
   defp list_pages(%__MODULE__{bucket: bucket} = config, prefix, continuation, acc) do
@@ -232,7 +257,7 @@ defmodule Smolquery.Segments.Store.S3 do
            url: "s3://#{bucket}?#{list_query(config, prefix, continuation)}"
          ) do
       {:ok, %{status: 200, body: body}} ->
-        pages = [keys_from_listing(body) | acc]
+        pages = [keys_from_listing(config, body) | acc]
 
         case next_continuation(body) do
           nil -> {:ok, pages |> List.flatten() |> Enum.sort()}
@@ -256,8 +281,8 @@ defmodule Smolquery.Segments.Store.S3 do
   defp next_continuation(_final_page), do: nil
 
   @impl Store
-  def delete(%__MODULE__{bucket: bucket} = config, key) do
-    case Req.delete(request(config), url: "s3://#{bucket}/#{key}") do
+  def delete(%__MODULE__{} = config, key) do
+    case Req.delete(request(config), url: location(config, key)) do
       {:ok, %{status: status}} when status in [200, 204, 404] -> :ok
       {:ok, %{status: status, body: body}} -> {:error, {:delete_failed, key, {status, body}}}
       {:error, reason} -> {:error, {:delete_failed, key, reason}}
@@ -287,7 +312,14 @@ defmodule Smolquery.Segments.Store.S3 do
   disabled (`Smolquery.QueryService.Runner`).
   """
   @spec location_prefix(t()) :: String.t()
-  def location_prefix(%__MODULE__{bucket: bucket}), do: "s3://" <> bucket <> "/"
+  def location_prefix(%__MODULE__{} = config), do: scope(config) <> "/"
+
+  defp scope(%__MODULE__{bucket: bucket, prefix: ""}), do: "s3://" <> bucket
+  defp scope(%__MODULE__{bucket: bucket, prefix: prefix}), do: "s3://" <> bucket <> "/" <> prefix
+
+  defp object_key(%__MODULE__{prefix: ""}, key), do: key
+  defp object_key(%__MODULE__{prefix: prefix}, ""), do: prefix
+  defp object_key(%__MODULE__{prefix: prefix}, key), do: prefix <> "/" <> key
 
   @doc """
   The bootstrap `CREATE SECRET` that lets a DuckDB engine read `s3://`
@@ -309,7 +341,7 @@ defmodule Smolquery.Segments.Store.S3 do
         credential_options(config) ++
         [
           "REGION #{Identifier.sql_string(config.region)}",
-          "SCOPE #{Identifier.sql_string("s3://" <> config.bucket)}"
+          "SCOPE #{Identifier.sql_string(scope(config))}"
         ] ++ endpoint_options(config)
 
     "CREATE SECRET IF NOT EXISTS #{@secret_name} (#{Enum.join(options, ", ")})"
@@ -339,9 +371,10 @@ defmodule Smolquery.Segments.Store.S3 do
   defp endpoint_options(%__MODULE__{endpoint: endpoint} = config) do
     uri = URI.parse(endpoint)
     host = if uri.port, do: "#{uri.host}:#{uri.port}", else: uri.host
+    path = String.trim_trailing(uri.path || "", "/")
 
     [
-      "ENDPOINT #{Identifier.sql_string(host)}",
+      "ENDPOINT #{Identifier.sql_string(host <> path)}",
       "URL_STYLE #{Identifier.sql_string(url_style(config))}",
       "USE_SSL #{uri.scheme == "https"}"
     ]
@@ -350,25 +383,41 @@ defmodule Smolquery.Segments.Store.S3 do
   defp url_style(%__MODULE__{url_style: nil}), do: "path"
   defp url_style(%__MODULE__{url_style: style}), do: style
 
-  defp upload(config, key, staged, size, conflict_retries \\ 1) do
+  defp upload(config, key, staged, size) do
+    case Req.head(request(config), url: location(config, key)) do
+      {:ok, %{status: 200, headers: headers}} -> {:ok, content_length(headers, size)}
+      _absent_or_unknown -> conditional_upload(config, key, staged, size)
+    end
+  end
+
+  defp conditional_upload(config, key, staged, size, conflict_retries \\ 1) do
     case Req.put(request(config),
-           url: "s3://#{config.bucket}/#{key}",
+           url: location(config, key),
            headers: [
              {"content-length", Integer.to_string(size)},
              {"if-none-match", "*"}
            ],
            body: File.stream!(staged, @chunk_bytes)
          ) do
-      {:ok, %{status: status}} when status in 200..299 -> {:ok, size}
-      {:ok, %{status: 412}} -> {:ok, committed_size(config, key, size)}
-      {:ok, %{status: 409}} when conflict_retries > 0 -> upload(config, key, staged, size, 0)
-      {:ok, %{status: status, body: body}} -> {:error, {:s3_status, status, body}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{status: status}} when status in 200..299 ->
+        {:ok, size}
+
+      {:ok, %{status: 412}} ->
+        {:ok, committed_size(config, key, size)}
+
+      {:ok, %{status: 409}} when conflict_retries > 0 ->
+        conditional_upload(config, key, staged, size, 0)
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:s3_status, status, body}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp committed_size(config, key, fallback) do
-    case Req.head(request(config), url: "s3://#{config.bucket}/#{key}") do
+    case Req.head(request(config), url: location(config, key)) do
       {:ok, %{status: 200, headers: headers}} -> content_length(headers, fallback)
       _head_unavailable -> fallback
     end
@@ -394,14 +443,20 @@ defmodule Smolquery.Segments.Store.S3 do
     |> URI.encode_query()
   end
 
-  defp keys_from_listing(%{"ListBucketResult" => %{"Contents" => contents}}) do
+  defp keys_from_listing(config, %{"ListBucketResult" => %{"Contents" => contents}}) do
     contents
     |> List.wrap()
     |> Enum.map(& &1["Key"])
     |> Enum.filter(&String.ends_with?(&1, ".parquet"))
+    |> Enum.map(&relative_key(config, &1))
   end
 
-  defp keys_from_listing(_empty), do: []
+  defp keys_from_listing(_config, _empty), do: []
+
+  defp relative_key(%__MODULE__{prefix: ""}, key), do: key
+
+  defp relative_key(%__MODULE__{prefix: prefix}, key),
+    do: String.replace_prefix(key, prefix <> "/", "")
 
   defp encode(staged, encoder) do
     encoder.(staged)

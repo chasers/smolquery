@@ -45,6 +45,7 @@ received value, and the accepted shape.
 | `SMOLQUERY_DATA_DIR` | The one directory that holds everything durable (`/data` in the image) |
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | Splits a tier onto its own disk (default: under the data dir) |
 | `SMOLQUERY_CATALOG` | The DuckLake metadata database, for example `postgres:dbname=smolquery` (default: the data dir's SQLite) |
+| `SMOLQUERY_DUCKLAKE_VERSION` | The DuckLake format a dataset's own catalog is pinned to when its creation request names none (`1.0`, PL-51 D7). A dataset records its version and every attach names it, so a lake is served at exactly that format and is never migrated on first touch. The value must look like `1.0` |
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format (`false`). The migration is one-way. Nodes on the old extension cannot read the result. See [deployment.md](deployment.md#catalog-format-upgrades) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | The time-travel promise (`86400000`). The value must exceed the longest pinned query. It must also exceed `retire_grace_ms` |
 | `SMOLQUERY_SEAL_ROW_GROUP_SIZE` | Sets `ROW_GROUP_SIZE` on every sealed Parquet `COPY`, for seal and compaction alike (`1048576`, T-280). A sealed-tier scan over `httpfs` pays roughly one range request per row group. This value thus sets a query's request count per segment. Smaller groups buy finer clustered-key pruning at that cost. The setting applies to newly written segments only. Compaction never revisits a healthy-sized segment, so old data keeps its old row groups. The seal path has no OOM adaptation. A claim's inputs are frozen. A seal `COPY` that deterministically OOMs at this size therefore retries forever. On a memory-tight node, lower this value or raise `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
@@ -60,8 +61,9 @@ received value, and the accepted shape.
 | `SMOLQUERY_COMPACT_MAX_ROWS` | The cap on a compaction group's summed rows (`4194304`, T-260). `compact_max_bytes` bounds compressed bytes only. On ~100x-compressible data, a 47 MiB group held ~25M rows. Merge cost scales with rows, so that group blew the merge's five-minute budget. It then re-planned identically every sweep. Sizing already reads each footer's `num_rows`, so the cap costs no new I/O (input/output). The compactor skips a head file when no neighbor fits beside it under the cap. A row-heavy file thus cannot wedge the table's backlog. The default is a start, not a prediction of the pin rate. The compactor adapts the cap per table. A merge OOM halves a table's cap, never below `65536` rows. Sustained evidence at the tightened cap earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`, T-262) |
 | `SMOLQUERY_COMPACT_BUCKET_MS` | The time-bucket width that compaction ownership shards on (`3600000`, T-269). Ownership used to be per table. One node then compacted a hot table alone while its peers idled. The ring now owns `{table, bucket}`. A segment's bucket is its ULID (Universally Unique Lexicographically Sortable Identifier) timestamp over this value. **Set it identically on every storage node.** Disjointness requires every node to compute the same bucket ids. Divergent values during a rolling change make two nodes merge the same runs until the rollout completes. A merge group stays inside its bucket, with one exception. A bucket that cannot meet `compact_min_inputs` alone rolls its candidates into the node's next owned bucket. Quiet tables thus still compact. Smaller buckets spread a backlog across more nodes. They also widen those carries |
 | `SMOLQUERY_S3_BUCKET` | Puts the sealed tier on an S3-compatible store. It points the `store:` of both the storage service and the query service at `Segments.Store.S3` |
+| `SMOLQUERY_S3_PREFIX` | A key prefix inside the bucket (`lakes/prod`). Every segment lives under it, so one bucket can hold more than one deployment. Unset, the store uses the bucket root |
 | `SMOLQUERY_S3_ACCESS_KEY_ID` / `SMOLQUERY_S3_SECRET_ACCESS_KEY` | Static S3 credentials. Set both, or neither. With both unset, the store uses the AWS (Amazon Web Services) [credential chain](#s3-credentials) instead. Startup rejects one without the other |
-| `SMOLQUERY_S3_ENDPOINT` | The S3-compatible endpoint. Unset targets AWS S3 |
+| `SMOLQUERY_S3_ENDPOINT` | The S3-compatible endpoint. Unset targets AWS S3. A path in the URL is kept, for an endpoint like Supabase Storage's `https://<ref>.storage.supabase.co/storage/v1/s3` |
 | `SMOLQUERY_S3_REGION` | The S3 region (`us-east-1`) |
 | `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (`path` when an endpoint is set) |
 | `SMOLQUERY_S3_STAGING_DIR` | The local scratch directory for segments before upload (`<data dir>/sealed-staging`) |
@@ -277,6 +279,7 @@ including onto an object store:
 ```elixir
 store: {Smolquery.Segments.Store.S3,
         bucket: "smolquery-sealed",
+        prefix: "lakes/prod",
         access_key_id: "...",
         secret_access_key: "...",
         endpoint: "http://minio:9000",

@@ -22,6 +22,14 @@ defmodule Smolquery.Catalog do
   no stub — the wrappers answer `{:error, :connections_unsupported}` and a
   caller learns that rather than crashing on an undefined function.
 
+  ## Datasets
+
+  A dataset is a record as well as a schema (PL-51): `Smolquery.Catalog.Dataset`
+  names the metadata database and the object store a dataset owns, or leaves
+  either to the deployment default. The record lives in the default lake for
+  the reason connections do. `dataset/2` and `update_dataset/2` are optional
+  callbacks; a catalog without them answers `{:error, :datasets_unsupported}`.
+
   ## Snapshots
 
   Every mutation returns the snapshot it committed at, and `segments/3` reads
@@ -41,6 +49,7 @@ defmodule Smolquery.Catalog do
   """
 
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
 
@@ -120,8 +129,10 @@ defmodule Smolquery.Catalog do
           optional(:partitions) => partitions()
         }
 
-  @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
+  @callback create_dataset(config :: term(), Dataset.t()) :: :ok | {:error, term()}
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
+  @callback dataset(config :: term(), name :: String.t()) :: {:ok, Dataset.t()} | {:error, term()}
+  @callback update_dataset(config :: term(), Dataset.t()) :: :ok | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
   @callback list_tables(config :: term(), dataset :: String.t()) ::
               {:ok, [String.t()]} | {:error, term()}
@@ -165,6 +176,8 @@ defmodule Smolquery.Catalog do
   @callback delete_connection(config :: term(), name :: String.t()) :: :ok | {:error, term()}
 
   @optional_callbacks put_table_options: 3,
+                      dataset: 2,
+                      update_dataset: 2,
                       put_connection: 2,
                       connection: 2,
                       list_connections: 1,
@@ -172,10 +185,38 @@ defmodule Smolquery.Catalog do
 
   @doc """
   Creates a dataset, if it does not already exist.
+
+  A name alone creates a dataset on the deployment defaults; a
+  `Smolquery.Catalog.Dataset` carries its own catalog and storage (PL-51).
+  Re-creating a dataset with the same settings is `:ok`; with different
+  settings it is `{:error, {:dataset_exists, name}}`, since the settings are
+  the dataset's identity.
   """
-  @spec create_dataset(t(), String.t()) :: :ok | {:error, term()}
-  def create_dataset(%__MODULE__{} = catalog, dataset),
+  @spec create_dataset(t(), String.t() | Dataset.t()) :: :ok | {:error, term()}
+  def create_dataset(%__MODULE__{} = catalog, %Dataset{} = dataset),
     do: catalog.impl.create_dataset(catalog.config, dataset)
+
+  def create_dataset(%__MODULE__{} = catalog, name) when is_binary(name) do
+    with {:ok, dataset} <- Dataset.default(name), do: create_dataset(catalog, dataset)
+  end
+
+  @doc """
+  The dataset named `name`, or `{:error, {:unknown_dataset, name}}`.
+
+  A dataset created before PL-51 — a schema with no record — answers as one
+  on the deployment defaults.
+  """
+  @spec dataset(t(), String.t()) :: {:ok, Dataset.t()} | {:error, term()}
+  def dataset(%__MODULE__{} = catalog, name),
+    do: dispatch(catalog, :dataset, [name], :datasets_unsupported)
+
+  @doc """
+  Stores a dataset whose credentials `Smolquery.Catalog.Dataset.update/2`
+  changed. Nothing else about a dataset can change after creation.
+  """
+  @spec update_dataset(t(), Dataset.t()) :: :ok | {:error, term()}
+  def update_dataset(%__MODULE__{} = catalog, %Dataset{} = dataset),
+    do: dispatch(catalog, :update_dataset, [dataset], :datasets_unsupported)
 
   @doc """
   Every dataset in the catalog.
@@ -465,11 +506,11 @@ defmodule Smolquery.Catalog do
   def delete_connection(%__MODULE__{} = catalog, name),
     do: dispatch(catalog, :delete_connection, [name])
 
-  defp dispatch(catalog, function, args) do
+  defp dispatch(catalog, function, args, unsupported \\ :connections_unsupported) do
     if function_exported?(catalog.impl, function, length(args) + 1) do
       apply(catalog.impl, function, [catalog.config | args])
     else
-      {:error, :connections_unsupported}
+      {:error, unsupported}
     end
   end
 

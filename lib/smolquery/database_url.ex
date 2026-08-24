@@ -63,16 +63,22 @@ defmodule Smolquery.DatabaseUrl do
   @doc """
   The `postgres:` metadata string `Smolquery.Catalog.DuckLake` attaches
   through, every value libpq-quoted.
+
+  An `:sslmode` in `parts` is carried through; the URL parser never sets
+  one, but a dataset's own catalog (`Smolquery.Catalog.Dataset`) always does.
   """
-  @spec libpq_metadata(parts()) :: String.t()
+  @spec libpq_metadata(parts() | map()) :: String.t()
   def libpq_metadata(parts) do
-    values = [
-      dbname: parts.database,
-      host: parts.hostname,
-      port: Integer.to_string(parts.port),
-      user: parts.username,
-      password: parts.password
-    ]
+    values =
+      [
+        dbname: parts.database,
+        host: parts.hostname,
+        port: Integer.to_string(parts.port),
+        user: parts.username,
+        password: parts.password,
+        sslmode: Map.get(parts, :sslmode)
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     "postgres:" <>
       Enum.map_join(values, " ", fn {key, value} -> "#{key}=#{quote_value(value)}" end)

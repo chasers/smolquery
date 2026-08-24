@@ -42,7 +42,8 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
       bucket: @bucket,
       access_key_id: System.get_env("TEST_S3_ACCESS_KEY_ID", "smolquery"),
       secret_access_key: System.get_env("TEST_S3_SECRET_ACCESS_KEY", "smolquery-secret"),
-      endpoint: System.get_env("TEST_S3_ENDPOINT", "http://localhost:9000")
+      endpoint: System.get_env("TEST_S3_ENDPOINT", "http://localhost:9000"),
+      region: System.get_env("TEST_S3_REGION", "us-east-1")
     }
 
     ensure_bucket!(config)
@@ -53,6 +54,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
         access_key_id: config.access_key_id,
         secret_access_key: config.secret_access_key,
         endpoint: config.endpoint,
+        region: config.region,
         staging_dir: Path.join(context.tmp_dir, "staging")
       )
 
@@ -99,6 +101,24 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     assert {:ok, ^keys} = Store.list(store, prefix)
   end
 
+  test "a prefixed store reads, lists, and deletes under its prefix (PL-51)", %{store: store} do
+    %Store{config: %S3{} = config} = store
+    prefix = "lakes/prefixed-#{:erlang.unique_integer([:positive])}"
+    prefixed = %Store{store | config: %S3{config | prefix: prefix}}
+    key = unique_key()
+
+    assert {:ok, %{location: location}} =
+             Store.put(prefixed, key, &File.write!(&1, FakeParquet.bytes("under")))
+
+    assert location == "s3://#{@bucket}/#{prefix}/#{key}"
+    assert {:ok, %{status: 200, body: body}} = get_object(store, "#{prefix}/#{key}")
+    assert body == FakeParquet.bytes("under")
+    assert {:ok, [^key]} = Store.list(prefixed, "segments")
+    assert {:ok, [^key]} = Store.list(prefixed, "")
+    assert :ok = Store.delete(prefixed, key)
+    assert {:ok, %{status: 404}} = get_object(store, "#{prefix}/#{key}")
+  end
+
   test "list/2 follows continuation tokens past the page size", %{store: store} do
     prefix = "paging-#{:erlang.unique_integer([:positive])}"
     keys = for i <- 1..3, do: "#{prefix}/#{i}.parquet"
@@ -106,7 +126,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     for key <- keys,
         do: {:ok, _} = Store.put(store, key, &File.write!(&1, FakeParquet.bytes("x")))
 
-    %Store{config: config} = store
+    %Store{config: %S3{} = config} = store
     paged = %Store{store | config: %S3{config | list_max_keys: 1}}
 
     assert {:ok, ^keys} = Store.list(paged, prefix)
@@ -204,6 +224,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
           access_key_id: config.access_key_id,
           secret_access_key: config.secret_access_key,
           endpoint: config.endpoint,
+          region: config.region,
           staging_dir: config.staging_dir},
        catalog: [
          metadata: "sqlite:#{Path.join(tmp_dir, "catalog.sqlite")}",
@@ -278,6 +299,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
           access_key_id: config.access_key_id,
           secret_access_key: config.secret_access_key,
           endpoint: config.endpoint,
+          region: config.region,
           staging_dir: config.staging_dir},
        job_bootstrap: [
          DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
@@ -305,7 +327,8 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     |> ReqS3.attach(
       aws_sigv4: [
         access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key
+        secret_access_key: config.secret_access_key,
+        region: config.region
       ],
       aws_endpoint_url_s3: config.endpoint
     )
@@ -317,7 +340,8 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
       |> ReqS3.attach(
         aws_sigv4: [
           access_key_id: config.access_key_id,
-          secret_access_key: config.secret_access_key
+          secret_access_key: config.secret_access_key,
+          region: config.region
         ],
         aws_endpoint_url_s3: config.endpoint
       )

@@ -73,6 +73,12 @@ defmodule Smolquery.DatabaseUrlTest do
 
       assert metadata =~ "password='one two'"
     end
+
+    test "carries an sslmode when the parts hold one" do
+      parts = [password: "pw"] |> url() |> DatabaseUrl.parse!() |> Map.put(:sslmode, "require")
+
+      assert DatabaseUrl.libpq_metadata(parts) =~ " sslmode='require'"
+    end
   end
 
   defp url(parts) do

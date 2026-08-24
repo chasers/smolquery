@@ -10,6 +10,7 @@ defmodule Smolquery.Test.StubCatalog do
   @behaviour Smolquery.Catalog
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Schema
 
   @schema Schema.new!([{"id", :int64}])
@@ -34,7 +35,7 @@ defmodule Smolquery.Test.StubCatalog do
   def snapshot, do: @snapshot
 
   @impl Catalog
-  def create_dataset(owner, dataset), do: record(owner, :create_dataset, [dataset], :ok)
+  def create_dataset(owner, %Dataset{name: name}), do: record(owner, :create_dataset, [name], :ok)
 
   @impl Catalog
   def list_datasets(owner), do: record(owner, :list_datasets, [], {:ok, ["analytics"]})

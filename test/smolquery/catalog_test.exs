@@ -2,6 +2,7 @@ defmodule Smolquery.CatalogTest do
   use ExUnit.Case, async: true
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Schema
   alias Smolquery.Segments.Segment
   alias Smolquery.Test.StubCatalog
@@ -19,6 +20,21 @@ defmodule Smolquery.CatalogTest do
     test "list_datasets/1 reaches the implementation", %{catalog: catalog} do
       assert Catalog.list_datasets(catalog) == {:ok, ["analytics"]}
       assert_received {:called, :list_datasets, []}
+    end
+
+    test "create_dataset/2 with a name that is not an identifier never reaches it",
+         %{catalog: catalog} do
+      assert Catalog.create_dataset(catalog, "bad name") ==
+               {:error, {:invalid_identifier, "bad name"}}
+
+      refute_received {:called, :create_dataset, _args}
+    end
+
+    test "dataset/2 and update_dataset/2 are optional", %{catalog: catalog} do
+      {:ok, dataset} = Dataset.default("analytics")
+
+      assert Catalog.dataset(catalog, "analytics") == {:error, :datasets_unsupported}
+      assert Catalog.update_dataset(catalog, dataset) == {:error, :datasets_unsupported}
     end
 
     test "create_table/3 reaches the implementation", %{catalog: catalog} do

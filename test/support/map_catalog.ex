@@ -19,6 +19,7 @@ defmodule Smolquery.Test.MapCatalog do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Schema
 
   @spec new() :: Catalog.t()
@@ -26,7 +27,7 @@ defmodule Smolquery.Test.MapCatalog do
     {:ok, agent} =
       Agent.start_link(fn ->
         %{
-          datasets: MapSet.new(),
+          datasets: %{},
           tables: %{},
           retention: %{},
           clustering: %{},
@@ -74,13 +75,42 @@ defmodule Smolquery.Test.MapCatalog do
   end
 
   @impl Catalog
-  def create_dataset(agent, dataset) do
-    Agent.update(agent, &%{&1 | datasets: MapSet.put(&1.datasets, dataset)})
+  def create_dataset(agent, %Dataset{} = dataset) do
+    Agent.get_and_update(agent, &put_new_dataset(&1, dataset))
+  end
+
+  defp put_new_dataset(state, dataset) do
+    now = System.system_time(:millisecond)
+
+    case Map.get(state.datasets, dataset.name) do
+      nil ->
+        stored = %{dataset | created_at: now, updated_at: now}
+        {:ok, %{state | datasets: Map.put(state.datasets, dataset.name, stored)}}
+
+      existing ->
+        if Dataset.same_settings?(existing, dataset),
+          do: {:ok, state},
+          else: {{:error, {:dataset_exists, dataset.name}}, state}
+    end
   end
 
   @impl Catalog
   def list_datasets(agent) do
-    {:ok, agent |> Agent.get(& &1.datasets) |> Enum.sort()}
+    {:ok, agent |> Agent.get(& &1.datasets) |> Map.keys() |> Enum.sort()}
+  end
+
+  @impl Catalog
+  def dataset(agent, name) do
+    case Agent.get(agent, &Map.get(&1.datasets, name)) do
+      nil -> {:error, {:unknown_dataset, name}}
+      dataset -> {:ok, dataset}
+    end
+  end
+
+  @impl Catalog
+  def update_dataset(agent, %Dataset{} = dataset) do
+    stored = %{dataset | updated_at: System.system_time(:millisecond)}
+    Agent.update(agent, &%{&1 | datasets: Map.put(&1.datasets, dataset.name, stored)})
   end
 
   @impl Catalog

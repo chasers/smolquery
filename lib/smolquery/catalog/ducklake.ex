@@ -116,6 +116,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Engine
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -199,7 +200,8 @@ defmodule Smolquery.Catalog.DuckLake do
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
       create_clustering_statement(catalog),
       create_partitions_statement(catalog),
-      create_connections_statement(catalog)
+      create_connections_statement(catalog),
+      create_datasets_statement(catalog)
     ]
 
     config
@@ -308,21 +310,98 @@ defmodule Smolquery.Catalog.DuckLake do
   defp postgres_metadata?(_metadata), do: false
 
   @impl Catalog
-  def create_dataset(%__MODULE__{} = config, dataset) do
-    with {:ok, name} <- dataset_name(config, dataset),
-         {:ok, _result} <- query(config, "CREATE SCHEMA IF NOT EXISTS #{name}") do
-      :ok
+  def create_dataset(%__MODULE__{} = config, %Dataset{} = dataset) do
+    with {:ok, name} <- dataset_name(config, dataset.name),
+         {:ok, existing} <- find_dataset(config, dataset.name),
+         :ok <- creatable(existing, dataset),
+         :ok <- catalog_unclaimed(config, dataset),
+         :ok <- create_schema(config, name, dataset) do
+      insert_dataset(config, dataset, existing)
     end
   end
 
   @impl Catalog
   def list_datasets(%__MODULE__{} = config) do
+    with {:ok, schemata} <- schemata(config),
+         {:ok, recorded} <- column(config, "SELECT name FROM #{datasets_table(config.catalog)}") do
+      {:ok, Enum.sort(Enum.uniq(schemata ++ recorded))}
+    end
+  end
+
+  @impl Catalog
+  def dataset(%__MODULE__{} = config, name) do
+    case find_dataset(config, name) do
+      {:ok, nil} -> {:error, {:unknown_dataset, name}}
+      found -> found
+    end
+  end
+
+  @impl Catalog
+  def update_dataset(%__MODULE__{} = config, %Dataset{} = dataset) do
+    Engine.transaction(config.engine, [
+      delete_dataset_sql(config, dataset.name),
+      insert_dataset_sql(config, dataset, dataset.created_at)
+    ])
+  end
+
+  defp schemata(config) do
     column(
       config,
-      "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1 " <>
-        "ORDER BY schema_name",
+      "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1",
       [config.catalog]
     )
+  end
+
+  defp find_dataset(config, name) do
+    with {:ok, %{rows: rows}} <- query(config, select_dataset_sql(config, name)) do
+      case rows do
+        [row] -> {:ok, dataset_from_row(row)}
+        [] -> find_schema(config, name)
+      end
+    end
+  end
+
+  defp find_schema(config, name) do
+    with {:ok, schemata} <- schemata(config) do
+      if name in schemata, do: Dataset.default(name), else: {:ok, nil}
+    end
+  end
+
+  defp creatable(nil, _dataset), do: :ok
+
+  defp creatable(%Dataset{} = existing, %Dataset{} = dataset) do
+    if Dataset.same_settings?(existing, dataset),
+      do: :ok,
+      else: {:error, {:dataset_exists, dataset.name}}
+  end
+
+  defp catalog_unclaimed(_config, %Dataset{catalog: nil}), do: :ok
+
+  defp catalog_unclaimed(config, %Dataset{name: name, catalog: catalog}) do
+    sql =
+      "SELECT name FROM #{datasets_table(config.catalog)} " <>
+        "WHERE name <> #{Identifier.sql_string(name)} " <>
+        "AND catalog_host = #{Identifier.sql_string(catalog.host)} " <>
+        "AND catalog_port = #{catalog.port} " <>
+        "AND catalog_database = #{Identifier.sql_string(catalog.database)}"
+
+    case column(config, sql) do
+      {:ok, []} -> :ok
+      {:ok, [owner | _rest]} -> {:error, {:catalog_in_use, owner}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp create_schema(_config, _name, %Dataset{catalog: %Dataset.Catalog{}}), do: :ok
+
+  defp create_schema(config, name, %Dataset{catalog: nil}) do
+    with {:ok, _result} <- query(config, "CREATE SCHEMA IF NOT EXISTS #{name}"), do: :ok
+  end
+
+  defp insert_dataset(_config, _dataset, %Dataset{created_at: at}) when is_integer(at), do: :ok
+
+  defp insert_dataset(config, dataset, _unrecorded) do
+    with {:ok, _result} <- query(config, insert_dataset_sql(config, dataset, nil)), do: :ok
   end
 
   @impl Catalog
@@ -966,6 +1045,135 @@ defmodule Smolquery.Catalog.DuckLake do
       sslmode: sslmode,
       created_at: created_at,
       updated_at: updated_at
+    }
+  end
+
+  defp datasets_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_datasets"
+
+  @dataset_columns ~w(name catalog_host catalog_port catalog_database catalog_username
+    catalog_secret catalog_sslmode catalog_version storage_bucket storage_prefix storage_endpoint
+    storage_region storage_url_style storage_access_key_id storage_secret
+    created_at updated_at)
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its dataset side table
+  (PL-51).
+
+  Bootstrap SQL like `create_connections_statement/1`: `list_datasets/1`
+  reads it on every listing, and `create_dataset/2` on every create, so a
+  lazy `CREATE TABLE IF NOT EXISTS` would put DDL on both. The primary key on
+  `name` is the replica identity for a published Postgres metadata database —
+  see `create_clustering_statement/1`.
+
+  `catalog_version` is the DuckLake format the dataset's lake is pinned to
+  (PL-51 D7); it is here from the first release of the table because adding
+  it to a deployed table later means an `ALTER` on every default lake.
+
+  A dataset on the deployment defaults stores `NULL` in every `catalog_*`
+  and `storage_*` column; a dataset created before this table existed has no
+  row at all, and reads back the same way. `catalog_secret` and
+  `storage_secret` hold what `Smolquery.Secrets` sealed, never a credential.
+  """
+  @spec create_datasets_statement(String.t()) :: String.t()
+  def create_datasets_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{datasets_table(catalog)} (" <>
+      "name VARCHAR NOT NULL, " <>
+      "catalog_host VARCHAR, catalog_port INTEGER, catalog_database VARCHAR, " <>
+      "catalog_username VARCHAR, catalog_secret VARCHAR, catalog_sslmode VARCHAR, " <>
+      "catalog_version VARCHAR, " <>
+      "storage_bucket VARCHAR, storage_prefix VARCHAR, storage_endpoint VARCHAR, " <>
+      "storage_region VARCHAR, storage_url_style VARCHAR, " <>
+      "storage_access_key_id VARCHAR, storage_secret VARCHAR, " <>
+      "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, " <>
+      "PRIMARY KEY (name))"
+  end
+
+  @dataset_column_list Enum.join(@dataset_columns, ", ")
+
+  defp select_dataset_sql(config, name) do
+    "SELECT #{@dataset_column_list} FROM #{datasets_table(config.catalog)} " <>
+      "WHERE name = #{Identifier.sql_string(name)}"
+  end
+
+  defp delete_dataset_sql(config, name) do
+    "DELETE FROM #{datasets_table(config.catalog)} WHERE name = #{Identifier.sql_string(name)}"
+  end
+
+  defp insert_dataset_sql(config, %Dataset{} = dataset, created_at) do
+    now = System.system_time(:millisecond)
+    catalog = dataset.catalog || %{}
+    storage = dataset.storage || %{}
+
+    values = [
+      Identifier.sql_string(dataset.name),
+      nullable_string(Map.get(catalog, :host)),
+      nullable_integer(Map.get(catalog, :port)),
+      nullable_string(Map.get(catalog, :database)),
+      nullable_string(Map.get(catalog, :username)),
+      nullable_string(Map.get(catalog, :secret)),
+      nullable_string(Map.get(catalog, :sslmode)),
+      nullable_string(Map.get(catalog, :version)),
+      nullable_string(Map.get(storage, :bucket)),
+      nullable_string(Map.get(storage, :prefix)),
+      nullable_string(Map.get(storage, :endpoint)),
+      nullable_string(Map.get(storage, :region)),
+      nullable_string(Map.get(storage, :url_style)),
+      nullable_string(Map.get(storage, :access_key_id)),
+      nullable_string(Map.get(storage, :secret)),
+      Integer.to_string(created_at || now),
+      Integer.to_string(now)
+    ]
+
+    row = Enum.join(values, ", ")
+
+    "INSERT INTO #{datasets_table(config.catalog)} (#{@dataset_column_list}) VALUES (#{row})"
+  end
+
+  defp nullable_string(nil), do: "NULL"
+  defp nullable_string(value), do: Identifier.sql_string(value)
+
+  defp nullable_integer(nil), do: "NULL"
+  defp nullable_integer(value), do: Integer.to_string(value)
+
+  defp dataset_from_row([name | columns]) do
+    {catalog_columns, [bucket, prefix, endpoint, region, url_style, key_id, secret, at, updated]} =
+      Enum.split(columns, 7)
+
+    %Dataset{
+      name: name,
+      catalog: catalog_from_columns(catalog_columns),
+      storage: storage_from_columns(bucket, prefix, endpoint, region, url_style, key_id, secret),
+      created_at: at,
+      updated_at: updated
+    }
+  end
+
+  defp catalog_from_columns([nil | _rest]), do: nil
+
+  defp catalog_from_columns([host, port, database, username, secret, sslmode, version]) do
+    %Dataset.Catalog{
+      host: host,
+      port: port,
+      database: database,
+      username: username,
+      secret: secret,
+      sslmode: sslmode,
+      version: version
+    }
+  end
+
+  defp storage_from_columns(nil, _prefix, _endpoint, _region, _url_style, _key_id, _secret),
+    do: nil
+
+  defp storage_from_columns(bucket, prefix, endpoint, region, url_style, key_id, secret) do
+    %Dataset.Storage{
+      bucket: bucket,
+      prefix: prefix,
+      endpoint: endpoint,
+      region: region,
+      url_style: url_style,
+      access_key_id: key_id,
+      secret: secret
     }
   end
 

@@ -31,6 +31,14 @@ if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
   config :smolquery, :internal_secret, internal_secret
 end
 
+if ducklake_version = System.get_env("SMOLQUERY_DUCKLAKE_VERSION") do
+  unless Regex.match?(~r/^\d+\.\d+$/, ducklake_version) do
+    raise "SMOLQUERY_DUCKLAKE_VERSION must look like 1.0, got: #{inspect(ducklake_version)}"
+  end
+
+  config :smolquery, :ducklake_version, ducklake_version
+end
+
 if credential_key = System.get_env("SMOLQUERY_CREDENTIAL_KEY") do
   config :smolquery, :credential_key, credential_key
 end
@@ -503,6 +511,7 @@ if s3_bucket = System.get_env("SMOLQUERY_S3_BUCKET") do
   s3_options =
     [
       bucket: s3_bucket,
+      prefix: System.get_env("SMOLQUERY_S3_PREFIX"),
       access_key_id: System.get_env("SMOLQUERY_S3_ACCESS_KEY_ID"),
       secret_access_key: System.get_env("SMOLQUERY_S3_SECRET_ACCESS_KEY"),
       staging_dir:

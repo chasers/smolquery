@@ -41,6 +41,47 @@ defmodule Smolquery.Segments.Store.S3Test do
     end
   end
 
+  describe "prefix" do
+    defp prefixed(prefix) do
+      S3.new(
+        bucket: "shared",
+        prefix: prefix,
+        access_key_id: "id",
+        secret_access_key: "secret",
+        staging_dir: "/tmp/staging"
+      )
+    end
+
+    test "every location lives under it" do
+      store = prefixed("lakes/analytics")
+
+      assert Store.location(store, "analytics/events/01K0.parquet") ==
+               "s3://shared/lakes/analytics/analytics/events/01K0.parquet"
+    end
+
+    test "surrounding slashes are trimmed" do
+      %Store{config: config} = prefixed("/lakes/analytics/")
+
+      assert config.prefix == "lakes/analytics"
+    end
+
+    test "location_prefix/1 and the secret scope include it" do
+      %Store{config: config} = prefixed("lakes/analytics")
+
+      assert S3.location_prefix(config) == "s3://shared/lakes/analytics/"
+      assert S3.create_secret_statement(config) =~ "SCOPE 's3://shared/lakes/analytics'"
+    end
+
+    test "an empty prefix is the bucket root, as before" do
+      %Store{config: config} = prefixed("")
+
+      assert S3.location_prefix(config) == "s3://shared/"
+
+      assert Store.location(%Store{impl: S3, config: config}, "k.parquet") ==
+               "s3://shared/k.parquet"
+    end
+  end
+
   describe "create_secret_statement/1" do
     test "targets real AWS S3 when no endpoint is configured" do
       %Store{config: config} =
@@ -79,6 +120,23 @@ defmodule Smolquery.Segments.Store.S3Test do
       assert statement =~ "ENDPOINT 'minio:9000'"
       assert statement =~ "URL_STYLE 'path'"
       assert statement =~ "USE_SSL false"
+    end
+
+    test "keeps an endpoint's path, which Supabase Storage's S3 endpoint carries (PL-51)" do
+      %Store{config: config} =
+        S3.new(
+          bucket: "sealed",
+          access_key_id: "id",
+          secret_access_key: "secret",
+          staging_dir: "/tmp/staging",
+          endpoint: "https://abc.storage.supabase.co/storage/v1/s3/"
+        )
+
+      statement = S3.create_secret_statement(config)
+
+      assert statement =~ "ENDPOINT 'abc.storage.supabase.co:443/storage/v1/s3'"
+      assert statement =~ "URL_STYLE 'path'"
+      assert statement =~ "USE_SSL true"
     end
 
     test "USE_SSL true for an https endpoint" do
