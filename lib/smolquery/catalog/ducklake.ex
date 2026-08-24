@@ -298,6 +298,24 @@ defmodule Smolquery.Catalog.DuckLake do
   defp lake_data_path(lake, nil, data_path), do: Path.join(data_path, lake)
 
   @doc """
+  The statements an engine that only reads a dataset's segments needs — the
+  extension for its credential mode and the `CREATE SECRET`, never the
+  attach. A partial worker on another node scans Parquet paths a plan
+  already resolved, so this is all it lacks (PL-51 L4).
+  """
+  @spec dataset_secret_statements(Dataset.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def dataset_secret_statements(%Dataset{storage: nil}), do: {:ok, []}
+
+  def dataset_secret_statements(%Dataset{} = dataset) do
+    with {:ok, store_options} <- Dataset.store_options(dataset) do
+      store = struct(Store.S3, store_options)
+      loads = Enum.flat_map(Store.S3.required_extensions(store), &["INSTALL #{&1}", "LOAD #{&1}"])
+
+      {:ok, loads ++ secret_statements(store)}
+    end
+  end
+
+  @doc """
   The `INSTALL`/`LOAD` statements an engine runs before
   `dataset_statements/2`: `postgres` for a dataset with its own catalog,
   and `aws` for one whose store authenticates through the credential chain.
@@ -1046,6 +1064,27 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def expire_snapshots(%__MODULE__{} = config, older_than_ms)
       when is_integer(older_than_ms) and older_than_ms > 0 do
+    with {:ok, own} <- expire_lake_snapshots(config, older_than_ms),
+         {:ok, datasets} <- own_catalog_datasets(config) do
+      every_lake_expiry(config, datasets, older_than_ms, own)
+    end
+  end
+
+  defp every_lake_expiry(config, datasets, older_than_ms, own) do
+    Enum.reduce_while(datasets, {:ok, own}, fn dataset, {:ok, total} ->
+      case expire_dataset_snapshots(config, dataset, older_than_ms) do
+        {:ok, expired} -> {:cont, {:ok, total + expired}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp expire_dataset_snapshots(config, dataset, older_than_ms) do
+    with {:ok, config} <- resolve_lake(config, dataset),
+         do: expire_lake_snapshots(config, older_than_ms)
+  end
+
+  defp expire_lake_snapshots(config, older_than_ms) do
     sql =
       "CALL ducklake_expire_snapshots(#{Identifier.sql_string(config.catalog)}, " <>
         "older_than => now() - INTERVAL #{Identifier.sql_string("#{older_than_ms} milliseconds")})"
@@ -1053,6 +1092,16 @@ defmodule Smolquery.Catalog.DuckLake do
     case query(config, sql) do
       {:ok, result} -> {:ok, result.num_rows}
       {:error, error} -> {:error, classify(error)}
+    end
+  end
+
+  @impl Catalog
+  def datasets(%__MODULE__{} = config) do
+    sql =
+      "SELECT #{@dataset_column_list} FROM #{datasets_table(default_lake(config))} ORDER BY name"
+
+    with {:ok, %{rows: rows}} <- query(config, sql) do
+      {:ok, Enum.map(rows, &dataset_from_row/1)}
     end
   end
 

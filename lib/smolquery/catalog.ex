@@ -133,6 +133,7 @@ defmodule Smolquery.Catalog do
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback dataset(config :: term(), name :: String.t()) :: {:ok, Dataset.t()} | {:error, term()}
   @callback update_dataset(config :: term(), Dataset.t()) :: :ok | {:error, term()}
+  @callback datasets(config :: term()) :: {:ok, [Dataset.t()]} | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
   @callback list_tables(config :: term(), dataset :: String.t()) ::
               {:ok, [String.t()]} | {:error, term()}
@@ -180,6 +181,7 @@ defmodule Smolquery.Catalog do
   @optional_callbacks put_table_options: 3,
                       dataset: 2,
                       update_dataset: 2,
+                      datasets: 1,
                       put_connection: 2,
                       connection: 2,
                       list_connections: 1,
@@ -211,6 +213,15 @@ defmodule Smolquery.Catalog do
   @spec dataset(t(), String.t()) :: {:ok, Dataset.t()} | {:error, term()}
   def dataset(%__MODULE__{} = catalog, name),
     do: dispatch(catalog, :dataset, [name], :datasets_unsupported)
+
+  @doc """
+  Every recorded dataset, by name — the registry rows alone, so a caller can
+  find the datasets that own a store or a catalog without touching any lake.
+  A dataset from before the registry (a bare schema) is not among them.
+  """
+  @spec datasets(t()) :: {:ok, [Dataset.t()]} | {:error, term()}
+  def datasets(%__MODULE__{} = catalog),
+    do: dispatch(catalog, :datasets, [], :datasets_unsupported)
 
   @doc """
   Stores a dataset whose credentials `Smolquery.Catalog.Dataset.update/2`

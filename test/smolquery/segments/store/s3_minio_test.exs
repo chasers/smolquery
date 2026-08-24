@@ -21,14 +21,19 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
   alias Smolquery.BufferService
   alias Smolquery.BufferService.HotServer
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.QueryService
   alias Smolquery.Schema
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
+  alias Smolquery.Segments.Store.Local
   alias Smolquery.Segments.Store.S3
   alias Smolquery.Segments.Writer
   alias Smolquery.StorageService
+  alias Smolquery.StorageService.GC
+  alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime
   alias Smolquery.Test.FakeParquet
 
@@ -314,6 +319,117 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
 
     assert job.state == :done
     assert Explorer.DataFrame.to_columns(frame)["s"] == [15]
+  end
+
+  test "a dataset with its own storage seals into its own bucket, queries back, and is swept (PL-51 L4)",
+       %{store: store, tmp_dir: tmp_dir} do
+    %Store{config: %S3{} = config} = store
+    previous = Application.get_env(:smolquery, :credential_key)
+    Application.put_env(:smolquery, :credential_key, Base.encode64(:crypto.strong_rand_bytes(32)))
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:smolquery, :credential_key, previous)
+      else
+        Application.delete_env(:smolquery, :credential_key)
+      end
+    end)
+
+    name = :"storage_s3_dataset_#{:erlang.unique_integer([:positive])}"
+    metadata = "sqlite:#{Path.join(tmp_dir, "catalog.sqlite")}"
+    data_path = Path.join(tmp_dir, "lake")
+
+    start_supervised!(
+      {StorageService.Supervisor,
+       name: name,
+       dir: Path.join(tmp_dir, "sealed"),
+       gc_grace_ms: 0,
+       catalog: [metadata: metadata, data_path: data_path]}
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+    {:ok, runtime} = Runtime.fetch(name)
+
+    prefix = "ds-#{:erlang.unique_integer([:positive])}"
+
+    {:ok, dataset} =
+      Dataset.new(%{
+        "name" => "tenant",
+        "storage" => %{
+          "bucket" => config.bucket,
+          "prefix" => prefix,
+          "endpoint" => config.endpoint,
+          "region" => config.region,
+          "access_key_id" => config.access_key_id,
+          "secret_access_key" => config.secret_access_key
+        }
+      })
+
+    schema = Schema.new!([{"id", :int64, nullable: false}])
+    :ok = Catalog.create_dataset(runtime.catalog, dataset)
+    :ok = Catalog.create_table(runtime.catalog, {"tenant", "events"}, schema)
+
+    rows = for i <- 1..5, do: %{"id" => i}
+    inputs = Local.new(dir: Path.join(tmp_dir, "inputs"))
+    {:ok, input} = Writer.write(rows, schema, store: inputs, prefix: "tenant/events")
+
+    {:ok, key} = Store.key("tenant/events", Id.generate())
+
+    assert {:ok, sealed} =
+             Merge.compact(runtime, {"tenant", "events"}, key, [
+               input.path
+             ])
+
+    assert sealed.path == "s3://#{config.bucket}/#{prefix}/#{key}"
+    assert {:ok, %{status: 200}} = get_object(store, "#{prefix}/#{key}")
+
+    assert {:ok, _snapshot} =
+             Catalog.register_segments(runtime.catalog, {"tenant", "events"}, [sealed])
+
+    {:ok, own_store} = Runtime.store_for(runtime, "tenant")
+    assert Store.location(own_store, key) == sealed.path
+
+    buffer = :"s3_dataset_buffer_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {BufferService.Supervisor, name: buffer, dir: Path.join(tmp_dir, "buffer")},
+      id: buffer
+    )
+
+    on_exit(fn -> BufferService.Runtime.delete(buffer) end)
+
+    query = :"s3_dataset_query_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {QueryService.Supervisor,
+       name: query,
+       catalog: runtime.catalog,
+       buffer_base_url: HotServer.base_url(buffer),
+       engine_extensions: [:httpfs],
+       allowed_directories: [tmp_dir],
+       data_path: data_path,
+       job_bootstrap: [
+         DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
+       ]},
+      id: query
+    )
+
+    on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+    assert {:ok, job, frame} =
+             QueryService.Client.query(query, "SELECT sum(id)::BIGINT AS s FROM tenant.events")
+
+    assert job.state == :done
+    assert Explorer.DataFrame.to_columns(frame)["s"] == [15]
+
+    {:ok, orphan_key} = Store.key("tenant/events", Id.generate())
+    {:ok, _put} = Store.put(own_store, orphan_key, &File.write!(&1, FakeParquet.bytes("orphan")))
+
+    assert {:ok, %{swept: swept}} = GC.sweep(name)
+    assert orphan_key in swept
+    refute key in swept
+    assert {:ok, %{status: 404}} = get_object(store, "#{prefix}/#{orphan_key}")
+    assert {:ok, %{status: 200}} = get_object(store, "#{prefix}/#{key}")
   end
 
   defp unique_key, do: "segments/#{:erlang.unique_integer([:positive])}.parquet"

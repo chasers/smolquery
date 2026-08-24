@@ -42,7 +42,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   @type request :: %{
           statements: [String.t()],
           partial_sql: String.t(),
-          allowed_paths: [String.t()]
+          allowed_paths: [String.t()],
+          allowed_directories: [String.t()]
         }
 
   @doc """
@@ -72,7 +73,9 @@ defmodule Smolquery.QueryService.PartialWorker do
       )
 
     statements =
-      settings(runtime) ++ request.statements ++ lockdown(runtime, path, request.allowed_paths)
+      settings(runtime) ++
+        request.statements ++
+        lockdown(runtime, path, request.allowed_paths, Map.get(request, :allowed_directories, []))
 
     case JobEngine.acquire(runtime) do
       {:ok, engine, _source} ->
@@ -109,12 +112,12 @@ defmodule Smolquery.QueryService.PartialWorker do
     end)
   end
 
-  defp lockdown(%Runtime{lockdown: false}, _path, _allowed_paths), do: []
+  defp lockdown(%Runtime{lockdown: false}, _path, _allowed_paths, _directories), do: []
 
-  defp lockdown(%Runtime{} = runtime, path, allowed_paths) do
+  defp lockdown(%Runtime{} = runtime, path, allowed_paths, allowed_directories) do
     directories =
       [Path.dirname(path) | runtime.allowed_directories] ++
-        EngineSecrets.sealed_prefixes(runtime.store)
+        EngineSecrets.sealed_prefixes(runtime.store) ++ allowed_directories
 
     [
       "SET allowed_directories = #{sql_list(directories)}",

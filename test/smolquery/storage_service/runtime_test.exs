@@ -2,8 +2,10 @@ defmodule Smolquery.StorageService.RuntimeTest do
   use ExUnit.Case, async: true
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.StubCatalog
 
   describe "new/1" do
@@ -264,6 +266,80 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.compact_engine(Storage) == Storage.CompactEngine
       assert Runtime.seals(Storage) == Storage.Seals
       assert Runtime.catalog_engine(Storage) == Storage.Catalog
+    end
+  end
+
+  describe "store_for/2 (PL-51 L4)" do
+    setup do
+      previous = Application.get_env(:smolquery, :credential_key)
+
+      Application.put_env(
+        :smolquery,
+        :credential_key,
+        Base.encode64(:crypto.strong_rand_bytes(32))
+      )
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:smolquery, :credential_key, previous)
+        else
+          Application.delete_env(:smolquery, :credential_key)
+        end
+      end)
+
+      catalog = MapCatalog.new()
+
+      {:ok, owned} =
+        Dataset.new(%{
+          "name" => "tenant",
+          "storage" => %{
+            "bucket" => "tenant-bucket",
+            "prefix" => "lakes/tenant",
+            "endpoint" => "http://minio:9000",
+            "region" => "eu-west-1",
+            "access_key_id" => "id",
+            "secret_access_key" => "secret"
+          }
+        })
+
+      :ok = Catalog.create_dataset(catalog, owned)
+      :ok = Catalog.create_dataset(catalog, "plain")
+
+      %{runtime: Runtime.new(name: __MODULE__.Stores, dir: "/tmp/sealed", catalog: catalog)}
+    end
+
+    test "a dataset with its own storage gets its own S3 store, staged like the default",
+         %{runtime: runtime} do
+      assert {:ok, %Store{impl: Store.S3, config: config}} = Runtime.store_for(runtime, "tenant")
+
+      assert config.bucket == "tenant-bucket"
+      assert config.prefix == "lakes/tenant"
+      assert config.endpoint == "http://minio:9000"
+      assert config.region == "eu-west-1"
+      assert config.access_key_id == "id"
+      assert config.secret_access_key == "secret"
+      assert config.secret_name == "smolquery_ds_tenant"
+      assert config.staging_dir == "/tmp/sealed/staging"
+    end
+
+    test "a dataset on the default store, or an unknown one, gets the runtime's store",
+         %{runtime: runtime} do
+      assert Runtime.store_for(runtime, "plain") == {:ok, runtime.store}
+      assert Runtime.store_for(runtime, "nope") == {:ok, runtime.store}
+    end
+
+    test "a catalog without dataset records answers the runtime's store" do
+      runtime =
+        Runtime.new(name: __MODULE__.Plain, dir: "/tmp/sealed", catalog: StubCatalog.new(self()))
+
+      assert Runtime.store_for(runtime, "anything") == {:ok, runtime.store}
+    end
+
+    test "prepare_store/2 is a no-op for the default store and any local store", %{
+      runtime: runtime
+    } do
+      assert Runtime.prepare_store(runtime, runtime.store) == :ok
+      assert Runtime.prepare_store(runtime, Store.Local.new(dir: "/tmp/other")) == :ok
     end
   end
 end

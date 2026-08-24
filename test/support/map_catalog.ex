@@ -108,6 +108,11 @@ defmodule Smolquery.Test.MapCatalog do
   end
 
   @impl Catalog
+  def datasets(agent) do
+    {:ok, agent |> Agent.get(& &1.datasets) |> Map.values() |> Enum.sort_by(& &1.name)}
+  end
+
+  @impl Catalog
   def update_dataset(agent, %Dataset{} = dataset) do
     stored = %{dataset | updated_at: System.system_time(:millisecond)}
     Agent.update(agent, &%{&1 | datasets: Map.put(&1.datasets, dataset.name, stored)})

@@ -169,6 +169,17 @@ defmodule Smolquery.QueryService.DatasetLakeIntegrationTest do
     assert {:ok, ^before_plain} = Catalog.current_snapshot(catalog)
   end
 
+  test "expire_snapshots/2 reaches every lake (PL-51 L4)", %{catalog: catalog, tmp_dir: tmp} do
+    first = seal_rows(catalog, Path.join(tmp, "owned"), @owned, 1..2)
+    second = seal_rows(catalog, Path.join(tmp, "owned"), @owned, 3..4)
+    assert second > first
+
+    Process.sleep(5)
+    assert {:ok, expired} = Catalog.expire_snapshots(catalog, 1)
+    assert expired >= 1
+    assert {:ok, ^second} = Catalog.current_snapshot(catalog, "owned")
+  end
+
   test "known_segments/1 spans every lake, so GC cannot mistake an owned segment for an orphan",
        %{catalog: catalog, tmp_dir: tmp} do
     seal_rows(catalog, Path.join(tmp, "owned"), @owned, 1..3)

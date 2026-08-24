@@ -284,32 +284,34 @@ defmodule Smolquery.StorageService.Merge do
   defp compact_row_count(runtime, urls, nil), do: footer_row_count(runtime, urls)
 
   defp merge(runtime, table_ref, key, inputs) do
-    with {:ok, schema} <-
-           Catalog.table_schema(runtime.catalog, Smolquery.Partitions.parent(table_ref)) do
+    {dataset, _table} = parent = Smolquery.Partitions.parent(table_ref)
+
+    with {:ok, schema} <- Catalog.table_schema(runtime.catalog, parent),
+         {:ok, store} <- Runtime.store_for(runtime, dataset),
+         :ok <- Runtime.prepare_store(runtime, store) do
       if length(inputs.urls) <= runtime.merge_inputs_per_call do
-        merge_direct(runtime, key, schema, inputs)
+        merge_direct(runtime, store, key, schema, inputs)
       else
-        merge_chunked(runtime, key, schema, inputs)
+        merge_chunked(runtime, store, key, schema, inputs)
       end
     end
   end
 
-  defp merge_direct(runtime, key, schema, inputs) do
+  defp merge_direct(runtime, store, key, schema, inputs) do
     with {:ok, projection} <- projection(runtime, schema, inputs.urls),
          {:ok, put} <-
-           Store.put(runtime.store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
+           Store.put(store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
       {:ok, segment(key, put, inputs.row_count)}
     end
   end
 
-  defp merge_chunked(runtime, key, schema, inputs) do
+  defp merge_chunked(runtime, store, key, schema, inputs) do
     table = staging_table(key)
     chunks = Enum.chunk_every(inputs.urls, runtime.merge_inputs_per_call)
 
     try do
       with :ok <- stage_chunks(runtime, schema, table, chunks),
-           {:ok, put} <-
-             Store.put(runtime.store, key, &copy_staged(runtime, schema, table, &1)) do
+           {:ok, put} <- Store.put(store, key, &copy_staged(runtime, schema, table, &1)) do
         {:ok, segment(key, put, inputs.row_count)}
       end
     after

@@ -77,7 +77,7 @@ defmodule Smolquery.StorageService.GC do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, candidates: %{}]
+  defstruct [:runtime, candidates: %{}, pending: []]
 
   @doc """
   Starts the sweeper for a runtime.
@@ -133,39 +133,68 @@ defmodule Smolquery.StorageService.GC do
 
   defp run(state) do
     with {:ok, known} <- Catalog.known_segments(state.runtime.catalog),
-         {:ok, keys} <- Store.list(state.runtime.store, "") do
-      candidates = owned(state.runtime, unreferenced(state.runtime, keys, known))
-      {expired, watching} = partition(state, candidates)
+         {:ok, swept, state} <- sweep_store(state, :default, state.runtime.store, known),
+         {:ok, owned, state} <- sweep_next_dataset(state, known),
+         {:ok, staged} <- Store.sweep_staging(state.runtime.store, state.runtime.gc_grace_ms) do
+      :telemetry.execute(
+        [:smolquery, :gc, :sweep],
+        %{swept: length(swept) + length(owned), staged: length(staged)},
+        %{}
+      )
 
-      with {:ok, swept} <- sweep_expired(state.runtime, expired),
-           {:ok, staged} <-
-             Store.sweep_staging(state.runtime.store, state.runtime.gc_grace_ms) do
-        :telemetry.execute(
-          [:smolquery, :gc, :sweep],
-          %{swept: length(swept), staged: length(staged)},
-          %{}
-        )
-
-        {:ok, %{swept: swept, staged: staged, watching: map_size(watching)},
-         %{state | candidates: watching}}
-      end
+      {:ok, %{swept: swept ++ owned, staged: staged, watching: map_size(state.candidates)}, state}
     end
   end
 
-  defp sweep_expired(_runtime, []), do: {:ok, []}
+  defp sweep_store(state, id, store, known) do
+    with {:ok, keys} <- Store.list(store, ""),
+         candidates = owned(state.runtime, unreferenced(store, keys, known)),
+         {expired, watching} = partition(state, id, candidates),
+         {:ok, expired} <- sweep_expired(state.runtime, store, expired) do
+      others = Map.reject(state.candidates, fn {{owner, _key}, _seen} -> owner == id end)
 
-  defp sweep_expired(runtime, keys) do
+      {:ok, expired, %{state | candidates: Map.merge(others, watching)}}
+    end
+  end
+
+  defp sweep_next_dataset(%{pending: []} = state, known) do
+    case Catalog.datasets(state.runtime.catalog) do
+      {:ok, datasets} ->
+        pending = for %{storage: storage, name: name} <- datasets, storage != nil, do: name
+        sweep_pending(%{state | pending: pending}, known)
+
+      {:error, :datasets_unsupported} ->
+        {:ok, [], state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp sweep_next_dataset(state, known), do: sweep_pending(state, known)
+
+  defp sweep_pending(%{pending: []} = state, _known), do: {:ok, [], state}
+
+  defp sweep_pending(%{pending: [dataset | rest]} = state, known) do
+    with {:ok, store} <- Runtime.store_for(state.runtime, dataset) do
+      sweep_store(%{state | pending: rest}, dataset, store, known)
+    end
+  end
+
+  defp sweep_expired(_runtime, _store, []), do: {:ok, []}
+
+  defp sweep_expired(runtime, store, keys) do
     with {:ok, known} <- Catalog.known_segments(runtime.catalog) do
-      expired = unreferenced(runtime, keys, known)
+      expired = unreferenced(store, keys, known)
 
-      with :ok <- delete_all(runtime, expired), do: {:ok, expired}
+      with :ok <- delete_all(store, expired), do: {:ok, expired}
     end
   end
 
-  defp unreferenced(runtime, keys, known) do
+  defp unreferenced(store, keys, known) do
     referenced = MapSet.new(known)
 
-    Enum.reject(keys, &MapSet.member?(referenced, Store.location(runtime.store, &1)))
+    Enum.reject(keys, &MapSet.member?(referenced, Store.location(store, &1)))
   end
 
   defp owned(runtime, keys) do
@@ -186,25 +215,25 @@ defmodule Smolquery.StorageService.GC do
     end
   end
 
-  defp partition(state, keys) do
+  defp partition(state, id, keys) do
     now = System.monotonic_time(:millisecond)
     cutoff = now - state.runtime.gc_grace_ms
 
-    seen = Map.new(keys, &{&1, Map.get(state.candidates, &1, now)})
+    seen = Map.new(keys, &{{id, &1}, Map.get(state.candidates, {id, &1}, now)})
     {expired, watching} = Enum.split_with(seen, fn {_key, first_seen} -> first_seen <= cutoff end)
 
-    {Enum.map(expired, &elem(&1, 0)), Map.new(watching)}
+    {Enum.map(expired, fn {{_id, key}, _seen} -> key end), Map.new(watching)}
   end
 
-  defp delete_all(_runtime, []), do: :ok
+  defp delete_all(_store, []), do: :ok
 
-  defp delete_all(runtime, keys) do
+  defp delete_all(store, keys) do
     Logger.info(fn ->
       "sealed-tier sweep deleting #{length(keys)} uncommitted segment(s)"
     end)
 
     Enum.reduce_while(keys, :ok, fn key, :ok ->
-      case Store.delete(runtime.store, key) do
+      case Store.delete(store, key) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end

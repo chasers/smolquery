@@ -361,14 +361,17 @@ the Postgres username and password, and the S3 key pair. Secrets are sealed
 with `SMOLQUERY_CREDENTIAL_KEY`, the same key federated connections use, so a
 node that creates such a dataset needs that key set.
 
-A dataset's own catalog is honored from creation: the create attaches the
-lake once (so a wrong host or password fails the request), every catalog
-operation and every query reaches it, and a query pins one snapshot per
-dataset it touches. The attach happens on first touch on each engine, never
-at boot, and is bounded by `SMOLQUERY_DATASET_ATTACH_LIMIT`. Two things are
-still layer 4 of PL-51: sealed segments land in the deployment's default
-store rather than the dataset's bucket, and snapshot expiry runs on the
-default lake only.
+Both axes are honored from creation. The create attaches the lake once (so a
+wrong host or password fails the request); every catalog operation and every
+query reaches the dataset's lake, and a query pins one snapshot per dataset
+it touches. The attach happens on first touch on each engine, never at boot,
+and is bounded by `SMOLQUERY_DATASET_ATTACH_LIMIT`. A dataset's sealed
+segments — seals and compactions alike — land in its own bucket under its
+prefix, the storage engines get its secret before they read it back, and
+garbage collection sweeps one dataset store per tick after the default store,
+against the segments every lake references. Snapshot expiry runs on every
+lake. What still walks every dataset each sweep is the compactor's and
+retention's table listing; that is tracked separately (T-372).
 
 ### The query service
 

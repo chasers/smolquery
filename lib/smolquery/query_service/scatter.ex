@@ -52,6 +52,7 @@ defmodule Smolquery.QueryService.Scatter do
   require Logger
 
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine.Connection
@@ -108,8 +109,11 @@ defmodule Smolquery.QueryService.Scatter do
          {:ok, outputs} <- describe(connection, plan.canonical_sql),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
-         {:ok, shards} <- shards(runtime, units) do
-      run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
+         {:ok, shards} <- shards(runtime, units),
+         {:ok, secrets} <- plan_secrets(plan) do
+      work = %{decomposition: decomposition, secrets: secrets, prefixes: plan.prefixes}
+
+      run(runtime, connection, work, ref, schema, shards, job_id, timeout_ms)
     else
       {:refused, reason} ->
         Logger.debug(fn -> "distributed query refused: #{inspect(reason)}" end)
@@ -190,14 +194,27 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
+  defp plan_secrets(%Plan{datasets: datasets}) do
+    datasets
+    |> Enum.reduce_while({:ok, []}, fn {_name, dataset}, {:ok, acc} ->
+      case DuckLake.dataset_secret_statements(dataset) do
+        {:ok, statements} -> {:cont, {:ok, [statements | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, chunks} -> {:ok, chunks |> Enum.reverse() |> Enum.concat()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp run(runtime, connection, work, ref, schema, shards, job_id, timeout_ms) do
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
 
     try do
-      with {:ok, paths} <-
-             gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms),
-           {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
+      with {:ok, paths} <- gather(runtime, work, ref, schema, shards, partials_dir, timeout_ms),
+           {:ok, frame} <- merge(runtime, connection, work.decomposition, paths) do
         measurements = %{
           shards: length(shards),
           partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
@@ -224,15 +241,17 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms) do
+  defp gather(runtime, work, ref, schema, shards, partials_dir, timeout_ms) do
     shards
     |> Enum.with_index()
     |> Task.async_stream(
       fn {{peer, files}, index} ->
         request = %{
-          statements: Views.table_view(ref, schema, Views.parquet_select(files)),
-          partial_sql: decomposition.partial_sql,
-          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http"))
+          statements:
+            Enum.concat(work.secrets, Views.table_view(ref, schema, Views.parquet_select(files))),
+          partial_sql: work.decomposition.partial_sql,
+          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
+          allowed_directories: work.prefixes
         }
 
         {index, dispatch(peer, runtime, request, timeout_ms)}

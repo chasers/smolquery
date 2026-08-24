@@ -201,6 +201,16 @@ a query touches (`Plan.snapshots`), and a job engine runs the dataset's
 `known_segments/1` unions every lake, so garbage collection never mistakes an
 owned dataset's segment for an orphan.
 
+A dataset that names its own bucket gets its own `Smolquery.Segments.Store.S3`
+(`StorageService.Runtime.store_for/2`): the seal handoff resolves a claim's
+sealed paths through it, the merge writes through it (after
+`prepare_store/2` has given the merge engine the dataset's secret), and GC
+sweeps the default store every tick plus one dataset store per tick, in
+round-robin, keyed so a candidate under one store is never confused with the
+same key under another. Partial workers on other nodes receive the dataset's
+secret and store prefix with the shard request. Snapshot expiry, like
+`known_segments/1`, visits every lake.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:

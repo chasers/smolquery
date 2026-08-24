@@ -134,7 +134,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   end
 
   defp compensate_stale(runtime, table_ref, claim) do
-    with {:ok, paths} <- sealed_paths(runtime, claim),
+    with {:ok, paths} <- sealed_paths(runtime, table_ref, claim),
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       held = MapSet.new(registered)
@@ -192,7 +192,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   # (Smolquery.Partitions). Every catalog operation here maps to the parent,
   # while the retire — buffer-facing — keeps the partition ref it came from.
   defp commit(runtime, table_ref, claim, entries) do
-    with {:ok, paths} <- sealed_paths(runtime, claim),
+    with {:ok, paths} <- sealed_paths(runtime, table_ref, claim),
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       if committed?(paths, registered) do
@@ -236,10 +236,15 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     )
   end
 
-  defp sealed_paths(runtime, %{keys: keys}) when is_list(keys) and keys != [],
-    do: {:ok, Enum.map(keys, &Store.location(runtime.store, &1))}
+  defp sealed_paths(runtime, table_ref, %{keys: keys}) when is_list(keys) and keys != [] do
+    {dataset, _table} = Partitions.parent(table_ref)
 
-  defp sealed_paths(_runtime, claim), do: {:error, {:invalid_claim, claim}}
+    with {:ok, store} <- Runtime.store_for(runtime, dataset) do
+      {:ok, Enum.map(keys, &Store.location(store, &1))}
+    end
+  end
+
+  defp sealed_paths(_runtime, _table_ref, claim), do: {:error, {:invalid_claim, claim}}
 
   defp committed?(paths, registered) do
     held = MapSet.new(registered)
@@ -265,7 +270,7 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   @spec committed?(Runtime.t(), Store.table_ref(), SealConsumer.claim()) ::
           {:ok, boolean()} | {:error, term()}
   def committed?(%Runtime{} = runtime, table_ref, claim) do
-    with {:ok, paths} <- sealed_paths(runtime, claim),
+    with {:ok, paths} <- sealed_paths(runtime, table_ref, claim),
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
       {:ok, committed?(paths, registered)}

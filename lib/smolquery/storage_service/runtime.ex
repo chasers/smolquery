@@ -228,6 +228,9 @@ defmodule Smolquery.StorageService.Runtime do
 
   alias Smolquery.BufferService.Ring
   alias Smolquery.Catalog
+  alias Smolquery.Catalog.Dataset
+  alias Smolquery.Engine
+  alias Smolquery.EngineSecrets
   alias Smolquery.Segments.Store
 
   @enforce_keys [:name, :store, :catalog, :ring]
@@ -449,6 +452,58 @@ defmodule Smolquery.StorageService.Runtime do
 
   def with_compact_max_rows(%__MODULE__{} = runtime),
     do: %{runtime | compact_max_rows: @compact_max_rows_default}
+
+  @doc """
+  The store a dataset's sealed segments live in (PL-51 L4): the dataset's own
+  S3 store when its record names one, otherwise `:store`. The dataset's store
+  stages through the same scratch directory as the default store, since a
+  seal is staged locally before its upload either way.
+
+  A catalog that stores no dataset records, and a dataset with no record,
+  both answer the default store — the pre-PL-51 behavior.
+  """
+  @spec store_for(t(), String.t()) :: {:ok, Store.t()} | {:error, term()}
+  def store_for(%__MODULE__{} = runtime, dataset) do
+    case Catalog.dataset(runtime.catalog, dataset) do
+      {:ok, %Dataset{storage: nil}} -> {:ok, runtime.store}
+      {:ok, %Dataset{} = owned} -> own_store(runtime, owned)
+      {:error, :datasets_unsupported} -> {:ok, runtime.store}
+      {:error, {:unknown_dataset, _name}} -> {:ok, runtime.store}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp own_store(runtime, dataset) do
+    with {:ok, options} <- Dataset.store_options(dataset) do
+      {:ok, Store.S3.new(options ++ [staging_dir: staging_dir(runtime.store)])}
+    end
+  end
+
+  defp staging_dir(%Store{config: %{staging_dir: dir}}) when is_binary(dir), do: dir
+  defp staging_dir(%Store{config: %{dir: dir}}) when is_binary(dir), do: Path.join(dir, "staging")
+  defp staging_dir(_store), do: Path.join(System.tmp_dir!(), "smolquery-dataset-staging")
+
+  @doc """
+  Gives the merge engine what it needs to read `store` back: the sealed-tier
+  secret and the extension its credential mode needs. The default store's
+  secret is a bootstrap statement; a dataset's store is met here, before the
+  merge that reads it, with statements that are no-ops the second time.
+  """
+  @spec prepare_store(t(), Store.t()) :: :ok | {:error, term()}
+  def prepare_store(%__MODULE__{store: store}, store), do: :ok
+  def prepare_store(%__MODULE__{}, %Store{impl: Store.Local}), do: :ok
+
+  def prepare_store(%__MODULE__{} = runtime, %Store{} = store) do
+    extensions = EngineSecrets.sealed_tier_extensions(store, []) -- runtime.engine_extensions
+    loads = Enum.flat_map(extensions, &["INSTALL #{&1}", "LOAD #{&1}"])
+
+    Enum.reduce_while(loads ++ EngineSecrets.sealed_tier(store), :ok, fn sql, :ok ->
+      case Engine.query(merge_engine(runtime), sql) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   @doc """
   The engine handle a merge's calls run on.
