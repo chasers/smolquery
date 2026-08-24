@@ -21,7 +21,9 @@ defmodule SmolqueryApi.Router do
       GET  /v1/docs.json                           the API described as JSON, no auth
       GET  /metrics                                Prometheus text (internal secret)
       GET  /v1/datasets                            list datasets
-      POST /v1/datasets                            create a dataset
+      POST /v1/datasets                            create a dataset (own catalog/storage optional)
+      GET  /v1/datasets/:ds                        a dataset's settings, never its secrets
+      PATCH /v1/datasets/:ds                       rotate a dataset's credentials
       GET  /v1/datasets/:ds/tables                 list a dataset's tables
       POST /v1/datasets/:ds/tables                 create a table
       GET  /v1/datasets/:ds/tables/:table          a table's schema + retention
@@ -68,6 +70,8 @@ defmodule SmolqueryApi.Router do
 
     get "/v1/datasets", DatasetController, :index
     post "/v1/datasets", DatasetController, :create
+    get "/v1/datasets/:dataset", DatasetController, :show
+    patch "/v1/datasets/:dataset", DatasetController, :update
     get "/v1/datasets/:dataset/tables", TableController, :index
     post "/v1/datasets/:dataset/tables", TableController, :create
     get "/v1/datasets/:dataset/tables/:table", TableController, :show

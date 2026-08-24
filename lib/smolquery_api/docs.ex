@@ -85,8 +85,50 @@ defmodule SmolqueryApi.Docs do
         "method" => "POST",
         "path" => "/v1/datasets",
         "auth" => "bearer",
-        "summary" => "Create a dataset. Idempotent.",
-        "request" => %{"id" => "string"}
+        "summary" =>
+          "Create a dataset. Idempotent for the same settings; 409 for a " <>
+            "dataset that exists with different ones. `catalog` and `storage` " <>
+            "are optional; either left out means the deployment default. " <>
+            "Compatible with a Supabase project's Postgres and Storage.",
+        "request" => %{
+          "id" => "identifier",
+          "catalog" => %{
+            "host" => "Postgres hostname",
+            "port" => "integer, default 5432",
+            "database" => "database name; one database serves one dataset",
+            "username" => "role to connect as",
+            "password" => "sealed before storage, never returned",
+            "sslmode" => "libpq sslmode, default require",
+            "version" =>
+              "DuckLake format the lake is pinned to, default SMOLQUERY_DUCKLAKE_VERSION (1.0)"
+          },
+          "storage" => %{
+            "bucket" => "S3 bucket name",
+            "prefix" => "key prefix inside the bucket, default the bucket root",
+            "endpoint" => "S3-compatible endpoint; unset targets AWS S3",
+            "region" => "default us-east-1",
+            "url_style" => "path or vhost",
+            "access_key_id" => "static key; omit both keys for the AWS credential chain",
+            "secret_access_key" => "sealed before storage, never returned"
+          }
+        }
+      },
+      %{
+        "method" => "GET",
+        "path" => "/v1/datasets/:dataset",
+        "auth" => "bearer",
+        "summary" =>
+          "A dataset's settings, never its secrets. `catalog` and `storage` " <>
+            "are null for the deployment default."
+      },
+      %{
+        "method" => "PATCH",
+        "path" => "/v1/datasets/:dataset",
+        "auth" => "bearer",
+        "summary" =>
+          "Rotate credentials: `catalog.username`, `catalog.password`, " <>
+            "`storage.access_key_id`, `storage.secret_access_key`. Every " <>
+            "other field is immutable and answers 400."
       },
       %{
         "method" => "GET",

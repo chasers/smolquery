@@ -24,6 +24,24 @@ defmodule SmolqueryApi.ErrorsTest do
     assert %{"error" => %{"status" => "ABORTED"}} = JSON.decode!(response.resp_body)
   end
 
+  test "maps the dataset conflicts to 409 and an immutable field to 400" do
+    for reason <- [{:dataset_exists, "analytics"}, {:catalog_in_use, "analytics"}] do
+      response = Errors.from_reason(conn(:post, "/"), reason)
+
+      assert response.status == 409
+      assert %{"error" => %{"status" => "ALREADY_EXISTS"}} = JSON.decode!(response.resp_body)
+    end
+
+    response = Errors.from_reason(conn(:patch, "/"), {:immutable_field, "storage.bucket"})
+
+    assert response.status == 400
+
+    assert %{"error" => %{"message" => "storage.bucket cannot change after creation"}} =
+             JSON.decode!(response.resp_body)
+
+    assert Errors.from_reason(conn(:get, "/"), :datasets_unsupported).status == 501
+  end
+
   test "sends the shed-load refusal with its retry-after" do
     response = Errors.send_resource_exhausted(conn(:post, "/"), 3, "buffer full, retry later")
 

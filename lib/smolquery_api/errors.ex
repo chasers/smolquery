@@ -57,6 +57,32 @@ defmodule SmolqueryApi.Errors do
     send_error(conn, 404, "NOT_FOUND", "dataset #{dataset} does not exist")
   end
 
+  def from_reason(conn, {:dataset_exists, dataset}) do
+    send_error(
+      conn,
+      409,
+      "ALREADY_EXISTS",
+      "dataset #{dataset} exists with different catalog or storage settings"
+    )
+  end
+
+  def from_reason(conn, {:catalog_in_use, owner}) do
+    send_error(
+      conn,
+      409,
+      "ALREADY_EXISTS",
+      "dataset #{owner} already uses that Postgres database; one database serves one dataset"
+    )
+  end
+
+  def from_reason(conn, {:immutable_field, name}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", "#{name} cannot change after creation")
+  end
+
+  def from_reason(conn, :datasets_unsupported) do
+    send_error(conn, 501, "UNIMPLEMENTED", "this catalog does not store dataset settings")
+  end
+
   def from_reason(conn, {:unsupported_type, type}) do
     send_error(conn, 400, "INVALID_ARGUMENT", "unsupported type: #{inspect(type)}")
   end

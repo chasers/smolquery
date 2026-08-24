@@ -48,7 +48,8 @@ docker run -d --name smolquery \
 auth='authorization: Bearer change-me'
 json='content-type: application/json'
 
-# create a dataset and a table
+# create a dataset and a table (a dataset can also bring its own Postgres
+# catalog and S3 bucket — a Supabase project, say; see docs/api.md)
 curl -H "$auth" -H "$json" -d '{"id": "analytics"}' \
      http://127.0.0.1:4000/v1/datasets
 curl -H "$auth" -H "$json" -d '{"id": "events", "schema": [

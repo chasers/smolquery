@@ -330,6 +330,40 @@ cannot work without it. The same engine also authenticates to the sealed tier's
 (`Smolquery.EngineSecrets`). A compaction that re-merges existing sealed
 segments can thus read them back over `s3://`.
 
+#### A dataset on its own Postgres and bucket
+
+The settings above are the deployment defaults. A dataset can name its own
+metadata database and its own bucket instead (PL-51), at creation, through
+`POST /v1/datasets` (see [the API](api.md#routes)). The fields are plain
+libpq and S3, so a [Supabase](https://supabase.com) project works as-is:
+
+- **`catalog`** — the project's Postgres. Use the direct host
+  (`db.<ref>.supabase.co`, port 5432) or the pooler in **session** mode.
+  Transaction-mode pooling (port 6543) does not work: DuckDB's `postgres`
+  extension needs a session. `sslmode` defaults to `require`. One Postgres
+  database serves one dataset, because a DuckLake's identity is its metadata
+  database; a second dataset on the same database is a 409. Do not add the
+  `ducklake_*` tables to a `FOR ALL TABLES` publication (see
+  `Smolquery.Catalog.DuckLake`).
+- **`storage`** — the project's Storage, through its S3 endpoint:
+  `endpoint: https://<ref>.storage.supabase.co/storage/v1/s3`, `region` = the
+  project's region, `url_style: path`, and an S3 access key pair from the
+  Storage settings. `prefix` keeps the dataset's segments under one key
+  prefix, so a bucket can hold other things too. Supabase Storage does not
+  honor `If-None-Match` on a `PUT`, so the store checks a key with `HEAD`
+  before it uploads; a committed segment is never re-uploaded there either
+  (see `Smolquery.Segments.Store.S3`).
+
+Either object left out means the deployment default; the two are independent.
+After creation only the credentials can change (`PATCH /v1/datasets/:ds`):
+the Postgres username and password, and the S3 key pair. Secrets are sealed
+with `SMOLQUERY_CREDENTIAL_KEY`, the same key federated connections use, so a
+node that creates such a dataset needs that key set.
+
+Layers 3 and 4 of PL-51 — the engines attaching a dataset's lake and the
+storage service writing to its bucket — are in progress. Until they land, the
+settings are stored and shown but not yet honored.
+
 ### The query service
 
 The query service runs each query as a job with a private DuckDB engine
