@@ -23,8 +23,9 @@ defmodule Smolquery.BufferService.Client do
 
   ## Bulk and control travel separately
 
-  Forward-batches go on the `:bulk` channel and metadata on `:control`, so a
-  manifest read a planner is waiting on does not queue behind a stream of writes.
+  Forward-batches go on a `{:bulk, table_ref}` channel and metadata on
+  `:control`, so a manifest read a planner is waiting on does not queue behind
+  a stream of writes, and one table's writes do not queue behind another's.
   See `Smolquery.BufferService.Transport` for why that split has to be explicit.
 
   ## The batch carries its schema
@@ -121,7 +122,7 @@ defmodule Smolquery.BufferService.Client do
     Transport.invoke(
       transport,
       owner,
-      :bulk,
+      {:bulk, table_ref},
       :write_batch,
       [name, table_ref, batch],
       timeout(routing, :write)

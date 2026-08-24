@@ -147,9 +147,9 @@ queries → QueryService ──────────────────�
   retry produces the same file, and a micro-segment stops counting at the
   instant its rows start counting in the catalog.
 - **Bulk traffic gets its own sockets.** Forward-batches and seal signals travel
-  over `gen_rpc` on split bulk/control channels, never Erlang distribution;
-  segment *bytes* travel over HTTP so DuckDB's `httpfs` keeps its projection and
-  range-read pushdown.
+  over `gen_rpc` on a per-table bulk pool and a control channel, never Erlang
+  distribution; segment *bytes* travel over HTTP so DuckDB's `httpfs` keeps its
+  projection and range-read pushdown.
 - **A query fans out to every expected buffer node**, not just a table's current
   owner — a ring change moves ownership instantly while the previous owner still
   holds the unsealed tail.

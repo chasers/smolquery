@@ -290,7 +290,10 @@ config :gen_rpc,
   tcp_server_port: 5369,
   tcp_client_port: 5369,
   rpc_module_control: :whitelist,
-  rpc_module_list: [Smolquery.BufferService.Endpoint]
+  rpc_module_list: [Smolquery.BufferService.Endpoint],
+  extra_process_flags: [fullsweep_after: 20]
+
+config :smolquery, Smolquery.BufferService.Transport.GenRpc, bulk_channels: 4
 ```
 
 - **Not Erlang distribution.** Forward-batches are large and constant. On the
@@ -299,8 +302,21 @@ config :gen_rpc,
   nodes going down. gen_rpc carries this traffic on its own sockets.
 - **Bulk and control are separate channels.** gen_rpc keys one connection per
   destination. To route everything at a node through one key only moves the
-  head-of-line blocking onto that socket. Writes travel on `:bulk`. Manifest
-  reads and retirements travel on `:control`.
+  head-of-line blocking onto that socket. Writes and replica shipments travel
+  on `{:bulk, table_ref}`. Manifest reads and retirements travel on
+  `:control`.
+- **Bulk is a pool.** The table ref hashes into one of `bulk_channels`
+  connections per node pair (`GEN_RPC_BULK_CHANNELS`, default 4). One table
+  keeps one socket, so its calls stay in order. Different tables spread over
+  the pool, so a hot table does not block the others (T-29). The bench in
+  `bench/results/ingest_transport.md` measured 2.5–2.6× for this shape.
+- **Membership gates the socket.** A node outside `Node.list/0` is answered
+  `{:error, {:badrpc, :nodedown}}` with no connect attempt (T-374). Without
+  the guard a departed node costs a full `connect_timeout` per channel.
+- **Socket processes sweep often.** `extra_process_flags` puts
+  `fullsweep_after: 20` on every gen_rpc client and acceptor process. They
+  carry each forward-batch binary, and a frequent full sweep keeps their
+  heaps from pinning those binaries (T-373).
 - **The allowlist is not optional.** gen_rpc's default `rpc_module_control` is
   `:disabled`. That default lets any peer with the cookie run arbitrary MFA
   (module, function, arguments) calls on a second port. The config names

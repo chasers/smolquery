@@ -26,11 +26,17 @@ defmodule Smolquery.BufferService.Transport do
 
   gen_rpc opens one connection per *destination key*, not per call, so routing
   everything at a node through one key just moves the head-of-line blocking onto
-  that socket. Traffic is therefore split by weight: `:bulk` carries
-  forward-batches, `:control` carries manifest reads and retirements. A manifest
-  read waits behind a queue of batches on a shared connection and does not on a
-  separate one — which is the whole reason the channel is part of this API rather
-  than an implementation detail.
+  that socket. Traffic is therefore split by weight: `{:bulk, key}` carries
+  forward-batches and replica shipments, `:control` carries manifest reads and
+  retirements. A manifest read waits behind a queue of batches on a shared
+  connection and does not on a separate one — which is the whole reason the
+  channel is part of this API rather than an implementation detail.
+
+  Bulk is a pool, not one socket (T-29). The key is the table ref, so one
+  table keeps one connection and its calls stay in order, while a hot table
+  no longer blocks every other table bound for the same node.
+  `Transport.GenRpc.destination/2` does the hashing; `Transport.Local`
+  ignores the channel.
 
   ## Implementations
 
@@ -42,10 +48,11 @@ defmodule Smolquery.BufferService.Transport do
   alias Smolquery.BufferService.Endpoint
 
   @typedoc """
-  Which connection a call travels on — `:bulk` for row-carrying writes,
-  `:control` for small, latency-sensitive metadata calls.
+  Which connection a call travels on — `{:bulk, key}` for row-carrying writes
+  and replica shipments, hashed by `key` into a pool, `:control` for small,
+  latency-sensitive metadata calls.
   """
-  @type channel :: :bulk | :control
+  @type channel :: {:bulk, term()} | :control
 
   @callback invoke(node(), channel(), atom(), [term()], timeout()) :: term()
 
