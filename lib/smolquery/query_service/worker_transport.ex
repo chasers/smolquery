@@ -13,9 +13,14 @@ defmodule Smolquery.QueryService.WorkerTransport do
   ## Channels
 
   The destination is `{peer, {:scatter, slot}}`. The job id hashes into one
-  of `Transport.GenRpc.bulk_channels/0` slots, so concurrent jobs spread over
-  the pool. Partials do not share sockets with forward-batches: a reply on
-  `:bulk` would queue behind the batches bound the same way.
+  of `channels/0` slots, so concurrent jobs spread over the pool. Partials do
+  not share sockets with forward-batches: a reply on `:bulk` would queue
+  behind the batches bound the same way. The pool has its own size,
+  `GEN_RPC_SCATTER_CHANNELS`, because partials and forward-batches have
+  different shapes: one large reply per job per peer against a stream of
+  writes.
+
+      config :smolquery, Smolquery.QueryService.WorkerTransport, channels: 4
 
   ## What gen_rpc does not do
 
@@ -32,10 +37,10 @@ defmodule Smolquery.QueryService.WorkerTransport do
   which `Smolquery.QueryService.Scatter` turns into a fallback.
   """
 
-  alias Smolquery.BufferService.Transport.GenRpc
   alias Smolquery.QueryService.PartialWorker
 
   @rpc_margin_ms 5_000
+  @default_channels 4
 
   @doc """
   Runs `request` on `peer`'s `PartialWorker` for job `job_id`.
@@ -63,7 +68,17 @@ defmodule Smolquery.QueryService.WorkerTransport do
   """
   @spec destination(node(), String.t()) :: {node(), {:scatter, pos_integer()}}
   def destination(peer, job_id),
-    do: {peer, {:scatter, :erlang.phash2(job_id, GenRpc.bulk_channels()) + 1}}
+    do: {peer, {:scatter, :erlang.phash2(job_id, channels()) + 1}}
+
+  @doc """
+  How many `{:scatter, _}` connections this node opens to each peer.
+  """
+  @spec channels() :: pos_integer()
+  def channels do
+    :smolquery
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:channels, @default_channels)
+  end
 
   defp remote(peer, name, request, job_id, timeout_ms) do
     destination = destination(peer, job_id)

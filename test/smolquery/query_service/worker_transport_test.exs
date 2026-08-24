@@ -1,7 +1,6 @@
 defmodule Smolquery.QueryService.WorkerTransportTest do
   use ExUnit.Case, async: true
 
-  alias Smolquery.BufferService.Transport.GenRpc
   alias Smolquery.QueryService.WorkerTransport
 
   @peer :"query1@elsewhere.invalid"
@@ -22,7 +21,7 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
   describe "destination/2" do
     test "a job always lands on the same scatter slot" do
       assert {@peer, {:scatter, slot}} = WorkerTransport.destination(@peer, "job-1")
-      assert slot in 1..GenRpc.bulk_channels()
+      assert slot in 1..WorkerTransport.channels()
       assert WorkerTransport.destination(@peer, "job-1") == {@peer, {:scatter, slot}}
     end
 

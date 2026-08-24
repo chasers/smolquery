@@ -479,6 +479,11 @@ if channels = System.get_env("GEN_RPC_BULK_CHANNELS") do
     bulk_channels: Smolquery.RuntimeConfig.positive_integer!("GEN_RPC_BULK_CHANNELS", channels)
 end
 
+if channels = System.get_env("GEN_RPC_SCATTER_CHANNELS") do
+  config :smolquery, Smolquery.QueryService.WorkerTransport,
+    channels: Smolquery.RuntimeConfig.positive_integer!("GEN_RPC_SCATTER_CHANNELS", channels)
+end
+
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
   db = Smolquery.DatabaseUrl.parse!(catalog_database_url)
 
