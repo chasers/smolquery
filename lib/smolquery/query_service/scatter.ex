@@ -40,9 +40,8 @@ defmodule Smolquery.QueryService.Scatter do
   the hot list is the plan's own — but sealed-tier min/max pruning is lost:
   DuckLake prunes only queries it plans itself. Shards balance by file
   count, not bytes. Partials travel as whole parquet binaries over gen_rpc,
-  off the distribution channel; streaming Arrow over the segment HTTP
-  routes remains the end state. Remote workers must reach the same sealed
-  store, which in practice means S3 or a shared disk.
+  off the distribution channel (T-364). Remote workers must reach the same
+  sealed store, which in practice means S3 or a shared disk.
 
   Cleanup is layered: the `after` here removes the partials directory on
   every path it can see, and `Runner`'s settle removes it again — a
