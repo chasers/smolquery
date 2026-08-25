@@ -56,9 +56,14 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   stale-owner gate above. And retirement carries the claim's keys, so the
   buffer refuses to stamp ids whose live claim moved on
   (`Smolquery.BufferService.HotManifest.retire/6`), which holds even for an
-  attempt that raced past both checks. Entries already sealed, and entries
-  gone from the manifest, stay the reconciliation cases they always were —
-  the guard skips them.
+  attempt that raced past both checks. Entries sealed under *this* claim's
+  own keys, and entries gone from the manifest, stay the reconciliation
+  cases they always were — the guard skips them. An entry sealed under
+  *different* keys is stale, not reconciliation: the released claim's inputs
+  were re-derived and fully sealed by the valve-sized claims while this
+  attempt ran, and treating that as reconciliation would let every gate pass
+  and strand this attempt's orphan segment double-counting the rows forever
+  (F-1, `tla/FINDINGS.md`).
 
   A stale refusal also compensates: any of the claim's keys already
   registered are dropped from the catalog before the error returns. An
@@ -101,6 +106,8 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   @behaviour Smolquery.StorageService.Handoff
 
+  use Snabbkaffex, only: :trace
+
   require Logger
 
   alias Smolquery.BufferService.Client
@@ -119,7 +126,10 @@ defmodule Smolquery.StorageService.Handoff.Seal do
       with {:ok, entries} <- claim_manifest(runtime, table_ref, claim),
            :ok <- claim_live(entries, claim),
            {:ok, snapshot} <- commit(runtime, table_ref, claim, entries) do
-        retire(runtime, table_ref, claim, snapshot)
+        tp(:"storage.seal.before_retire", %{table_ref: table_ref, keys: claim[:keys]})
+        retired = retire(runtime, table_ref, claim, snapshot)
+        tp(:"storage.seal.retired", %{table_ref: table_ref, keys: claim[:keys], result: retired})
+        retired
       end
 
     case result do
@@ -174,12 +184,16 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   defp claim_manifest(_runtime, _table_ref, _claim), do: {:ok, []}
 
+  # A sealed_at set under this claim's own keys is reconciliation (a crashed
+  # attempt's earlier seal); one set under different keys means the claim was
+  # released and re-derived while this attempt ran — skipping it would register
+  # an orphan segment double-counting the re-derived claims' rows (F-1).
   defp claim_live(entries, %{ids: ids, keys: keys}) when is_list(ids) and is_list(keys) do
     claimed = MapSet.new(ids)
 
     entries
     |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
-    |> Enum.reject(&(&1["sealed_at"] || &1["claim_keys"] == keys))
+    |> Enum.reject(&(&1["claim_keys"] == keys))
     |> case do
       [] -> :ok
       stale -> {:error, {:stale_claim, Enum.map(stale, & &1["id"])}}
@@ -209,7 +223,9 @@ defmodule Smolquery.StorageService.Handoff.Seal do
          :ok <- claim_live(fresh, claim) do
       record_segment(table_ref, segment)
 
-      Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
+      result = Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
+      tp(:"storage.seal.registered", %{table_ref: table_ref, keys: claim[:keys]})
+      result
     end
   end
 
