@@ -8,13 +8,11 @@ TLC found, and what is next so a follow-up agent can pick up.
 Toolchain: `./tla/run <config>` (fetches `tla2tools.jar` on first use). Specs
 live in `tla/`.
 
-> **Provenance / state note (2026-08-25).** This document and the specs come
-> from the fork branch `edgurgel:smolquery:tla`. The code changes on that
-> branch — the F-1 gate fix in `seal.ex`/`hot_manifest.ex`, the snabbkaffe
-> replication test, and the snabbkaffex dep — are **not merged**; on this
-> repo's `main` the F-1 bug is live. The "gate fix APPLIED" section below
-> describes the fork branch, not `main`. T-385 tracks the merge decision and
-> T-386 the durable reconciler (plan PL-54).
+> **Provenance note (2026-08-25).** This document and the specs come from the
+> fork branch `edgurgel:smolquery:tla` by @edgurgel. The F-1 gate fix in
+> `seal.ex`/`hot_manifest.ex`, the snabbkaffe replication test, and the
+> snabbkaffex dep were ported from that branch in PR #260 (T-385). The
+> durable reconciler for the two residuals stays open as T-386 (plan PL-54).
 
 ## What to cover, ranked by safety value
 

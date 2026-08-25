@@ -37,15 +37,16 @@ property is load-bearing.
 | `SealHandoff` | base handoff + atomic compaction + correct dedup rule | PASS |
 | `SealHandoff_naive` | dedup off the at-S listing instead of `registered_through` | VIOLATED (by design) |
 | `SealHandoff_nonatomic` | compaction as two snapshots | VIOLATED (by design) |
-| `ReleasedClaim` | T-294 fence as coded on `main`, crash allowed | VIOLATED — **F-1, live bug** |
+| `ReleasedClaim` | T-294 fence as coded before PR #260, crash allowed | VIOLATED — F-1 |
 | `ReleasedClaim_nocrash` | same, pure timing race, no crash | VIOLATED — F-1 |
 | `ReleasedClaim_fix_nocrash` | gate fix modeled, reap allowed | VIOLATED — reap residual |
 | `ReleasedClaim_fix_nocrash_noreap` | gate fix, no reap | PASS |
 | `ReleasedClaim_fix_crash` | gate fix, crash allowed | VIOLATED — crash residual |
 | `ReleasedClaim_reconciler` | gate fix + durable reconciler | PASS — complete fix |
 
-The `GateFix`/`Reconciler` constants model *proposed* code. Neither is on
-`main` yet; T-385 tracks the gate-fix decision and T-386 the reconciler.
+The `GateFix` constant models the fix PR #260 applies (T-385). The
+`Reconciler` constant models *proposed* code — the durable reconciler for the
+crash and reap residuals stays open as T-386.
 
 ## Conventions
 
