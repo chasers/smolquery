@@ -3,11 +3,13 @@ defmodule Smolquery.TelemetryTest do
   The aggregator, driven by events alone — the way every service reaches it.
 
   Assertions are deltas, not absolutes: the counter table is one per node on
-  purpose, so any concurrently running test that exercises a real service
-  moves the same counters.
+  purpose. The module runs sync so those deltas hold — ExUnit runs every
+  async module first and sync modules one at a time, so no other test's
+  commit or manifest change lands between a `before` read and its assert
+  (T-224, T-305, and the T-320 test on CI run 32856347788).
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Smolquery.Telemetry
 
