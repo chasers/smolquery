@@ -6,14 +6,59 @@ jar="$dir/tla2tools.jar"
 jar_url="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
 
 if [ $# -eq 0 ]; then
-  echo "usage: tla/run <config>... | tla/run all" >&2
+  echo "usage: tla/run <config>... | tla/run all | tla/run check" >&2
   echo "       config is a .cfg basename, e.g. ReleasedClaim_nocrash" >&2
+  echo "       check runs every config and compares against tla/expected.tsv" >&2
   exit 2
 fi
 
 if [ ! -f "$jar" ]; then
   echo "fetching tla2tools.jar ..." >&2
   curl -fsSL -o "$jar" "$jar_url"
+fi
+
+run_one() {
+  cfg="$1"
+  module="${cfg%%_*}"
+  if java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
+       -deadlock -workers auto -metadir "$dir/states" \
+       -config "$dir/$cfg.cfg" "$dir/$module.tla"; then
+    echo PASS
+  else
+    echo VIOLATED
+  fi
+}
+
+if [ "$1" = "check" ]; then
+  status=0
+  for path in "$dir"/*.cfg; do
+    cfg="$(basename "$path" .cfg)"
+    expected="$(awk -F'\t' -v c="$cfg" '$1 == c { print $2 }' "$dir/expected.tsv")"
+
+    if [ -z "$expected" ]; then
+      printf '%-36s MISSING from expected.tsv\n' "$cfg"
+      status=1
+      continue
+    fi
+
+    actual="$(run_one "$cfg" 2>/dev/null | tail -1)"
+
+    if [ "$actual" = "$expected" ]; then
+      printf '%-36s %s (as expected)\n' "$cfg" "$actual"
+    else
+      printf '%-36s %s (EXPECTED %s)\n' "$cfg" "$actual" "$expected"
+      status=1
+    fi
+  done
+
+  while IFS="$(printf '\t')" read -r cfg _expected; do
+    if [ -n "$cfg" ] && [ ! -f "$dir/$cfg.cfg" ]; then
+      printf '%-36s listed in expected.tsv but has no .cfg\n' "$cfg"
+      status=1
+    fi
+  done < "$dir/expected.tsv"
+
+  exit $status
 fi
 
 if [ "$1" = "all" ]; then

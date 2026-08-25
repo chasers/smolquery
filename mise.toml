@@ -93,5 +93,5 @@ description = "Drop build artifacts and fetched deps"
 run = "rm -rf _build deps"
 
 [tasks.tla]
-description = "Model-check every TLA+ config in tla/ (fetches tla2tools.jar on first use)"
-run = "./tla/run all"
+description = "Model-check every TLA+ config against tla/expected.tsv (fetches tla2tools.jar on first use)"
+run = "./tla/run check"

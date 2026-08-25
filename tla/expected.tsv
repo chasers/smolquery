@@ -1,0 +1,14 @@
+ReleasedClaim	VIOLATED
+ReleasedClaim_fix_crash	VIOLATED
+ReleasedClaim_fix_nocrash	VIOLATED
+ReleasedClaim_fix_nocrash_noreap	PASS
+ReleasedClaim_nocrash	VIOLATED
+ReleasedClaim_reconciler	PASS
+SealHandoff	PASS
+SealHandoff_naive	VIOLATED
+SealHandoff_nonatomic	VIOLATED
+SegmentShipping	VIOLATED
+SegmentShipping_ackfirst	VIOLATED
+SegmentShipping_core	PASS
+SegmentShipping_durabledrop	PASS
+SegmentShipping_retry	VIOLATED
