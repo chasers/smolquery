@@ -350,6 +350,85 @@ defmodule Smolquery.StorageService.SealerTest do
     assert Process.alive?(sealer)
   end
 
+  describe "reconcile_released (T-386)" do
+    @tag :tmp_dir
+    test "hands a reconcile signal to the configured handoff", %{name: name} do
+      assert Sealer.reconcile_released(name, @events, claim(["a"])) == :ok
+
+      assert_receive {:reconciling, @events, %{ids: ["a"]}, reconcile}
+
+      HandoffProbe.release(reconcile)
+    end
+
+    @tag :tmp_dir
+    test "waits out a running attempt for the table", %{name: name} do
+      Sealer.seal_ready(name, @events, claim(["a"]))
+      assert_receive {:sealing, @events, _claim, attempt}
+
+      Sealer.reconcile_released(name, @events, claim(["a"]))
+      refute_receive {:reconciling, @events, _claim, _reconcile}, 50
+
+      HandoffProbe.release(attempt)
+      assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+
+      Sealer.reconcile_released(name, @events, claim(["a"]))
+      assert_receive {:reconciling, @events, _claim, reconcile}
+
+      HandoffProbe.release(reconcile)
+    end
+
+    @tag :tmp_dir
+    test "coalesces a repeat signal for keys already reconciling", %{name: name} do
+      Sealer.reconcile_released(name, @events, claim(["a"]))
+      assert_receive {:reconciling, @events, _claim, reconcile}
+
+      Sealer.reconcile_released(name, @events, claim(["a"]))
+      refute_receive {:reconciling, @events, _claim, _second}, 50
+
+      HandoffProbe.release(reconcile)
+    end
+
+    @tag :tmp_dir
+    test "logs a failed reconciliation and frees it for the next signal", %{name: name} do
+      log =
+        capture_log(fn ->
+          Sealer.reconcile_released(name, @events, claim(["a"]))
+          assert_receive {:reconciling, @events, _claim, reconcile}
+
+          HandoffProbe.release(reconcile, {:error, :catalog_unavailable})
+
+          Eventually.until(fn ->
+            Sealer.reconcile_released(name, @events, claim(["a"]))
+
+            receive do
+              {:reconciling, @events, _claim, second} ->
+                HandoffProbe.release(second)
+                true
+            after
+              20 -> false
+            end
+          end)
+        end)
+
+      assert log =~ "reconciliation of released keys"
+    end
+
+    @tag :tmp_dir
+    @tag max_concurrent_seals: 1
+    test "does not hold a seal slot", %{name: name} do
+      Sealer.seal_ready(name, @clicks, claim(["a"]))
+      assert_receive {:sealing, @clicks, _claim, attempt}
+
+      Sealer.reconcile_released(name, @events, claim(["b"]))
+      assert_receive {:reconciling, @events, _claim, reconcile}
+
+      HandoffProbe.release(reconcile)
+      HandoffProbe.release(attempt)
+
+      assert Eventually.until(fn -> Sealer.sealing(name) == [] end)
+    end
+  end
+
   describe "storage-ring ownership (Milestone 8 L6)" do
     setup context do
       name = :"sealer_owned_#{:erlang.unique_integer([:positive])}"

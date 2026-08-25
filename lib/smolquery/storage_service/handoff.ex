@@ -37,10 +37,35 @@ defmodule Smolquery.StorageService.Handoff do
               :ok | {:error, term()}
 
   @doc """
+  Reconciles a released claim's tombstone for `table_ref` (T-386): drops any
+  segment registered under the claim's keys, then confirms back to the buffer
+  so the tombstone clears.
+  """
+  @callback reconcile_released(
+              config :: term(),
+              Runtime.t(),
+              Store.table_ref(),
+              SealConsumer.claim()
+            ) :: :ok | {:error, term()}
+
+  @doc """
   Dispatches one attempt to a configured implementation.
   """
   @spec seal({module(), term()}, Runtime.t(), Store.table_ref(), SealConsumer.claim()) ::
           :ok | {:error, term()}
   def seal({impl, config}, %Runtime{} = runtime, table_ref, claim),
     do: impl.seal(config, runtime, table_ref, claim)
+
+  @doc """
+  Dispatches one reconciliation to a configured implementation.
+  """
+  @spec reconcile_released(
+          {module(), term()},
+          Runtime.t(),
+          Store.table_ref(),
+          SealConsumer.claim()
+        ) ::
+          :ok | {:error, term()}
+  def reconcile_released({impl, config}, %Runtime{} = runtime, table_ref, claim),
+    do: impl.reconcile_released(config, runtime, table_ref, claim)
 end

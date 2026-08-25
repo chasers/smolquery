@@ -112,6 +112,17 @@ The window ends when the last old sealer drains. With storage rolled first,
 a claim released by a new buffer never has an old sealer's attempt
 outstanding.
 
+### Release tombstones (T-386)
+
+The rollout that ships T-386 adds two manifest-log record types (`tombstone`,
+`reconciled`) and a `:reconciled` replica mutation. New code reads old logs;
+old code refuses a new log's records, so **do not downgrade a buffer node
+past this release once it has released an oversized claim**. An old replica
+refusing the `:reconciled` mutation costs a retry interval per attempt until
+the rollout completes. A release logged by the previous version leaves no
+tombstone; those claims keep the pre-reconciler exposure and close as they
+drain.
+
 ### Web role credentials (0.7.1)
 
 From 0.7.1, the `smolquery-env` Secret must hold three values for any pod

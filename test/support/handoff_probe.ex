@@ -30,6 +30,16 @@ defmodule Smolquery.Test.HandoffProbe do
     end
   end
 
+  @impl Handoff
+  def reconcile_released({test, result}, _runtime, table_ref, claim) do
+    send(test, {:reconciling, table_ref, claim, self()})
+
+    receive do
+      :release -> finish(result)
+      {:release, override} -> finish(override)
+    end
+  end
+
   @doc """
   Lets a reported attempt finish, returning the configured result.
   """

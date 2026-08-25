@@ -60,6 +60,19 @@ defmodule Smolquery.StorageService.Client do
     end
   end
 
+  @impl SealConsumer
+  @spec reconcile_released(keyword(), Store.table_ref(), SealConsumer.claim()) :: :ok
+  def reconcile_released(config, table_ref, claim) do
+    name = Keyword.get(config, :name, Smolquery.StorageService)
+
+    if reachable?(name) do
+      owner = name |> Routing.resolve() |> Routing.owner(table_ref)
+      Sealer.reconcile_released(name, table_ref, claim, owner)
+    else
+      report_missing(name, table_ref, claim.ids)
+    end
+  end
+
   defp reachable?(name) do
     match?({:ok, _runtime}, Runtime.fetch(name)) or
       PgGroup.nodes(Smolquery.StorageService, name, []) != []

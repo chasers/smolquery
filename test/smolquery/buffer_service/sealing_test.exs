@@ -545,9 +545,73 @@ defmodule Smolquery.BufferService.SealingTest do
     end
   end
 
+  describe "release tombstone reconciliation (T-386)" do
+    test "signals once the released ids are sealed, and goes quiet on the ack", context do
+      name = :"reconcile_#{:erlang.unique_integer([:positive])}"
+
+      %{name: ^name} = start_buffer_service(context, name: name, seal_max_files: 1_000_000)
+
+      ids =
+        for n <- 1..18 do
+          {:ok, ack} = Client.write_batch(name, @table, batch(n..n))
+          ack.segment_id
+        end
+
+      {:ok, runtime} = Runtime.fetch(name)
+      {:ok, prefix} = Store.prefix(@table)
+      {:ok, old_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
+      {:ok, _oversized} = HotManifest.claim(runtime.manifest, @table, ids, [old_key])
+
+      :ok = stop_supervised(name)
+      flush_messages()
+
+      %{name: ^name} =
+        start_buffer_service(context,
+          name: name,
+          seal_max_files: 1,
+          seal_max_bytes: 1_000_000_000,
+          seal_retry_ms: 1
+        )
+
+      assert_receive {:seal_ready, @table, first}, 2_000
+      assert first.ids == Enum.take(ids, 16)
+      refute_receive {:reconcile_released, @table, _tombstone}, 50
+
+      :ok = Client.retire(name, @table, first.ids, 1, first.keys)
+      flush_messages()
+
+      assert_receive {:seal_ready, @table, second}, 2_000
+      assert second.ids == Enum.drop(ids, 16)
+      refute_receive {:reconcile_released, @table, _tombstone}, 50
+
+      :ok = Client.retire(name, @table, second.ids, 2, second.keys)
+
+      assert_receive {:reconcile_released, @table, tombstone}, 2_000
+      assert tombstone.keys == [old_key]
+      assert Enum.sort(tombstone.ids) == Enum.sort(ids)
+      assert tombstone.origin == node()
+
+      assert Client.release_reconciled(name, @table, [old_key]) == :ok
+
+      {:ok, runtime} = Runtime.fetch(name)
+      assert HotManifest.tombstones(runtime.manifest, @table) == []
+
+      flush_reconciles()
+      refute_receive {:reconcile_released, @table, _tombstone}, 100
+    end
+  end
+
   defp flush_messages do
     receive do
       {:seal_ready, _table, _claim} -> flush_messages()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp flush_reconciles do
+    receive do
+      {:reconcile_released, _table, _tombstone} -> flush_reconciles()
     after
       0 -> :ok
     end

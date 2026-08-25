@@ -413,7 +413,14 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   released whole, never re-signalled. It then re-claims as valve-sized claims.
   A seal attempt still running for the released claim is refused at three
   gates: a liveness check before its merge, a liveness check before its
-  register, and a claim-key fence on retire.
+  register, and a claim-key fence on retire. The gates need the attempt alive
+  and the entries present; a crash after register, or a retire delayed past
+  the reap, evades all three (F-1 residuals, `tla/FINDINGS.md`). The release
+  therefore also records a durable tombstone naming the claim's output keys.
+  Once every released id is sealed under the re-derived claims, the owner
+  signals `reconcile_released` — level-triggered, like seal signals — and the
+  storage side drops any segment registered under the tombstoned keys, then
+  confirms back to clear the tombstone (T-386).
 - **The claim is how a query planner dedups, exactly.** Each manifest entry
   carries its claim's `claim_keys`. At catalog snapshot `S`, the rule is:
   include a micro-segment unless its claim's keys are all in the catalog's

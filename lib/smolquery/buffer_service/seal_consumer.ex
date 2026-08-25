@@ -64,10 +64,32 @@ defmodule Smolquery.BufferService.SealConsumer do
   @callback seal_ready(config :: term(), Store.table_ref(), claim()) :: :ok
 
   @doc """
+  Reports that a released claim's tombstone is ready to reconcile (T-386).
+
+  `claim` names the released claim's output key(s) and ids. Fired — and
+  re-fired every `seal_retry_ms`, level-triggered like `seal_ready/3` — once
+  every released id is sealed or gone from the manifest, which is when
+  dropping any segment registered under those keys is loss-free: the rows are
+  committed under the re-derived claims' keys. The signal repeats until the
+  consumer confirms the reconciliation back through
+  `Smolquery.BufferService.Client.release_reconciled_at/4`, which clears the
+  tombstone.
+  """
+  @callback reconcile_released(config :: term(), Store.table_ref(), claim()) :: :ok
+
+  @doc """
   Dispatches a signal to a configured consumer, stamped with this node as the
   claim's `:origin`.
   """
   @spec seal_ready({module(), term()}, Store.table_ref(), HotManifest.claim()) :: :ok
   def seal_ready({impl, config}, table_ref, claim),
     do: impl.seal_ready(config, table_ref, Map.put(claim, :origin, node()))
+
+  @doc """
+  Dispatches a reconcile signal to a configured consumer, stamped with this
+  node as the claim's `:origin`.
+  """
+  @spec reconcile_released({module(), term()}, Store.table_ref(), HotManifest.tombstone()) :: :ok
+  def reconcile_released({impl, config}, table_ref, tombstone),
+    do: impl.reconcile_released(config, table_ref, Map.put(tombstone, :origin, node()))
 end

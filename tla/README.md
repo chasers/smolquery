@@ -45,8 +45,9 @@ property is load-bearing.
 | `ReleasedClaim_reconciler` | gate fix + durable reconciler | PASS — complete fix |
 
 The `GateFix` constant models the fix PR #260 applies (T-385). The
-`Reconciler` constant models *proposed* code — the durable reconciler for the
-crash and reap residuals stays open as T-386.
+`Reconciler` constant models the durable reconciler built as T-386 — the
+release tombstone plus the level-triggered `reconcile_released` signal; see
+`FINDINGS.md` for the mapping from the spec's standing rule to the code.
 
 ## Conventions
 
