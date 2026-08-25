@@ -31,6 +31,51 @@ defmodule Smolquery.TelemetryTest do
     end
   end
 
+  describe "span/3 (T-380)" do
+    @span_event [:smolquery, :test, :span]
+
+    setup do
+      handler = "span-test-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        @span_event,
+        fn _event, measurements, meta, _config -> send(test, {:span, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "static meta: emits duration_us and returns the result" do
+      assert Telemetry.span(@span_event, %{kind: :static}, fn -> {:ok, 1} end) == {:ok, 1}
+
+      assert_receive {:span, %{duration_us: duration}, %{kind: :static}}
+      assert is_integer(duration) and duration >= 0
+    end
+
+    test "describe: merges measurements and meta derived from the result" do
+      describe = fn {:ok, bytes} -> {%{bytes: bytes}, %{result: :ok}} end
+
+      assert Telemetry.span(@span_event, describe, fn -> {:ok, 42} end) == {:ok, 42}
+      assert_receive {:span, %{duration_us: _duration, bytes: 42}, %{result: :ok}}
+    end
+
+    test "describe answering nil emits nothing" do
+      assert Telemetry.span(@span_event, fn _result -> nil end, fn -> :error end) == :error
+      refute_receive {:span, _measurements, _meta}
+    end
+
+    test "an exception unwinds past the emit" do
+      assert_raise RuntimeError, fn ->
+        Telemetry.span(@span_event, %{kind: :raised}, fn -> raise "boom" end)
+      end
+
+      refute_receive {:span, _measurements, _meta}
+    end
+  end
+
   test "prices object-store requests by op, class, bytes, and latency bucket (T-379)" do
     put = ~s({op="put"})
     counted = ~s({op="put",class="2xx"})

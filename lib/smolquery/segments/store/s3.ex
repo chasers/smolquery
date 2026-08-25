@@ -99,6 +99,7 @@ defmodule Smolquery.Segments.Store.S3 do
   alias Smolquery.AwsCredentials
   alias Smolquery.Identifier
   alias Smolquery.Segments.Store
+  alias Smolquery.Telemetry
 
   @enforce_keys [:bucket, :staging_dir]
   defstruct [
@@ -431,17 +432,11 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   defp timed(op, bytes, request) do
-    started = System.monotonic_time(:microsecond)
-    response = request.()
-
-    :telemetry.execute(
-      [:smolquery, :s3, :request],
-      %{duration_us: System.monotonic_time(:microsecond) - started, bytes: bytes},
-      %{op: op, status: status(response), result: result(response)}
-    )
-
-    response
+    Telemetry.span([:smolquery, :s3, :request], &describe(&1, op, bytes), request)
   end
+
+  defp describe(response, op, bytes),
+    do: {%{bytes: bytes}, %{op: op, status: status(response), result: result(response)}}
 
   defp status({:ok, %{status: status}}), do: status
   defp status(_transport_failure), do: nil
