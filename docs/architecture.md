@@ -262,7 +262,11 @@ What that ack means:
   - A follower that is down fails the write honestly.
   - A ring smaller than the factor refuses writes as `underreplicated`.
   - A failed shipment compensates the owner's local commit away. No side
-    keeps rows the caller was told failed.
+    keeps rows the caller was told failed: the drop is shipped with the
+    error, and also recorded as *owed* in the manifest log, re-shipped on
+    the seal cadence until the replicas ack (F-2, `tla/FINDINGS.md`) —
+    a follower copy whose ack was lost would otherwise be served by the
+    planner's every-member manifest merge forever.
 
   Claims, retires, and drops replicate too. Followers go first, because they
   are idempotent. A follower's disk stays `Adopter`-replayable; promotion is

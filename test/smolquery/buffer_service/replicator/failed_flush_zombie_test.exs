@@ -59,22 +59,23 @@ end
 
 defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
   @moduledoc """
-  Replication of TLA+ finding F-2 (`tla/FINDINGS.md`,
-  `tla/SegmentShipping.tla`): a failed flush's compensating drop is
+  Regression test for TLA+ finding F-2 (`tla/FINDINGS.md`,
+  `tla/SegmentShipping.tla`): a failed flush's compensating drop was
   fire-and-forget, and the read side merges hot manifests from every member —
-  so a follower that applied the entry and missed the drop serves rows the
-  caller was told FAILED, with no crash and no promotion. A retry then
-  double-counts them under a fresh entry id the planner's dedupe-by-id cannot
-  tie back — and the same `batch_id` does not dedup it, because the
-  compensating local drop also forgot the batch record
-  (`hot_manifest.ex` `forget_batches`).
+  so a follower that applied the entry (ack lost) and missed the drop served
+  rows the caller was told FAILED, with no crash and no promotion, and a
+  retry double-counted them under a fresh entry id forever. The same
+  `batch_id` did not dedup it, because the compensating local drop also
+  forgot the batch record (`hot_manifest.ex` `forget_batches`).
 
-  One network hiccup produces it: the first ship is applied but its ack times
-  out; the compensating drop is lost in the same window.
+  The fix (T-390) owes the drop durably: the committer records it with the
+  compensation, and the owner re-ships it on the maintenance tick until the
+  replicas ack (`SegmentShipping_durabledrop.cfg` is the model of this).
 
-  A PASS of this test means the bug is present. Invert the assertions to the
-  correct contract (zombie compensated, retry counted once) when F-2 is
-  fixed.
+  One network hiccup drives the race: the first ship is applied but its ack
+  times out; the compensating drop is lost in the same window. The test then
+  asserts the corrected contract — the drop is owed, the re-ship clears the
+  zombie, and the retry is counted exactly once.
   """
 
   use ExUnit.Case, async: true
@@ -82,9 +83,11 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Endpoint
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Replicator.FailedFlushZombieTest.LossyTransport
   alias Smolquery.BufferService.Replicator.SegmentShipping
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.BufferService.TableBuffer
   alias Smolquery.Schema
 
   @moduletag :tmp_dir
@@ -121,7 +124,13 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
     |> Enum.uniq_by(& &1.id)
   end
 
-  test "F-2: a lost drop strands a zombie the read side serves; a retry double-counts",
+  defp buffer(name) do
+    [{pid, _value}] = Registry.lookup(Runtime.registry(name), @table)
+
+    pid
+  end
+
+  test "F-2: a lost drop is owed, re-shipped until the zombie clears, and a retry counts once",
        context do
     :ok = LossyTransport.script(self())
 
@@ -139,17 +148,23 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
     assert {:error, {:replication_failed, _node, _reason}} =
              Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-zombie"))
 
+    {:ok, runtime} = Runtime.fetch(owner)
+
     assert entries(owner) == []
     assert [zombie] = entries(follower)
-    assert zombie.row_count == 1
     assert zombie.claim_keys == []
+    assert HotManifest.owed_drops(runtime.manifest, @table) == [zombie.id]
 
-    assert [_zombie] = planner_union(owner, follower)
+    :ok = TableBuffer.maintain(buffer(owner))
+
+    assert entries(follower) == []
+    assert HotManifest.owed_drops(runtime.manifest, @table) == []
 
     assert {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-zombie"))
     refute ack.segment_id == zombie.id
 
-    assert [_first, _second] = union = planner_union(owner, follower)
-    assert Enum.sum(Enum.map(union, & &1.row_count)) == 2
+    assert [only] = union = planner_union(owner, follower)
+    assert only.id == ack.segment_id
+    assert Enum.sum(Enum.map(union, & &1.row_count)) == 1
   end
 end

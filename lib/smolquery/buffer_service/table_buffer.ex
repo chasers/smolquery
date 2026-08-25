@@ -716,9 +716,49 @@ defmodule Smolquery.BufferService.TableBuffer do
       state
       |> service_live_claims(due?)
       |> signal_reconcilable(due?)
+      |> settle_owed_drops(due?)
       |> claim_up_to_max()
     else
       state
+    end
+  end
+
+  # A compensated flush's drop is owed to the replicas until they ack it
+  # (F-2, tla/FINDINGS.md): the fire-and-forget drop shipped with the error
+  # can be lost, and the replica's zombie copy is served by every query's
+  # manifest merge. Re-ship on the seal cadence until the append succeeds,
+  # then settle the record. The append can stall this process for a
+  # transport timeout, but only while a replica is unreachable — a state in
+  # which every flush of this table is already failing on the same target.
+  defp settle_owed_drops(state, false), do: state
+
+  defp settle_owed_drops(state, true) do
+    case HotManifest.owed_drops(state.runtime.manifest, state.table_ref) do
+      [] ->
+        state
+
+      ids ->
+        reship_owed_drops(state, Enum.sort(ids))
+
+        %{state | signaled_at: now()}
+    end
+  end
+
+  defp reship_owed_drops(state, ids) do
+    with :ok <- append_replicas(state, :drop, %{ids: ids}),
+         :ok <-
+           Committer.with_log(state.committer, fn log ->
+             HotManifest.settle_drop(state.runtime.manifest, state.table_ref, ids, log)
+           end) do
+      Logger.info(fn ->
+        "settled #{length(ids)} owed replica drop(s) on #{inspect(state.table_ref)}"
+      end)
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "re-shipping #{length(ids)} owed replica drop(s) on #{inspect(state.table_ref)} " <>
+            "failed: #{inspect(reason)} — retrying every seal_retry_ms"
+        )
     end
   end
 
