@@ -345,6 +345,7 @@ lib/smolquery_web/             # Phoenix LiveView UI
 deploy/                        # kustomize manifests (base + kind overlay)
 bench/                         # performance harnesses + results/ (see docs/benchmarks.md)
 skills/                        # Claude Code skills (./skills/install.sh; see skills/README.md)
+tla/                           # TLA+ models of the safety-critical algorithms (see tla/README.md)
 ```
 
 ## Documentation
