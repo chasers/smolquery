@@ -190,6 +190,7 @@ defmodule Smolquery.BufferService.HotManifest do
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
+  alias Smolquery.Telemetry
 
   @enforce_keys [:table, :log_dir, :store]
   defstruct [:table, :log_dir, :store]
@@ -1030,20 +1031,11 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp measured(op, fun) do
-    started_at = System.monotonic_time()
-    result = fun.()
-
-    :telemetry.execute(
+    Telemetry.span(
       [:smolquery, :hot_manifest, :read],
-      %{
-        duration_us:
-          System.convert_time_unit(System.monotonic_time() - started_at, :native, :microsecond),
-        entries: read_entries(result)
-      },
-      %{op: op}
+      &{%{entries: read_entries(&1)}, %{op: op}},
+      fun
     )
-
-    result
   end
 
   defp count(_change, 0), do: :ok
@@ -1054,7 +1046,8 @@ defmodule Smolquery.BufferService.HotManifest do
     })
   end
 
-  defp read_entries(entries), do: length(entries)
+  defp read_entries(entries) when is_list(entries), do: length(entries)
+  defp read_entries(_raised), do: 0
 
   defp index_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry) do
     ack = %{segment_id: entry.id, row_count: entry.row_count}

@@ -106,9 +106,11 @@ defmodule Smolquery.Telemetry do
                                           status: integer | nil, result: :ok | :error}
                                           — one HTTP request to the sealed object store
                                           (T-379). bytes is the object size on a PUT, zero
-                                          otherwise; a request includes Req's own retries
+                                          otherwise, and only for a put that got a response. Req
+                                          retries a list or head on a transient failure
+                                          inside one request; a put or delete is one attempt
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
-      [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold}
+      [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold | :failed}
                                           — one per job or shard engine acquired (PL-50)
       [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
                                           — one per query the distributed path answered (PL-49)
@@ -128,35 +130,52 @@ defmodule Smolquery.Telemetry do
   Runs `fun`, then emits `event` with how long it took (T-380).
 
   The shared clock for every emitter whose shape is "time one call, emit one
-  event": `duration_us` is measured here, and `describe.(result)` supplies
+  event": `duration_us` and `start_us` (raw monotonic time, for a trace to
+  order spans by) are measured here, and `describe.(result)` supplies
   the rest — `{measurements, meta}` to merge in, which is how a response
   status or a byte count reaches the event, or `nil` to emit nothing for
   this result. A map in place of `describe` is static meta.
 
-  The event is emitted when `fun` returns, whether it answered `{:ok, _}`
-  or `{:error, _}`; an exception unwinds past the emit, the same rule as
-  `Smolquery.QueryService.Trace.span/3`, which keeps its own clock because
-  it also records where a span started.
+  The event is emitted whatever `fun` did. A return value — `{:ok, _}` or
+  `{:error, _}` alike — reaches `describe` as is. A raise, throw, or exit
+  reaches it as `{:raised, kind, reason}`; the event is emitted, then the
+  exception continues with its stacktrace. A timed call missing from its
+  own counters is the one failure a metrics pipe must not have, and a
+  seal that raises before its PUT is still a failed request to the store.
+  `Smolquery.QueryService.Trace.span/3` is this clock under a phase label.
   """
-  @spec span([atom(), ...], map() | (result -> {map(), map()} | nil), (-> result)) :: result
+  @spec span(
+          [atom(), ...],
+          map() | (result | {:raised, :error | :exit | :throw, term()} -> {map(), map()}),
+          (-> result)
+        ) :: result
         when result: var
   def span(event, meta, fun) when is_map(meta),
-    do: span(event, fn _result -> {%{}, meta} end, fun)
+    do: span(event, fn _outcome -> {%{}, meta} end, fun)
 
   def span(event, describe, fun) when is_function(describe, 1) and is_function(fun, 0) do
     started = System.monotonic_time(:microsecond)
-    result = fun.()
-    duration_us = System.monotonic_time(:microsecond) - started
 
-    case describe.(result) do
-      {measurements, meta} when is_map(measurements) and is_map(meta) ->
-        :telemetry.execute(event, Map.put(measurements, :duration_us, duration_us), meta)
+    try do
+      fun.()
+    catch
+      kind, reason ->
+        emit(event, started, describe.({:raised, kind, reason}))
 
-      nil ->
-        :ok
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    else
+      result ->
+        emit(event, started, describe.(result))
+
+        result
     end
+  end
 
-    result
+  defp emit(event, started, {measurements, meta}) when is_map(measurements) and is_map(meta) do
+    duration_us = System.monotonic_time(:microsecond) - started
+    clock = %{start_us: started, duration_us: duration_us}
+
+    :telemetry.execute(event, Map.merge(measurements, clock), meta)
   end
 
   @events [
@@ -266,18 +285,21 @@ defmodule Smolquery.Telemetry do
         "\"error\" is a request that got no response (T-379).",
     "smolquery_s3_request_microseconds_total" =>
       "Time spent waiting on the sealed object store, by op; divide by requests for " <>
-        "the mean. A request includes Req's transient-error retries (T-379).",
+        "the mean. Req retries a list or head on a transient failure inside one " <>
+        "request; a put or delete is one attempt (T-379).",
     "smolquery_s3_request_bytes_total" =>
-      "Object bytes sent to the sealed object store, by op; only a put carries any (T-379).",
+      "Object bytes a put offered the sealed object store and got a response for, by op; " <>
+        "a put with no response counts none (T-379).",
     "smolquery_s3_request_microseconds_bucket" =>
-      "Object-store requests by duration, by op, cumulative in le; counters, not a histogram (T-379).",
+      "Object-store requests by duration, by op, cumulative in le at 10 ms, 50 ms, 250 ms, " <>
+        "1 s, and 5 s; counters, not a histogram (T-379).",
     "smolquery_query_jobs_total" => "Query jobs reaching a terminal state, by state.",
     "smolquery_lifecycle_broadcasts_total" =>
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean.",
     "smolquery_query_engines_total" =>
-      "Job engines acquired, by source: warm from the pool or started cold (PL-50).",
+      "Job engines acquired, by source: warm from the pool, started cold, or failed to start (PL-50).",
     "smolquery_query_engine_microseconds_total" =>
       "Time spent acquiring job engines; divide by engines for the mean.",
     "smolquery_query_scattered_total" =>
@@ -302,8 +324,6 @@ defmodule Smolquery.Telemetry do
   # this module follows.
   @commit_row_buckets [1_000, 4_000, 16_000, 64_000]
 
-  # Bounds for `smolquery_s3_request_microseconds_bucket`, ascending: 10 ms,
-  # 50 ms, 250 ms, 1 s, 5 s.
   @s3_latency_buckets [10_000, 50_000, 250_000, 1_000_000, 5_000_000]
 
   # The closed set of window-close reasons `TableBuffer` names. An unrecognised
@@ -632,26 +652,29 @@ defmodule Smolquery.Telemetry do
   # and half 10,000, and the seal path's cost is not linear in segment size
   # (T-333).
   defp bucket_commit_rows(measurements, %{result: :ok} = meta) do
-    rows = committed_rows(measurements, meta)
-
-    for bound <- @commit_row_buckets, rows <= bound do
-      bump({"smolquery_buffer_commit_rows_bucket", [le: bound]}, 1)
-    end
-
-    bump({"smolquery_buffer_commit_rows_bucket", [le: "+Inf"]}, 1)
+    bucket(
+      "smolquery_buffer_commit_rows_bucket",
+      [],
+      @commit_row_buckets,
+      committed_rows(measurements, meta)
+    )
   end
 
   defp bucket_commit_rows(_measurements, _meta), do: :ok
 
-  defp bucket_s3_latency(op, duration_us) when is_integer(duration_us) do
-    for bound <- @s3_latency_buckets, duration_us <= bound do
-      bump({"smolquery_s3_request_microseconds_bucket", [op: op, le: bound]}, 1)
-    end
-
-    bump({"smolquery_s3_request_microseconds_bucket", [op: op, le: "+Inf"]}, 1)
+  defp bucket_s3_latency(op, duration_us) do
+    bucket("smolquery_s3_request_microseconds_bucket", [op: op], @s3_latency_buckets, duration_us)
   end
 
-  defp bucket_s3_latency(_op, _duration), do: :ok
+  defp bucket(family, labels, bounds, value) when is_integer(value) do
+    for bound <- bounds, value <= bound do
+      bump({family, labels ++ [le: bound]}, 1)
+    end
+
+    bump({family, labels ++ [le: "+Inf"]}, 1)
+  end
+
+  defp bucket(_family, _labels, _bounds, _value), do: :ok
 
   defp s3_op(%{op: op}) when op in [:put, :head, :list, :delete], do: op
   defp s3_op(_meta), do: :unknown

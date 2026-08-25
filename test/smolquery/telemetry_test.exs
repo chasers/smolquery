@@ -64,17 +64,35 @@ defmodule Smolquery.TelemetryTest do
       assert_receive {:span, %{duration_us: _duration, bytes: 42}, %{result: :ok}}
     end
 
-    test "describe answering nil emits nothing" do
-      assert Telemetry.span(@span_event, fn _result -> nil end, fn -> :error end) == :error
-      refute_receive {:span, _measurements, _meta}
+    test "every emit carries start_us for a trace to order by" do
+      Telemetry.span(@span_event, %{kind: :clock}, fn -> :ok end)
+
+      assert_receive {:span, %{start_us: start, duration_us: _duration}, %{kind: :clock}}
+      assert is_integer(start)
     end
 
-    test "an exception unwinds past the emit" do
-      assert_raise RuntimeError, fn ->
-        Telemetry.span(@span_event, %{kind: :raised}, fn -> raise "boom" end)
+    test "a raise reaches describe as {:raised, kind, reason}, emits, then continues" do
+      describe = fn {:raised, :error, %RuntimeError{message: message}} ->
+        {%{}, %{result: :error, message: message}}
       end
 
-      refute_receive {:span, _measurements, _meta}
+      assert_raise RuntimeError, "boom", fn ->
+        Telemetry.span(@span_event, describe, fn -> raise "boom" end)
+      end
+
+      assert_receive {:span, %{duration_us: _duration}, %{result: :error, message: "boom"}}
+    end
+
+    test "a throw and an exit emit under static meta and continue" do
+      assert catch_throw(Telemetry.span(@span_event, %{kind: :thrown}, fn -> throw(:ball) end)) ==
+               :ball
+
+      assert_receive {:span, _measurements, %{kind: :thrown}}
+
+      assert catch_exit(Telemetry.span(@span_event, %{kind: :exited}, fn -> exit(:bye) end)) ==
+               :bye
+
+      assert_receive {:span, _measurements, %{kind: :exited}}
     end
   end
 
@@ -82,13 +100,17 @@ defmodule Smolquery.TelemetryTest do
     put = ~s({op="put"})
     counted = ~s({op="put",class="2xx"})
     fast = ~s({op="put",le="10000"})
+    mid = ~s({op="put",le="50000"})
     inf = ~s({op="put",le="+Inf"})
+    failed_delete = ~s({op="delete",class="error"})
 
     before_requests = value("smolquery_s3_requests_total", counted)
     before_us = value("smolquery_s3_request_microseconds_total", put)
     before_bytes = value("smolquery_s3_request_bytes_total", put)
     before_fast = value("smolquery_s3_request_microseconds_bucket", fast)
+    before_mid = value("smolquery_s3_request_microseconds_bucket", mid)
     before_inf = value("smolquery_s3_request_microseconds_bucket", inf)
+    before_failed = value("smolquery_s3_requests_total", failed_delete)
 
     :telemetry.execute(
       [:smolquery, :s3, :request],
@@ -100,6 +122,7 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_s3_request_microseconds_total", put) == before_us + 30_000
     assert value("smolquery_s3_request_bytes_total", put) == before_bytes + 4_096
     assert value("smolquery_s3_request_microseconds_bucket", fast) == before_fast
+    assert value("smolquery_s3_request_microseconds_bucket", mid) == before_mid + 1
     assert value("smolquery_s3_request_microseconds_bucket", inf) == before_inf + 1
 
     :telemetry.execute(
@@ -108,7 +131,7 @@ defmodule Smolquery.TelemetryTest do
       %{op: :delete, status: nil, result: :error}
     )
 
-    assert value("smolquery_s3_requests_total", ~s({op="delete",class="error"})) >= 1
+    assert value("smolquery_s3_requests_total", failed_delete) == before_failed + 1
   end
 
   test "tracks whether the manifest index is in steady state or growing (T-320)" do

@@ -29,6 +29,8 @@ defmodule Smolquery.QueryService.Trace do
   that raises.
   """
 
+  alias Smolquery.Telemetry
+
   @event [:smolquery, :query, :span]
 
   @typedoc """
@@ -50,25 +52,14 @@ defmodule Smolquery.QueryService.Trace do
   @doc """
   Runs `fun` as the phase `name`, emitting its span when it returns.
 
-  The span is emitted whether `fun` succeeded or not in the tagged-tuple
-  sense — a phase that answered `{:error, _}` still took its time — but not
-  when it raises: an exception unwinds past the emit, and the job fails with
-  it either way.
+  `Smolquery.Telemetry.span/3` is the clock (T-380): the span is emitted
+  whether `fun` answered `{:ok, _}` or `{:error, _}`, and when it raises —
+  the phase still took its time, and a trace that ends at the failing phase
+  says where the job died — before the exception continues.
   """
   @spec span(atom(), map(), (-> result)) :: result when result: var
-  def span(name, meta \\ %{}, fun) do
-    started = System.monotonic_time(:microsecond)
-    result = fun.()
-    finished = System.monotonic_time(:microsecond)
-
-    :telemetry.execute(
-      @event,
-      %{start_us: started, duration_us: finished - started},
-      Map.put(meta, :phase, name)
-    )
-
-    result
-  end
+  def span(name, meta \\ %{}, fun),
+    do: Telemetry.span(@event, Map.put(meta, :phase, name), fun)
 
   @doc """
   Attaches a collector for the job whose runner is `owner`.
