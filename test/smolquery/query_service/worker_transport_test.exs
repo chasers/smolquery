@@ -7,7 +7,7 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
   @request %{statements: [], partial_sql: "SELECT 1", allowed_paths: []}
 
   describe "call/5" do
-    test "runs a local shard through erpc against this node's runtime" do
+    test "runs a local shard as a direct call against this node's runtime" do
       assert WorkerTransport.call(node(), :never_started, @request, "job", 5_000) ==
                {:error, :query_service_unavailable}
     end

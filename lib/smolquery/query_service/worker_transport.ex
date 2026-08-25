@@ -2,10 +2,12 @@ defmodule Smolquery.QueryService.WorkerTransport do
   @moduledoc """
   How a scattered shard reaches its worker node (T-364).
 
-  This node runs its own shards through `:erpc.call/4`, which spawns the
-  worker in-process and kills it if this caller dies. A peer is reached over
-  `:gen_rpc` on its own sockets, the way
-  `Smolquery.BufferService.Transport.GenRpc` carries buffer traffic: a
+  This node runs its own shards as a direct call, the way
+  `Smolquery.BufferService.Transport.Local` does for an owned table: no
+  socket, no serialization, and an exit mapped to the same `{:badrpc, _}`
+  shapes a remote failure has. A peer is reached over `:gen_rpc` on its own
+  sockets, the way `Smolquery.BufferService.Transport.GenRpc` carries buffer
+  traffic: a
   partial comes back as one parquet binary, and on the distribution
   connection that binary would sit in front of heartbeats and every other
   cluster call while it transfers.
@@ -24,11 +26,12 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   ## What gen_rpc does not do
 
-  gen_rpc does not kill the remote worker when this caller dies or gives up.
-  The request therefore carries the job's deadline, and
-  `Smolquery.QueryService.PartialWorker` bounds its own query with it, so an
-  abandoned shard costs the peer at most one deadline. The rpc itself waits
-  that deadline plus a margin, the same rule the buffer transport follows.
+  Neither path kills a worker when this caller gives up: gen_rpc cannot, and
+  a direct call has no deadline of its own. The request therefore carries
+  the job's deadline, and `Smolquery.QueryService.PartialWorker` bounds its
+  own query with it, so an abandoned shard costs at most one deadline. The
+  rpc itself waits that deadline plus a margin, the same rule the buffer
+  transport follows.
 
   ## Errors
 
@@ -49,10 +52,11 @@ defmodule Smolquery.QueryService.WorkerTransport do
           {:ok, %{parquet: binary(), rows: non_neg_integer()}} | {:error, term()}
   def call(peer, name, request, job_id, timeout_ms)
 
-  def call(peer, name, request, _job_id, timeout_ms) when peer == node() do
-    :erpc.call(peer, PartialWorker, :run, [name, request], timeout_ms)
+  def call(peer, name, request, _job_id, _timeout_ms) when peer == node() do
+    PartialWorker.run(name, request)
   catch
-    kind, reason -> {:error, {:worker_unreachable, peer, {kind, reason}}}
+    :exit, {:timeout, _call} -> {:error, {:worker_unreachable, peer, {:badrpc, :timeout}}}
+    :exit, reason -> {:error, {:worker_unreachable, peer, {:badrpc, {:EXIT, reason}}}}
   end
 
   def call(peer, name, request, job_id, timeout_ms) do

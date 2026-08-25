@@ -8,8 +8,8 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   assertions too, and prove nothing.
 
   Workers here are `local_workers` instances dispatched through
-  `Smolquery.QueryService.WorkerTransport` to this node, which takes the
-  `:erpc` path; the gen_rpc path to a peer is `worker_transport_peer_test`.
+  `Smolquery.QueryService.WorkerTransport` to this node, which is a direct
+  call; the gen_rpc path to a peer is `worker_transport_peer_test`.
   Genuine cross-host scatter is the kind cluster's to prove, like hot-tier
   fan-out before it (T-77).
   """

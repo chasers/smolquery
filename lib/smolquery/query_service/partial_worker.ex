@@ -2,13 +2,12 @@ defmodule Smolquery.QueryService.PartialWorker do
   @moduledoc """
   Runs one shard of a scattered query on whichever node it lands on (PL-49).
 
-  `Smolquery.QueryService.WorkerTransport` calls `run/2`: through
-  `:erpc.call/4` on the coordinator's own node, where `:erpc` kills the
-  spawned worker when its caller dies, and over gen_rpc from a peer, where
-  nothing does (T-364). So the request carries the job's deadline, and the
-  partial query runs under it: a shard whose coordinator gave up stops at
-  that deadline, and the `after` below kills its engine. The request also
-  carries everything shard-specific: the view statements that define the planned table name
+  `Smolquery.QueryService.WorkerTransport` calls `run/2`: directly on the
+  coordinator's own node, and over gen_rpc from a peer (T-364). Neither
+  path stops the worker when its caller gives up, so the request carries
+  the job's deadline, and the partial query runs under it: a shard whose
+  coordinator gave up stops at that deadline, and the `after` below kills
+  its engine. The request also carries everything shard-specific: the view statements that define the planned table name
   over this shard's files, the partial SQL that reads it, and the hot-tier
   URLs the shard may fetch. Everything node-local comes from this node's own
   published `Smolquery.QueryService.Runtime`: the engine extensions and the

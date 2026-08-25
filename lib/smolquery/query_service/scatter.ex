@@ -26,7 +26,7 @@ defmodule Smolquery.QueryService.Scatter do
      workers are the query service's own `Smolquery.Cluster.PgGroup`
      members — the nodes whose supervisors joined the group, no probing;
      without, `local_workers` instances on this node. Dispatch goes through
-     `Smolquery.QueryService.WorkerTransport`: `:erpc` for this node,
+     `Smolquery.QueryService.WorkerTransport`: a direct call for this node,
      gen_rpc on its own sockets for a peer (T-364), each call bounded by
      the job's own deadline.
   4. Each worker's parquet bytes land in the job's partials directory —
@@ -47,8 +47,8 @@ defmodule Smolquery.QueryService.Scatter do
   Cleanup is layered: the `after` here removes the partials directory on
   every path it can see, and `Runner`'s settle removes it again — a
   cancelled or timed-out job brutal-kills this task, which skips `after`
-  blocks. `:erpc` kills a local in-flight worker when its caller dies; a
-  remote one bounds itself with the deadline the request carries.
+  blocks. An in-flight worker, local or remote, bounds itself with the
+  deadline the request carries.
   """
 
   require Logger
