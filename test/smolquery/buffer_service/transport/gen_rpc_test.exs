@@ -110,12 +110,14 @@ defmodule Smolquery.BufferService.Transport.GenRpcTest do
     assert node in :gen_rpc.nodes()
   end
 
-  test "reports an unreachable owner rather than raising", %{name: name} do
+  test "refuses an owner outside the cluster without a connect", %{name: name} do
     Application.put_env(:smolquery, Smolquery.BufferService, ring: [:"gone@127.0.0.1"])
     Routing.forget(name)
 
-    assert {:error, {kind, _reason}} = Client.write_batch(name, @table, batch(1..1))
-    assert kind in [:badrpc, :badtcp]
+    started = System.monotonic_time(:millisecond)
+
+    assert Client.write_batch(name, @table, batch(1..1)) == {:error, {:badrpc, :nodedown}}
+    assert System.monotonic_time(:millisecond) - started < 1_000
   end
 
   defp configure_internal_secret(node) do

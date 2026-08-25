@@ -474,6 +474,11 @@ if gen_rpc_port = System.get_env("GEN_RPC_PORT") do
   config :gen_rpc, tcp_server_port: port, tcp_client_port: port
 end
 
+if channels = System.get_env("GEN_RPC_BULK_CHANNELS") do
+  config :smolquery, Smolquery.BufferService.Transport.GenRpc,
+    bulk_channels: Smolquery.RuntimeConfig.positive_integer!("GEN_RPC_BULK_CHANNELS", channels)
+end
+
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
   db = Smolquery.DatabaseUrl.parse!(catalog_database_url)
 

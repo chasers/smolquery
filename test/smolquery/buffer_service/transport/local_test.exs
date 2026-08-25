@@ -30,7 +30,13 @@ defmodule Smolquery.BufferService.Transport.LocalTest do
 
       on_exit(fn -> Runtime.delete(name) end)
 
-      assert Transport.Local.invoke(node(), :bulk, :write_batch, [name, @table, batch()], 1) ==
+      assert Transport.Local.invoke(
+               node(),
+               {:bulk, @table},
+               :write_batch,
+               [name, @table, batch()],
+               1
+             ) ==
                {:error, {:badrpc, :timeout}}
     end
   end

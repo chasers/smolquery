@@ -324,9 +324,16 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end
   end
 
-  defp ship(targets, name, function, args) do
+  defp ship(targets, name, function, [table_ref | _rest] = args) do
     Enum.reduce_while(targets, :ok, fn {transport, node, instance}, :ok ->
-      case Transport.invoke(transport, node, :bulk, function, [instance | args], timeout(name)) do
+      case Transport.invoke(
+             transport,
+             node,
+             {:bulk, table_ref},
+             function,
+             [instance | args],
+             timeout(name)
+           ) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:replication_failed, node, reason}}}
         other -> {:halt, {:error, {:replication_failed, node, other}}}
@@ -349,7 +356,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
 
   defp ship_best_effort([], _name, _args), do: :ok
 
-  defp ship_best_effort(targets, name, args) do
+  defp ship_best_effort(targets, name, [table_ref | _rest] = args) do
     timeout = timeout(name)
 
     {:ok, _pid} =
@@ -359,7 +366,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
             Transport.invoke(
               transport,
               node,
-              :bulk,
+              {:bulk, table_ref},
               :apply_replica_mutation,
               [instance | args],
               timeout
