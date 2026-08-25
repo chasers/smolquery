@@ -68,7 +68,7 @@ defmodule Smolquery.QueryService.JobEngine do
   end
 
   defp acquired({:ok, _engine, source}), do: {%{}, %{source: source}}
-  defp acquired({:error, _reason}), do: nil
+  defp acquired(_failed_or_raised), do: {%{}, %{source: :failed}}
 
   @doc """
   Starts a database and a connection bootstrapped with `opts`

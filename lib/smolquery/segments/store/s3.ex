@@ -89,9 +89,12 @@ defmodule Smolquery.Segments.Store.S3 do
   Every HTTP request this store makes emits `[:smolquery, :s3, :request]`
   with `%{duration_us, bytes}` and `%{op, status, result}` (T-379). The op is
   `:put`, `:head`, `:list`, or `:delete`; `bytes` is the object size on a
-  put and zero otherwise. One event covers one `Req` call, retries included,
-  so it is the time the caller actually waited. DuckDB's own reads through
-  `httpfs` never pass through here and are not counted.
+  put that got a response, zero otherwise. One event covers one `Req` call:
+  Req retries a list or head on a transient failure inside it, a put or
+  delete is one attempt, and a raise inside the call — the credential chain
+  holding nothing, say — still emits with `status: nil` before it
+  propagates. DuckDB's own reads through `httpfs` never pass through here
+  and are not counted.
   """
 
   @behaviour Smolquery.Segments.Store
@@ -435,8 +438,13 @@ defmodule Smolquery.Segments.Store.S3 do
     Telemetry.span([:smolquery, :s3, :request], &describe(&1, op, bytes), request)
   end
 
-  defp describe(response, op, bytes),
-    do: {%{bytes: bytes}, %{op: op, status: status(response), result: result(response)}}
+  defp describe(response, op, bytes) do
+    {%{bytes: offered(response, bytes)},
+     %{op: op, status: status(response), result: result(response)}}
+  end
+
+  defp offered({:ok, _response}, bytes), do: bytes
+  defp offered(_no_response, _bytes), do: 0
 
   defp status({:ok, %{status: status}}), do: status
   defp status(_transport_failure), do: nil
