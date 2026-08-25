@@ -49,6 +49,7 @@ defmodule Smolquery.BufferService.Client do
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.BufferService.Transport
   alias Smolquery.Segments.Store
+  alias Smolquery.Telemetry
 
   @type batch :: Endpoint.batch()
 
@@ -110,14 +111,12 @@ defmodule Smolquery.BufferService.Client do
     # Timed apart from the call because on a partitioned table most batches are
     # remote, and serializing a multi-megabyte frame to Arrow IPC before every
     # one of them is a per-request cost nothing had ever priced (T-182).
-    started = System.monotonic_time(:microsecond)
-    batch = wire_batch(transport, batch)
-
-    :telemetry.execute(
-      [:smolquery, :buffer, :wire],
-      %{duration_us: System.monotonic_time(:microsecond) - started},
-      %{transport: if(transport == Transport.Local, do: :local, else: :remote)}
-    )
+    batch =
+      Telemetry.span(
+        [:smolquery, :buffer, :wire],
+        %{transport: if(transport == Transport.Local, do: :local, else: :remote)},
+        fn -> wire_batch(transport, batch) end
+      )
 
     Transport.invoke(
       transport,

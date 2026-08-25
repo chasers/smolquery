@@ -3,7 +3,8 @@ defmodule Smolquery.Telemetry do
   The node's metrics: `:telemetry` events in, Prometheus text out (PL-10 D8).
 
   Every service emits plain `:telemetry` events at its seams and knows nothing
-  about metrics; this module attaches to those events, keeps counters in a
+  about metrics — `span/3` below is the one shared clock for the common
+  "time a call, emit an event" shape; this module attaches to those events, keeps counters in a
   public ETS table, and renders them for `GET /metrics`. Events are the seam
   on purpose — a StatsD or OpenTelemetry exporter can attach to the same
   events later without touching a call site.
@@ -122,6 +123,41 @@ defmodule Smolquery.Telemetry do
 
   @table __MODULE__
   @handler_id "smolquery-metrics"
+
+  @doc """
+  Runs `fun`, then emits `event` with how long it took (T-380).
+
+  The shared clock for every emitter whose shape is "time one call, emit one
+  event": `duration_us` is measured here, and `describe.(result)` supplies
+  the rest — `{measurements, meta}` to merge in, which is how a response
+  status or a byte count reaches the event, or `nil` to emit nothing for
+  this result. A map in place of `describe` is static meta.
+
+  The event is emitted when `fun` returns, whether it answered `{:ok, _}`
+  or `{:error, _}`; an exception unwinds past the emit, the same rule as
+  `Smolquery.QueryService.Trace.span/3`, which keeps its own clock because
+  it also records where a span started.
+  """
+  @spec span([atom(), ...], map() | (result -> {map(), map()} | nil), (-> result)) :: result
+        when result: var
+  def span(event, meta, fun) when is_map(meta),
+    do: span(event, fn _result -> {%{}, meta} end, fun)
+
+  def span(event, describe, fun) when is_function(describe, 1) and is_function(fun, 0) do
+    started = System.monotonic_time(:microsecond)
+    result = fun.()
+    duration_us = System.monotonic_time(:microsecond) - started
+
+    case describe.(result) do
+      {measurements, meta} when is_map(measurements) and is_map(meta) ->
+        :telemetry.execute(event, Map.put(measurements, :duration_us, duration_us), meta)
+
+      nil ->
+        :ok
+    end
+
+    result
+  end
 
   @events [
     [:smolquery, :api, :stop],

@@ -31,6 +31,7 @@ defmodule Smolquery.QueryService.JobEngine do
   alias Smolquery.EngineSecrets
   alias Smolquery.QueryService.EnginePool
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.Telemetry
 
   @probe_timeout_ms 5_000
 
@@ -58,24 +59,16 @@ defmodule Smolquery.QueryService.JobEngine do
   """
   @spec acquire(Runtime.t()) :: {:ok, t(), source()} | {:error, term()}
   def acquire(%Runtime{} = runtime) do
-    started = System.monotonic_time(:microsecond)
-
-    result =
+    Telemetry.span([:smolquery, :query, :engine], &acquired/1, fn ->
       case warm(runtime) do
         {:ok, engine} -> {:ok, engine, :warm}
         :cold -> cold(runtime)
       end
-
-    with {:ok, _engine, source} <- result do
-      :telemetry.execute(
-        [:smolquery, :query, :engine],
-        %{duration_us: System.monotonic_time(:microsecond) - started},
-        %{source: source}
-      )
-    end
-
-    result
+    end)
   end
+
+  defp acquired({:ok, _engine, source}), do: {%{}, %{source: source}}
+  defp acquired({:error, _reason}), do: nil
 
   @doc """
   Starts a database and a connection bootstrapped with `opts`

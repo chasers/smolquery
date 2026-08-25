@@ -3,11 +3,13 @@ defmodule Smolquery.TelemetryTest do
   The aggregator, driven by events alone — the way every service reaches it.
 
   Assertions are deltas, not absolutes: the counter table is one per node on
-  purpose, so any concurrently running test that exercises a real service
-  moves the same counters.
+  purpose. The module runs sync so those deltas hold — ExUnit runs every
+  async module first and sync modules one at a time, so no other test's
+  commit or manifest change lands between a `before` read and its assert
+  (T-224, T-305, and the T-320 test on CI run 32856347788).
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Smolquery.Telemetry
 
@@ -28,6 +30,51 @@ defmodule Smolquery.TelemetryTest do
     case Regex.run(pattern, Telemetry.render()) do
       [_line, count] -> String.to_integer(count)
       nil -> 0
+    end
+  end
+
+  describe "span/3 (T-380)" do
+    @span_event [:smolquery, :test, :span]
+
+    setup do
+      handler = "span-test-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        @span_event,
+        fn _event, measurements, meta, _config -> send(test, {:span, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "static meta: emits duration_us and returns the result" do
+      assert Telemetry.span(@span_event, %{kind: :static}, fn -> {:ok, 1} end) == {:ok, 1}
+
+      assert_receive {:span, %{duration_us: duration}, %{kind: :static}}
+      assert is_integer(duration) and duration >= 0
+    end
+
+    test "describe: merges measurements and meta derived from the result" do
+      describe = fn {:ok, bytes} -> {%{bytes: bytes}, %{result: :ok}} end
+
+      assert Telemetry.span(@span_event, describe, fn -> {:ok, 42} end) == {:ok, 42}
+      assert_receive {:span, %{duration_us: _duration, bytes: 42}, %{result: :ok}}
+    end
+
+    test "describe answering nil emits nothing" do
+      assert Telemetry.span(@span_event, fn _result -> nil end, fn -> :error end) == :error
+      refute_receive {:span, _measurements, _meta}
+    end
+
+    test "an exception unwinds past the emit" do
+      assert_raise RuntimeError, fn ->
+        Telemetry.span(@span_event, %{kind: :raised}, fn -> raise "boom" end)
+      end
+
+      refute_receive {:span, _measurements, _meta}
     end
   end
 
