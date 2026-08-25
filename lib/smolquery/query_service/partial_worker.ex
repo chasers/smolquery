@@ -2,11 +2,12 @@ defmodule Smolquery.QueryService.PartialWorker do
   @moduledoc """
   Runs one shard of a scattered query on whichever node it lands on (PL-49).
 
-  `Smolquery.QueryService.Scatter` calls `run/2` through `:erpc.call/4` —
-  the local node included, so one code path serves both, and `:erpc` kills
-  the spawned worker when its caller dies, so a cancelled or timed-out job
-  takes its in-flight shards down with it. The request carries everything
-  shard-specific: the view statements that define the planned table name
+  `Smolquery.QueryService.WorkerTransport` calls `run/2`: directly on the
+  coordinator's own node, and over gen_rpc from a peer (T-364). Neither
+  path stops the worker when its caller gives up, so the request carries
+  the job's deadline, and the partial query runs under it: a shard whose
+  coordinator gave up stops at that deadline, and the `after` below kills
+  its engine. The request also carries everything shard-specific: the view statements that define the planned table name
   over this shard's files, the partial SQL that reads it, and the hot-tier
   URLs the shard may fetch. Everything node-local comes from this node's own
   published `Smolquery.QueryService.Runtime`: the engine extensions and the
@@ -40,9 +41,10 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.Runtime
 
   @type request :: %{
-          statements: [String.t()],
-          partial_sql: String.t(),
-          allowed_paths: [String.t()]
+          required(:statements) => [String.t()],
+          required(:partial_sql) => String.t(),
+          required(:allowed_paths) => [String.t()],
+          optional(:timeout_ms) => timeout()
         }
 
   @doc """
@@ -78,7 +80,12 @@ defmodule Smolquery.QueryService.PartialWorker do
       {:ok, engine, _source} ->
         try do
           with :ok <- apply_statements(engine.connection, statements) do
-            copy_out(engine.connection, request.partial_sql, path)
+            copy_out(
+              engine.connection,
+              request.partial_sql,
+              path,
+              Map.get(request, :timeout_ms, :infinity)
+            )
           end
         after
           JobEngine.stop(engine)
@@ -127,10 +134,10 @@ defmodule Smolquery.QueryService.PartialWorker do
     "[" <> Enum.map_join(values, ", ", &Identifier.sql_string/1) <> "]"
   end
 
-  defp copy_out(connection, partial_sql, path) do
+  defp copy_out(connection, partial_sql, path, timeout_ms) do
     statement = "COPY (#{partial_sql}) TO #{Identifier.sql_string(path)} (FORMAT parquet)"
 
-    with {:ok, result} <- Connection.query(connection, statement, [], :infinity) do
+    with {:ok, result} <- Connection.query(connection, statement, [], timeout_ms) do
       {:ok, %{parquet: File.read!(path), rows: copied_rows(result)}}
     end
   end

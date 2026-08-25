@@ -11,8 +11,8 @@ defmodule Smolquery.QueryService.JobEngine do
   choreography in one place is what stops the two from drifting (PL-49
   review): a half-started engine is killed rather than leaked, and `stop/1`
   unlinks before it kills, so a non-trapping caller — the worker runs inside
-  an `:erpc`-spawned process — never races its own teardown's exit signal
-  against delivering its result.
+  a scatter task or a gen_rpc acceptor — never races its own teardown's
+  exit signal against delivering its result.
 
   ## Warm engines (PL-50)
 

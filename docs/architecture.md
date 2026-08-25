@@ -319,9 +319,10 @@ config :smolquery, Smolquery.BufferService.Transport.GenRpc, bulk_channels: 4
   heaps from pinning those binaries (T-373).
 - **The allowlist is not optional.** gen_rpc's default `rpc_module_control` is
   `:disabled`. That default lets any peer with the cookie run arbitrary MFA
-  (module, function, arguments) calls on a second port. The config names
-  `Endpoint`, the single module every transport dispatches to. That closes the
-  exposure. Per-node TLS (Transport Layer Security) is the other half
+  (module, function, arguments) calls on a second port. The config names the
+  two remote entry points: `Endpoint`, which every buffer transport
+  dispatches to, and `QueryService.PartialWorker`, which runs a scattered
+  shard (T-364). That closes the exposure. Per-node TLS (Transport Layer Security) is the other half
   (`GEN_RPC_TLS`).
 - **Ownership routes, it does not refuse.** A call for a table this node does
   not own is forwarded. `Routing` answers ownership from configuration, even

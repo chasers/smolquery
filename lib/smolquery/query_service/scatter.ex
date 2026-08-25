@@ -25,9 +25,10 @@ defmodule Smolquery.QueryService.Scatter do
   3. Units go round-robin across the workers. With clustering on, the
      workers are the query service's own `Smolquery.Cluster.PgGroup`
      members — the nodes whose supervisors joined the group, no probing;
-     without, `local_workers` instances on this node. Dispatch is
-     `:erpc.call/4` either way, so the local path and the remote path are
-     the same code, each call bounded by the job's own deadline.
+     without, `local_workers` instances on this node. Dispatch goes through
+     `Smolquery.QueryService.WorkerTransport`: a direct call for this node,
+     gen_rpc on its own sockets for a peer (T-364), each call bounded by
+     the job's own deadline.
   4. Each worker's parquet bytes land in the job's partials directory —
      `Runner` put it inside `allowed_directories` before lockdown — and the
      final query reads them back with `read_parquet` on the job's own
@@ -38,15 +39,15 @@ defmodule Smolquery.QueryService.Scatter do
   Consistency holds — the sealed list is pinned to the plan's snapshot and
   the hot list is the plan's own — but sealed-tier min/max pruning is lost:
   DuckLake prunes only queries it plans itself. Shards balance by file
-  count, not bytes. Partials travel as whole parquet binaries over
-  `:erpc`; production wants Arrow over the segment HTTP routes. Remote
-  workers must reach the same sealed store, which in practice means S3 or
-  a shared disk.
+  count, not bytes. Partials travel as whole parquet binaries over gen_rpc,
+  off the distribution channel (T-364). Remote workers must reach the same
+  sealed store, which in practice means S3 or a shared disk.
 
   Cleanup is layered: the `after` here removes the partials directory on
   every path it can see, and `Runner`'s settle removes it again — a
   cancelled or timed-out job brutal-kills this task, which skips `after`
-  blocks, and `:erpc` kills the in-flight workers when their caller dies.
+  blocks. An in-flight worker, local or remote, bounds itself with the
+  deadline the request carries.
   """
 
   require Logger
@@ -56,10 +57,10 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.Decomposer
-  alias Smolquery.QueryService.PartialWorker
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
+  alias Smolquery.QueryService.WorkerTransport
 
   @default_spill_root ".tmp"
 
@@ -194,7 +195,7 @@ defmodule Smolquery.QueryService.Scatter do
 
     try do
       with {:ok, paths} <-
-             gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms),
+             gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
         measurements = %{
           shards: length(shards),
@@ -222,7 +223,7 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, timeout_ms) do
+  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms) do
     shards
     |> Enum.with_index()
     |> Task.async_stream(
@@ -230,10 +231,11 @@ defmodule Smolquery.QueryService.Scatter do
         request = %{
           statements: Views.table_view(ref, schema, Views.parquet_select(files)),
           partial_sql: decomposition.partial_sql,
-          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http"))
+          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
+          timeout_ms: timeout_ms
         }
 
-        {index, dispatch(peer, runtime, request, timeout_ms)}
+        {index, WorkerTransport.call(peer, runtime.name, request, job_id, timeout_ms)}
       end,
       max_concurrency: length(shards),
       ordered: true,
@@ -260,12 +262,6 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp bounded(final, :infinity), do: final
   defp bounded(final, max_rows), do: "SELECT * FROM (#{final}) LIMIT #{max_rows + 1}"
-
-  defp dispatch(peer, runtime, request, timeout_ms) do
-    :erpc.call(peer, PartialWorker, :run, [runtime.name, request], timeout_ms)
-  catch
-    kind, reason -> {:error, {:worker_unreachable, peer, {kind, reason}}}
-  end
 
   defp merge(runtime, connection, decomposition, paths) do
     final = Decomposer.final_sql(decomposition, Views.read_parquet(paths))

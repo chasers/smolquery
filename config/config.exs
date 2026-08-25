@@ -38,10 +38,11 @@ config :gen_rpc,
   tcp_server_port: 5369,
   tcp_client_port: 5369,
   rpc_module_control: :whitelist,
-  rpc_module_list: [Smolquery.BufferService.Endpoint],
+  rpc_module_list: [Smolquery.BufferService.Endpoint, Smolquery.QueryService.PartialWorker],
   extra_process_flags: [fullsweep_after: 20]
 
 config :smolquery, Smolquery.BufferService.Transport.GenRpc, bulk_channels: 4
+config :smolquery, Smolquery.QueryService.WorkerTransport, channels: 4
 
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
