@@ -31,6 +31,39 @@ defmodule Smolquery.TelemetryTest do
     end
   end
 
+  test "prices object-store requests by op, class, bytes, and latency bucket (T-379)" do
+    put = ~s({op="put"})
+    counted = ~s({op="put",class="2xx"})
+    fast = ~s({op="put",le="10000"})
+    inf = ~s({op="put",le="+Inf"})
+
+    before_requests = value("smolquery_s3_requests_total", counted)
+    before_us = value("smolquery_s3_request_microseconds_total", put)
+    before_bytes = value("smolquery_s3_request_bytes_total", put)
+    before_fast = value("smolquery_s3_request_microseconds_bucket", fast)
+    before_inf = value("smolquery_s3_request_microseconds_bucket", inf)
+
+    :telemetry.execute(
+      [:smolquery, :s3, :request],
+      %{duration_us: 30_000, bytes: 4_096},
+      %{op: :put, status: 200, result: :ok}
+    )
+
+    assert value("smolquery_s3_requests_total", counted) == before_requests + 1
+    assert value("smolquery_s3_request_microseconds_total", put) == before_us + 30_000
+    assert value("smolquery_s3_request_bytes_total", put) == before_bytes + 4_096
+    assert value("smolquery_s3_request_microseconds_bucket", fast) == before_fast
+    assert value("smolquery_s3_request_microseconds_bucket", inf) == before_inf + 1
+
+    :telemetry.execute(
+      [:smolquery, :s3, :request],
+      %{duration_us: 1_000, bytes: 0},
+      %{op: :delete, status: nil, result: :error}
+    )
+
+    assert value("smolquery_s3_requests_total", ~s({op="delete",class="error"})) >= 1
+  end
+
   test "tracks whether the manifest index is in steady state or growing (T-320)" do
     added = ~s({change="added"})
     reaped = ~s({change="reaped"})
