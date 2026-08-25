@@ -83,6 +83,15 @@ defmodule Smolquery.Segments.Store.S3 do
         region: "us-east-2",
         staging_dir: "/var/lib/smolquery/sealed-staging"
       )
+
+  ## Telemetry
+
+  Every HTTP request this store makes emits `[:smolquery, :s3, :request]`
+  with `%{duration_us, bytes}` and `%{op, status, result}` (T-379). The op is
+  `:put`, `:head`, `:list`, or `:delete`; `bytes` is the object size on a
+  put and zero otherwise. One event covers one `Req` call, retries included,
+  so it is the time the caller actually waited. DuckDB's own reads through
+  `httpfs` never pass through here and are not counted.
   """
 
   @behaviour Smolquery.Segments.Store
@@ -228,9 +237,11 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   defp list_pages(%__MODULE__{bucket: bucket} = config, prefix, continuation, acc) do
-    case Req.get(request(config),
-           url: "s3://#{bucket}?#{list_query(config, prefix, continuation)}"
-         ) do
+    case timed(:list, 0, fn ->
+           Req.get(request(config),
+             url: "s3://#{bucket}?#{list_query(config, prefix, continuation)}"
+           )
+         end) do
       {:ok, %{status: 200, body: body}} ->
         pages = [keys_from_listing(body) | acc]
 
@@ -257,7 +268,7 @@ defmodule Smolquery.Segments.Store.S3 do
 
   @impl Store
   def delete(%__MODULE__{bucket: bucket} = config, key) do
-    case Req.delete(request(config), url: "s3://#{bucket}/#{key}") do
+    case timed(:delete, 0, fn -> Req.delete(request(config), url: "s3://#{bucket}/#{key}") end) do
       {:ok, %{status: status}} when status in [200, 204, 404] -> :ok
       {:ok, %{status: status, body: body}} -> {:error, {:delete_failed, key, {status, body}}}
       {:error, reason} -> {:error, {:delete_failed, key, reason}}
@@ -351,14 +362,16 @@ defmodule Smolquery.Segments.Store.S3 do
   defp url_style(%__MODULE__{url_style: style}), do: style
 
   defp upload(config, key, staged, size, conflict_retries \\ 1) do
-    case Req.put(request(config),
-           url: "s3://#{config.bucket}/#{key}",
-           headers: [
-             {"content-length", Integer.to_string(size)},
-             {"if-none-match", "*"}
-           ],
-           body: File.stream!(staged, @chunk_bytes)
-         ) do
+    case timed(:put, size, fn ->
+           Req.put(request(config),
+             url: "s3://#{config.bucket}/#{key}",
+             headers: [
+               {"content-length", Integer.to_string(size)},
+               {"if-none-match", "*"}
+             ],
+             body: File.stream!(staged, @chunk_bytes)
+           )
+         end) do
       {:ok, %{status: status}} when status in 200..299 -> {:ok, size}
       {:ok, %{status: 412}} -> {:ok, committed_size(config, key, size)}
       {:ok, %{status: 409}} when conflict_retries > 0 -> upload(config, key, staged, size, 0)
@@ -368,7 +381,7 @@ defmodule Smolquery.Segments.Store.S3 do
   end
 
   defp committed_size(config, key, fallback) do
-    case Req.head(request(config), url: "s3://#{config.bucket}/#{key}") do
+    case timed(:head, 0, fn -> Req.head(request(config), url: "s3://#{config.bucket}/#{key}") end) do
       {:ok, %{status: 200, headers: headers}} -> content_length(headers, fallback)
       _head_unavailable -> fallback
     end
@@ -416,6 +429,25 @@ defmodule Smolquery.Segments.Store.S3 do
 
     Path.join([dir, @staging, name])
   end
+
+  defp timed(op, bytes, request) do
+    started = System.monotonic_time(:microsecond)
+    response = request.()
+
+    :telemetry.execute(
+      [:smolquery, :s3, :request],
+      %{duration_us: System.monotonic_time(:microsecond) - started, bytes: bytes},
+      %{op: op, status: status(response), result: result(response)}
+    )
+
+    response
+  end
+
+  defp status({:ok, %{status: status}}), do: status
+  defp status(_transport_failure), do: nil
+
+  defp result({:ok, _response}), do: :ok
+  defp result(_transport_failure), do: :error
 
   defp request(%__MODULE__{} = config) do
     Req.new()

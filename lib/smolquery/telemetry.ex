@@ -22,7 +22,8 @@ defmodule Smolquery.Telemetry do
   is still a plain counter, with no `_sum`/`_count` pair and no
   `# TYPE histogram`. A mean commit size cannot distinguish a steady 5,292 rows
   from half at 800 and half at 10,000, and the seal path's cost is not linear
-  in segment size, so the distribution is the measurement (T-333). Labels are closed sets (a result atom, a status class), never a
+  in segment size, so the distribution is the measurement (T-333). A mean
+  request time to the object store hides its tail the same way (T-379). Labels are closed sets (a result atom, a status class), never a
   table or job id, so cardinality is bounded by this file rather than by
   traffic.
 
@@ -99,6 +100,12 @@ defmodule Smolquery.Telemetry do
   broadcasts are counted back here per node, by kind — a closed set.
       [:smolquery, :retention, :sweep]    %{dropped, expired_snapshots}
       [:smolquery, :gc, :sweep]           %{swept, staged}
+      [:smolquery, :s3, :request]         %{duration_us, bytes},
+                                          meta %{op: :put | :head | :list | :delete,
+                                          status: integer | nil, result: :ok | :error}
+                                          — one HTTP request to the sealed object store
+                                          (T-379). bytes is the object size on a PUT, zero
+                                          otherwise; a request includes Req's own retries
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold}
                                           — one per job or shard engine acquired (PL-50)
@@ -135,6 +142,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :hot_server, :request],
     [:smolquery, :retention, :sweep],
     [:smolquery, :gc, :sweep],
+    [:smolquery, :s3, :request],
     [:smolquery, :query, :job],
     [:smolquery, :query, :scatter],
     [:smolquery, :query, :engine],
@@ -217,6 +225,16 @@ defmodule Smolquery.Telemetry do
     "smolquery_snapshots_expired_total" => "Catalog snapshots expired by retention sweeps.",
     "smolquery_gc_segments_swept_total" => "Uncommitted sealed segments GC deleted.",
     "smolquery_gc_staged_files_swept_total" => "Leaked staging files GC deleted.",
+    "smolquery_s3_requests_total" =>
+      "HTTP requests to the sealed object store, by op and status class; class " <>
+        "\"error\" is a request that got no response (T-379).",
+    "smolquery_s3_request_microseconds_total" =>
+      "Time spent waiting on the sealed object store, by op; divide by requests for " <>
+        "the mean. A request includes Req's transient-error retries (T-379).",
+    "smolquery_s3_request_bytes_total" =>
+      "Object bytes sent to the sealed object store, by op; only a put carries any (T-379).",
+    "smolquery_s3_request_microseconds_bucket" =>
+      "Object-store requests by duration, by op, cumulative in le; counters, not a histogram (T-379).",
     "smolquery_query_jobs_total" => "Query jobs reaching a terminal state, by state.",
     "smolquery_lifecycle_broadcasts_total" =>
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
@@ -247,6 +265,10 @@ defmodule Smolquery.Telemetry do
   # here is what bounds the family's cardinality, the same rule every label in
   # this module follows.
   @commit_row_buckets [1_000, 4_000, 16_000, 64_000]
+
+  # Bounds for `smolquery_s3_request_microseconds_bucket`, ascending: 10 ms,
+  # 50 ms, 250 ms, 1 s, 5 s.
+  @s3_latency_buckets [10_000, 50_000, 250_000, 1_000_000, 5_000_000]
 
   # The closed set of window-close reasons `TableBuffer` names. An unrecognised
   # one counts as `:unknown` rather than creating a series, so the label can
@@ -511,6 +533,16 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_gc_staged_files_swept_total", []}, Map.get(measurements, :staged, 0))
   end
 
+  def handle_event([:smolquery, :s3, :request], measurements, meta, nil) do
+    op = s3_op(meta)
+    duration_us = Map.get(measurements, :duration_us, 0)
+
+    bump({"smolquery_s3_requests_total", [op: op, class: s3_class(meta)]}, 1)
+    bump({"smolquery_s3_request_microseconds_total", [op: op]}, duration_us)
+    bump({"smolquery_s3_request_bytes_total", [op: op]}, Map.get(measurements, :bytes, 0))
+    bucket_s3_latency(op, duration_us)
+  end
+
   def handle_event([:smolquery, :query, :job], measurements, meta, nil) do
     bump({"smolquery_query_jobs_total", [state: Map.get(meta, :state, :unknown)]}, 1)
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
@@ -574,6 +606,22 @@ defmodule Smolquery.Telemetry do
   end
 
   defp bucket_commit_rows(_measurements, _meta), do: :ok
+
+  defp bucket_s3_latency(op, duration_us) when is_integer(duration_us) do
+    for bound <- @s3_latency_buckets, duration_us <= bound do
+      bump({"smolquery_s3_request_microseconds_bucket", [op: op, le: bound]}, 1)
+    end
+
+    bump({"smolquery_s3_request_microseconds_bucket", [op: op, le: "+Inf"]}, 1)
+  end
+
+  defp bucket_s3_latency(_op, _duration), do: :ok
+
+  defp s3_op(%{op: op}) when op in [:put, :head, :list, :delete], do: op
+  defp s3_op(_meta), do: :unknown
+
+  defp s3_class(%{status: status}) when is_integer(status), do: status_class(status)
+  defp s3_class(_meta), do: "error"
 
   defp flush_reason(%{reason: reason}) when reason in @flush_reasons, do: reason
   defp flush_reason(_meta), do: :unknown
