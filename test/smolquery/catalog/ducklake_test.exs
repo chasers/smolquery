@@ -895,4 +895,13 @@ defmodule Smolquery.Catalog.DuckLakeTest do
         false
     end
   end
+
+  describe "a MAP(STRING, STRING) column" do
+    test "declares as MAP(VARCHAR, VARCHAR) and reads back as the map type", %{catalog: catalog} do
+      schema = Schema.new!([{"id", :int64, nullable: false}, {"attrs", {:map, :string, :string}}])
+
+      assert :ok = Catalog.create_table(catalog, {"analytics", "attributed"}, schema)
+      assert Catalog.table_schema(catalog, {"analytics", "attributed"}) == {:ok, schema}
+    end
+  end
 end

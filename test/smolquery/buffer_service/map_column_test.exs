@@ -1,0 +1,104 @@
+defmodule Smolquery.BufferService.MapColumnTest do
+  @moduledoc """
+  A `MAP(STRING, STRING)` schema through a real buffer, both batch shapes.
+
+  Explorer cannot write a Parquet `MAP`, so a rows batch against a map schema
+  must reach the DuckDB writer as NDJSON — the committer's re-encode — and the
+  Polars writer must refuse it rather than write a segment the planner cannot
+  union with the sealed table.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias Smolquery.BufferService
+  alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.Runtime
+  alias Smolquery.Engine
+  alias Smolquery.Schema
+
+  @moduletag :tmp_dir
+  @table {"logs", "events"}
+  @engine __MODULE__.Engine
+
+  defp schema do
+    Schema.new!([{"id", :int64, nullable: false}, {"attrs", {:map, :string, :string}}])
+  end
+
+  defp rows_batch, do: %{schema: schema(), rows: rows()}
+
+  defp rows do
+    [
+      %{"id" => 1, "attrs" => %{"host" => "h1", "pod" => "api-7"}},
+      %{"id" => 2, "attrs" => %{"host" => "h2"}},
+      %{"id" => 3}
+    ]
+  end
+
+  defp ndjson_batch do
+    body = Enum.map_join(rows(), "\n", &JSON.encode!/1) <> "\n"
+
+    %{schema: schema(), ndjson: body, row_count: 3, byte_size: byte_size(body)}
+  end
+
+  defp start_buffer(context, writer) do
+    name = :"buffer_map_#{writer}_#{:erlang.unique_integer([:positive])}"
+
+    opts = [
+      name: name,
+      dir: Path.join(context.tmp_dir, "buffer"),
+      flush_interval_ms: 25,
+      flush_writer: writer,
+      write_pool_size: 1
+    ]
+
+    start_supervised!({BufferService.Supervisor, opts}, id: name)
+    on_exit(fn -> Runtime.delete(name) end)
+
+    {name, Runtime.new(opts)}
+  end
+
+  defp hosts(runtime) do
+    start_supervised!({Engine, name: @engine, extensions: []})
+
+    [entry] = HotManifest.entries(runtime.manifest, @table)
+    path = Path.join(runtime.store.config.dir, entry.key)
+
+    {:ok, %{rows: rows}} =
+      Engine.query(@engine, "SELECT id, attrs['host'] FROM read_parquet($1) ORDER BY id", [path])
+
+    rows
+  end
+
+  describe "under the DuckDB writer" do
+    test "a rows batch lands as a MAP segment, the same as an unparsed body", context do
+      {name, runtime} = start_buffer(context, :duckdb)
+
+      assert {:ok, ack} = Client.write_batch(name, @table, rows_batch())
+      assert ack.row_count == 3
+
+      assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
+    end
+
+    test "an unparsed body lands as a MAP segment", context do
+      {name, runtime} = start_buffer(context, :duckdb)
+
+      assert {:ok, ack} = Client.write_batch(name, @table, ndjson_batch())
+      assert ack.row_count == 3
+
+      assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
+    end
+  end
+
+  describe "under the Polars writer" do
+    test "a rows batch is refused rather than written in a shape DuckDB cannot union",
+         context do
+      {name, runtime} = start_buffer(context, :polars)
+
+      assert {:error, {:unsupported_type, {:map, :string, :string}}} =
+               Client.write_batch(name, @table, rows_batch())
+
+      assert HotManifest.entries(runtime.manifest, @table) == []
+    end
+  end
+end

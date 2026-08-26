@@ -10,6 +10,7 @@ defmodule SmolqueryWeb.DataTable do
   use Phoenix.Component
 
   alias Explorer.DataFrame
+  alias Smolquery.Engine.Frame
 
   attr :id, :string, required: true
   attr :columns, :list, required: true
@@ -44,7 +45,7 @@ defmodule SmolqueryWeb.DataTable do
     rows =
       frame
       |> DataFrame.slice(offset, limit)
-      |> DataFrame.to_rows()
+      |> Frame.to_rows()
       |> Enum.map(fn row -> Enum.map(columns, &Map.fetch!(row, &1)) end)
 
     {columns, rows}
@@ -57,5 +58,6 @@ defmodule SmolqueryWeb.DataTable do
   defp cell(%Date{} = value), do: Date.to_iso8601(value)
   defp cell(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
   defp cell(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp cell(value) when is_map(value), do: JSON.encode!(value)
   defp cell(value), do: inspect(value)
 end

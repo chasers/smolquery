@@ -15,7 +15,16 @@ defmodule SmolqueryWeb.TableLive.Index do
   alias Smolquery.Schema
   alias SmolqueryWeb.Runtime
 
-  @types ["STRING", "INT64", "FLOAT64", "BOOL", "TIMESTAMP", "DATE", "NUMERIC(38,9)"]
+  @types [
+    "STRING",
+    "INT64",
+    "FLOAT64",
+    "BOOL",
+    "TIMESTAMP",
+    "DATE",
+    "NUMERIC(38,9)",
+    "MAP(STRING, STRING)"
+  ]
 
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do

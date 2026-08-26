@@ -104,8 +104,9 @@ defmodule Smolquery.IngestService.ColumnarValidator do
   defp cast_column(nil, %Field{nullable: false}, _rows), do: :fallback
 
   defp cast_column(nil, %Field{} = field, rows) do
-    with {:ok, dtype} <- Schema.explorer_dtype(field.type) do
-      {:ok, Series.from_list(List.duplicate(nil, rows), dtype: dtype)}
+    case Schema.explorer_dtype(field.type) do
+      {:ok, dtype} -> {:ok, Series.from_list(List.duplicate(nil, rows), dtype: dtype)}
+      {:error, _no_dtype} -> :fallback
     end
   end
 

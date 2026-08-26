@@ -67,6 +67,15 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   Without both, a buffer pod ratchets to its cgroup ceiling and is OOM-killed
   holding garbage. One measurement on a loaded pod: 1,892 MB of process heaps,
   a live set of 0.0 MB, and 2,394 MB freed by a single forced collection.
+
+  ## A map schema takes the DuckDB writer, whatever shape its rows arrived in
+
+  Explorer cannot write a `MAP(STRING, STRING)` column (see `Smolquery.Schema`),
+  so under `flush_writer: :duckdb` a rows commit against such a schema is
+  re-encoded as the NDJSON the passthrough path would have carried and written
+  by DuckDB. The hot segment then always carries the sealed table's type. Under
+  `flush_writer: :polars` the write refuses the schema with
+  `{:error, {:unsupported_type, _}}`, which is the caller's answer.
   """
 
   use GenServer
@@ -77,6 +86,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -277,21 +287,35 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp encode(runtime, prefix, commit) do
-    if ndjson_commit?(commit) do
-      encode_ndjson(runtime, prefix, commit)
-    else
-      with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
-        Writer.write(merged, commit.schema,
-          store: runtime.store,
-          prefix: prefix,
-          compression: runtime.compression
-        )
-      end
+    cond do
+      ndjson_commit?(commit) ->
+        encode_ndjson(runtime, prefix, commit)
+
+      duckdb_only?(runtime, commit) ->
+        encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
+
+      true ->
+        with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
+          Writer.write(merged, commit.schema,
+            store: runtime.store,
+            prefix: prefix,
+            compression: runtime.compression
+          )
+        end
     end
   end
 
   defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
   defp ndjson_commit?(_commit), do: false
+
+  defp duckdb_only?(%{flush_writer: :duckdb}, %{chunks: chunks, schema: schema}) do
+    Enum.all?(chunks, &is_list/1) and match?({:error, _no_dtype}, Schema.explorer_dtypes(schema))
+  end
+
+  defp duckdb_only?(_runtime, _commit), do: false
+
+  defp as_ndjson(rows) when is_list(rows),
+    do: {:ndjson, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n", length(rows)}
 
   # The bytes reach disk here rather than at the API, because the API no longer
   # knows which node owns the table — #108's partitions send most batches to a

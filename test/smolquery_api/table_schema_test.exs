@@ -7,13 +7,15 @@ defmodule SmolqueryApi.TableSchemaTest do
   @schema Schema.new!([
             {"id", :int64, nullable: false},
             {"ts", :timestamp},
-            {"amount", {:numeric, 38, 2}}
+            {"amount", {:numeric, 38, 2}},
+            {"attrs", {:map, :string, :string}}
           ])
 
   @json [
     %{"name" => "id", "type" => "INT64", "nullable" => false},
     %{"name" => "ts", "type" => "TIMESTAMP", "nullable" => true},
-    %{"name" => "amount", "type" => "NUMERIC(38,2)", "nullable" => true}
+    %{"name" => "amount", "type" => "NUMERIC(38,2)", "nullable" => true},
+    %{"name" => "attrs", "type" => "MAP(STRING, STRING)", "nullable" => true}
   ]
 
   describe "to_json/1" do

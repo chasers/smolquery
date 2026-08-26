@@ -18,6 +18,7 @@ defmodule SmolqueryApi.JobController do
   use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
+  alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
@@ -181,7 +182,7 @@ defmodule SmolqueryApi.JobController do
     rows =
       frame
       |> DataFrame.slice(offset, max_results)
-      |> DataFrame.to_rows()
+      |> Frame.to_rows()
       |> Enum.map(&row_json/1)
 
     body = %{

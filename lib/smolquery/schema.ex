@@ -17,9 +17,31 @@ defmodule Smolquery.Schema do
   | `:timestamp` | `TIMESTAMP` | `{:naive_datetime, :microsecond}` | `TIMESTAMP` |
   | `:date` | `DATE` | `:date` | `DATE` |
   | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
+  | `{:map, :string, :string}` | `MAP(STRING, STRING)` | — | `MAP(VARCHAR, VARCHAR)` |
 
   The API names are the BigQuery-flavored strings `SmolqueryApi` speaks in
-  table-schema JSON.
+  table-schema JSON. `MAP(STRING, STRING)` is the one BigQuery does not have: it
+  is ClickHouse's `Map(String, String)`, the shape OpenTelemetry attribute bags
+  arrive in.
+
+  ## A map has no Explorer dtype
+
+  Explorer has no map dtype, and the closest shape it can write — a list of
+  `{key, value}` structs — reaches Parquet without the `MAP` annotation, so
+  DuckDB reads it back as `STRUCT[]` and refuses to union it with a sealed
+  `MAP` column. A map column is therefore written only by the DuckDB flush
+  writer (`flush_writer: :duckdb`, the default), which reads the spooled NDJSON
+  straight into `MAP(VARCHAR, VARCHAR)`. `explorer_dtype/1` answers
+  `{:error, {:unsupported_type, _}}` for it, and every Explorer-side path — the
+  columnar validator, the Polars writer, CSV loads — falls back or refuses on
+  that answer. On the read side a map arrives from `Smolquery.Engine.frame/3`
+  as Explorer's list-of-struct; `Smolquery.Engine.Frame.to_rows/1` turns it
+  back into a map.
+
+  A map's values are strings. A JSON value that is not a string is written as
+  its JSON text (`1`, `true`, `["a","b"]`, `{"k":"v"}`) — the same
+  stringification DuckDB's `read_json` applies on the passthrough path, so a
+  row reads back the same whichever path wrote it.
 
   A schema also carries the table's `clustering` key — the column names writes
   sort by, smolquery's analog of ClickHouse's `ORDER BY`. It rides here because
@@ -68,6 +90,7 @@ defmodule Smolquery.Schema do
           | :timestamp
           | :date
           | {:numeric, pos_integer(), non_neg_integer()}
+          | {:map, :string, :string}
 
   @type field_spec ::
           Field.t()
@@ -84,6 +107,9 @@ defmodule Smolquery.Schema do
   ]
 
   @scalar_types Enum.map(@mapping, &elem(&1, 0))
+  @map_type {:map, :string, :string}
+  @map_duckdb "MAP(VARCHAR, VARCHAR)"
+  @map_api "MAP(STRING, STRING)"
   @logical_to_explorer Map.new(@mapping, fn {logical, dtype, _duckdb, _api} ->
                          {logical, dtype}
                        end)
@@ -178,10 +204,16 @@ defmodule Smolquery.Schema do
     {:ok, type}
   end
 
+  def validate_type(@map_type), do: {:ok, @map_type}
+
   def validate_type(type), do: {:error, {:unsupported_type, type}}
 
   @doc """
   The Explorer dtype for a logical type.
+
+  A map has none — see "A map has no Explorer dtype" above — so this answers
+  `{:error, {:unsupported_type, _}}` for it, which is what the Explorer-side
+  paths fall back on.
   """
   @spec explorer_dtype(logical_type()) :: {:ok, term()} | {:error, {:unsupported_type, term()}}
   def explorer_dtype({:numeric, precision, scale}), do: {:ok, {:decimal, precision, scale}}
@@ -212,6 +244,7 @@ defmodule Smolquery.Schema do
   """
   @spec duckdb_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def duckdb_type({:numeric, precision, scale}), do: {:ok, "DECIMAL(#{precision},#{scale})"}
+  def duckdb_type(@map_type), do: {:ok, @map_duckdb}
 
   def duckdb_type(type) do
     case Map.fetch(@logical_to_duckdb, type) do
@@ -228,7 +261,7 @@ defmodule Smolquery.Schema do
   def logical_from_duckdb(name) when is_binary(name) do
     case Map.fetch(@duckdb_to_logical, String.upcase(name)) do
       {:ok, type} -> {:ok, type}
-      :error -> decimal_from_duckdb(name)
+      :error -> compound_from_duckdb(name)
     end
   end
 
@@ -237,6 +270,7 @@ defmodule Smolquery.Schema do
   """
   @spec api_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def api_type({:numeric, precision, scale}), do: {:ok, "NUMERIC(#{precision},#{scale})"}
+  def api_type(@map_type), do: {:ok, @map_api}
 
   def api_type(type) do
     case Map.fetch(@logical_to_api, type) do
@@ -252,7 +286,7 @@ defmodule Smolquery.Schema do
   def type_from_api(name) when is_binary(name) do
     case Map.fetch(@api_to_logical, String.upcase(name)) do
       {:ok, type} -> {:ok, type}
-      :error -> numeric_from_api(name)
+      :error -> compound_from_api(name)
     end
   end
 
@@ -273,6 +307,12 @@ defmodule Smolquery.Schema do
   | `:timestamp` | ISO 8601 string; an offset is converted to UTC | `NaiveDateTime` |
   | `:date` | ISO 8601 string | `Date` |
   | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
+  | `{:map, :string, :string}` | object; a non-string value becomes its JSON text | map of binaries |
+
+  A map also accepts the list of `%{"key" => k, "value" => v}` entries Explorer
+  reads a Parquet `MAP` as, so a Parquet load round-trips a map column. A map
+  value that is `null` stays `nil`; a key must be a string, which JSON
+  guarantees.
 
   `nil` passes through for every type; whether a column may be null is the
   validator's question, not a value question. A value already in its native
@@ -349,7 +389,23 @@ defmodule Smolquery.Schema do
   def value_from_json({:numeric, _p, _s}, value) when is_float(value),
     do: {:ok, Decimal.from_float(value)}
 
+  def value_from_json(@map_type, value) when is_map(value) and not is_struct(value) do
+    if Enum.all?(value, fn {key, _value} -> is_binary(key) end),
+      do: {:ok, Map.new(value, fn {key, entry} -> {key, map_value_text(entry)} end)},
+      else: invalid(@map_type, value)
+  end
+
+  def value_from_json(@map_type, entries) when is_list(entries) do
+    if Enum.all?(entries, &match?(%{"key" => key, "value" => _value} when is_binary(key), &1)),
+      do: {:ok, Map.new(entries, &{&1["key"], map_value_text(&1["value"])})},
+      else: invalid(@map_type, entries)
+  end
+
   def value_from_json(type, value), do: invalid(type, value)
+
+  defp map_value_text(nil), do: nil
+  defp map_value_text(value) when is_binary(value), do: value
+  defp map_value_text(value), do: JSON.encode!(value)
 
   defp invalid(type, value), do: {:error, {:invalid_value, type, value}}
 
@@ -440,22 +496,30 @@ defmodule Smolquery.Schema do
     |> Enum.map(fn {name, _count} -> name end)
   end
 
-  defp numeric_from_api(name) do
-    case Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, String.trim(name)) do
-      [_match, precision, scale] ->
+  defp compound_from_api(name) do
+    cond do
+      Regex.match?(~r/^MAP\(\s*STRING\s*,\s*STRING\s*\)$/i, String.trim(name)) ->
+        {:ok, @map_type}
+
+      match = Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
+        [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
 
-      nil ->
+      true ->
         {:error, {:unsupported_type, name}}
     end
   end
 
-  defp decimal_from_duckdb(name) do
-    case Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, String.trim(name)) do
-      [_match, precision, scale] ->
+  defp compound_from_duckdb(name) do
+    cond do
+      Regex.match?(~r/^MAP\(\s*VARCHAR\s*,\s*VARCHAR\s*\)$/i, String.trim(name)) ->
+        {:ok, @map_type}
+
+      match = Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
+        [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
 
-      nil ->
+      true ->
         {:error, {:unsupported_type, name}}
     end
   end
