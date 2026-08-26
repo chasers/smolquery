@@ -27,6 +27,7 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimDoubleCountTest do
 
   import ExUnit.CaptureLog
 
+  alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FullNode
@@ -60,8 +61,20 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimDoubleCountTest do
     ack.segment_id
   end
 
+  # Gated on buffer-side ETS state first: polling the catalog or spawning a
+  # query job every tick fights the seal commits for the DuckLake sqlite
+  # lock, which is the very work the poll is waiting on. The tombstone
+  # clears last, so the catalog and the query are read after the dust
+  # settles.
   defp settled?(node) do
-    FullNode.sealed_count(node) == 2 and FullNode.query_ids(node) == [1, 2, 3, 4]
+    tombstones(node) == [] and FullNode.sealed_count(node) == 2 and
+      FullNode.query_ids(node) == [1, 2, 3, 4]
+  end
+
+  defp tombstones(node) do
+    {:ok, runtime} = BufferService.Runtime.fetch(node.buffer)
+
+    BufferService.HotManifest.tombstones(runtime.manifest, @table)
   end
 
   test "F-1: a released claim's in-flight attempt is refused and its orphan compensated",
@@ -87,7 +100,7 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimDoubleCountTest do
 
             FullNode.restart_buffer(context, node, @shrunk_valves)
 
-            assert Eventually.until(fn -> settled?(node) end, 400, 25)
+            assert Eventually.until(fn -> settled?(node) end, 200, 100)
           end,
           fn _result, trace ->
             assert [%{result: {:error, {:stale_claim, _diff}}}] =

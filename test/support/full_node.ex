@@ -146,10 +146,16 @@ defmodule Smolquery.Test.FullNode do
 
   @doc """
   The registered sealed segments at the current snapshot.
+
+  A transient catalog error (CI disks make `database is locked` a real
+  answer under concurrent seal traffic) comes back as a tagged tuple rather
+  than a crash, so an `Eventually` predicate polling this retries through
+  it instead of dying mid-wait.
   """
   def sealed_count(node) do
-    {:ok, sealed} = Catalog.segments(node.catalog, @table, :current)
-
-    length(sealed)
+    case Catalog.segments(node.catalog, @table, :current) do
+      {:ok, sealed} -> length(sealed)
+      {:error, reason} -> {:catalog_failed, reason}
+    end
   end
 end

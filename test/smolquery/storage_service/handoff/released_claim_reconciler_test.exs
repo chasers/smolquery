@@ -72,6 +72,10 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimReconcilerTest do
     BufferService.HotManifest.tombstones(runtime.manifest, @table)
   end
 
+  # Tombstones first: buffer-side ETS, no catalog read and no query job
+  # until reconciliation actually finished — polling the catalog while the
+  # seal commits write the same sqlite metadata is lock churn against the
+  # very work being awaited.
   defp reconciled?(node) do
     tombstones(node) == [] and FullNode.sealed_count(node) == 2 and
       FullNode.query_ids(node) == [1, 2, 3, 4]
@@ -96,7 +100,7 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimReconcilerTest do
 
             FullNode.restart_buffer(context, node, @shrunk_valves)
 
-            assert Eventually.until(fn -> reconciled?(node) end, 400, 25)
+            assert Eventually.until(fn -> reconciled?(node) end, 200, 100)
           end,
           fn _result, trace ->
             assert [_re1, _re2] =
@@ -148,7 +152,7 @@ defmodule Smolquery.StorageService.Handoff.ReleasedClaimReconcilerTest do
 
             tp(:test_reaped, %{})
 
-            assert Eventually.until(fn -> reconciled?(node) end, 400, 25)
+            assert Eventually.until(fn -> reconciled?(node) end, 200, 100)
           end,
           fn _result, trace ->
             assert [%{result: :ok}] =
