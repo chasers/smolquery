@@ -73,7 +73,7 @@ defmodule Smolquery.StorageService.Sealer do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, attempts: %{}, failures: %{}, retry_at: %{}]
+  defstruct [:runtime, attempts: %{}, reconciles: %{}, failures: %{}, retry_at: %{}]
 
   @stuck_after 5
   @backoff_doubling_cap 30
@@ -126,6 +126,32 @@ defmodule Smolquery.StorageService.Sealer do
   end
 
   @doc """
+  Hands a reconcile signal for a released claim's tombstone to the sealer on
+  `node`, without waiting for the reconciliation (T-386).
+
+  The same cast-and-forget shape as `seal_ready/4`, for the same reason: the
+  caller is the owning `TableBuffer`'s maintenance tick, and the signal is
+  level-triggered — a dropped one costs a `seal_retry_ms` interval.
+  """
+  @spec reconcile_released(atom(), Store.table_ref(), SealConsumer.claim(), node()) :: :ok
+  def reconcile_released(name, table_ref, claim, node \\ node()) do
+    destination = {Runtime.sealer(name), node}
+    message = {:"$gen_cast", {:reconcile_released, table_ref, claim}}
+
+    case :erlang.send(destination, message, [:noconnect, :nosuspend]) do
+      :ok ->
+        :ok
+
+      _unconnected ->
+        spawn(fn -> send(destination, message) end)
+
+        :ok
+    end
+  catch
+    _kind, _reason -> :ok
+  end
+
+  @doc """
   The tables this node is sealing right now.
 
   For tests and operators asking what the pool is busy with.
@@ -158,6 +184,21 @@ defmodule Smolquery.StorageService.Sealer do
     end
   end
 
+  # A reconcile waits out any running attempt for the table: the released
+  # claim's own in-flight attempt registers at most once, and its register must
+  # land — and be seen — before reconciliation decides whether there is an
+  # orphan to drop. Level-triggered re-signalling makes the wait a retry
+  # interval, never a lost reconciliation.
+  @impl GenServer
+  def handle_cast({:reconcile_released, table_ref, claim}, state) do
+    cond do
+      not owner?(state, table_ref) -> {:noreply, ignore_foreign(state, table_ref)}
+      attempting?(state, table_ref) -> {:noreply, state}
+      reconciling?(state, table_ref, claim) -> {:noreply, state}
+      true -> {:noreply, start_reconcile(state, table_ref, claim)}
+    end
+  end
+
   @impl GenServer
   def handle_call(:sealing, _from, state),
     do: {:reply, state.attempts |> Map.values() |> Enum.map(& &1.table_ref), state}
@@ -174,7 +215,7 @@ defmodule Smolquery.StorageService.Sealer do
         {:noreply, state |> record(attempt, result) |> finish(ref)}
 
       :error ->
-        {:noreply, state}
+        {:noreply, finish_reconcile(state, ref, result)}
     end
   end
 
@@ -188,7 +229,7 @@ defmodule Smolquery.StorageService.Sealer do
          state |> failed(attempt.table_ref, "crashed: #{inspect(reason)}") |> finish(ref)}
 
       :error ->
-        {:noreply, state}
+        {:noreply, finish_reconcile(state, ref, {:error, {:crashed, reason}})}
     end
   end
 
@@ -335,6 +376,50 @@ defmodule Smolquery.StorageService.Sealer do
     }
 
     %{state | attempts: Map.put(state.attempts, task.ref, attempt)}
+  end
+
+  defp attempting?(state, table_ref),
+    do: Enum.any?(state.attempts, fn {_ref, attempt} -> attempt.table_ref == table_ref end)
+
+  defp reconciling?(state, table_ref, claim) do
+    Enum.any?(state.reconciles, fn {_ref, reconcile} ->
+      reconcile.table_ref == table_ref and reconcile.keys == claim[:keys]
+    end)
+  end
+
+  defp start_reconcile(state, table_ref, claim) do
+    runtime = state.runtime
+
+    task =
+      Task.Supervisor.async_nolink(Runtime.seals(runtime.name), fn ->
+        Handoff.reconcile_released(runtime.handoff, runtime, table_ref, claim)
+      end)
+
+    reconcile = %{table_ref: table_ref, keys: claim[:keys]}
+
+    %{state | reconciles: Map.put(state.reconciles, task.ref, reconcile)}
+  end
+
+  defp finish_reconcile(state, ref, result) do
+    case Map.fetch(state.reconciles, ref) do
+      {:ok, reconcile} ->
+        report_reconcile(reconcile, result)
+
+        %{state | reconciles: Map.delete(state.reconciles, ref)}
+
+      :error ->
+        state
+    end
+  end
+
+  defp report_reconcile(_reconcile, :ok), do: :ok
+
+  defp report_reconcile(reconcile, result) do
+    Logger.warning(
+      "reconciliation of released keys #{inspect(reconcile.keys)} on " <>
+        "#{inspect(reconcile.table_ref)} failed: #{inspect(result)} — the tombstone " <>
+        "re-signals every seal_retry_ms until it clears"
+    )
   end
 
   defp free_slot(state) do

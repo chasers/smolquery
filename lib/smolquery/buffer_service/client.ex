@@ -199,6 +199,34 @@ defmodule Smolquery.BufferService.Client do
   end
 
   @doc """
+  Confirms a released claim's reconciliation, clearing its tombstone (T-386).
+
+  The storage side calls this after verifying no segment under `keys` stays
+  registered in the catalog — any orphan was dropped first. Routed to the
+  ring's current owner.
+  """
+  @spec release_reconciled(atom(), Store.table_ref(), [String.t()]) :: :ok | {:error, term()}
+  def release_reconciled(name, table_ref, keys) do
+    route(name, :control, :release_reconciled, [name, table_ref, keys], table_ref, :control)
+  end
+
+  @doc """
+  `release_reconciled/3`, pinned to the node holding the tombstone rather than
+  routed to the ring's current owner — the same origin-pinning `retire_at/6`
+  applies, for the same reason.
+  """
+  @spec release_reconciled_at(node() | nil, atom(), Store.table_ref(), [String.t()]) ::
+          :ok | {:error, term()}
+  def release_reconciled_at(nil, name, table_ref, keys),
+    do: release_reconciled(name, table_ref, keys)
+
+  def release_reconciled_at(node, name, table_ref, keys) do
+    name
+    |> Routing.resolve()
+    |> invoke(node, :control, :release_reconciled, [name, table_ref, keys], :control)
+  end
+
+  @doc """
   Flushes a table's accumulator now.
 
   For a caller that needs the tail durable without waiting out the interval — a

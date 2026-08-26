@@ -72,9 +72,10 @@ defmodule Smolquery.BufferService.Replicator do
   the same rows double-commit them to the catalog. `args` is the mutation's
   own vocabulary: `%{ids: ids, keys: keys}` for `:claim`,
   `%{ids: ids, snapshot: snapshot, keys: keys}` for `:retire`,
-  `%{ids: ids}` for `:drop`, and `%{ids: ids}` for `:release` — the
+  `%{ids: ids}` for `:drop`, `%{ids: ids}` for `:release` — the
   whole-claim release that returns an oversized frozen claim's ids to
-  pending (T-294).
+  pending (T-294) — and `%{keys: keys}` for `:reconciled`, the confirmation
+  that clears a released claim's tombstone (T-386).
 
   `manifest` and `store` are the owner's, handed along the way `commit`
   carries its store: an implementation that repairs a diverged replica
@@ -85,7 +86,7 @@ defmodule Smolquery.BufferService.Replicator do
   @type mutation :: %{
           name: atom(),
           table_ref: Store.table_ref(),
-          op: :claim | :retire | :drop | :release,
+          op: :claim | :retire | :drop | :release | :reconciled,
           args: map(),
           manifest: HotManifest.t(),
           store: Store.t()

@@ -69,12 +69,20 @@ defmodule Smolquery.StorageService.Handoff.Seal do
   registered are dropped from the catalog before the error returns. An
   attempt refused after its register — or one finding a predecessor's
   registration — would otherwise strand a segment whose rows the re-derived
-  claims commit again under their own keys, and nothing else would ever
-  remove it: GC deliberately spares committed segments, and no later attempt
-  for the released claim runs past the first gate. Between that registration
-  and the drop the rows count twice at the current snapshot — the same
-  transient window a crash between commit and retire always had, closed the
-  same way by the next actor to look.
+  claims commit again under their own keys: GC deliberately spares committed
+  segments, and no later attempt for the released claim runs past the first
+  gate. Between that registration and the drop the rows count twice at the
+  current snapshot — the same transient window a crash between commit and
+  retire always had, closed the same way by the next actor to look.
+
+  The gates and this compensation need the attempt alive and the entries
+  present. An attempt that crashes after its register, or whose retire lands
+  after the grace reaper deleted the entries, evades all of it (the F-1
+  residuals, `tla/FINDINGS.md`). The durable backstop is the release
+  tombstone: the buffer records the released claim's keys, re-signals
+  `reconcile_released` once the re-derived claims have sealed every released
+  id, and `reconcile_released/4` here drops any segment still registered
+  under those keys before confirming the tombstone away (T-386).
 
   ## Retirement goes through the buffer's client, not its HTTP API
 
@@ -143,6 +151,19 @@ defmodule Smolquery.StorageService.Handoff.Seal do
     end
   end
 
+  @impl Handoff
+  def reconcile_released(_config, %Runtime{} = runtime, table_ref, claim) do
+    with {:ok, paths} <- sealed_paths(runtime, claim),
+         {:ok, registered} <-
+           Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current),
+         :ok <-
+           paths
+           |> Enum.filter(&(&1 in registered))
+           |> drop_orphans(runtime, table_ref) do
+      Client.release_reconciled_at(claim[:origin], runtime.buffer_name, table_ref, claim.keys)
+    end
+  end
+
   defp compensate_stale(runtime, table_ref, claim) do
     with {:ok, paths} <- sealed_paths(runtime, claim),
          {:ok, registered} <-
@@ -168,14 +189,16 @@ defmodule Smolquery.StorageService.Handoff.Seal do
             "re-commit these rows under their own keys"
         )
 
+        :ok
+
       {:error, reason} ->
         Logger.warning(
           "failed to drop a released claim's registered segment(s) on " <>
             "#{inspect(table_ref)}: #{inspect(reason)} — the rows double-count until dropped"
         )
-    end
 
-    :ok
+        {:error, {:compensation_failed, reason}}
+    end
   end
 
   defp claim_manifest(runtime, table_ref, %{ids: ids} = claim) when is_list(ids) do

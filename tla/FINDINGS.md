@@ -245,17 +245,39 @@ TLA config matrix (`tla/ReleasedClaim.tla`, `AllowCrash`/`GateFix`/`AllowReap`/
 | `ReleasedClaim_fix_crash` | ✓ | ✓ | ✓ | – | VIOLATED (crash residual) |
 | `ReleasedClaim_reconciler` | ✓ | ✓ | ✓ | ✓ | **PASS** (complete fix) |
 
+## Durable reconciler — BUILT (T-386, 2026-08-25)
+
+The two residuals are closed by a release tombstone + a level-triggered
+reconcile signal, stacked on the gate-fix PR:
+
+- **Tombstone**: `HotManifest.release` records `%{keys, ids}` durably
+  (derived from the released claim; survives recovery and log compaction via
+  a dedicated `tombstone` record; replicated with the release mutation).
+- **Signal**: the owner's maintenance tick fires
+  `SealConsumer.reconcile_released` once every released id is sealed-or-gone
+  — from then on the rows are committed under re-derived keys, so the drop is
+  loss-free. Level-triggered every `seal_retry_ms` until cleared.
+- **Reconcile**: `Sealer` waits out any running attempt for the table (the
+  released claim's attempt registers at most once), then
+  `Handoff.Seal.reconcile_released/4` drops any segment registered under the
+  tombstoned keys and acks through `Client.release_reconciled_at/4`, which
+  clears the tombstone (a new `reconciled` log record + replica mutation).
+
+Model faithfulness: the spec's `Reconcile` is a standing rule; the
+implementation clears the tombstone after reconciling, made safe by the
+running-attempt guard. Residual narrowing, documented not closed: an attempt
+still running on a *stale* storage owner after a ring change can register
+after the clear — the same two-owner overlap the sealer already documents.
+
+Snabbkaffe tests drive both residual schedules end to end
+(`released_claim_reconciler_test.exs`: `inject_crash` at
+`storage.seal.before_retire` for the crash residual; a `force_ordering` past
+a simulated reap for the other). Both end exactly-once with the tombstone
+cleared.
+
 ## Next up for a follow-up agent
 
-- **Durable reconciler — deferred by decision (2026-08-25).** The owner chose to
-  ship the gate fix only for now and leave the two residuals (crash-after-register,
-  retire-past-grace) documented here. When picked up: build the release-key
-  tombstone + a GC-piggybacked sweep that drops a tombstoned orphan once the
-  re-derived coverage is registered. The model already confirms it closes both
-  residuals (`ReleasedClaim_reconciler.cfg` PASSES with crashes+reaps). Add a
-  snabbkaffe test for the crash residual (`inject_crash` at
-  `storage.seal.before_retire`) once built.
-- Then Specs 3-6 (RingEpoch T-92, exactly-once inserts, segment shipping T-96).
+- Specs 3-6 (RingEpoch T-92, exactly-once inserts, segment shipping T-96).
 - Spec 3: RingEpoch ownership fence (T-92) — at-most-one-owner mutual exclusion.
 - Spec 4: exactly-once inserts (batch_id dedup, crash-before-reply + replay).
 - Spec 5: segment-shipping replication (T-96) all-replicas ack + compensation.

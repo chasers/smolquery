@@ -21,4 +21,14 @@ defmodule Smolquery.BufferService.SealLog do
 
     :ok
   end
+
+  @impl SealConsumer
+  def reconcile_released(_config, {dataset, table}, %{keys: keys}) do
+    Logger.info(fn ->
+      "reconcile_released #{dataset}.#{table}: #{length(keys)} released key(s) await " <>
+        "reconciliation, no sealer configured"
+    end)
+
+    :ok
+  end
 end

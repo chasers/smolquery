@@ -194,12 +194,12 @@ defmodule Smolquery.BufferService.Endpoint do
   @spec apply_replica_mutation(
           atom(),
           Store.table_ref(),
-          :claim | :retire | :drop | :release,
+          :claim | :retire | :drop | :release | :reconciled,
           map(),
           term()
         ) :: :ok | {:error, term()}
   def apply_replica_mutation(name, table_ref, op, args, epoch)
-      when op in [:claim, :retire, :drop, :release] do
+      when op in [:claim, :retire, :drop, :release, :reconciled] do
     with {:ok, runtime} <- runtime(name),
          :ok <- replica_epoch_check(name, epoch) do
       if holds_nothing?(runtime, table_ref) do
@@ -264,6 +264,20 @@ defmodule Smolquery.BufferService.Endpoint do
     with {:ok, runtime} <- runtime(name),
          {:ok, buffer} <- buffer(runtime, table_ref) do
       TableBuffer.retire(buffer, ids, snapshot, keys)
+    end
+  catch
+    :exit, {:noproc, _call} -> {:error, :buffer_unavailable}
+  end
+
+  @doc """
+  Clears a released claim's tombstone, on the storage side's confirmation that
+  no segment under `keys` stays registered (T-386).
+  """
+  @spec release_reconciled(atom(), Store.table_ref(), [String.t()]) :: :ok | {:error, term()}
+  def release_reconciled(name, table_ref, keys) do
+    with {:ok, runtime} <- runtime(name),
+         {:ok, buffer} <- buffer(runtime, table_ref) do
+      TableBuffer.release_reconciled(buffer, keys)
     end
   catch
     :exit, {:noproc, _call} -> {:error, :buffer_unavailable}

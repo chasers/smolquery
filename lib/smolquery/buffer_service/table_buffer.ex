@@ -374,10 +374,15 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
-  Applies a claim, retire, or drop the table's owner replicated here (T-96).
+  Applies a claim, retire, drop, release, or reconciled the table's owner
+  replicated here (T-96).
   """
-  @spec apply_replica_mutation(GenServer.server(), :claim | :retire | :drop, map(), timeout()) ::
-          :ok | {:error, term()}
+  @spec apply_replica_mutation(
+          GenServer.server(),
+          :claim | :retire | :drop | :release | :reconciled,
+          map(),
+          timeout()
+        ) :: :ok | {:error, term()}
   def apply_replica_mutation(buffer, op, args, timeout) do
     GenServer.call(buffer, {:apply_replica_mutation, op, args}, timeout)
   end
@@ -401,6 +406,15 @@ defmodule Smolquery.BufferService.TableBuffer do
           :ok | {:error, term()}
   def retire(buffer, ids, snapshot, keys \\ nil, timeout \\ 5_000),
     do: GenServer.call(buffer, {:retire, ids, snapshot, keys}, timeout)
+
+  @doc """
+  Clears a released claim's tombstone, on the storage side's confirmation that
+  no segment under `keys` is registered (T-386).
+  """
+  @spec release_reconciled(GenServer.server(), [String.t()], timeout()) ::
+          :ok | {:error, term()}
+  def release_reconciled(buffer, keys, timeout \\ 5_000),
+    do: GenServer.call(buffer, {:release_reconciled, keys}, timeout)
 
   @doc """
   Runs the seal check and the grace-period sweep now, without waiting for the tick.
@@ -532,6 +546,17 @@ defmodule Smolquery.BufferService.TableBuffer do
       :ok -> {:reply, :ok, run_maintenance(state)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:release_reconciled, keys}, _from, state) do
+    result =
+      Committer.with_log(state.committer, fn log ->
+        with :ok <- append_replicas(state, :reconciled, %{keys: keys}) do
+          HotManifest.reconcile_released(state.runtime.manifest, state.table_ref, keys, log)
+        end
+      end)
+
+    {:reply, result, state}
   end
 
   def handle_call({:accept_replica, entry, bytes}, _from, state) do
@@ -686,12 +711,46 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp signal_when_ready(state) do
     if RingEpoch.owner?(state.runtime.name, state.table_ref) do
+      due? = due?(state)
+
       state
-      |> service_live_claims(due?(state))
+      |> service_live_claims(due?)
+      |> signal_reconcilable(due?)
       |> claim_up_to_max()
     else
       state
     end
+  end
+
+  # A released claim's tombstone is reconcilable once every id it covered is
+  # sealed or gone from the manifest: from then on the rows are committed under
+  # the re-derived claims' keys, so dropping any segment registered under the
+  # released keys is loss-free (T-386). Level-triggered on the same cadence as
+  # seal signals; the tombstone clears when the storage side acks through
+  # release_reconciled/3.
+  defp signal_reconcilable(state, false), do: state
+
+  defp signal_reconcilable(state, true) do
+    reconcilable =
+      state.runtime.manifest
+      |> HotManifest.tombstones(state.table_ref)
+      |> Enum.filter(&covered?(state, &1))
+
+    Enum.each(
+      reconcilable,
+      &SealConsumer.reconcile_released(state.runtime.seal_consumer, state.table_ref, &1)
+    )
+
+    if reconcilable == [], do: state, else: %{state | signaled_at: now()}
+  end
+
+  defp covered?(state, %{ids: ids}) do
+    Enum.all?(ids, fn id ->
+      case HotManifest.entry(state.runtime.manifest, state.table_ref, id) do
+        {:ok, entry} -> not is_nil(entry.sealed_at)
+        :error -> true
+      end
+    end)
   end
 
   # Re-signals every live claim in one due-gated batch (T-339): `signaled_at`
@@ -1072,6 +1131,12 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp apply_replica_mutation(state, :drop, %{ids: ids}) do
     Committer.with_log(state.committer, fn log ->
       HotManifest.drop(state.runtime.manifest, state.table_ref, ids, log)
+    end)
+  end
+
+  defp apply_replica_mutation(state, :reconciled, %{keys: keys}) do
+    Committer.with_log(state.committer, fn log ->
+      HotManifest.reconcile_released(state.runtime.manifest, state.table_ref, keys, log)
     end)
   end
 

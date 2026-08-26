@@ -18,4 +18,11 @@ defmodule Smolquery.Test.SealCollector do
 
     :ok
   end
+
+  @impl SealConsumer
+  def reconcile_released(test, table_ref, tombstone) do
+    send(test, {:reconcile_released, table_ref, tombstone})
+
+    :ok
+  end
 end

@@ -25,4 +25,14 @@ defmodule Smolquery.StorageService.Handoff.Log do
 
     {:error, :not_implemented}
   end
+
+  @impl Handoff
+  def reconcile_released(_config, _runtime, {dataset, table}, %{keys: keys}) do
+    Logger.info(fn ->
+      "reconcile_released #{dataset}.#{table}: #{length(keys)} released key(s), " <>
+        "reconciliation not implemented"
+    end)
+
+    {:error, :not_implemented}
+  end
 end

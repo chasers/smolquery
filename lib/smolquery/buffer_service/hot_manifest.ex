@@ -204,6 +204,12 @@ defmodule Smolquery.BufferService.HotManifest do
   """
   @type claim :: %{ids: [String.t()], keys: [String.t()]}
 
+  @typedoc """
+  A released claim's output key(s) and the ids it covered, held until the
+  release is reconciled against the catalog (T-386).
+  """
+  @type tombstone :: %{keys: [String.t()], ids: [String.t()]}
+
   @opaque log :: {:hot_log, :file.fd()}
 
   @log "manifest.log"
@@ -253,6 +259,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.new(batches(name), @index_options ++ [:set, :named_table])
     :ets.new(claims(name), @index_options ++ [:set, :named_table])
     :ets.new(retired(name), @index_options ++ [:ordered_set, :named_table])
+    :ets.new(tombstones(name), @index_options ++ [:set, :named_table])
 
     {:ok, name}
   end
@@ -587,10 +594,58 @@ defmodule Smolquery.BufferService.HotManifest do
           |> Enum.flat_map(&lookup(manifest, table_ref, &1))
           |> Enum.each(&insert(manifest, table_ref, Entry.claim(&1, [])))
 
+          record_tombstone(manifest, table_ref, %{keys: claim.keys, ids: claim.ids})
           refresh_claim(manifest, table_ref)
         end
     end
   end
+
+  @doc """
+  The table's release tombstones: claims released but not yet reconciled.
+
+  Each names the released claim's output key(s) and the ids it covered. A
+  tombstone is recorded by `release/4` and cleared by `reconcile_released/4`
+  once the storage side has confirmed no segment under those keys is
+  registered (T-386). It is the durable record that lets a reconciler drop a
+  released claim's orphan segment even after the in-flight attempt crashed or
+  the reaper deleted the entries — the two windows the T-294 gates cannot
+  close (F-1 residuals, `tla/FINDINGS.md`).
+  """
+  @spec tombstones(t(), Store.table_ref()) :: [tombstone()]
+  def tombstones(%__MODULE__{table: table}, table_ref) do
+    :ets.select(tombstones(table), [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}])
+  end
+
+  @doc """
+  Clears a release tombstone, once its released keys are reconciled.
+
+  Called on the storage side's confirmation that no segment under `keys` is
+  registered in the catalog (any orphan was dropped first). Idempotent: a
+  tombstone already cleared — or never recorded, as with a release logged
+  before tombstones existed — is `:ok` without an append.
+  """
+  @spec reconcile_released(t(), Store.table_ref(), [String.t()], log() | nil) ::
+          :ok | {:error, term()}
+  def reconcile_released(%__MODULE__{table: table} = manifest, table_ref, keys, log \\ nil) do
+    case :ets.lookup(tombstones(table), {table_ref, keys}) do
+      [] ->
+        :ok
+
+      [_tombstone] ->
+        record = %{"op" => "reconciled", "keys" => keys}
+
+        with :ok <- append(manifest, table_ref, record, log) do
+          :ets.delete(tombstones(table), {table_ref, keys})
+
+          :ok
+        end
+    end
+  end
+
+  defp record_tombstone(_manifest, _table_ref, %{keys: []}), do: true
+
+  defp record_tombstone(%__MODULE__{table: table}, table_ref, tombstone),
+    do: :ets.insert(tombstones(table), {{table_ref, tombstone.keys}, tombstone})
 
   @doc """
   The table's oldest outstanding claim, if a sealer still owes one.
@@ -745,9 +800,10 @@ defmodule Smolquery.BufferService.HotManifest do
   @spec recover(t(), Store.table_ref()) :: {:ok, map()} | {:error, term()}
   def recover(%__MODULE__{} = manifest, table_ref) do
     with {:ok, records} <- read_log(manifest, table_ref),
-         {:ok, logged} <- replay(records),
+         {:ok, logged, tombstones} <- replay(records),
          {:ok, prefix} <- Store.prefix(table_ref),
          {:ok, keys} <- Store.list(manifest.store, prefix) do
+      replace_tombstones(manifest, table_ref, tombstones)
       reconcile(manifest, table_ref, logged, keys)
     end
   end
@@ -773,17 +829,25 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
-  Rewrites a table's log to hold only its live entries.
+  Rewrites a table's log to hold only its live entries and open tombstones.
 
   A log otherwise grows with history rather than with the tail it describes. The
   rewrite is staged and renamed, so a crash mid-compaction leaves the old log
-  intact.
+  intact. Open release tombstones are re-emitted as `tombstone` records —
+  distinct from `release` records, whose replay would clear the re-derived
+  claims off the rewritten entries — so compaction cannot silently forget a
+  release that still awaits reconciliation (T-386).
   """
   @spec compact(t(), Store.table_ref()) :: :ok | {:error, term()}
   def compact(%__MODULE__{} = manifest, table_ref) do
     with {:ok, path} <- log_path(manifest, table_ref) do
       staged = Path.join(Path.dirname(path), @staged)
-      records = manifest |> entries(table_ref) |> Enum.map(&Entry.to_record/1)
+
+      records =
+        (manifest |> entries(table_ref) |> Enum.map(&Entry.to_record/1)) ++
+          (manifest
+           |> tombstones(table_ref)
+           |> Enum.map(&%{"op" => "tombstone", "keys" => &1.keys, "ids" => &1.ids}))
 
       with :ok <- File.mkdir_p(Path.dirname(path)),
            :ok <- write_records(staged, records),
@@ -989,6 +1053,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp retired(table), do: Module.concat(table, Retired)
 
+  defp tombstones(table) when is_atom(table), do: Module.concat(table, Tombstones)
+
   defp id_spec(table_ref), do: [{{{table_ref, :"$1"}, :_}, [], [:"$1"]}]
 
   defp index_retired(%__MODULE__{table: table}, table_ref, %Entry{retired_at: at, id: id})
@@ -1104,6 +1170,11 @@ defmodule Smolquery.BufferService.HotManifest do
       recovered: Enum.count(entries, &(not MapSet.member?(present, &1.id))),
       reaped: length(removed)
     }
+  end
+
+  defp replace_tombstones(%__MODULE__{table: table} = manifest, table_ref, tombstones) do
+    :ets.match_delete(tombstones(table), {{table_ref, :_}, :_})
+    Enum.each(tombstones, &record_tombstone(manifest, table_ref, &1))
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok
@@ -1230,60 +1301,88 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp replay(records) do
-    Enum.reduce_while(records, {:ok, %{}}, fn record, {:ok, acc} ->
+    Enum.reduce_while(records, {:ok, {%{}, %{}}}, fn record, {:ok, acc} ->
       case apply_record(record, acc) do
         {:ok, acc} -> {:cont, {:ok, acc}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, entries} -> {:ok, entries |> Map.values() |> Enum.sort_by(& &1.id)}
-      {:error, reason} -> {:error, reason}
+      {:ok, {entries, tombstones}} ->
+        {:ok, entries |> Map.values() |> Enum.sort_by(& &1.id), Map.values(tombstones)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp apply_record(%{"op" => "add"} = record, acc) do
+  defp apply_record(%{"op" => "add"} = record, {entries, tombstones}) do
     with {:ok, entry} <- Entry.from_record(record) do
-      {:ok, Map.put(acc, entry.id, entry)}
+      {:ok, {Map.put(entries, entry.id, entry), tombstones}}
     end
   end
 
-  defp apply_record(%{"op" => "retire", "ids" => ids} = record, acc) do
+  defp apply_record(%{"op" => "retire", "ids" => ids} = record, {entries, tombstones}) do
     snapshot = record["sealed_at"]
     retired_at = record["retired_at"]
 
     {:ok,
-     Enum.reduce(ids, acc, fn id, acc ->
-       case Map.fetch(acc, id) do
-         {:ok, entry} -> Map.put(acc, id, Entry.seal(entry, snapshot, retired_at))
-         :error -> acc
-       end
-     end)}
+     {Enum.reduce(ids, entries, fn id, entries ->
+        case Map.fetch(entries, id) do
+          {:ok, entry} -> Map.put(entries, id, Entry.seal(entry, snapshot, retired_at))
+          :error -> entries
+        end
+      end), tombstones}}
   end
 
-  defp apply_record(%{"op" => "claim", "ids" => ids, "keys" => keys}, acc) do
+  defp apply_record(%{"op" => "claim", "ids" => ids, "keys" => keys}, {entries, tombstones}) do
     {:ok,
-     Enum.reduce(ids, acc, fn id, acc ->
-       case Map.fetch(acc, id) do
-         {:ok, entry} -> Map.put(acc, id, Entry.claim(entry, keys))
-         :error -> acc
-       end
-     end)}
+     {Enum.reduce(ids, entries, fn id, entries ->
+        case Map.fetch(entries, id) do
+          {:ok, entry} -> Map.put(entries, id, Entry.claim(entry, keys))
+          :error -> entries
+        end
+      end), tombstones}}
   end
 
-  defp apply_record(%{"op" => "release", "ids" => ids}, acc) do
-    {:ok,
-     Enum.reduce(ids, acc, fn id, acc ->
-       case Map.fetch(acc, id) do
-         {:ok, entry} -> Map.put(acc, id, Entry.claim(entry, []))
-         :error -> acc
-       end
-     end)}
+  # The tombstone derives from the released ids' claim_keys at this log
+  # position rather than from the record, so a release logged by any version
+  # replays into the same tombstone (T-386).
+  defp apply_record(%{"op" => "release", "ids" => ids}, {entries, tombstones}) do
+    keys =
+      Enum.find_value(ids, [], fn id ->
+        case Map.fetch(entries, id) do
+          {:ok, %Entry{claim_keys: [_ | _] = keys}} -> keys
+          _unclaimed -> nil
+        end
+      end)
+
+    entries =
+      Enum.reduce(ids, entries, fn id, entries ->
+        case Map.fetch(entries, id) do
+          {:ok, entry} -> Map.put(entries, id, Entry.claim(entry, []))
+          :error -> entries
+        end
+      end)
+
+    {:ok, {entries, put_tombstone(tombstones, keys, ids)}}
   end
 
-  defp apply_record(%{"op" => "drop", "ids" => ids}, acc), do: {:ok, Map.drop(acc, ids)}
+  defp apply_record(%{"op" => "tombstone", "keys" => keys, "ids" => ids}, {entries, tombstones}),
+    do: {:ok, {entries, put_tombstone(tombstones, keys, ids)}}
+
+  defp apply_record(%{"op" => "reconciled", "keys" => keys}, {entries, tombstones}),
+    do: {:ok, {entries, Map.delete(tombstones, keys)}}
+
+  defp apply_record(%{"op" => "drop", "ids" => ids}, {entries, tombstones}),
+    do: {:ok, {Map.drop(entries, ids), tombstones}}
 
   defp apply_record(record, _acc), do: {:error, {:unknown_record, record}}
+
+  defp put_tombstone(tombstones, [], _ids), do: tombstones
+
+  defp put_tombstone(tombstones, keys, ids),
+    do: Map.put(tombstones, keys, %{keys: keys, ids: ids})
 
   defp now, do: System.os_time(:millisecond)
 end
