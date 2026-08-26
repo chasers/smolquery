@@ -4,6 +4,10 @@ defmodule Smolquery.QueryService.MapColumnIntegrationTest do
   (`Smolquery.Test.FullNode`): an unparsed body and a rows batch in through the
   buffer, a seal into DuckLake, and reads through the planner's hot ∪ sealed
   union — the seam T-140 found broken for an Explorer-written map.
+
+  The seal valve is two files, so no seal is committing while a read runs:
+  a query job racing a seal for the DuckLake sqlite lock is a known transient
+  (`database is locked`), not what this test is about.
   """
 
   use ExUnit.Case, async: false
@@ -28,7 +32,7 @@ defmodule Smolquery.QueryService.MapColumnIntegrationTest do
     node =
       FullNode.start(context,
         schema: schema(),
-        seal_max_files: 1,
+        seal_max_files: 2,
         seal_max_bytes: 1_000_000_000,
         seal_max_age_ms: 600_000
       )
@@ -69,19 +73,27 @@ defmodule Smolquery.QueryService.MapColumnIntegrationTest do
              %{"id" => 2, "host" => "h2", "attrs" => %{"host" => "h2", "n" => "1"}}
            ]
 
-    assert Eventually.until(fn -> FullNode.sealed_count(node) == 1 end, 200, 100)
-
     {:ok, _ack} =
       Client.write_batch(node.buffer, @table, %{
         schema: schema(),
         rows: [%{"id" => 3, "attrs" => %{"host" => "h3"}}, %{"id" => 4}]
       })
 
+    assert Eventually.until(fn -> FullNode.sealed_count(node) == 1 end, 200, 100)
+
+    {:ok, _ack} =
+      Client.write_batch(
+        node.buffer,
+        @table,
+        ndjson_batch([%{"id" => 5, "attrs" => %{"host" => "h5"}}])
+      )
+
     assert query(node, sql) == [
              %{"id" => 1, "host" => "h1", "attrs" => %{"host" => "h1", "pod" => "api-7"}},
              %{"id" => 2, "host" => "h2", "attrs" => %{"host" => "h2", "n" => "1"}},
              %{"id" => 3, "host" => "h3", "attrs" => %{"host" => "h3"}},
-             %{"id" => 4, "host" => nil, "attrs" => %{}}
+             %{"id" => 4, "host" => nil, "attrs" => %{}},
+             %{"id" => 5, "host" => "h5", "attrs" => %{"host" => "h5"}}
            ]
 
     assert query(node, "SELECT id FROM analytics.events WHERE attrs['host'] = 'h3'") ==
