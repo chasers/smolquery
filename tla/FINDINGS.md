@@ -352,25 +352,63 @@ planner-style union serves it; a retry with the SAME `batch_id` returns
 counts the row twice. A PASS of that test means the bug is present — invert
 it when F-2 is fixed.
 
-**Fix directions (not applied — needs owner decision):**
-1. **Durable compensation** (modeled: `SegmentShipping_durabledrop.cfg`
-   PASSES): the owner records the failed flush's entry id as a pending drop —
-   durable in the manifest log, the same tombstone pattern T-386 built for
-   released claims — and re-ships it every maintenance tick until every
-   follower acks. Closes F-2a and F-2b for a reachable follower; an owner
-   crash before delivery still needs the record replicated or reconciled.
-2. **Provisional replicas**: a follower marks `accept_replica` entries
-   provisional and serves them to the planner only after a confirm (the next
-   flush's implicit ack, or adopter promotion). Closes the window entirely,
-   at the cost of a confirm protocol.
-3. At minimum, stop `forget_batches` on the compensating drop (tombstone the
-   batch_id as failed instead), so a keyed retry can be tied to the zombie —
-   narrows F-2b for keyed callers, does nothing for F-2a.
+**Fix: durable compensation — BUILT (T-390, 2026-08-25).** The direction the
+model validated (`SegmentShipping_durabledrop.cfg` PASSES), mirroring the
+T-386 tombstone machinery:
+
+- The committer records the compensated entry's id as an OWED drop in the
+  manifest log (`HotManifest.owe_drop/4`) — only for failures that reached
+  the ship (`{:replication_failed, ...}`); a pre-ship failure (underreplicated
+  ring, unreadable bytes) owes nothing. Owed drops survive recovery and log
+  compaction (`drop_owed` / `drop_settled` records).
+- The owning table buffer re-ships the drop on the seal cadence
+  (`append_replicas :drop`, which also fans out best-effort to stale holders)
+  until the replicas ack, then settles the record.
+- Closes F-2a and F-2b: the zombie is dropped as soon as the replica is
+  reachable again, and the retry stands alone — exactly once. The regression
+  test asserts the corrected contract end to end
+  (`failed_flush_zombie_test.exs`).
+
+Residual, documented not closed: an owner that dies for good before the
+settle — the promoted zombie holder re-answers the batch's `batch_id` with
+the original ack, which is why idempotency keys stay the recommended write
+mode. Alternatives considered: provisional replicas (a confirm protocol —
+closes even that window, much larger change); keeping the `batch_id` record
+on compensation (narrows F-2b only).
+
+### Review hardening (2026-08-25, code review of the stack)
+
+A review of the four PRs surfaced four correctness gaps in the T-386/T-390
+machinery, all closed in the same stack:
+
+- **Sealer exclusion is now bidirectional**: `seal_ready` defers while a
+  reconcile runs for the table, so a late-delivered signal (the `:noconnect`
+  spawn fallback) cannot register an orphan behind the reconcile's back.
+- **`covered?` requires re-derived coverage**: a released id sealed under
+  empty or the released claim's own keys (the keys-less-fence window) no
+  longer counts as covered — reconciling then could have dropped the rows'
+  only sealed copy. Over-counting stays the failure direction, never loss.
+- **The owed drop lands before the local drop, unconditionally**: a crash
+  between the two appends now leaves an unreplied-but-consistent entry, never
+  a replica-only zombie; the committer no longer parses the replicator's
+  error shapes to decide.
+- **The compactor defers a tombstoned group**: merging a released claim's
+  registered orphan would bake its rows past the reconciler's reach
+  (`Compactor` asks `Client.tombstones/2` before a swap). The window remains
+  only while the whole buffer tier is unreachable, and then compaction
+  proceeds rather than stalling buffer-less deployments.
+- **The CI gate distinguishes ERROR from VIOLATED**: TLC exit codes 10-13 are
+  violations; any other nonzero exit (parse error, bad config, OOM) now fails
+  `tla/run check` outright instead of matching an expected-VIOLATED row.
+
+Documented, deliberately not closed: an owed drop settles when the *current*
+followers ack — a zombie on an ex-follower after a ring change is reached
+only by the best-effort fan-out (same class as the dead-owner residual
+above); and reconcile tasks bypass the sealer's failure/backoff bookkeeping
+(they are rare, cheap metadata ops, and level-triggered).
 
 ## Next up for a follow-up agent
 
-- **F-2 fix** — owner decision on the direction above; the durable-drop
-  tombstone mirrors the T-386 machinery.
 - Specs 3-4 (RingEpoch T-92, exactly-once inserts).
 - Spec 3: RingEpoch ownership fence (T-92) — at-most-one-owner mutual exclusion.
 - Spec 4: exactly-once inserts (batch_id dedup, crash-before-reply + replay).

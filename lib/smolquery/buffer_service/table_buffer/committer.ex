@@ -627,7 +627,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     end
   end
 
+  # The owed record lands before the local drop, so a crash between the two
+  # leaves the entry intact everywhere (an unreplied write) rather than a
+  # replica-only zombie the drop can no longer reach (F-2, tla/FINDINGS.md).
   defp compensate(state, entry, reason) do
+    owe_replica_drop(state, entry)
+
     case HotManifest.drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
       :ok ->
         :ok
@@ -639,5 +644,19 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     end
 
     {:error, reason}
+  end
+
+  defp owe_replica_drop(state, entry) do
+    case HotManifest.owe_drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
+      :ok ->
+        :ok
+
+      {:error, owe_reason} ->
+        Logger.warning(
+          "recording the owed replica drop for #{inspect(state.table_ref)} failed: " <>
+            "#{inspect(owe_reason)} — a replica copy of #{entry.id} may outlive this " <>
+            "compensation"
+        )
+    end
   end
 end

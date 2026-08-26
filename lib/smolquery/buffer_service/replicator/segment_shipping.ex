@@ -25,10 +25,21 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   an entry its callers were told failed — and possibly a follower holding
   one the owner compensated away. So a failed shipment is compensated: the
   entry is dropped locally and a drop is best-effort shipped to every
-  follower. The residual window — a follower that applied the entry,
-  missed the drop, and was promoted before the owner could compensate —
-  re-answers the batch's `:batch_id` with the original ack, which is why
-  idempotency keys are the recommended write mode under replication.
+  follower.
+
+  The best-effort drop alone is not enough (F-2, `tla/FINDINGS.md`,
+  `tla/SegmentShipping.tla`): a follower that applied the entry — its ack
+  lost — and then missed the drop holds a zombie copy that the planner's
+  every-member manifest merge serves immediately, and a retried batch
+  double-counts those rows forever under a fresh entry id (the compensating
+  local drop also forgets the `batch_id` record, so even an idempotent retry
+  commits fresh). The committer therefore also records the drop as OWED in
+  the manifest log (`Smolquery.BufferService.HotManifest.owe_drop/4`), and
+  the owning table buffer re-ships it on the seal cadence until the replicas
+  ack, settling the record only then. The residual that remains is an owner
+  that dies for good before the settle: a promoted follower re-answers the
+  batch's `:batch_id` with the original ack, which is why idempotency keys
+  stay the recommended write mode under replication.
 
   ## Mutations ship first, and past the followers
 

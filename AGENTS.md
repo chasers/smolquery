@@ -92,9 +92,10 @@ AI-generated slop the compiler won't. All support `--format json`.
 - **Find dead code** — `mix reach.check --dead-code` (advisory; not a CI gate).
 - **Find duplication before extracting a helper** — `mix ex_dna` lists clones;
   `mix ex_dna.explain <n>` shows the anti-unification and suggested extraction.
-- **Model-check a distributed algorithm** — `./tla/run all` (or `mise run
-  tla`) runs the TLA+ specs in `tla/`. See `tla/README.md` for the config
-  matrix and `tla/FINDINGS.md` for what each spec proved or found.
+- **Model-check a distributed algorithm** — `./tla/run check` (or `mise run
+  tla`) runs the TLA+ specs in `tla/` against `tla/expected.tsv`; CI runs the
+  same gate on every PR. See `tla/README.md` for the config matrix and
+  `tla/FINDINGS.md` for what each spec proved or found.
 
 Slop gates enforced by CI (don't disable them to get green — fix the code):
 

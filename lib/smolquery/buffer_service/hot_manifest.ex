@@ -260,6 +260,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.new(claims(name), @index_options ++ [:set, :named_table])
     :ets.new(retired(name), @index_options ++ [:ordered_set, :named_table])
     :ets.new(tombstones(name), @index_options ++ [:set, :named_table])
+    :ets.new(owed(name), @index_options ++ [:set, :named_table])
 
     {:ok, name}
   end
@@ -766,6 +767,65 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   @doc """
+  Records that a drop of `ids` is still owed to the table's replicas (F-2,
+  `tla/FINDINGS.md`).
+
+  A compensated flush drops its entry locally, but the follower may hold a
+  copy whose ack was lost — and the compensating drop shipped alongside the
+  error is fire-and-forget. The owed record is the durable difference: the
+  owner re-ships the drop every maintenance tick until the replicas ack, then
+  settles it with `settle_drop/4`. Without it, the follower's zombie copy is
+  served by every query's manifest merge, and a retried batch double-counts
+  the rows forever.
+  """
+  @spec owe_drop(t(), Store.table_ref(), [String.t()], log() | nil) :: :ok | {:error, term()}
+  def owe_drop(%__MODULE__{table: table} = manifest, table_ref, ids, log \\ nil) do
+    case Enum.uniq(ids) do
+      [] ->
+        :ok
+
+      ids ->
+        with :ok <- append(manifest, table_ref, owed_record(ids), log) do
+          Enum.each(ids, &:ets.insert(owed(table), {{table_ref, &1}, &1}))
+
+          :ok
+        end
+    end
+  end
+
+  @doc """
+  The ids whose replica drops are still owed, oldest-inserted order not
+  guaranteed.
+  """
+  @spec owed_drops(t(), Store.table_ref()) :: [String.t()]
+  def owed_drops(%__MODULE__{table: table}, table_ref) do
+    :ets.select(owed(table), [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}])
+  end
+
+  @doc """
+  Settles owed replica drops, once the replicas acked the re-shipped drop.
+
+  Idempotent: an id never owed — or already settled — is `:ok`, and only the
+  ids actually owed are logged as settled.
+  """
+  @spec settle_drop(t(), Store.table_ref(), [String.t()], log() | nil) :: :ok | {:error, term()}
+  def settle_drop(%__MODULE__{table: table} = manifest, table_ref, ids, log \\ nil) do
+    case Enum.uniq(ids) |> Enum.filter(&(:ets.lookup(owed(table), {table_ref, &1}) != [])) do
+      [] ->
+        :ok
+
+      owed_ids ->
+        record = %{"op" => "drop_settled", "ids" => owed_ids}
+
+        with :ok <- append(manifest, table_ref, record, log) do
+          Enum.each(owed_ids, &:ets.delete(owed(table), {table_ref, &1}))
+
+          :ok
+        end
+    end
+  end
+
+  @doc """
   Entries retired before `cutoff`, as unix milliseconds.
 
   The grace-period reaper's input: an entry is safe to delete once no query that
@@ -800,10 +860,11 @@ defmodule Smolquery.BufferService.HotManifest do
   @spec recover(t(), Store.table_ref()) :: {:ok, map()} | {:error, term()}
   def recover(%__MODULE__{} = manifest, table_ref) do
     with {:ok, records} <- read_log(manifest, table_ref),
-         {:ok, logged, tombstones} <- replay(records),
+         {:ok, logged, tombstones, owed_ids} <- replay(records),
          {:ok, prefix} <- Store.prefix(table_ref),
          {:ok, keys} <- Store.list(manifest.store, prefix) do
       replace_tombstones(manifest, table_ref, tombstones)
+      replace_owed(manifest, table_ref, owed_ids)
       reconcile(manifest, table_ref, logged, keys)
     end
   end
@@ -845,9 +906,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
       records =
         (manifest |> entries(table_ref) |> Enum.map(&Entry.to_record/1)) ++
-          (manifest
-           |> tombstones(table_ref)
-           |> Enum.map(&%{"op" => "tombstone", "keys" => &1.keys, "ids" => &1.ids}))
+          (manifest |> tombstones(table_ref) |> Enum.map(&tombstone_record/1)) ++
+          owed_records(manifest, table_ref)
 
       with :ok <- File.mkdir_p(Path.dirname(path)),
            :ok <- write_records(staged, records),
@@ -1055,6 +1115,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp tombstones(table) when is_atom(table), do: Module.concat(table, Tombstones)
 
+  defp owed(table) when is_atom(table), do: Module.concat(table, Owed)
+
   defp id_spec(table_ref), do: [{{{table_ref, :"$1"}, :_}, [], [:"$1"]}]
 
   defp index_retired(%__MODULE__{table: table}, table_ref, %Entry{retired_at: at, id: id})
@@ -1175,6 +1237,18 @@ defmodule Smolquery.BufferService.HotManifest do
   defp replace_tombstones(%__MODULE__{table: table} = manifest, table_ref, tombstones) do
     :ets.match_delete(tombstones(table), {{table_ref, :_}, :_})
     Enum.each(tombstones, &record_tombstone(manifest, table_ref, &1))
+  end
+
+  defp replace_owed(%__MODULE__{table: table}, table_ref, owed_ids) do
+    :ets.match_delete(owed(table), {{table_ref, :_}, :_})
+    Enum.each(owed_ids, &:ets.insert(owed(table), {{table_ref, &1}, &1}))
+  end
+
+  defp owed_records(manifest, table_ref) do
+    case owed_drops(manifest, table_ref) do
+      [] -> []
+      ids -> [owed_record(Enum.sort(ids))]
+    end
   end
 
   defp forget_missing(_manifest, _table_ref, []), do: :ok
@@ -1301,28 +1375,29 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp replay(records) do
-    Enum.reduce_while(records, {:ok, {%{}, %{}}}, fn record, {:ok, acc} ->
+    Enum.reduce_while(records, {:ok, {%{}, %{}, MapSet.new()}}, fn record, {:ok, acc} ->
       case apply_record(record, acc) do
         {:ok, acc} -> {:cont, {:ok, acc}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, {entries, tombstones}} ->
-        {:ok, entries |> Map.values() |> Enum.sort_by(& &1.id), Map.values(tombstones)}
+      {:ok, {entries, tombstones, owed}} ->
+        {:ok, entries |> Map.values() |> Enum.sort_by(& &1.id), Map.values(tombstones),
+         MapSet.to_list(owed)}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp apply_record(%{"op" => "add"} = record, {entries, tombstones}) do
+  defp apply_record(%{"op" => "add"} = record, {entries, tombstones, owed}) do
     with {:ok, entry} <- Entry.from_record(record) do
-      {:ok, {Map.put(entries, entry.id, entry), tombstones}}
+      {:ok, {Map.put(entries, entry.id, entry), tombstones, owed}}
     end
   end
 
-  defp apply_record(%{"op" => "retire", "ids" => ids} = record, {entries, tombstones}) do
+  defp apply_record(%{"op" => "retire", "ids" => ids} = record, {entries, tombstones, owed}) do
     snapshot = record["sealed_at"]
     retired_at = record["retired_at"]
 
@@ -1332,23 +1407,25 @@ defmodule Smolquery.BufferService.HotManifest do
           {:ok, entry} -> Map.put(entries, id, Entry.seal(entry, snapshot, retired_at))
           :error -> entries
         end
-      end), tombstones}}
+      end), tombstones, owed}}
   end
 
-  defp apply_record(%{"op" => "claim", "ids" => ids, "keys" => keys}, {entries, tombstones}) do
+  defp apply_record(
+         %{"op" => "claim", "ids" => ids, "keys" => keys},
+         {entries, tombstones, owed}
+       ) do
     {:ok,
      {Enum.reduce(ids, entries, fn id, entries ->
         case Map.fetch(entries, id) do
           {:ok, entry} -> Map.put(entries, id, Entry.claim(entry, keys))
           :error -> entries
         end
-      end), tombstones}}
+      end), tombstones, owed}}
   end
 
   # The tombstone derives from the released ids' claim_keys at this log
-  # position rather than from the record, so a release logged by any version
-  # replays into the same tombstone (T-386).
-  defp apply_record(%{"op" => "release", "ids" => ids}, {entries, tombstones}) do
+  # position, so a release logged by any version replays the same (T-386).
+  defp apply_record(%{"op" => "release", "ids" => ids}, {entries, tombstones, owed}) do
     keys =
       Enum.find_value(ids, [], fn id ->
         case Map.fetch(entries, id) do
@@ -1365,19 +1442,33 @@ defmodule Smolquery.BufferService.HotManifest do
         end
       end)
 
-    {:ok, {entries, put_tombstone(tombstones, keys, ids)}}
+    {:ok, {entries, put_tombstone(tombstones, keys, ids), owed}}
   end
 
-  defp apply_record(%{"op" => "tombstone", "keys" => keys, "ids" => ids}, {entries, tombstones}),
-    do: {:ok, {entries, put_tombstone(tombstones, keys, ids)}}
+  defp apply_record(
+         %{"op" => "tombstone", "keys" => keys, "ids" => ids},
+         {entries, tombstones, owed}
+       ),
+       do: {:ok, {entries, put_tombstone(tombstones, keys, ids), owed}}
 
-  defp apply_record(%{"op" => "reconciled", "keys" => keys}, {entries, tombstones}),
-    do: {:ok, {entries, Map.delete(tombstones, keys)}}
+  defp apply_record(%{"op" => "reconciled", "keys" => keys}, {entries, tombstones, owed}),
+    do: {:ok, {entries, Map.delete(tombstones, keys), owed}}
 
-  defp apply_record(%{"op" => "drop", "ids" => ids}, {entries, tombstones}),
-    do: {:ok, {Map.drop(entries, ids), tombstones}}
+  defp apply_record(%{"op" => "drop", "ids" => ids}, {entries, tombstones, owed}),
+    do: {:ok, {Map.drop(entries, ids), tombstones, owed}}
+
+  defp apply_record(%{"op" => "drop_owed", "ids" => ids}, {entries, tombstones, owed}),
+    do: {:ok, {entries, tombstones, Enum.reduce(ids, owed, &MapSet.put(&2, &1))}}
+
+  defp apply_record(%{"op" => "drop_settled", "ids" => ids}, {entries, tombstones, owed}),
+    do: {:ok, {entries, tombstones, Enum.reduce(ids, owed, &MapSet.delete(&2, &1))}}
 
   defp apply_record(record, _acc), do: {:error, {:unknown_record, record}}
+
+  defp tombstone_record(tombstone),
+    do: %{"op" => "tombstone", "keys" => tombstone.keys, "ids" => tombstone.ids}
+
+  defp owed_record(ids), do: %{"op" => "drop_owed", "ids" => ids}
 
   defp put_tombstone(tombstones, [], _ids), do: tombstones
 

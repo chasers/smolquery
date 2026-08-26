@@ -134,9 +134,21 @@ defmodule Smolquery.StorageService.Handoff.Seal do
       with {:ok, entries} <- claim_manifest(runtime, table_ref, claim),
            :ok <- claim_live(entries, claim),
            {:ok, snapshot} <- commit(runtime, table_ref, claim, entries) do
-        tp(:"storage.seal.before_retire", %{table_ref: table_ref, keys: claim[:keys]})
+        tp(:"storage.seal.before_retire", %{
+          table_ref: table_ref,
+          keys: claim[:keys],
+          ids: claim[:ids]
+        })
+
         retired = retire(runtime, table_ref, claim, snapshot)
-        tp(:"storage.seal.retired", %{table_ref: table_ref, keys: claim[:keys], result: retired})
+
+        tp(:"storage.seal.retired", %{
+          table_ref: table_ref,
+          keys: claim[:keys],
+          ids: claim[:ids],
+          result: retired
+        })
+
         retired
       end
 
@@ -153,18 +165,18 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   @impl Handoff
   def reconcile_released(_config, %Runtime{} = runtime, table_ref, claim) do
-    with {:ok, paths} <- sealed_paths(runtime, claim),
-         {:ok, registered} <-
-           Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current),
-         :ok <-
-           paths
-           |> Enum.filter(&(&1 in registered))
-           |> drop_orphans(runtime, table_ref) do
+    with :ok <- drop_registered_orphans(runtime, table_ref, claim) do
       Client.release_reconciled_at(claim[:origin], runtime.buffer_name, table_ref, claim.keys)
     end
   end
 
   defp compensate_stale(runtime, table_ref, claim) do
+    drop_registered_orphans(runtime, table_ref, claim)
+
+    :ok
+  end
+
+  defp drop_registered_orphans(runtime, table_ref, claim) do
     with {:ok, paths} <- sealed_paths(runtime, claim),
          {:ok, registered} <-
            Catalog.segments(runtime.catalog, Partitions.parent(table_ref), :current) do
@@ -174,8 +186,6 @@ defmodule Smolquery.StorageService.Handoff.Seal do
       |> Enum.filter(&MapSet.member?(held, &1))
       |> drop_orphans(runtime, table_ref)
     end
-
-    :ok
   end
 
   defp drop_orphans([], _runtime, _table_ref), do: :ok
@@ -207,10 +217,8 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   defp claim_manifest(_runtime, _table_ref, _claim), do: {:ok, []}
 
-  # A sealed_at set under this claim's own keys is reconciliation (a crashed
-  # attempt's earlier seal); one set under different keys means the claim was
-  # released and re-derived while this attempt ran — skipping it would register
-  # an orphan segment double-counting the re-derived claims' rows (F-1).
+  # A claim_keys mismatch is stale even when sealed_at is set: sealed under
+  # other keys means released and re-derived, not reconciliation (F-1).
   defp claim_live(entries, %{ids: ids, keys: keys}) when is_list(ids) and is_list(keys) do
     claimed = MapSet.new(ids)
 
@@ -247,7 +255,9 @@ defmodule Smolquery.StorageService.Handoff.Seal do
       record_segment(table_ref, segment)
 
       result = Catalog.register_segments(runtime.catalog, Partitions.parent(table_ref), [segment])
-      tp(:"storage.seal.registered", %{table_ref: table_ref, keys: claim[:keys]})
+
+      tp(:"storage.seal.registered", %{table_ref: table_ref, keys: claim[:keys], ids: claim[:ids]})
+
       result
     end
   end

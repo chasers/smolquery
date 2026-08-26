@@ -12,7 +12,8 @@ modeled. Read it before you add or change a spec.
 ## How to run
 
 ```sh
-./tla/run all                       # every config (also: mise run tla)
+./tla/run check                     # every config vs expected.tsv (CI's gate; also: mise run tla)
+./tla/run all                       # every config, full TLC output
 ./tla/run ReleasedClaim_nocrash     # one config
 ```
 
@@ -20,6 +21,13 @@ The script downloads `tla2tools.jar` into `tla/` on first use. The jar and
 the `tla/states/` scratch directory are git-ignored. The script runs TLC with
 `-deadlock` because these specs have valid terminal states. A settled state
 is not a bug; the `NoPermanentDouble` invariant catches a bad terminal state.
+
+CI runs `./tla/run check` on every pull request (the `tla` job in
+`.github/workflows/ci.yml`): each config's PASS/VIOLATED result must match
+[`expected.tsv`](expected.tsv) — a VIOLATED row there is intentional (a
+negative control, or a documented finding on the unfixed code path). A new
+config must be added to `expected.tsv`, and a fix that changes a result must
+update it in the same change.
 
 ## Layout
 
@@ -45,9 +53,9 @@ property is load-bearing.
 | `ReleasedClaim_reconciler` | gate fix + durable reconciler | PASS — complete fix |
 | `SegmentShipping_core` | T-96 ship-before-ack durability, owner crash | PASS |
 | `SegmentShipping_ackfirst` | ack the caller before the ship | VIOLATED (by design) |
-| `SegmentShipping` | failed-flush compensation as coded, no crash | VIOLATED — **F-2a** |
-| `SegmentShipping_retry` | as coded, caller retries the failed batch | VIOLATED — **F-2b** |
-| `SegmentShipping_durabledrop` | drop owed durably, re-shipped until delivered | PASS — fix direction |
+| `SegmentShipping` | failed-flush compensation pre-T-390, no crash | VIOLATED — F-2a |
+| `SegmentShipping_retry` | pre-T-390, caller retries the failed batch | VIOLATED — F-2b |
+| `SegmentShipping_durabledrop` | drop owed durably, re-shipped until delivered | PASS — the T-390 fix |
 
 The `GateFix` constant models the fix PR #260 applies (T-385). The
 `Reconciler` constant models the durable reconciler built as T-386 — the

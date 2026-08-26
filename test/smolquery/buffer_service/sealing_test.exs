@@ -596,22 +596,14 @@ defmodule Smolquery.BufferService.SealingTest do
       {:ok, runtime} = Runtime.fetch(name)
       assert HotManifest.tombstones(runtime.manifest, @table) == []
 
-      flush_reconciles()
+      flush_messages()
       refute_receive {:reconcile_released, @table, _tombstone}, 100
     end
   end
 
   defp flush_messages do
     receive do
-      {:seal_ready, _table, _claim} -> flush_messages()
-    after
-      0 -> :ok
-    end
-  end
-
-  defp flush_reconciles do
-    receive do
-      {:reconcile_released, _table, _tombstone} -> flush_reconciles()
+      {tag, _table, _payload} when tag in [:seal_ready, :reconcile_released] -> flush_messages()
     after
       0 -> :ok
     end

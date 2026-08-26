@@ -59,34 +59,48 @@ end
 
 defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
   @moduledoc """
-  Replication of TLA+ finding F-2 (`tla/FINDINGS.md`,
-  `tla/SegmentShipping.tla`): a failed flush's compensating drop is
+  Regression test for TLA+ finding F-2 (`tla/FINDINGS.md`,
+  `tla/SegmentShipping.tla`): a failed flush's compensating drop was
   fire-and-forget, and the read side merges hot manifests from every member —
-  so a follower that applied the entry and missed the drop serves rows the
-  caller was told FAILED, with no crash and no promotion. A retry then
-  double-counts them under a fresh entry id the planner's dedupe-by-id cannot
-  tie back — and the same `batch_id` does not dedup it, because the
-  compensating local drop also forgot the batch record
-  (`hot_manifest.ex` `forget_batches`).
+  so a follower that applied the entry (ack lost) and missed the drop served
+  rows the caller was told FAILED, with no crash and no promotion, and a
+  retry double-counted them under a fresh entry id forever. The same
+  `batch_id` did not dedup it, because the compensating local drop also
+  forgot the batch record (`hot_manifest.ex` `forget_batches`).
 
-  One network hiccup produces it: the first ship is applied but its ack times
-  out; the compensating drop is lost in the same window.
+  The fix (T-390) owes the drop durably: the committer records it with the
+  compensation, and the owner re-ships it on the maintenance tick until the
+  replicas ack (`SegmentShipping_durabledrop.cfg` is the model of this).
 
-  A PASS of this test means the bug is present. Invert the assertions to the
-  correct contract (zombie compensated, retry counted once) when F-2 is
-  fixed.
+  One network hiccup drives the race: the first ship is applied but its ack
+  times out; the compensating drop is lost in the same window. Everything
+  else is the production path: the fault sits at the `Transport` behaviour —
+  the same seam that picks gen_rpc over local calls in a cluster — the
+  re-ship is the owner's own maintenance tick, and the read goes through
+  `QueryService.Client.query/3` against the follower's hot server, the view
+  the planner's every-member fan-out would merge in a cluster. The test
+  asserts the corrected contract: the zombie clears on its own, the
+  same-`batch_id` retry lands once, and no query ever again serves rows the
+  caller was told failed.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.Endpoint
+  alias Smolquery.BufferService.HotManifest
+  alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Replicator.FailedFlushZombieTest.LossyTransport
   alias Smolquery.BufferService.Replicator.SegmentShipping
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.Catalog
+  alias Smolquery.Catalog.DuckLake
+  alias Smolquery.QueryService
   alias Smolquery.Schema
+  alias Smolquery.Test.Eventually
 
+  @moduletag :integration
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
@@ -94,7 +108,12 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
   defp start_instance(context, opts \\ []) do
     opts =
       Keyword.merge(
-        [name: :"zombie_#{:erlang.unique_integer([:positive])}", flush_interval_ms: 25],
+        [
+          name: :"zombie_#{:erlang.unique_integer([:positive])}",
+          flush_interval_ms: 25,
+          maintenance_interval_ms: 50,
+          seal_retry_ms: 25
+        ],
         opts
       )
 
@@ -116,16 +135,59 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
     entries
   end
 
-  defp planner_union(owner, follower) do
-    (entries(owner) ++ entries(follower))
-    |> Enum.uniq_by(& &1.id)
+  defp start_follower_view(context, follower) do
+    storage = :"zombie_catalog_#{:erlang.unique_integer([:positive])}"
+    query = :"zombie_query_#{:erlang.unique_integer([:positive])}"
+    metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
+    data_path = Path.join(context.tmp_dir, "ducklake")
+
+    start_supervised!(
+      {DuckLake,
+       name: Smolquery.StorageService.Runtime.catalog_engine(storage),
+       metadata: metadata,
+       data_path: data_path},
+      id: storage
+    )
+
+    catalog = DuckLake.new(engine: Smolquery.StorageService.Runtime.catalog_engine(storage))
+    :ok = Catalog.create_dataset(catalog, "analytics")
+    :ok = Catalog.create_table(catalog, @table, Schema.new!([{"id", :int64}]))
+
+    start_supervised!(
+      {QueryService.Supervisor,
+       name: query,
+       catalog: catalog,
+       buffer_name: follower,
+       buffer_base_url: HotServer.base_url(follower),
+       engine_extensions: [:httpfs],
+       allowed_directories: [context.tmp_dir],
+       job_bootstrap: [
+         DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)
+       ]},
+      id: query
+    )
+
+    on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+    query
   end
 
-  test "F-2: a lost drop strands a zombie the read side serves; a retry double-counts",
+  defp follower_view_ids(query) do
+    case QueryService.Client.query(query, "SELECT id FROM analytics.events ORDER BY id") do
+      {:ok, _job, %Explorer.DataFrame{} = frame} ->
+        frame |> Explorer.DataFrame.to_columns() |> Map.get("id", [])
+
+      {:ok, job, nil} ->
+        {:query_failed, job.error}
+    end
+  end
+
+  test "F-2: a lost drop is owed, re-shipped until the zombie clears, and a retry counts once",
        context do
     :ok = LossyTransport.script(self())
 
     follower = start_instance(context)
+    view = start_follower_view(context, follower)
 
     owner =
       start_instance(
@@ -139,17 +201,29 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
     assert {:error, {:replication_failed, _node, _reason}} =
              Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-zombie"))
 
+    {:ok, runtime} = Runtime.fetch(owner)
+
     assert entries(owner) == []
     assert [zombie] = entries(follower)
-    assert zombie.row_count == 1
     assert zombie.claim_keys == []
+    assert HotManifest.owed_drops(runtime.manifest, @table) == [zombie.id]
 
-    assert [_zombie] = planner_union(owner, follower)
+    assert Eventually.until(
+             fn ->
+               entries(follower) == [] and
+                 HotManifest.owed_drops(runtime.manifest, @table) == []
+             end,
+             400,
+             25
+           )
+
+    assert follower_view_ids(view) == []
 
     assert {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => 1}], "b-zombie"))
     refute ack.segment_id == zombie.id
 
-    assert [_first, _second] = union = planner_union(owner, follower)
-    assert Enum.sum(Enum.map(union, & &1.row_count)) == 2
+    assert [replica] = entries(follower)
+    assert replica.id == ack.segment_id
+    assert follower_view_ids(view) == [1]
   end
 end
