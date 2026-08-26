@@ -12,10 +12,11 @@ defmodule Smolquery.SchemaTest do
     :timestamp,
     :date,
     {:numeric, 38, 2},
-    {:map, :string, :string}
+    {:map, :string, :string},
+    :variant
   ]
 
-  @explorer_types List.delete(@logical_types, {:map, :string, :string})
+  @explorer_types @logical_types -- [{:map, :string, :string}, :variant]
 
   describe "new/1" do
     test "accepts tuples, tuples with options, and Field structs" do
@@ -131,6 +132,21 @@ defmodule Smolquery.SchemaTest do
                Schema.explorer_dtypes(
                  Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}])
                )
+    end
+
+    test "a variant has no Explorer dtype, is stored as JSON, and is queried as VARIANT" do
+      assert Schema.explorer_dtype(:variant) == {:error, {:unsupported_type, :variant}}
+      assert Schema.duckdb_type(:variant) == {:ok, "JSON"}
+      assert Schema.logical_from_duckdb("json") == {:ok, :variant}
+      assert Schema.query_type(:variant) == {:ok, "VARIANT"}
+      assert Schema.api_type(:variant) == {:ok, "VARIANT"}
+      assert Schema.type_from_api("Variant") == {:ok, :variant}
+    end
+
+    test "every other type is queried as it is stored" do
+      for type <- @explorer_types ++ [{:map, :string, :string}] do
+        assert Schema.query_type(type) == Schema.duckdb_type(type)
+      end
     end
 
     test "speaks the map in DuckDB's and ClickHouse's words" do
@@ -253,6 +269,22 @@ defmodule Smolquery.SchemaTest do
                {:ok, %{"host" => "h1", "n" => "1"}}
 
       assert Schema.value_from_json({:map, :string, :string}, []) == {:ok, %{}}
+    end
+
+    test "a variant takes any JSON value as it is" do
+      for value <- [
+            %{"host" => "h1", "n" => 1, "tags" => ["a", %{"k" => nil}]},
+            [1, "a"],
+            "s",
+            1,
+            1.5,
+            true
+          ] do
+        assert Schema.value_from_json(:variant, value) == {:ok, value}
+      end
+
+      assert Schema.value_from_json(:variant, Decimal.new(1)) ==
+               {:error, {:invalid_value, :variant, Decimal.new(1)}}
     end
 
     test "a map rejects anything that is not an object or an entry list" do

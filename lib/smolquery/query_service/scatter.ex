@@ -106,7 +106,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp attempt(runtime, connection, plan, job_id, timeout_ms) do
     with {:ok, ref} <- single_table(plan),
          {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-         {:ok, outputs} <- describe(connection, plan.canonical_sql),
+         {:ok, outputs} <- Connection.describe(connection, plan.canonical_sql, :infinity),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
@@ -127,18 +127,6 @@ defmodule Smolquery.QueryService.Scatter do
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
   defp single_table(%Plan{tables: [ref]}), do: {:ok, ref}
   defp single_table(%Plan{tables: refs}), do: {:refused, {:table_count, length(refs)}}
-
-  defp describe(connection, canonical_sql) do
-    with {:ok, result} <-
-           Connection.query(connection, "DESCRIBE " <> canonical_sql, [], :infinity) do
-      {:ok,
-       Enum.map(result.rows, fn row ->
-         fields = result.columns |> Enum.zip(row) |> Map.new()
-
-         {fields["column_name"], fields["column_type"]}
-       end)}
-    end
-  end
 
   defp decompose(connection, plan, outputs, schema) do
     columns = Enum.map(schema.fields, & &1.name)

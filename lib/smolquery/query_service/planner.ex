@@ -545,6 +545,7 @@ defmodule Smolquery.QueryService.Planner do
       statements: attaches ++ statements,
       federated: attaches != [],
       hot: hot,
+      schemas: Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end),
       statistics: statistics(members, hot, tables)
     }
   end

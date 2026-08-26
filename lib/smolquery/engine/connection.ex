@@ -104,6 +104,23 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @doc """
+  The columns `sql` would produce, as `{name, type}` pairs in result order —
+  a `DESCRIBE`, which binds the statement without running it.
+  """
+  @spec describe(GenServer.server(), String.t(), timeout()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, Exception.t()}
+  def describe(conn, sql, timeout \\ 30_000) do
+    with {:ok, result} <- query(conn, "DESCRIBE " <> sql, [], timeout) do
+      {:ok,
+       Enum.map(result.rows, fn row ->
+         fields = result.columns |> Enum.zip(row) |> Map.new()
+
+         {fields["column_name"], fields["column_type"]}
+       end)}
+    end
+  end
+
+  @doc """
   Runs `sql` and returns the result as an `Explorer.DataFrame`.
 
   The Arrow stream goes straight to Polars in Rust, so no row is ever built as an
@@ -163,9 +180,9 @@ defmodule Smolquery.Engine.Connection do
   Fatal and internal errors are unrecoverable in place: DuckDB refuses every
   subsequent query on that database until it is restarted.
   """
-  @spec fatal?(Exception.t()) :: boolean()
+  @spec fatal?(Exception.t() | String.t()) :: boolean()
   def fatal?(error) do
-    message = Exception.message(error)
+    message = if is_binary(error), do: error, else: Exception.message(error)
 
     Enum.any?(@fatal_markers, &String.contains?(message, &1))
   end

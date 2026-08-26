@@ -38,7 +38,8 @@ defmodule Smolquery.QueryService.Job do
     :explain,
     :trace,
     :scatter,
-    :error
+    :error,
+    json_columns: []
   ]
 
   @type state :: :pending | :running | :done | :error | :cancelled
@@ -56,7 +57,8 @@ defmodule Smolquery.QueryService.Job do
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
           scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
-          error: term()
+          error: term(),
+          json_columns: [String.t()]
         }
 
   @doc """

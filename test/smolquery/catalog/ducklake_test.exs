@@ -904,4 +904,13 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.table_schema(catalog, {"analytics", "attributed"}) == {:ok, schema}
     end
   end
+
+  describe "a VARIANT column" do
+    test "declares as VARIANT and reads back as the variant type", %{catalog: catalog} do
+      schema = Schema.new!([{"id", :int64, nullable: false}, {"attrs", :variant}])
+
+      assert :ok = Catalog.create_table(catalog, {"analytics", "varied"}, schema)
+      assert Catalog.table_schema(catalog, {"analytics", "varied"}) == {:ok, schema}
+    end
+  end
 end

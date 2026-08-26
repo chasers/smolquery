@@ -23,7 +23,8 @@ defmodule SmolqueryWeb.TableLive.Index do
     "TIMESTAMP",
     "DATE",
     "NUMERIC(38,9)",
-    "MAP(STRING, STRING)"
+    "MAP(STRING, STRING)",
+    "VARIANT"
   ]
 
   @impl Phoenix.LiveView

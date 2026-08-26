@@ -69,6 +69,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Scatter
   alias Smolquery.QueryService.Trace
+  alias Smolquery.QueryService.VariantResults
 
   @type option ::
           {:timeout_ms, pos_integer()}
@@ -200,7 +201,7 @@ defmodule Smolquery.QueryService.Runner do
               done.statistics
             )
 
-          {%{job | scatter: done.scatter}, frame}
+          {%{job | scatter: done.scatter, json_columns: done.json_columns}, frame}
 
         {:error, reason} ->
           {Job.failed(state.job, reason), nil}
@@ -254,6 +255,8 @@ defmodule Smolquery.QueryService.Runner do
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
            end),
+         {:ok, plan, json_columns} <-
+           Trace.span(:variants, fn -> VariantResults.prepare(connection, plan) end),
          {:ok, {result, scatter}} <-
            Trace.span(:execute, fn ->
              outcome(
@@ -272,6 +275,7 @@ defmodule Smolquery.QueryService.Runner do
        %{
          result: result,
          scatter: scatter,
+         json_columns: json_columns,
          snapshot: plan.snapshot,
          duration_ms: duration,
          statistics: plan.statistics
