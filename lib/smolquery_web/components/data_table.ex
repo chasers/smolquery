@@ -38,14 +38,15 @@ defmodule SmolqueryWeb.DataTable do
   @doc """
   One page of a result frame as `{columns, rows}` ready for `data_table/1`.
   """
-  @spec frame_page(DataFrame.t(), non_neg_integer(), pos_integer()) :: {[String.t()], [[term()]]}
-  def frame_page(%DataFrame{} = frame, offset, limit) do
+  @spec frame_page(DataFrame.t(), non_neg_integer(), pos_integer(), keyword()) ::
+          {[String.t()], [[term()]]}
+  def frame_page(%DataFrame{} = frame, offset, limit, opts \\ []) do
     columns = DataFrame.names(frame)
 
     rows =
       frame
       |> DataFrame.slice(offset, limit)
-      |> Frame.to_rows()
+      |> Frame.to_rows(opts)
       |> Enum.map(fn row -> Enum.map(columns, &Map.fetch!(row, &1)) end)
 
     {columns, rows}

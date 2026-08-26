@@ -303,8 +303,10 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp fetch_preview(runtime, sql) do
     case QueryService.Client.query(runtime.query_name, sql, timeout_ms: 15_000) do
-      {:ok, %QueryService.Job{state: :done}, frame} ->
-        {columns, rows} = DataTable.frame_page(frame, 0, @preview_rows)
+      {:ok, %QueryService.Job{state: :done} = job, frame} ->
+        {columns, rows} =
+          DataTable.frame_page(frame, 0, @preview_rows, json_columns: job.json_columns)
+
         {:ok, columns, rows}
 
       {:ok, job, _frame} ->

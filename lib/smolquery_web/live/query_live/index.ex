@@ -230,7 +230,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
       frame ->
         {columns, rows} =
-          DataTable.frame_page(frame, socket.assigns.page * @page_size, @page_size)
+          DataTable.frame_page(frame, socket.assigns.page * @page_size, @page_size,
+            json_columns: socket.assigns.job.json_columns
+          )
 
         socket |> assign(:columns, columns) |> assign(:rows, rows)
     end

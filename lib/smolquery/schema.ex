@@ -57,11 +57,18 @@ defmodule Smolquery.Schema do
   `ducklake_add_data_files` — the seal's zero-copy registration — refuses to
   map that file onto a VARIANT column (`Expected VARIANT, found type STRUCT`).
   A `JSON` column it registers. So `duckdb_type/1` says `JSON`, the writer
-  reads the column as JSON with no cast, and `query_type/1` says `VARIANT`:
+  reads the column as JSON with no cast, and `view_cast/1` says `VARIANT`:
   `Smolquery.QueryService.Views` projects `"attrs"::VARIANT` in every table
   view, so a query sees the variant type across the hot ∪ sealed union. The
-  parse is paid per scanned row, per query; the day DuckLake registers a
-  variant file, `duckdb_type/1` flips and nothing above it moves.
+  parse is paid per row that reaches a projection or filter naming the
+  column, per query — DuckDB does not read a column no expression names.
+
+  The reverse mapping, `JSON` to `:variant`, holds by construction: this
+  schema has no JSON logical type, so a `JSON` column in a catalog smolquery
+  manages is a variant and nothing else. The day DuckLake registers a variant
+  file, `duckdb_type/1` flips for new tables, `view_cast/1` keeps casting
+  both storages, and `Field` learns the stored type so the seal merge casts
+  to what each table holds (T-394).
 
   The same writer story as a map applies: no Explorer dtype, DuckDB writes it.
   And a variant never leaves DuckDB as itself: Arrow has no VARIANT, so the
@@ -158,10 +165,18 @@ defmodule Smolquery.Schema do
   @explorer_to_logical Map.new(@mapping, fn {logical, dtype, _duckdb, _api} ->
                          {dtype, logical}
                        end)
-  @logical_to_duckdb Map.new(@mapping, fn {logical, _dtype, duckdb, _api} -> {logical, duckdb} end)
-  @duckdb_to_logical Map.new(@mapping, fn {logical, _dtype, duckdb, _api} -> {duckdb, logical} end)
-  @logical_to_api Map.new(@mapping, fn {logical, _dtype, _duckdb, api} -> {logical, api} end)
-  @api_to_logical Map.new(@mapping, fn {logical, _dtype, _duckdb, api} -> {api, logical} end)
+  @logical_to_duckdb @mapping
+                     |> Map.new(fn {logical, _dtype, duckdb, _api} -> {logical, duckdb} end)
+                     |> Map.put(:variant, "JSON")
+  @duckdb_to_logical @mapping
+                     |> Map.new(fn {logical, _dtype, duckdb, _api} -> {duckdb, logical} end)
+                     |> Map.put("JSON", :variant)
+  @logical_to_api @mapping
+                  |> Map.new(fn {logical, _dtype, _duckdb, api} -> {logical, api} end)
+                  |> Map.put(:variant, "VARIANT")
+  @api_to_logical @mapping
+                  |> Map.new(fn {logical, _dtype, _duckdb, api} -> {api, logical} end)
+                  |> Map.put("VARIANT", :variant)
 
   @doc """
   Builds a schema from field specs — `Field` structs or `{name, type}` /
@@ -288,7 +303,6 @@ defmodule Smolquery.Schema do
   @spec duckdb_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def duckdb_type({:numeric, precision, scale}), do: {:ok, "DECIMAL(#{precision},#{scale})"}
   def duckdb_type(@map_type), do: {:ok, @map_duckdb}
-  def duckdb_type(:variant), do: {:ok, "JSON"}
 
   def duckdb_type(type) do
     case Map.fetch(@logical_to_duckdb, type) do
@@ -298,28 +312,19 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
-  The DuckDB type a column presents to a query — `VARIANT` for a variant,
-  which the catalog stores as `JSON`; otherwise `duckdb_type/1`.
+  The DuckDB type a table view casts the column to, or `:none` when a query
+  sees the stored type as it is.
 
-  A table view casts every column whose query type differs from its stored
-  type (`Smolquery.QueryService.Views`).
+  `VARIANT` for a variant, whatever a given table stores it as — `JSON`
+  today, and `VARIANT` once DuckLake registers a variant file (T-394). A table
+  created before that flip keeps its `JSON` column, so the rule is on the
+  logical type, not on what `duckdb_type/1` says now: old and new tables then
+  read alike, and a `VARIANT` to `VARIANT` cast costs nothing.
+  `Smolquery.QueryService.Views` renders the cast.
   """
-  @spec query_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
-  def query_type(:variant), do: {:ok, "VARIANT"}
-  def query_type(type), do: duckdb_type(type)
-
-  @doc """
-  Whether a table view must cast the column to its query type.
-
-  True for a variant whatever a given table stores it as — `JSON` today, and
-  `VARIANT` once DuckLake registers a variant file (T-394). A table created
-  before that flip keeps its `JSON` column, so the rule is on the logical
-  type, not on what `duckdb_type/1` says now: old and new tables then read
-  alike, and a `VARIANT` to `VARIANT` cast costs nothing.
-  """
-  @spec cast_in_view?(logical_type()) :: boolean()
-  def cast_in_view?(:variant), do: true
-  def cast_in_view?(_type), do: false
+  @spec view_cast(logical_type()) :: {:cast, String.t()} | :none
+  def view_cast(:variant), do: {:cast, "VARIANT"}
+  def view_cast(_type), do: :none
 
   @doc """
   The logical type for a DuckDB type name, as `information_schema` reports it.
@@ -339,7 +344,6 @@ defmodule Smolquery.Schema do
   @spec api_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def api_type({:numeric, precision, scale}), do: {:ok, "NUMERIC(#{precision},#{scale})"}
   def api_type(@map_type), do: {:ok, @map_api}
-  def api_type(:variant), do: {:ok, "VARIANT"}
 
   def api_type(type) do
     case Map.fetch(@logical_to_api, type) do
@@ -569,14 +573,13 @@ defmodule Smolquery.Schema do
   end
 
   defp compound_from_api(name) do
+    name = String.trim(name)
+
     cond do
-      Regex.match?(~r/^MAP\(\s*STRING\s*,\s*STRING\s*\)$/i, String.trim(name)) ->
+      Regex.match?(~r/^MAP\(\s*STRING\s*,\s*STRING\s*\)$/i, name) ->
         {:ok, @map_type}
 
-      String.upcase(String.trim(name)) == "VARIANT" ->
-        {:ok, :variant}
-
-      match = Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
+      match = Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, name) ->
         [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
 
@@ -586,14 +589,13 @@ defmodule Smolquery.Schema do
   end
 
   defp compound_from_duckdb(name) do
+    name = String.trim(name)
+
     cond do
-      Regex.match?(~r/^MAP\(\s*VARCHAR\s*,\s*VARCHAR\s*\)$/i, String.trim(name)) ->
+      Regex.match?(~r/^MAP\(\s*VARCHAR\s*,\s*VARCHAR\s*\)$/i, name) ->
         {:ok, @map_type}
 
-      String.upcase(String.trim(name)) == "JSON" ->
-        {:ok, :variant}
-
-      match = Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
+      match = Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, name) ->
         [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
 

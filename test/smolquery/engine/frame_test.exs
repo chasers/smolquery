@@ -46,4 +46,12 @@ defmodule Smolquery.Engine.FrameTest do
              %{"id" => 2, "doc" => nil, "text" => nil}
            ]
   end
+
+  test "keeps text that is not JSON, and skips a named column the frame lacks" do
+    {:ok, frame} = Engine.frame(@engine, "SELECT 'Infinity' AS v, '[1]' AS l")
+
+    assert Frame.to_rows(frame, json_columns: ["v", "l", "absent"]) == [
+             %{"v" => "Infinity", "l" => [1]}
+           ]
+  end
 end
