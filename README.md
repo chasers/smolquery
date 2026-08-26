@@ -90,6 +90,10 @@ without them refuses to boot.
 - **A BigQuery-shaped API.** Datasets, tables, streaming inserts, batch loads
   (NDJSON / CSV / Parquet), sync queries and async jobs with paged results. One
   Bearer token, plain JSON, no SDK required.
+- **Attribute bags as columns.** `MAP(STRING, STRING)` (ClickHouse's
+  `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
+  scalars. Both have limits a caller must know — they are listed in
+  [docs/api.md](docs/api.md#schema-types).
 - **Durable and queryable are the same event.** An insert acks only once its
   rows are fsynced into a Parquet micro-segment *and* into the table's manifest
   log — the same manifest a query plans against. Read-your-writes with no second
@@ -359,8 +363,8 @@ tla/                           # TLA+ models of the safety-critical algorithms (
 - [**Deployment**](docs/deployment.md) — how a release is published, the
   release artifacts, and the upgrade procedures, catalog format migrations
   included.
-- [**HTTP API**](docs/api.md) — the `/v1` surface, schema types, and the error
-  envelope.
+- [**HTTP API**](docs/api.md) — the `/v1` surface, schema types and their
+  limits, and the error envelope.
 - [**Glossary**](docs/glossary.md) — the terms each service uses, defined in
   one place.
 - [**Benchmarks**](docs/benchmarks.md) — the measurements the design decisions

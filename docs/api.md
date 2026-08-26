@@ -59,14 +59,39 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 
 `INT64`, `FLOAT64`, `STRING`, `BOOL`, `TIMESTAMP`, `DATE`, `NUMERIC(p,s)`, `MAP(STRING, STRING)`, and `VARIANT`.
 
-`MAP(STRING, STRING)` is ClickHouse's `Map(String, String)`: an open set of string keys with string values, the shape OpenTelemetry attribute bags arrive in. Query it with DuckDB's map functions: `attrs['host']` (a string, or NULL for a missing key), `map_contains(attrs, 'host')`, `map_keys(attrs)`, `cardinality(attrs)`, and `to_json(attrs)`.
+The last two are semi-structured, and each has limits a caller must know. The limits are listed here, once. The sections on values and results below refer back here. There is no `JSON` type: `VARIANT` covers it, and `attrs::JSON` gives the text.
 
-`VARIANT` is DuckDB's semi-structured type: any JSON value, with each value's own type kept. An integer stays an integer, an array stays an array, an object nests. Query it with DuckDB's variant functions:
+### `MAP(STRING, STRING)`
 
-- `attrs['host']::VARCHAR` — a key, cast to a scalar. A cast that does not fit the stored value is an error; use `TRY_CAST(attrs['n'] AS BIGINT)` when a key holds mixed types.
+ClickHouse's `Map(String, String)`: an open set of string keys with string values, the shape OpenTelemetry attribute bags arrive in. Query it with DuckDB's map functions: `attrs['host']` (a string, or NULL for a missing key), `map_contains(attrs, 'host')`, `map_keys(attrs)`, `cardinality(attrs)`, and `to_json(attrs)`.
+
+Limitations:
+
+- **Values are strings.** A value that is not a string is stored as its JSON text: `1` becomes `"1"`, `true` becomes `"true"`, `["a","b"]` becomes `"[\"a\",\"b\"]"`.
+- A value that is not a JSON object is rejected.
+- A `NULL` map reads back as `{}`. The result frame cannot tell the two apart.
+- No stats pruning. A filter on a key reads every row of the table.
+- Needs the DuckDB flush writer (`flush_writer: duckdb`, the default). Under the Polars writer an insert into the table fails.
+- A CSV load cannot carry a map. NDJSON and Parquet loads can.
+
+### `VARIANT`
+
+DuckDB's semi-structured type: any JSON value, with each value's own type kept. An integer stays an integer, an array stays an array, an object nests. Query it with DuckDB's variant functions:
+
+- `attrs['host']::VARCHAR` — a key, cast to a scalar.
 - `attrs['a']['b'][1]` — nested access. Array indexes start at 1.
 - `variant_typeof(attrs)` — `OBJECT(host, n)`, `ARRAY(2)`, `VARCHAR`, `INT64`, `VARIANT_NULL`, and so on.
 - `attrs::JSON` — the document as JSON text.
+
+Limitations:
+
+- **Stored as JSON text**, in both tiers. DuckLake cannot yet register a Parquet file with DuckDB's variant encoding, so each query parses the JSON of every row it scans. A key is not a column on disk.
+- No stats pruning. A filter on a key reads every row of the table.
+- **Casts are strict.** `attrs['n']::BIGINT` errors if any scanned row holds a string in `n`. Use `TRY_CAST(attrs['n'] AS BIGINT)` for a key with mixed types.
+- A `VARIANT` result column crosses the engine boundary as JSON text and arrives decoded: an object, an array, or a scalar. A `NULL` arrives as `null`.
+- A `VARIANT` nested in a struct or list in a result (`SELECT {'v': attrs}`) is refused with a `400`. Select the variant on its own, or cast it with `::JSON`.
+- A `VARIANT` made without a table (`SELECT '1'::VARIANT`) is not cast at the boundary, and the query fails.
+- Needs the DuckDB flush writer, the same as a map. A CSV load cannot carry a variant. NDJSON and Parquet loads can.
 
 Choose `MAP(STRING, STRING)` for ClickHouse parity and string-only attributes. Choose `VARIANT` when values must keep their types or nest.
 
@@ -77,18 +102,12 @@ Insert rows are JSON objects keyed by column name. Values coerce by the table's 
 - `INT64` accepts integers or digit strings. JavaScript clients lose precision past 2^53.
 - `TIMESTAMP` and `DATE` take ISO 8601 strings. Offsets convert to Coordinated Universal Time (UTC).
 - `NUMERIC` prefers strings; floats round.
-- `MAP(STRING, STRING)` takes a JSON object. A value that is not a string is stored as its JSON text: `1` becomes `"1"`, `true` becomes `"true"`, `["a","b"]` becomes `"[\"a\",\"b\"]"`. A value that is not an object is rejected.
+- `MAP(STRING, STRING)` takes a JSON object. Every value is stored as a string — see its limits under [Schema types](#schema-types).
 - `VARIANT` takes any JSON value, unchanged.
 
 The ingest edge validates each row against a **cached schema** (`schema_cache_ttl_ms`). Create, read, update, and delete (CRUD) operations on the same node invalidate the cache. The edge forwards one request as one forward-batch. It never acknowledges from memory: the response returns when the rows are on the buffer node's disk and in its hot manifest.
 
-Query results page from the frame the runner holds until `result_ttl_ms`. Temporal values arrive as ISO 8601 strings; decimal values arrive as decimal strings; a map arrives as a JSON object. This mirrors what inserts accept. One asymmetry: a `NULL` map reads back as `{}`, because the result frame cannot tell the two apart. A result larger than `result_max_rows` (default 10,000, the same as the `maxResults` ceiling — see [configuration](configuration.md)) fails the query with `400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
-
-A variant column in a result arrives as the JSON value it holds — an object, an array, or a scalar. Inside a query the column is `VARIANT`; the runner casts it to JSON only where it leaves the engine, because Arrow has no variant type. A variant nested in a struct or list in a result (`SELECT {'v': attrs}`) is refused with a `400`: select the variant on its own, or cast it with `::JSON`.
-
-On disk a variant is JSON text, in both tiers. DuckLake cannot yet register a Parquet file with DuckDB's variant encoding, so each query parses the JSON of the rows it scans. A filter on a variant key reads every row of the table; the min-max stats prune nothing for it.
-
-A map or variant column needs the DuckDB flush writer (`flush_writer: duckdb`, the default). Under the Polars writer an insert into a table with such a column fails. A CSV load cannot carry either; NDJSON and Parquet loads can.
+Query results page from the frame the runner holds until `result_ttl_ms`. Temporal values arrive as ISO 8601 strings; decimal values arrive as decimal strings; a map arrives as a JSON object; a variant arrives as the JSON value it holds. This mirrors what inserts accept. The limits of a map or variant in a result are under [Schema types](#schema-types). A result larger than `result_max_rows` (default 10,000, the same as the `maxResults` ceiling — see [configuration](configuration.md)) fails the query with `400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
 
 ## Explain
 

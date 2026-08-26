@@ -298,6 +298,18 @@ defmodule SmolqueryWeb.TableLive.Index do
                 </button>
                 <button type="submit" class="btn btn-primary btn-sm">Create table</button>
               </div>
+
+              <p class="text-xs opacity-70">
+                MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
+                pruning on a key, DuckDB flush writer only.
+                <a
+                  href="https://github.com/chasers/smolquery/blob/main/docs/api.md#schema-types"
+                  target="_blank"
+                  class="link"
+                >
+                  Read them before you choose one.
+                </a>
+              </p>
             </form>
           </div>
         </div>

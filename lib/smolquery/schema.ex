@@ -70,6 +70,20 @@ defmodule Smolquery.Schema do
   decodes those columns into JSON values — a variant reaches the client as the
   nested JSON it was inserted as.
 
+  ## What a caller must know about a map or a variant
+
+  The limits, in one list; `docs/api.md` carries the same list for API callers:
+
+    * neither has stats bounds, so nothing prunes on a key filter
+    * only the DuckDB flush writer writes them; the Polars writer refuses the
+      schema, and a CSV load cannot carry either
+    * a map's values are strings — any other JSON value is stored as its text —
+      and a `NULL` map reads back as `%{}`
+    * a variant is JSON text on disk, parsed per scanned row per query; its
+      casts are strict (`TRY_CAST` for a mixed key); a variant nested in a
+      struct or list cannot be returned; a variant with no table behind it is
+      not cast at the boundary and fails the export
+
   A schema also carries the table's `clustering` key — the column names writes
   sort by, smolquery's analog of ClickHouse's `ORDER BY`. It rides here because
   this is the one description of a table that already reaches every write point,
