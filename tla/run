@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+dir="$(cd "$(dirname "$0")" && pwd)"
+jar="$dir/tla2tools.jar"
+jar_url="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+
+if [ $# -eq 0 ]; then
+  echo "usage: tla/run <config>... | tla/run all" >&2
+  echo "       config is a .cfg basename, e.g. ReleasedClaim_nocrash" >&2
+  exit 2
+fi
+
+if [ ! -f "$jar" ]; then
+  echo "fetching tla2tools.jar ..." >&2
+  curl -fsSL -o "$jar" "$jar_url"
+fi
+
+if [ "$1" = "all" ]; then
+  set -- $(cd "$dir" && ls *.cfg | sed 's/\.cfg$//')
+fi
+
+status=0
+for cfg in "$@"; do
+  module="${cfg%%_*}"
+  printf '== %s (module %s) ==\n' "$cfg" "$module"
+  if java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
+       -deadlock -workers auto -metadir "$dir/states" \
+       -config "$dir/$cfg.cfg" "$dir/$module.tla"; then
+    printf '== %s: PASS ==\n\n' "$cfg"
+  else
+    printf '== %s: VIOLATED ==\n\n' "$cfg"
+    status=1
+  fi
+done
+exit $status

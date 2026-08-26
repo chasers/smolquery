@@ -1,6 +1,7 @@
 [tools]
 erlang = "29.0.2"
 elixir = "1.20.2-otp-29"
+java = "corretto"
 
 [env]
 # Scope kubectl to this repo's single-context (kind) kubeconfig. Outside any repo
@@ -90,3 +91,7 @@ run = "mix ci"
 [tasks.clean]
 description = "Drop build artifacts and fetched deps"
 run = "rm -rf _build deps"
+
+[tasks.tla]
+description = "Model-check every TLA+ config in tla/ (fetches tla2tools.jar on first use)"
+run = "./tla/run all"

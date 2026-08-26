@@ -231,14 +231,29 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
                HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys)
     end
 
-    test "stays idempotent for sealed and reaped ids, keys or not", %{manifest: manifest} do
+    test "stays idempotent for a sealed id under its own keys or none", %{manifest: manifest} do
+      entry = add(manifest, @table)
+      {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
+      :ok = HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys)
+
+      assert HotManifest.retire(manifest, @table, claim.ids, 9, claim.keys) == :ok
+      assert HotManifest.retire(manifest, @table, claim.ids, 9) == :ok
+
+      stale = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
+      assert HotManifest.retire(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SZ"], 9, stale) == :ok
+    end
+
+    test "refuses a sealed id retired under a different claim's keys (F-1)", %{manifest: manifest} do
       entry = add(manifest, @table)
       {:ok, claim} = HotManifest.claim(manifest, @table, [entry.id], @keys)
       :ok = HotManifest.retire(manifest, @table, claim.ids, 7, claim.keys)
 
       stale = ["analytics/events/01KYWPEEGAM8FQVQS5S2QF26SX.parquet"]
-      assert HotManifest.retire(manifest, @table, claim.ids, 9, stale) == :ok
-      assert HotManifest.retire(manifest, @table, ["01KYWPEEGAM8FQVQS5S2QF26SZ"], 9, stale) == :ok
+
+      assert {:error, {:stale_claim, %{keys: ^stale, ids: ids}}} =
+               HotManifest.retire(manifest, @table, claim.ids, 9, stale)
+
+      assert ids == claim.ids
     end
   end
 

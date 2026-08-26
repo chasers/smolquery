@@ -52,3 +52,7 @@ deploy/overlays/kind-symmetric/tls/
 # Built web assets and fetched JS deps (rebuilt by mix assets.build)
 /priv/static/assets/
 /assets/node_modules/
+
+# TLA+ model checker artifacts; the jar is fetched by tla/run.
+/tla/tla2tools.jar
+/tla/states/

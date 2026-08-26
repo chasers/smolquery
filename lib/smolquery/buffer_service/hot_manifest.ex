@@ -638,17 +638,29 @@ defmodule Smolquery.BufferService.HotManifest do
   overwrite the committed one with fewer rows.
 
   `keys` fences the retire against a released claim (T-294): a sealer names
-  the claim keys its segment was written under, and an unsealed entry whose
+  the claim keys its segment was written under, and an entry whose
   `claim_keys` no longer match refuses the whole retire as
   `{:error, {:stale_claim, ...}}` — the claim was released and re-derived
   while that attempt ran, and stamping its ids sealed would let the
-  re-derived claims' segments double-commit the rows. `nil` skips the fence,
-  for callers retiring outside any claim — which includes, for exactly one
-  rolling deploy, sealers from the release that predates the fence; that
-  window keeps the pre-fence exposure and closes when the last old sealer
-  drains (`docs/deployment.md` says how to order the rollout). The
-  idempotent retry contract is unchanged either way: ids already sealed, and
-  ids the reaper has deleted, stay `:ok`.
+  re-derived claims' segments double-commit the rows.
+
+  The fence looks at *every* still-present entry the retire names, sealed or
+  not — not only the unsealed ones. A released claim's inputs are re-derived
+  under new keys and can be fully sealed by those valve-sized claims before
+  the original oversized attempt reaches this call; short-circuiting to `:ok`
+  the moment nothing is unsealed would then miss that the claim moved, let
+  the original's retire succeed, and strand its orphan segment
+  double-counting the rows forever (F-1, `tla/FINDINGS.md`). An entry sealed
+  under *this* claim's own keys is still the ordinary reconciliation case a
+  crashed sealer retries from, and stays `:ok`.
+
+  `nil` skips the fence, for callers retiring outside any claim — which
+  includes, for exactly one rolling deploy, sealers from the release that
+  predates the fence; that window keeps the pre-fence exposure and closes
+  when the last old sealer drains (`docs/deployment.md` says how to order the
+  rollout). The idempotent retry contract is unchanged either way: ids
+  already sealed under this claim, and ids the reaper has deleted, stay
+  `:ok`.
   """
   @spec retire(
           t(),
@@ -659,24 +671,29 @@ defmodule Smolquery.BufferService.HotManifest do
           log() | nil
         ) :: :ok | {:error, term()}
   def retire(%__MODULE__{} = manifest, table_ref, ids, snapshot, keys \\ nil, log \\ nil) do
-    case unsealed(manifest, table_ref, ids) do
+    present =
+      ids
+      |> Enum.uniq()
+      |> Enum.flat_map(&lookup(manifest, table_ref, &1))
+
+    case stale_for(present, keys) do
       [] ->
-        :ok
-
-      pending ->
-        case stale_for(pending, keys) do
+        case Enum.reject(present, &Entry.sealed?/1) do
           [] ->
-            seal_all(manifest, table_ref, with_claim(manifest, table_ref, pending), snapshot, log)
+            :ok
 
-          stale ->
-            {:error, {:stale_claim, %{keys: keys, ids: Enum.map(stale, & &1.id)}}}
+          pending ->
+            seal_all(manifest, table_ref, with_claim(manifest, table_ref, pending), snapshot, log)
         end
+
+      stale ->
+        {:error, {:stale_claim, %{keys: keys, ids: Enum.map(stale, & &1.id)}}}
     end
   end
 
-  defp stale_for(_pending, nil), do: []
+  defp stale_for(_present, nil), do: []
 
-  defp stale_for(pending, keys), do: Enum.reject(pending, &(&1.claim_keys == keys))
+  defp stale_for(present, keys), do: Enum.reject(present, &(&1.claim_keys == keys))
 
   @doc """
   Deletes `ids` from the store and the manifest.
