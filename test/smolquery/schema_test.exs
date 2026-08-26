@@ -143,10 +143,13 @@ defmodule Smolquery.SchemaTest do
       assert Schema.type_from_api("Variant") == {:ok, :variant}
     end
 
-    test "every other type is queried as it is stored" do
+    test "every other type is queried as it is stored, and needs no cast in a view" do
       for type <- @explorer_types ++ [{:map, :string, :string}] do
         assert Schema.query_type(type) == Schema.duckdb_type(type)
+        refute Schema.cast_in_view?(type)
       end
+
+      assert Schema.cast_in_view?(:variant)
     end
 
     test "speaks the map in DuckDB's and ClickHouse's words" do
