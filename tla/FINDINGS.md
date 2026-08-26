@@ -78,6 +78,11 @@ double-counts acked rows":
   targets. Built + ran **Spec 1** (`SealHandoff.tla`) and **Spec 2**
   (`ReleasedClaim.tla`). Spec 1 PASSES; Spec 2 found a real permanent
   double-count (F-1 below). Specs 3-6 not started.
+- 2026-08-25 (later): F-1 gate fix ported (PR #260, T-385); durable
+  reconciler built (PR #261, T-386). Built + ran **Spec 5**
+  (`SegmentShipping.tla`, T-387): the core ship-before-ack durability claim
+  PASSES; the failed-flush compensation does not — F-2 below, confirmed by
+  TLC and replicated in real code. Specs 3-4 not started.
 
 ## Spec 1 — `SealHandoff.tla` (base handoff + compaction): PASS
 
@@ -275,9 +280,98 @@ Snabbkaffe tests drive both residual schedules end to end
 a simulated reap for the other). Both end exactly-once with the tombstone
 cleared.
 
+## Spec 5 — `SegmentShipping.tla` (T-96 replication): F-2 found
+
+Models one flush under RF=2: owner group-commit (local add), ship to the
+follower (applied+acked / applied-but-ack-lost / unreachable), ack-all before
+the caller's ack, and the compensation path — best-effort drop to the
+follower, local drop (which also forgets the batch_id record), error reply.
+The read is the planner's, as built: hot manifests merged from EVERY member
+(`planner.ex` `manifest_urls`, `Client.manifest_nodes`), deduped by entry id.
+The caller may retry a failed batch under a fresh entry id.
+
+| config | checks | result |
+|---|---|---|
+| `SegmentShipping_core` | acked rows survive an owner crash (ship-before-ack) | **PASS** |
+| `SegmentShipping_ackfirst` | ack the caller before the ship, then crash | VIOLATED (by design — the order is load-bearing) |
+| `SegmentShipping` | as coded: best-effort drop; no crash, no retry | **VIOLATED — F-2a** |
+| `SegmentShipping_retry` | as coded, caller retries the failed batch | **VIOLATED — F-2b** |
+| `SegmentShipping_durabledrop` | fix: the drop is owed durably, re-shipped until delivered | **PASS** |
+
+The core T-96 claim is sound: ship-before-ack makes an acked batch survive
+one node loss, and the negative control confirms the ordering carries it.
+
+### F-2 (CONFIRMED by TLC, replicated in Elixir): a failed flush's zombie replica is served immediately, and a retry double-counts it — idempotency keys included
+
+**Severity:** high (resurrection of rows the caller was told failed; permanent
+double count on retry; no crash, no promotion, no ring change required).
+**Where:** `buffer_service/replicator/segment_shipping.ex` (`compensate/3`
+discards the drop's result), `buffer_service/table_buffer/committer.ex`
+(`compensate/3` local drop), `buffer_service/hot_manifest.ex`
+(`forget_batches` on drop), `query_service/planner.ex` (every-member
+manifest merge). **Model:** `tla/SegmentShipping.tla`.
+
+**The claim (moduledoc):** "no side keeps rows the caller was told failed",
+with one documented residual — a follower that applied the entry, missed the
+drop, *and was promoted* before the owner could compensate; idempotency keys
+are the recommended remedy.
+
+**The hole is wider on both ends:**
+1. **No promotion is needed.** The planner fans hot-manifest reads out to
+   every member and merges. A follower that applied the entry (ack lost) and
+   missed the fire-and-forget drop serves the zombie to every query
+   *immediately*. Nothing ever removes it: the owner never re-claims an id it
+   dropped, mutation fan-outs only name other ids, and the reaper only reaps
+   retired entries. A later ring change seals it into the catalog permanently.
+2. **Idempotency keys do not close the retry.** The compensating local drop
+   runs `forget_batches`, erasing the owner's `batch_id` record with the
+   entry. The caller's retry — same `batch_id` — lands on the owner, finds no
+   duplicate, and commits fresh under a new entry id. The planner's
+   dedupe-by-id cannot tie the zombie to the retry: they are different ids
+   carrying the same rows. Terminal state: rows counted twice, forever.
+   (The documented "follower re-answers the batch_id" remedy only works when
+   the retry reaches the *promoted follower*.)
+
+TLC counterexample (`SegmentShipping_retry.cfg`, 8 steps, no crash):
+```
+Add(e1) → ShipAppliedAckLost   \* follower fsynced e1; owner saw a timeout
+→ DropLost                     \* the best-effort drop vanished in the same hiccup
+→ LocalDropAndReply            \* owner dropped e1 + its batch_id; caller told failed
+→ Add(e2) → ShipOk → Ack       \* retry commits fresh as e2; caller acked
+\* terminal: follower serves e1, both serve e2 → the rows count twice forever
+```
+
+**Replication (real code): DONE, first run.**
+`test/smolquery/buffer_service/replicator/failed_flush_zombie_test.exs` — two
+buffer instances (the T-96 single-BEAM harness) with a scripted transport
+that loses exactly two replies: the first `accept_replica`'s ack (after
+delivery) and the first `:drop`. The caller gets `{:error,
+{:replication_failed, ...}}`; the follower holds the unclaimed zombie; the
+planner-style union serves it; a retry with the SAME `batch_id` returns
+`{:ok, ...}` (not `{:duplicate, ...}`) under a fresh id; the union then
+counts the row twice. A PASS of that test means the bug is present — invert
+it when F-2 is fixed.
+
+**Fix directions (not applied — needs owner decision):**
+1. **Durable compensation** (modeled: `SegmentShipping_durabledrop.cfg`
+   PASSES): the owner records the failed flush's entry id as a pending drop —
+   durable in the manifest log, the same tombstone pattern T-386 built for
+   released claims — and re-ships it every maintenance tick until every
+   follower acks. Closes F-2a and F-2b for a reachable follower; an owner
+   crash before delivery still needs the record replicated or reconciled.
+2. **Provisional replicas**: a follower marks `accept_replica` entries
+   provisional and serves them to the planner only after a confirm (the next
+   flush's implicit ack, or adopter promotion). Closes the window entirely,
+   at the cost of a confirm protocol.
+3. At minimum, stop `forget_batches` on the compensating drop (tombstone the
+   batch_id as failed instead), so a keyed retry can be tied to the zombie —
+   narrows F-2b for keyed callers, does nothing for F-2a.
+
 ## Next up for a follow-up agent
 
-- Specs 3-6 (RingEpoch T-92, exactly-once inserts, segment shipping T-96).
+- **F-2 fix** — owner decision on the direction above; the durable-drop
+  tombstone mirrors the T-386 machinery.
+- Specs 3-4 (RingEpoch T-92, exactly-once inserts).
 - Spec 3: RingEpoch ownership fence (T-92) — at-most-one-owner mutual exclusion.
 - Spec 4: exactly-once inserts (batch_id dedup, crash-before-reply + replay).
 - Spec 5: segment-shipping replication (T-96) all-replicas ack + compensation.

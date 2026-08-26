@@ -43,6 +43,11 @@ property is load-bearing.
 | `ReleasedClaim_fix_nocrash_noreap` | gate fix, no reap | PASS |
 | `ReleasedClaim_fix_crash` | gate fix, crash allowed | VIOLATED — crash residual |
 | `ReleasedClaim_reconciler` | gate fix + durable reconciler | PASS — complete fix |
+| `SegmentShipping_core` | T-96 ship-before-ack durability, owner crash | PASS |
+| `SegmentShipping_ackfirst` | ack the caller before the ship | VIOLATED (by design) |
+| `SegmentShipping` | failed-flush compensation as coded, no crash | VIOLATED — **F-2a** |
+| `SegmentShipping_retry` | as coded, caller retries the failed batch | VIOLATED — **F-2b** |
+| `SegmentShipping_durabledrop` | drop owed durably, re-shipped until delivered | PASS — fix direction |
 
 The `GateFix` constant models the fix PR #260 applies (T-385). The
 `Reconciler` constant models the durable reconciler built as T-386 — the
