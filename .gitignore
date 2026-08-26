@@ -56,3 +56,6 @@ deploy/overlays/kind-symmetric/tls/
 # TLA+ model checker artifacts; the jar is fetched by tla/run.
 /tla/tla2tools*.jar
 /tla/states/
+
+# snabbkaffe nemesis trace dumps from test runs.
+/snabbkaffe/
