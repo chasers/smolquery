@@ -80,6 +80,17 @@ defmodule Smolquery.BufferService.MapColumnTest do
       assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
     end
 
+    test "a frame batch without the map column lands as a MAP segment too", context do
+      {name, runtime} = start_buffer(context, :duckdb)
+      frame = Explorer.DataFrame.new(id: Explorer.Series.from_list([1, 2, 3], dtype: {:s, 64}))
+      batch = %{schema: schema(), frame: frame, byte_size: 24}
+
+      assert {:ok, ack} = Client.write_batch(name, @table, batch)
+      assert ack.row_count == 3
+
+      assert hosts(runtime) == [[1, nil], [2, nil], [3, nil]]
+    end
+
     test "an unparsed body lands as a MAP segment", context do
       {name, runtime} = start_buffer(context, :duckdb)
 
@@ -95,7 +106,7 @@ defmodule Smolquery.BufferService.MapColumnTest do
          context do
       {name, runtime} = start_buffer(context, :polars)
 
-      assert {:error, {:unsupported_type, {:map, :string, :string}}} =
+      assert {:error, {:flush_writer_unsupported, :polars, {:map, :string, :string}}} =
                Client.write_batch(name, @table, rows_batch())
 
       assert HotManifest.entries(runtime.manifest, @table) == []

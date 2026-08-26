@@ -13,6 +13,14 @@ defmodule Smolquery.Engine.Frame do
   A `NULL` map is the one thing that does not survive the crossing: Polars
   reads it as an empty list, so it comes out as `%{}`.
 
+  The fold is keyed on that dtype, because the frame carries nothing else:
+  Arrow's map type reaches Polars as a list of structs and the map-ness is
+  gone. So a computed `LIST(STRUCT(key VARCHAR, value VARCHAR))` folds too,
+  and a computed map with values that are not strings (`MAP {'a': 1}`) does
+  not, arriving as its entries. Only `MAP(STRING, STRING)` is a column type,
+  so a stored map always folds; the two edge shapes are query-time constructs
+  and are documented as such.
+
   A `VARIANT` column crosses as JSON text instead
   (`Smolquery.QueryService.VariantResults`), and the job names which columns
   those are; `to_rows/2` decodes them back into JSON values. Text that is not

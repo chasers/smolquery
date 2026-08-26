@@ -59,6 +59,6 @@ defmodule SmolqueryWeb.DataTable do
   defp cell(%Date{} = value), do: Date.to_iso8601(value)
   defp cell(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
   defp cell(%DateTime{} = value), do: DateTime.to_iso8601(value)
-  defp cell(value) when is_map(value), do: JSON.encode!(value)
+  defp cell(value) when is_map(value) and not is_struct(value), do: JSON.encode!(value)
   defp cell(value), do: inspect(value)
 end

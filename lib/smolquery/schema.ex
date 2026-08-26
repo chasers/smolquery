@@ -40,9 +40,11 @@ defmodule Smolquery.Schema do
   back into a map.
 
   A map's values are strings. A JSON value that is not a string is written as
-  its JSON text (`1`, `true`, `["a","b"]`, `{"k":"v"}`) — the same
-  stringification DuckDB's `read_json` applies on the passthrough path, so a
-  row reads back the same whichever path wrote it.
+  its JSON text (`1`, `true`, `["a","b"]`, `{"k":"v"}`), the way DuckDB's
+  `read_json` stringifies it on the passthrough path. The two encoders agree
+  on scalars and short documents; they can differ on a float's exponent form
+  and on the key order of a nested object, because this path re-encodes a
+  decoded term and the passthrough keeps the client's bytes.
 
   ## A variant is stored as JSON and queried as VARIANT
 
@@ -383,10 +385,9 @@ defmodule Smolquery.Schema do
   | `{:map, :string, :string}` | object; a non-string value becomes its JSON text | map of binaries |
   | `:variant` | any JSON value | the decoded term, unchanged |
 
-  A map also accepts the list of `%{"key" => k, "value" => v}` entries Explorer
-  reads a Parquet `MAP` as, so a Parquet load round-trips a map column. A map
-  value that is `null` stays `nil`; a key must be a string, which JSON
-  guarantees.
+  A map takes an object and nothing else — the passthrough path's `read_json`
+  refuses an array or a scalar, and this path must agree with it. A map value
+  that is `null` stays `nil`; a key must be a string, which JSON guarantees.
 
   `nil` passes through for every type; whether a column may be null is the
   validator's question, not a value question. A value already in its native
@@ -469,12 +470,6 @@ defmodule Smolquery.Schema do
       else: invalid(@map_type, value)
   end
 
-  def value_from_json(@map_type, entries) when is_list(entries) do
-    if Enum.all?(entries, &match?(%{"key" => key, "value" => _value} when is_binary(key), &1)),
-      do: {:ok, Map.new(entries, &{&1["key"], map_value_text(&1["value"])})},
-      else: invalid(@map_type, entries)
-  end
-
   def value_from_json(:variant, value) when not is_struct(value), do: {:ok, value}
 
   def value_from_json(type, value), do: invalid(type, value)
@@ -494,6 +489,47 @@ defmodule Smolquery.Schema do
       with {:ok, dtype} <- explorer_dtype(field.type), do: {:ok, {field.name, dtype}}
     end)
   end
+
+  @doc """
+  Whether Explorer can build and write every column of this schema — false
+  when a field is a map or a variant, which only the DuckDB writer writes.
+  """
+  @spec explorer_writable?(t()) :: boolean()
+  def explorer_writable?(%__MODULE__{fields: fields}),
+    do: Enum.all?(fields, &match?({:ok, _dtype}, explorer_dtype(&1.type)))
+
+  @doc """
+  The first field Explorer cannot write, if any.
+  """
+  @spec explorer_unwritable(t()) :: {:ok, Field.t()} | :none
+  def explorer_unwritable(%__MODULE__{fields: fields}) do
+    case Enum.find(fields, &match?({:error, _no_dtype}, explorer_dtype(&1.type))) do
+      nil -> :none
+      field -> {:ok, field}
+    end
+  end
+
+  @doc """
+  The `column_name dtype` pairs for the fields Explorer can read — what a CSV
+  load parses with. A CSV cannot carry a map or a variant, so those fields
+  are left out; a CSV that names one anyway parses it as text, and the row
+  validator then refuses the value.
+  """
+  @spec readable_explorer_dtypes(t()) :: [{String.t(), term()}]
+  def readable_explorer_dtypes(%__MODULE__{fields: fields}) do
+    for field <- fields, {:ok, dtype} <- [explorer_dtype(field.type)], do: {field.name, dtype}
+  end
+
+  @doc """
+  Whether a column of this type can serve in a clustering key.
+
+  A map or a variant sorts, but no stats bound it, so the pruner could never
+  use the key — the sort would be a tax with no return. Refused up front.
+  """
+  @spec clustering_type?(logical_type()) :: boolean()
+  def clustering_type?(@map_type), do: false
+  def clustering_type?(:variant), do: false
+  def clustering_type?(_type), do: true
 
   @doc """
   The column definitions for a `CREATE TABLE` statement, quoted and ordered.

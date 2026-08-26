@@ -25,6 +25,7 @@ defmodule SmolqueryApi.LoadController do
   alias Explorer.DataFrame
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias SmolqueryApi.Errors
   alias SmolqueryApi.InsertController
   alias SmolqueryApi.Json
@@ -160,18 +161,18 @@ defmodule SmolqueryApi.LoadController do
   end
 
   defp parse(:csv, path, schema) do
-    with {:ok, dtypes} <- Schema.explorer_dtypes(schema),
-         {:ok, frame} <- DataFrame.from_csv(path, dtypes: dtypes) do
-      {:ok, indexed(frame), []}
-    else
-      {:error, %{} = error} -> {:error, {:parse_failed, Exception.message(error)}}
-      {:error, reason} -> {:error, reason}
+    case DataFrame.from_csv(path, dtypes: Schema.readable_explorer_dtypes(schema)) do
+      {:ok, frame} -> {:ok, indexed(frame), []}
+      {:error, error} -> {:error, {:parse_failed, Exception.message(error)}}
     end
   end
 
-  defp parse(:parquet, path, _schema) do
-    case DataFrame.from_parquet(path) do
-      {:ok, frame} -> {:ok, indexed(frame), []}
+  defp parse(:parquet, path, schema) do
+    with :none <- Schema.explorer_unwritable(schema),
+         {:ok, frame} <- DataFrame.from_parquet(path) do
+      {:ok, indexed(frame), []}
+    else
+      {:ok, %Field{type: type}} -> {:error, {:load_format_unsupported, :parquet, type}}
       {:error, error} -> {:error, {:parse_failed, Exception.message(error)}}
     end
   end

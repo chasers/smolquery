@@ -116,6 +116,38 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
+  def from_reason(conn, {:clustering_column_not_sortable, column}) do
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      "clustering column #{column} is a MAP or VARIANT; nothing prunes on it"
+    )
+  end
+
+  def from_reason(conn, {:load_format_unsupported, format, type}) do
+    {:ok, name} = Smolquery.Schema.api_type(type)
+
+    send_error(
+      conn,
+      400,
+      "INVALID_ARGUMENT",
+      "a #{format} load cannot carry a #{name} column; load NDJSON"
+    )
+  end
+
+  def from_reason(conn, {:flush_writer_unsupported, writer, type}) do
+    {:ok, name} = Smolquery.Schema.api_type(type)
+
+    send_error(
+      conn,
+      503,
+      "UNAVAILABLE",
+      "the buffer's #{writer} flush writer cannot write a #{name} column; " <>
+        "set SMOLQUERY_FLUSH_WRITER=duckdb"
+    )
+  end
+
   def from_reason(conn, {:unknown_clustering_column, column}) do
     send_error(conn, 422, "INVALID_ARGUMENT", "clustering column does not exist: #{column}")
   end

@@ -462,4 +462,32 @@ defmodule SmolqueryApi.TableControllerTest do
       assert body["partitions"] == 3
     end
   end
+
+  describe "clustering on a map or variant column" do
+    test "is refused with 400", %{name: name} do
+      create_dataset(name, "analytics")
+
+      created =
+        post_json(name, "/v1/datasets/analytics/tables", %{
+          "id" => "attributed",
+          "schema" => [
+            %{"name" => "id", "type" => "INT64"},
+            %{"name" => "attrs", "type" => "MAP(STRING, STRING)"},
+            %{"name" => "doc", "type" => "VARIANT"}
+          ]
+        })
+
+      assert created.status == 200
+
+      for column <- ["attrs", "doc"] do
+        response =
+          patch_json(name, "/v1/datasets/analytics/tables/attributed", %{
+            "clustering" => [column]
+          })
+
+        assert response.status == 400
+        assert JSON.decode!(response.resp_body)["error"]["message"] =~ "nothing prunes on it"
+      end
+    end
+  end
 end

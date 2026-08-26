@@ -209,7 +209,12 @@ defmodule Smolquery.Segments.Writer do
     DataFrame.to_parquet(frame, device, compression: compression)
   end
 
-  defp build_frame(%DataFrame{} = frame, schema), do: {:ok, sort_frame(frame, schema)}
+  defp build_frame(%DataFrame{} = frame, schema) do
+    case Schema.explorer_unwritable(schema) do
+      :none -> {:ok, sort_frame(frame, schema)}
+      {:ok, %Field{type: type}} -> {:error, {:unsupported_type, type}}
+    end
+  end
 
   defp build_frame([], _schema), do: {:error, :no_rows}
 
