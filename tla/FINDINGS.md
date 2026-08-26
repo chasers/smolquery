@@ -376,6 +376,37 @@ mode. Alternatives considered: provisional replicas (a confirm protocol —
 closes even that window, much larger change); keeping the `batch_id` record
 on compensation (narrows F-2b only).
 
+### Review hardening (2026-08-25, code review of the stack)
+
+A review of the four PRs surfaced four correctness gaps in the T-386/T-390
+machinery, all closed in the same stack:
+
+- **Sealer exclusion is now bidirectional**: `seal_ready` defers while a
+  reconcile runs for the table, so a late-delivered signal (the `:noconnect`
+  spawn fallback) cannot register an orphan behind the reconcile's back.
+- **`covered?` requires re-derived coverage**: a released id sealed under
+  empty or the released claim's own keys (the keys-less-fence window) no
+  longer counts as covered — reconciling then could have dropped the rows'
+  only sealed copy. Over-counting stays the failure direction, never loss.
+- **The owed drop lands before the local drop, unconditionally**: a crash
+  between the two appends now leaves an unreplied-but-consistent entry, never
+  a replica-only zombie; the committer no longer parses the replicator's
+  error shapes to decide.
+- **The compactor defers a tombstoned group**: merging a released claim's
+  registered orphan would bake its rows past the reconciler's reach
+  (`Compactor` asks `Client.tombstones/2` before a swap). The window remains
+  only while the whole buffer tier is unreachable, and then compaction
+  proceeds rather than stalling buffer-less deployments.
+- **The CI gate distinguishes ERROR from VIOLATED**: TLC exit codes 10-13 are
+  violations; any other nonzero exit (parse error, bad config, OOM) now fails
+  `tla/run check` outright instead of matching an expected-VIOLATED row.
+
+Documented, deliberately not closed: an owed drop settles when the *current*
+followers ack — a zombie on an ex-follower after a ring change is reached
+only by the best-effort fan-out (same class as the dead-owner residual
+above); and reconcile tasks bypass the sealer's failure/backoff bookkeeping
+(they are rare, cheap metadata ops, and level-triggered).
+
 ## Next up for a follow-up agent
 
 - Specs 3-4 (RingEpoch T-92, exactly-once inserts).

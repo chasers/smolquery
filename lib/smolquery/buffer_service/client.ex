@@ -157,6 +157,15 @@ defmodule Smolquery.BufferService.Client do
   end
 
   @doc """
+  The sealed-segment keys of the table's release tombstones (T-386), from the
+  ring's current owner.
+  """
+  @spec tombstones(atom(), Store.table_ref()) :: {:ok, [String.t()]} | {:error, term()}
+  def tombstones(name, table_ref) do
+    route(name, :control, :tombstones, [name, table_ref], table_ref, :control)
+  end
+
+  @doc """
   Stamps `ids` as sealed at the catalog snapshot a sealer committed them in.
 
   Idempotent in every direction a crashed sealer can retry from: ids already
@@ -192,11 +201,8 @@ defmodule Smolquery.BufferService.Client do
   def retire_at(nil, name, table_ref, ids, snapshot, keys),
     do: retire(name, table_ref, ids, snapshot, keys)
 
-  def retire_at(node, name, table_ref, ids, snapshot, keys) do
-    name
-    |> Routing.resolve()
-    |> invoke(node, :control, :retire, [name, table_ref, ids, snapshot, keys], :control)
-  end
+  def retire_at(node, name, table_ref, ids, snapshot, keys),
+    do: invoke_at(node, name, :retire, [name, table_ref, ids, snapshot, keys])
 
   @doc """
   Confirms a released claim's reconciliation, clearing its tombstone (T-386).
@@ -220,11 +226,8 @@ defmodule Smolquery.BufferService.Client do
   def release_reconciled_at(nil, name, table_ref, keys),
     do: release_reconciled(name, table_ref, keys)
 
-  def release_reconciled_at(node, name, table_ref, keys) do
-    name
-    |> Routing.resolve()
-    |> invoke(node, :control, :release_reconciled, [name, table_ref, keys], :control)
-  end
+  def release_reconciled_at(node, name, table_ref, keys),
+    do: invoke_at(node, name, :release_reconciled, [name, table_ref, keys])
 
   @doc """
   Flushes a table's accumulator now.
@@ -275,6 +278,9 @@ defmodule Smolquery.BufferService.Client do
   """
   @spec absence_tolerance(atom()) :: non_neg_integer()
   def absence_tolerance(name), do: Routing.absence_tolerance(name)
+
+  defp invoke_at(node, name, function, args),
+    do: name |> Routing.resolve() |> invoke(node, :control, function, args, :control)
 
   defp route(name, channel, function, args, table_ref, timeout_kind) do
     routing = Routing.resolve(name)

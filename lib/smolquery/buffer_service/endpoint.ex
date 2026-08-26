@@ -252,6 +252,24 @@ defmodule Smolquery.BufferService.Endpoint do
   end
 
   @doc """
+  The sealed-segment keys of the table's release tombstones (T-386).
+
+  What the compactor asks before it merges: a registered segment under a
+  tombstoned key is a released claim's orphan awaiting reconciliation, and
+  folding it into a merged segment would bake its rows in past the
+  reconciler's reach.
+  """
+  @spec tombstones(atom(), Store.table_ref()) :: {:ok, [String.t()]} | {:error, term()}
+  def tombstones(name, table_ref) do
+    with {:ok, runtime} <- runtime(name) do
+      {:ok,
+       runtime.manifest
+       |> HotManifest.tombstones(table_ref)
+       |> Enum.flat_map(& &1.keys)}
+    end
+  end
+
+  @doc """
   Stamps segments as sealed at the catalog snapshot a sealer committed them in.
 
   A buffer dying between the lookup and the call comes back as

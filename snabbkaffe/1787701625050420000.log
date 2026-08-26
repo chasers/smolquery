@@ -1,0 +1,5 @@
+2026-08-25T16:46:54.368262-07:00 [$trace_begin] #{'~meta' => #{},begin_system_time => 1787701614368262}.
+/Users/chasegranberry/Dev/supabase/smolquery/lib/smolquery/storage_service/handoff/seal.ex:250 2026-08-25T16:46:54.502323-07:00 [storage.seal.registered] #{keys => [<<"analytics/events/01M0XN3NVNWH4AV3NAJXGE9J7Z.parquet">>],table_ref => {<<"analytics">>,<<"events">>},ids => [<<"01M0XN3NT0TSMAW24V5FPE2QMG">>,<<"01M0XN3NVNXP2Z7S7ZJXQ4NHBY">>],'~meta' => #{node => nonode@nohost,pid => <0.1846.0>,gl => <0.69.0>}}.
+2026-08-25T16:46:54.502332-07:00 [snabbkaffe_crash] #{keys => [<<"analytics/events/01M0XN3NVNWH4AV3NAJXGE9J7Z.parquet">>],table_ref => {<<"analytics">>,<<"events">>},ids => [<<"01M0XN3NT0TSMAW24V5FPE2QMG">>,<<"01M0XN3NVNXP2Z7S7ZJXQ4NHBY">>],'~meta' => #{},crash_kind => #Fun<Elixir.Smolquery.StorageService.Handoff.Seal.7.44096981>}.
+2026-08-25T16:46:54.502675-07:00 [$trace_end] #{'~meta' => #{}}.
+

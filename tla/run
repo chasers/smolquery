@@ -2,8 +2,9 @@
 set -eu
 
 dir="$(cd "$(dirname "$0")" && pwd)"
-jar="$dir/tla2tools.jar"
-jar_url="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+tlc_version="1.7.4"
+jar="$dir/tla2tools-$tlc_version.jar"
+jar_url="https://github.com/tlaplus/tlaplus/releases/download/v$tlc_version/tla2tools.jar"
 
 if [ $# -eq 0 ]; then
   echo "usage: tla/run <config>... | tla/run all | tla/run check" >&2
@@ -13,20 +14,33 @@ if [ $# -eq 0 ]; then
 fi
 
 if [ ! -f "$jar" ]; then
-  echo "fetching tla2tools.jar ..." >&2
+  echo "fetching tla2tools.jar v$tlc_version ..." >&2
   curl -fsSL -o "$jar" "$jar_url"
 fi
 
-run_one() {
+tlc() {
   cfg="$1"
   module="${cfg%%_*}"
-  if java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
-       -deadlock -workers auto -metadir "$dir/states" \
-       -config "$dir/$cfg.cfg" "$dir/$module.tla"; then
-    echo PASS
-  else
-    echo VIOLATED
-  fi
+  java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
+    -deadlock -workers auto -metadir "$dir/states" \
+    -config "$dir/$cfg.cfg" "$dir/$module.tla"
+}
+
+# TLC's exit codes: 0 = no error, 10-13 = a violation the model checker
+# found, anything else = TLC itself failed (parse error, bad config, OOM).
+# Mapping every nonzero exit to VIOLATED would let a broken spec match an
+# expected-VIOLATED row and pass CI without checking anything.
+result_of() {
+  set +e
+  tlc "$1" > "$2" 2>&1
+  code=$?
+  set -e
+
+  case $code in
+    0) echo PASS ;;
+    10 | 11 | 12 | 13) echo VIOLATED ;;
+    *) echo "ERROR($code)" ;;
+  esac
 }
 
 if [ "$1" = "check" ]; then
@@ -34,21 +48,26 @@ if [ "$1" = "check" ]; then
   for path in "$dir"/*.cfg; do
     cfg="$(basename "$path" .cfg)"
     expected="$(awk -F'\t' -v c="$cfg" '$1 == c { print $2 }' "$dir/expected.tsv")"
+    out="$(mktemp)"
 
     if [ -z "$expected" ]; then
       printf '%-36s MISSING from expected.tsv\n' "$cfg"
       status=1
+      rm -f "$out"
       continue
     fi
 
-    actual="$(run_one "$cfg" 2>/dev/null | tail -1)"
+    actual="$(result_of "$cfg" "$out")"
 
     if [ "$actual" = "$expected" ]; then
       printf '%-36s %s (as expected)\n' "$cfg" "$actual"
     else
       printf '%-36s %s (EXPECTED %s)\n' "$cfg" "$actual" "$expected"
+      sed 's/^/    /' "$out"
       status=1
     fi
+
+    rm -f "$out"
   done
 
   while IFS="$(printf '\t')" read -r cfg _expected; do
@@ -67,15 +86,12 @@ fi
 
 status=0
 for cfg in "$@"; do
-  module="${cfg%%_*}"
-  printf '== %s (module %s) ==\n' "$cfg" "$module"
-  if java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
-       -deadlock -workers auto -metadir "$dir/states" \
-       -config "$dir/$cfg.cfg" "$dir/$module.tla"; then
-    printf '== %s: PASS ==\n\n' "$cfg"
-  else
-    printf '== %s: VIOLATED ==\n\n' "$cfg"
-    status=1
-  fi
+  printf '== %s (module %s) ==\n' "$cfg" "${cfg%%_*}"
+  out="$(mktemp)"
+  outcome="$(result_of "$cfg" "$out")"
+  cat "$out"
+  rm -f "$out"
+  printf '== %s: %s ==\n\n' "$cfg" "$outcome"
+  [ "$outcome" = "PASS" ] || status=1
 done
 exit $status

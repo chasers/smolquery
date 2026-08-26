@@ -108,22 +108,8 @@ defmodule Smolquery.StorageService.Sealer do
   `gen_server:cast/2`.
   """
   @spec seal_ready(atom(), Store.table_ref(), SealConsumer.claim(), node()) :: :ok
-  def seal_ready(name, table_ref, claim, node \\ node()) do
-    destination = {Runtime.sealer(name), node}
-    message = {:"$gen_cast", {:seal_ready, table_ref, claim}}
-
-    case :erlang.send(destination, message, [:noconnect, :nosuspend]) do
-      :ok ->
-        :ok
-
-      _unconnected ->
-        spawn(fn -> send(destination, message) end)
-
-        :ok
-    end
-  catch
-    _kind, _reason -> :ok
-  end
+  def seal_ready(name, table_ref, claim, node \\ node()),
+    do: cast_signal(name, node, {:seal_ready, table_ref, claim})
 
   @doc """
   Hands a reconcile signal for a released claim's tombstone to the sealer on
@@ -134,9 +120,12 @@ defmodule Smolquery.StorageService.Sealer do
   level-triggered — a dropped one costs a `seal_retry_ms` interval.
   """
   @spec reconcile_released(atom(), Store.table_ref(), SealConsumer.claim(), node()) :: :ok
-  def reconcile_released(name, table_ref, claim, node \\ node()) do
+  def reconcile_released(name, table_ref, claim, node \\ node()),
+    do: cast_signal(name, node, {:reconcile_released, table_ref, claim})
+
+  defp cast_signal(name, node, request) do
     destination = {Runtime.sealer(name), node}
-    message = {:"$gen_cast", {:reconcile_released, table_ref, claim}}
+    message = {:"$gen_cast", request}
 
     case :erlang.send(destination, message, [:noconnect, :nosuspend]) do
       :ok ->
@@ -178,17 +167,18 @@ defmodule Smolquery.StorageService.Sealer do
     cond do
       not owner?(state, table_ref) -> {:noreply, ignore_foreign(state, table_ref)}
       sealing?(state, table_ref, claim) -> {:noreply, state}
+      reconciling_table?(state, table_ref) -> {:noreply, state}
       cooling_down?(state, table_ref) -> {:noreply, shed_cooling(state, table_ref)}
       at_capacity?(state) -> {:noreply, shed(state, table_ref)}
       true -> {:noreply, start_attempt(state, table_ref, claim)}
     end
   end
 
-  # A reconcile waits out any running attempt for the table: the released
-  # claim's own in-flight attempt registers at most once, and its register must
-  # land — and be seen — before reconciliation decides whether there is an
-  # orphan to drop. Level-triggered re-signalling makes the wait a retry
-  # interval, never a lost reconciliation.
+  # Attempts and reconciles exclude each other in both directions: a reconcile
+  # waits out the table's running attempts (their register must land first),
+  # and seal_ready defers while a reconcile runs (a late signal must not
+  # register an orphan behind the reconcile's back). Level-triggered
+  # re-signalling makes either wait a retry interval, never a lost operation.
   @impl GenServer
   def handle_cast({:reconcile_released, table_ref, claim}, state) do
     cond do
@@ -380,6 +370,9 @@ defmodule Smolquery.StorageService.Sealer do
 
   defp attempting?(state, table_ref),
     do: Enum.any?(state.attempts, fn {_ref, attempt} -> attempt.table_ref == table_ref end)
+
+  defp reconciling_table?(state, table_ref),
+    do: Enum.any?(state.reconciles, fn {_ref, reconcile} -> reconcile.table_ref == table_ref end)
 
   defp reconciling?(state, table_ref, claim) do
     Enum.any?(state.reconciles, fn {_ref, reconcile} ->

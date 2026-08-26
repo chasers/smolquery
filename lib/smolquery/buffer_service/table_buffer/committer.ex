@@ -627,12 +627,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     end
   end
 
-  # The drop is also OWED durably (F-2, tla/FINDINGS.md): the follower may
-  # hold a copy whose ack was lost, and the replicator's compensating drop is
-  # fire-and-forget — the owner re-ships the drop every maintenance tick
-  # until the replicas ack, or the follower's zombie copy is served by every
-  # query's manifest merge and a retried batch double-counts the rows.
+  # The owed record lands before the local drop, so a crash between the two
+  # leaves the entry intact everywhere (an unreplied write) rather than a
+  # replica-only zombie the drop can no longer reach (F-2, tla/FINDINGS.md).
   defp compensate(state, entry, reason) do
+    owe_replica_drop(state, entry)
+
     case HotManifest.drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
       :ok ->
         :ok
@@ -643,15 +643,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
         )
     end
 
-    owe_replica_drop(state, entry, reason)
-
     {:error, reason}
   end
 
-  # Only a flush that reached the ship can have left a replica copy behind; a
-  # pre-ship failure (underreplicated ring, unreadable local bytes) owes
-  # nothing.
-  defp owe_replica_drop(state, entry, {:replication_failed, _node, _reason}) do
+  defp owe_replica_drop(state, entry) do
     case HotManifest.owe_drop(state.runtime.manifest, state.table_ref, [entry.id], state.log) do
       :ok ->
         :ok
@@ -664,6 +659,4 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
         )
     end
   end
-
-  defp owe_replica_drop(_state, _entry, _pre_ship_failure), do: :ok
 end

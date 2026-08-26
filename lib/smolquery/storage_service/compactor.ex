@@ -163,6 +163,7 @@ defmodule Smolquery.StorageService.Compactor do
   slow mystery.
   """
 
+  alias Smolquery.BufferService.Client, as: BufferClient
   alias Smolquery.Catalog
   alias Smolquery.Engine
   alias Smolquery.Engine.CallExited
@@ -523,7 +524,8 @@ defmodule Smolquery.StorageService.Compactor do
     with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
          [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
          [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths),
-         {:ok, group} <- plan(runtime, plannable) do
+         {:ok, group} <- plan(runtime, plannable),
+         :ok <- refuse_tombstoned(runtime, table_ref, group) do
       swap(runtime, table_ref, group, started_at)
     else
       [] ->
@@ -538,6 +540,36 @@ defmodule Smolquery.StorageService.Compactor do
       {:error, reason, failed_paths} ->
         failed(runtime, table_ref, reason, started_at, paths: failed_paths)
     end
+  end
+
+  # A registered segment under a tombstoned key is a released claim's orphan
+  # awaiting reconciliation (T-386): merging it would bake its rows into the
+  # compacted output past the reconciler's reach, permanently double-counted.
+  # An unreachable buffer answers no tombstones, so compaction proceeds — a
+  # deployment compacting tables with no live buffer keeps working, at the
+  # cost of re-opening this window only while the whole buffer tier is down.
+  defp refuse_tombstoned(runtime, table_ref, %{paths: paths}) do
+    tombstoned = tombstoned_paths(runtime, table_ref)
+
+    if tombstoned != [] and Enum.any?(paths, &(&1 in tombstoned)) do
+      Logger.info(fn ->
+        "compaction of #{inspect(table_ref)} deferred: the group holds a released " <>
+          "claim's segment awaiting reconciliation (T-386)"
+      end)
+
+      :skip
+    else
+      :ok
+    end
+  end
+
+  defp tombstoned_paths(runtime, table_ref) do
+    case BufferClient.tombstones(runtime.buffer_name, table_ref) do
+      {:ok, keys} -> Enum.map(keys, &Store.location(runtime.store, &1))
+      {:error, _unreachable} -> []
+    end
+  catch
+    _kind, _reason -> []
   end
 
   defp reject_quarantined(quarantined_groups, owned, listed) do

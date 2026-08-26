@@ -785,9 +785,7 @@ defmodule Smolquery.BufferService.HotManifest do
         :ok
 
       ids ->
-        record = %{"op" => "drop_owed", "ids" => ids}
-
-        with :ok <- append(manifest, table_ref, record, log) do
+        with :ok <- append(manifest, table_ref, owed_record(ids), log) do
           Enum.each(ids, &:ets.insert(owed(table), {{table_ref, &1}, &1}))
 
           :ok
@@ -908,9 +906,7 @@ defmodule Smolquery.BufferService.HotManifest do
 
       records =
         (manifest |> entries(table_ref) |> Enum.map(&Entry.to_record/1)) ++
-          (manifest
-           |> tombstones(table_ref)
-           |> Enum.map(&%{"op" => "tombstone", "keys" => &1.keys, "ids" => &1.ids})) ++
+          (manifest |> tombstones(table_ref) |> Enum.map(&tombstone_record/1)) ++
           owed_records(manifest, table_ref)
 
       with :ok <- File.mkdir_p(Path.dirname(path)),
@@ -1251,7 +1247,7 @@ defmodule Smolquery.BufferService.HotManifest do
   defp owed_records(manifest, table_ref) do
     case owed_drops(manifest, table_ref) do
       [] -> []
-      ids -> [%{"op" => "drop_owed", "ids" => Enum.sort(ids)}]
+      ids -> [owed_record(Enum.sort(ids))]
     end
   end
 
@@ -1428,8 +1424,7 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   # The tombstone derives from the released ids' claim_keys at this log
-  # position rather than from the record, so a release logged by any version
-  # replays into the same tombstone (T-386).
+  # position, so a release logged by any version replays the same (T-386).
   defp apply_record(%{"op" => "release", "ids" => ids}, {entries, tombstones, owed}) do
     keys =
       Enum.find_value(ids, [], fn id ->
@@ -1469,6 +1464,11 @@ defmodule Smolquery.BufferService.HotManifest do
     do: {:ok, {entries, tombstones, Enum.reduce(ids, owed, &MapSet.delete(&2, &1))}}
 
   defp apply_record(record, _acc), do: {:error, {:unknown_record, record}}
+
+  defp tombstone_record(tombstone),
+    do: %{"op" => "tombstone", "keys" => tombstone.keys, "ids" => tombstone.ids}
+
+  defp owed_record(ids), do: %{"op" => "drop_owed", "ids" => ids}
 
   defp put_tombstone(tombstones, [], _ids), do: tombstones
 

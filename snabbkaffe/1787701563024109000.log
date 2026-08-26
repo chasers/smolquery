@@ -1,0 +1,4 @@
+2026-08-25T16:46:01.568784-07:00 [$trace_begin] #{'~meta' => #{},begin_system_time => 1787701561568784}.
+/Users/chasegranberry/Dev/supabase/smolquery/lib/smolquery/storage_service/handoff/seal.ex:250 2026-08-25T16:46:01.899889-07:00 [storage.seal.registered] #{keys => [<<"analytics/events/01M0XN22D1AQM15STFBAW96ZA4.parquet">>],table_ref => {<<"analytics">>,<<"events">>},ids => [<<"01M0XN229BRJX09H60H92K1PS3">>,<<"01M0XN22D16GYVR0N8SV23T0ER">>],'~meta' => #{node => nonode@nohost,pid => <0.1094.0>,gl => <0.69.0>}}.
+2026-08-25T16:46:01.899911-07:00 [$trace_end] #{'~meta' => #{}}.
+

@@ -126,11 +126,11 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Cache tla2tools.jar
+      - name: Cache the TLC jar
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: tla/tla2tools.jar
-          key: tla2tools-v1.7.4
+          path: tla/tla2tools-*.jar
+          key: tla2tools-${{ hashFiles('tla/run') }}
 
       - name: Model-check every config against tla/expected.tsv
         run: ./tla/run check

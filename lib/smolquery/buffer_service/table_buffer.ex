@@ -549,12 +549,16 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_call({:release_reconciled, keys}, _from, state) do
+    held = HotManifest.tombstones(state.runtime.manifest, state.table_ref)
+
     result =
-      Committer.with_log(state.committer, fn log ->
+      if Enum.any?(held, &(&1.keys == keys)) do
         with :ok <- append_replicas(state, :reconciled, %{keys: keys}) do
-          HotManifest.reconcile_released(state.runtime.manifest, state.table_ref, keys, log)
+          apply_replica_mutation(state, :reconciled, %{keys: keys})
         end
-      end)
+      else
+        :ok
+      end
 
     {:reply, result, state}
   end
@@ -723,13 +727,9 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  # A compensated flush's drop is owed to the replicas until they ack it
-  # (F-2, tla/FINDINGS.md): the fire-and-forget drop shipped with the error
-  # can be lost, and the replica's zombie copy is served by every query's
-  # manifest merge. Re-ship on the seal cadence until the append succeeds,
-  # then settle the record. The append can stall this process for a
-  # transport timeout, but only while a replica is unreachable — a state in
-  # which every flush of this table is already failing on the same target.
+  # The re-ship can stall this process for a transport timeout, but only
+  # while a replica is unreachable — a state in which every flush of this
+  # table is already failing on the same target.
   defp settle_owed_drops(state, false), do: state
 
   defp settle_owed_drops(state, true) do
@@ -762,12 +762,6 @@ defmodule Smolquery.BufferService.TableBuffer do
     end
   end
 
-  # A released claim's tombstone is reconcilable once every id it covered is
-  # sealed or gone from the manifest: from then on the rows are committed under
-  # the re-derived claims' keys, so dropping any segment registered under the
-  # released keys is loss-free (T-386). Level-triggered on the same cadence as
-  # seal signals; the tombstone clears when the storage side acks through
-  # release_reconciled/3.
   defp signal_reconcilable(state, false), do: state
 
   defp signal_reconcilable(state, true) do
@@ -784,14 +778,19 @@ defmodule Smolquery.BufferService.TableBuffer do
     if reconcilable == [], do: state, else: %{state | signaled_at: now()}
   end
 
-  defp covered?(state, %{ids: ids}) do
+  defp covered?(state, %{ids: ids, keys: released_keys}) do
     Enum.all?(ids, fn id ->
       case HotManifest.entry(state.runtime.manifest, state.table_ref, id) do
-        {:ok, entry} -> not is_nil(entry.sealed_at)
+        {:ok, entry} -> sealed_by_rederived?(entry, released_keys)
         :error -> true
       end
     end)
   end
+
+  defp sealed_by_rederived?(%{sealed_at: nil}, _released_keys), do: false
+
+  defp sealed_by_rederived?(%{claim_keys: claim_keys}, released_keys),
+    do: claim_keys != [] and claim_keys != released_keys
 
   # Re-signals every live claim in one due-gated batch (T-339): `signaled_at`
   # is per ref, so the gate is evaluated once before the fold — stamping it
