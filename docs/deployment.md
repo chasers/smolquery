@@ -92,6 +92,13 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The Polars flush writer is gone (PL-57)
+
+`SMOLQUERY_FLUSH_WRITER` is no longer a setting. DuckDB writes every flush,
+which was already the default. A deployment that still sets the variable fails
+the boot with a message that names this note: unset it. Nothing else changes
+for a deployment that never set it.
+
 ### Per-table partition counts (T-304)
 
 The release that ships T-304 lets a table raise its own write-partition

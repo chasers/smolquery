@@ -136,18 +136,6 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
-  def from_reason(conn, {:flush_writer_unsupported, writer, type}) do
-    {:ok, name} = Smolquery.Schema.api_type(type)
-
-    send_error(
-      conn,
-      503,
-      "UNAVAILABLE",
-      "the buffer's #{writer} flush writer cannot write a #{name} column; " <>
-        "set SMOLQUERY_FLUSH_WRITER=duckdb"
-    )
-  end
-
   def from_reason(conn, {:unknown_clustering_column, column}) do
     send_error(conn, 422, "INVALID_ARGUMENT", "clustering column does not exist: #{column}")
   end

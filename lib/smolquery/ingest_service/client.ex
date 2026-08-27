@@ -13,9 +13,7 @@ defmodule Smolquery.IngestService.Client do
   batch with no valid rows reports zero without touching the buffer.
   """
 
-  alias Explorer.DataFrame
   alias Smolquery.BufferService
-  alias Smolquery.IngestService.ColumnarValidator
   alias Smolquery.IngestService.Runtime
   alias Smolquery.IngestService.SchemaCache
   alias Smolquery.IngestService.Validator
@@ -62,29 +60,21 @@ defmodule Smolquery.IngestService.Client do
   end
 
   @doc """
-  Validates NDJSON `body` against the table's schema and writes the valid
-  rows — `insert/4`'s contract, entered from bytes instead of decoded terms.
+  Writes the NDJSON `body` to the table — `insert/4`'s contract, entered from
+  bytes instead of decoded terms.
 
-  The fast path never materializes rows: `ColumnarValidator` parses and
-  casts the whole body in one native pass and the resulting frame rides to
-  the buffer as a frame (T-139). Any batch the columnar pass cannot prove
-  entirely valid falls back to decoding the lines and running the per-row
-  validator, so `insertErrors` reporting is byte-for-byte what `insert/4`
-  answers — a line that is not a JSON object is rejected at its index like
-  any other invalid row.
-
-  Takes the same `:batch_id` option, with the same dedup semantics.
+  The body goes to the owning buffer as the bytes the client sent; nothing here
+  parses it (T-180). The flush validates what this node did not: rows the
+  schema refuses come back at their index in this body, the way `insert/4`
+  reports them, and the rest are durable. Takes the same `:batch_id` option,
+  with the same dedup semantics.
   """
   @spec insert_ndjson(atom(), Store.table_ref(), binary(), keyword()) ::
           {:ok, result()} | {:error, term()}
   def insert_ndjson(name, table_ref, body, opts \\ []) when is_binary(body) do
     with {:ok, runtime} <- runtime(name),
          {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      if runtime.ndjson_passthrough do
-        forward_ndjson(runtime, table_ref, schema, body, opts)
-      else
-        parse_and_write(runtime, table_ref, schema, body, opts)
-      end
+      forward_ndjson(runtime, table_ref, schema, body, opts)
     end
   end
 
@@ -142,12 +132,6 @@ defmodule Smolquery.IngestService.Client do
 
         {:ok, %{inserted: 0, errors: errors}}
 
-      # The owning buffer's flush writer cannot take unparsed bytes — its config
-      # and this node's disagree. Parsing here costs what passthrough saves, but
-      # answers the request instead of failing it over a deployment seam.
-      {:error, :ndjson_unsupported} ->
-        parse_and_write(runtime, table_ref, schema, body, opts)
-
       {:error, _reason} = error ->
         error
     end
@@ -168,73 +152,10 @@ defmodule Smolquery.IngestService.Client do
     |> Enum.count(&(String.trim(&1) != ""))
   end
 
-  defp parse_and_write(runtime, table_ref, schema, body, opts) do
-    # The parse is timed separately from the write because they are the two
-    # halves of the ack that live on this side of the wire, and T-181 left
-    # ~400ms of it unattributed (T-182).
-    started = System.monotonic_time(:microsecond)
-    validated = ColumnarValidator.validate(schema, body)
-    parse_us = System.monotonic_time(:microsecond) - started
-
-    case validated do
-      {:ok, frame} ->
-        write_frame(runtime, table_ref, schema, frame, byte_size(body), opts, parse_us)
-
-      :fallback ->
-        insert_decoded_lines(runtime, table_ref, schema, body, opts)
-    end
-  end
-
-  defp insert_decoded_lines(runtime, table_ref, schema, body, opts) do
-    case Validator.validate(schema, decode_lines(body)) do
-      {[], errors} ->
-        measure(0, errors)
-
-        {:ok, %{inserted: 0, errors: errors}}
-
-      {valid, errors} ->
-        write(runtime, table_ref, schema, valid, errors, Keyword.get(opts, :batch_id))
-    end
-  end
-
   defp write_target(table_ref, schema, runtime, batch_id) do
     partitions = Partitions.count(schema.partitions, runtime.write_partitions)
 
     Partitions.write_ref(table_ref, partitions, batch_id)
-  end
-
-  defp decode_lines(body) do
-    body
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case JSON.decode(line) do
-        {:ok, row} -> row
-        {:error, _reason} -> line
-      end
-    end)
-  end
-
-  defp write_frame(runtime, table_ref, schema, frame, byte_size, opts, parse_us) do
-    batch = %{schema: schema, frame: frame, byte_size: byte_size}
-    batch_id = Keyword.get(opts, :batch_id)
-    target = write_target(table_ref, schema, runtime, batch_id)
-
-    batch =
-      case batch_id do
-        nil -> batch
-        batch_id -> Map.put(batch, :batch_id, batch_id)
-      end
-
-    started = System.monotonic_time(:microsecond)
-    written = BufferService.Client.write_batch(runtime.buffer_name, target, batch)
-    write_us = System.monotonic_time(:microsecond) - started
-
-    with {:ok, _ack} <- written do
-      inserted = DataFrame.n_rows(frame)
-      measure(inserted, [], parse_us, write_us)
-
-      {:ok, %{inserted: inserted, errors: []}}
-    end
   end
 
   @doc """

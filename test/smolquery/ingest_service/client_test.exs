@@ -179,8 +179,7 @@ defmodule Smolquery.IngestService.ClientTest do
     test "blank lines are not counted as inserted rows", context do
       %{name: name, buffer: buffer} =
         start_stack(context,
-          buffer: [flush_writer: :duckdb, write_pool_size: 1],
-          ingest: [ndjson_passthrough: true]
+          buffer: [write_pool_size: 1]
         )
 
       body = ~s({"id": 1}\n\n{"id": 2}\n)
@@ -199,8 +198,7 @@ defmodule Smolquery.IngestService.ClientTest do
     test "whitespace-only lines are not counted as inserted rows", context do
       %{name: name, buffer: buffer} =
         start_stack(context,
-          buffer: [flush_writer: :duckdb, write_pool_size: 1],
-          ingest: [ndjson_passthrough: true]
+          buffer: [write_pool_size: 1]
         )
 
       body = ~s({"id": 1}\n \r\n{"id": 2}\n)
@@ -216,8 +214,7 @@ defmodule Smolquery.IngestService.ClientTest do
     test "a body of only whitespace inserts nothing and lands nothing", context do
       %{name: name, buffer: buffer} =
         start_stack(context,
-          buffer: [flush_writer: :duckdb, write_pool_size: 1],
-          ingest: [ndjson_passthrough: true]
+          buffer: [write_pool_size: 1]
         )
 
       assert {:ok, %{inserted: 0, errors: []}} =
@@ -226,17 +223,6 @@ defmodule Smolquery.IngestService.ClientTest do
       {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
 
       assert entries == []
-    end
-
-    test "a buffer whose flush writer cannot flush bytes gets them parsed", context do
-      %{name: name, buffer: buffer} = start_stack(context, ingest: [ndjson_passthrough: true])
-
-      assert {:ok, %{inserted: 1, errors: []}} =
-               IngestService.Client.insert_ndjson(name, @table, ~s({"id": 1}\n))
-
-      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
-
-      assert Enum.sum_by(entries, & &1.row_count) == 1
     end
   end
 

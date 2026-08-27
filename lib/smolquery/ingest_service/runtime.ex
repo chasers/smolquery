@@ -33,16 +33,10 @@ defmodule Smolquery.IngestService.Runtime do
   `Smolquery.Partitions.count/2`). The query service's `write_partitions`
   must match this one; see the caveats in `Smolquery.Partitions`.
 
-  `ndjson_passthrough` forwards an `application/x-ndjson` body to the owning
-  buffer as the bytes the client sent, so this node spends no CPU per row. It
-  defaults to true, matching `Smolquery.BufferService`'s `:duckdb` writer.
-
-  It only engages if the *caller* sends the ndjson content type. A caller
-  posting a JSON array takes the parse-and-cast path no matter what is
-  configured here, which is a 3-4x difference the server cannot see: the
-  comparison rig measured 26,733 rows/s at a 901 ms ack against 105,733 at
-  189 ms on one fleet, and spent most of a day looking for it in the flush
-  path. `Smolquery.BufferService.Runtime` carries the other half of that story.
+  An `application/x-ndjson` body is forwarded to the owning buffer as the
+  bytes the client sent, so this node spends no CPU per row (T-180). There is
+  no switch for it any more: the Polars flush writer that needed parsed rows
+  is gone (PL-57).
   """
 
   alias Smolquery.Catalog
@@ -54,8 +48,7 @@ defmodule Smolquery.IngestService.Runtime do
     :catalog_opts,
     buffer_name: Smolquery.BufferService,
     schema_cache_ttl_ms: 60_000,
-    write_partitions: 1,
-    ndjson_passthrough: true
+    write_partitions: 1
   ]
 
   @type t :: %__MODULE__{
@@ -64,8 +57,7 @@ defmodule Smolquery.IngestService.Runtime do
           catalog_opts: keyword() | nil,
           buffer_name: atom(),
           schema_cache_ttl_ms: pos_integer(),
-          write_partitions: pos_integer(),
-          ndjson_passthrough: boolean()
+          write_partitions: pos_integer()
         }
 
   @doc """
@@ -91,8 +83,7 @@ defmodule Smolquery.IngestService.Runtime do
       Keyword.take(config, [
         :buffer_name,
         :schema_cache_ttl_ms,
-        :write_partitions,
-        :ndjson_passthrough
+        :write_partitions
       ])
     )
   end

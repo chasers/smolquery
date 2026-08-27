@@ -31,10 +31,10 @@ defmodule Smolquery.Schema do
   `{key, value}` structs — reaches Parquet without the `MAP` annotation, so
   DuckDB reads it back as `STRUCT[]` and refuses to union it with a sealed
   `MAP` column. A map column is therefore written only by the DuckDB flush
-  writer (`flush_writer: :duckdb`, the default), which reads the spooled NDJSON
+  writer — the one writer since PL-57 — which reads the spooled NDJSON
   straight into `MAP(VARCHAR, VARCHAR)`. `explorer_dtype/1` answers
   `{:error, {:unsupported_type, _}}` for it, and every Explorer-side path — the
-  columnar validator, the Polars writer, CSV loads — falls back or refuses on
+  columnar validator, the fixture writer, CSV loads — falls back or refuses on
   that answer. On the read side a map arrives from `Smolquery.Engine.frame/3`
   as Explorer's list-of-struct; `Smolquery.Engine.Frame.to_rows/1` turns it
   back into a map.
@@ -84,8 +84,8 @@ defmodule Smolquery.Schema do
   The limits, in one list; `docs/api.md` carries the same list for API callers:
 
     * neither has stats bounds, so nothing prunes on a key filter
-    * only the DuckDB flush writer writes them; the Polars writer refuses the
-      schema, and a CSV load cannot carry either
+    * only DuckDB writes a segment holding them; Explorer's fixture writer
+      refuses the schema, and a CSV or Parquet load cannot carry either
     * a map's values are strings — any other JSON value is stored as its text —
       and a `NULL` map reads back as `%{}`
     * a variant is JSON text on disk, parsed per scanned row per query; its

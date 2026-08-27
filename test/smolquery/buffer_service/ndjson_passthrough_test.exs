@@ -45,7 +45,6 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
       name: name,
       dir: Path.join(context.tmp_dir, "buffer"),
       flush_interval_ms: 25,
-      flush_writer: :duckdb,
       write_pool_size: 1
     ]
 

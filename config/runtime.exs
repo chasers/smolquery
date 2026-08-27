@@ -341,18 +341,10 @@ if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_BUFFERED_BYTES", bytes)
 end
 
-# One variable sets both halves, because they are one decision: the ingest edge
-# only stops parsing if the buffer it forwards to can write the bytes, and a
-# buffer that starts DuckDB instances for flushes nothing sends is waste.
-if writer = System.get_env("SMOLQUERY_FLUSH_WRITER") do
-  flush_writer =
-    Smolquery.RuntimeConfig.enum!("SMOLQUERY_FLUSH_WRITER", writer, [
-      {"polars", :polars},
-      {"duckdb", :duckdb}
-    ])
-
-  config :smolquery, Smolquery.BufferService, flush_writer: flush_writer
-  config :smolquery, Smolquery.IngestService, ndjson_passthrough: flush_writer == :duckdb
+if System.get_env("SMOLQUERY_FLUSH_WRITER") do
+  raise ArgumentError,
+        "SMOLQUERY_FLUSH_WRITER is no longer a setting: the Polars flush writer was " <>
+          "removed (PL-57) and DuckDB writes every flush. Unset the variable."
 end
 
 if size = System.get_env("SMOLQUERY_WRITE_POOL_SIZE") do

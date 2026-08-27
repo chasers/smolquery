@@ -2,10 +2,9 @@ defmodule Smolquery.BufferService.MapColumnTest do
   @moduledoc """
   A `MAP(STRING, STRING)` schema through a real buffer, both batch shapes.
 
-  Explorer cannot write a Parquet `MAP`, so a rows batch against a map schema
-  must reach the DuckDB writer as NDJSON — the committer's re-encode — and the
-  Polars writer must refuse it rather than write a segment the planner cannot
-  union with the sealed table.
+  Explorer cannot write a Parquet `MAP`, so a rows or frame batch against a map
+  schema reaches DuckDB as NDJSON — the committer's re-encode — and lands as
+  the same MAP segment an unparsed body does.
   """
 
   use ExUnit.Case, async: false
@@ -41,14 +40,13 @@ defmodule Smolquery.BufferService.MapColumnTest do
     %{schema: schema(), ndjson: body, row_count: 3, byte_size: byte_size(body)}
   end
 
-  defp start_buffer(context, writer) do
-    name = :"buffer_map_#{writer}_#{:erlang.unique_integer([:positive])}"
+  defp start_buffer(context) do
+    name = :"buffer_map_#{:erlang.unique_integer([:positive])}"
 
     opts = [
       name: name,
       dir: Path.join(context.tmp_dir, "buffer"),
       flush_interval_ms: 25,
-      flush_writer: writer,
       write_pool_size: 1
     ]
 
@@ -70,9 +68,9 @@ defmodule Smolquery.BufferService.MapColumnTest do
     rows
   end
 
-  describe "under the DuckDB writer" do
+  describe "through the DuckDB writer" do
     test "a rows batch lands as a MAP segment, the same as an unparsed body", context do
-      {name, runtime} = start_buffer(context, :duckdb)
+      {name, runtime} = start_buffer(context)
 
       assert {:ok, ack} = Client.write_batch(name, @table, rows_batch())
       assert ack.row_count == 3
@@ -81,7 +79,7 @@ defmodule Smolquery.BufferService.MapColumnTest do
     end
 
     test "a frame batch without the map column lands as a MAP segment too", context do
-      {name, runtime} = start_buffer(context, :duckdb)
+      {name, runtime} = start_buffer(context)
       frame = Explorer.DataFrame.new(id: Explorer.Series.from_list([1, 2, 3], dtype: {:s, 64}))
       batch = %{schema: schema(), frame: frame, byte_size: 24}
 
@@ -92,24 +90,12 @@ defmodule Smolquery.BufferService.MapColumnTest do
     end
 
     test "an unparsed body lands as a MAP segment", context do
-      {name, runtime} = start_buffer(context, :duckdb)
+      {name, runtime} = start_buffer(context)
 
       assert {:ok, ack} = Client.write_batch(name, @table, ndjson_batch())
       assert ack.row_count == 3
 
       assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
-    end
-  end
-
-  describe "under the Polars writer" do
-    test "a rows batch is refused rather than written in a shape DuckDB cannot union",
-         context do
-      {name, runtime} = start_buffer(context, :polars)
-
-      assert {:error, {:flush_writer_unsupported, :polars, {:map, :string, :string}}} =
-               Client.write_batch(name, @table, rows_batch())
-
-      assert HotManifest.entries(runtime.manifest, @table) == []
     end
   end
 end

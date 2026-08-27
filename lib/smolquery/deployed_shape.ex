@@ -51,7 +51,6 @@ defmodule Smolquery.DeployedShape do
     budget = BufferRuntime.write_engine_budget(runtime)
 
     labels = [
-      flush_writer: runtime.flush_writer,
       compression: runtime.compression,
       flush_max_bytes: runtime.flush_max_bytes,
       flush_interval_ms: runtime.flush_interval_ms,
@@ -71,13 +70,6 @@ defmodule Smolquery.DeployedShape do
 
     Logger.info("buffer shape: #{describe(labels)}")
     Telemetry.put_info("smolquery_buffer_shape_info", labels)
-
-    warn_slow(
-      runtime.flush_writer == :polars,
-      "buffer is on the :polars flush writer. The :duckdb writer is the path " <>
-        "the NDJSON passthrough is built around, and selecting :polars disables " <>
-        "that passthrough with it. Set SMOLQUERY_FLUSH_WRITER=duckdb."
-    )
 
     warn_slow(
       transport_tls?(),
@@ -121,19 +113,12 @@ defmodule Smolquery.DeployedShape do
 
   def announce(%IngestRuntime{} = runtime) do
     labels = [
-      ndjson_passthrough: runtime.ndjson_passthrough,
       write_partitions: runtime.write_partitions,
       schema_cache_ttl_ms: runtime.schema_cache_ttl_ms
     ]
 
     Logger.info("ingest shape: #{describe(labels)}")
     Telemetry.put_info("smolquery_ingest_shape_info", labels)
-
-    warn_slow(
-      not runtime.ndjson_passthrough,
-      "the NDJSON passthrough is off, so every insert is parsed and cast row " <>
-        "by row at this edge. Set SMOLQUERY_FLUSH_WRITER=duckdb."
-    )
 
     :ok
   end
