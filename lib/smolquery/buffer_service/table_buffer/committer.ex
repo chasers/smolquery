@@ -3,7 +3,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   The durability half of a table's group commit (T-152, PL-20).
 
   `Smolquery.BufferService.TableBuffer` accumulates; this process makes
-  batches durable — the Polars encode, the store put, the manifest append and
+  batches durable — the DuckDB encode, the store put, the manifest append and
   fsync, and the replication round all run here, and the pending callers are
   answered from here once their rows are durable. That split is what
   pipelines the buffer: batch formation continues in the `TableBuffer` while
@@ -70,18 +70,18 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   ## Every commit encodes through DuckDB (PL-57)
 
-  An NDJSON passthrough commit is spooled as the bytes the client sent. A rows
-  or frame commit — `insert/4`, a batch load — is re-encoded to NDJSON first
-  and takes the same `COPY`. One writer, so a hot segment always carries the
-  sealed table's types, `MAP(STRING, STRING)` and `VARIANT` included; the
-  Explorer writer that once took rows directly could not write those.
+  An NDJSON passthrough chunk is spooled as the bytes the client sent. A rows
+  chunk — `insert/4`, a batch load — is re-encoded to NDJSON first, so the two
+  share a commit and take the same `COPY`. One writer, so a hot segment always
+  carries the sealed table's types, `MAP(STRING, STRING)` and `VARIANT`
+  included; the Explorer writer that once took rows directly could not write
+  those (T-399 removed the frame path that fed it).
   """
 
   use GenServer
 
   require Logger
 
-  alias Explorer.DataFrame
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
@@ -114,9 +114,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   """
   @type commit :: %{
           :schema => Smolquery.Schema.t(),
-          :chunks => [
-            [Writer.row()] | Explorer.DataFrame.t() | {:ndjson, binary(), non_neg_integer()}
-          ],
+          :chunks => [[Writer.row()] | {:ndjson, binary(), non_neg_integer()}],
           :pending => [{GenServer.from(), :new | :duplicate | :flush}],
           :batch_ids => [String.t()],
           :row_count => non_neg_integer(),
@@ -285,21 +283,13 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     %{state | encoding: Map.put(state.encoding, task.ref, {commit, started})}
   end
 
-  defp encode(runtime, prefix, commit) do
-    if ndjson_commit?(commit),
-      do: encode_ndjson(runtime, prefix, commit),
-      else:
-        encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
-  end
+  defp encode(runtime, prefix, commit),
+    do: encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
 
-  defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
-  defp ndjson_commit?(_commit), do: false
+  defp as_ndjson({:ndjson, _body, _count} = chunk), do: chunk
 
   defp as_ndjson(rows) when is_list(rows),
     do: {:ndjson, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n", length(rows)}
-
-  defp as_ndjson(%DataFrame{} = frame),
-    do: {:ndjson, DataFrame.dump_ndjson!(frame), DataFrame.n_rows(frame)}
 
   # The bytes reach disk here rather than at the API, because the API no longer
   # knows which node owns the table — #108's partitions send most batches to a

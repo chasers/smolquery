@@ -17,7 +17,6 @@ defmodule Smolquery.BufferService.Endpoint do
   a caller try the next owner rather than crash.
   """
 
-  alias Explorer.DataFrame
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -30,25 +29,15 @@ defmodule Smolquery.BufferService.Endpoint do
   alias Smolquery.Segments.Writer
 
   @typedoc """
-  A forward-batch: rows as a term list, or already columnar (T-139).
-
-  A columnar batch carries `:frame` in the same BEAM and `:frame_ipc` — the
-  frame as Arrow IPC bytes — across the wire, because a `DataFrame` is a NIF
-  resource whose reference does not survive another node's term decode.
-  `Smolquery.BufferService.Client.write_batch/3` picks per transport; both
-  carry `:byte_size`, the ingest edge's estimate of what the batch costs the
-  owner's accumulator, since the admission bound cannot measure a resource.
-
-  Those three shapes are already validated. `:ndjson` is not: it is the bytes
-  the client sent, forwarded unparsed, with `:row_count` the sender's count of
-  non-blank lines. The flush parses it, so a value the schema cannot take fails
-  the whole commit rather than one row.
+  A forward-batch: rows as a term list, already validated, or `:ndjson` — the
+  bytes the client sent, forwarded unparsed, with `:row_count` the sender's
+  count of non-blank lines and `:byte_size` what the batch costs the owner's
+  accumulator. The flush parses NDJSON, so a value the schema cannot take is
+  reported per row after the fact (the committer's salvage), not before.
   """
   @type batch :: %{
           required(:schema) => Schema.t(),
           optional(:rows) => [Writer.row()],
-          optional(:frame) => DataFrame.t(),
-          optional(:frame_ipc) => binary(),
           optional(:ndjson) => binary(),
           optional(:row_count) => non_neg_integer(),
           optional(:byte_size) => non_neg_integer(),
@@ -103,20 +92,6 @@ defmodule Smolquery.BufferService.Endpoint do
 
   defp payload(_runtime, %{rows: rows}) when is_list(rows), do: {:ok, rows}
 
-  defp payload(_runtime, %{frame: %DataFrame{} = frame, byte_size: bytes})
-       when is_integer(bytes),
-       do: {:ok, frame}
-
-  defp payload(_runtime, %{frame_ipc: ipc, byte_size: bytes})
-       when is_binary(ipc) and is_integer(bytes) do
-    case DataFrame.load_ipc(ipc) do
-      {:ok, frame} -> {:ok, frame}
-      {:error, _reason} -> {:error, :invalid_frame}
-    end
-  rescue
-    _error in [ArgumentError, RuntimeError] -> {:error, :invalid_frame}
-  end
-
   # NDJSON crosses the wire as the bytes the client sent, so there is nothing to
   # decode here and nothing to validate yet — the flush parses it. `row_count` is
   # the sender's line count, and the ack is built from it, so it is carried
@@ -128,7 +103,6 @@ defmodule Smolquery.BufferService.Endpoint do
   defp payload(_runtime, _batch), do: {:error, :invalid_batch}
 
   defp payload_count(rows) when is_list(rows), do: length(rows)
-  defp payload_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
   defp payload_count({:ndjson, _body, count}), do: count
 
   defp admit(runtime, table_ref, schema, payload, byte_size, batch_id) do
@@ -377,10 +351,6 @@ defmodule Smolquery.BufferService.Endpoint do
 
   defp buffer_write(buffer, runtime, schema, rows, _byte_size, batch_id) when is_list(rows) do
     TableBuffer.write(buffer, schema, rows, runtime.write_timeout_ms, batch_id)
-  end
-
-  defp buffer_write(buffer, runtime, schema, %DataFrame{} = frame, byte_size, batch_id) do
-    TableBuffer.write_frame(buffer, schema, frame, byte_size, runtime.write_timeout_ms, batch_id)
   end
 
   defp buffer_write(buffer, runtime, schema, {:ndjson, body, count}, byte_size, batch_id) do

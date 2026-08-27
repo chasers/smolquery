@@ -82,9 +82,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   A batch whose schema differs from the one accumulating forces a flush and starts
   a fresh accumulator. One segment always has one schema, and additive evolution
   therefore works at the file level for free — `read_parquet(union_by_name = true)`
-  handles the read side. A payload-kind change forces the same flush: an NDJSON
-  passthrough body and a rows/frame batch cannot share a commit, because the
-  committer encodes a commit one way or the other.
+  handles the read side. An NDJSON passthrough body and a rows batch share a
+  commit: the committer re-encodes rows to NDJSON, so every chunk takes the
+  same `COPY`.
 
   ## Sealing is signalled against a frozen set
 
@@ -176,7 +176,6 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   require Logger
 
-  alias Explorer.DataFrame
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -291,40 +290,11 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
-  Accumulates an already-columnar batch — same contract as `write/5`, with
-  the rows as an `Explorer.DataFrame` instead of a term list (T-139).
-
-  `byte_size` is the caller's estimate of what the batch costs this node —
-  the ingest edge passes the wire size it parsed the frame from.
-  `:erlang.external_size/1` would answer a few words here: the frame's data
-  lives behind a NIF resource, not on the BEAM heap, so the admission bound
-  has to be told what it cannot measure.
-  """
-  @spec write_frame(
-          GenServer.server(),
-          Schema.t(),
-          DataFrame.t(),
-          non_neg_integer(),
-          timeout(),
-          String.t() | nil
-        ) :: {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
-  def write_frame(
-        buffer,
-        %Schema{} = schema,
-        %DataFrame{} = frame,
-        byte_size,
-        timeout,
-        batch_id \\ nil
-      ) do
-    GenServer.call(buffer, {:write, schema, frame, batch_id, byte_size}, timeout)
-  end
-
-  @doc """
   Accumulates an unparsed NDJSON body and returns once it is durable.
 
   `row_count` is the sender's count of non-blank lines, not a parse: this node
   does not read the bytes, and the flush is what turns them into a segment.
-  Otherwise identical to `write_frame/6`, including the ack and the dedup
+  Otherwise identical to `write/5`, including the ack and the dedup
   semantics.
   """
   @spec write_ndjson(
@@ -1207,7 +1177,6 @@ defmodule Smolquery.BufferService.TableBuffer do
     state =
       state
       |> flush_on_schema_change(schema)
-      |> flush_on_kind_change(rows)
 
     if full?(state, count, bytes) do
       {:reply, {:error, :buffer_full}, state}
@@ -1225,19 +1194,6 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp flush_on_schema_change(%__MODULE__{chunks: []} = state, _schema), do: state
   defp flush_on_schema_change(%__MODULE__{schema: schema} = state, schema), do: state
   defp flush_on_schema_change(state, _schema), do: handoff(state, :schema)
-
-  # An NDJSON passthrough chunk cannot share a commit with rows or a frame:
-  # the committer encodes a commit one way, decided by its chunks' kind. Mixing
-  # them would crash the encode for every caller in the commit, so a kind
-  # change flushes exactly as a schema change does.
-  defp flush_on_kind_change(%__MODULE__{chunks: []} = state, _chunk), do: state
-
-  defp flush_on_kind_change(%__MODULE__{chunks: [head | _rest]} = state, chunk) do
-    if chunk_kind(head) == chunk_kind(chunk), do: state, else: handoff(state, :kind)
-  end
-
-  defp chunk_kind({:ndjson, _body, _count}), do: :ndjson
-  defp chunk_kind(_rows_or_frame), do: :mergeable
 
   defp accumulate(state, schema, rows, count, bytes, batch_id, from) do
     %{
@@ -1280,7 +1236,6 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp chunk_count(rows) when is_list(rows), do: length(rows)
-  defp chunk_count(%DataFrame{} = frame), do: DataFrame.n_rows(frame)
 
   # Counted by the sender, because counting lines again here would be a second
   # pass over bytes this node is deliberately not reading.

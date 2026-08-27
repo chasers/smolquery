@@ -1,35 +1,33 @@
 defmodule Smolquery.Segments.Writer do
   @moduledoc """
-  Writes rows into an immutable Parquet segment.
+  Writes an immutable Parquet segment.
 
-  This is the whole write path's terminal step, and the reason DuckDB never
-  writes: rows become an `Explorer.DataFrame` and Polars encodes the Parquet
-  file in Rust. Both tiers use it — buffer nodes write micro-segments, the
-  sealer writes large sealed segments — so the durability property has to hold
-  once, here.
+  Two writers live here, with one contract — a `Segment` describing a file the
+  store has committed:
+
+    * `write({:ndjson, paths}, schema, opts)` is the buffer's flush. DuckDB
+      reads the spooled NDJSON bodies, sorts on the clustering key, writes the
+      Parquet, and the row count and stats are read off the staged file. No
+      row becomes an Elixir term. Every type the catalog declares is written
+      here, `MAP(STRING, STRING)` and `VARIANT` included (PL-57).
+    * `write(rows, schema, opts)` is the fixture writer: tests and benches
+      build a segment from rows through Explorer. It refuses a schema Explorer
+      cannot write. Nothing in a deployment calls it.
 
   Where the bytes land is `Smolquery.Segments.Store`'s business, and durability is
   its contract: this module encodes into the staging path the store provides and
   the store commits it. That split is what lets the hot tier move between local
   disk and an object store without the write path knowing.
 
-  Stats come from the in-memory DataFrame rather than a read-back of the file:
-  the numbers are the same, and the hot manifest needs them at flush time
-  (Milestone 3) without a DuckDB round trip. The sealed tier needs no help
-  here — DuckLake reads the Parquet footer itself when a segment is registered.
-
   ## Sorting on the clustering key
 
-  Rows are sorted by the schema's clustering key before the frame is encoded —
-  stably, in declared order, nulls last — so the row-group stats above are tight
-  enough for a reader to prune on. An empty key sorts nothing, and both
-  row-list and DataFrame inputs take the same path: the frame is built first
-  and Polars sorts it. Sorting the frame rather than the row list is a
-  correctness requirement, not a convenience — Elixir's `Enum.sort` orders
-  `NaiveDateTime`, `Date` and `Decimal` values by Erlang term order, which
-  compares struct fields alphabetically (`:day` before `:month` before
-  `:year`), so January 31 would sort after February 1. Polars compares the
-  column's logical values.
+  Rows are sorted by the schema's clustering key before the file is written —
+  in declared order, nulls last — so the row-group stats are tight enough for a
+  reader to prune on. The flush sorts in DuckDB (`ORDER BY` in the `COPY`); the
+  fixture writer sorts the frame in Polars. Neither sorts Elixir terms, and that
+  is a correctness requirement: Erlang term order on `NaiveDateTime`, `Date` and
+  `Decimal` compares struct fields alphabetically (`:day` before `:month` before
+  `:year`), so January 31 would sort after February 1.
 
   The columns come from `Smolquery.Schema.clustering_columns/1` rather than the
   `:clustering` field, so a key naming a column this schema no longer has sorts
@@ -39,10 +37,11 @@ defmodule Smolquery.Segments.Writer do
   ## Usage
 
       schema = Smolquery.Schema.new!([{"id", :int64}, {"ts", :timestamp}])
-      rows = [%{"id" => 1, "ts" => ~N[2026-07-31 12:00:00]}]
       store = Smolquery.Segments.Store.Local.new(dir: "/data/segments")
 
-      {:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, store: store)
+      {:ok, segment} =
+        Smolquery.Segments.Writer.write({:ndjson, [spooled_path]}, schema,
+          store: store, engine: MyEngine)
 
   """
 
@@ -151,49 +150,6 @@ defmodule Smolquery.Segments.Writer do
          byte_size: put.byte_size,
          stats: stats(frame, schema)
        }}
-    end
-  end
-
-  @doc """
-  Merges a group commit's accumulated chunks — row lists and/or DataFrames,
-  oldest first — into the single `[row()] | DataFrame.t()` that `write/3`
-  takes.
-
-  All-list chunks stay a row list, exactly the shape the accumulator used to
-  concatenate itself. Once any chunk is a frame, every list chunk becomes one
-  (schema-ordered columns, so the frames agree) and the frames concatenate —
-  rows never materialize as terms on the commit path that was fed frames.
-  """
-  @spec merge_chunks([[row()] | DataFrame.t()], Schema.t()) ::
-          {:ok, [row()] | DataFrame.t()} | {:error, term()}
-  def merge_chunks([chunk], _schema), do: {:ok, chunk}
-
-  def merge_chunks(chunks, schema) when is_list(chunks) do
-    if Enum.all?(chunks, &is_list/1) do
-      {:ok, Enum.concat(chunks)}
-    else
-      with {:ok, frames} <- chunk_frames(chunks, schema) do
-        {:ok, DataFrame.concat_rows(frames)}
-      end
-    end
-  rescue
-    error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
-  end
-
-  defp chunk_frames(chunks, schema) do
-    Enum.reduce_while(chunks, {:ok, []}, fn
-      %DataFrame{} = frame, {:ok, frames} ->
-        {:cont, {:ok, [frame | frames]}}
-
-      rows, {:ok, frames} ->
-        case frame_from_rows(rows, schema) do
-          {:ok, frame} -> {:cont, {:ok, [frame | frames]}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-    end)
-    |> case do
-      {:ok, frames} -> {:ok, Enum.reverse(frames)}
-      {:error, _reason} = error -> error
     end
   end
 

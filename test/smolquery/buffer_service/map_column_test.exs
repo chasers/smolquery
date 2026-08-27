@@ -2,8 +2,8 @@ defmodule Smolquery.BufferService.MapColumnTest do
   @moduledoc """
   A `MAP(STRING, STRING)` schema through a real buffer, both batch shapes.
 
-  Explorer cannot write a Parquet `MAP`, so a rows or frame batch against a map
-  schema reaches DuckDB as NDJSON — the committer's re-encode — and lands as
+  Explorer cannot write a Parquet `MAP`, so a rows batch against a map schema
+  reaches DuckDB as NDJSON — the committer's re-encode — and lands as
   the same MAP segment an unparsed body does.
   """
 
@@ -76,17 +76,6 @@ defmodule Smolquery.BufferService.MapColumnTest do
       assert ack.row_count == 3
 
       assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
-    end
-
-    test "a frame batch without the map column lands as a MAP segment too", context do
-      {name, runtime} = start_buffer(context)
-      frame = Explorer.DataFrame.new(id: Explorer.Series.from_list([1, 2, 3], dtype: {:s, 64}))
-      batch = %{schema: schema(), frame: frame, byte_size: 24}
-
-      assert {:ok, ack} = Client.write_batch(name, @table, batch)
-      assert ack.row_count == 3
-
-      assert hosts(runtime) == [[1, nil], [2, nil], [3, nil]]
     end
 
     test "an unparsed body lands as a MAP segment", context do

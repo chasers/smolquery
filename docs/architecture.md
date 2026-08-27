@@ -100,8 +100,8 @@ With `frame/3`, five million rows take 307 ms and no measurable heap. Through
 ## Segments and the catalog
 
 The storage of record is write-once Parquet segments plus a DuckLake catalog.
-`Smolquery.Segments.Writer` encodes rows through Explorer (Polars). It names
-each segment with a ULID (Universally Unique Lexicographically Sortable
+`Smolquery.Segments.Writer` writes each segment with one DuckDB `COPY` over
+the spooled NDJSON. It names each segment with a ULID (Universally Unique Lexicographically Sortable
 Identifier). A `Smolquery.Segments.Store` commits the bytes. The store owns
 what "durable" means. `Smolquery.Catalog` registers those files without a
 copy:
@@ -522,7 +522,7 @@ TO staged
 ```
 
 - **No segment's bytes become an Elixir term.** That matters most for the
-  largest objects the system writes. The segment writer hands Polars a path
+  largest objects the system writes. The segment writer hands DuckDB a path
   for the same reason.
 - **The inputs come over HTTP**, from `HotServer`. The bytes have to travel
   that way regardless: `httpfs` speaks HTTP and nothing else. The manifest
@@ -676,12 +676,12 @@ row group. The default of 1,048,576 rows therefore trades pruning granularity
 for an ~8x smaller request count per segment.
 
 The write path pays for the sort. Flush throughput at saturation is **~7%**
-slower: Polars sorts the built frame in Rust, and on the ack path the
+slower: DuckDB sorts the flush in its `COPY`, and on the ack path the
 [ack budget](benchmarks.md) governs. Seal merge peaks **~+180 MiB** higher in
 transient operating-system RSS (resident set size) under `memory_limit`
 ([`bench/results/clustering.md`](../bench/results/clustering.md)).
 
-The sort compares column values logically, in Polars, never as Elixir terms.
+The sort compares column values logically, in DuckDB, never as Elixir terms.
 Erlang term order on `NaiveDateTime`/`Date`/`Decimal` structs is not
 chronological: struct fields compare alphabetically, `:day` before `:month`. A
 sort of row maps with `Enum.sort_by` would therefore order January 31 after

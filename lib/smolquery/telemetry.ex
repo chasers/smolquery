@@ -38,7 +38,6 @@ defmodule Smolquery.Telemetry do
 
       [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
-      [:smolquery, :buffer, :wire]        %{duration_us}, meta %{transport: :local | :remote}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
                                             replicate_us},
@@ -182,7 +181,6 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :api, :stop],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
-    [:smolquery, :buffer, :wire],
     [:smolquery, :buffer, :flush_trigger],
     [:smolquery, :buffer, :admission],
     [:smolquery, :buffer, :dedup],
@@ -217,8 +215,6 @@ defmodule Smolquery.Telemetry do
     "smolquery_ingest_phase_microseconds_total" =>
       "Time the ingest edge spent parsing bytes and awaiting the buffer; divide by inserts.",
     "smolquery_ingest_inserts_total" => "Insert calls the ingest edge answered.",
-    "smolquery_buffer_wire_microseconds_total" =>
-      "Time spent serializing batches for the wire, by transport; divide by inserts.",
     "smolquery_api_request_microseconds_total" =>
       "Time spent answering HTTP requests; divide by requests for the mean.",
     "smolquery_buffer_admission_refused_rows_total" =>
@@ -441,14 +437,6 @@ defmodule Smolquery.Telemetry do
         Map.get(measurements, :"#{phase}_us", 0)
       )
     end
-  end
-
-  def handle_event([:smolquery, :buffer, :wire], measurements, meta, nil) do
-    bump(
-      {"smolquery_buffer_wire_microseconds_total",
-       [transport: Map.get(meta, :transport, :local)]},
-      Map.get(measurements, :duration_us, 0)
-    )
   end
 
   def handle_event([:smolquery, :buffer, :commit], measurements, meta, nil) do

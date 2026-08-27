@@ -49,7 +49,6 @@ defmodule Smolquery.BufferService.Client do
   alias Smolquery.BufferService.TableBuffer
   alias Smolquery.BufferService.Transport
   alias Smolquery.Segments.Store
-  alias Smolquery.Telemetry
 
   @type batch :: Endpoint.batch()
 
@@ -108,16 +107,6 @@ defmodule Smolquery.BufferService.Client do
     owner = Routing.owner(routing, table_ref)
     transport = Routing.transport(routing, owner)
 
-    # Timed apart from the call because on a partitioned table most batches are
-    # remote, and serializing a multi-megabyte frame to Arrow IPC before every
-    # one of them is a per-request cost nothing had ever priced (T-182).
-    batch =
-      Telemetry.span(
-        [:smolquery, :buffer, :wire],
-        %{transport: if(transport == Transport.Local, do: :local, else: :remote)},
-        fn -> wire_batch(transport, batch) end
-      )
-
     Transport.invoke(
       transport,
       owner,
@@ -127,21 +116,6 @@ defmodule Smolquery.BufferService.Client do
       timeout(routing, :write)
     )
   end
-
-  # A DataFrame is a NIF resource; its reference means nothing after another
-  # node's term decode, so a columnar batch crosses the wire as Arrow IPC
-  # bytes and stays a live frame only for the in-BEAM transport.
-  defp wire_batch(Transport.Local, batch), do: batch
-
-  defp wire_batch(_remote, %{frame: frame} = batch) do
-    batch
-    |> Map.delete(:frame)
-    |> Map.put(:frame_ipc, Explorer.DataFrame.dump_ipc!(frame))
-  end
-
-  # NDJSON is already bytes, so a remote batch needs no conversion — which is the
-  # point of the passthrough path: no frame exists on this node to serialize.
-  defp wire_batch(_remote, batch), do: batch
 
   @doc """
   The table's hot manifest — every micro-segment its owner holds for it.
