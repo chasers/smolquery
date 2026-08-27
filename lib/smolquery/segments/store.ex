@@ -27,7 +27,7 @@ defmodule Smolquery.Segments.Store do
 
   `put/3` takes a function rather than bytes or a path the caller chose. The
   store creates the staging location, hands it over to be written, and commits
-  it. Two reasons, both structural: Polars encodes Parquet to a file from Rust,
+  it. Two reasons, both structural: DuckDB's `COPY` writes Parquet to a file,
   so no segment ever becomes an Elixir binary on the way to storage — which
   matters most for the sealer's 128–512 MB segments — and a caller cannot stage a
   file on the wrong filesystem, which would silently turn `Store.Local`'s atomic

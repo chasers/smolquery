@@ -8,7 +8,7 @@ defmodule Smolquery.StorageService.Merge do
 
   So no segment's bytes ever become an Elixir term. That matters more here than
   anywhere else in the system — a sealed segment is the largest object smolquery
-  writes — and it is the same reason `Smolquery.Segments.Writer` hands Polars a
+  writes — and it is the same reason `Smolquery.Segments.Writer` hands DuckDB a
   path rather than building a binary.
 
   `union_by_name` is what makes additive schema evolution work at the file level:

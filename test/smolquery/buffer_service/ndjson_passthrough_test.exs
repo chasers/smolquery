@@ -81,9 +81,7 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
     assert Enum.sum(Enum.map(entries, & &1.row_count)) == 30
   end
 
-  # One accumulator takes both shapes, but a commit encodes one way — mixing
-  # them used to crash the encode and 500 every caller in the commit.
-  test "a rows batch and an unparsed body land in separate commits", %{
+  test "a rows batch and an unparsed body share a commit", %{
     name: name,
     runtime: runtime
   } do
@@ -101,9 +99,8 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
 
     assert Enum.all?(acks, &match?({:ok, _ack}, &1))
 
-    entries = HotManifest.entries(runtime.manifest, @table)
-
-    assert Enum.sum(Enum.map(entries, & &1.row_count)) == 5
+    assert [entry] = HotManifest.entries(runtime.manifest, @table)
+    assert entry.row_count == 5
   end
 
   test "the row count comes from the Parquet footer, not the sender", %{
