@@ -45,6 +45,16 @@ defmodule Smolquery.Identifier do
   end
 
   @doc """
+  A double-quoted label for a name this module did not mint — a result
+  column's name as `DESCRIBE` reports it, such as `count_star()` or
+  `attrs['host']`. Embedded quotes are doubled. Nothing is validated, because
+  DuckDB already produced the name and a query must be able to refer to it.
+  """
+  @spec quote_label(String.t()) :: String.t()
+  def quote_label(name) when is_binary(name),
+    do: ~s(") <> String.replace(name, ~s("), ~s("")) <> ~s(")
+
+  @doc """
   A single-quoted SQL string literal, for the table-function arguments that
   cannot take a bound parameter.
   """

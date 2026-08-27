@@ -157,4 +157,35 @@ defmodule Smolquery.Engine.ConnectionTest do
                )
     end
   end
+
+  describe "describe/3" do
+    setup do
+      {:ok, conn} = Connection.start_link(database: @database)
+      %{conn: conn}
+    end
+
+    test "names the columns a statement would produce, with their types", %{conn: conn} do
+      assert Connection.describe(conn, "SELECT 1::BIGINT AS n, 'x' AS s, count(*) FROM range(3)") ==
+               {:ok, [{"n", "BIGINT"}, {"s", "VARCHAR"}, {"count_star()", "BIGINT"}]}
+    end
+
+    test "answers the engine's error for a statement that does not bind", %{conn: conn} do
+      assert {:error, %Adbc.Error{}} = Connection.describe(conn, "SELECT nope")
+    end
+  end
+
+  describe "frame/4 on an export Arrow refuses" do
+    setup do
+      {:ok, conn} = Connection.start_link(database: @database)
+      %{conn: conn}
+    end
+
+    test "answers an exception, not the bare text Explorer returns", %{conn: conn} do
+      assert {:error, %Adbc.Error{message: message}} =
+               Connection.frame(conn, "SELECT '1'::VARIANT")
+
+      assert message =~ "Arrow"
+      assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
+    end
+  end
 end

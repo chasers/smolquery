@@ -70,23 +70,26 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
   ## A map schema takes the DuckDB writer, whatever shape its rows arrived in
 
-  Explorer cannot write a `MAP(STRING, STRING)` column (see `Smolquery.Schema`),
-  so under `flush_writer: :duckdb` a rows commit against such a schema is
-  re-encoded as the NDJSON the passthrough path would have carried and written
-  by DuckDB. The hot segment then always carries the sealed table's type. Under
-  `flush_writer: :polars` the write refuses the schema with
-  `{:error, {:unsupported_type, _}}`, which is the caller's answer.
+  Explorer cannot write a `MAP(STRING, STRING)` or `VARIANT` column (see
+  `Smolquery.Schema`), so under `flush_writer: :duckdb` a rows or frame commit
+  against such a schema is re-encoded as the NDJSON the passthrough path would
+  have carried and written by DuckDB. The hot segment then always carries the
+  sealed table's type. Under `flush_writer: :polars` the commit is refused with
+  `{:error, {:flush_writer_unsupported, :polars, type}}` — a deployment's
+  configuration, which the API reports as such and not as the caller's mistake.
   """
 
   use GenServer
 
   require Logger
 
+  alias Explorer.DataFrame
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -291,10 +294,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       ndjson_commit?(commit) ->
         encode_ndjson(runtime, prefix, commit)
 
-      duckdb_only?(runtime, commit) ->
-        encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
-
-      true ->
+      Schema.explorer_writable?(commit.schema) ->
         with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
           Writer.write(merged, commit.schema,
             store: runtime.store,
@@ -302,20 +302,24 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
             compression: runtime.compression
           )
         end
+
+      runtime.flush_writer == :duckdb ->
+        encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
+
+      true ->
+        {:ok, %Field{type: type}} = Schema.explorer_unwritable(commit.schema)
+        {:error, {:flush_writer_unsupported, runtime.flush_writer, type}}
     end
   end
 
   defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
   defp ndjson_commit?(_commit), do: false
 
-  defp duckdb_only?(%{flush_writer: :duckdb}, %{chunks: chunks, schema: schema}) do
-    Enum.all?(chunks, &is_list/1) and match?({:error, _no_dtype}, Schema.explorer_dtypes(schema))
-  end
-
-  defp duckdb_only?(_runtime, _commit), do: false
-
   defp as_ndjson(rows) when is_list(rows),
     do: {:ndjson, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n", length(rows)}
+
+  defp as_ndjson(%DataFrame{} = frame),
+    do: {:ndjson, DataFrame.dump_ndjson!(frame), DataFrame.n_rows(frame)}
 
   # The bytes reach disk here rather than at the API, because the API no longer
   # knows which node owns the table — #108's partitions send most batches to a

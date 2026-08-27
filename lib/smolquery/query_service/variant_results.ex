@@ -18,13 +18,22 @@ defmodule Smolquery.QueryService.VariantResults do
   more. So the describe runs only when a referenced table declares a variant
   column (`Plan.schemas`); every other plan passes through untouched. A
   variant conjured without a table (`SELECT '1'::VARIANT`) is not rewritten
-  and fails the export the way DuckDB reports it.
+  and fails the export the way DuckDB reports it. The described columns ride
+  out in `outputs`, so `Smolquery.QueryService.Scatter` does not bind the same
+  statement a second time.
 
   ## Not a nested variant
 
   `DESCRIBE` names a variant inside a struct or list too (`STRUCT(v VARIANT)`,
-  `VARIANT[]`). Those cannot be cast column-wide without changing the value's
-  shape, so they are refused with a message that says how to select them.
+  `VARIANT[]`). This module cannot cast those column-wide without changing the
+  value's shape, so it refuses the query with a message that says how to
+  select them.
+
+  ## The wrapper is a subquery
+
+  A rewritten plan reads `SELECT ... FROM (<canonical>)`. The decomposer
+  refuses a subquery in `FROM`, so the runner does not offer a rewritten plan
+  to the scatter path at all.
   """
 
   alias Smolquery.Engine.Connection
@@ -33,22 +42,44 @@ defmodule Smolquery.QueryService.VariantResults do
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
 
-  @doc """
-  The plan, with `VARIANT` result columns cast to `JSON`, and the names of
-  those columns — `[]` when nothing needed casting.
+  @typedoc "A result column as `DESCRIBE` reports it: its name and DuckDB type."
+  @type column :: {String.t(), String.t()}
+
+  @typedoc """
+  The plan to run, the names of the result columns that now carry JSON text,
+  and the described result columns — `nil` when no describe was needed.
   """
-  @spec prepare(GenServer.server(), Plan.t()) ::
-          {:ok, Plan.t(), [String.t()]} | {:error, term()}
+  @type t :: %__MODULE__{
+          plan: Plan.t(),
+          json_columns: [String.t()],
+          outputs: [column()] | nil
+        }
+
+  @enforce_keys [:plan]
+  defstruct [:plan, json_columns: [], outputs: nil]
+
+  @doc """
+  The plan, with `VARIANT` result columns cast to `JSON`, beside the names of
+  those columns and the described outputs.
+  """
+  @spec prepare(GenServer.server(), Plan.t()) :: {:ok, t()} | {:error, term()}
   def prepare(connection, %Plan{} = plan) do
-    if variant_reachable?(plan) do
-      with {:ok, columns} <- Connection.describe(connection, plan.canonical_sql, :infinity),
-           {:ok, projection, json_columns} <- projection(columns) do
-        {:ok, rewrite(plan, projection, json_columns), json_columns}
-      end
-    else
-      {:ok, plan, []}
+    if variant_reachable?(plan),
+      do: describe_and_cast(connection, plan),
+      else: {:ok, %__MODULE__{plan: plan}}
+  end
+
+  defp describe_and_cast(connection, plan) do
+    with {:ok, columns} <- Connection.describe(connection, plan.canonical_sql, :infinity),
+         :ok <- refuse_nested(columns) do
+      {:ok, cast(plan, columns, variant_columns(columns))}
     end
   end
+
+  defp cast(plan, columns, []), do: %__MODULE__{plan: plan, outputs: columns}
+
+  defp cast(plan, columns, json_columns),
+    do: %__MODULE__{plan: rewrite(plan, columns), json_columns: json_columns, outputs: columns}
 
   @doc """
   Whether any table the plan references declares a variant column.
@@ -60,35 +91,60 @@ defmodule Smolquery.QueryService.VariantResults do
     end)
   end
 
-  defp projection(columns) do
-    Enum.reduce_while(columns, {:ok, [], []}, fn {name, type}, {:ok, exprs, json} ->
-      quoted = Identifier.quote_name!(name)
+  @doc """
+  What an export failure means, when the result's types can say.
 
-      cond do
-        type == "VARIANT" ->
-          {:cont, {:ok, ["#{quoted}::JSON AS #{quoted}" | exprs], [name | json]}}
-
-        String.contains?(type, "VARIANT") ->
-          {:halt, {:error, {:invalid_query, nested_message(name, type)}}}
-
-        true ->
-          {:cont, {:ok, [quoted | exprs], json}}
-      end
-    end)
-    |> case do
-      {:ok, _exprs, []} -> {:ok, nil, []}
-      {:ok, exprs, json} -> {:ok, Enum.join(Enum.reverse(exprs), ", "), Enum.reverse(json)}
-      {:error, reason} -> {:error, reason}
+  A `VARIANT` that reaches the result without a table behind it
+  (`SELECT '1'::VARIANT`) is not rewritten, and Arrow refuses it with an
+  internal error. When a frame read fails that way, one describe names the
+  column, and the caller gets the same `{:invalid_query, _}` a nested variant
+  gets, instead of the engine's opaque text. Any other error passes through.
+  """
+  @spec explain_export_failure(GenServer.server(), Plan.t(), Exception.t()) :: term()
+  def explain_export_failure(connection, %Plan{} = plan, error) do
+    with true <- arrow_failure?(error),
+         {:ok, columns} <- Connection.describe(connection, plan.canonical_sql, :infinity),
+         [name | _rest] <- variant_columns(columns) do
+      {:invalid_query,
+       "column #{inspect(name)} is a VARIANT with no table column behind it, which cannot " <>
+         "be returned; cast it with ::JSON"}
+    else
+      _not_a_variant_export -> error
     end
   end
 
-  defp rewrite(plan, nil, []), do: plan
+  defp arrow_failure?(error), do: String.contains?(Exception.message(error), "Arrow")
 
-  defp rewrite(%Plan{canonical_sql: canonical} = plan, projection, _json_columns) do
-    sql = "SELECT #{projection} FROM (#{canonical})"
+  defp refuse_nested(columns) do
+    case Enum.find(columns, fn {_name, type} -> nested_variant?(type) end) do
+      nil -> :ok
+      {name, type} -> {:error, {:invalid_query, nested_message(name, type)}}
+    end
+  end
+
+  @quoted_literal ~r/'(?:[^']|'')*'/
+  @variant_word ~r/\bVARIANT\b/
+
+  defp nested_variant?("VARIANT"), do: false
+
+  defp nested_variant?(type),
+    do: type |> String.replace(@quoted_literal, "''") |> then(&Regex.match?(@variant_word, &1))
+
+  defp variant_columns(columns), do: for({name, "VARIANT"} <- columns, do: name)
+
+  defp rewrite(%Plan{canonical_sql: canonical} = plan, columns) do
+    sql = "SELECT #{Enum.map_join(columns, ", ", &column_expression/1)} FROM (#{canonical})"
 
     %{plan | sql: sql, canonical_sql: sql}
   end
+
+  defp column_expression({name, "VARIANT"}) do
+    quoted = Identifier.quote_label(name)
+
+    "#{quoted}::JSON AS #{quoted}"
+  end
+
+  defp column_expression({name, _type}), do: Identifier.quote_label(name)
 
   defp nested_message(name, type) do
     "column #{inspect(name)} has type #{type}: a VARIANT nested in a struct or list " <>

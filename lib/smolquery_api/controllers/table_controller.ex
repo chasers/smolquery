@@ -218,6 +218,9 @@ defmodule SmolqueryApi.TableController do
           Schema.field(schema, column) == :error ->
             {:halt, {:error, {:unknown_clustering_column, column}}}
 
+          not clustering_field?(schema, column) ->
+            {:halt, {:error, {:clustering_column_not_sortable, column}}}
+
           true ->
             {:cont, {:ok, MapSet.put(seen, column)}}
         end
@@ -233,6 +236,12 @@ defmodule SmolqueryApi.TableController do
 
   defp clustering_from_json(%{"clustering" => clustering}, _schema),
     do: {:error, {:invalid_clustering, clustering}}
+
+  defp clustering_field?(schema, column) do
+    {:ok, field} = Schema.field(schema, column)
+
+    Schema.clustering_type?(field.type)
+  end
 
   defp id(%{"id" => id}) when is_binary(id) do
     if Smolquery.Partitions.reserved?(id) do

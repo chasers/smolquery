@@ -136,6 +136,11 @@ defmodule Smolquery.Engine.Connection do
   works and is quiet, but measured 38% slower on five million rows (388 ms against
   282 ms) and copies the whole result through a 226 MiB binary on the way, which is
   a poor trade for silencing a log line.
+
+  Explorer's spec promises an exception on error, but for an export Arrow cannot
+  make — a `VARIANT` column, which Arrow has no type for — its NIF answers a bare
+  string. That string is wrapped in an `Adbc.Error` here, so every caller sees one
+  error shape and `fatal?/1` can read it.
   """
   @spec frame(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
@@ -180,9 +185,9 @@ defmodule Smolquery.Engine.Connection do
   Fatal and internal errors are unrecoverable in place: DuckDB refuses every
   subsequent query on that database until it is restarted.
   """
-  @spec fatal?(Exception.t() | String.t()) :: boolean()
+  @spec fatal?(Exception.t()) :: boolean()
   def fatal?(error) do
-    message = if is_binary(error), do: error, else: Exception.message(error)
+    message = Exception.message(error)
 
     Enum.any?(@fatal_markers, &String.contains?(message, &1))
   end
@@ -221,6 +226,7 @@ defmodule Smolquery.Engine.Connection do
   def handle_call({:frame, sql, params}, _from, state) do
     state.adbc
     |> Explorer.DataFrame.from_query(sql, params)
+    |> exception_shaped()
     |> reply_or_stop(state)
   end
 
@@ -235,6 +241,12 @@ defmodule Smolquery.Engine.Connection do
   def handle_call(:adbc_connection, _from, state) do
     {:reply, state.adbc, state}
   end
+
+  @dialyzer {:nowarn_function, exception_shaped: 1}
+  defp exception_shaped({:error, message}) when is_binary(message),
+    do: {:error, %Adbc.Error{message: message}}
+
+  defp exception_shaped(other), do: other
 
   defp reply_or_stop({:ok, value}, state), do: {:reply, {:ok, value}, state}
 

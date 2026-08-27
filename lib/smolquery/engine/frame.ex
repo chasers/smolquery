@@ -13,9 +13,19 @@ defmodule Smolquery.Engine.Frame do
   A `NULL` map is the one thing that does not survive the crossing: Polars
   reads it as an empty list, so it comes out as `%{}`.
 
+  The fold is keyed on that dtype, because the frame carries nothing else:
+  Arrow's map type reaches Polars as a list of structs and the map-ness is
+  gone. So a computed `LIST(STRUCT(key VARCHAR, value VARCHAR))` folds too,
+  and a computed map with values that are not strings (`MAP {'a': 1}`) does
+  not, arriving as its entries. Only `MAP(STRING, STRING)` is a column type,
+  so a stored map always folds; the two edge shapes are query-time constructs
+  and are documented as such.
+
   A `VARIANT` column crosses as JSON text instead
   (`Smolquery.QueryService.VariantResults`), and the job names which columns
-  those are; `to_rows/2` decodes them back into JSON values.
+  those are; `to_rows/2` decodes them back into JSON values. Text that is not
+  JSON stays text: DuckDB renders a non-finite double as `Infinity` or `NaN`,
+  which no JSON decoder takes, and a string is the honest value for it.
   """
 
   alias Explorer.DataFrame
@@ -28,14 +38,16 @@ defmodule Smolquery.Engine.Frame do
   """
   @spec to_rows(DataFrame.t(), keyword()) :: [%{optional(String.t()) => term()}]
   def to_rows(%DataFrame{} = frame, opts \\ []) do
-    rows = DataFrame.to_rows(frame)
     maps = map_columns(frame)
     json = Keyword.get(opts, :json_columns, [])
 
-    case {maps, json} do
-      {[], []} -> rows
-      _decode -> Enum.map(rows, &(&1 |> fold_maps(maps) |> decode_json(json)))
-    end
+    frame
+    |> DataFrame.to_rows()
+    |> Enum.map(fn row ->
+      row
+      |> update_columns(maps, &entries_to_map/1)
+      |> update_columns(json, &decode_text/1)
+    end)
   end
 
   @doc """
@@ -49,20 +61,17 @@ defmodule Smolquery.Engine.Frame do
     |> Enum.map(fn {name, _dtype} -> name end)
   end
 
-  defp fold_maps(row, columns) do
-    Enum.reduce(columns, row, fn column, row ->
-      Map.update!(row, column, &entries_to_map/1)
-    end)
-  end
-
-  defp decode_json(row, columns) do
-    Enum.reduce(columns, row, fn column, row ->
-      Map.update!(row, column, &decode_text/1)
-    end)
-  end
+  defp update_columns(row, columns, fun),
+    do: Enum.reduce(columns, row, &Map.replace_lazy(&2, &1, fun))
 
   defp decode_text(nil), do: nil
-  defp decode_text(text), do: JSON.decode!(text)
+
+  defp decode_text(text) do
+    case JSON.decode(text) do
+      {:ok, value} -> value
+      {:error, _not_json} -> text
+    end
+  end
 
   defp entries_to_map(nil), do: nil
   defp entries_to_map(entries), do: Map.new(entries, &{&1["key"], &1["value"]})

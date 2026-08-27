@@ -12,6 +12,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   call; the gen_rpc path to a peer is `worker_transport_peer_test`.
   Genuine cross-host scatter is the kind cluster's to prove, like hot-tier
   fan-out before it (T-77).
+
+  The table is seeded before either query service starts: each one warms an
+  engine pool that attaches the same sqlite lake, and under CI load those
+  attaches held the file lock long enough to exhaust the catalog's commit
+  retries (`{:error, :commit_conflict}` out of `seed/3`).
   """
 
   use ExUnit.Case, async: false
@@ -53,6 +58,8 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     on_exit(fn -> BufferService.Runtime.delete(buffer) end)
 
+    seed(catalog, buffer, context.tmp_dir)
+
     shared = [
       catalog: catalog,
       buffer_base_url: HotServer.base_url(buffer),
@@ -85,7 +92,6 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       QueryService.Runtime.delete(distributed)
     end)
 
-    seed(catalog, buffer, context.tmp_dir)
     attach_telemetry()
 
     %{control: control, distributed: distributed}

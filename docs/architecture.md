@@ -818,7 +818,12 @@ sequenceDiagram
     J-->>C: job + first page of rows
 ```
 
-The planner never rewrites SQL (Structured Query Language). It finds each
+The planner never rewrites SQL (Structured Query Language). One step after
+planning does wrap the statement, and only on the path that returns rows:
+when a referenced table declares a `VARIANT` column, the runner describes the
+result and casts each `VARIANT` result column to JSON in an outer `SELECT`
+(`Smolquery.QueryService.VariantResults`), because Arrow cannot carry a
+variant. An `EXPLAIN` sees the statement as written. The planner finds each
 table the query references with DuckDB's own parser. The parser doubles as the
 read-only gate: only a single SELECT serializes. For each table, the planner
 creates `<dataset>.<table>` as a view in the job engine's own catalog. The

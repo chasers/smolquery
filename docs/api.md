@@ -71,8 +71,11 @@ Limitations:
 - A value that is not a JSON object is rejected.
 - A `NULL` map reads back as `{}`. The result frame cannot tell the two apart.
 - No stats pruning. A filter on a key reads every row of the table.
-- Needs the DuckDB flush writer (`flush_writer: duckdb`, the default). Under the Polars writer an insert into the table fails.
-- A CSV load cannot carry a map. NDJSON and Parquet loads can.
+- Needs the DuckDB flush writer (`flush_writer: duckdb`, the default). Under the Polars writer an insert into the table answers `503 UNAVAILABLE`.
+- Only an NDJSON load can carry a map. A Parquet load into a table with a map column answers `400`. A CSV load works when the CSV has no map column.
+- A map cannot be a clustering column: nothing prunes on it.
+- In a result, a computed `LIST(STRUCT(key, value))` of strings arrives folded as an object, and a computed map with values that are not strings arrives as its entries. A stored map always arrives as an object.
+- A value that is not a string is stored as its JSON text as this node encodes it. The passthrough path keeps the client's bytes. The two can differ on a float's exponent form and on the key order of a nested object.
 
 ### `VARIANT`
 
@@ -89,9 +92,11 @@ Limitations:
 - No stats pruning. A filter on a key reads every row of the table.
 - **Casts are strict.** `attrs['n']::BIGINT` errors if any scanned row holds a string in `n`. Use `TRY_CAST(attrs['n'] AS BIGINT)` for a key with mixed types.
 - A `VARIANT` result column crosses the engine boundary as JSON text and arrives decoded: an object, an array, or a scalar. A `NULL` arrives as `null`.
-- A `VARIANT` nested in a struct or list in a result (`SELECT {'v': attrs}`) is refused with a `400`. Select the variant on its own, or cast it with `::JSON`.
+- The runner refuses a `VARIANT` nested in a struct or list in a result (`SELECT {'v': attrs}`) with a `400`, before the query runs. Select the variant on its own, or cast it with `::JSON`. An `EXPLAIN` of the same query still answers.
+- A query that returns a `VARIANT` column does not use the distributed (scatter) path. The runner answers it from one engine.
 - A `VARIANT` made without a table (`SELECT '1'::VARIANT`) is not cast at the boundary, and the query fails.
-- Needs the DuckDB flush writer, the same as a map. A CSV load cannot carry a variant. NDJSON and Parquet loads can.
+- Needs the DuckDB flush writer, the same as a map, with the same `503` under Polars. Only an NDJSON load can carry a variant; a Parquet load answers `400`; a CSV load works when the CSV has no variant column.
+- A variant cannot be a clustering column.
 
 Choose `MAP(STRING, STRING)` for ClickHouse parity and string-only attributes. Choose `VARIANT` when values must keep their types or nest.
 
@@ -136,6 +141,8 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
   {"name": "execute",        "startUs": 59200, "durationUs": 812000,"meta": {}}
 ]}}
 ```
+
+A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 
 Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `trace` option only decides whether this job collects them. A job that failed or was cancelled still settles with the spans it got: the partial trace is exactly what explains the failure. History does not persist the trace, the same as `statistics` and `explain`. A non-boolean `trace` value is a 400.
 

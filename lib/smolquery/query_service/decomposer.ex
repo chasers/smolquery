@@ -391,9 +391,7 @@ defmodule Smolquery.QueryService.Decomposer do
   end
 
   defp exact(connection, partial_sql) do
-    with {:ok, result} <- Connection.query(connection, "DESCRIBE " <> partial_sql, [], :infinity) do
-      columns = Enum.map(result.rows, fn [name, type | _rest] -> {name, type} end)
-
+    with {:ok, columns} <- Connection.describe(connection, partial_sql, :infinity) do
       cond do
         Enum.any?(columns, fn {name, type} ->
           type == "HUGEINT" and not String.starts_with?(name, "#{@prefix}a")

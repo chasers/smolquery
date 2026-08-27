@@ -59,7 +59,8 @@ defmodule Smolquery.IngestService.ColumnarValidator do
   """
   @spec validate(Schema.t(), binary()) :: {:ok, DataFrame.t()} | :fallback
   def validate(%Schema{} = schema, ndjson) when is_binary(ndjson) do
-    with {:ok, frame} <- load(ndjson),
+    with true <- Schema.explorer_writable?(schema),
+         {:ok, frame} <- load(ndjson),
          :ok <- known_columns(frame, schema),
          {:ok, columns} <- cast_columns(frame, schema) do
       {:ok, DataFrame.new(columns)}

@@ -59,6 +59,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.QueryService.Decomposer
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.VariantResults
   alias Smolquery.QueryService.Views
   alias Smolquery.QueryService.WorkerTransport
 
@@ -87,15 +88,31 @@ defmodule Smolquery.QueryService.Scatter do
   distributed answer carries its shard count and merged partial bytes, so
   the job can say how it was served.
   """
-  @spec execute(Runtime.t(), GenServer.server(), Plan.t(), String.t(), timeout()) ::
+  @spec execute(
+          Runtime.t(),
+          GenServer.server(),
+          Plan.t(),
+          String.t(),
+          timeout(),
+          [VariantResults.column()] | nil
+        ) ::
           {:ok, Explorer.DataFrame.t(),
            %{shards: pos_integer(), partial_bytes: non_neg_integer()}}
           | :fallback
-  def execute(%Runtime{distributed: %{enabled: false}}, _connection, _plan, _job_id, _timeout_ms),
-    do: :fallback
+  def execute(runtime, connection, plan, job_id, timeout_ms, outputs \\ nil)
 
-  def execute(%Runtime{} = runtime, connection, plan, job_id, timeout_ms) do
-    attempt(runtime, connection, plan, job_id, timeout_ms)
+  def execute(
+        %Runtime{distributed: %{enabled: false}},
+        _connection,
+        _plan,
+        _job_id,
+        _timeout_ms,
+        _outputs
+      ),
+      do: :fallback
+
+  def execute(%Runtime{} = runtime, connection, plan, job_id, timeout_ms, outputs) do
+    attempt(runtime, connection, plan, job_id, timeout_ms, outputs)
   catch
     kind, reason ->
       Logger.warning("distributed query fell back: #{inspect({kind, reason})}")
@@ -103,10 +120,10 @@ defmodule Smolquery.QueryService.Scatter do
       :fallback
   end
 
-  defp attempt(runtime, connection, plan, job_id, timeout_ms) do
+  defp attempt(runtime, connection, plan, job_id, timeout_ms, outputs) do
     with {:ok, ref} <- single_table(plan),
-         {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-         {:ok, outputs} <- Connection.describe(connection, plan.canonical_sql, :infinity),
+         {:ok, schema} <- planned_schema(plan, ref),
+         {:ok, outputs} <- describe(connection, plan.canonical_sql, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
@@ -123,6 +140,18 @@ defmodule Smolquery.QueryService.Scatter do
         :fallback
     end
   end
+
+  defp planned_schema(%Plan{schemas: schemas}, ref) do
+    case Map.fetch(schemas, ref) do
+      {:ok, schema} -> {:ok, schema}
+      :error -> {:refused, {:no_planned_schema, ref}}
+    end
+  end
+
+  defp describe(_connection, _canonical_sql, outputs) when is_list(outputs), do: {:ok, outputs}
+
+  defp describe(connection, canonical_sql, nil),
+    do: Connection.describe(connection, canonical_sql, :infinity)
 
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
   defp single_table(%Plan{tables: [ref]}), do: {:ok, ref}

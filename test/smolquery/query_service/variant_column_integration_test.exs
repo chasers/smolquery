@@ -7,7 +7,9 @@ defmodule Smolquery.QueryService.VariantColumnIntegrationTest do
 
   The seal valve is two files, so no seal is committing while a read runs:
   a query job racing a seal for the DuckLake sqlite lock is a known transient
-  (`database is locked`), not what this test is about.
+  (`database is locked`), not what this test is about. The two unparsed bodies
+  seal; the rows batch lands last and stays hot, so the union read covers a
+  rows-written variant on the hot side.
   """
 
   use ExUnit.Case, async: false
@@ -84,15 +86,15 @@ defmodule Smolquery.QueryService.VariantColumnIntegrationTest do
            ]
 
     {:ok, _ack} =
-      Client.write_batch(node.buffer, @table, %{
-        schema: schema(),
-        rows: [%{"id" => 3, "attrs" => [1, "x"]}, %{"id" => 4}]
-      })
+      Client.write_batch(node.buffer, @table, ndjson_batch([%{"id" => 5, "attrs" => 5.5}]))
 
     assert Eventually.until(fn -> FullNode.sealed_count(node) == 1 end, 200, 100)
 
     {:ok, _ack} =
-      Client.write_batch(node.buffer, @table, ndjson_batch([%{"id" => 5, "attrs" => 5.5}]))
+      Client.write_batch(node.buffer, @table, %{
+        schema: schema(),
+        rows: [%{"id" => 3, "attrs" => [1, "x"]}, %{"id" => 4}]
+      })
 
     {job, frame} = query(node, "SELECT id, attrs FROM analytics.events ORDER BY id")
 

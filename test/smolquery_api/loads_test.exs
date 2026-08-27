@@ -167,4 +167,36 @@ defmodule SmolqueryApi.LoadControllerTest do
 
     assert response.status == 404
   end
+
+  describe "a table with a map column" do
+    @attributed "/v1/datasets/analytics/tables/attributed/load"
+
+    setup %{name: name} do
+      {:ok, runtime} = Runtime.fetch(name)
+
+      schema =
+        Schema.new!([{"id", :int64, nullable: false}, {"attrs", {:map, :string, :string}}])
+
+      :ok = Catalog.create_table(runtime.catalog, {"analytics", "attributed"}, schema)
+      :ok
+    end
+
+    test "refuses a parquet load with 400 instead of crashing the reader", %{name: name} do
+      body =
+        [{"id", Series.from_list([1], dtype: {:s, 64})}]
+        |> DataFrame.new()
+        |> DataFrame.dump_parquet!()
+
+      response = load(name, body, "application/vnd.apache.parquet", @attributed)
+
+      assert response.status == 400
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "parquet load cannot carry"
+    end
+
+    test "loads a csv that leaves the map column out", %{name: name} do
+      response = load(name, "id\n1\n2\n", "text/csv", @attributed)
+
+      assert JSON.decode!(response.resp_body)["insertedRows"] == 2
+    end
+  end
 end

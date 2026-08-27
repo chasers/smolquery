@@ -10,11 +10,10 @@ defmodule Smolquery.QueryService.Views do
   change to the shape cannot land in one site and not the other (PL-49
   review).
 
-  The projection is also where a column's query type is put on: a column for
-  which `Smolquery.Schema.cast_in_view?/1` is true is cast to its
-  `Smolquery.Schema.query_type/1`, which is how a `VARIANT` column stored as
-  `JSON` reaches a query as a variant — and still will when a later table
-  stores it as `VARIANT`.
+  The projection is also where a column's query type is put on: a column with
+  a `Smolquery.Schema.view_cast/1` is cast to it, which is how a `VARIANT`
+  column stored as `JSON` reaches a query as a variant — and still will when a
+  later table stores it as `VARIANT`.
   """
 
   alias Smolquery.Identifier
@@ -54,12 +53,9 @@ defmodule Smolquery.QueryService.Views do
   defp column_expression(%Schema.Field{name: name, type: type}) do
     quoted = Identifier.quote_name!(name)
 
-    if Schema.cast_in_view?(type) do
-      {:ok, queried} = Schema.query_type(type)
-
-      "#{quoted}::#{queried} AS #{quoted}"
-    else
-      quoted
+    case Schema.view_cast(type) do
+      {:cast, queried} -> "#{quoted}::#{queried} AS #{quoted}"
+      :none -> quoted
     end
   end
 end

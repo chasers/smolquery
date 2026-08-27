@@ -303,8 +303,10 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp fetch_preview(runtime, sql) do
     case QueryService.Client.query(runtime.query_name, sql, timeout_ms: 15_000) do
-      {:ok, %QueryService.Job{state: :done}, frame} ->
-        {columns, rows} = DataTable.frame_page(frame, 0, @preview_rows)
+      {:ok, %QueryService.Job{state: :done} = job, frame} ->
+        {columns, rows} =
+          DataTable.frame_page(frame, 0, @preview_rows, json_columns: job.json_columns)
+
         {:ok, columns, rows}
 
       {:ok, job, _frame} ->
@@ -364,10 +366,23 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp check_clustering_columns(columns, schema) do
-    case Enum.find(columns, &(Schema.field(schema, &1) == :error)) do
-      nil -> {:ok, columns}
-      unknown -> {:error, {:unknown_clustering_column, unknown}}
+    Enum.reduce_while(columns, {:ok, columns}, fn column, ok ->
+      case clustering_column_problem(schema, column) do
+        nil -> {:cont, ok}
+        problem -> {:halt, {:error, problem}}
+      end
+    end)
+  end
+
+  defp clustering_column_problem(schema, column) do
+    case Schema.field(schema, column) do
+      :error -> {:unknown_clustering_column, column}
+      {:ok, %{type: type}} -> unless_clustering(type, column)
     end
+  end
+
+  defp unless_clustering(type, column) do
+    if Schema.clustering_type?(type), do: nil, else: {:clustering_column_not_sortable, column}
   end
 
   defp put_retention(socket, retention) do

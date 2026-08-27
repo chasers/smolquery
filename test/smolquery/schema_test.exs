@@ -138,18 +138,15 @@ defmodule Smolquery.SchemaTest do
       assert Schema.explorer_dtype(:variant) == {:error, {:unsupported_type, :variant}}
       assert Schema.duckdb_type(:variant) == {:ok, "JSON"}
       assert Schema.logical_from_duckdb("json") == {:ok, :variant}
-      assert Schema.query_type(:variant) == {:ok, "VARIANT"}
+      assert Schema.view_cast(:variant) == {:cast, "VARIANT"}
       assert Schema.api_type(:variant) == {:ok, "VARIANT"}
       assert Schema.type_from_api("Variant") == {:ok, :variant}
     end
 
-    test "every other type is queried as it is stored, and needs no cast in a view" do
+    test "every other type needs no cast in a view" do
       for type <- @explorer_types ++ [{:map, :string, :string}] do
-        assert Schema.query_type(type) == Schema.duckdb_type(type)
-        refute Schema.cast_in_view?(type)
+        assert Schema.view_cast(type) == :none
       end
-
-      assert Schema.cast_in_view?(:variant)
     end
 
     test "speaks the map in DuckDB's and ClickHouse's words" do
@@ -265,15 +262,6 @@ defmodule Smolquery.SchemaTest do
       assert Schema.value_from_json(map, %{}) == {:ok, %{}}
     end
 
-    test "a map also takes the entry list Explorer reads a Parquet MAP as" do
-      entries = [%{"key" => "host", "value" => "h1"}, %{"key" => "n", "value" => 1}]
-
-      assert Schema.value_from_json({:map, :string, :string}, entries) ==
-               {:ok, %{"host" => "h1", "n" => "1"}}
-
-      assert Schema.value_from_json({:map, :string, :string}, []) == {:ok, %{}}
-    end
-
     test "a variant takes any JSON value as it is" do
       for value <- [
             %{"host" => "h1", "n" => 1, "tags" => ["a", %{"k" => nil}]},
@@ -290,15 +278,14 @@ defmodule Smolquery.SchemaTest do
                {:error, {:invalid_value, :variant, Decimal.new(1)}}
     end
 
-    test "a map rejects anything that is not an object or an entry list" do
+    test "a map rejects anything that is not an object, the way read_json does" do
       map = {:map, :string, :string}
+      entries = [%{"key" => "host", "value" => "h1"}]
 
       assert Schema.value_from_json(map, "host=h1") == {:error, {:invalid_value, map, "host=h1"}}
       assert Schema.value_from_json(map, 1) == {:error, {:invalid_value, map, 1}}
-      assert Schema.value_from_json(map, ["a"]) == {:error, {:invalid_value, map, ["a"]}}
-
-      assert Schema.value_from_json(map, [%{"k" => "v"}]) ==
-               {:error, {:invalid_value, map, [%{"k" => "v"}]}}
+      assert Schema.value_from_json(map, []) == {:error, {:invalid_value, map, []}}
+      assert Schema.value_from_json(map, entries) == {:error, {:invalid_value, map, entries}}
     end
 
     test "converts an offset timestamp to naive UTC" do
@@ -385,6 +372,28 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.column_definitions(schema) ==
                {:ok, ~s|"id" BIGINT NOT NULL, "ts" TIMESTAMP, "amount" DECIMAL(38,2)|}
+    end
+  end
+
+  describe "what Explorer can write" do
+    test "a schema with a map or variant is not Explorer-writable, and names the field" do
+      plain = Schema.new!([{"id", :int64}, {"name", :string}])
+
+      mapped =
+        Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}, {"doc", :variant}])
+
+      assert Schema.explorer_writable?(plain)
+      refute Schema.explorer_writable?(mapped)
+      assert Schema.explorer_unwritable(plain) == :none
+      assert {:ok, %Field{name: "attrs"}} = Schema.explorer_unwritable(mapped)
+      assert Schema.readable_explorer_dtypes(mapped) == [{"id", {:s, 64}}]
+    end
+
+    test "a map or variant cannot cluster; everything else can" do
+      refute Schema.clustering_type?({:map, :string, :string})
+      refute Schema.clustering_type?(:variant)
+
+      for type <- @explorer_types, do: assert(Schema.clustering_type?(type))
     end
   end
 end

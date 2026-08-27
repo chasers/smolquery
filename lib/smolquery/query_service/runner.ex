@@ -255,9 +255,7 @@ defmodule Smolquery.QueryService.Runner do
            Trace.span(:statements, fn ->
              run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
            end),
-         {:ok, plan, json_columns} <-
-           Trace.span(:variants, fn -> VariantResults.prepare(connection, plan) end),
-         {:ok, {result, scatter}} <-
+         {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
              outcome(
                runtime,
@@ -284,29 +282,61 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
-    case Scatter.execute(runtime, connection, plan, job_id, timeout_ms) do
-      {:ok, frame, scatter} ->
-        checked(frame, max_rows, scatter)
-
-      :fallback ->
-        with {:ok, frame} <- Connection.frame(connection, bounded(plan, max_rows), [], :infinity) do
-          checked(frame, max_rows, nil)
-        end
+    with {:ok, prepared} <- variants(connection, plan) do
+      run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms)
     end
   end
 
   defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id, _timeout_ms) do
     with {:ok, result} <-
            Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
-      {:ok, {{:explain, explain_text(result)}, nil}}
+      {:ok, {{:explain, explain_text(result)}, nil, []}}
     end
   end
 
-  defp checked(frame, max_rows, scatter) do
+  defp run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms) do
+    case scatter(runtime, connection, plan, prepared, job_id, timeout_ms) do
+      {:ok, frame, scatter} ->
+        checked(frame, max_rows, scatter, prepared.json_columns)
+
+      :fallback ->
+        with {:ok, frame} <- frame(connection, prepared.plan, bounded(prepared.plan, max_rows)) do
+          checked(frame, max_rows, nil, prepared.json_columns)
+        end
+    end
+  end
+
+  defp variants(connection, plan) do
+    if VariantResults.variant_reachable?(plan),
+      do: Trace.span(:variants, fn -> VariantResults.prepare(connection, plan) end),
+      else: {:ok, %VariantResults{plan: plan}}
+  end
+
+  defp scatter(
+         _runtime,
+         _connection,
+         _plan,
+         %VariantResults{json_columns: [_ | _]},
+         _job_id,
+         _timeout_ms
+       ),
+       do: :fallback
+
+  defp scatter(runtime, connection, plan, %VariantResults{outputs: outputs}, job_id, timeout_ms),
+    do: Scatter.execute(runtime, connection, plan, job_id, timeout_ms, outputs)
+
+  defp frame(connection, plan, sql) do
+    case Connection.frame(connection, sql, [], :infinity) do
+      {:ok, frame} -> {:ok, frame}
+      {:error, error} -> {:error, VariantResults.explain_export_failure(connection, plan, error)}
+    end
+  end
+
+  defp checked(frame, max_rows, scatter, json_columns) do
     if is_integer(max_rows) and DataFrame.n_rows(frame) > max_rows do
       {:error, {:result_too_large, max_rows}}
     else
-      {:ok, {{:frame, frame}, scatter}}
+      {:ok, {{:frame, frame}, scatter, json_columns}}
     end
   end
 
