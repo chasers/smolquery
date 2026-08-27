@@ -139,6 +139,17 @@ defmodule SmolqueryApi.InsertController do
     |> Errors.send_error(503, "UNAVAILABLE", "table ownership is moving; retry")
   end
 
+  def insert_error(conn, :ndjson_unsupported) do
+    conn
+    |> put_resp_header("retry-after", "5")
+    |> Errors.send_error(
+      503,
+      "UNAVAILABLE",
+      "the owning buffer node runs a release with the Polars flush writer; " <>
+        "finish the rollout, buffer nodes first (PL-57)"
+    )
+  end
+
   def insert_error(conn, reason), do: Errors.from_reason(conn, reason)
 
   defp insert_id(%{"insertId" => id}) when is_binary(id) and id != "" and byte_size(id) <= 128,

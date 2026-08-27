@@ -14,7 +14,7 @@ defmodule Bench.Buffer do
       log's fsync are what makes an ack durable. This prices them, isolated from
       everything else group commit does.
     * **The inline-flush ceiling (D6)** — one table's throughput is capped at one
-      Polars encode per cycle. This is the number that decides whether
+      encode per cycle. This is the number that decides whether
       double-buffering is worth building, and the number partitioned writes
       (PL-6) have to beat.
 
@@ -394,7 +394,7 @@ defmodule Bench.Buffer do
   end
 
   defp inline_flush_ceiling(dir) do
-    heading("the inline-flush ceiling (D6): one table, one Polars encode per cycle")
+    heading("the inline-flush ceiling (D6): one table, one encode per cycle")
 
     writer_counts = Enum.filter([1, 4, 16, 64, 256, 1024], &(&1 <= env("MAX_WRITERS", 1024)))
     calls = env("CALLS", 20)

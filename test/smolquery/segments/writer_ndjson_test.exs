@@ -249,4 +249,17 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert Writer.readable_ndjson?(@engine, path, variant_schema())
     end
   end
+
+  describe "ndjson_problem/3" do
+    test "names what DuckDB refuses, in DuckDB's words", %{tmp_dir: dir} do
+      path = spool(dir, "refused.ndjson", [%{"tenant" => "a", "id" => "not-an-integer"}])
+
+      assert {:refused, message} = Writer.ndjson_problem(@engine, path, schema())
+      assert message =~ "not-an-integer"
+      refute Writer.readable_ndjson?(@engine, path, schema())
+
+      fine = spool(dir, "fine.ndjson", [%{"tenant" => "a", "id" => 1, "ratio" => 1.0}])
+      assert Writer.ndjson_problem(@engine, fine, schema()) == :ok
+    end
+  end
 end

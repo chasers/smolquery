@@ -82,10 +82,16 @@ defmodule Smolquery.Segments.Store do
 
   @typedoc """
   Writes the segment's bytes to the staging path it is given.
-  """
-  @type encoder :: (Path.t() -> :ok | {:error, term()})
 
-  @type put_result :: %{location: String.t(), byte_size: non_neg_integer()}
+  The store calls it once, in the caller's process, before it commits the
+  file. An encoder that learns something while it has the staged file — the
+  row count and stats DuckDB reads off it — answers `{:ok, meta}`, and `put/3`
+  hands `meta` back in its result; nothing else has to read the file again
+  from wherever the store put it.
+  """
+  @type encoder :: (Path.t() -> :ok | {:ok, term()} | {:error, term()})
+
+  @type put_result :: %{location: String.t(), byte_size: non_neg_integer(), meta: term()}
 
   @extension ".parquet"
   @parquet_magic "PAR1"
@@ -127,9 +133,16 @@ defmodule Smolquery.Segments.Store do
 
   defp validating(encoder) do
     fn staged ->
-      with :ok <- encoder.(staged), do: validate_parquet(staged)
+      with {:ok, meta} <- encoded(encoder.(staged)),
+           :ok <- validate_parquet(staged) do
+        {:ok, meta}
+      end
     end
   end
+
+  defp encoded(:ok), do: {:ok, nil}
+  defp encoded({:ok, _meta} = encoded), do: encoded
+  defp encoded({:error, _reason} = error), do: error
 
   @doc """
   Deletes staged writes older than `age_ms`, returning what was deleted.

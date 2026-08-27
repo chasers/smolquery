@@ -310,6 +310,10 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.value_from_json(:int64, true) == {:error, {:invalid_value, :int64, true}}
       assert Schema.value_from_json(:string, 1) == {:error, {:invalid_value, :string, 1}}
+
+      assert Schema.value_from_json(:string, <<0xFF, 0xFE>>) ==
+               {:error, {:invalid_value, :string, <<0xFF, 0xFE>>}}
+
       assert Schema.value_from_json(:bool, "true") == {:error, {:invalid_value, :bool, "true"}}
 
       assert Schema.value_from_json(:date, "01/02/2026") ==

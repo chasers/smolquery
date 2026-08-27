@@ -377,7 +377,7 @@ defmodule Smolquery.Schema do
   |---|---|---|
   | `:int64` | integer, or a string of digits (JS clients lose precision past 2^53) | integer |
   | `:float64` | number, or a string that parses as one | float |
-  | `:string` | string | binary |
+  | `:string` | string; valid UTF-8, since the flush re-encodes it as JSON | binary |
   | `:bool` | boolean | boolean |
   | `:timestamp` | ISO 8601 string; an offset is converted to UTC | `NaiveDateTime` |
   | `:date` | ISO 8601 string | `Date` |
@@ -418,7 +418,9 @@ defmodule Smolquery.Schema do
     end
   end
 
-  def value_from_json(:string, value) when is_binary(value), do: {:ok, value}
+  def value_from_json(:string, value) when is_binary(value) do
+    if String.valid?(value), do: {:ok, value}, else: invalid(:string, value)
+  end
 
   def value_from_json(:bool, value) when is_boolean(value), do: {:ok, value}
 

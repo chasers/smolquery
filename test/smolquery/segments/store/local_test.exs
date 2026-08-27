@@ -14,6 +14,7 @@ defmodule Smolquery.Segments.Store.LocalTest do
       store = Local.new(dir: dir)
 
       assert {:ok, put} = Store.put(store, "a/b/one.parquet", write("hello"))
+      assert put.meta == nil
 
       assert put.location == Path.join(dir, "a/b/one.parquet")
       assert put.byte_size == byte_size(FakeParquet.bytes("hello"))
@@ -274,6 +275,18 @@ defmodule Smolquery.Segments.Store.LocalTest do
 
     test "an empty or absent staging directory sweeps nothing", %{tmp_dir: dir} do
       assert Store.sweep_staging(Local.new(dir: dir), 0) == {:ok, []}
+    end
+  end
+
+  describe "an encoder that learns something from the staged file" do
+    test "hands it back as the put's meta", %{tmp_dir: dir} do
+      store = Local.new(dir: dir)
+
+      assert {:ok, %{meta: %{rows: 3}}} =
+               Store.put(store, "meta/one.parquet", fn staged ->
+                 File.write!(staged, FakeParquet.bytes())
+                 {:ok, %{rows: 3}}
+               end)
     end
   end
 end

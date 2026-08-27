@@ -140,7 +140,7 @@ defmodule Smolquery.IngestService.Client do
   # Non-blank lines, not newlines: the flush's `read_json` skips a blank line,
   # so counting it would ack a row that was never committed. Splitting keeps
   # this a pass over the bytes without a parse, and its indices are the ones
-  # `decode_lines/1` and the salvage path report errors at.
+  # the salvage path reports errors at.
   # Only a line carrying non-whitespace is a row. The flush's reader skips a
   # blank line rather than parse it, and since the zero-row guard a commit of
   # nothing lands nothing — so counting `" "` (or the `"\r"` a CRLF body leaves

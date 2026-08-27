@@ -301,7 +301,7 @@ defmodule SmolqueryWeb.TableLive.Index do
 
               <p class="text-xs opacity-70">
                 MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
-                pruning on a key, DuckDB flush writer only.
+                pruning on a key, NDJSON loads only.
                 <a
                   href="https://github.com/chasers/smolquery/blob/main/docs/api.md#schema-types"
                   target="_blank"

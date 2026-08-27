@@ -292,4 +292,13 @@ defmodule SmolqueryApi.InsertControllerTest do
       assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => oversized}).status == 400
     end
   end
+
+  describe "a buffer node still on the Polars writer (rollout window, PL-57)" do
+    test "is a 503 that names the rollout order, not an internal error" do
+      response = SmolqueryApi.InsertController.insert_error(conn(:post, "/"), :ndjson_unsupported)
+
+      assert response.status == 503
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "buffer nodes first"
+    end
+  end
 end

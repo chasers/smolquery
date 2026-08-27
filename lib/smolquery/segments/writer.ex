@@ -41,6 +41,7 @@ defmodule Smolquery.Segments.Writer do
   """
 
   alias Smolquery.Engine
+  alias Smolquery.Engine.Connection
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
@@ -57,9 +58,10 @@ defmodule Smolquery.Segments.Writer do
 
   Needs `:engine` and a store whose staging path is a local file — DuckDB's
   `COPY` writes to a filesystem path, not to an object store. The row count
-  and the stats are read off that staged file before the store moves it, so
-  the store's own location never has to be readable by DuckDB (a `memory://`
-  test store is one; an `s3://` one is not read back either). Carries no
+  and the stats are read off that staged file inside the encoder and come
+  back as the put's `meta`, so the store's own location never has to be
+  readable by DuckDB (a `memory://` test store is one; an `s3://` one is not
+  read back either). Carries no
   per-row validation, so a value the schema cannot take fails the whole batch
   rather than one row: see `PL-22` for what that costs and whether it pays.
   """
@@ -97,13 +99,10 @@ defmodule Smolquery.Segments.Writer do
     id = Keyword.get_lazy(opts, :id, &Id.generate/0)
     compression = Keyword.get(opts, :compression, :zstd)
 
-    facts = {self(), make_ref()}
-
     with :ok <- some_paths(paths),
          {:ok, key} <- Store.key(prefix, id),
-         {:ok, put} <-
-           Store.put(store, key, &encode_ndjson(engine, paths, &1, schema, compression, facts)),
-         {:ok, row_count, stats} <- staged_facts(facts) do
+         {:ok, %{meta: %{row_count: row_count, stats: stats}} = put} <-
+           Store.put(store, key, &encode_ndjson(engine, paths, &1, schema, compression)) do
       {:ok,
        %Segment{
          id: id,
@@ -130,11 +129,14 @@ defmodule Smolquery.Segments.Writer do
     do: ndjson_problem(engine, path, schema) == :ok
 
   @doc """
-  What DuckDB refuses about `path` read as this schema — its own message — or
-  `:ok`. `readable_ndjson?/3` is this without the message; the salvage uses
-  the message to tell a caller why a row was refused.
+  What DuckDB refuses about `path` read as this schema — `{:refused, message}`
+  with its own words — or `:ok`. `{:error, reason}` is the engine failing, not
+  the bytes: a dead pool member, a call that exited. `readable_ndjson?/3` is
+  this without the message; the salvage uses the message to tell a caller why
+  a row was refused, and stops on an engine failure rather than blame the rows.
   """
-  @spec ndjson_problem(atom(), Path.t(), Schema.t()) :: :ok | {:error, String.t()}
+  @spec ndjson_problem(atom(), Path.t(), Schema.t()) ::
+          :ok | {:refused, String.t()} | {:error, {:engine_failed, String.t()}}
   def ndjson_problem(engine, path, %Schema{fields: fields} = schema) do
     # `count(*)` is not enough: it needs no column values, so DuckDB is free to
     # skip the casts and answer a row count for a body it could not actually
@@ -150,28 +152,29 @@ defmodule Smolquery.Segments.Writer do
 
     case Engine.query(engine, sql, [path]) do
       {:ok, _result} -> :ok
-      {:error, error} -> {:error, Exception.message(error)}
+      {:error, error} -> problem(classify(error, :refused))
     end
   end
 
   defp some_paths([]), do: {:error, :no_rows}
   defp some_paths(_paths), do: :ok
 
-  defp encode_ndjson(engine, paths, staged, schema, compression, {parent, ref}) do
+  defp classify(%Adbc.Error{} = error, refusal) do
+    if Connection.fatal?(error),
+      do: {:engine_failed, Exception.message(error)},
+      else: {refusal, Exception.message(error)}
+  end
+
+  defp classify(error, _refusal), do: {:engine_failed, Exception.message(error)}
+
+  defp problem({:refused, _message} = refused), do: refused
+  defp problem({:engine_failed, _message} = failed), do: {:error, failed}
+
+  defp encode_ndjson(engine, paths, staged, schema, compression) do
     with :ok <- copy_ndjson(engine, paths, staged, schema, compression),
          {:ok, row_count} <- footer_rows(engine, staged),
          {:ok, stats} <- ndjson_stats(engine, staged, schema) do
-      send(parent, {ref, row_count, stats})
-
-      :ok
-    end
-  end
-
-  defp staged_facts({_parent, ref}) do
-    receive do
-      {^ref, row_count, stats} -> {:ok, row_count, stats}
-    after
-      0 -> {:error, :no_staged_facts}
+      {:ok, %{row_count: row_count, stats: stats}}
     end
   end
 
@@ -197,7 +200,7 @@ defmodule Smolquery.Segments.Writer do
 
     case Engine.query(engine, sql, paths ++ [staged]) do
       {:ok, _result} -> :ok
-      {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
+      {:error, error} -> {:error, classify(error, :ndjson_copy_failed)}
     end
   end
 
@@ -207,8 +210,8 @@ defmodule Smolquery.Segments.Writer do
   defp footer_rows(engine, path) do
     case Engine.query(engine, "SELECT num_rows FROM parquet_file_metadata($1)", [path]) do
       {:ok, %{rows: [[rows] | _rest]}} -> {:ok, rows}
-      {:ok, _other} -> {:error, {:ndjson_copy_failed, "no parquet footer at #{path}"}}
-      {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
+      {:ok, _other} -> {:error, {:segment_facts_failed, "no parquet footer at #{path}"}}
+      {:error, error} -> {:error, {:segment_facts_failed, Exception.message(error)}}
     end
   end
 
@@ -230,8 +233,8 @@ defmodule Smolquery.Segments.Writer do
 
     case Engine.query(engine, "SELECT #{selects} FROM read_parquet($1)", [path]) do
       {:ok, %{rows: [values]}} -> {:ok, zip_stats(fields, values)}
-      {:ok, _other} -> {:error, {:ndjson_copy_failed, "no stats row for #{path}"}}
-      {:error, error} -> {:error, {:ndjson_copy_failed, Exception.message(error)}}
+      {:ok, _other} -> {:error, {:segment_facts_failed, "no stats row for #{path}"}}
+      {:error, error} -> {:error, {:segment_facts_failed, Exception.message(error)}}
     end
   end
 
