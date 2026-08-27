@@ -33,9 +33,11 @@ defmodule Smolquery.Test.FullNode do
   @doc """
   Starts buffer + storage + query wired together. `buffer_opts` sets the
   valves and cadences the scenario needs; everything else is the production
-  shape.
+  shape. A `:schema` in `buffer_opts` replaces `schema/0` for the table the
+  node creates.
   """
   def start(context, buffer_opts) do
+    {schema, buffer_opts} = Keyword.pop(buffer_opts, :schema, schema())
     unique = :erlang.unique_integer([:positive])
     buffer = :"node_buffer_#{unique}"
     storage = :"node_storage_#{unique}"
@@ -65,7 +67,7 @@ defmodule Smolquery.Test.FullNode do
     {:ok, storage_runtime} = StorageRuntime.fetch(storage)
     catalog = storage_runtime.catalog
     :ok = Catalog.create_dataset(catalog, "analytics")
-    :ok = Catalog.create_table(catalog, @table, schema())
+    :ok = Catalog.create_table(catalog, @table, schema)
 
     start_supervised!(
       {QueryService.Supervisor,

@@ -458,4 +458,18 @@ defmodule SmolqueryApi.JobControllerTest do
       assert {400, _body} = get_json(name, "/v1/jobs/#{id}/results?page_token=#{token}")
     end
   end
+
+  describe "a MAP column in a result" do
+    test "renders as a JSON object", %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{
+          "query" => "SELECT MAP {'host': 'h1', 'pod': 'api-7'} AS attrs UNION ALL SELECT MAP {}"
+        })
+
+      assert response.status == 200
+
+      assert %{"rows" => [%{"attrs" => %{"host" => "h1", "pod" => "api-7"}}, %{"attrs" => %{}}]} =
+               JSON.decode!(response.resp_body)
+    end
+  end
 end

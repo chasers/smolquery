@@ -111,4 +111,23 @@ defmodule Smolquery.IngestService.ColumnarValidatorTest do
     assert Series.dtype(frame["ts"]) == {:naive_datetime, :microsecond}
     assert Series.nil_count(frame["ts"]) == 2
   end
+
+  describe "a schema with a map column" do
+    defp map_schema do
+      Schema.new!([{"id", :int64, nullable: false}, {"attrs", {:map, :string, :string}}])
+    end
+
+    test "falls back when the column is present, so the row path coerces it" do
+      body = ndjson([%{"id" => 1, "attrs" => %{"host" => "h1"}}])
+
+      assert ColumnarValidator.validate(map_schema(), body) == :fallback
+
+      assert {[%{"id" => 1, "attrs" => %{"host" => "h1"}}], []} =
+               Validator.validate(map_schema(), [%{"id" => 1, "attrs" => %{"host" => "h1"}}])
+    end
+
+    test "falls back when the column is absent, rather than writing a shape DuckDB cannot union" do
+      assert ColumnarValidator.validate(map_schema(), ndjson([%{"id" => 1}])) == :fallback
+    end
+  end
 end

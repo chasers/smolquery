@@ -104,4 +104,84 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
 
     assert message =~ "not-an-integer"
   end
+
+  describe "a MAP(STRING, STRING) column" do
+    defp map_schema do
+      Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}])
+    end
+
+    test "is written as a Parquet MAP that DuckDB reads by key", %{tmp_dir: dir} do
+      path =
+        spool(dir, "map.ndjson", [
+          %{"id" => 1, "attrs" => %{"host" => "h1", "pod" => "api-7"}},
+          %{"id" => 2, "attrs" => %{"host" => "h2"}},
+          %{"id" => 3},
+          %{"id" => 4, "attrs" => %{}}
+        ])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, map_schema(), store: store(dir), engine: @engine)
+
+      {:ok, %{rows: rows}} =
+        Engine.query(
+          @engine,
+          "SELECT id, attrs['host'], cardinality(attrs) FROM read_parquet($1) ORDER BY id",
+          [segment.path]
+        )
+
+      assert rows == [[1, "h1", 2], [2, "h2", 1], [3, nil, nil], [4, nil, 0]]
+
+      {:ok, %{rows: [[type]]}} =
+        Engine.query(@engine, "SELECT typeof(attrs) FROM read_parquet($1) LIMIT 1", [
+          segment.path
+        ])
+
+      assert type == "MAP(VARCHAR, VARCHAR)"
+    end
+
+    test "carries a null count but no bounds, so nothing prunes on it", %{tmp_dir: dir} do
+      path =
+        spool(dir, "map_stats.ndjson", [
+          %{"id" => 1, "attrs" => %{"host" => "h1"}},
+          %{"id" => 2}
+        ])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, map_schema(), store: store(dir), engine: @engine)
+
+      assert segment.stats["attrs"] == %{min: nil, max: nil, null_count: 1}
+      assert segment.stats["id"] == %{min: 1, max: 2, null_count: 0}
+    end
+
+    test "stringifies a non-string value exactly as value_from_json/2 does", %{tmp_dir: dir} do
+      attrs = %{
+        "n" => 1,
+        "ratio" => 1.5,
+        "ok" => true,
+        "tags" => ["a", "b"],
+        "nested" => %{"k" => "v"},
+        "none" => nil
+      }
+
+      path = spool(dir, "map_mixed.ndjson", [%{"id" => 1, "attrs" => attrs}])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, map_schema(), store: store(dir), engine: @engine)
+
+      {:ok, %{rows: [[read]]}} =
+        Engine.query(@engine, "SELECT attrs FROM read_parquet($1)", [segment.path])
+
+      assert {:ok, coerced} = Schema.value_from_json({:map, :string, :string}, attrs)
+      assert read == coerced
+    end
+
+    test "refuses a value that is not an object as a failed flush", %{tmp_dir: dir} do
+      path = spool(dir, "map_bad.ndjson", [%{"id" => 1, "attrs" => "host=h1"}])
+
+      assert {:error, {:put_failed, _key, {:ndjson_copy_failed, message}}} =
+               Writer.write({:ndjson, [path]}, map_schema(), store: store(dir), engine: @engine)
+
+      assert message =~ "OBJECT"
+    end
+  end
 end

@@ -11,8 +11,11 @@ defmodule Smolquery.SchemaTest do
     :bool,
     :timestamp,
     :date,
-    {:numeric, 38, 2}
+    {:numeric, 38, 2},
+    {:map, :string, :string}
   ]
+
+  @explorer_types List.delete(@logical_types, {:map, :string, :string})
 
   describe "new/1" do
     test "accepts tuples, tuples with options, and Field structs" do
@@ -113,11 +116,35 @@ defmodule Smolquery.SchemaTest do
   end
 
   describe "type mapping" do
-    test "round-trips every logical type through Explorer dtypes" do
-      for type <- @logical_types do
+    test "round-trips every Explorer-writable logical type through Explorer dtypes" do
+      for type <- @explorer_types do
         assert {:ok, dtype} = Schema.explorer_dtype(type)
         assert Schema.logical_from_explorer(dtype) == {:ok, type}
       end
+    end
+
+    test "a map has no Explorer dtype, so Explorer-side paths fall back on it" do
+      assert Schema.explorer_dtype({:map, :string, :string}) ==
+               {:error, {:unsupported_type, {:map, :string, :string}}}
+
+      assert {:error, {:unsupported_type, _map}} =
+               Schema.explorer_dtypes(
+                 Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}])
+               )
+    end
+
+    test "speaks the map in DuckDB's and ClickHouse's words" do
+      assert Schema.duckdb_type({:map, :string, :string}) == {:ok, "MAP(VARCHAR, VARCHAR)"}
+      assert Schema.logical_from_duckdb("map(varchar,varchar)") == {:ok, {:map, :string, :string}}
+      assert Schema.api_type({:map, :string, :string}) == {:ok, "MAP(STRING, STRING)"}
+      assert Schema.type_from_api("map(string,string)") == {:ok, {:map, :string, :string}}
+      assert Schema.type_from_api("MAP( STRING , STRING )") == {:ok, {:map, :string, :string}}
+
+      assert Schema.type_from_api("MAP(STRING, INT64)") ==
+               {:error, {:unsupported_type, "MAP(STRING, INT64)"}}
+
+      assert Schema.logical_from_duckdb("MAP(VARCHAR, BIGINT)") ==
+               {:error, {:unsupported_type, "MAP(VARCHAR, BIGINT)"}}
     end
 
     test "round-trips every logical type through DuckDB type names" do
@@ -192,6 +219,51 @@ defmodule Smolquery.SchemaTest do
       assert Schema.value_from_json({:numeric, 38, 2}, "12.50") == {:ok, Decimal.new("12.50")}
       assert Schema.value_from_json({:numeric, 38, 2}, 12) == {:ok, Decimal.new(12)}
       assert Schema.value_from_json({:numeric, 38, 2}, 12.5) == {:ok, Decimal.from_float(12.5)}
+    end
+
+    test "a map keeps strings and writes any other value as its JSON text" do
+      map = {:map, :string, :string}
+
+      assert Schema.value_from_json(map, %{"host" => "h1", "pod" => nil}) ==
+               {:ok, %{"host" => "h1", "pod" => nil}}
+
+      assert Schema.value_from_json(map, %{
+               "n" => 1,
+               "ratio" => 1.5,
+               "ok" => true,
+               "tags" => ["a", "b"],
+               "nested" => %{"k" => "v"}
+             }) ==
+               {:ok,
+                %{
+                  "n" => "1",
+                  "ratio" => "1.5",
+                  "ok" => "true",
+                  "tags" => ~s(["a","b"]),
+                  "nested" => ~s({"k":"v"})
+                }}
+
+      assert Schema.value_from_json(map, %{}) == {:ok, %{}}
+    end
+
+    test "a map also takes the entry list Explorer reads a Parquet MAP as" do
+      entries = [%{"key" => "host", "value" => "h1"}, %{"key" => "n", "value" => 1}]
+
+      assert Schema.value_from_json({:map, :string, :string}, entries) ==
+               {:ok, %{"host" => "h1", "n" => "1"}}
+
+      assert Schema.value_from_json({:map, :string, :string}, []) == {:ok, %{}}
+    end
+
+    test "a map rejects anything that is not an object or an entry list" do
+      map = {:map, :string, :string}
+
+      assert Schema.value_from_json(map, "host=h1") == {:error, {:invalid_value, map, "host=h1"}}
+      assert Schema.value_from_json(map, 1) == {:error, {:invalid_value, map, 1}}
+      assert Schema.value_from_json(map, ["a"]) == {:error, {:invalid_value, map, ["a"]}}
+
+      assert Schema.value_from_json(map, [%{"k" => "v"}]) ==
+               {:error, {:invalid_value, map, [%{"k" => "v"}]}}
     end
 
     test "converts an offset timestamp to naive UTC" do
