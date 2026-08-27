@@ -19,7 +19,7 @@ defmodule Smolquery.DeployedShapeTest do
     :ok
   end
 
-  defp buffer_runtime(overrides) do
+  defp buffer_runtime(overrides \\ []) do
     dir = Path.join(System.tmp_dir!(), "deployed-shape-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(dir) end)
 
@@ -84,10 +84,10 @@ defmodule Smolquery.DeployedShapeTest do
 
   describe "announce/1 for the buffer" do
     test "states the resolved path rather than what was configured" do
-      log = capture_log(fn -> DeployedShape.announce(buffer_runtime(flush_writer: :duckdb)) end)
+      log = capture_log(fn -> DeployedShape.announce(buffer_runtime()) end)
 
       assert log =~ "buffer shape:"
-      assert log =~ "flush_writer=duckdb"
+      assert log =~ "compression=zstd"
       assert log =~ "flush_idle_interval_ms=5"
       assert log =~ "commit_siblings=0"
       assert log =~ "transport_tls=false"
@@ -100,7 +100,7 @@ defmodule Smolquery.DeployedShapeTest do
     test "states the write pool's resolved per-member budget" do
       log =
         capture_log(fn ->
-          DeployedShape.announce(buffer_runtime(flush_writer: :duckdb, write_pool_size: 2))
+          DeployedShape.announce(buffer_runtime(write_pool_size: 2))
         end)
 
       assert log =~ "write_pool_size=2"
@@ -128,7 +128,6 @@ defmodule Smolquery.DeployedShapeTest do
         capture_log(fn ->
           DeployedShape.announce(
             buffer_runtime(
-              flush_writer: :duckdb,
               write_pool_size: 4,
               write_engine_threads: 2,
               write_engine_memory_limit: "256MB"
@@ -139,39 +138,16 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "write_engine_threads=2"
       assert log =~ "write_engine_memory_limit=256MB"
     end
-
-    test "warns when the slower writer is selected, because nothing else will" do
-      log = capture_log(fn -> DeployedShape.announce(buffer_runtime(flush_writer: :polars)) end)
-
-      assert log =~ "slow path"
-      assert log =~ ":polars"
-      assert log =~ "SMOLQUERY_FLUSH_WRITER=duckdb"
-    end
-
-    test "stays quiet on the fast path" do
-      log = capture_log(fn -> DeployedShape.announce(buffer_runtime(flush_writer: :duckdb)) end)
-
-      refute log =~ "slow path"
-    end
   end
 
   describe "announce/1 for the ingest edge" do
-    test "warns when the passthrough is off" do
-      runtime = %IngestRuntime{name: :t, catalog: nil, ndjson_passthrough: false}
-
-      log = capture_log(fn -> DeployedShape.announce(runtime) end)
-
-      assert log =~ "slow path"
-      assert log =~ "parsed and cast row"
-    end
-
-    test "stays quiet when the passthrough is on" do
-      runtime = %IngestRuntime{name: :t, catalog: nil, ndjson_passthrough: true}
+    test "logs the edge's shape" do
+      runtime = %IngestRuntime{name: :t, catalog: nil}
 
       log = capture_log(fn -> DeployedShape.announce(runtime) end)
 
       assert log =~ "ingest shape:"
-      refute log =~ "slow path"
+      assert log =~ "write_partitions=1"
     end
   end
 
@@ -188,19 +164,19 @@ defmodule Smolquery.DeployedShapeTest do
     end
 
     test "renders as a gauge pinned at 1, with the shape in the labels" do
-      capture_log(fn -> DeployedShape.announce(buffer_runtime(flush_writer: :duckdb)) end)
+      capture_log(fn -> DeployedShape.announce(buffer_runtime()) end)
 
       rendered = Smolquery.Telemetry.render()
 
       assert rendered =~ "# TYPE smolquery_buffer_shape_info gauge"
-      assert rendered =~ ~s(flush_writer="duckdb")
+      assert rendered =~ ~s(compression="zstd")
       assert rendered =~ "smolquery_buffer_shape_info{"
     end
 
     # Counts the whole family rather than asserting exactly one, because a
     # running application announces its own shape into the same table.
     test "re-registering the same shape does not accumulate series" do
-      runtime = buffer_runtime(flush_writer: :duckdb)
+      runtime = buffer_runtime()
 
       capture_log(fn -> DeployedShape.announce(runtime) end)
       before = shape_series()

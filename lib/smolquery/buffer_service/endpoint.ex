@@ -121,19 +121,9 @@ defmodule Smolquery.BufferService.Endpoint do
   # decode here and nothing to validate yet — the flush parses it. `row_count` is
   # the sender's line count, and the ack is built from it, so it is carried
   # rather than recomputed.
-  #
-  # Only the DuckDB flush writer can turn those bytes into a segment, and the
-  # sender's config says nothing about this node's, so the check runs where the
-  # payload is accepted: refusing here fails one request cleanly instead of
-  # crashing every flush of the table against an engine that was never started.
-  defp payload(runtime, %{ndjson: body, row_count: count, byte_size: bytes})
-       when is_binary(body) and is_integer(count) and is_integer(bytes) do
-    if runtime.flush_writer == :duckdb do
-      {:ok, {:ndjson, body, count}}
-    else
-      {:error, :ndjson_unsupported}
-    end
-  end
+  defp payload(_runtime, %{ndjson: body, row_count: count, byte_size: bytes})
+       when is_binary(body) and is_integer(count) and is_integer(bytes),
+       do: {:ok, {:ndjson, body, count}}
 
   defp payload(_runtime, _batch), do: {:error, :invalid_batch}
 

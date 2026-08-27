@@ -47,7 +47,7 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
-  `:write_pool_size` is how many DuckDB instances the `:duckdb` flush spreads
+  `:write_pool_size` is how many DuckDB instances the flush spreads
   its encodes over — see `engine_for/2` for why it hashes on the segment id,
   and `engines/1` for the pool itself. It must be a positive integer no larger
   than `@max_write_pool_size`; `new/1` refuses anything else at boot rather
@@ -102,13 +102,13 @@ defmodule Smolquery.BufferService.Runtime do
   bound *memory* — the bench proved the queue that hurts is the mailbox,
   which the memory bounds never see.
 
-  `flush_writer` defaults to `:duckdb`, the path the ingest edge's NDJSON
-  passthrough is built around: the spooled bytes become Parquet in one `COPY`
-  without ever being Elixir terms. It used to default to `:polars`, which meant
-  a fresh deployment silently came up on the slower path *and* — because
-  `Smolquery.IngestService`'s `ndjson_passthrough` is derived from this value —
-  silently disabled the passthrough with it. Two defaults compounding into the
-  slow path is not a default anyone chooses on purpose.
+  Every flush encodes through DuckDB: the spooled NDJSON bytes become Parquet
+  in one `COPY` without ever being Elixir terms, and a rows batch is re-encoded
+  to NDJSON on the way. There used to be a `flush_writer` choice with a Polars
+  path behind it — the slower path, one that disabled the ingest edge's
+  passthrough, and one that could not write a map or a variant. PL-57 removed
+  it; a set `SMOLQUERY_FLUSH_WRITER` fails the boot so a pinned deployment
+  notices.
 
   `flush_max_bytes` defaults to 2 MB rather than 8 MB. Measured on the
   comparison rig at 2,346-byte rows: 8 MB gave 24,067 rows/s at a 926 ms ack
@@ -231,7 +231,6 @@ defmodule Smolquery.BufferService.Runtime do
     seal_consumer: {Smolquery.BufferService.SealLog, []},
     compression: :zstd,
     encode_concurrency: 2,
-    flush_writer: :duckdb,
     write_pool_size: 1,
     write_engine_memory_limit: nil,
     write_engine_threads: nil,
@@ -269,7 +268,6 @@ defmodule Smolquery.BufferService.Runtime do
           seal_consumer: {module(), term()},
           compression: atom(),
           encode_concurrency: pos_integer(),
-          flush_writer: :polars | :duckdb,
           write_pool_size: pos_integer(),
           write_engine_memory_limit: String.t() | nil,
           write_engine_threads: pos_integer() | nil,
@@ -301,7 +299,6 @@ defmodule Smolquery.BufferService.Runtime do
     :seal_consumer,
     :compression,
     :encode_concurrency,
-    :flush_writer,
     :write_pool_size,
     :write_engine_memory_limit,
     :write_engine_threads,

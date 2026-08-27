@@ -90,12 +90,12 @@ defmodule Smolquery.RuntimeConfigTest do
   end
 
   test "maps supported enum values without creating atoms" do
-    choices = [{"polars", :polars}, {"duckdb", :duckdb}]
+    choices = [{"zstd", :zstd}, {"snappy", :snappy}]
 
-    assert RuntimeConfig.enum!("WRITER", "duckdb", choices) == :duckdb
+    assert RuntimeConfig.enum!("CODEC", "snappy", choices) == :snappy
 
-    assert_raise ArgumentError, ~r/WRITER.*other.*polars, duckdb/, fn ->
-      RuntimeConfig.enum!("WRITER", "other", choices)
+    assert_raise ArgumentError, ~r/CODEC.*other.*zstd, snappy/, fn ->
+      RuntimeConfig.enum!("CODEC", "other", choices)
     end
   end
 

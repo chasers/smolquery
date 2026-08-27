@@ -64,7 +64,10 @@ defmodule Smolquery.Segments.Writer do
   Parquet, so no row in the batch ever becomes an Elixir term.
 
   Needs `:engine` and a store whose staging path is a local file — DuckDB's
-  `COPY` writes to a filesystem path, not to an object store. Carries no
+  `COPY` writes to a filesystem path, not to an object store. The row count
+  and the stats are read off that staged file before the store moves it, so
+  the store's own location never has to be readable by DuckDB (a `memory://`
+  test store is one; an `s3://` one is not read back either). Carries no
   per-row validation, so a value the schema cannot take fails the whole batch
   rather than one row: see `PL-22` for what that costs and whether it pays.
   """
@@ -86,6 +89,11 @@ defmodule Smolquery.Segments.Writer do
   null. An `Explorer.DataFrame` may be passed instead, in which case its
   columns must already match `schema`.
 
+  This is the fixture writer: tests and tools build a segment from rows
+  through Explorer. The buffer never calls it — a flush encodes through DuckDB
+  (`{:ndjson, paths}`, PL-57) — and it refuses a schema Explorer cannot write,
+  a map or a variant.
+
   ## Options
 
     * `:store` (required) — the `Smolquery.Segments.Store` the segment is put in
@@ -105,12 +113,13 @@ defmodule Smolquery.Segments.Writer do
     id = Keyword.get_lazy(opts, :id, &Id.generate/0)
     compression = Keyword.get(opts, :compression, :zstd)
 
+    facts = {self(), make_ref()}
+
     with :ok <- some_paths(paths),
          {:ok, key} <- Store.key(prefix, id),
          {:ok, put} <-
-           Store.put(store, key, &copy_ndjson(engine, paths, &1, schema, compression)),
-         {:ok, row_count} <- footer_rows(engine, put.location),
-         {:ok, stats} <- ndjson_stats(engine, put.location, schema) do
+           Store.put(store, key, &encode_ndjson(engine, paths, &1, schema, compression, facts)),
+         {:ok, row_count, stats} <- staged_facts(facts) do
       {:ok,
        %Segment{
          id: id,
@@ -265,6 +274,24 @@ defmodule Smolquery.Segments.Writer do
 
   defp some_paths([]), do: {:error, :no_rows}
   defp some_paths(_paths), do: :ok
+
+  defp encode_ndjson(engine, paths, staged, schema, compression, {parent, ref}) do
+    with :ok <- copy_ndjson(engine, paths, staged, schema, compression),
+         {:ok, row_count} <- footer_rows(engine, staged),
+         {:ok, stats} <- ndjson_stats(engine, staged, schema) do
+      send(parent, {ref, row_count, stats})
+
+      :ok
+    end
+  end
+
+  defp staged_facts({_parent, ref}) do
+    receive do
+      {^ref, row_count, stats} -> {:ok, row_count, stats}
+    after
+      0 -> {:error, :no_staged_facts}
+    end
+  end
 
   # One statement for the whole flush: DuckDB reads every spooled body, sorts the
   # union on the clustering key and writes one Parquet file. `read_json` with an

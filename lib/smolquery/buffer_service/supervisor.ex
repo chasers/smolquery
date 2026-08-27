@@ -42,8 +42,8 @@ defmodule Smolquery.BufferService.Supervisor do
   fail closed, which its published-but-stale state already guarantees even
   across its own restarts.
 
-  The `flush_writer: :duckdb` write pool starts *below* the buffers, in its own
-  `one_for_one` supervisor, and only for that writer. It is the one child this
+  The DuckDB write pool starts *below* the buffers, in its own `one_for_one`
+  supervisor. It is the one child this
   subtree runs that a client can make crash on demand — a fatal DuckDB error
   stops the connection (`Smolquery.Engine.Connection`) — so it must sit where
   its restarts cannot reach a row. The comment on the pool's own child spec,
@@ -132,11 +132,6 @@ defmodule Smolquery.BufferService.Supervisor do
     Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
   end
 
-  # Started only for `flush_writer: :duckdb`, so the default path pays nothing —
-  # not a database, not a connection, not the extension load its bootstrap runs,
-  # and not this child either: `write_pool/1` is `nil` for every other writer and
-  # `init/1` rejects it, so the default child list is the one it always was.
-  #
   # ## Why the pool is its own supervisor, and why it is down here
   #
   # The pool used to be the *first* children of this list. Under `rest_for_one`
@@ -174,7 +169,7 @@ defmodule Smolquery.BufferService.Supervisor do
   # pool that gives up leaves the NDJSON route answering errors on a node whose
   # JSON route, buffers and hot tier are untouched, which is the trade this
   # module wants.
-  defp write_pool(%Runtime{flush_writer: :duckdb} = runtime) do
+  defp write_pool(%Runtime{} = runtime) do
     %{
       id: Runtime.write_pool(runtime.name),
       type: :supervisor,
@@ -194,11 +189,7 @@ defmodule Smolquery.BufferService.Supervisor do
     }
   end
 
-  defp write_pool(%Runtime{}), do: nil
-
-  # The `:duckdb` flush writer needs its own DuckDB instances. Only reached
-  # through `write_pool/1`, which is `nil` for every other writer, so `:polars`
-  # deployments carry no extra process.
+  # The flush needs its own DuckDB instances.
   #
   # Each member is sized for the pool by `Runtime.write_engine_budget/1`, whose
   # doc carries the whole argument — what multiplies when a member inherits

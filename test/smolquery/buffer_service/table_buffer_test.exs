@@ -319,13 +319,16 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert total == 12
     end
 
-    test "an encode failure fails only its own commit, and the next lands", context do
+    test "a bad row is rejected at its index, and the next commit lands", context do
       %{name: name} =
         start_buffer_service(context, flush_max_rows: 1, encode_concurrency: 2)
 
-      poisoned = %{schema: schema(), rows: [%{"id" => :not_encodable}]}
+      poisoned = %{schema: schema(), rows: [%{"id" => "not_encodable"}]}
 
-      assert {:error, {:invalid_rows, _message}} = Client.write_batch(name, @table, poisoned)
+      assert {:invalid, [%{index: 0, errors: [%{message: message}]}]} =
+               Client.write_batch(name, @table, poisoned)
+
+      assert message =~ "cannot accept"
       assert {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
       assert ack.row_count == 1
     end

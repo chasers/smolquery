@@ -68,15 +68,13 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   holding garbage. One measurement on a loaded pod: 1,892 MB of process heaps,
   a live set of 0.0 MB, and 2,394 MB freed by a single forced collection.
 
-  ## A map schema takes the DuckDB writer, whatever shape its rows arrived in
+  ## Every commit encodes through DuckDB (PL-57)
 
-  Explorer cannot write a `MAP(STRING, STRING)` or `VARIANT` column (see
-  `Smolquery.Schema`), so under `flush_writer: :duckdb` a rows or frame commit
-  against such a schema is re-encoded as the NDJSON the passthrough path would
-  have carried and written by DuckDB. The hot segment then always carries the
-  sealed table's type. Under `flush_writer: :polars` the commit is refused with
-  `{:error, {:flush_writer_unsupported, :polars, type}}` — a deployment's
-  configuration, which the API reports as such and not as the caller's mistake.
+  An NDJSON passthrough commit is spooled as the bytes the client sent. A rows
+  or frame commit — `insert/4`, a batch load — is re-encoded to NDJSON first
+  and takes the same `COPY`. One writer, so a hot segment always carries the
+  sealed table's types, `MAP(STRING, STRING)` and `VARIANT` included; the
+  Explorer writer that once took rows directly could not write those.
   """
 
   use GenServer
@@ -88,8 +86,6 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   alias Smolquery.BufferService.Load
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Runtime
-  alias Smolquery.Schema
-  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
@@ -290,26 +286,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp encode(runtime, prefix, commit) do
-    cond do
-      ndjson_commit?(commit) ->
-        encode_ndjson(runtime, prefix, commit)
-
-      Schema.explorer_writable?(commit.schema) ->
-        with {:ok, merged} <- Writer.merge_chunks(commit.chunks, commit.schema) do
-          Writer.write(merged, commit.schema,
-            store: runtime.store,
-            prefix: prefix,
-            compression: runtime.compression
-          )
-        end
-
-      runtime.flush_writer == :duckdb ->
+    if ndjson_commit?(commit),
+      do: encode_ndjson(runtime, prefix, commit),
+      else:
         encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
-
-      true ->
-        {:ok, %Field{type: type}} = Schema.explorer_unwritable(commit.schema)
-        {:error, {:flush_writer_unsupported, runtime.flush_writer, type}}
-    end
   end
 
   defp ndjson_commit?(%{chunks: [{:ndjson, _body, _count} | _rest]}), do: true
@@ -336,8 +316,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     try do
       case write_ndjson(runtime, prefix, commit, id, engine, paths) do
-        {:ok, segment} -> {:ok, segment}
-        {:error, _reason} -> salvage(runtime, prefix, commit, id, engine, paths)
+        {:ok, segment} ->
+          {:ok, segment}
+
+        {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} ->
+          salvage(runtime, prefix, commit, id, engine, paths)
+
+        {:error, _store_or_engine} = error ->
+          error
       end
     after
       Enum.each(paths, &File.rm/1)
@@ -359,8 +345,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # rows were fine. Worse, the failure is deterministic, so a client retrying a bad
   # batch would keep poisoning its neighbours.
   #
-  # Only reached when the whole-commit COPY already failed, so the cost is paid by
-  # the batch that caused it. Each body is checked on its own, the good ones commit
+  # Only reached when the whole-commit COPY already failed on the bytes — a store
+  # that refused the file (`:enospc`) is the caller's answer as it is, since no
+  # body caused it — so the cost is paid by the batch that caused it. Each body
+  # is checked on its own, the good ones commit
   # together, and a bad one is decoded through the per-row validator so its caller
   # gets the same `insertErrors` the JSON route would have given it. Rows that are
   # valid inside a bad body are re-spooled and committed too — rejecting a whole

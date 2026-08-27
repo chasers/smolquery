@@ -117,7 +117,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
 
   test "the :duckdb write pool runs under its own supervisor, with one child per member",
        context do
-    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 2)
+    name = start_buffer_service(context, write_pool_size: 2)
 
     pool = Process.whereis(Runtime.write_pool(name))
 
@@ -126,7 +126,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
   end
 
   test "write-pool members use the resolved thread budget", context do
-    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 2)
+    name = start_buffer_service(context, write_pool_size: 2)
     {:ok, runtime} = Runtime.fetch(name)
     expected = max(div(Engine.thread_count(), 2), 1)
 
@@ -135,19 +135,13 @@ defmodule Smolquery.BufferService.SupervisorTest do
            end) == [expected, expected]
   end
 
-  test "the :polars writer starts no write pool", context do
-    name = start_buffer_service(context, flush_writer: :polars)
-
-    assert Process.whereis(Runtime.write_pool(name)) == nil
-  end
-
   # The claim the pool's child spec makes: a pool that exhausts its own restart
   # intensity exits `:shutdown`, `:transient` turns that into a permanent
   # absence, and nothing that holds a row moves. Killing the *member* over and
   # over is how a real fault arrives — a fatal DuckDB error stops the engine,
   # not the pool.
   test "a write pool that gives up takes nothing with it", context do
-    name = start_buffer_service(context, flush_writer: :duckdb, write_pool_size: 1)
+    name = start_buffer_service(context, write_pool_size: 1)
 
     manifest = Process.whereis(Runtime.manifest(name))
     buffers = Process.whereis(Runtime.buffers(name))
