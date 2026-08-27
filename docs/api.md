@@ -141,6 +141,8 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
 ]}}
 ```
 
+A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `manifests` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read.
+
 A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 
 Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `trace` option only decides whether this job collects them. A job that failed or was cancelled still settles with the spans it got: the partial trace is exactly what explains the failure. History does not persist the trace, the same as `statistics` and `explain`. A non-boolean `trace` value is a 400.

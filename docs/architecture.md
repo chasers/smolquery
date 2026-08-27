@@ -814,6 +814,7 @@ sequenceDiagram
     J->>B: hot manifests (every expected buffer node)
     B-->>J: entries + claim keys + min-max stats
     J->>J: prune by WHERE, drop entries sealed by S
+    J->>E: ORDER BY col LIMIT n over one table: probe the newest entries for the n-th value, drop entries short of it
     J->>E: CREATE OR REPLACE VIEW per table — lake pinned at S, unioned with read_parquet(urls)
     J->>E: disable + lock external access, then run the user's SQL
     E-->>J: Arrow → Explorer frame
@@ -861,6 +862,17 @@ Properties worth knowing:
   conjuncts against flush-time min-max stats. It is conservative in every
   uncertain case. The sealed tier prunes itself: DuckLake keeps stats at
   registration.
+- **A last-N query reads the newest hot files, not all of them** (T-400). An
+  `ORDER BY col DESC LIMIT n` is not a WHERE conjunct, and DuckDB applies it
+  only after a footer read per file — hundreds of round trips under ingest
+  for the one or two files that hold the answer. When the statement is one
+  SELECT over one table, ordered by a plain column with a constant LIMIT,
+  the planner probes the newest entries (by their stats) with the user's own
+  WHERE for the n-th value of `col`, then keeps only the entries whose stats
+  can reach it. The probe's rows are real rows of the answer set, so the
+  bound is sound; a probe that finds fewer than n rows, or fails, keeps
+  every entry. `SMOLQUERY_TOP_N_PROBE_ROWS` sizes the second probe round
+  and `0` turns the bound off.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.
 - **A `catalog.schema.table` reference federates** (T-324). A catalog name

@@ -109,6 +109,14 @@ defmodule Smolquery.QueryService.Runtime do
   the job. Each warm engine holds one catalog connection and its DuckDB
   baseline memory while it waits.
 
+  `top_n_probe_rows` (T-400) is the hot-row budget of the Top-N bound's
+  second probe round: an `ORDER BY col LIMIT n` query over one table probes
+  the newest micro-segments for the n-th value of `col` and reads only the
+  entries that can reach it (`Smolquery.QueryService.TopN`). Round 1 probes
+  the newest entries whose rows cover `n`; round 2, when the first found
+  fewer than n matching rows, probes the newest whose rows cover this many.
+  `1_000_000` by default; `0` turns the bound off.
+
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
   a job's own `distributed:` option overrides it either way. `min_files` is
@@ -162,6 +170,7 @@ defmodule Smolquery.QueryService.Runtime do
     warm_engines: 2,
     warm_engine_max_age_ms: 300_000,
     warm_probe: "SELECT 1",
+    top_n_probe_rows: 1_000_000,
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -194,6 +203,7 @@ defmodule Smolquery.QueryService.Runtime do
           warm_engines: non_neg_integer(),
           warm_engine_max_age_ms: pos_integer(),
           warm_probe: String.t(),
+          top_n_probe_rows: non_neg_integer(),
           store: Store.t() | nil,
           distributed: %{
             enabled: boolean(),
@@ -219,7 +229,8 @@ defmodule Smolquery.QueryService.Runtime do
     :result_max_rows,
     :write_partitions,
     :warm_engines,
-    :warm_engine_max_age_ms
+    :warm_engine_max_age_ms,
+    :top_n_probe_rows
   ]
 
   @doc """

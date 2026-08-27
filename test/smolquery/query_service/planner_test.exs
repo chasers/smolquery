@@ -1,15 +1,21 @@
 defmodule Smolquery.QueryService.PlannerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.QueryService.Trace
   alias Smolquery.Schema
+  alias Smolquery.Segments.Store
   alias Smolquery.Test.FixedCatalog
   alias Smolquery.Test.ManifestServer
+  alias Smolquery.Test.SegmentFixture
 
   @engine __MODULE__.Parser
   @conn Engine.connection_name(@engine)
@@ -38,6 +44,8 @@ defmodule Smolquery.QueryService.PlannerTest do
     )
   end
 
+  defp ids(entries), do: Enum.map(entries, & &1["id"])
+
   defp runtime(entries, opts \\ []) do
     agent = start_supervised!({Agent, fn -> entries end}, id: make_ref())
     server = start_supervised!(ManifestServer.bandit_spec(agent), id: make_ref())
@@ -53,10 +61,15 @@ defmodule Smolquery.QueryService.PlannerTest do
       )
 
     Runtime.new(
-      name: :"planner_#{:erlang.unique_integer([:positive])}",
-      catalog: FixedCatalog.new(answers),
-      buffer_base_url: ManifestServer.base_url(server),
-      buffer_timeout_ms: 2_000
+      Keyword.merge(
+        [
+          name: :"planner_#{:erlang.unique_integer([:positive])}",
+          catalog: FixedCatalog.new(answers),
+          buffer_base_url: ManifestServer.base_url(server),
+          buffer_timeout_ms: 2_000
+        ],
+        Keyword.get(opts, :runtime, [])
+      )
     )
   end
 
@@ -565,6 +578,164 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert {:error, {:hot_tier_unavailable, @table, _reason}} =
                Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+    end
+  end
+
+  describe "the Top-N bound (T-400)" do
+    @hot_schema Schema.new!([{"id", :int64}, {"project", :string}, {"ts", :timestamp}])
+    @tail "SELECT * FROM analytics.events WHERE project = 'a' ORDER BY ts DESC LIMIT 5"
+
+    defp segment(dir, rows, schema \\ @hot_schema) do
+      {:ok, prefix} = Store.prefix(@table)
+
+      {:ok, segment} =
+        SegmentFixture.write(rows, schema, store: Store.Local.new(dir: dir), prefix: prefix)
+
+      segment |> Entry.from_segment(0) |> Entry.to_manifest() |> Map.put("url", segment.path)
+    end
+
+    defp minute(k, row) do
+      %{
+        "id" => k * 100 + row,
+        "project" => project(row),
+        "ts" => NaiveDateTime.add(~N[2026-08-27 10:00:00], k * 60 + row, :second)
+      }
+    end
+
+    defp project(0), do: "c"
+    defp project(row) when rem(row, 2) == 0, do: "a"
+    defp project(_odd), do: "b"
+
+    defp hot_entries(dir, count \\ 10),
+      do: for(k <- 1..count, do: segment(dir, for(row <- 0..19, do: minute(k, row))))
+
+    defp hot_runtime(entries, opts \\ []) do
+      runtime(entries, Keyword.merge([answers: [schemas: %{@table => @hot_schema}]], opts))
+    end
+
+    defp at(entries, positions), do: for(k <- positions, do: Enum.at(entries, k - 1)["id"])
+
+    @tag :tmp_dir
+    test "a last-N query reads only the entries that can hold one of its rows", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, @tail)
+
+      assert ids(plan.hot[@table]) == at(entries, [10])
+      [_schema, view] = plan.statements
+      assert view =~ Enum.at(entries, 9)["url"]
+      refute view =~ Enum.at(entries, 8)["url"]
+      assert view =~ "AT (VERSION => #{@snapshot})"
+    end
+
+    @tag :tmp_dir
+    test "a rare match falls through to the second round's budget", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      runtime = hot_runtime(entries, runtime: [top_n_probe_rows: 60])
+      sql = "SELECT * FROM analytics.events WHERE project = 'c' ORDER BY ts DESC LIMIT 3"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == at(entries, [8, 9, 10])
+    end
+
+    @tag :tmp_dir
+    test "too few matches in both rounds keeps every entry", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      runtime = hot_runtime(entries, runtime: [top_n_probe_rows: 60])
+      sql = "SELECT * FROM analytics.events WHERE project = 'c' ORDER BY ts DESC LIMIT 4"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    @tag :tmp_dir
+    test "ASC bounds by the oldest entries", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      sql = "SELECT id FROM analytics.events ORDER BY ts LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
+
+      assert ids(plan.hot[@table]) == at(entries, [1])
+    end
+
+    @tag :tmp_dir
+    test "a candidate that predates a column still binds the WHERE", ctx do
+      entries = hot_entries(ctx.tmp_dir, 9)
+      old_schema = Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+      rows = for row <- 0..19, do: minute(10, row) |> Map.delete("project")
+      entries = entries ++ [segment(ctx.tmp_dir, rows, old_schema)]
+      runtime = hot_runtime(entries, runtime: [top_n_probe_rows: 40])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, @tail)
+
+      assert ids(plan.hot[@table]) == at(entries, [9, 10])
+    end
+
+    @tag :tmp_dir
+    test "the trace carries the outcome", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      collector = Trace.attach("top-n-#{System.unique_integer([:positive])}", self())
+
+      assert {:ok, _plan} = Planner.plan(hot_runtime(entries), @conn, @tail)
+
+      assert %{meta: %{bounded: true, rounds: 1, candidates: 1}} =
+               collector |> Trace.stop() |> Enum.find(&(&1.name == :top_n))
+    end
+
+    @tag :tmp_dir
+    test "a budget of zero turns the bound off", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      runtime = hot_runtime(entries, runtime: [top_n_probe_rows: 0])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, @tail)
+
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    @tag :tmp_dir
+    test "fewer entries than the probe is worth are read as they are", ctx do
+      entries = hot_entries(ctx.tmp_dir, 3)
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, @tail)
+
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    @tag :tmp_dir
+    test "a query the bound does not apply to reads every entry", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      sql = "SELECT * FROM analytics.events WHERE project = 'a' ORDER BY ts DESC"
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
+
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    test "a probe that cannot read its candidates keeps every entry and says so" do
+      stats = fn k ->
+        %{
+          "ts" => %{
+            "min" => %{"type" => "naive_datetime", "value" => "2026-08-27T10:#{k}:00"},
+            "max" => %{"type" => "naive_datetime", "value" => "2026-08-27T10:#{k}:19"},
+            "null_count" => 0
+          }
+        }
+      end
+
+      entries =
+        for k <- 10..19, do: entry("01#{k}", %{"row_count" => 20, "stats" => stats.(k)})
+
+      runtime = hot_runtime(entries)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, plan} = Planner.plan(runtime, @conn, @tail)
+          assert ids(plan.hot[@table]) == ids(entries)
+        end)
+
+      assert log =~ "top-n probe failed, reading every hot entry"
     end
   end
 end

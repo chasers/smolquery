@@ -69,6 +69,20 @@ defmodule Smolquery.QueryService.Planner do
   built, saving DuckDB an HTTP footer read per file. The sealed tier prunes
   itself — DuckLake collects stats at registration (verified in PL-2).
 
+  ## A last-N query reads the newest micro-segments (T-400)
+
+  `ORDER BY col DESC LIMIT n` is not a conjunct, so the pruner cannot read
+  it, and DuckDB applies it only after a footer read per file — hundreds of
+  HTTP round trips per query under ingest, for the one or two files that
+  hold the answer. `Smolquery.QueryService.TopN` closes that gap: when the
+  statement is one SELECT over one table, ordered by a plain column with a
+  constant LIMIT, the planner probes the newest entries (by their stats)
+  through a view of the table's own name, with the user's WHERE, for the
+  n-th value of `col`, and keeps only the entries whose stats can reach it.
+  The probe runs on the job engine before the plan's statements do, and the
+  runner's `CREATE OR REPLACE VIEW` then defines the table for real. A
+  query that does not qualify, and a probe that fails, keep every entry.
+
   ## Both tiers project onto the catalog's schema
 
   Micro-segments written before a column was added lack it; `UNION ALL BY
@@ -185,6 +199,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.QueryService.TopN
   alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.Views
 
@@ -193,11 +208,12 @@ defmodule Smolquery.QueryService.Planner do
   @doc """
   Plans `sql` against the catalog and the hot tier, as one consistent read.
 
-  `connection` (an `Smolquery.Engine.Connection` server) is only used to
-  parse — one round trip runs `json_serialize_sql` for the AST and derives
-  the statement's canonical text (`Plan.canonical_sql`, what the runner's
-  result budget wraps), and nothing else does. The runner passes its own job
-  engine's connection, so parsing never queues behind another job's scan.
+  `connection` (an `Smolquery.Engine.Connection` server) is used to parse —
+  one round trip runs `json_serialize_sql` for the AST and derives the
+  statement's canonical text (`Plan.canonical_sql`, what the runner's result
+  budget wraps) — and, for a query the Top-N bound applies to, to probe the
+  hot tier (`Smolquery.QueryService.TopN.bound/6`). The runner passes its own
+  job engine's connection, so neither queues behind another job's scan.
   """
   @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
   def plan(%Runtime{} = runtime, connection, sql) do
@@ -211,21 +227,53 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
          {:ok, manifests} <-
            Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
+      members = members(refs, tables, manifests)
+      pruned = pruned(members, Pruner.conjuncts(statement, refs))
+      hot = bounded(runtime, connection, statement, refs, tables, pruned)
+
       {:ok,
        Trace.span(:build, fn ->
-         build(
-           sql,
-           canonical,
-           snapshot,
-           refs,
-           tables,
-           manifests,
-           Pruner.conjuncts(statement, refs),
-           attaches
-         )
+         build(sql, canonical, snapshot, refs, tables, members, hot, attaches)
        end)}
     end
   end
+
+  defp members(refs, tables, manifests) do
+    Map.new(refs, fn ref ->
+      {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
+    end)
+  end
+
+  defp pruned(members, conjuncts) do
+    Map.new(members, fn {ref, entries} ->
+      {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || []))}
+    end)
+  end
+
+  defp bounded(runtime, connection, statement, refs, tables, hot) do
+    case TopN.spec(statement, refs) do
+      nil ->
+        hot
+
+      %{ref: ref} = spec ->
+        {entries, _outcome} =
+          Trace.span(:top_n, &top_n_outcome/1, fn ->
+            TopN.bound(
+              connection,
+              statement,
+              spec,
+              tables[ref].schema,
+              hot[ref],
+              runtime.top_n_probe_rows
+            )
+          end)
+
+        Map.put(hot, ref, entries)
+    end
+  end
+
+  defp top_n_outcome({_entries, outcome}), do: outcome
+  defp top_n_outcome(_raised), do: %{}
 
   defp federated(_runtime, []), do: {:ok, []}
 
@@ -524,17 +572,7 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, canonical, snapshot, refs, tables, manifests, conjuncts, attaches) do
-    members =
-      Map.new(refs, fn ref ->
-        {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
-      end)
-
-    hot =
-      Map.new(members, fn {ref, entries} ->
-        {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || []))}
-      end)
-
+  defp build(sql, canonical, snapshot, refs, tables, members, hot, attaches) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
 
     %Plan{
