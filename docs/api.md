@@ -135,11 +135,14 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
   {"name": "resolve",        "startUs": 43380, "durationUs": 2900,  "meta": {}},
   {"name": "manifests",      "startUs": 46300, "durationUs": 8100,  "meta": {}},
   {"name": "manifest_fetch", "startUs": 46310, "durationUs": 7900,  "meta": {"url": "http://buffer-0:4321"}},
+  {"name": "prune",          "startUs": 54420, "durationUs": 60,    "meta": {}},
   {"name": "build",          "startUs": 54500, "durationUs": 350,   "meta": {}},
   {"name": "statements",     "startUs": 54900, "durationUs": 4200,  "meta": {}},
   {"name": "execute",        "startUs": 59200, "durationUs": 812000,"meta": {}}
 ]}}
 ```
+
+A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `prune` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read. A probe that was skipped or raised reports the same three keys with `bounded` false. `prune` is the membership rule and the WHERE pruner, on every query.
 
 A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 
@@ -164,7 +167,7 @@ A finished job carries a **`statistics`** object. It appears on the `job` in a `
 
 The numbers are plan-derived. They report the files the planner decided the query needs, plus those files' catalog and manifest sizes. They are not engine-measured input/output (I/O). The tiers prune by different mechanisms, so the report keeps them separate.
 
-For the hot tier, `filesTotal` counts the micro-segments that passed the membership rule. `filesScanned` counts what survived min-max pruning: the pruner's effect, counted. For the sealed tier, both fields count the segments listed at the pinned snapshot. DuckDB may prune further at scan time; the planner cannot see that.
+For the hot tier, `filesTotal` counts the micro-segments that passed the membership rule. `filesScanned` counts what survived the WHERE pruner and the Top-N bound (T-400): the planner's pruning, counted. For the sealed tier, both fields count the segments listed at the pinned snapshot. DuckDB may prune further at scan time; the planner cannot see that.
 
 ## Errors
 

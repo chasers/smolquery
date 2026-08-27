@@ -52,14 +52,23 @@ defmodule Smolquery.QueryService.Trace do
   @doc """
   Runs `fun` as the phase `name`, emitting its span when it returns.
 
+  `meta` is the span's metadata: a map, or a function of `fun`'s outcome
+  that builds one — `{:raised, kind, reason}` when `fun` raised — for a
+  phase whose metadata is what it found out (the `top_n` probe's outcome).
+
   `Smolquery.Telemetry.span/3` is the clock (T-380): the span is emitted
   whether `fun` answered `{:ok, _}` or `{:error, _}`, and when it raises —
   the phase still took its time, and a trace that ends at the failing phase
   says where the job died — before the exception continues.
   """
-  @spec span(atom(), map(), (-> result)) :: result when result: var
-  def span(name, meta \\ %{}, fun),
+  @spec span(atom(), map() | (term() -> map()), (-> result)) :: result when result: var
+  def span(name, meta \\ %{}, fun)
+
+  def span(name, meta, fun) when is_map(meta),
     do: Telemetry.span(@event, Map.put(meta, :phase, name), fun)
+
+  def span(name, describe, fun) when is_function(describe, 1),
+    do: Telemetry.span(@event, &{%{}, Map.put(describe.(&1), :phase, name)}, fun)
 
   @doc """
   Attaches a collector for the job whose runner is `owner`.

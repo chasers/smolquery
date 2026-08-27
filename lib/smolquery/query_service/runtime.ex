@@ -94,6 +94,9 @@ defmodule Smolquery.QueryService.Runtime do
   `allowed_directories`, the plan's own micro-segment URLs, and the sealed
   tier's object-store prefix (when `store` is `Store.S3`) readable. On
   by default: SQL arriving over the HTTP API must not read arbitrary files.
+  The Top-N probe (T-400) runs the user's WHERE before that point, to read
+  the hot tier; under lockdown it runs with extension autoload off, so it
+  can do nothing the locked-down query could not.
   `allowed_directories` defaults to the node's `:data_dir` (expanded) plus
   whatever the catalog configuration names; a deployment whose sealed
   segments live elsewhere on disk must say so here, or its queries will
@@ -108,6 +111,14 @@ defmodule Smolquery.QueryService.Runtime do
   stale catalog connection falls back to a cold start rather than failing
   the job. Each warm engine holds one catalog connection and its DuckDB
   baseline memory while it waits.
+
+  `top_n_probe_rows` (T-400) is the hot-row budget of the Top-N bound's
+  second probe round: an `ORDER BY col LIMIT n` query over one table probes
+  the newest micro-segments for the n-th value of `col` and reads only the
+  entries that can reach it (`Smolquery.QueryService.TopN`). Round 1 probes
+  the newest entries whose rows cover `n`; round 2, when the first found
+  fewer than n matching rows, probes the newest whose rows cover this many.
+  `1_000_000` by default; `0` turns the bound off.
 
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
@@ -162,6 +173,7 @@ defmodule Smolquery.QueryService.Runtime do
     warm_engines: 2,
     warm_engine_max_age_ms: 300_000,
     warm_probe: "SELECT 1",
+    top_n_probe_rows: 1_000_000,
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -194,6 +206,7 @@ defmodule Smolquery.QueryService.Runtime do
           warm_engines: non_neg_integer(),
           warm_engine_max_age_ms: pos_integer(),
           warm_probe: String.t(),
+          top_n_probe_rows: non_neg_integer(),
           store: Store.t() | nil,
           distributed: %{
             enabled: boolean(),
@@ -219,7 +232,8 @@ defmodule Smolquery.QueryService.Runtime do
     :result_max_rows,
     :write_partitions,
     :warm_engines,
-    :warm_engine_max_age_ms
+    :warm_engine_max_age_ms,
+    :top_n_probe_rows
   ]
 
   @doc """

@@ -58,14 +58,53 @@ defmodule Smolquery.QueryService.TopN do
   A `SELECT * REPLACE (…)` is refused for the same reason.
 
   Every miss is `nil` — no bound, never an error.
+
+  ## What the probe refuses
+
+  `bound/6` asks DuckDB's own catalog (`duckdb_functions()`) about every
+  function the statement names, and probes nothing when one is `VOLATILE`
+  or a macro: `WHERE random() < 0.01` draws once in the probe and again in
+  the query, so the probe's rows are not rows of the answer, and the bound
+  they give is wrong. `CONSISTENT_WITHIN_QUERY` functions — `now()`,
+  `current_date` — are accepted: the probe's clock reads milliseconds
+  before the query's, and a window such as `ts > now() - INTERVAL 5
+  MINUTE` stays sound across that gap, since the rows the later clock adds
+  are the newest ones. A predicate built to flip on the clock between two
+  statements is the one shape this does not cover.
+
+  The ordering column must be stored as an integer, a float, a string, a
+  timestamp, or a date. A DECIMAL's manifest stats arrive as strings (the
+  bound encoding has no case for them, the same gap the WHERE pruner has),
+  so a bound could never prune; the probe is not paid for.
+
+  Under `lockdown`, the probe runs with extension autoload and autoinstall
+  off. It runs before the runner locks the engine down — it must, to read
+  the hot tier over HTTP — and the user's WHERE runs inside it, so without
+  that a `::INET` cast could fetch an extension from the network pre-lockdown
+  and answer a query that lockdown would refuse. Locked down, the user's own
+  query cannot autoload either, so the probe is never more able than it.
   """
+
+  require Logger
 
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Connection
+  alias Smolquery.Engine.Result
+  alias Smolquery.Identifier
   alias Smolquery.QueryService.Pruner
+  alias Smolquery.QueryService.Views
+  alias Smolquery.Schema
 
   @type direction :: :desc | :asc
+
+  @typedoc """
+  What `bound/6` did: whether a bound was found, how many probe rounds ran,
+  and how many entries the last round probed. It rides on the `top_n` trace
+  span.
+  """
+  @type outcome :: %{bounded: boolean(), rounds: non_neg_integer(), candidates: non_neg_integer()}
 
   @typedoc """
   What the bound needs from the statement: the table, the ordering column,
@@ -79,7 +118,14 @@ defmodule Smolquery.QueryService.TopN do
           limit: pos_integer()
         }
 
+  @min_entries 8
   @excluded_classes ["SUBQUERY", "WINDOW"]
+  @bounded_types [:int64, :float64, :string, :timestamp, :date]
+  @stable ["CONSISTENT", "CONSISTENT_WITHIN_QUERY"]
+  @no_autoload [
+    "SET autoinstall_known_extensions = false",
+    "SET autoload_known_extensions = false"
+  ]
   @directions %{"DESCENDING" => :desc, "ASCENDING" => :asc, "ORDER_DEFAULT" => :asc}
   @null_orders ["ORDER_DEFAULT", "NULLS LAST"]
 
@@ -140,7 +186,9 @@ defmodule Smolquery.QueryService.TopN do
   The choice only affects how tight the bound is, never whether it is sound.
   """
   @spec candidates([HotClient.entry()], t(), pos_integer()) :: [HotClient.entry()]
-  def candidates(entries, %{column: column, direction: direction}, rows) do
+  def candidates(entries, spec, rows), do: entries |> ranked(spec) |> take_rows(rows)
+
+  defp ranked(entries, %{column: column, direction: direction}) do
     entries
     |> Enum.flat_map(fn entry ->
       case edge(entry, column, direction) do
@@ -150,7 +198,6 @@ defmodule Smolquery.QueryService.TopN do
     end)
     |> sort(direction)
     |> Enum.map(fn {_edge, entry} -> entry end)
-    |> take_rows(rows)
   end
 
   @doc """
@@ -166,6 +213,187 @@ defmodule Smolquery.QueryService.TopN do
 
     Enum.filter(entries, &Pruner.keep?(&1, [conjunct]))
   end
+
+  @doc """
+  The entries `spec`'s query can need, found by probing `connection`.
+
+  `opts` are `:budget` — the hot-row budget of the second round — and
+  `:lockdown`, whether the runner locks this engine down after planning.
+
+  Round 1 probes the newest entries whose rows cover `n`; when they hold
+  fewer than n rows that match, round 2 probes the newest whose rows cover
+  the budget (or n, when the budget is smaller). A probe that returns n rows
+  gives the bound; one that returns fewer gives nothing, and after the last
+  round every entry is kept.
+
+  The probe is skipped, and every entry kept, when the budget is `0`, when
+  fewer than #{@min_entries} entries survive (the probe costs about one footer and one
+  column chunk), when the ordering column is not stored as a type the bound
+  can compare, when the statement names a volatile function or a macro, and
+  when a round's candidates are already every entry that has stats. A probe
+  that fails — an unreachable buffer node, a predicate the candidates cannot
+  bind — logs a warning and keeps every entry: the answer the planner gave
+  before the bound existed, never a failed query.
+
+  The probe reads through `Smolquery.QueryService.Views.table_view/3` under
+  the table's own name, over the candidates alone, with the catalog's
+  columns padded by an empty NULL branch so a column the candidates lack
+  binds. It measures `count(col)` and the n-th value in one row: the count
+  is of non-null values, since a NULL sorts last and can live in any entry,
+  so only n non-null rows prove that the answer holds no NULL.
+  """
+  @spec bound(GenServer.server(), map(), t(), Schema.t(), [HotClient.entry()],
+          budget: non_neg_integer(),
+          lockdown: boolean()
+        ) :: {[HotClient.entry()], outcome()}
+  def bound(connection, statement, spec, schema, entries, opts) do
+    budget = Keyword.fetch!(opts, :budget)
+
+    if budget > 0 and length(entries) >= @min_entries and bounded_type?(schema, spec.column) do
+      probe(
+        connection,
+        statement,
+        spec,
+        schema,
+        entries,
+        budget,
+        Keyword.get(opts, :lockdown, true)
+      )
+    else
+      {entries, skipped()}
+    end
+  end
+
+  defp probe(connection, statement, spec, schema, entries, budget, lockdown) do
+    with :ok <- restrain(connection, lockdown),
+         {:ok, sql} <- probe_sql(connection, statement, spec) do
+      probe = %{connection: connection, probe: sql, spec: spec, schema: schema}
+
+      rounds(
+        probe,
+        entries,
+        ranked(entries, spec),
+        [spec.limit, max(budget, spec.limit)],
+        skipped()
+      )
+    else
+      :unstable -> {entries, skipped()}
+      {:error, reason} -> fallback(entries, reason, skipped())
+    end
+  end
+
+  defp bounded_type?(%Schema{fields: fields}, column) do
+    Enum.any?(fields, &(&1.name == column and &1.type in @bounded_types))
+  end
+
+  defp restrain(_connection, false), do: :ok
+  defp restrain(connection, true), do: define(connection, @no_autoload)
+
+  defp skipped, do: %{bounded: false, rounds: 0, candidates: 0}
+
+  defp rounds(_probe, entries, _ranked, [], outcome), do: {entries, outcome}
+
+  defp rounds(probe, entries, ranked, [rows | budgets], outcome) do
+    candidates = take_rows(ranked, rows)
+    count = length(candidates)
+
+    if count == 0 or count == outcome.candidates or count == length(ranked) do
+      {entries, outcome}
+    else
+      outcome = %{outcome | rounds: outcome.rounds + 1, candidates: count}
+
+      case measure(probe, candidates) do
+        {:ok, {n, bound}} when n >= probe.spec.limit and not is_nil(bound) ->
+          {prune(entries, probe.spec, bound), %{outcome | bounded: true}}
+
+        {:ok, _short} ->
+          rounds(probe, entries, ranked, budgets, outcome)
+
+        {:error, reason} ->
+          fallback(entries, reason, outcome)
+      end
+    end
+  end
+
+  defp fallback(entries, reason, outcome) do
+    Logger.warning(fn ->
+      "top-n probe failed, reading every hot entry: #{inspect(reason)}"
+    end)
+
+    {entries, outcome}
+  end
+
+  defp probe_sql(connection, statement, spec) do
+    json = statement |> probe_ast(spec) |> JSON.encode!()
+
+    sql =
+      "SELECT json_deserialize_sql(#{Identifier.sql_string(json)}), " <>
+        unstable_count(function_names(statement))
+
+    case Connection.query(connection, sql) do
+      {:ok, %Result{rows: [[probe, 0]]}} when is_binary(probe) -> {:ok, probe}
+      {:ok, %Result{rows: [[probe, _unstable]]}} when is_binary(probe) -> :unstable
+      {:ok, result} -> {:error, {:probe_not_rendered, result}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp function_names(statement) do
+    statement
+    |> walk([], fn node, acc ->
+      case node do
+        %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name | acc]
+        _other -> acc
+      end
+    end)
+    |> Enum.map(&String.downcase/1)
+    |> Enum.uniq()
+  end
+
+  defp unstable_count([]), do: "0"
+
+  defp unstable_count(names) do
+    "(SELECT count(*) FROM duckdb_functions() WHERE lower(function_name) IN (" <>
+      Enum.map_join(names, ", ", &Identifier.sql_string/1) <>
+      ") AND coalesce(stability, '') NOT IN (" <>
+      Enum.map_join(@stable, ", ", &Identifier.sql_string/1) <> "))"
+  end
+
+  defp measure(%{connection: connection, probe: probe, spec: spec, schema: schema}, candidates) do
+    urls = Enum.map(candidates, & &1["url"])
+    from = padding(schema) <> " UNION ALL BY NAME " <> Views.parquet_select(urls)
+
+    with :ok <- define(connection, Views.table_view(spec.ref, schema, from)),
+         {:ok, %Result{rows: [[count, bound]]}} <-
+           Connection.query(connection, measurement(probe, spec.direction), [], :infinity) do
+      {:ok, {count, bound}}
+    else
+      {:ok, result} -> {:error, {:probe_not_measured, result}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp define(connection, statements) do
+    Enum.reduce_while(statements, :ok, fn statement, :ok ->
+      case Connection.query(connection, statement, [], :infinity) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp padding(%Schema{fields: fields}) do
+    "SELECT " <>
+      Enum.map_join(fields, ", ", &("NULL AS " <> Identifier.quote_name!(&1.name))) <>
+      " WHERE false"
+  end
+
+  defp measurement(probe, direction) do
+    "SELECT count(probe.value), #{edge_of(direction)}(probe.value) FROM (#{probe}) AS probe(value)"
+  end
+
+  defp edge_of(:desc), do: "min"
+  defp edge_of(:asc), do: "max"
 
   defp source(
          %{
@@ -295,15 +523,22 @@ defmodule Smolquery.QueryService.TopN do
   defp edge(%{min: min}, :asc), do: min
   defp edge(_missing, _direction), do: nil
 
-  defp sort([], _direction), do: []
+  defp sort(keyed, :desc), do: Enum.sort_by(keyed, fn {edge, _entry} -> edge end, &after?/2)
+  defp sort(keyed, :asc), do: Enum.sort_by(keyed, fn {edge, _entry} -> edge end, &before?/2)
 
-  defp sort([{edge, _entry} | _rest] = keyed, direction) do
-    Enum.sort_by(keyed, fn {edge, _entry} -> edge end, sorter(direction, edge))
+  defp before?(a, b), do: rank(a, b) != :gt
+  defp after?(a, b), do: rank(a, b) != :lt
+
+  defp rank(%NaiveDateTime{} = a, %NaiveDateTime{} = b), do: NaiveDateTime.compare(a, b)
+  defp rank(%Date{} = a, %Date{} = b), do: Date.compare(a, b)
+
+  defp rank(a, b) do
+    cond do
+      a < b -> :lt
+      a > b -> :gt
+      true -> :eq
+    end
   end
-
-  defp sorter(direction, %NaiveDateTime{}), do: {direction, NaiveDateTime}
-  defp sorter(direction, %Date{}), do: {direction, Date}
-  defp sorter(direction, _plain), do: direction
 
   defp take_rows(entries, rows) do
     entries

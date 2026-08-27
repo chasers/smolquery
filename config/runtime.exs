@@ -404,6 +404,14 @@ if count = System.get_env("SMOLQUERY_WARM_ENGINES") do
     warm_engines: Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_WARM_ENGINES", count)
 end
 
+# `SMOLQUERY_TOP_N_PROBE_ROWS` (T-400) is the hot-row budget of the Top-N
+# bound's second probe round; `0` turns the bound off.
+if rows = System.get_env("SMOLQUERY_TOP_N_PROBE_ROWS") do
+  config :smolquery, Smolquery.QueryService,
+    top_n_probe_rows:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_TOP_N_PROBE_ROWS", rows)
+end
+
 # Distributed queries (PL-49) are on by default: a decomposable aggregate
 # query scatters its file list across several DuckDB instances — the query
 # service's group members when clustering is on,
