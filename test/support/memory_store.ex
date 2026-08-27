@@ -31,11 +31,11 @@ defmodule Smolquery.Test.MemoryStore do
     staged = Path.join(System.tmp_dir!(), "memory-store-#{:erlang.unique_integer([:positive])}")
 
     try do
-      with :ok <- encoder.(staged),
+      with {:ok, meta} <- encoder.(staged),
            {:ok, contents} <- File.read(staged) do
         Agent.update(agent, &Map.put(&1, key, contents))
 
-        {:ok, %{location: location(agent, key), byte_size: byte_size(contents)}}
+        {:ok, %{location: location(agent, key), byte_size: byte_size(contents), meta: meta}}
       else
         {:error, reason} -> {:error, {:put_failed, key, reason}}
       end

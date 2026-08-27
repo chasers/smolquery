@@ -30,7 +30,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.QueryService.Client
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -107,7 +107,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     segments =
       for batch <- 0..5 do
         rows = for i <- 1..2, do: %{"id" => batch * 2 + i, "name" => "g-#{rem(batch, 3)}"}
-        {:ok, segment} = Writer.write(rows, schema(), store: store)
+        {:ok, segment} = SegmentFixture.write(rows, schema(), store: store)
 
         segment
       end

@@ -19,7 +19,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -65,7 +65,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
         }
       end
 
-    {:ok, segment} = Writer.write(rows, schema(), store: Local.new(dir: dir))
+    {:ok, segment} = SegmentFixture.write(rows, schema(), store: Local.new(dir: dir))
 
     segment
   end
@@ -175,7 +175,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       segments_dir: dir
     } do
       narrow = Schema.new!([{"id", :int64}])
-      {:ok, segment} = Writer.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
+      {:ok, segment} = SegmentFixture.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
 
       assert {:error, error} = Catalog.register_segments(catalog, @table, [segment])
       assert Exception.message(error) =~ "not found in file"
@@ -462,7 +462,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
 
       narrow = Schema.new!([{"id", :int64}])
-      {:ok, bad} = Writer.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
+      {:ok, bad} = SegmentFixture.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
 
       assert {:error, error} = Catalog.replace_segments(catalog, @table, [bad], [a.path])
       assert Exception.message(error) =~ "not found in file"

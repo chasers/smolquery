@@ -6,8 +6,8 @@ defmodule Smolquery.BufferService.HotManifestTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
   alias Smolquery.Test.MemoryStore
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :tmp_dir
 
@@ -33,7 +33,7 @@ defmodule Smolquery.BufferService.HotManifestTest do
 
   defp write(manifest, table_ref, rows) do
     {:ok, prefix} = Store.prefix(table_ref)
-    {:ok, segment} = Writer.write(rows, schema(), store: manifest.store, prefix: prefix)
+    {:ok, segment} = SegmentFixture.write(rows, schema(), store: manifest.store, prefix: prefix)
 
     segment
   end

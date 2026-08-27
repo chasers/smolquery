@@ -87,7 +87,7 @@ defmodule Bench.OtelLogs do
   alias Explorer.DataFrame
   alias Smolquery.IngestService.Validator
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @tail_limit 100
 
@@ -196,7 +196,7 @@ defmodule Bench.OtelLogs do
   end
 
   defp segment!(rows, schema, store) do
-    {:ok, segment} = Writer.write(rows, schema, store: store)
+    {:ok, segment} = SegmentFixture.write(rows, schema, store: store)
 
     segment
   end

@@ -88,11 +88,11 @@ defmodule Smolquery.Segments.Store.Local do
 
     with :ok <- File.mkdir_p(Path.dirname(target)),
          :ok <- File.mkdir_p(Path.dirname(staged)),
-         :ok <- encode(staged, encoder),
+         {:ok, meta} <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          :ok <- sync(staged, config.fsync),
          {:ok, committed_size} <- commit(staged, target, size) do
-      {:ok, %{location: target, byte_size: committed_size}}
+      {:ok, %{location: target, byte_size: committed_size, meta: meta}}
     else
       {:error, reason} ->
         File.rm(staged)

@@ -95,9 +95,16 @@ One note per release, newest first.
 ### The Polars flush writer is gone (PL-57)
 
 `SMOLQUERY_FLUSH_WRITER` is no longer a setting. DuckDB writes every flush,
-which was already the default. A deployment that still sets the variable fails
-the boot with a message that names this note: unset it. Nothing else changes
-for a deployment that never set it.
+which was already the default. A deployment that still sets it to `duckdb`
+boots with a warning: unset it. A deployment that still sets it to `polars`
+fails the boot with a message that names this note, because its writer would
+change under it. Nothing else changes for a deployment that never set it.
+
+A deployment that had pinned `polars` has a rollout order. A new ingest node
+always forwards NDJSON bytes; an old buffer node on `polars` refuses them, and
+the new node answers `503 UNAVAILABLE` for that table until the buffer node is
+upgraded. Roll the buffer nodes first, then the ingest nodes, and the window
+closes. No data is lost in the window: the request is refused, not dropped.
 
 ### Per-table partition counts (T-304)
 

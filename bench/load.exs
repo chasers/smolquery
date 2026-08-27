@@ -57,6 +57,7 @@ defmodule Bench.Load do
   alias Smolquery.IngestService.Validator
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @formats [
     {:ndjson, "application/x-ndjson", "ndjson"},
@@ -175,7 +176,7 @@ defmodule Bench.Load do
             valid
           end
 
-        {:ok, segment} = Writer.write(List.flatten(frames), schema, store: store)
+        {:ok, segment} = SegmentFixture.write(List.flatten(frames), schema, store: store)
         Process.put({:segment, rows}, segment.path)
 
         segment.path

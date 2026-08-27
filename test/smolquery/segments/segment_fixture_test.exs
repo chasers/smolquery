@@ -1,4 +1,4 @@
-defmodule Smolquery.Segments.WriterTest do
+defmodule Smolquery.Test.SegmentFixtureTest do
   use ExUnit.Case, async: true
 
   alias Explorer.DataFrame
@@ -6,7 +6,7 @@ defmodule Smolquery.Segments.WriterTest do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :tmp_dir
 
@@ -46,7 +46,8 @@ defmodule Smolquery.Segments.WriterTest do
 
   describe "write/3" do
     test "writes a ULID-named segment and describes it", %{tmp_dir: dir} do
-      assert {:ok, %Segment{} = segment} = Writer.write(rows(3), schema(), store: store(dir))
+      assert {:ok, %Segment{} = segment} =
+               SegmentFixture.write(rows(3), schema(), store: store(dir))
 
       assert Id.valid?(segment.id)
       assert segment.key == segment.id <> ".parquet"
@@ -60,7 +61,8 @@ defmodule Smolquery.Segments.WriterTest do
     test "writes under a table's prefix", %{tmp_dir: dir} do
       {:ok, prefix} = Store.prefix({"analytics", "events"})
 
-      assert {:ok, segment} = Writer.write(rows(1), schema(), store: store(dir), prefix: prefix)
+      assert {:ok, segment} =
+               SegmentFixture.write(rows(1), schema(), store: store(dir), prefix: prefix)
 
       assert segment.key == "analytics/events/#{segment.id}.parquet"
       assert segment.path == Path.join(dir, segment.key)
@@ -68,25 +70,25 @@ defmodule Smolquery.Segments.WriterTest do
     end
 
     test "refuses a prefix that could climb out of the store", %{tmp_dir: dir} do
-      assert Writer.write(rows(1), schema(), store: store(dir), prefix: "../escape") ==
+      assert SegmentFixture.write(rows(1), schema(), store: store(dir), prefix: "../escape") ==
                {:error, {:invalid_prefix, "../escape"}}
     end
 
     test "takes an explicit id", %{tmp_dir: dir} do
       id = Id.generate()
 
-      assert {:ok, segment} = Writer.write(rows(1), schema(), store: store(dir), id: id)
+      assert {:ok, segment} = SegmentFixture.write(rows(1), schema(), store: store(dir), id: id)
       assert segment.id == id
       assert Path.basename(segment.path) == id <> ".parquet"
     end
 
     test "rejects an id that is not a ULID", %{tmp_dir: dir} do
-      assert Writer.write(rows(1), schema(), store: store(dir), id: "../escape") ==
+      assert SegmentFixture.write(rows(1), schema(), store: store(dir), id: "../escape") ==
                {:error, {:invalid_segment_id, "../escape"}}
     end
 
     test "leaves nothing behind in the staging directory", %{tmp_dir: dir} do
-      assert {:ok, _segment} = Writer.write(rows(2), schema(), store: store(dir))
+      assert {:ok, _segment} = SegmentFixture.write(rows(2), schema(), store: store(dir))
 
       assert File.ls!(Path.join(dir, ".tmp")) == []
     end
@@ -94,40 +96,33 @@ defmodule Smolquery.Segments.WriterTest do
     test "creates the staging directory when the target is fresh", %{tmp_dir: dir} do
       nested = Path.join(dir, "dataset/table")
 
-      assert {:ok, segment} = Writer.write(rows(1), schema(), store: store(nested))
+      assert {:ok, segment} = SegmentFixture.write(rows(1), schema(), store: store(nested))
       assert File.exists?(segment.path)
     end
 
     test "refuses to write an empty segment", %{tmp_dir: dir} do
-      assert Writer.write([], schema(), store: store(dir)) == {:error, :no_rows}
+      assert SegmentFixture.write([], schema(), store: store(dir)) == {:error, :no_rows}
     end
 
     test "reports rows that do not fit the schema", %{tmp_dir: dir} do
       rows = [%{"id" => "not an integer"}]
 
-      assert {:error, {:invalid_rows, message}} = Writer.write(rows, schema(), store: store(dir))
+      assert {:error, {:invalid_rows, message}} =
+               SegmentFixture.write(rows, schema(), store: store(dir))
+
       assert is_binary(message)
     end
 
     test "writes a missing column as null", %{tmp_dir: dir} do
-      assert {:ok, segment} = Writer.write([%{"id" => 1}], schema(), store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write([%{"id" => 1}], schema(), store: store(dir))
 
       assert segment.row_count == 1
       assert segment.stats["name"].null_count == 1
       assert segment.stats["id"].null_count == 0
     end
 
-    test "accepts a DataFrame directly", %{tmp_dir: dir} do
-      frame = DataFrame.new(id: [1, 2, 3])
-
-      assert {:ok, segment} =
-               Writer.write(frame, Schema.new!([{"id", :int64}]), store: store(dir))
-
-      assert segment.row_count == 3
-    end
-
     test "round-trips every logical type through the written file", %{tmp_dir: dir} do
-      {:ok, segment} = Writer.write(rows(2), schema(), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows(2), schema(), store: store(dir))
 
       frame = DataFrame.from_parquet!(segment.path)
 
@@ -147,7 +142,7 @@ defmodule Smolquery.Segments.WriterTest do
 
   describe "stats" do
     test "carries min-max for the orderable types pruning uses", %{tmp_dir: dir} do
-      {:ok, segment} = Writer.write(rows(4), schema(), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows(4), schema(), store: store(dir))
 
       assert segment.stats["id"] == %{min: 1, max: 4, null_count: 0}
 
@@ -169,7 +164,7 @@ defmodule Smolquery.Segments.WriterTest do
     end
 
     test "counts nulls but skips min-max for types with no useful order", %{tmp_dir: dir} do
-      {:ok, segment} = Writer.write(rows(2), schema(), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows(2), schema(), store: store(dir))
 
       assert segment.stats["name"] == %{min: nil, max: nil, null_count: 0}
       assert segment.stats["ok"] == %{min: nil, max: nil, null_count: 0}
@@ -178,7 +173,7 @@ defmodule Smolquery.Segments.WriterTest do
     test "bounds a string column that leads the clustering key", %{tmp_dir: dir} do
       rows = [%{"tenant" => "c"}, %{"tenant" => "a"}, %{"tenant" => "b"}]
 
-      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows, tenant_schema(["tenant"]), store: store(dir))
 
       assert segment.stats["tenant"] == %{min: "a", max: "c", null_count: 0}
     end
@@ -186,7 +181,7 @@ defmodule Smolquery.Segments.WriterTest do
     test "excludes trailing nulls from a leading string column's max", %{tmp_dir: dir} do
       rows = [%{"tenant" => "b"}, %{"tenant" => nil}, %{"tenant" => "a"}]
 
-      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows, tenant_schema(["tenant"]), store: store(dir))
 
       assert segment.stats["tenant"] == %{min: "a", max: "b", null_count: 1}
     end
@@ -194,7 +189,7 @@ defmodule Smolquery.Segments.WriterTest do
     test "leaves an all-null leading string column unbounded", %{tmp_dir: dir} do
       rows = [%{"tenant" => nil}, %{"tenant" => nil}]
 
-      {:ok, segment} = Writer.write(rows, tenant_schema(["tenant"]), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows, tenant_schema(["tenant"]), store: store(dir))
 
       assert segment.stats["tenant"] == %{min: nil, max: nil, null_count: 2}
     end
@@ -206,14 +201,15 @@ defmodule Smolquery.Segments.WriterTest do
         %{"id" => 1, "tenant" => "m"}
       ]
 
-      {:ok, segment} = Writer.write(rows, tenant_schema(["id", "tenant"]), store: store(dir))
+      {:ok, segment} =
+        SegmentFixture.write(rows, tenant_schema(["id", "tenant"]), store: store(dir))
 
       assert segment.stats["tenant"] == %{min: nil, max: nil, null_count: 0}
       assert segment.stats["id"] == %{min: 1, max: 2, null_count: 0}
     end
 
     test "has an entry for every schema column", %{tmp_dir: dir} do
-      {:ok, segment} = Writer.write(rows(1), schema(), store: store(dir))
+      {:ok, segment} = SegmentFixture.write(rows(1), schema(), store: store(dir))
 
       assert Map.keys(segment.stats) |> Enum.sort() == Schema.names(schema()) |> Enum.sort()
     end
@@ -229,7 +225,7 @@ defmodule Smolquery.Segments.WriterTest do
 
       schema = Schema.new!([{"id", :int64}, {"ts", :timestamp}])
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["id"] == [3, 1, 2]
     end
@@ -242,7 +238,7 @@ defmodule Smolquery.Segments.WriterTest do
       ]
 
       assert {:ok, segment} =
-               Writer.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
+               SegmentFixture.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
 
       frame = DataFrame.from_parquet!(segment.path)
 
@@ -255,26 +251,6 @@ defmodule Smolquery.Segments.WriterTest do
              ]
     end
 
-    test "sorts DataFrame input by clustering columns", %{tmp_dir: dir} do
-      frame =
-        DataFrame.new(
-          id: [3, 1, 2],
-          ts: [
-            ~N[2026-07-31 12:00:03],
-            ~N[2026-07-31 12:00:01],
-            ~N[2026-07-31 12:00:02]
-          ]
-        )
-
-      schema =
-        %{Schema.new!([{"id", :int64}, {"ts", :timestamp}]) | clustering: ["id"]}
-
-      assert {:ok, segment} = Writer.write(frame, schema, store: store(dir))
-
-      sorted = DataFrame.from_parquet!(segment.path)
-      assert DataFrame.to_columns(sorted)["id"] == [1, 2, 3]
-    end
-
     test "sorts timestamps chronologically, not by Erlang term order", %{tmp_dir: dir} do
       rows = [
         %{"id" => 1, "ts" => ~N[2026-02-01 00:00:00]},
@@ -284,7 +260,7 @@ defmodule Smolquery.Segments.WriterTest do
       ]
 
       assert {:ok, segment} =
-               Writer.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
+               SegmentFixture.write(rows, clustered_schema(["id", "ts"]), store: store(dir))
 
       frame = DataFrame.from_parquet!(segment.path)
 
@@ -304,7 +280,7 @@ defmodule Smolquery.Segments.WriterTest do
 
       schema = %{Schema.new!([{"day", :date}]) | clustering: ["day"]}
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["day"] == [~D[2026-01-31], ~D[2026-02-01]]
     end
@@ -319,7 +295,7 @@ defmodule Smolquery.Segments.WriterTest do
       schema =
         %{Schema.new!([{"id", :int64}]) | clustering: ["id"]}
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["id"] == [1, 2, nil]
     end
@@ -335,7 +311,7 @@ defmodule Smolquery.Segments.WriterTest do
         | clustering: ["dropped", "id"]
       }
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["id"] == [1, 2]
     end
@@ -344,7 +320,7 @@ defmodule Smolquery.Segments.WriterTest do
       rows = [%{"id" => 2}, %{"id" => 1}]
       schema = %{Schema.new!([{"id", :int64}]) | clustering: ["dropped"]}
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["id"] == [2, 1]
     end
@@ -358,7 +334,7 @@ defmodule Smolquery.Segments.WriterTest do
       schema =
         %{Schema.new!([{"id", :int64}, {"name", :string}]) | clustering: ["id"]}
 
-      assert {:ok, segment} = Writer.write(rows, schema, store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows, schema, store: store(dir))
       frame = DataFrame.from_parquet!(segment.path)
       assert DataFrame.to_columns(frame)["name"] == ["first", "second"]
     end
@@ -366,7 +342,7 @@ defmodule Smolquery.Segments.WriterTest do
 
   describe "durability" do
     test "a written segment is fsynced before it is observable", %{tmp_dir: dir} do
-      assert {:ok, segment} = Writer.write(rows(1), schema(), store: store(dir))
+      assert {:ok, segment} = SegmentFixture.write(rows(1), schema(), store: store(dir))
 
       assert File.exists?(segment.path)
       assert File.ls!(Path.join(dir, ".tmp")) == []

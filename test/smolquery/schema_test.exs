@@ -310,6 +310,10 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.value_from_json(:int64, true) == {:error, {:invalid_value, :int64, true}}
       assert Schema.value_from_json(:string, 1) == {:error, {:invalid_value, :string, 1}}
+
+      assert Schema.value_from_json(:string, <<0xFF, 0xFE>>) ==
+               {:error, {:invalid_value, :string, <<0xFF, 0xFE>>}}
+
       assert Schema.value_from_json(:bool, "true") == {:error, {:invalid_value, :bool, "true"}}
 
       assert Schema.value_from_json(:date, "01/02/2026") ==
@@ -382,8 +386,6 @@ defmodule Smolquery.SchemaTest do
       mapped =
         Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}, {"doc", :variant}])
 
-      assert Schema.explorer_writable?(plain)
-      refute Schema.explorer_writable?(mapped)
       assert Schema.explorer_unwritable(plain) == :none
       assert {:ok, %Field{name: "attrs"}} = Schema.explorer_unwritable(mapped)
       assert Schema.readable_explorer_dtypes(mapped) == [{"id", {:s, 64}}]

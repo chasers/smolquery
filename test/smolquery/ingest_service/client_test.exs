@@ -175,6 +175,30 @@ defmodule Smolquery.IngestService.ClientTest do
     end
   end
 
+  describe "a row the validator takes and the flush refuses" do
+    test "is reported at its index in the caller's body, beside the validator's own errors",
+         context do
+      %{name: name, buffer: buffer} = start_stack(context, buffer: [write_pool_size: 1])
+
+      rows = [
+        %{"id" => "not-an-int"},
+        %{"id" => 1},
+        %{"id" => 9_223_372_036_854_775_808},
+        %{"id" => 2}
+      ]
+
+      assert {:ok, %{inserted: 2, errors: [first, third]}} =
+               IngestService.Client.insert(name, @table, rows)
+
+      assert first.index == 0
+      assert third.index == 2
+      assert hd(third.errors).message =~ "the flush refused the row"
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+  end
+
   describe "NDJSON passthrough (T-180)" do
     test "blank lines are not counted as inserted rows", context do
       %{name: name, buffer: buffer} =

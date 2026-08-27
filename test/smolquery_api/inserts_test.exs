@@ -180,7 +180,7 @@ defmodule SmolqueryApi.InsertControllerTest do
 
     defp ndjson(rows), do: Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
 
-    test "a clean NDJSON body lands through the columnar path", %{name: name, buffer: buffer} do
+    test "a clean NDJSON body lands as the bytes it was sent", %{name: name, buffer: buffer} do
       response = post_ndjson(name, ndjson([%{"id" => 1}, %{"id" => 2}, %{"id" => 3}]))
 
       assert response.status == 200
@@ -194,7 +194,7 @@ defmodule SmolqueryApi.InsertControllerTest do
       assert Enum.sum(Enum.map(entries, & &1.row_count)) == 3
     end
 
-    test "a batch the columnar pass cannot prove valid reports per-index errors", %{name: name} do
+    test "a body the flush refuses reports per-index errors from the salvage", %{name: name} do
       response = post_ndjson(name, ndjson([%{"id" => 1}, %{"id" => "junk"}, %{"id" => 3}]))
 
       assert response.status == 200
@@ -290,6 +290,15 @@ defmodule SmolqueryApi.InsertControllerTest do
 
       oversized = String.duplicate("x", 129)
       assert post_body(name, %{"rows" => [%{"id" => 1}], "insertId" => oversized}).status == 400
+    end
+  end
+
+  describe "a buffer node still on the Polars writer (rollout window, PL-57)" do
+    test "is a 503 that names the rollout order, not an internal error" do
+      response = SmolqueryApi.InsertController.insert_error(conn(:post, "/"), :ndjson_unsupported)
+
+      assert response.status == 503
+      assert JSON.decode!(response.resp_body)["error"]["message"] =~ "buffer nodes first"
     end
   end
 end

@@ -63,7 +63,9 @@ fsyncs behind an ack. It locates the one-table inline-flush ceiling in five
 parts:
 
 1. A writer sweep to 1024, against a light schema and a heavy schema.
-2. The Polars encode, timed in isolation.
+2. The encode, timed in isolation. Since PL-57 this arm times the fixture
+   writer (`Writer.write(rows)`), not the DuckDB `COPY` a deployment runs;
+   see T-401 before reading it as a production number.
 3. The fsync toggle, re-run at the top of the sweep.
 4. A `flush_max_bytes` sweep.
 5. A partition proxy that runs P independent buffers over one workload.
@@ -205,8 +207,9 @@ Know two consequences before you optimize anything here:
   calls `DataFrame.to_rows` at 29.2 ms — more than the JSON decode it
   replaces. Validation and the re-encode still run after that.
   `bench/results/ingest_transport.md` said the same from the transport side:
-  the frame→rows conversion, not the wire, is the cost. The win needs frames
-  end to end; `Writer.write/3` already takes a frame.
+  the frame→rows conversion, not the wire, is the cost. The frame path that
+  argument led to (T-139) was removed in PL-57 once the passthrough made it
+  unreachable; a `/load` that forwards NDJSON bytes is the remaining lever.
 - Partitioning one table's writes is worth ~1.5×, not 8×. Hold offered load at
   16 writers, then spread it over 1/2/4/8 tables: 39.0k → 46.9k → 55.1k →
   57.1k rows/s. Only the last quarter of a batch's CPU runs inside the
@@ -227,8 +230,8 @@ rows/s, CSV 14.3k, Parquet 14.6k, from files of 106 MiB, 50 MiB, and 0.2 MiB.
 Parsing is ~42 µs of a row's ~111 µs. The remaining ~69 µs is
 format-independent, because all three formats converge on `DataFrame.to_rows`
 → validate → re-encode. That is the same floor the insert bench's stage
-profile found. It is also the argument for frames end to end (T-139) — a new
-content type on today's `parse/3` cannot remove the floor.
+profile found. It was the argument for frames end to end (T-139), a path
+PL-57 later removed — a new content type on `parse/3` cannot remove the floor.
 
 `POST /…/load` takes the file as the body: NDJSON, CSV, or Parquet by content
 type. It spools the file to disk. It parses the file. It pushes 10,000-row
@@ -316,7 +319,7 @@ VM spends that CPU:
 
 It answers "why is the beam hot" from inside the VM. It shows whether the time
 is on the normal schedulers (Bandit, JSON decode, validation), on the dirty
-CPU schedulers (Polars encode, offloaded major GCs), or on dirty IO — and in
+CPU schedulers (the DuckDB encode, offloaded major GCs), or on dirty IO — and in
 which processes. Reach for perf or eBPF in a Linux VM only after this script
 says the time is inside the `emulator` state. That is the one bucket no in-VM
 view can open. Knobs: `WRITERS`, `BATCH`, `SECONDS`, `WARMUP_MS`.

@@ -20,7 +20,7 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -75,7 +75,7 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
 
   defp seal_rows(catalog, dir, range) do
     rows = for i <- range, do: %{"id" => i, "name" => "sealed-#{i}"}
-    {:ok, segment} = Writer.write(rows, schema(), store: Local.new(dir: dir))
+    {:ok, segment} = SegmentFixture.write(rows, schema(), store: Local.new(dir: dir))
     {:ok, snapshot} = Catalog.register_segments(catalog, @table, [segment])
 
     snapshot

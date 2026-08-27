@@ -46,9 +46,10 @@ parts work together.
 - **ingest edge** — the API-side service that turns one HTTP insert into one
   forward batch for the owning buffer node.
 - **forward batch** — the unit the ingest edge sends to a buffer node: the
-  schema plus the rows, bytes, or frame of one request.
+  schema plus the rows or the NDJSON bytes of one request.
 - **NDJSON passthrough** — the edge forwards an NDJSON body as the bytes the
-  client sent. DuckDB parses the rows once, at flush.
+  client sent. DuckDB parses the rows once, at flush. Always on: the writer
+  that needed parsed rows is gone (PL-57).
 - **schema cache** — a per-node ETS cache of table schemas, bounded by
   `schema_cache_ttl_ms`. CRUD invalidates it on the acting node; the TTL
   bounds staleness everywhere else.

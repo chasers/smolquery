@@ -28,7 +28,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -140,7 +140,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
 
   defp write_segment(dir, count) do
     rows = for i <- 1..count, do: %{"id" => i}
-    {:ok, segment} = Writer.write(rows, schema(), store: Local.new(dir: dir))
+    {:ok, segment} = SegmentFixture.write(rows, schema(), store: Local.new(dir: dir))
     segment
   end
 

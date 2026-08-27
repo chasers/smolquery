@@ -341,10 +341,20 @@ if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MAX_BUFFERED_BYTES", bytes)
 end
 
-if System.get_env("SMOLQUERY_FLUSH_WRITER") do
-  raise ArgumentError,
-        "SMOLQUERY_FLUSH_WRITER is no longer a setting: the Polars flush writer was " <>
-          "removed (PL-57) and DuckDB writes every flush. Unset the variable."
+case System.get_env("SMOLQUERY_FLUSH_WRITER") do
+  nil ->
+    :ok
+
+  "duckdb" ->
+    IO.warn(
+      "SMOLQUERY_FLUSH_WRITER is removed and ignored: DuckDB writes every flush (PL-57). " <>
+        "Unset the variable."
+    )
+
+  other ->
+    raise ArgumentError,
+          "SMOLQUERY_FLUSH_WRITER=#{other} names a flush writer that no longer exists: " <>
+            "the Polars writer was removed (PL-57) and DuckDB writes every flush. Unset the variable."
 end
 
 if size = System.get_env("SMOLQUERY_WRITE_POOL_SIZE") do

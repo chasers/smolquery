@@ -140,7 +140,7 @@ defmodule Smolquery.IngestService.Client do
   # Non-blank lines, not newlines: the flush's `read_json` skips a blank line,
   # so counting it would ack a row that was never committed. Splitting keeps
   # this a pass over the bytes without a parse, and its indices are the ones
-  # `decode_lines/1` and the salvage path report errors at.
+  # the salvage path reports errors at.
   # Only a line carrying non-whitespace is a row. The flush's reader skips a
   # blank line rather than parse it, and since the zero-row guard a commit of
   # nothing lands nothing — so counting `" "` (or the `"\r"` a CRLF body leaves
@@ -177,11 +177,40 @@ defmodule Smolquery.IngestService.Client do
     batch = batch(schema, valid, batch_id)
     target = write_target(table_ref, schema, runtime, batch_id)
 
-    with {:ok, _ack} <- BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
-      measure(length(valid), errors)
+    case BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
+      {:ok, _ack} ->
+        measure(length(valid), errors)
 
-      {:ok, %{inserted: length(valid), errors: errors}}
+        {:ok, %{inserted: length(valid), errors: errors}}
+
+      {:ok, _ack, refused} ->
+        report(valid, errors, refused, length(valid) - length(refused))
+
+      {:invalid, refused} ->
+        report(valid, errors, refused, 0)
+
+      {:error, _reason} = error ->
+        error
     end
+  end
+
+  # The flush refused rows the validator took (`Committer.salvage`); their
+  # indices are positions in `valid`, so they are mapped back onto the caller's
+  # body before they join the validator's own errors.
+  defp report(valid, errors, refused, inserted) do
+    rejected = MapSet.new(errors, & &1.index)
+
+    original =
+      0..(length(valid) + length(errors) - 1)//1
+      |> Enum.reject(&MapSet.member?(rejected, &1))
+      |> List.to_tuple()
+
+    mapped = Enum.map(refused, &%{&1 | index: elem(original, &1.index)})
+    all = Enum.sort_by(errors ++ mapped, & &1.index)
+
+    measure(inserted, all)
+
+    {:ok, %{inserted: inserted, errors: all}}
   end
 
   defp measure(accepted, errors, parse_us \\ 0, write_us \\ 0) do

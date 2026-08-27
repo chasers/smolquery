@@ -333,6 +333,16 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert ack.row_count == 1
     end
 
+    test "a term JSON cannot encode fails its commit as invalid rows, not a crash", context do
+      %{name: name} = start_buffer_service(context, flush_max_rows: 1)
+
+      poisoned = %{schema: schema(), rows: [%{"id" => {:not, :json}}]}
+
+      assert {:error, {:invalid_rows, _message}} = Client.write_batch(name, @table, poisoned)
+      assert {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+      assert ack.row_count == 1
+    end
+
     test "flushes on the byte threshold", context do
       %{name: name} = start_buffer_service(context, flush_max_bytes: 1, flush_interval_ms: 60_000)
 

@@ -220,11 +220,11 @@ defmodule Smolquery.Segments.Store.S3 do
     staged = staging_path(config, key)
 
     with :ok <- File.mkdir_p(Path.dirname(staged)),
-         :ok <- encode(staged, encoder),
+         {:ok, meta} <- encode(staged, encoder),
          {:ok, %File.Stat{size: size}} <- File.stat(staged),
          {:ok, committed_size} <- upload(config, key, staged, size) do
       File.rm(staged)
-      {:ok, %{location: location(config, key), byte_size: committed_size}}
+      {:ok, %{location: location(config, key), byte_size: committed_size, meta: meta}}
     else
       {:error, reason} ->
         File.rm(staged)
