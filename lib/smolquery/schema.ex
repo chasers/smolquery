@@ -309,6 +309,19 @@ defmodule Smolquery.Schema do
   def query_type(type), do: duckdb_type(type)
 
   @doc """
+  Whether a table view must cast the column to its query type.
+
+  True for a variant whatever a given table stores it as — `JSON` today, and
+  `VARIANT` once DuckLake registers a variant file (T-394). A table created
+  before that flip keeps its `JSON` column, so the rule is on the logical
+  type, not on what `duckdb_type/1` says now: old and new tables then read
+  alike, and a `VARIANT` to `VARIANT` cast costs nothing.
+  """
+  @spec cast_in_view?(logical_type()) :: boolean()
+  def cast_in_view?(:variant), do: true
+  def cast_in_view?(_type), do: false
+
+  @doc """
   The logical type for a DuckDB type name, as `information_schema` reports it.
   """
   @spec logical_from_duckdb(String.t()) ::
