@@ -34,7 +34,7 @@ defmodule Smolquery.Schema do
   writer — the one writer since PL-57 — which reads the spooled NDJSON
   straight into `MAP(VARCHAR, VARCHAR)`. `explorer_dtype/1` answers
   `{:error, {:unsupported_type, _}}` for it, and every Explorer-side path — the
-  columnar validator, the fixture writer, CSV loads — falls back or refuses on
+  fixture writer, CSV and Parquet loads — refuses on
   that answer. On the read side a map arrives from `Smolquery.Engine.frame/3`
   as Explorer's list-of-struct; `Smolquery.Engine.Frame.to_rows/1` turns it
   back into a map.
@@ -489,14 +489,6 @@ defmodule Smolquery.Schema do
       with {:ok, dtype} <- explorer_dtype(field.type), do: {:ok, {field.name, dtype}}
     end)
   end
-
-  @doc """
-  Whether Explorer can build and write every column of this schema — false
-  when a field is a map or a variant, which only the DuckDB writer writes.
-  """
-  @spec explorer_writable?(t()) :: boolean()
-  def explorer_writable?(%__MODULE__{fields: fields}),
-    do: Enum.all?(fields, &match?({:ok, _dtype}, explorer_dtype(&1.type)))
 
   @doc """
   The first field Explorer cannot write, if any.

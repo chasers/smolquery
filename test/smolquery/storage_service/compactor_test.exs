@@ -18,10 +18,10 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -79,7 +79,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     rows = for i <- range, do: %{"id" => i}
 
     {:ok, segment} =
-      Writer.write(rows, schema(),
+      SegmentFixture.write(rows, schema(),
         store: runtime.store,
         prefix: prefix,
         id: Id.generate(index * 1_000)

@@ -137,8 +137,8 @@ queries → QueryService ──────────────────�
           (DuckDB via ADBC: catalog ∪ hot tiers, one query plan)
 ```
 
-- **The write path is columnar.** The default DuckDB writer parses the forwarded
-  NDJSON body at flush time and writes immutable Parquet segments — small in (a
+- **The write path is one `COPY`.** DuckDB parses the forwarded NDJSON body at
+  flush time and writes immutable Parquet segments — small in (a
   ~1 s group commit is what "durable" means), large out (a few big files on
   object storage).
 - **DuckDB is a disposable, stateless read engine.** Each query job gets its own

@@ -382,8 +382,6 @@ defmodule Smolquery.SchemaTest do
       mapped =
         Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}, {"doc", :variant}])
 
-      assert Schema.explorer_writable?(plain)
-      refute Schema.explorer_writable?(mapped)
       assert Schema.explorer_unwritable(plain) == :none
       assert {:ok, %Field{name: "attrs"}} = Schema.explorer_unwritable(mapped)
       assert Schema.readable_explorer_dtypes(mapped) == [{"id", {:s, 64}}]

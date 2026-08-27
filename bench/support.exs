@@ -1,3 +1,5 @@
+Code.require_file("../test/support/segment_fixture.ex", __DIR__)
+
 defmodule Bench.Support do
   @moduledoc """
   Shared fixtures and timing helpers for the scripts in `bench/`.
@@ -11,7 +13,7 @@ defmodule Bench.Support do
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @dataset "analytics"
   @table {"analytics", "events"}
@@ -99,7 +101,7 @@ defmodule Bench.Support do
         end
 
       {:ok, segment} =
-        Writer.write(values, schema, store: Local.new(dir: Path.join(dir, "segments")))
+        SegmentFixture.write(values, schema, store: Local.new(dir: Path.join(dir, "segments")))
 
       segment
     end

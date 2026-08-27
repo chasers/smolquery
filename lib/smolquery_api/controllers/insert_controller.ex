@@ -20,10 +20,10 @@ defmodule SmolqueryApi.InsertController do
   Inserts the body's rows into a table.
 
   One body shape: `application/x-ndjson`, one JSON object per line — the same
-  bytes ClickHouse's `JSONEachRow` takes. It rides the columnar fast path
-  (`Smolquery.IngestService.Client.insert_ndjson/4`), which never materializes
-  valid rows as Elixir terms, and `insertId` is a query parameter because there
-  is no envelope to put it in.
+  bytes ClickHouse's `JSONEachRow` takes. The body is forwarded as bytes
+  (`Smolquery.IngestService.Client.insert_ndjson/4`); no row becomes an Elixir
+  term on this node, and `insertId` is a query parameter because there is no
+  envelope to put it in.
 
   `application/json` used to be accepted here, carrying `{"rows": [...]}`, and
   is now a 415. Two content types were two ingest paths, and the array one was

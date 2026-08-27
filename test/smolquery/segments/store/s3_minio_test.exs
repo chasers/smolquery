@@ -27,10 +27,10 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.S3
-  alias Smolquery.Segments.Writer
   alias Smolquery.StorageService
   alias Smolquery.StorageService.Runtime
   alias Smolquery.Test.FakeParquet
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -170,7 +170,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     schema = Schema.new!([{"id", :int64, nullable: false}])
     rows = for i <- 1..5, do: %{"id" => i}
 
-    {:ok, segment} = Writer.write(rows, schema, store: store, prefix: "engine-read")
+    {:ok, segment} = SegmentFixture.write(rows, schema, store: store, prefix: "engine-read")
 
     {:ok, _pid} =
       Engine.start_link(
@@ -217,7 +217,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
 
     schema = Schema.new!([{"id", :int64, nullable: false}])
     rows = for i <- 1..5, do: %{"id" => i}
-    {:ok, segment} = Writer.write(rows, schema, store: store, prefix: "catalog-register")
+    {:ok, segment} = SegmentFixture.write(rows, schema, store: store, prefix: "catalog-register")
 
     :ok = Catalog.create_dataset(runtime.catalog, "smoke")
     :ok = Catalog.create_table(runtime.catalog, {"smoke", "a"}, schema)
@@ -251,7 +251,7 @@ defmodule Smolquery.Segments.Store.S3MinioTest do
     :ok = Catalog.create_table(catalog, {"smoke", "q"}, schema)
 
     rows = for i <- 1..5, do: %{"id" => i}
-    {:ok, segment} = Writer.write(rows, schema, store: store, prefix: "query-lockdown")
+    {:ok, segment} = SegmentFixture.write(rows, schema, store: store, prefix: "query-lockdown")
     {:ok, _snapshot} = Catalog.register_segments(catalog, {"smoke", "q"}, [segment])
 
     buffer = :"s3_query_buffer_#{:erlang.unique_integer([:positive])}"

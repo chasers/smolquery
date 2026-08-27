@@ -47,7 +47,9 @@ defmodule Smolquery.Segments.Store do
       store = Smolquery.Segments.Store.Local.new(dir: "/var/lib/smolquery/buffer")
 
       {:ok, prefix} = Smolquery.Segments.Store.prefix({"analytics", "events"})
-      {:ok, segment} = Smolquery.Segments.Writer.write(rows, schema, store: store, prefix: prefix)
+      {:ok, segment} =
+        Smolquery.Segments.Writer.write({:ndjson, [spooled_path]}, schema,
+          store: store, prefix: prefix, engine: MyEngine)
 
       {:ok, keys} = Smolquery.Segments.Store.list(store, prefix)
 

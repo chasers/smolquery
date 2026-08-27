@@ -31,8 +31,9 @@ defmodule Smolquery.BufferService.Endpoint do
   @typedoc """
   A forward-batch: rows as a term list, already validated, or `:ndjson` — the
   bytes the client sent, forwarded unparsed, with `:row_count` the sender's
-  count of non-blank lines and `:byte_size` what the batch costs the owner's
-  accumulator. The flush parses NDJSON, so a value the schema cannot take is
+  count of non-blank lines and `:byte_size` what the body costs the owner's
+  accumulator (a rows batch is measured on arrival). The flush parses NDJSON,
+  so a value the schema cannot take is
   reported per row after the fact (the committer's salvage), not before.
   """
   @type batch :: %{

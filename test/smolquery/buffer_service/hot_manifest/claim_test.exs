@@ -13,7 +13,7 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :tmp_dir
 
@@ -32,7 +32,7 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
     schema = Schema.new!([{"id", :int64}])
 
     {:ok, segment} =
-      Writer.write([%{"id" => 1}], schema, store: manifest.store, prefix: prefix)
+      SegmentFixture.write([%{"id" => 1}], schema, store: manifest.store, prefix: prefix)
 
     {:ok, entry} = HotManifest.add(manifest, table_ref, segment)
 

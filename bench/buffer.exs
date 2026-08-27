@@ -162,6 +162,7 @@ defmodule Bench.Buffer do
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
 
   @dataset "bench"
   @weights [:light, :heavy, :huge]
@@ -461,7 +462,10 @@ defmodule Bench.Buffer do
       %{rows: batch_rows, schema: schema} = batch(rows, 0, weight)
 
       encode =
-        timed(fn -> {:ok, _segment} = Writer.write(batch_rows, schema, store: store) end, 5)
+        timed(
+          fn -> {:ok, _segment} = SegmentFixture.write(batch_rows, schema, store: store) end,
+          5
+        )
 
       cycle = max(encode.median, interval * 1_000)
 

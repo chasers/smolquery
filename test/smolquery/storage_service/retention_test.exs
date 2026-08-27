@@ -17,9 +17,9 @@ defmodule Smolquery.StorageService.RetentionTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
-  alias Smolquery.Segments.Writer
   alias Smolquery.StorageService.Retention
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -71,7 +71,7 @@ defmodule Smolquery.StorageService.RetentionTest do
     rows = timestamps |> Enum.with_index() |> Enum.map(fn {ts, i} -> %{"id" => i, "ts" => ts} end)
 
     {:ok, segment} =
-      Writer.write(rows, schema(),
+      SegmentFixture.write(rows, schema(),
         store: runtime.store,
         prefix: prefix,
         id: Id.generate(index * 1_000)

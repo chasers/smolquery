@@ -38,6 +38,7 @@ defmodule Bench.Clustering do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
+  alias Smolquery.Test.SegmentFixture
   alias Smolquery.StorageService
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
@@ -471,7 +472,7 @@ defmodule Bench.Clustering do
     parent = self()
     before = process_memory_of(parent)
     sampler = spawn_link(fn -> beam_sample_loop(parent, before, before) end)
-    {:ok, _segment} = Writer.write(shuffled, schema, store: store)
+    {:ok, _segment} = SegmentFixture.write(shuffled, schema, store: store)
     send(sampler, :stop)
 
     peak =

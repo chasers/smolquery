@@ -1,18 +1,14 @@
 defmodule Smolquery.Segments.Writer do
   @moduledoc """
-  Writes an immutable Parquet segment.
+  Writes an immutable Parquet segment: one DuckDB `COPY` over the spooled
+  NDJSON bodies of a group commit.
 
-  Two writers live here, with one contract — a `Segment` describing a file the
-  store has committed:
-
-    * `write({:ndjson, paths}, schema, opts)` is the buffer's flush. DuckDB
-      reads the spooled NDJSON bodies, sorts on the clustering key, writes the
-      Parquet, and the row count and stats are read off the staged file. No
-      row becomes an Elixir term. Every type the catalog declares is written
-      here, `MAP(STRING, STRING)` and `VARIANT` included (PL-57).
-    * `write(rows, schema, opts)` is the fixture writer: tests and benches
-      build a segment from rows through Explorer. It refuses a schema Explorer
-      cannot write. Nothing in a deployment calls it.
+  DuckDB reads the bodies, sorts on the clustering key, and writes the Parquet;
+  the row count and the stats are read off the staged file before the store
+  moves it. No row becomes an Elixir term, and every type the catalog declares
+  is written here, `MAP(STRING, STRING)` and `VARIANT` included — this is the
+  one writer since PL-57. Tests and benches that need a segment from rows use
+  `Smolquery.Test.SegmentFixture`, which lives outside `lib/`.
 
   Where the bytes land is `Smolquery.Segments.Store`'s business, and durability is
   its contract: this module encodes into the staging path the store provides and
@@ -21,13 +17,12 @@ defmodule Smolquery.Segments.Writer do
 
   ## Sorting on the clustering key
 
-  Rows are sorted by the schema's clustering key before the file is written —
-  in declared order, nulls last — so the row-group stats are tight enough for a
-  reader to prune on. The flush sorts in DuckDB (`ORDER BY` in the `COPY`); the
-  fixture writer sorts the frame in Polars. Neither sorts Elixir terms, and that
-  is a correctness requirement: Erlang term order on `NaiveDateTime`, `Date` and
-  `Decimal` compares struct fields alphabetically (`:day` before `:month` before
-  `:year`), so January 31 would sort after February 1.
+  The `COPY` orders rows by the schema's clustering key — in declared order,
+  nulls last — so the row-group stats are tight enough for a reader to prune
+  on. The sort is DuckDB's, never Erlang term order, and that is a correctness
+  requirement: term order on `NaiveDateTime`, `Date` and `Decimal` compares
+  struct fields alphabetically (`:day` before `:month` before `:year`), so
+  January 31 would sort after February 1.
 
   The columns come from `Smolquery.Schema.clustering_columns/1` rather than the
   `:clustering` field, so a key naming a column this schema no longer has sorts
@@ -45,8 +40,6 @@ defmodule Smolquery.Segments.Writer do
 
   """
 
-  alias Explorer.DataFrame
-  alias Explorer.Series
   alias Smolquery.Engine
   alias Smolquery.Identifier
   alias Smolquery.Schema
@@ -82,20 +75,13 @@ defmodule Smolquery.Segments.Writer do
   @orderable [:int64, :float64, :timestamp, :date]
 
   @doc """
-  Writes `rows` as a segment in `:store`, returning the `Segment` describing it.
-
-  Rows are maps keyed by column name; a column missing from a row is written as
-  null. An `Explorer.DataFrame` may be passed instead, in which case its
-  columns must already match `schema`.
-
-  This is the fixture writer: tests and tools build a segment from rows
-  through Explorer. The buffer never calls it — a flush encodes through DuckDB
-  (`{:ndjson, paths}`, PL-57) — and it refuses a schema Explorer cannot write,
-  a map or a variant.
+  Writes the spooled NDJSON `paths` as one segment in `:store`, returning the
+  `Segment` describing it.
 
   ## Options
 
     * `:store` (required) — the `Smolquery.Segments.Store` the segment is put in
+    * `:engine` (required) — the DuckDB engine that runs the `COPY`
     * `:prefix` — key prefix the segment is written under, typically a table's
       (see `Smolquery.Segments.Store.prefix/1`). Defaults to the store root.
     * `:id` — segment id, and so the last component of its key. Defaults to a
@@ -103,8 +89,7 @@ defmodule Smolquery.Segments.Writer do
     * `:compression` — Parquet codec, defaulting to `:zstd`
 
   """
-  @spec write(ndjson() | [row()] | DataFrame.t(), Schema.t(), [option()]) ::
-          {:ok, Segment.t()} | {:error, term()}
+  @spec write(ndjson(), Schema.t(), [option()]) :: {:ok, Segment.t()} | {:error, term()}
   def write({:ndjson, paths}, %Schema{} = schema, opts) when is_list(paths) do
     store = Keyword.fetch!(opts, :store)
     engine = Keyword.fetch!(opts, :engine)
@@ -131,77 +116,6 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
-  def write(rows, %Schema{} = schema, opts) do
-    store = Keyword.fetch!(opts, :store)
-    prefix = Keyword.get(opts, :prefix, "")
-    id = Keyword.get_lazy(opts, :id, &Id.generate/0)
-    compression = Keyword.get(opts, :compression, :zstd)
-
-    with {:ok, key} <- Store.key(prefix, id),
-         {:ok, frame} <- build_frame(rows, schema),
-         {:ok, put} <-
-           Store.put(store, key, &encode_parquet(frame, &1, compression)) do
-      {:ok,
-       %Segment{
-         id: id,
-         key: key,
-         path: put.location,
-         row_count: DataFrame.n_rows(frame),
-         byte_size: put.byte_size,
-         stats: stats(frame, schema)
-       }}
-    end
-  end
-
-  @doc """
-  Builds the unsorted frame for `rows` — the schema's columns, in order.
-  """
-  @spec frame_from_rows([row()], Schema.t()) :: {:ok, DataFrame.t()} | {:error, term()}
-  def frame_from_rows(rows, %Schema{} = schema) when is_list(rows) do
-    with {:ok, dtypes} <- Schema.explorer_dtypes(schema) do
-      columns =
-        Enum.map(dtypes, fn {name, dtype} ->
-          {name, Series.from_list(Enum.map(rows, &Map.get(&1, name)), dtype: dtype)}
-        end)
-
-      {:ok, DataFrame.new(columns)}
-    end
-  rescue
-    error in [ArgumentError, RuntimeError] -> {:error, {:invalid_rows, Exception.message(error)}}
-  end
-
-  defp encode_parquet(frame, device, compression) do
-    DataFrame.to_parquet(frame, device, compression: compression)
-  end
-
-  defp build_frame(%DataFrame{} = frame, schema) do
-    case Schema.explorer_unwritable(schema) do
-      :none -> {:ok, sort_frame(frame, schema)}
-      {:ok, %Field{type: type}} -> {:error, {:unsupported_type, type}}
-    end
-  end
-
-  defp build_frame([], _schema), do: {:error, :no_rows}
-
-  defp build_frame(rows, schema) when is_list(rows) do
-    with {:ok, frame} <- frame_from_rows(rows, schema) do
-      {:ok, sort_frame(frame, schema)}
-    end
-  end
-
-  defp sort_frame(frame, schema) do
-    case Schema.clustering_columns(schema) do
-      [] ->
-        frame
-
-      columns ->
-        DataFrame.sort_with(frame, fn lf -> Enum.map(columns, &lf[&1]) end,
-          stable: true,
-          nils: :last
-        )
-    end
-  end
-
   @doc """
   Whether DuckDB can read `path` as this schema, without writing anything.
 
@@ -212,7 +126,16 @@ defmodule Smolquery.Segments.Writer do
   happened to share the commit.
   """
   @spec readable_ndjson?(atom(), Path.t(), Schema.t()) :: boolean()
-  def readable_ndjson?(engine, path, %Schema{fields: fields} = schema) do
+  def readable_ndjson?(engine, path, %Schema{} = schema),
+    do: ndjson_problem(engine, path, schema) == :ok
+
+  @doc """
+  What DuckDB refuses about `path` read as this schema — its own message — or
+  `:ok`. `readable_ndjson?/3` is this without the message; the salvage uses
+  the message to tell a caller why a row was refused.
+  """
+  @spec ndjson_problem(atom(), Path.t(), Schema.t()) :: :ok | {:error, String.t()}
+  def ndjson_problem(engine, path, %Schema{fields: fields} = schema) do
     # `count(*)` is not enough: it needs no column values, so DuckDB is free to
     # skip the casts and answer a row count for a body it could not actually
     # read. Counting every column forces each one to be evaluated, which is the
@@ -225,7 +148,10 @@ defmodule Smolquery.Segments.Writer do
       columns = {#{columns_spec(schema)}})
     """
 
-    match?({:ok, _result}, Engine.query(engine, sql, [path]))
+    case Engine.query(engine, sql, [path]) do
+      {:ok, _result} -> :ok
+      {:error, error} -> {:error, Exception.message(error)}
+    end
   end
 
   defp some_paths([]), do: {:error, :no_rows}
@@ -287,7 +213,7 @@ defmodule Smolquery.Segments.Writer do
   end
 
   # The manifest's stats, computed by DuckDB over the file just written — one
-  # pass over a local file still in the page cache. Unlike the frame path this
+  # pass over a local file still in the page cache. Unlike Explorer's fixture writer this
   # bounds every string column rather than only the sorted one, since DuckDB
   # compares text natively where `Explorer.Series.min/1` refuses it (T-179).
   defp ndjson_stats(engine, path, %Schema{fields: fields}) do
@@ -354,56 +280,4 @@ defmodule Smolquery.Segments.Writer do
   defp codec(:lz4), do: "LZ4"
   defp codec(:uncompressed), do: "UNCOMPRESSED"
   defp codec({algorithm, _level}), do: codec(algorithm)
-
-  defp stats(frame, %Schema{fields: fields} = schema) do
-    sorted = leading_clustering_column(schema)
-    row_count = DataFrame.n_rows(frame)
-
-    Map.new(fields, fn %Field{} = field ->
-      series = frame[field.name]
-      null_count = Series.nil_count(series)
-
-      {field.name,
-       column_stats(
-         bound(series, field, sorted, :min, row_count, null_count),
-         bound(series, field, sorted, :max, row_count, null_count),
-         null_count
-       )}
-    end)
-  end
-
-  # `Series.min/1` refuses `:string`, so a text column would carry no bounds and
-  # `Smolquery.QueryService.Pruner` could not prune on a tenant id — the first
-  # column of most clustering keys, and the one an equality predicate names most.
-  #
-  # The leading clustering column needs no comparison pass to answer: `sort_frame/2`
-  # has already ordered the whole frame by it, ascending with nulls last, so its
-  # bounds are the first and last non-null positions. Later clustering columns are
-  # ordered only within a run of the first, and unclustered columns not at all, so
-  # neither gets bounds this way — a wrong bound prunes away real rows, which is
-  # worse than no bound at all.
-  defp bound(series, %Field{name: name, type: :string}, name, which, row_count, null_count) do
-    case row_count - null_count do
-      0 -> nil
-      present -> Series.at(series, if(which == :min, do: 0, else: present - 1))
-    end
-  end
-
-  defp bound(series, %Field{type: {:numeric, _precision, _scale}}, _sorted, which, _rows, _nulls),
-    do: extreme(series, which)
-
-  defp bound(series, %Field{type: type}, _sorted, which, _rows, _nulls) when type in @orderable,
-    do: extreme(series, which)
-
-  defp bound(_series, _field, _sorted, _which, _rows, _nulls), do: nil
-
-  defp extreme(series, :min), do: Series.min(series)
-  defp extreme(series, :max), do: Series.max(series)
-
-  defp leading_clustering_column(%Schema{} = schema) do
-    case Schema.clustering_columns(schema) do
-      [column | _rest] -> column
-      [] -> nil
-    end
-  end
 end

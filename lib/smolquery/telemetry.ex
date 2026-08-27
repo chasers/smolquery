@@ -44,7 +44,7 @@ defmodule Smolquery.Telemetry do
                                           meta %{result: :ok | :error, table_ref: ref}
       [:smolquery, :buffer, :flush_trigger] %{rows, bytes},
                                           meta %{reason: :rows | :bytes | :interval | :idle |
-                                          :schema | :kind | :flush | :drain | :shutdown,
+                                          :schema | :flush | :drain | :shutdown,
                                           table_ref: ref}
                                           — why a group-commit window closed; the one
                                           fact that says which knob is in control (T-333)
@@ -325,7 +325,7 @@ defmodule Smolquery.Telemetry do
   # The closed set of window-close reasons `TableBuffer` names. An unrecognised
   # one counts as `:unknown` rather than creating a series, so the label can
   # never be widened by anything but this list.
-  @flush_reasons ~w(rows bytes interval idle schema kind flush drain shutdown)a
+  @flush_reasons ~w(rows bytes interval idle schema flush drain shutdown)a
 
   @info %{
     "smolquery_buffer_shape_info" =>

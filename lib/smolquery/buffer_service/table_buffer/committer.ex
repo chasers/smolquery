@@ -278,18 +278,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     runtime = state.runtime
     prefix = state.prefix
 
-    task = Task.async(fn -> encode(runtime, prefix, commit) end)
+    task = Task.async(fn -> encode_ndjson(runtime, prefix, commit) end)
 
     %{state | encoding: Map.put(state.encoding, task.ref, {commit, started})}
   end
-
-  defp encode(runtime, prefix, commit),
-    do: encode_ndjson(runtime, prefix, %{commit | chunks: Enum.map(commit.chunks, &as_ndjson/1)})
-
-  defp as_ndjson({:ndjson, _body, _count} = chunk), do: chunk
-
-  defp as_ndjson(rows) when is_list(rows),
-    do: {:ndjson, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n", length(rows)}
 
   # The bytes reach disk here rather than at the API, because the API no longer
   # knows which node owns the table — #108's partitions send most batches to a
@@ -354,7 +346,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     if bad == [] do
       {:error, :ndjson_commit_failed}
     else
-      recovered = Enum.map(bad, &recover(runtime, commit, id, &1))
+      recovered = Enum.map(bad, &recover(runtime, commit, id, engine, &1))
 
       salvaged =
         Enum.map(good, fn {path, _index} -> path end) ++ Enum.flat_map(recovered, & &1.paths)
@@ -385,7 +377,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # buffer has to stay deployable without it. `:row_validator` is configured the
   # way `:seal_consumer` already is, so the errors a caller sees here are the
   # errors the JSON route would have given it, without the dependency.
-  defp recover(runtime, commit, id, {path, index}) do
+  defp recover(runtime, commit, id, engine, {path, index}) do
     {valid, errors} =
       path
       |> File.read!()
@@ -398,7 +390,52 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       end)
       |> then(&validate_rows(runtime, commit.schema, &1))
 
-    %{index: index, errors: errors, paths: respool(runtime, id, index, valid)}
+    probe = Path.join(runtime.spool_dir, "#{id}-#{index}-probe.ndjson")
+
+    {kept, refused} =
+      refused_by_duckdb(engine, commit.schema, probe, indexed_valid(valid, errors))
+
+    File.rm(probe)
+
+    %{
+      index: index,
+      errors: Enum.sort_by(errors ++ refused, & &1.index),
+      paths: respool(runtime, id, index, kept)
+    }
+  end
+
+  # The validator is the fast pre-check; DuckDB is the authority. A row the
+  # validator takes and DuckDB refuses — an INT64 past 2^63, a NUMERIC past its
+  # precision (T-397) — would otherwise fail the rewrite too, and with it every
+  # body that shares the commit. Bisecting through DuckDB names exactly the rows
+  # it refuses, with its own message, in O(refused × log n) probes.
+  defp refused_by_duckdb(_engine, _schema, _probe, []), do: {[], []}
+
+  defp refused_by_duckdb(engine, schema, probe, indexed) do
+    File.write!(probe, ndjson_iodata(Enum.map(indexed, &elem(&1, 1))))
+
+    case {Writer.ndjson_problem(engine, probe, schema), indexed} do
+      {:ok, _rows} ->
+        {Enum.map(indexed, &elem(&1, 1)), []}
+
+      {{:error, message}, [{index, _row}]} ->
+        {[], [%{index: index, errors: [%{message: "the flush refused the row: " <> message}]}]}
+
+      {{:error, _message}, _rows} ->
+        {left, right} = Enum.split(indexed, div(length(indexed), 2))
+        {left_kept, left_refused} = refused_by_duckdb(engine, schema, probe, left)
+        {right_kept, right_refused} = refused_by_duckdb(engine, schema, probe, right)
+
+        {left_kept ++ right_kept, left_refused ++ right_refused}
+    end
+  end
+
+  defp indexed_valid(valid, errors) do
+    rejected = MapSet.new(errors, & &1.index)
+
+    0..(length(valid) + length(errors) - 1)//1
+    |> Enum.reject(&MapSet.member?(rejected, &1))
+    |> Enum.zip(valid)
   end
 
   # No validator configured means no way to attribute rows to a caller, so the
@@ -418,22 +455,27 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp respool(runtime, id, index, rows) do
     path = Path.join(runtime.spool_dir, "#{id}-#{index}-valid.ndjson")
 
-    File.write!(path, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n")
+    File.write!(path, ndjson_iodata(rows))
 
     [path]
   end
+
+  defp ndjson_iodata(rows), do: Enum.map(rows, &[JSON.encode_to_iodata!(&1), "\n"])
 
   defp spool(runtime, id, chunks) do
     File.mkdir_p!(runtime.spool_dir)
 
     chunks
     |> Enum.with_index()
-    |> Enum.map(fn {{:ndjson, body, _count}, index} ->
+    |> Enum.map(fn {chunk, index} ->
       path = Path.join(runtime.spool_dir, "#{id}-#{index}.ndjson")
-      File.write!(path, body)
+      File.write!(path, chunk_bytes(chunk))
       path
     end)
   end
+
+  defp chunk_bytes({:ndjson, body, _count}), do: body
+  defp chunk_bytes(rows) when is_list(rows), do: ndjson_iodata(rows)
 
   defp finish(state, commit, encoded, started) do
     encoded_at = System.monotonic_time(:microsecond)

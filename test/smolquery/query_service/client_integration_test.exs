@@ -17,8 +17,8 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
   alias Smolquery.QueryService.Client
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
-  alias Smolquery.Segments.Writer
   alias Smolquery.Test.Eventually
+  alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -77,7 +77,10 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
     tmp_dir: tmp
   } do
     sealed = for i <- 1..2, do: %{"id" => i, "name" => "sealed-#{i}"}
-    {:ok, segment} = Writer.write(sealed, schema(), store: Local.new(dir: Path.join(tmp, "seg")))
+
+    {:ok, segment} =
+      SegmentFixture.write(sealed, schema(), store: Local.new(dir: Path.join(tmp, "seg")))
+
     {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
 
     hot = for i <- 3..5, do: %{"id" => i, "name" => "hot-#{i}"}

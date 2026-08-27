@@ -81,26 +81,72 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
     assert Enum.sum(Enum.map(entries, & &1.row_count)) == 30
   end
 
-  test "a rows batch and an unparsed body share a commit", %{
-    name: name,
-    runtime: runtime
-  } do
+  test "a rows batch and an unparsed body share a commit", context do
+    name = :"buffer_shared_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {BufferService.Supervisor,
+       name: name,
+       dir: Path.join(context.tmp_dir, "shared"),
+       flush_interval_ms: 60_000,
+       flush_max_rows: 5,
+       write_pool_size: 1},
+      id: name
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    rows = %{
+      schema: schema(),
+      rows: [%{"id" => 1, "tenant" => "a"}, %{"id" => 2, "tenant" => "b"}]
+    }
+
     tasks = [
-      Task.async(fn ->
-        Client.write_batch(name, @table, %{
-          schema: schema(),
-          rows: [%{"id" => 1, "tenant" => "a"}, %{"id" => 2, "tenant" => "b"}]
-        })
-      end),
+      Task.async(fn -> Client.write_batch(name, @table, rows) end),
       Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(3..5)) end)
     ]
 
-    acks = Task.await_many(tasks, 15_000)
+    assert [{:ok, rows_ack}, {:ok, ndjson_ack}] = Task.await_many(tasks, 15_000)
+    assert rows_ack.segment_id == ndjson_ack.segment_id
+    assert rows_ack.row_count == 5
+  end
 
-    assert Enum.all?(acks, &match?({:ok, _ack}, &1))
+  test "a row DuckDB refuses is named to its caller, and the body sharing the commit lands",
+       context do
+    name = :"buffer_refused_#{:erlang.unique_integer([:positive])}"
 
+    start_supervised!(
+      {BufferService.Supervisor,
+       name: name,
+       dir: Path.join(context.tmp_dir, "refused"),
+       flush_interval_ms: 60_000,
+       flush_max_rows: 5,
+       write_pool_size: 1},
+      id: name
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    too_big = 9_223_372_036_854_775_808
+
+    rows = %{
+      schema: schema(),
+      rows: [%{"id" => 1, "tenant" => "a"}, %{"id" => too_big, "tenant" => "b"}]
+    }
+
+    tasks = [
+      Task.async(fn -> Client.write_batch(name, @table, rows) end),
+      Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(3..5)) end)
+    ]
+
+    assert [rows_reply, {:ok, ndjson_ack}] = Task.await_many(tasks, 15_000)
+    assert {:ok, rows_ack, [%{index: 1, errors: [%{message: message}]}]} = rows_reply
+    assert message =~ "the flush refused the row"
+    assert rows_ack.segment_id == ndjson_ack.segment_id
+
+    {:ok, runtime} = Runtime.fetch(name)
     assert [entry] = HotManifest.entries(runtime.manifest, @table)
-    assert entry.row_count == 5
+    assert entry.row_count == 4
   end
 
   test "the row count comes from the Parquet footer, not the sender", %{
