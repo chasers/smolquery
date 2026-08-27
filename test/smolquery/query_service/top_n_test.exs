@@ -258,6 +258,17 @@ defmodule Smolquery.QueryService.TopNTest do
       assert TopN.candidates([entry("01A", 100, %{})], @desc, 1) == []
     end
 
+    test "edges of mixed types rank without raising: the choice is only tightness" do
+      entries = [
+        entry("01A", 1, ts("2026-08-27T10:00:00", "2026-08-27T10:00:09")),
+        entry("01B", 1, %{"ts" => %{"min" => 1, "max" => 9, "null_count" => 0}}),
+        entry("01C", 1, ts("2026-08-27T10:00:30", "2026-08-27T10:00:39"))
+      ]
+
+      assert [_first, _second, _third] = TopN.candidates(entries, @desc, 100)
+      assert hd(ids(TopN.candidates(entries, @desc, 1))) in ["01C", "01B"]
+    end
+
     test "numeric stats sort as numbers" do
       spec = %{@desc | column: "id"}
 

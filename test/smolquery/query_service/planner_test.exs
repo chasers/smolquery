@@ -713,7 +713,78 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert ids(plan.hot[@table]) == ids(entries)
     end
 
-    test "a probe that cannot read its candidates keeps every entry and says so" do
+    @tag :tmp_dir
+    test "a WHERE that draws a volatile function is not probed", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      sql = "SELECT * FROM analytics.events WHERE random() < 0.5 ORDER BY ts DESC LIMIT 5"
+      collector = Trace.attach("top-n-#{System.unique_integer([:positive])}", self())
+
+      log =
+        capture_log(fn ->
+          assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
+          assert ids(plan.hot[@table]) == ids(entries)
+        end)
+
+      refute log =~ "top-n probe failed"
+
+      assert %{meta: %{bounded: false, rounds: 0}} =
+               collector |> Trace.stop() |> Enum.find(&(&1.name == :top_n))
+    end
+
+    @tag :tmp_dir
+    test "a clock-relative window is probed: the later clock only adds newer rows", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+
+      sql =
+        "SELECT * FROM analytics.events WHERE ts > now()::TIMESTAMP - INTERVAL 100 YEAR ORDER BY ts DESC LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
+
+      assert ids(plan.hot[@table]) == at(entries, [10])
+    end
+
+    @tag :tmp_dir
+    test "an ordering column the manifest cannot bound is not probed", ctx do
+      schema = Schema.new!([{"id", :int64}, {"amount", {:numeric, 10, 2}}, {"ts", :timestamp}])
+
+      entries =
+        for k <- 1..10 do
+          rows =
+            for row <- 0..19,
+                do: %{
+                  "id" => k * 100 + row,
+                  "amount" => Decimal.new(k * 100 + row),
+                  "ts" => minute(k, row)["ts"]
+                }
+
+          segment(ctx.tmp_dir, rows, schema)
+        end
+
+      runtime = runtime(entries, answers: [schemas: %{@table => schema}])
+      sql = "SELECT * FROM analytics.events ORDER BY amount DESC LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    @tag :tmp_dir
+    test "under lockdown the probe turns extension autoload off first", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+
+      assert {:ok, _plan} = Planner.plan(hot_runtime(entries), @conn, @tail)
+
+      {:ok, result} =
+        Smolquery.Engine.Connection.query(
+          @conn,
+          "SELECT current_setting('autoload_known_extensions'), current_setting('autoinstall_known_extensions')"
+        )
+
+      assert result.rows == [[false, false]]
+    end
+
+    @tag :tmp_dir
+    test "a probe that cannot read its candidates keeps every entry and says so", ctx do
       stats = fn k ->
         %{
           "ts" => %{
@@ -725,7 +796,13 @@ defmodule Smolquery.QueryService.PlannerTest do
       end
 
       entries =
-        for k <- 10..19, do: entry("01#{k}", %{"row_count" => 20, "stats" => stats.(k)})
+        for k <- 10..19 do
+          entry("01#{k}", %{
+            "row_count" => 20,
+            "stats" => stats.(k),
+            "url" => Path.join(ctx.tmp_dir, "missing-#{k}.parquet")
+          })
+        end
 
       runtime = hot_runtime(entries)
 

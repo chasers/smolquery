@@ -94,6 +94,9 @@ defmodule Smolquery.QueryService.Runtime do
   `allowed_directories`, the plan's own micro-segment URLs, and the sealed
   tier's object-store prefix (when `store` is `Store.S3`) readable. On
   by default: SQL arriving over the HTTP API must not read arbitrary files.
+  The Top-N probe (T-400) runs the user's WHERE before that point, to read
+  the hot tier; under lockdown it runs with extension autoload off, so it
+  can do nothing the locked-down query could not.
   `allowed_directories` defaults to the node's `:data_dir` (expanded) plus
   whatever the catalog configuration names; a deployment whose sealed
   segments live elsewhere on disk must say so here, or its queries will

@@ -10,9 +10,11 @@ defmodule Smolquery.QueryService.Statistics do
   pruning shows up as `files_scanned` jumping, not as "a bit slower".
 
   The two tiers are reported separately because they prune by different
-  mechanisms. The hot tier is pruned by `Smolquery.QueryService.Pruner`, so
-  `files_total` (entries that passed the membership rule) versus
-  `files_scanned` (entries the plan kept) measures that pruner directly. The
+  mechanisms. The hot tier is pruned by the planner — the WHERE pruner
+  (`Smolquery.QueryService.Pruner`) and the Top-N bound
+  (`Smolquery.QueryService.TopN`) — so `files_total` (entries that passed
+  the membership rule) versus `files_scanned` (entries the plan kept)
+  measures the two together. The
   sealed tier prunes inside DuckDB from DuckLake's per-file stats, which the
   planner cannot observe — there `files_scanned` equals `files_total` and
   both mean "sealed segments listed at the snapshot": the upper bound the

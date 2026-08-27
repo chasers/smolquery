@@ -870,8 +870,9 @@ Properties worth knowing:
   the planner probes the newest entries (by their stats) with the user's own
   WHERE for the n-th value of `col`, then keeps only the entries whose stats
   can reach it. The probe's rows are real rows of the answer set, so the
-  bound is sound; a probe that finds fewer than n rows, or fails, keeps
-  every entry. `SMOLQUERY_TOP_N_PROBE_ROWS` sizes the second probe round
+  bound is sound; a WHERE naming a volatile function (`random()`) is not
+  probed, and a probe that finds fewer than n rows, or fails, keeps every
+  entry. The probe runs before lockdown, with extension autoload off. `SMOLQUERY_TOP_N_PROBE_ROWS` sizes the second probe round
   and `0` turns the bound off.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.

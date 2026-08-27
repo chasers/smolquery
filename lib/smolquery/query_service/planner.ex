@@ -79,9 +79,12 @@ defmodule Smolquery.QueryService.Planner do
   constant LIMIT, the planner probes the newest entries (by their stats)
   through a view of the table's own name, with the user's WHERE, for the
   n-th value of `col`, and keeps only the entries whose stats can reach it.
-  The probe runs on the job engine before the plan's statements do, and the
-  runner's `CREATE OR REPLACE VIEW` then defines the table for real. A
-  query that does not qualify, and a probe that fails, keep every entry.
+  The probe runs on the job engine before the plan's statements do — before
+  lockdown, since it reads the hot tier over HTTP — with extension autoload
+  off under `lockdown`, so the user's WHERE can do nothing there that it
+  could not do locked down. The runner's `CREATE OR REPLACE VIEW` then
+  defines the table for real. A query that does not qualify, a WHERE that
+  names a volatile function, and a probe that fails all keep every entry.
 
   ## Both tiers project onto the catalog's schema
 
@@ -227,8 +230,13 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
          {:ok, manifests} <-
            Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
-      members = members(refs, tables, manifests)
-      pruned = pruned(members, Pruner.conjuncts(statement, refs))
+      {members, pruned} =
+        Trace.span(:prune, fn ->
+          members = members(refs, tables, manifests)
+
+          {members, pruned(members, Pruner.conjuncts(statement, refs))}
+        end)
+
       hot = bounded(runtime, connection, statement, refs, tables, pruned)
 
       {:ok,
@@ -264,7 +272,8 @@ defmodule Smolquery.QueryService.Planner do
               spec,
               tables[ref].schema,
               hot[ref],
-              runtime.top_n_probe_rows
+              budget: runtime.top_n_probe_rows,
+              lockdown: runtime.lockdown
             )
           end)
 
@@ -273,7 +282,7 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp top_n_outcome({_entries, outcome}), do: outcome
-  defp top_n_outcome(_raised), do: %{}
+  defp top_n_outcome(_raised), do: %{bounded: false, rounds: 0, candidates: 0}
 
   defp federated(_runtime, []), do: {:ok, []}
 
