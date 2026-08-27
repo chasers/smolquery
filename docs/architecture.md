@@ -814,7 +814,7 @@ sequenceDiagram
     J->>B: hot manifests (every expected buffer node)
     B-->>J: entries + claim keys + min-max stats
     J->>J: prune by WHERE, drop entries sealed by S
-    J->>E: CREATE VIEW per table — lake pinned at S, unioned with read_parquet(urls)
+    J->>E: CREATE OR REPLACE VIEW per table — lake pinned at S, unioned with read_parquet(urls)
     J->>E: disable + lock external access, then run the user's SQL
     E-->>J: Arrow → Explorer frame
     J-->>C: job + first page of rows
@@ -832,7 +832,7 @@ creates `<dataset>.<table>` as a view in the job engine's own catalog. The
 view shadows the attached lake:
 
 ```sql
-CREATE VIEW "analytics"."events" AS SELECT "id", "ts" FROM (
+CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "id", "ts" FROM (
   SELECT * FROM "lake"."analytics"."events" AT (VERSION => 42)   -- sealed, pinned
   UNION ALL BY NAME
   SELECT * FROM read_parquet(['http://…/01A.parquet'], union_by_name := true)

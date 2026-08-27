@@ -37,6 +37,10 @@ defmodule Smolquery.QueryService.Views do
   @doc """
   The statements defining `dataset.table` as `schema`'s columns projected
   over `from_sql`.
+
+  The view replaces one of the same name: the planner's Top-N probe
+  (`Smolquery.QueryService.TopN`) defines the table over its candidate
+  entries first, and the runner's statements then define it for real.
   """
   @spec table_view(Smolquery.Catalog.table_ref(), Schema.t(), String.t()) :: [String.t()]
   def table_view({dataset, table}, schema, from_sql) do
@@ -46,7 +50,7 @@ defmodule Smolquery.QueryService.Views do
 
     [
       "CREATE SCHEMA IF NOT EXISTS #{ds}",
-      "CREATE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{from_sql})"
+      "CREATE OR REPLACE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{from_sql})"
     ]
   end
 

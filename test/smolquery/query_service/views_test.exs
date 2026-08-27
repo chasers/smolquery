@@ -9,7 +9,7 @@ defmodule Smolquery.QueryService.ViewsTest do
 
     assert Views.table_view({"analytics", "events"}, schema, "SELECT 1") == [
              ~s|CREATE SCHEMA IF NOT EXISTS "analytics"|,
-             ~s|CREATE VIEW "analytics"."events" AS SELECT "id", "attrs" FROM (SELECT 1)|
+             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "id", "attrs" FROM (SELECT 1)|
            ]
   end
 
@@ -19,6 +19,6 @@ defmodule Smolquery.QueryService.ViewsTest do
     assert [_schema, view] = Views.table_view({"analytics", "events"}, schema, "SELECT 1")
 
     assert view ==
-             ~s|CREATE VIEW "analytics"."events" AS SELECT "id", "doc"::VARIANT AS "doc" FROM (SELECT 1)|
+             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "id", "doc"::VARIANT AS "doc" FROM (SELECT 1)|
   end
 end

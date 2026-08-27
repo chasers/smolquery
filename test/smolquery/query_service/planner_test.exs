@@ -336,7 +336,10 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert [schema_stmt, view_stmt] = plan.statements
       assert schema_stmt == ~s|CREATE SCHEMA IF NOT EXISTS "analytics"|
-      assert view_stmt =~ ~s|CREATE VIEW "analytics"."events" AS SELECT "id", "name" FROM|
+
+      assert view_stmt =~
+               ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "id", "name" FROM|
+
       assert view_stmt =~ ~s|FROM "lake"."analytics"."events" AT (VERSION => #{@snapshot})|
     end
 
