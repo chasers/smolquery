@@ -184,4 +184,69 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert message =~ "OBJECT"
     end
   end
+
+  describe "a VARIANT column" do
+    defp variant_schema do
+      Schema.new!([{"id", :int64}, {"attrs", :variant}])
+    end
+
+    test "is written as JSON text that reads as a VARIANT keeping each value's type", %{
+      tmp_dir: dir
+    } do
+      path =
+        spool(dir, "variant.ndjson", [
+          %{"id" => 1, "attrs" => %{"host" => "h1", "n" => 1, "tags" => ["a", "b"]}},
+          %{"id" => 2, "attrs" => %{"host" => "h2", "n" => "x"}},
+          %{"id" => 3},
+          %{"id" => 4, "attrs" => "just a string"},
+          %{"id" => 5, "attrs" => [1, 2]}
+        ])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, variant_schema(), store: store(dir), engine: @engine)
+
+      {:ok, %{rows: rows}} =
+        Engine.query(
+          @engine,
+          "SELECT id, attrs['host']::VARCHAR, TRY_CAST(attrs['n'] AS BIGINT), variant_typeof(attrs), " <>
+            "attrs::JSON::VARCHAR FROM (SELECT id, attrs::VARIANT AS attrs FROM read_parquet($1)) ORDER BY id",
+          [segment.path]
+        )
+
+      assert rows == [
+               [1, "h1", 1, "OBJECT(host, n, tags)", ~s({"host":"h1","n":1,"tags":["a","b"]})],
+               [2, "h2", nil, "OBJECT(host, n)", ~s({"host":"h2","n":"x"})],
+               [3, nil, nil, "VARIANT_NULL", "null"],
+               [4, nil, nil, "VARCHAR", ~s("just a string")],
+               [5, nil, nil, "ARRAY(2)", "[1,2]"]
+             ]
+
+      {:ok, %{rows: [[type]]}} =
+        Engine.query(@engine, "SELECT typeof(attrs) FROM read_parquet($1) LIMIT 1", [
+          segment.path
+        ])
+
+      assert type == "JSON"
+    end
+
+    test "carries a null count but no bounds", %{tmp_dir: dir} do
+      path =
+        spool(dir, "variant_stats.ndjson", [%{"id" => 1, "attrs" => %{"a" => 1}}, %{"id" => 2}])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, variant_schema(), store: store(dir), engine: @engine)
+
+      assert segment.stats["attrs"] == %{min: nil, max: nil, null_count: 1}
+    end
+
+    test "takes any JSON value, so readable_ndjson?/3 never refuses a shape", %{tmp_dir: dir} do
+      path =
+        spool(dir, "variant_ok.ndjson", [
+          %{"id" => 1, "attrs" => %{"a" => [1]}},
+          %{"id" => 2, "attrs" => "s"}
+        ])
+
+      assert Writer.readable_ndjson?(@engine, path, variant_schema())
+    end
+  end
 end

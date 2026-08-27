@@ -33,4 +33,17 @@ defmodule Smolquery.Engine.FrameTest do
     assert Frame.map_columns(frame) == []
     assert Frame.to_rows(frame) == [%{"id" => 1, "name" => "x"}]
   end
+
+  test "decodes the columns the job says crossed as JSON text" do
+    {:ok, frame} =
+      Engine.frame(
+        @engine,
+        ~s|SELECT 1::BIGINT AS id, '{"a":[1,{"b":null}]}' AS doc, 'kept' AS text UNION ALL SELECT 2, NULL, NULL|
+      )
+
+    assert Frame.to_rows(frame, json_columns: ["doc"]) == [
+             %{"id" => 1, "doc" => %{"a" => [1, %{"b" => nil}]}, "text" => "kept"},
+             %{"id" => 2, "doc" => nil, "text" => nil}
+           ]
+  end
 end

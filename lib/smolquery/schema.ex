@@ -18,6 +18,7 @@ defmodule Smolquery.Schema do
   | `:date` | `DATE` | `:date` | `DATE` |
   | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
   | `{:map, :string, :string}` | `MAP(STRING, STRING)` | — | `MAP(VARCHAR, VARCHAR)` |
+  | `:variant` | `VARIANT` | — | `JSON` stored, `VARIANT` queried |
 
   The API names are the BigQuery-flavored strings `SmolqueryApi` speaks in
   table-schema JSON. `MAP(STRING, STRING)` is the one BigQuery does not have: it
@@ -42,6 +43,32 @@ defmodule Smolquery.Schema do
   its JSON text (`1`, `true`, `["a","b"]`, `{"k":"v"}`) — the same
   stringification DuckDB's `read_json` applies on the passthrough path, so a
   row reads back the same whichever path wrote it.
+
+  ## A variant is stored as JSON and queried as VARIANT
+
+  `VARIANT` is DuckDB's semi-structured type: any JSON value, with each
+  value's type kept — `1` stays an integer, `["a","b"]` stays an array, an
+  object nests. Query it with `attrs['host']::VARCHAR`,
+  `TRY_CAST(attrs['n'] AS BIGINT)`, `variant_typeof(attrs)`, and `attrs::JSON`
+  for the document back out.
+
+  On disk it is `JSON` text, in both tiers. DuckDB's Parquet encoding of a
+  VARIANT carries no Parquet logical type, and DuckLake's
+  `ducklake_add_data_files` — the seal's zero-copy registration — refuses to
+  map that file onto a VARIANT column (`Expected VARIANT, found type STRUCT`).
+  A `JSON` column it registers. So `duckdb_type/1` says `JSON`, the writer
+  reads the column as JSON with no cast, and `query_type/1` says `VARIANT`:
+  `Smolquery.QueryService.Views` projects `"attrs"::VARIANT` in every table
+  view, so a query sees the variant type across the hot ∪ sealed union. The
+  parse is paid per scanned row, per query; the day DuckLake registers a
+  variant file, `duckdb_type/1` flips and nothing above it moves.
+
+  The same writer story as a map applies: no Explorer dtype, DuckDB writes it.
+  And a variant never leaves DuckDB as itself: Arrow has no VARIANT, so the
+  query runner casts every VARIANT result column back to `JSON` before the
+  result crosses (`Smolquery.QueryService.VariantResults`), and the API
+  decodes those columns into JSON values — a variant reaches the client as the
+  nested JSON it was inserted as.
 
   A schema also carries the table's `clustering` key — the column names writes
   sort by, smolquery's analog of ClickHouse's `ORDER BY`. It rides here because
@@ -91,6 +118,7 @@ defmodule Smolquery.Schema do
           | :date
           | {:numeric, pos_integer(), non_neg_integer()}
           | {:map, :string, :string}
+          | :variant
 
   @type field_spec ::
           Field.t()
@@ -205,6 +233,7 @@ defmodule Smolquery.Schema do
   end
 
   def validate_type(@map_type), do: {:ok, @map_type}
+  def validate_type(:variant), do: {:ok, :variant}
 
   def validate_type(type), do: {:error, {:unsupported_type, type}}
 
@@ -245,6 +274,7 @@ defmodule Smolquery.Schema do
   @spec duckdb_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def duckdb_type({:numeric, precision, scale}), do: {:ok, "DECIMAL(#{precision},#{scale})"}
   def duckdb_type(@map_type), do: {:ok, @map_duckdb}
+  def duckdb_type(:variant), do: {:ok, "JSON"}
 
   def duckdb_type(type) do
     case Map.fetch(@logical_to_duckdb, type) do
@@ -252,6 +282,17 @@ defmodule Smolquery.Schema do
       :error -> {:error, {:unsupported_type, type}}
     end
   end
+
+  @doc """
+  The DuckDB type a column presents to a query — `VARIANT` for a variant,
+  which the catalog stores as `JSON`; otherwise `duckdb_type/1`.
+
+  A table view casts every column whose query type differs from its stored
+  type (`Smolquery.QueryService.Views`).
+  """
+  @spec query_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
+  def query_type(:variant), do: {:ok, "VARIANT"}
+  def query_type(type), do: duckdb_type(type)
 
   @doc """
   The logical type for a DuckDB type name, as `information_schema` reports it.
@@ -271,6 +312,7 @@ defmodule Smolquery.Schema do
   @spec api_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def api_type({:numeric, precision, scale}), do: {:ok, "NUMERIC(#{precision},#{scale})"}
   def api_type(@map_type), do: {:ok, @map_api}
+  def api_type(:variant), do: {:ok, "VARIANT"}
 
   def api_type(type) do
     case Map.fetch(@logical_to_api, type) do
@@ -308,6 +350,7 @@ defmodule Smolquery.Schema do
   | `:date` | ISO 8601 string | `Date` |
   | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
   | `{:map, :string, :string}` | object; a non-string value becomes its JSON text | map of binaries |
+  | `:variant` | any JSON value | the decoded term, unchanged |
 
   A map also accepts the list of `%{"key" => k, "value" => v}` entries Explorer
   reads a Parquet `MAP` as, so a Parquet load round-trips a map column. A map
@@ -400,6 +443,8 @@ defmodule Smolquery.Schema do
       do: {:ok, Map.new(entries, &{&1["key"], map_value_text(&1["value"])})},
       else: invalid(@map_type, entries)
   end
+
+  def value_from_json(:variant, value) when not is_struct(value), do: {:ok, value}
 
   def value_from_json(type, value), do: invalid(type, value)
 
@@ -501,6 +546,9 @@ defmodule Smolquery.Schema do
       Regex.match?(~r/^MAP\(\s*STRING\s*,\s*STRING\s*\)$/i, String.trim(name)) ->
         {:ok, @map_type}
 
+      String.upcase(String.trim(name)) == "VARIANT" ->
+        {:ok, :variant}
+
       match = Regex.run(~r/^NUMERIC\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
         [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
@@ -514,6 +562,9 @@ defmodule Smolquery.Schema do
     cond do
       Regex.match?(~r/^MAP\(\s*VARCHAR\s*,\s*VARCHAR\s*\)$/i, String.trim(name)) ->
         {:ok, @map_type}
+
+      String.upcase(String.trim(name)) == "JSON" ->
+        {:ok, :variant}
 
       match = Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, String.trim(name)) ->
         [_match, precision, scale] = match

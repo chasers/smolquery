@@ -12,6 +12,10 @@ defmodule Smolquery.Engine.Frame do
 
   A `NULL` map is the one thing that does not survive the crossing: Polars
   reads it as an empty list, so it comes out as `%{}`.
+
+  A `VARIANT` column crosses as JSON text instead
+  (`Smolquery.QueryService.VariantResults`), and the job names which columns
+  those are; `to_rows/2` decodes them back into JSON values.
   """
 
   alias Explorer.DataFrame
@@ -20,15 +24,17 @@ defmodule Smolquery.Engine.Frame do
 
   @doc """
   `frame` as maps keyed by column name, with each map column's entries
-  folded back into a map.
+  folded back into a map and each `:json_columns` column's text decoded.
   """
-  @spec to_rows(DataFrame.t()) :: [%{optional(String.t()) => term()}]
-  def to_rows(%DataFrame{} = frame) do
+  @spec to_rows(DataFrame.t(), keyword()) :: [%{optional(String.t()) => term()}]
+  def to_rows(%DataFrame{} = frame, opts \\ []) do
     rows = DataFrame.to_rows(frame)
+    maps = map_columns(frame)
+    json = Keyword.get(opts, :json_columns, [])
 
-    case map_columns(frame) do
-      [] -> rows
-      columns -> Enum.map(rows, &fold_maps(&1, columns))
+    case {maps, json} do
+      {[], []} -> rows
+      _decode -> Enum.map(rows, &(&1 |> fold_maps(maps) |> decode_json(json)))
     end
   end
 
@@ -48,6 +54,15 @@ defmodule Smolquery.Engine.Frame do
       Map.update!(row, column, &entries_to_map/1)
     end)
   end
+
+  defp decode_json(row, columns) do
+    Enum.reduce(columns, row, fn column, row ->
+      Map.update!(row, column, &decode_text/1)
+    end)
+  end
+
+  defp decode_text(nil), do: nil
+  defp decode_text(text), do: JSON.decode!(text)
 
   defp entries_to_map(nil), do: nil
   defp entries_to_map(entries), do: Map.new(entries, &{&1["key"], &1["value"]})

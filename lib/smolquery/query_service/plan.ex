@@ -19,6 +19,11 @@ defmodule Smolquery.QueryService.Plan do
   trailing semicolon — which is what makes the runner's result-budget wrap
   safe to parenthesize.
 
+  `schemas` carries each referenced table's catalog schema, keyed by table:
+  what the runner reads to decide whether a result can carry a `VARIANT`
+  column that needs casting before it crosses Arrow
+  (`Smolquery.QueryService.VariantResults`).
+
   `federated` says whether `statements` opens with `ATTACH`es for registered
   Postgres connections (T-324). The runner reads it to decide whether the job
   engine needs DuckDB's `postgres` extension — loading that extension is not
@@ -38,6 +43,7 @@ defmodule Smolquery.QueryService.Plan do
     tables: [],
     statements: [],
     hot: %{},
+    schemas: %{},
     federated: false
   ]
 
@@ -48,6 +54,7 @@ defmodule Smolquery.QueryService.Plan do
           tables: [Catalog.table_ref()],
           statements: [String.t()],
           hot: %{Catalog.table_ref() => [HotClient.entry()]},
+          schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
           statistics: Statistics.t() | nil,
           federated: boolean()
         }

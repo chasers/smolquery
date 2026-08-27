@@ -9,6 +9,10 @@ defmodule Smolquery.QueryService.Views do
   neither tier carries from leaking in — so both render through here, and a
   change to the shape cannot land in one site and not the other (PL-49
   review).
+
+  The projection is also where a column's query type is put on: a column whose
+  `Smolquery.Schema.query_type/1` differs from its stored type is cast, which
+  is how a `VARIANT` column stored as `JSON` reaches a query as a variant.
   """
 
   alias Smolquery.Identifier
@@ -37,11 +41,19 @@ defmodule Smolquery.QueryService.Views do
   def table_view({dataset, table}, schema, from_sql) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
-    columns = Enum.map_join(schema.fields, ", ", &Identifier.quote_name!(&1.name))
+    columns = Enum.map_join(schema.fields, ", ", &column_expression/1)
 
     [
       "CREATE SCHEMA IF NOT EXISTS #{ds}",
       "CREATE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{from_sql})"
     ]
+  end
+
+  defp column_expression(%Schema.Field{name: name, type: type}) do
+    quoted = Identifier.quote_name!(name)
+    {:ok, stored} = Schema.duckdb_type(type)
+    {:ok, queried} = Schema.query_type(type)
+
+    if queried == stored, do: quoted, else: "#{quoted}::#{queried} AS #{quoted}"
   end
 end

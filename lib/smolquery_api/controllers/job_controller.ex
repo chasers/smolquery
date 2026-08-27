@@ -182,7 +182,7 @@ defmodule SmolqueryApi.JobController do
     rows =
       frame
       |> DataFrame.slice(offset, max_results)
-      |> Frame.to_rows()
+      |> Frame.to_rows(json_columns: job.json_columns)
       |> Enum.map(&row_json/1)
 
     body = %{
