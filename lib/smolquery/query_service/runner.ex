@@ -74,6 +74,7 @@ defmodule Smolquery.QueryService.Runner do
   @type option ::
           {:timeout_ms, pos_integer()}
           | {:explain, :plan | :analyze}
+          | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
 
@@ -121,7 +122,7 @@ defmodule Smolquery.QueryService.Runner do
       runtime: override_distributed(runtime, Keyword.get(opts, :distributed)),
       timeout_ms: timeout_ms,
       job: job,
-      explain: Keyword.get(opts, :explain),
+      explain: mode(opts),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
       engine: nil,
@@ -137,6 +138,10 @@ defmodule Smolquery.QueryService.Runner do
 
   defp override_distributed(%Runtime{} = runtime, enabled) when is_boolean(enabled),
     do: %{runtime | distributed: %{runtime.distributed | enabled: enabled}}
+
+  defp mode(opts) do
+    if Keyword.get(opts, :describe, false), do: :describe, else: Keyword.get(opts, :explain)
+  end
 
   @impl GenServer
   def handle_continue(:run, state) do
@@ -284,6 +289,12 @@ defmodule Smolquery.QueryService.Runner do
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
     with {:ok, prepared} <- variants(connection, plan) do
       run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms)
+    end
+  end
+
+  defp outcome(_runtime, connection, plan, _max_rows, :describe, _job_id, _timeout_ms) do
+    with {:ok, frame} <- Connection.frame(connection, "DESCRIBE " <> plan.sql, [], :infinity) do
+      {:ok, {{:frame, frame}, nil, []}}
     end
   end
 

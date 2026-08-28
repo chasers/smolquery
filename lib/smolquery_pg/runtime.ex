@@ -90,4 +90,11 @@ defmodule SmolqueryPg.Runtime do
   """
   @spec listener(atom()) :: atom()
   def listener(name), do: Module.concat(name, "Listener")
+
+  @doc """
+  The registry that maps a session's backend key to the job it is running,
+  for `CancelRequest`.
+  """
+  @spec cancels(atom()) :: atom()
+  def cancels(name), do: Module.concat(name, "Cancels")
 end

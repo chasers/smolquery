@@ -216,17 +216,172 @@ defmodule SmolqueryPg.WireTest do
   end
 
   describe "the extended protocol" do
-    test "answers 0A000 and resynchronises on Sync", %{port: port} do
+    test "parse, bind, describe, execute answer typed rows", %{port: port} do
       {socket, _params} = connect(port)
 
-      :ok = PgClient.send_raw(socket, PgClient.frame(?P, ["", 0, "SELECT 1", 0, <<0::16>>]))
-      :ok = PgClient.send_raw(socket, PgClient.frame(?S, []))
+      answer = PgClient.extended(socket, "SELECT 1::BIGINT AS i, 'x' AS s")
+
+      assert answer.errors == []
+      assert answer.status == ?I
+
+      assert [
+               %{
+                 columns: [%{name: "i", oid: 20}, %{name: "s", oid: 25}],
+                 rows: [["1", "x"]],
+                 tag: "SELECT 1"
+               }
+             ] =
+               answer.results
+    end
+
+    test "binary results carry the Postgres binary forms", %{port: port} do
+      {socket, _params} = connect(port)
+
+      answer =
+        PgClient.extended(
+          socket,
+          "SELECT 7::BIGINT AS i, 1.5::DOUBLE AS f, true AS b, DATE '2000-01-02' AS d, 12.50::DECIMAL(38,2) AS n",
+          [],
+          result_formats: [1]
+        )
+
+      assert [%{rows: [[<<7::64-signed>>, <<1.5::float-64>>, <<1>>, <<1::32-signed>>, numeric]]}] =
+               answer.results
+
+      assert <<2::16, 0::16-signed, 0::16, 2::16, 12::16, 5000::16>> = numeric
+    end
+
+    test "parameters bind by declared OID, in text and binary", %{port: port} do
+      {socket, _params} = connect(port)
+
+      answer =
+        PgClient.extended(socket, "SELECT $1 + $2 AS sum, $3 AS s, $4 AS z", [
+          {20, 0, "40"},
+          {20, 1, <<2::64-signed>>},
+          {25, 0, "it's"},
+          {25, 0, nil}
+        ])
+
+      assert answer.errors == []
+      assert [%{rows: [["42", "it's", nil]]}] = answer.results
+    end
+
+    test "describing a statement answers its parameters and columns before a bind", %{port: port} do
+      {socket, _params} = connect(port)
+
+      answer =
+        PgClient.extended(socket, "SELECT $1::bigint AS n, 'x' AS s", [{20, 0, "5"}],
+          declared: [0],
+          describe_statement: true
+        )
+
+      assert answer.parameters == [20]
+      last = List.last(answer.results)
+      assert Enum.map(last.columns, & &1.oid) == [20, 25]
+      assert last.rows == [["5", "x"]]
+    end
+
+    test "a no-parameter statement describes its columns and runs", %{port: port} do
+      {socket, _params} = connect(port)
+
+      answer = PgClient.extended(socket, "SELECT 1 AS a, 'x' AS b", [], describe_statement: true)
+
+      assert answer.parameters == []
+      last = List.last(answer.results)
+      assert Enum.map(last.columns, & &1.name) == ["a", "b"]
+      assert last.rows == [["1", "x"]]
+    end
+
+    test "a row limit suspends the portal, and later executes drain it", %{port: port} do
+      {socket, _params} = connect(port)
+
+      first = PgClient.extended(socket, "SELECT range AS n FROM range(5)", [], max_rows: 2)
+      assert first.suspended
+      assert [%{rows: [_, _] = page1}] = first.results
+
+      :ok = PgClient.send_raw(socket, [PgClient.execute("", 2), PgClient.frame(?S, [])])
+      second = PgClient.query_answer(socket)
+      assert second.suspended
+      assert [%{rows: [_, _] = page2}] = second.results
+
+      :ok = PgClient.send_raw(socket, [PgClient.execute("", 0), PgClient.frame(?S, [])])
+      third = PgClient.query_answer(socket)
+      refute Map.get(third, :suspended, false)
+      assert [%{rows: [_] = page3, tag: "SELECT 1"}] = third.results
+
+      values = (page1 ++ page2 ++ page3) |> List.flatten() |> Enum.sort()
+      assert values == ["0", "1", "2", "3", "4"]
+    end
+
+    test "session statements run through the extended protocol too", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{results: [%{tag: "SET"}], params: %{"application_name" => "pgx"}} =
+               PgClient.extended(socket, "SET application_name = 'pgx'")
+
+      assert %{results: [%{tag: "BEGIN"}], status: ?T} = PgClient.extended(socket, "BEGIN")
+      assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.extended(socket, "COMMIT")
+      assert %{results: [%{tag: ""}]} = PgClient.extended(socket, "")
+    end
+
+    test "an error discards the pipeline until Sync, then the session is usable", %{port: port} do
+      {socket, _params} = connect(port)
+
+      answer = PgClient.extended(socket, "SELECT FROM WHERE")
+
+      assert [%{"C" => "42601"}] = answer.errors
+      assert answer.results == []
+      assert answer.status == ?I
+
+      assert %{errors: [%{"C" => "26000"}]} =
+               (:ok =
+                  PgClient.send_raw(socket, [
+                    PgClient.bind("", "missing", [], []),
+                    PgClient.frame(?S, [])
+                  ])) &&
+                 PgClient.query_answer(socket)
+
+      assert %{results: [%{rows: [["1"]]}]} = PgClient.extended(socket, "SELECT 1")
+    end
+
+    test "a wrong parameter count is a protocol error", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{errors: [%{"C" => "08P01"}]} =
+               PgClient.extended(socket, "SELECT $1, $2", [{25, 0, "a"}])
+    end
+
+    test "an unknown message type answers 0A000 and resynchronises on Sync", %{port: port} do
+      {socket, _params} = connect(port)
+
+      :ok = PgClient.send_raw(socket, [PgClient.frame(?F, "body"), PgClient.frame(?S, [])])
 
       assert {:ok, {?E, body}} = PgClient.recv(socket)
       assert %{"C" => "0A000"} = PgClient.fields(body)
       assert {:ok, {?Z, "I"}} = PgClient.recv(socket)
+    end
+  end
 
-      assert %{results: [%{rows: [["1"]]}]} = PgClient.query(socket, "SELECT 1")
+  describe "cancellation" do
+    test "a CancelRequest with the session's key cancels its running query", %{port: port} do
+      {socket, _params} = connect(port)
+      %{backend: {pid, key}} = PgClient.backend_key(socket)
+
+      :ok =
+        PgClient.send_raw(
+          socket,
+          PgClient.frame(?Q, [
+            "SELECT max(a.range * b.range) FROM range(100000) a, range(100000) b",
+            0
+          ])
+        )
+
+      Process.sleep(100)
+      {:ok, canceller} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      :ok = :gen_tcp.send(canceller, <<16::32, 80_877_102::32, pid::32, key::32>>)
+      assert {:error, :closed} = :gen_tcp.recv(canceller, 0, 5_000)
+
+      assert %{errors: [%{"C" => "57014"}], status: ?I} = PgClient.query_answer(socket)
     end
   end
 

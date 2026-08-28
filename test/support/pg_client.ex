@@ -31,13 +31,28 @@ defmodule Smolquery.Test.PgClient do
     with {:ok, {?R, <<3::32>>}} <- recv(socket),
          :ok <- :gen_tcp.send(socket, frame(?p, [password, 0])),
          {:ok, {?R, <<0::32>>}} <- recv(socket) do
-      {:ok, socket,
-       until_ready(socket, %{params: %{}, results: [], errors: [], notices: []}).params}
+      answer = query_answer(socket)
+      Process.put({__MODULE__, socket}, answer.backend)
+
+      {:ok, socket, answer.params}
     else
       {:ok, {?E, body}} -> {:error, fields(body)}
       other -> {:error, other}
     end
   end
+
+  @doc """
+  The `BackendKeyData` the server sent this socket at startup.
+  """
+  @spec backend_key(:gen_tcp.socket()) :: %{backend: {integer(), integer()}}
+  def backend_key(socket), do: %{backend: Process.get({__MODULE__, socket})}
+
+  @doc """
+  Collects every backend message until `ReadyForQuery`.
+  """
+  @spec query_answer(:gen_tcp.socket()) :: map()
+  def query_answer(socket),
+    do: until_ready(socket, %{params: %{}, results: [], errors: [], notices: []})
 
   @doc """
   Sends `sql` as one `Query` and collects the answer.
@@ -51,8 +66,86 @@ defmodule Smolquery.Test.PgClient do
   def query(socket, sql) do
     :ok = :gen_tcp.send(socket, frame(?Q, [sql, 0]))
 
-    until_ready(socket, %{params: %{}, results: [], errors: [], notices: []})
+    query_answer(socket)
   end
+
+  @doc """
+  One extended-protocol round: `Parse`, `Bind` with `params` as
+  `{oid, format, value}` triples, `Describe` of the portal, `Execute` with
+  `max_rows`, and `Sync`. `result_formats` is what `Bind` asks for.
+  Answers the same map as `query/2`, plus `:parameters` (the
+  `ParameterDescription` OIDs, when a statement was described), and
+  `:suspended` when the portal was left open.
+  """
+  @spec extended(
+          :gen_tcp.socket(),
+          String.t(),
+          [{pos_integer(), 0 | 1, binary() | nil}],
+          keyword()
+        ) ::
+          map()
+  def extended(socket, sql, params \\ [], opts \\ []) do
+    result_formats = Keyword.get(opts, :result_formats, [])
+    max_rows = Keyword.get(opts, :max_rows, 0)
+
+    declared =
+      Keyword.get(opts, :declared, Enum.map(params, fn {oid, _format, _value} -> oid end))
+
+    messages = [
+      parse("", sql, declared),
+      if(Keyword.get(opts, :describe_statement, false), do: describe(?S, ""), else: []),
+      bind("", "", params, result_formats),
+      describe(?P, ""),
+      execute("", max_rows),
+      frame(?S, [])
+    ]
+
+    :ok = :gen_tcp.send(socket, messages)
+
+    query_answer(socket)
+  end
+
+  @doc """
+  A `Parse` message.
+  """
+  @spec parse(String.t(), String.t(), [non_neg_integer()]) :: iodata()
+  def parse(name, sql, oids),
+    do: frame(?P, [name, 0, sql, 0, <<length(oids)::16>>, Enum.map(oids, &<<&1::32>>)])
+
+  @doc """
+  A `Bind` message.
+  """
+  @spec bind(String.t(), String.t(), [{pos_integer(), 0 | 1, binary() | nil}], [0 | 1]) ::
+          iodata()
+  def bind(portal, statement, params, result_formats) do
+    frame(?B, [
+      portal,
+      0,
+      statement,
+      0,
+      <<length(params)::16>>,
+      Enum.map(params, fn {_oid, format, _value} -> <<format::16>> end),
+      <<length(params)::16>>,
+      Enum.map(params, fn
+        {_oid, _format, nil} -> <<-1::32-signed>>
+        {_oid, _format, value} -> [<<byte_size(value)::32>>, value]
+      end),
+      <<length(result_formats)::16>>,
+      Enum.map(result_formats, &<<&1::16>>)
+    ])
+  end
+
+  @doc """
+  A `Describe` (`?S` or `?P`) message.
+  """
+  @spec describe(byte(), String.t()) :: iodata()
+  def describe(kind, name), do: frame(?D, [kind, name, 0])
+
+  @doc """
+  An `Execute` message.
+  """
+  @spec execute(String.t(), non_neg_integer()) :: iodata()
+  def execute(portal, max_rows), do: frame(?E, [portal, 0, <<max_rows::32>>])
 
   @doc """
   Sends raw bytes, for protocol-level tests.
@@ -119,13 +212,22 @@ defmodule Smolquery.Test.PgClient do
     %{acc | params: Map.put(acc.params, name, value)}
   end
 
-  defp absorb({?K, _body}, acc), do: acc
+  defp absorb({?K, <<pid::32, key::32>>}, acc), do: Map.put(acc, :backend, {pid, key})
+  defp absorb({tag, <<>>}, acc) when tag in [?1, ?2, ?3], do: acc
+  defp absorb({?n, <<>>}, acc), do: acc
+  defp absorb({?s, <<>>}, acc), do: Map.put(acc, :suspended, true)
+
+  defp absorb({?t, <<count::16, rest::binary>>}, acc),
+    do: Map.put(acc, :parameters, for(<<oid::32 <- binary_part(rest, 0, count * 4)>>, do: oid))
 
   defp absorb({?T, body}, acc),
     do: %{acc | results: [%{columns: columns(body), rows: []} | acc.results]}
 
   defp absorb({?D, body}, %{results: [current | rest]} = acc),
     do: %{acc | results: [%{current | rows: [row(body) | current.rows]} | rest]}
+
+  defp absorb({?D, body}, %{results: []} = acc),
+    do: %{acc | results: [%{columns: [], rows: [row(body)]}]}
 
   defp absorb({?C, body}, acc) do
     tag = body |> String.split(<<0>>) |> hd()

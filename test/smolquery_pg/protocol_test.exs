@@ -47,8 +47,8 @@ defmodule SmolqueryPg.ProtocolTest do
     end
 
     test "names a message it does not know" do
-      assert {:ok, {:unknown, ?P, "body"}, <<>>} =
-               Protocol.decode(IO.iodata_to_binary(PgClient.frame(?P, "body")))
+      assert {:ok, {:unknown, ?F, "body"}, <<>>} =
+               Protocol.decode(IO.iodata_to_binary(PgClient.frame(?F, "body")))
     end
   end
 
@@ -84,5 +84,42 @@ defmodule SmolqueryPg.ProtocolTest do
       assert IO.iodata_to_binary(Protocol.ready_for_query(:transaction)) == <<?Z, 5::32, ?T>>
       assert IO.iodata_to_binary(Protocol.ready_for_query(:failed)) == <<?Z, 5::32, ?E>>
     end
+  end
+end
+
+defmodule SmolqueryPg.ProtocolExtendedTest do
+  use ExUnit.Case, async: true
+
+  alias Smolquery.Test.PgClient
+  alias SmolqueryPg.Protocol
+
+  test "decodes the extended protocol's messages" do
+    parse = IO.iodata_to_binary(PgClient.parse("s1", "SELECT $1", [20]))
+    assert {:ok, {:parse, "s1", "SELECT $1", [20]}, <<>>} = Protocol.decode(parse)
+
+    bind = IO.iodata_to_binary(PgClient.bind("p1", "s1", [{20, 1, <<1::64>>}, {25, 0, nil}], [1]))
+
+    assert {:ok, {:bind, "p1", "s1", [1, 0], [<<1::64>>, nil], [1]}, <<>>} =
+             Protocol.decode(bind)
+
+    describe = IO.iodata_to_binary(PgClient.describe(?S, "s1"))
+    assert {:ok, {:describe, :statement, "s1"}, <<>>} = Protocol.decode(describe)
+
+    execute = IO.iodata_to_binary(PgClient.execute("p1", 50))
+    assert {:ok, {:execute, "p1", 50}, <<>>} = Protocol.decode(execute)
+
+    close = IO.iodata_to_binary(PgClient.frame(?C, [?P, "p1", 0]))
+    assert {:ok, {:close, :portal, "p1"}, <<>>} = Protocol.decode(close)
+
+    assert {:ok, :flush, <<>>} = Protocol.decode(IO.iodata_to_binary(PgClient.frame(?H, [])))
+  end
+
+  test "encodes the bodiless answers and a parameter description" do
+    assert IO.iodata_to_binary(Protocol.parse_complete()) == <<?1, 4::32>>
+    assert IO.iodata_to_binary(Protocol.portal_suspended()) == <<?s, 4::32>>
+    assert IO.iodata_to_binary(Protocol.no_data()) == <<?n, 4::32>>
+
+    assert IO.iodata_to_binary(Protocol.parameter_description([20, 25])) ==
+             <<?t, 14::32, 2::16, 20::32, 25::32>>
   end
 end
