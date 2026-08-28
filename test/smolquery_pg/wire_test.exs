@@ -395,3 +395,136 @@ defmodule SmolqueryPg.WireTest do
     end
   end
 end
+
+defmodule SmolqueryPg.FdwStatementsTest do
+  @moduledoc """
+  The statements `postgres_fdw` drives a scan with (PL-58 layer 4):
+  cursors over a transaction block, savepoints, `DEALLOCATE ALL`, and
+  `EXPLAIN`.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias Smolquery.QueryService
+  alias Smolquery.Test.FixedCatalog
+  alias Smolquery.Test.MapCatalog
+  alias Smolquery.Test.PgClient
+  alias SmolqueryPg.Runtime
+
+  @password "fdw-statements-password"
+
+  setup do
+    unique = :erlang.unique_integer([:positive])
+    query = :"pg_fdw_query_#{unique}"
+    pg = :"pg_fdw_edge_#{unique}"
+
+    start_supervised!(
+      {QueryService.Supervisor,
+       name: query, catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}})},
+      id: query
+    )
+
+    on_exit(fn -> QueryService.Runtime.delete(query) end)
+
+    start_supervised!(
+      {SmolqueryPg.Supervisor,
+       name: pg, password: @password, query_name: query, port: 0, catalog: MapCatalog.new()},
+      id: pg
+    )
+
+    on_exit(fn -> Runtime.delete(pg) end)
+
+    {:ok, {_ip, port}} = SmolqueryPg.Supervisor.bound(pg)
+    {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+    %{socket: socket}
+  end
+
+  test "the exact fdw scan: transaction, declare, fetch pages, close, commit", %{socket: socket} do
+    assert %{results: [%{tag: "BEGIN"}], status: ?T} =
+             PgClient.query(socket, "START TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+
+    assert %{errors: [], results: [%{tag: "DECLARE CURSOR"}]} =
+             PgClient.query(socket, "DECLARE c1 CURSOR FOR SELECT range AS n FROM range(5)")
+
+    assert %{results: [%{columns: [%{name: "n", oid: 20}], rows: [_, _] = page1, tag: "FETCH 2"}]} =
+             PgClient.query(socket, "FETCH 2 FROM c1")
+
+    assert %{results: [%{rows: [_, _] = page2, tag: "FETCH 2"}]} =
+             PgClient.query(socket, "FETCH 2 FROM c1")
+
+    assert %{results: [%{rows: [_] = page3, tag: "FETCH 1"}]} =
+             PgClient.query(socket, "FETCH ALL FROM c1")
+
+    assert %{results: [%{rows: [], tag: "FETCH 0"}]} = PgClient.query(socket, "FETCH 100 FROM c1")
+
+    values = (page1 ++ page2 ++ page3) |> List.flatten() |> Enum.sort()
+    assert values == ["0", "1", "2", "3", "4"]
+
+    assert %{results: [%{tag: "CLOSE CURSOR"}]} = PgClient.query(socket, "CLOSE c1")
+    assert %{errors: [%{"C" => "34000"}]} = PgClient.query(socket, "FETCH 1 FROM c1")
+
+    assert %{results: [%{tag: "ROLLBACK"}], status: ?I} =
+             PgClient.query(socket, "COMMIT TRANSACTION")
+  end
+
+  test "MOVE advances without rows, and savepoints are quiet no-ops", %{socket: socket} do
+    PgClient.query(socket, "BEGIN")
+    PgClient.query(socket, "DECLARE c2 CURSOR FOR SELECT range AS n FROM range(4)")
+
+    assert %{results: [%{tag: "MOVE 3", rows: []}]} = PgClient.query(socket, "MOVE 3 FROM c2")
+
+    assert %{results: [%{tag: "FETCH 1", rows: [[_last]]}]} =
+             PgClient.query(socket, "FETCH ALL FROM c2")
+
+    assert %{results: [%{tag: "SAVEPOINT"}], status: ?T} = PgClient.query(socket, "SAVEPOINT s1")
+
+    assert %{results: [%{tag: "ROLLBACK"}], status: ?T} =
+             PgClient.query(socket, "ROLLBACK TO SAVEPOINT s1")
+
+    assert %{results: [%{tag: "RELEASE"}], status: ?T} =
+             PgClient.query(socket, "RELEASE SAVEPOINT s1")
+
+    assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.query(socket, "COMMIT")
+  end
+
+  test "DEALLOCATE ALL and DISCARD ALL clear the session's state", %{socket: socket} do
+    assert %{results: [%{tag: "DEALLOCATE ALL"}]} = PgClient.query(socket, "DEALLOCATE ALL")
+
+    PgClient.query(socket, "SET application_name = 'fdw'")
+    PgClient.query(socket, "DECLARE c3 CURSOR FOR SELECT 1 AS one")
+
+    assert %{results: [%{tag: "DISCARD ALL"}]} = PgClient.query(socket, "DISCARD ALL")
+    assert %{errors: [%{"C" => "34000"}]} = PgClient.query(socket, "FETCH 1 FROM c3")
+    assert %{results: [%{rows: [["fdw"]]}]} = PgClient.query(socket, "SHOW application_name")
+  end
+
+  test "EXPLAIN answers one Foreign Scan cost line postgres_fdw can parse", %{socket: socket} do
+    assert %{
+             errors: [],
+             results: [%{columns: [%{name: "QUERY PLAN"}], rows: [[plan]], tag: "EXPLAIN"}]
+           } =
+             PgClient.query(socket, "EXPLAIN SELECT 1 AS n")
+
+    assert [_all, _start, _total, rows, _width] =
+             Regex.run(~r/\(cost=(\d+\.\d+)\.\.(\d+\.\d+) rows=(\d+) width=(\d+)\)/, plan)
+
+    assert String.to_integer(rows) >= 1
+  end
+
+  test "a failed statement aborts the block for cursors too", %{socket: socket} do
+    PgClient.query(socket, "BEGIN")
+    assert %{errors: [%{"C" => "42601"}], status: ?E} = PgClient.query(socket, "SELECT FROM")
+
+    assert %{errors: [%{"C" => "25P02"}]} =
+             PgClient.query(socket, "DECLARE c4 CURSOR FOR SELECT 1")
+
+    assert %{errors: [%{"C" => "25P02"}]} = PgClient.query(socket, "SAVEPOINT s")
+
+    assert %{results: [%{tag: "ROLLBACK"}], status: ?T} =
+             PgClient.query(socket, "ROLLBACK TO SAVEPOINT s")
+
+    assert %{results: [%{rows: [["1"]]}], status: ?T} = PgClient.query(socket, "SELECT 1")
+    assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.query(socket, "COMMIT")
+  end
+end
