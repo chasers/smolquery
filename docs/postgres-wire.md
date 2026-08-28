@@ -105,6 +105,9 @@ A DuckDB error keeps its message and takes the code its class implies:
 | `SMOLQUERY_PG_PASSWORD` | The password every client must present (the API key) |
 | `SMOLQUERY_PG_IP` / `SMOLQUERY_PG_PORT` | The bind address and port (`127.0.0.1` / `5432`) |
 
+In `dev`, the port is `15432`: a developer machine often runs its own
+Postgres on `5432`, and a bound port fails the whole node's boot.
+
 The role is `pg` in `SMOLQUERY_ROLES`. A node with the role and no
 password refuses to boot. The edge sends queries to the node's own
 `Smolquery.QueryService`, so the node needs the `query` role too.
