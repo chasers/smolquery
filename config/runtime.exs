@@ -57,6 +57,19 @@ if web_ip = System.get_env("SMOLQUERY_WEB_IP") do
   config :smolquery, SmolqueryWeb.Endpoint, http: [ip: ip]
 end
 
+if pg_password = System.get_env("SMOLQUERY_PG_PASSWORD") do
+  config :smolquery, SmolqueryPg, password: pg_password
+end
+
+if pg_port = System.get_env("SMOLQUERY_PG_PORT") do
+  config :smolquery, SmolqueryPg,
+    port: Smolquery.RuntimeConfig.port!("SMOLQUERY_PG_PORT", pg_port)
+end
+
+if pg_ip = System.get_env("SMOLQUERY_PG_IP") do
+  config :smolquery, SmolqueryPg, ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_PG_IP", pg_ip)
+end
+
 if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
   config :smolquery, Smolquery.MetricsServer,
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)
