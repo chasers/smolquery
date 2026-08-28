@@ -21,9 +21,12 @@ defmodule SmolqueryPg.Runtime do
   one. There is no fallback past that: a node holding the `:pg` role with
   neither configured refuses to boot rather than serve an open listener.
 
-  The listener binds loopback by default. Layer 1 authenticates with a
-  cleartext password, so exposing the port beyond the node is a deliberate
-  act that belongs behind TLS (`SmolqueryPg` layer 5) or a TLS terminator.
+  The listener binds loopback by default. `auth` selects how the password
+  crosses: `:scram_sha_256` (the default — the password never crosses at
+  all) or `:cleartext` for a legacy client. `tls_cert`/`tls_key`
+  (`SMOLQUERY_PG_TLS_CERT`/`_KEY`) make the edge accept `SSLRequest` and
+  upgrade the connection; without them it declines and the session stays
+  plaintext, which is what binding beyond loopback should not do.
 
   `query_name` is the `Smolquery.QueryService` instance every `SELECT` runs
   through.
@@ -38,7 +41,10 @@ defmodule SmolqueryPg.Runtime do
     :password,
     :catalog,
     :catalog_opts,
+    :tls_cert,
+    :tls_key,
     query_name: Smolquery.QueryService,
+    auth: :scram_sha_256,
     ip: {127, 0, 0, 1},
     port: 5432
   ]
@@ -49,6 +55,9 @@ defmodule SmolqueryPg.Runtime do
           catalog: Catalog.t(),
           catalog_opts: keyword() | nil,
           query_name: atom(),
+          auth: :scram_sha_256 | :cleartext,
+          tls_cert: Path.t() | nil,
+          tls_key: Path.t() | nil,
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -85,8 +94,27 @@ defmodule SmolqueryPg.Runtime do
           role: :pg
         )
     }
-    |> struct!(Keyword.take(config, [:query_name, :ip, :port]))
+    |> struct!(Keyword.take(config, [:query_name, :auth, :tls_cert, :tls_key, :ip, :port]))
+    |> validate_tls()
   end
+
+  defp validate_tls(%__MODULE__{tls_cert: nil, tls_key: nil} = runtime), do: runtime
+
+  defp validate_tls(%__MODULE__{tls_cert: cert, tls_key: key} = runtime)
+       when is_binary(cert) and is_binary(key),
+       do: runtime
+
+  defp validate_tls(_runtime) do
+    raise ArgumentError,
+          "the Postgres wire edge takes tls_cert and tls_key together " <>
+            "(SMOLQUERY_PG_TLS_CERT and SMOLQUERY_PG_TLS_KEY), or neither"
+  end
+
+  @doc """
+  Whether the edge answers `SSLRequest` with an upgrade.
+  """
+  @spec tls?(t()) :: boolean()
+  def tls?(%__MODULE__{tls_cert: cert}), do: cert != nil
 
   defp api_key, do: Keyword.get(Application.get_env(:smolquery, SmolqueryApi, []), :api_key)
 

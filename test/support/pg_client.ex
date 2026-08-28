@@ -28,16 +28,84 @@ defmodule Smolquery.Test.PgClient do
 
     :ok = :gen_tcp.send(socket, startup([{"user", user}, {"database", database}]))
 
-    with {:ok, {?R, <<3::32>>}} <- recv(socket),
-         :ok <- :gen_tcp.send(socket, frame(?p, [password, 0])),
-         {:ok, {?R, <<0::32>>}} <- recv(socket) do
+    with {:ok, socket} <- authenticate(socket, password) do
       answer = query_answer(socket)
       Process.put({__MODULE__, socket}, answer.backend)
 
       {:ok, socket, answer.params}
-    else
+    end
+  end
+
+  defp authenticate(socket, password) do
+    case recv(socket) do
+      {:ok, {?R, <<3::32>>}} ->
+        :ok = :gen_tcp.send(socket, frame(?p, [password, 0]))
+        auth_outcome(socket)
+
+      {:ok, {?R, <<10::32, _mechanisms::binary>>}} ->
+        scram(socket, password)
+
+      {:ok, {?E, body}} ->
+        {:error, fields(body)}
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp auth_outcome(socket) do
+    case recv(socket) do
+      {:ok, {?R, <<0::32>>}} -> {:ok, socket}
+      {:ok, {?R, <<12::32, _final::binary>>}} -> auth_outcome(socket)
       {:ok, {?E, body}} -> {:error, fields(body)}
       other -> {:error, other}
+    end
+  end
+
+  defp scram(socket, password) do
+    nonce = 18 |> :crypto.strong_rand_bytes() |> Base.encode64()
+    client_first_bare = "n=,r=" <> nonce
+    initial = "n,," <> client_first_bare
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        frame(?p, ["SCRAM-SHA-256", 0, <<byte_size(initial)::32>>, initial])
+      )
+
+    case recv(socket) do
+      {:ok, {?R, <<11::32, server_first::binary>>}} ->
+        :ok = :gen_tcp.send(socket, client_final(password, client_first_bare, server_first))
+
+        auth_outcome(socket)
+
+      {:ok, {?E, body}} ->
+        {:error, fields(body)}
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp client_final(password, client_first_bare, server_first) do
+    %{"r" => full_nonce, "s" => salt, "i" => iterations} = scram_attributes(server_first)
+    {:ok, salt} = Base.decode64(salt)
+    iterations = String.to_integer(iterations)
+    salted = :crypto.pbkdf2_hmac(:sha256, password, salt, iterations, 32)
+    client_key = :crypto.mac(:hmac, :sha256, salted, "Client Key")
+    stored_key = :crypto.hash(:sha256, client_key)
+    without_proof = "c=biws,r=" <> full_nonce
+    auth_message = Enum.join([client_first_bare, server_first, without_proof], ",")
+    signature = :crypto.mac(:hmac, :sha256, stored_key, auth_message)
+    proof = Base.encode64(:crypto.exor(client_key, signature))
+
+    frame(?p, [without_proof, ",p=", proof])
+  end
+
+  defp scram_attributes(message) do
+    for part <- String.split(message, ","), part != "", into: %{} do
+      <<key, ?=, value::binary>> = part
+      {<<key>>, value}
     end
   end
 

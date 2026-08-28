@@ -70,6 +70,23 @@ if pg_ip = System.get_env("SMOLQUERY_PG_IP") do
   config :smolquery, SmolqueryPg, ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_PG_IP", pg_ip)
 end
 
+if pg_tls_cert = System.get_env("SMOLQUERY_PG_TLS_CERT") do
+  config :smolquery, SmolqueryPg, tls_cert: pg_tls_cert
+end
+
+if pg_tls_key = System.get_env("SMOLQUERY_PG_TLS_KEY") do
+  config :smolquery, SmolqueryPg, tls_key: pg_tls_key
+end
+
+if pg_auth = System.get_env("SMOLQUERY_PG_AUTH") do
+  config :smolquery, SmolqueryPg,
+    auth:
+      Smolquery.RuntimeConfig.enum!("SMOLQUERY_PG_AUTH", pg_auth, [
+        {"scram-sha-256", :scram_sha_256},
+        {"cleartext", :cleartext}
+      ])
+end
+
 if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
   config :smolquery, Smolquery.MetricsServer,
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)

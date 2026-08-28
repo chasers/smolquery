@@ -1128,9 +1128,11 @@ tables*. Inter-node traffic can switch to mutual TLS (`GEN_RPC_TLS`,
 authority), so the CA is the trust boundary.
 
 The Postgres wire edge requires a password on every connection
-(`SMOLQUERY_PG_PASSWORD`, or the API key). Layer 1 of PL-58 authenticates
-in cleartext and declines `SSLRequest`, so the listener binds loopback by
-default. A node with the `:pg` role refuses to boot without the password.
+(`SMOLQUERY_PG_PASSWORD`, or the API key), presented over SCRAM-SHA-256 by
+default, so it does not cross the wire. `SSLRequest` upgrades to TLS when
+`SMOLQUERY_PG_TLS_CERT`/`_KEY` are set, and is declined otherwise — the
+listener binds loopback by default. A node with the `:pg` role refuses to
+boot without the password.
 
 The web UI requires its own basic-auth credential (`SMOLQUERY_WEB_USERNAME` /
 `SMOLQUERY_WEB_PASSWORD`). The credential is not the API key, so a UI rotation

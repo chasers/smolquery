@@ -29,7 +29,12 @@ defmodule SmolqueryPg.WireTest do
 
     start_supervised!(
       {SmolqueryPg.Supervisor,
-       name: pg, password: @password, query_name: query, port: 0, catalog: MapCatalog.new()},
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: query,
+       port: 0,
+       catalog: MapCatalog.new()},
       id: pg
     )
 
@@ -428,7 +433,12 @@ defmodule SmolqueryPg.FdwStatementsTest do
 
     start_supervised!(
       {SmolqueryPg.Supervisor,
-       name: pg, password: @password, query_name: query, port: 0, catalog: MapCatalog.new()},
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: query,
+       port: 0,
+       catalog: MapCatalog.new()},
       id: pg
     )
 

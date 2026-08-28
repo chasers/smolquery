@@ -22,7 +22,12 @@ defmodule SmolqueryPg.FullNodeTest do
 
     start_supervised!(
       {SmolqueryPg.Supervisor,
-       name: pg, password: @password, query_name: node.query, port: 0, catalog: node.catalog},
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: node.query,
+       port: 0,
+       catalog: node.catalog},
       id: pg
     )
 

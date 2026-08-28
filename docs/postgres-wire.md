@@ -10,12 +10,20 @@ psql "host=127.0.0.1 port=5432 user=smolquery password=$SMOLQUERY_API_KEY"
 smolquery=> SELECT count(*) AS n FROM analytics.events;
 ```
 
-## What works today (layers 1 to 4)
+## What works today (layers 1 to 5)
 
-- **Startup and cleartext password auth.** The password is the API key
-  (`SMOLQUERY_API_KEY`), or `SMOLQUERY_PG_PASSWORD` when set. The user and
-  database names are accepted as given. The edge declines `SSLRequest` and
-  `GSSENCRequest` with `N`; the client then continues in plaintext.
+- **Startup and SCRAM-SHA-256 auth.** The password is the API key
+  (`SMOLQUERY_API_KEY`), or `SMOLQUERY_PG_PASSWORD` when set — and with
+  SCRAM (the default) it never crosses the wire: the client proves it,
+  and the server proves it back. `SMOLQUERY_PG_AUTH=cleartext` restores
+  the plain password message for a legacy client. The user and database
+  names are accepted as given.
+- **TLS.** With `SMOLQUERY_PG_TLS_CERT` and `SMOLQUERY_PG_TLS_KEY` set,
+  `SSLRequest` answers `S` and the connection upgrades before the
+  startup packet. Without them the edge declines with `N` and the session
+  stays plaintext — bind loopback, or terminate TLS in front, before
+  exposing the listener. Channel binding is not offered; `psql` connects
+  with its default `channel_binding=prefer`.
 - **The simple query protocol.** `psql` and any client that sends `Query`
   messages. A message may carry several statements; they run in order and
   the first error stops the rest.
@@ -86,9 +94,6 @@ Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
 ## Not yet
 
-Each is a layer of PL-58, in order:
-
-- SCRAM-SHA-256 and TLS.
 - `information_schema` breadth for BI tools (T-412): the three core views
   exist; the long tail does not.
 - Result streaming past `result_max_rows` (T-411): a `FETCH` loop could
@@ -119,10 +124,11 @@ can see different snapshots if a seal lands between them.
 
 ## Security
 
-The password crosses the wire in cleartext until layer 5 adds SCRAM and
-TLS. The listener binds loopback by default (`SMOLQUERY_PG_IP`). Expose it
-beyond the node only behind a TLS terminator, or on a private network. The
-`ErrorResponse` for a wrong password names the user, never the password.
+SCRAM keeps the password off the wire; TLS keeps the rows off it too. The
+listener binds loopback by default (`SMOLQUERY_PG_IP`); expose it beyond
+the node only with `SMOLQUERY_PG_TLS_CERT`/`_KEY` set, or behind a TLS
+terminator. The `ErrorResponse` for a wrong password names the user,
+never the password.
 
 Every SQL string is untrusted, the same as on the HTTP API: the planner's
 gate and the job engine's lockdown apply unchanged.
@@ -152,6 +158,8 @@ A DuckDB error keeps its message and takes the code its class implies:
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_PG_PASSWORD` | The password every client must present (the API key) |
+| `SMOLQUERY_PG_AUTH` | `scram-sha-256` (default) or `cleartext` |
+| `SMOLQUERY_PG_TLS_CERT` / `SMOLQUERY_PG_TLS_KEY` | PEM certificate and key; set both to accept `SSLRequest` |
 | `SMOLQUERY_PG_IP` / `SMOLQUERY_PG_PORT` | The bind address and port (`127.0.0.1` / `5432`) |
 
 In `dev`, the port is `15432`: a developer machine often runs its own
