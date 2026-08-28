@@ -155,15 +155,6 @@ defmodule SmolqueryApi.Docs do
         }
       },
       %{
-        "method" => "POST",
-        "path" => "/v1/datasets/:dataset/tables/:table/load",
-        "auth" => "bearer",
-        "summary" =>
-          "Batch load. Body is the file: application/x-ndjson, text/csv, or " <>
-            "application/vnd.apache.parquet. Synchronous, not atomic, no " <>
-            "insertId; a retry re-inserts. 413 past the load size cap."
-      },
-      %{
         "method" => "GET",
         "path" => "/v1/connections",
         "auth" => "bearer",

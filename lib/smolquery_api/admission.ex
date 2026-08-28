@@ -11,11 +11,11 @@ defmodule SmolqueryApi.Admission do
 
   `SmolqueryApi.Router` calls `admit_conn/1` between auth and parsing, so an
   ingest body is counted before the first byte is read and an unauthenticated
-  request never reaches the counter. Only `POST .../insert` and `POST .../load`
-  are counted — every other route carries small bodies the parsers already
-  bound. The reservation is the request's `content-length`, capped at the
-  route's own body limit; a request that does not declare a length reserves
-  that limit outright, so a chunked body cannot slip under the counter.
+  request never reaches the counter. Only `POST .../insert` is counted —
+  every other route carries small bodies the parsers already bound. The
+  reservation is the request's `content-length`, capped at the route's own
+  body limit; a request that does not declare a length reserves that limit
+  outright, so a chunked body cannot slip under the counter.
 
   Admission over the limit answers 429 with `retry-after`, the same contract
   the buffer's own refusals speak. An idle counter always admits one request,
@@ -26,14 +26,6 @@ defmodule SmolqueryApi.Admission do
   request process releases on crash, so an abandoned request cannot leak its
   reservation. The server is one process per API instance; two calls per
   request is noise next to a multi-megabyte body.
-
-  A load reserves its declared size for the whole request, upload phase
-  included, even though the body spools to disk in small chunks and only the
-  parse phase materializes it. That is deliberate: the counter must cover the
-  request's resident peak — a load's parse holds many times the file — and a
-  reservation that shrank during the upload would admit inserts the parse
-  phase then competes with. The cost is that one large load can hold most of
-  a small limit for its full duration.
 
   A request dispatched for an instance with no admission server passes
   uncounted. In production the server starts under `SmolqueryApi.Supervisor`
@@ -73,14 +65,13 @@ defmodule SmolqueryApi.Admission do
   """
   @spec admit_conn(Plug.Conn.t()) :: Plug.Conn.t()
   def admit_conn(
-        %Plug.Conn{method: "POST", path_info: ["v1", "datasets", _, "tables", _, action]} = conn
-      )
-      when action in ["insert", "load"] do
+        %Plug.Conn{method: "POST", path_info: ["v1", "datasets", _, "tables", _, "insert"]} = conn
+      ) do
     instance = conn.private.smolquery_api
 
     case Process.whereis(server(instance)) do
       nil -> conn
-      server -> admit_conn(conn, server, reservation(conn, action, instance))
+      server -> admit_conn(conn, server, reservation(conn, instance))
     end
   end
 
@@ -122,8 +113,8 @@ defmodule SmolqueryApi.Admission do
   @spec in_flight(atom()) :: non_neg_integer()
   def in_flight(instance), do: GenServer.call(server(instance), :in_flight)
 
-  defp reservation(conn, action, instance) do
-    ceiling = ceiling(action, instance)
+  defp reservation(conn, instance) do
+    ceiling = ceiling(instance)
 
     case Plug.Conn.get_req_header(conn, "content-length") do
       [length | _] ->
@@ -137,14 +128,9 @@ defmodule SmolqueryApi.Admission do
     end
   end
 
-  defp ceiling("insert", instance) do
+  defp ceiling(instance) do
     {:ok, runtime} = Runtime.fetch(instance)
     runtime.max_ndjson_bytes
-  end
-
-  defp ceiling("load", instance) do
-    {:ok, runtime} = Runtime.fetch(instance)
-    runtime.load_max_bytes
   end
 
   @impl GenServer

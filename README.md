@@ -88,9 +88,9 @@ without them refuses to boot.
 
 ## Features
 
-- **A BigQuery-shaped API.** Datasets, tables, streaming inserts, batch loads
-  (NDJSON / CSV / Parquet), sync queries and async jobs with paged results. One
-  Bearer token, plain JSON, no SDK required.
+- **A BigQuery-shaped API.** Datasets, tables, streaming NDJSON inserts, sync
+  queries and async jobs with paged results. One Bearer token, plain JSON, no
+  SDK required.
 - **A Postgres wire listener.** `psql`, Postgrex, and `postgres_fdw` connect
   to port 5432 (`15432` in dev) with the API key as the password and run the
   same `SELECT` an HTTP query would: the simple and extended protocols,

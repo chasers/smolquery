@@ -28,7 +28,6 @@ defmodule SmolqueryApi.Router do
       PATCH /v1/datasets/:ds/tables/:table         set/clear retention policy
       DELETE /v1/datasets/:ds/tables/:table/segments  drop segments by path
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
-      POST /v1/datasets/:ds/tables/:table/load     batch load (NDJSON/CSV/Parquet body)
       GET  /v1/connections                         list federated Postgres connections
       POST /v1/connections                         register one (replaces by name)
       GET  /v1/connections/:name                   one connection, never its password
@@ -74,7 +73,6 @@ defmodule SmolqueryApi.Router do
     patch "/v1/datasets/:dataset/tables/:table", TableController, :update
     delete "/v1/datasets/:dataset/tables/:table/segments", SegmentController, :delete
     post "/v1/datasets/:dataset/tables/:table/insert", InsertController, :create
-    post "/v1/datasets/:dataset/tables/:table/load", LoadController, :create
     get "/v1/connections", ConnectionController, :index
     post "/v1/connections", ConnectionController, :create
     post "/v1/connections/:name/test", ConnectionController, :test

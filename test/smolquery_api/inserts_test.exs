@@ -105,7 +105,6 @@ defmodule SmolqueryApi.InsertControllerTest do
              JSON.decode!(response.resp_body)
 
     assert message =~ "10 bytes"
-    assert message =~ "/load"
   end
 
   test "a JSON array body is a 415 that names the header to send (T-190)", %{name: name} do
@@ -121,7 +120,6 @@ defmodule SmolqueryApi.InsertControllerTest do
              JSON.decode!(response.resp_body)
 
     assert message =~ "application/x-ndjson"
-    assert message =~ "/load"
   end
 
   test "an overloaded buffer is a 429 whose retry-after is the prediction", %{

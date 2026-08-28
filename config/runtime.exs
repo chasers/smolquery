@@ -22,11 +22,6 @@ if bytes = System.get_env("SMOLQUERY_INSERT_MAX_NDJSON_BYTES") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_INSERT_MAX_NDJSON_BYTES", bytes)
 end
 
-if bytes = System.get_env("SMOLQUERY_LOAD_MAX_BYTES") do
-  config :smolquery, SmolqueryApi,
-    load_max_bytes: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_LOAD_MAX_BYTES", bytes)
-end
-
 if internal_secret = System.get_env("SMOLQUERY_INTERNAL_SECRET") do
   config :smolquery, :internal_secret, internal_secret
 end
