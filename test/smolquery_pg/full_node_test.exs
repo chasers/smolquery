@@ -21,7 +21,8 @@ defmodule SmolqueryPg.FullNodeTest do
     pg = :"pg_full_node_#{:erlang.unique_integer([:positive])}"
 
     start_supervised!(
-      {SmolqueryPg.Supervisor, name: pg, password: @password, query_name: node.query, port: 0},
+      {SmolqueryPg.Supervisor,
+       name: pg, password: @password, query_name: node.query, port: 0, catalog: node.catalog},
       id: pg
     )
 

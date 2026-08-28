@@ -128,4 +128,139 @@ defmodule SmolqueryPg.Sql do
     do: dollar(rest, tag, [char | current], tokens)
 
   defp text(current), do: current |> Enum.reverse() |> IO.iodata_to_binary()
+
+  @doc """
+  `sql` with every `$n` placeholder in code replaced by `fun.(n)`. A `$`
+  inside a string, a comment, or a dollar-quoted body stays. Binary
+  matching, no regex: this runs per `Bind`.
+  """
+  @spec map_placeholders(String.t(), (pos_integer() -> iodata())) :: String.t()
+  def map_placeholders(sql, fun) do
+    map_code(sql, fn code -> code |> placeholders(fun, []) |> IO.iodata_to_binary() end)
+  end
+
+  defp placeholders(<<>>, _fun, acc), do: Enum.reverse(acc)
+
+  defp placeholders(<<?$, digit, rest::binary>>, fun, acc) when digit in ?0..?9,
+    do: placeholder(rest, fun, acc, digit - ?0)
+
+  defp placeholders(<<char, rest::binary>>, fun, acc), do: placeholders(rest, fun, [char | acc])
+
+  defp placeholder(<<digit, rest::binary>>, fun, acc, n) when digit in ?0..?9,
+    do: placeholder(rest, fun, acc, n * 10 + digit - ?0)
+
+  defp placeholder(rest, fun, acc, n), do: placeholders(rest, fun, [fun.(n) | acc])
+
+  @doc """
+  The `$n` placeholders of `sql`'s code: the highest `n`, and the cast
+  hint beside each (`$1::bigint` reads as a declaration). Binary matching,
+  one pass.
+  """
+  @spec placeholder_info(String.t()) ::
+          {max :: non_neg_integer(), hints :: %{pos_integer() => String.t()}}
+  def placeholder_info(sql) do
+    sql
+    |> tokens()
+    |> Enum.reduce({0, %{}}, fn
+      {:code, code}, acc -> scan_info(code, acc)
+      {_kind, _text}, acc -> acc
+    end)
+  end
+
+  defp scan_info(<<>>, acc), do: acc
+
+  defp scan_info(<<?$, digit, rest::binary>>, acc) when digit in ?0..?9,
+    do: scan_info_number(rest, acc, digit - ?0)
+
+  defp scan_info(<<_char, rest::binary>>, acc), do: scan_info(rest, acc)
+
+  defp scan_info_number(<<digit, rest::binary>>, acc, n) when digit in ?0..?9,
+    do: scan_info_number(rest, acc, n * 10 + digit - ?0)
+
+  defp scan_info_number(rest, {max, hints}, n) do
+    acc = {max(max, n), hints}
+
+    case cast_hint(skip_spaces(rest)) do
+      {:ok, type, rest} -> scan_info(rest, put_hint(acc, n, type))
+      :none -> scan_info(rest, acc)
+    end
+  end
+
+  defp put_hint({max, hints}, n, type), do: {max, Map.put(hints, n, type)}
+
+  defp skip_spaces(<<space, rest::binary>>) when space in [?\s, ?\t, ?\n, ?\r],
+    do: skip_spaces(rest)
+
+  defp skip_spaces(rest), do: rest
+
+  defp cast_hint(<<"::", rest::binary>>) do
+    case type_words(skip_spaces(rest), []) do
+      {[], _rest} -> :none
+      {words, rest} -> {:ok, Enum.join(words, " "), rest}
+    end
+  end
+
+  defp cast_hint(_rest), do: :none
+
+  @type_suffixes ~w(precision varying zone time with without)
+
+  defp type_words(rest, words) do
+    case word(rest, []) do
+      {"", _rest} ->
+        {Enum.reverse(words), rest}
+
+      {word, after_word} ->
+        lower = String.downcase(word)
+
+        if words == [] or lower in @type_suffixes,
+          do: type_words(skip_spaces(after_word), [lower | words]),
+          else: {Enum.reverse(words), rest}
+    end
+  end
+
+  defp word(<<?_, rest::binary>>, acc), do: word(rest, [?_ | acc])
+
+  defp word(<<char, rest::binary>>, acc)
+       when char in ?a..?z or char in ?A..?Z or char in ?0..?9,
+       do: word(rest, [char | acc])
+
+  defp word(rest, acc), do: {acc |> Enum.reverse() |> List.to_string(), rest}
+
+  @doc """
+  The leading keyword of `statement` — past whitespace and comments, in
+  lower case — or `""` when none starts it. Binary matching: this runs per
+  statement.
+  """
+  @spec leading_keyword(String.t()) :: String.t()
+  def leading_keyword(statement), do: keyword(statement)
+
+  defp keyword(<<space, rest::binary>>) when space in [?\s, ?\t, ?\n, ?\r], do: keyword(rest)
+
+  defp keyword(<<"--", rest::binary>>), do: keyword(past_line(rest))
+  defp keyword(<<"/*", rest::binary>>), do: keyword(past_block(rest, 1))
+  defp keyword(<<?(, _rest::binary>>), do: "("
+
+  defp keyword(<<?_, _rest::binary>> = statement), do: keyword_word(statement)
+
+  defp keyword(<<char, _rest::binary>> = statement)
+       when char in ?a..?z or char in ?A..?Z,
+       do: keyword_word(statement)
+
+  defp keyword(_other), do: ""
+
+  defp keyword_word(statement) do
+    {word, _rest} = word(statement, [])
+
+    String.downcase(word)
+  end
+
+  defp past_line(<<>>), do: <<>>
+  defp past_line(<<?\n, rest::binary>>), do: rest
+  defp past_line(<<_char, rest::binary>>), do: past_line(rest)
+
+  defp past_block(<<>>, _depth), do: <<>>
+  defp past_block(<<"*/", rest::binary>>, 1), do: rest
+  defp past_block(<<"*/", rest::binary>>, depth), do: past_block(rest, depth - 1)
+  defp past_block(<<"/*", rest::binary>>, depth), do: past_block(rest, depth + 1)
+  defp past_block(<<_char, rest::binary>>, depth), do: past_block(rest, depth)
 end

@@ -1,0 +1,165 @@
+defmodule SmolqueryPg.PgCatalog.Rewrite do
+  @moduledoc """
+  Bridges the Postgres dialect of the catalog corpus onto DuckDB (PL-58).
+
+  The catalog queries clients send are a known corpus — `psql`'s backslash
+  commands, a driver's type bootstrap, `postgres_fdw`'s import — written in
+  Postgres dialect. DuckDB's own parser does most of the work: after a
+  small textual pre-pass, `json_serialize_sql` yields the statement's AST
+  (which classification reads) and `json_deserialize_sql` yields a
+  canonical DuckDB form (which runs). Regex lives only where the parser
+  cannot go: on constructs DuckDB refuses to parse at all.
+
+  ## `pre/2` — before the parse
+
+  Each of these is a parse error or a wrong binding in DuckDB:
+
+  - `OPERATOR(pg_catalog.~)` does not parse; it becomes the bare operator.
+  - `pg_catalog.` qualifications (including `::pg_catalog.text` casts) do
+    not parse; they drop. The emulated tables live unqualified in `main`.
+  - The `reg*` and `oid` cast targets do not exist; they become `BIGINT`.
+    `name` and `"char"` become `VARCHAR`.
+  - `COLLATE <name>` names collations DuckDB does not have; it drops.
+  - `pg_partition_ancestors(x) WITH ORDINALITY` does not parse; it becomes
+    an empty two-column subquery.
+  - `current_setting('x')` and the session constants (`current_database()`,
+    `current_user`, ...) parse, but would bind to DuckDB's builtins and
+    answer DuckDB's values; they become literals from the session.
+
+  ## `post/1` — after the parse
+
+  DuckDB parses `a ~ 'p'` as `regexp_full_match`, but Postgres's `~`
+  matches anywhere: the canonical text's `regexp_full_match(` becomes
+  `regexp_matches(`. `information_schema.x` becomes the `is_x` view —
+  after classification, which must still see the real schema name, and
+  textually because DuckDB reserves the `information_schema` name.
+  """
+
+  alias SmolqueryPg.Sql
+
+  @doc """
+  The textual pre-pass: `sql` with the constructs DuckDB cannot parse (or
+  would bind wrongly) rewritten, `settings` supplying the session values.
+  Strings, quoted identifiers, and comments are never touched
+  (`SmolqueryPg.Sql`).
+  """
+  @spec pre(String.t(), %{String.t() => String.t()}) :: String.t()
+  def pre(sql, settings) do
+    Sql.map_code(sql, fn code ->
+      code
+      |> strip_operator_calls()
+      |> strip_qualifications()
+      |> rewrite_settings(settings)
+      |> rewrite_session_constants()
+      |> strip_collate()
+      |> rewrite_casts()
+      |> rewrite_partition_ancestors()
+    end)
+  end
+
+  @doc """
+  The post-parse pass over the canonical SQL `json_deserialize_sql`
+  answered.
+  """
+  @spec post(String.t()) :: String.t()
+  def post(canonical) do
+    canonical
+    |> Sql.tokens()
+    |> post_tokens([])
+    |> IO.iodata_to_binary()
+  end
+
+  @is_prefix "information_schema."
+  @is_prefix_size byte_size(@is_prefix)
+
+  defp post_tokens([{:code, code}, {:quoted, quoted} | rest], acc) do
+    case split_information_schema(code) do
+      {:ok, prefix} ->
+        post_tokens(rest, [[post_code(prefix), "is_", String.trim(quoted, "\"")] | acc])
+
+      :none ->
+        post_tokens([{:quoted, quoted} | rest], [post_code(code) | acc])
+    end
+  end
+
+  defp post_tokens([{:code, code} | rest], acc), do: post_tokens(rest, [post_code(code) | acc])
+  defp post_tokens([{_kind, text} | rest], acc), do: post_tokens(rest, [text | acc])
+  defp post_tokens([], acc), do: Enum.reverse(acc)
+
+  defp split_information_schema(code) when byte_size(code) < @is_prefix_size, do: :none
+
+  defp split_information_schema(code) do
+    split = byte_size(code) - @is_prefix_size
+    <<prefix::binary-size(^split), suffix::binary>> = code
+
+    if String.downcase(suffix) == @is_prefix, do: {:ok, prefix}, else: :none
+  end
+
+  defp post_code(code) do
+    code
+    |> String.replace("regexp_full_match(", "regexp_matches(")
+    |> rewrite_information_schema()
+  end
+
+  defp strip_operator_calls(code),
+    do: Regex.replace(~r/OPERATOR\s*\(\s*pg_catalog\.(\S+?)\s*\)/i, code, " \\g{1} ")
+
+  defp strip_qualifications(code), do: Regex.replace(~r/\bpg_catalog\./i, code, "")
+
+  defp rewrite_settings(code, settings) do
+    Regex.replace(~r/current_setting\s*\(\s*'((?:[^']|'')*)'\s*\)/i, code, fn _match, name ->
+      "'" <> String.replace(setting_value(settings, name), "'", "''") <> "'"
+    end)
+  end
+
+  defp setting_value(settings, name) do
+    Map.get_lazy(settings, name, fn -> insensitive_setting(settings, name) end) || ""
+  end
+
+  defp insensitive_setting(settings, name) do
+    lower = String.downcase(name)
+
+    Enum.find_value(settings, "", fn {key, value} ->
+      if String.downcase(key) == lower, do: value
+    end)
+  end
+
+  @session_constants [
+    {~r/\bcurrent_database\s*\(\s*\)/i, "'smolquery'"},
+    {~r/\bcurrent_schema\s*\(\s*\)/i, "'public'"},
+    {~r/\bcurrent_user\b/i, "'smolquery'"},
+    {~r/\bsession_user\b/i, "'smolquery'"},
+    {~r/\bcurrent_role\b/i, "'smolquery'"}
+  ]
+
+  defp rewrite_session_constants(code) do
+    Enum.reduce(@session_constants, code, fn {pattern, replacement}, code ->
+      Regex.replace(pattern, code, replacement)
+    end)
+  end
+
+  defp strip_collate(code),
+    do: Regex.replace(~r/\bCOLLATE\s+(?:default\b|"[^"]+"|[\w.]+)/i, code, "")
+
+  @bigint_casts ~w(regclass regtype regnamespace regproc regprocedure regoper regoperator regrole regconfig regdictionary oid xid cid tid)
+  @varchar_casts ~w(name bpchar)
+
+  defp rewrite_casts(code) do
+    code = Regex.replace(~r/::\s*(#{Enum.join(@bigint_casts, "|")})\b/i, code, "::BIGINT")
+    code = Regex.replace(~r/::\s*(#{Enum.join(@varchar_casts, "|")})\b/i, code, "::VARCHAR")
+
+    Regex.replace(~r/::\s*"char"/i, code, "::VARCHAR")
+  end
+
+  defp rewrite_partition_ancestors(code) do
+    Regex.replace(
+      ~r/pg_partition_ancestors\s*\([^)]*\)\s*WITH\s+ORDINALITY/i,
+      code,
+      "(SELECT CAST(NULL AS BIGINT), CAST(NULL AS BIGINT) WHERE FALSE)"
+    )
+  end
+
+  defp rewrite_information_schema(code) do
+    Regex.replace(~r/\binformation_schema\."?(\w+)"?/i, code, "is_\\g{1}")
+  end
+end

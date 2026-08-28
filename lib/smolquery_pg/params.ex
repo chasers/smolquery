@@ -33,33 +33,24 @@ defmodule SmolqueryPg.Params do
   """
   @spec oids(String.t(), [non_neg_integer()]) :: [pos_integer()]
   def oids(sql, declared) do
-    code = Sql.map_code(sql, & &1)
-    hints = hints(code)
+    {max_placeholder, hints} = Sql.placeholder_info(sql)
     declared_count = length(declared)
-    count = max(declared_count, placeholders(code))
+    count = max(declared_count, max_placeholder)
     padded = declared ++ List.duplicate(0, count - declared_count)
 
     padded
     |> Enum.with_index(1)
     |> Enum.map(fn
-      {0, n} -> Map.get(hints, n, 25)
+      {0, n} -> hint_oid(hints, n)
       {oid, _n} -> oid
     end)
   end
 
-  defp placeholders(code) do
-    ~r/\$(\d+)/
-    |> Regex.scan(code, capture: :all_but_first)
-    |> Enum.map(fn [n] -> String.to_integer(n) end)
-    |> Enum.max(fn -> 0 end)
-  end
-
-  @hint ~r/\$(\d+)\s*::\s*("?[A-Za-z_][A-Za-z0-9_]*"?(?:\s+(?:precision|varying|with\s+time\s+zone|without\s+time\s+zone))?)/i
-
-  defp hints(code) do
-    @hint
-    |> Regex.scan(code, capture: :all_but_first)
-    |> Map.new(fn [n, type] -> {String.to_integer(n), Types.oid_for_type_name(type)} end)
+  defp hint_oid(hints, n) do
+    case Map.fetch(hints, n) do
+      {:ok, type} -> Types.oid_for_type_name(type)
+      :error -> 25
+    end
   end
 
   @doc """
@@ -70,12 +61,9 @@ defmodule SmolqueryPg.Params do
   @spec substitute(String.t(), [value()]) :: {:ok, String.t()} | {:error, term()}
   def substitute(sql, values) do
     with {:ok, literals} <- literals(values) do
-      {:ok,
-       Sql.map_code(sql, fn code ->
-         Regex.replace(~r/\$(\d+)/, code, fn match, n ->
-           Enum.at(literals, String.to_integer(n) - 1, match)
-         end)
-       end)}
+      lookup = literals |> Enum.with_index(1) |> Map.new(fn {literal, n} -> {n, literal} end)
+
+      {:ok, Sql.map_placeholders(sql, &Map.get(lookup, &1, "$#{&1}"))}
     end
   end
 
@@ -86,16 +74,14 @@ defmodule SmolqueryPg.Params do
   """
   @spec with_typed_nulls(String.t(), [pos_integer()]) :: String.t()
   def with_typed_nulls(sql, oids) do
-    Sql.map_code(sql, fn code ->
-      Regex.replace(~r/\$(\d+)/, code, &typed_null(&1, &2, oids))
-    end)
-  end
+    lookup = oids |> Enum.with_index(1) |> Map.new(fn {oid, n} -> {n, oid} end)
 
-  defp typed_null(match, n, oids) do
-    case Enum.at(oids, String.to_integer(n) - 1) do
-      nil -> match
-      oid -> "NULL::" <> Types.duckdb_type_for_oid(oid)
-    end
+    Sql.map_placeholders(sql, fn n ->
+      case Map.fetch(lookup, n) do
+        {:ok, oid} -> "NULL::" <> Types.duckdb_type_for_oid(oid)
+        :error -> "$#{n}"
+      end
+    end)
   end
 
   defp literals(values) do

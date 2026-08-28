@@ -14,6 +14,13 @@ defmodule SmolqueryPg.Statements do
   alias SmolqueryPg.Sql
 
   @doc """
+  The leading keyword of a statement, lower case — see
+  `SmolqueryPg.Sql.leading_keyword/1`.
+  """
+  @spec leading_keyword(String.t()) :: String.t()
+  defdelegate leading_keyword(statement), to: Sql
+
+  @doc """
   The statements of `sql`, in order, each trimmed and without its
   terminating semicolon.
   """

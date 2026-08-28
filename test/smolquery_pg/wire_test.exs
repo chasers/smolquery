@@ -8,6 +8,7 @@ defmodule SmolqueryPg.WireTest do
 
   alias Smolquery.QueryService
   alias Smolquery.Test.FixedCatalog
+  alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.PgClient
   alias SmolqueryPg.Runtime
 
@@ -27,7 +28,8 @@ defmodule SmolqueryPg.WireTest do
     on_exit(fn -> QueryService.Runtime.delete(query) end)
 
     start_supervised!(
-      {SmolqueryPg.Supervisor, name: pg, password: @password, query_name: query, port: 0},
+      {SmolqueryPg.Supervisor,
+       name: pg, password: @password, query_name: query, port: 0, catalog: MapCatalog.new()},
       id: pg
     )
 
@@ -48,7 +50,7 @@ defmodule SmolqueryPg.WireTest do
     test "authenticates with the password and reports the session parameters", %{port: port} do
       {_socket, params} = connect(port)
 
-      assert params["server_version"] == "16.0"
+      assert params["server_version"] == "14.10"
       assert params["client_encoding"] == "UTF8"
       assert params["integer_datetimes"] == "on"
       assert params["standard_conforming_strings"] == "on"
@@ -180,7 +182,7 @@ defmodule SmolqueryPg.WireTest do
 
       assert %{results: [%{columns: columns, rows: rows}]} = PgClient.query(socket, "SHOW ALL")
       assert Enum.map(columns, & &1.name) == ~w(name setting description)
-      assert Enum.any?(rows, &match?(["server_version", "16.0", ""], &1))
+      assert Enum.any?(rows, &match?(["server_version", "14.10", ""], &1))
     end
 
     test "a transaction block tracks its status, and a failure aborts it", %{port: port} do
@@ -389,7 +391,7 @@ defmodule SmolqueryPg.WireTest do
     Application.put_env(:smolquery, SmolqueryApi, [])
 
     assert_raise ArgumentError, ~r/refuses to boot/, fn ->
-      SmolqueryPg.Supervisor.start_link(name: :pg_no_password, port: 0)
+      SmolqueryPg.Supervisor.start_link(name: :pg_no_password, port: 0, catalog: MapCatalog.new())
     end
   end
 end

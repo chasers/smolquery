@@ -81,6 +81,7 @@ defmodule SmolqueryPg.Types do
   def describe(dtype, false), do: describe(dtype)
 
   defp describe({:duckdb, type}), do: describe_duckdb(type)
+  defp describe({:pg_array, _inner}), do: {25, -1, -1}
   defp describe(:boolean), do: {16, 1, -1}
   defp describe({:s, _bits}), do: {20, 8, -1}
   defp describe({:u, _bits}), do: {20, 8, -1}
@@ -470,6 +471,7 @@ defmodule SmolqueryPg.Types do
   def encode_text({:decimal, _precision, _scale}, false, %Decimal{} = value),
     do: Decimal.to_string(value, :normal)
 
+  def encode_text({:pg_array, _inner}, false, value) when is_list(value), do: pg_array(value)
   def encode_text(@map_dtype, false, value) when is_map(value), do: JSON.encode!(value)
   def encode_text({:list, _inner}, false, value), do: json_or_inspect(value)
   def encode_text({:struct, _fields}, false, value), do: json_or_inspect(value)
@@ -485,6 +487,20 @@ defmodule SmolqueryPg.Types do
   defp float(value) when is_float(value), do: Float.to_string(value)
   defp float(value) when is_integer(value), do: Integer.to_string(value)
   defp float(value), do: inspect(value)
+
+  defp pg_array(values), do: ["{", Enum.map_join(values, ",", &pg_array_element/1), "}"]
+
+  defp pg_array_element(nil), do: "NULL"
+  defp pg_array_element(value) when is_integer(value), do: Integer.to_string(value)
+  defp pg_array_element(value) when is_float(value), do: Float.to_string(value)
+
+  defp pg_array_element(value) when is_binary(value) do
+    if value != "" and not String.contains?(value, ["\"", "\\", ",", "{", "}", " "]),
+      do: value,
+      else: "\"" <> String.replace(String.replace(value, "\\", "\\\\"), "\"", "\\\"") <> "\""
+  end
+
+  defp pg_array_element(value), do: inspect(value)
 
   defp json_or_inspect(value) do
     JSON.encode!(value)
