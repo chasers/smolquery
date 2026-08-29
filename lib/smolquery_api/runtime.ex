@@ -23,11 +23,10 @@ defmodule SmolqueryApi.Runtime do
   land there, and the ip still defaults to loopback: exposing the listener
   beyond the node is a deliberate act, not a default.
 
-  `max_ndjson_bytes` caps a `POST .../insert` body and `load_max_bytes` caps a
-  `POST .../load` body. A larger body is a 413. Each cap is also what
-  `SmolqueryApi.Admission` reserves for its route when a request declares no
-  `content-length`. `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` and
-  `SMOLQUERY_LOAD_MAX_BYTES` set them in a release.
+  `max_ndjson_bytes` caps a `POST .../insert` body. A larger body is a 413.
+  The cap is also what `SmolqueryApi.Admission` reserves when a request
+  declares no `content-length`. `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` sets it
+  in a release.
 
   `catalog` is where the CRUD routes resolve datasets, tables, and schemas —
   the same seam `Smolquery.QueryService` uses. Given options (or nothing), the
@@ -46,7 +45,6 @@ defmodule SmolqueryApi.Runtime do
     :catalog_opts,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
-    load_max_bytes: 268_435_456,
     max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil
   ]
@@ -58,7 +56,6 @@ defmodule SmolqueryApi.Runtime do
           catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
-          load_max_bytes: pos_integer(),
           max_ndjson_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil
         }
@@ -94,7 +91,6 @@ defmodule SmolqueryApi.Runtime do
       Keyword.take(config, [
         :ingest_name,
         :query_name,
-        :load_max_bytes,
         :max_ndjson_bytes,
         :insert_max_in_flight_bytes
       ])

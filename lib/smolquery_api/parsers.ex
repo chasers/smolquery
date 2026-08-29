@@ -2,8 +2,8 @@ defmodule SmolqueryApi.Parsers do
   @moduledoc """
   `Plug.Parsers` behind the envelope.
 
-  Same parser set the Plug.Router had — JSON only, with the three load body
-  types passed through raw for `SmolqueryApi.LoadController` to stream — but
+  Same parser set the Plug.Router had — JSON only, with NDJSON passed
+  through raw for `SmolqueryApi.InsertController` to read — but
   a body that fails to parse answers 400/415 in `SmolqueryApi.Errors`'
   envelope instead of raising into Phoenix's error rendering. Sits after
   `SmolqueryApi.Auth` in the pipeline, so unauthenticated bodies are never
@@ -19,7 +19,7 @@ defmodule SmolqueryApi.Parsers do
     Plug.Parsers.init(
       parsers: [:json],
       json_decoder: JSON,
-      pass: ["application/x-ndjson", "text/csv", "application/vnd.apache.parquet"]
+      pass: ["application/x-ndjson"]
     )
   end
 

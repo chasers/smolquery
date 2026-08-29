@@ -34,8 +34,9 @@ defmodule SmolqueryApi.InsertController do
   anywhere. A 415 naming the header is a better answer than a silent 3-4x, and
   an array body is one line of client code away from ndjson.
 
-  Bulk files still take CSV and Parquet through `POST /load`, which parses to
-  rows and pushes chunks — that path is unchanged.
+  There is no batch-load route. A file goes in as NDJSON, split into bodies
+  under `max_ndjson_bytes`, fanned out over concurrent inserts — the measured
+  fast path (`docs/benchmarks.md`).
 
   An optional `insertId` makes the request idempotent: retrying it — after a
   timeout, a dropped connection, or a 5xx whose write may still have landed —
@@ -56,7 +57,7 @@ defmodule SmolqueryApi.InsertController do
           415,
           "UNSUPPORTED_MEDIA_TYPE",
           "insert bodies must be application/x-ndjson (one JSON object per line); " <>
-            "got #{inspect(other)}. Use POST /load for CSV and Parquet files."
+            "got #{inspect(other)}."
         )
     end
   end
@@ -75,7 +76,7 @@ defmodule SmolqueryApi.InsertController do
           conn,
           413,
           "PAYLOAD_TOO_LARGE",
-          "NDJSON insert bodies are limited to #{max_bytes} bytes; use /load for files"
+          "NDJSON insert bodies are limited to #{max_bytes} bytes; split the file into smaller bodies"
         )
 
       {:error, reason} ->

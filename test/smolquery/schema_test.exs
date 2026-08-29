@@ -388,7 +388,6 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.explorer_unwritable(plain) == :none
       assert {:ok, %Field{name: "attrs"}} = Schema.explorer_unwritable(mapped)
-      assert Schema.readable_explorer_dtypes(mapped) == [{"id", {:s, 64}}]
     end
 
     test "a map or variant cannot cluster; everything else can" do

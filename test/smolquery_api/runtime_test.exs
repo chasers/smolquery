@@ -5,11 +5,11 @@ defmodule SmolqueryApi.RuntimeTest do
 
   describe "new/1" do
     test "resolves options over application config" do
-      runtime = Runtime.new(name: :api_runtime_test, api_key: "k", load_max_bytes: 1024)
+      runtime = Runtime.new(name: :api_runtime_test, api_key: "k", max_ndjson_bytes: 1024)
 
       assert runtime.name == :api_runtime_test
       assert runtime.api_key == "k"
-      assert runtime.load_max_bytes == 1024
+      assert runtime.max_ndjson_bytes == 1024
     end
 
     test "defaults the instance name" do

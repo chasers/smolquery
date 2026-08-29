@@ -4,10 +4,9 @@ defmodule Bench.Otel do
   @moduledoc """
   The OpenTelemetry logs fixture, and the node takeover the e2e benches share.
 
-  `bench/otel_logs.exs` (PL-17, streaming inserts) and `bench/load.exs` (PL-18,
-  batch loads) measure different endpoints against the same data and the same
-  node, so the schema, the row generator, and the boot takeover live here rather
-  than being duplicated into both.
+  `bench/otel_logs.exs` (PL-17, streaming inserts) and the other e2e benches
+  measure against the same data and the same node, so the schema, the row
+  generator, and the boot takeover live here rather than being duplicated.
 
   ## The fixture
 

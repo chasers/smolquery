@@ -504,17 +504,6 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
-  The `column_name dtype` pairs for the fields Explorer can read — what a CSV
-  load parses with. A CSV cannot carry a map or a variant, so those fields
-  are left out; a CSV that names one anyway parses it as text, and the row
-  validator then refuses the value.
-  """
-  @spec readable_explorer_dtypes(t()) :: [{String.t(), term()}]
-  def readable_explorer_dtypes(%__MODULE__{fields: fields}) do
-    for field <- fields, {:ok, dtype} <- [explorer_dtype(field.type)], do: {field.name, dtype}
-  end
-
-  @doc """
   Whether a column of this type can serve in a clustering key.
 
   A map or a variant sorts, but no stats bound it, so the pruner could never

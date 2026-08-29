@@ -40,7 +40,7 @@ Three rules shape everything below:
 - **The write path is one `COPY`.** The ingest edge forwards NDJSON
   (newline-delimited JSON) bytes to the buffer owner. At flush time, DuckDB's
   `COPY ... read_json` parses the bytes and writes immutable Parquet. A rows
-  batch (a bulk load) is re-encoded to NDJSON and takes the same statement:
+  batch is re-encoded to NDJSON and takes the same statement:
   there is one writer (PL-57). Small
   data comes in: a ~1 s group commit is what "durable and queryable" means.
   Large data goes out: a few big files land on object storage.
