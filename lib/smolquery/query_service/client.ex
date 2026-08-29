@@ -41,17 +41,22 @@ defmodule Smolquery.QueryService.Client do
   @type option ::
           {:timeout_ms, pos_integer()}
           | {:explain, :plan | :analyze}
+          | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
 
-  @submit_option_keys [:timeout_ms, :explain, :trace, :distributed]
+  @submit_option_keys [:timeout_ms, :explain, :describe, :trace, :distributed]
 
   @doc """
   Runs `sql` and waits for its result.
 
   With `explain: :plan` or `explain: :analyze` the job finishes with the
   engine's plan text on `job.explain` and no result frame — see
-  `Smolquery.QueryService.Job.explained/5`. With `trace: true` it settles
+  `Smolquery.QueryService.Job.explained/5`. With `describe: true` the job
+  plans for real, then answers DuckDB's `DESCRIBE` of the query as the
+  result frame — `column_name` and `column_type` per result column, without
+  executing the query (PL-58: a Postgres `Describe` must name a prepared
+  statement's columns before it binds). With `trace: true` it settles
   with its phase spans on `job.trace` (`Smolquery.QueryService.Trace`).
   `distributed: true | false` overrides the runtime's distributed default
   for this job only (PL-49); a distributed answer settles with the shard

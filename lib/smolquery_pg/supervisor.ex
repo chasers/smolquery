@@ -7,8 +7,9 @@ defmodule SmolqueryPg.Supervisor do
   password fails the boot right here — fail closed — rather than starting a
   listener that would wave connections through.
 
-  The one child is a `ThousandIsland` server; `SmolqueryPg.Handler` owns
-  each connection. The read timeout is infinite on purpose: an idle `psql`
+  Two children: the cancel registry (`SmolqueryPg.Runtime.cancels/1`),
+  then a `ThousandIsland` server whose `SmolqueryPg.Handler` owns each
+  connection. The read timeout is infinite on purpose: an idle `psql`
   session holds its connection open for hours, and Thousand Island's
   default would close it after a minute of silence.
   """
@@ -35,6 +36,7 @@ defmodule SmolqueryPg.Supervisor do
     Runtime.put(runtime)
 
     children = [
+      {Registry, keys: :unique, name: Runtime.cancels(runtime.name)},
       {ThousandIsland,
        port: runtime.port,
        transport_options: [ip: runtime.ip],
@@ -44,7 +46,7 @@ defmodule SmolqueryPg.Supervisor do
        supervisor_options: [name: Runtime.listener(runtime.name)]}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   @doc """

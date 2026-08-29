@@ -32,8 +32,14 @@ defmodule SmolqueryPg.Protocol do
   @type frontend ::
           {:query, String.t()}
           | {:password, String.t()}
-          | :terminate
+          | {:parse, String.t(), String.t(), [non_neg_integer()]}
+          | {:bind, String.t(), String.t(), [0 | 1], [binary() | nil], [0 | 1]}
+          | {:describe, :statement | :portal, String.t()}
+          | {:execute, String.t(), non_neg_integer()}
+          | {:close, :statement | :portal, String.t()}
+          | :flush
           | :sync
+          | :terminate
           | {:unknown, byte(), binary()}
 
   @type startup ::
@@ -123,14 +129,68 @@ defmodule SmolqueryPg.Protocol do
   defp message(?p, body), do: {:password, cstring(body)}
   defp message(?X, _body), do: :terminate
   defp message(?S, _body), do: :sync
+  defp message(?H, _body), do: :flush
+
+  defp message(?P, body) do
+    {name, rest} = take_cstring(body)
+    {sql, <<count::16, rest::binary>>} = take_cstring(rest)
+
+    {:parse, name, sql, int32s(rest, count)}
+  end
+
+  defp message(?B, body) do
+    {portal, rest} = take_cstring(body)
+    {statement, <<format_count::16, rest::binary>>} = take_cstring(rest)
+    {param_formats, <<param_count::16, rest::binary>>} = int16s(rest, format_count)
+    {params, <<result_count::16, rest::binary>>} = values(rest, param_count)
+    {result_formats, _rest} = int16s(rest, result_count)
+
+    {:bind, portal, statement, param_formats, params, result_formats}
+  end
+
+  defp message(?D, <<kind, body::binary>>), do: {:describe, target(kind), cstring(body)}
+  defp message(?C, <<kind, body::binary>>), do: {:close, target(kind), cstring(body)}
+
+  defp message(?E, body) do
+    {portal, <<max_rows::32, _rest::binary>>} = take_cstring(body)
+
+    {:execute, portal, max_rows}
+  end
+
   defp message(tag, body), do: {:unknown, tag, body}
 
-  defp cstring(body) do
+  defp target(?S), do: :statement
+  defp target(?P), do: :portal
+
+  defp cstring(body), do: body |> take_cstring() |> elem(0)
+
+  defp take_cstring(body) do
     case :binary.split(body, <<0>>) do
-      [string, _rest] -> string
-      [string] -> string
+      [string, rest] -> {string, rest}
+      [string] -> {string, <<>>}
     end
   end
+
+  defp int32s(body, count) do
+    for <<oid::32 <- binary_part(body, 0, count * 4)>>, do: oid
+  end
+
+  defp int16s(body, count) do
+    size = count * 2
+    <<codes::binary-size(^size), rest::binary>> = body
+
+    {for(<<code::16 <- codes>>, do: code), rest}
+  end
+
+  defp values(body, count), do: values(body, count, [])
+
+  defp values(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp values(<<-1::32-signed, rest::binary>>, count, acc),
+    do: values(rest, count - 1, [nil | acc])
+
+  defp values(<<size::32, value::binary-size(size), rest::binary>>, count, acc),
+    do: values(rest, count - 1, [value | acc])
 
   @doc """
   The one-byte answer to `SSLRequest` and `GSSENCRequest`: not here.
@@ -207,6 +267,32 @@ defmodule SmolqueryPg.Protocol do
 
     frame(?D, body)
   end
+
+  @doc """
+  `ParseComplete`, `BindComplete`, `CloseComplete`, `NoData`, and
+  `PortalSuspended`: the bodiless answers of the extended protocol.
+  """
+  @spec parse_complete() :: iodata()
+  def parse_complete, do: frame(?1, <<>>)
+
+  @spec bind_complete() :: iodata()
+  def bind_complete, do: frame(?2, <<>>)
+
+  @spec close_complete() :: iodata()
+  def close_complete, do: frame(?3, <<>>)
+
+  @spec no_data() :: iodata()
+  def no_data, do: frame(?n, <<>>)
+
+  @spec portal_suspended() :: iodata()
+  def portal_suspended, do: frame(?s, <<>>)
+
+  @doc """
+  `ParameterDescription`: one OID per parameter of a prepared statement.
+  """
+  @spec parameter_description([pos_integer()]) :: iodata()
+  def parameter_description(oids),
+    do: frame(?t, [<<length(oids)::16>>, Enum.map(oids, &<<&1::32>>)])
 
   @doc """
   `CommandComplete` with `tag`, for example `SELECT 3` or `SET`.

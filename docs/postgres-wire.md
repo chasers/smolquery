@@ -10,7 +10,7 @@ psql "host=127.0.0.1 port=5432 user=smolquery password=$SMOLQUERY_API_KEY"
 smolquery=> SELECT count(*) AS n FROM analytics.events;
 ```
 
-## What works today (layer 1)
+## What works today (layers 1 and 2)
 
 - **Startup and cleartext password auth.** The password is the API key
   (`SMOLQUERY_API_KEY`), or `SMOLQUERY_PG_PASSWORD` when set. The user and
@@ -29,6 +29,23 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, and `ABORT` track the
   status the prompt shows. A failed statement inside a block aborts the
   block (`25P02`) until it ends, as Postgres does.
+- **The extended query protocol.** `Parse`, `Bind`, `Describe`, `Execute`,
+  `Close`, `Flush`, `Sync`; named prepared statements and portals; an
+  `Execute` row limit answers `PortalSuspended` and a later `Execute`
+  continues the portal. Results in binary format on request, every type.
+- **Parameters.** A `Bind` value becomes a typed SQL literal in place of
+  its `$n` (`SmolqueryPg.Params`) — text and binary formats, decoded by the
+  declared OID, so a text value can never leave its quotes. The edge
+  infers no types: an undeclared parameter is `text`, and a cast the
+  client writes (`$1::bigint`) is read as its declaration. Native binding
+  through the query service replaces the substitution later (T-410).
+- **`Describe` before `Bind`.** A statement with parameters is described
+  through the query service's `describe` mode — the planner plans it for
+  real, and DuckDB's `DESCRIBE` names the columns without running the
+  query. A statement without parameters runs once, and the portal that
+  binds it serves the same rows: one job per driver-shaped query.
+- **Cancellation.** `BackendKeyData` is real: a `CancelRequest` quoting it
+  cancels the session's running job (`57014`).
 
 Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
@@ -36,13 +53,10 @@ Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
 Each is a layer of PL-58, in order:
 
-- The extended query protocol (`Parse`/`Bind`/`Execute`) and binary
-  results. Drivers that use it — Postgrex, psycopg, JDBC, pgx — connect but
-  cannot run a query yet: the edge answers `0A000` and resynchronises on
-  `Sync`.
-- `pg_catalog` and `information_schema`. `psql`'s `\d` commands do not
-  answer yet.
-- Cursors, `EXPLAIN`, and `postgres_fdw`.
+- `pg_catalog` and `information_schema`. Drivers that bootstrap from
+  `pg_type` — Postgrex, psycopg's binary adapters — and `psql`'s `\d`
+  commands do not answer yet.
+- Cursors (`DECLARE`/`FETCH`), `EXPLAIN`, and `postgres_fdw`.
 - SCRAM-SHA-256 and TLS.
 
 ## Types

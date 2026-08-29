@@ -9,20 +9,20 @@ defmodule SmolqueryPg.Handler do
 
   1. **startup** — the first packet. `SSLRequest` and `GSSENCRequest` are
      declined with `N`, and the client sends its real startup next. A
-     `CancelRequest` closes the connection (layer 2 acts on it). A startup
-     packet moves to the password phase.
+     `CancelRequest` cancels the job its key names through
+     `SmolqueryPg.Session.cancel/3` and closes. A startup packet moves to
+     the password phase.
   2. **password** — `AuthenticationCleartextPassword` was sent; the answer
      is compared in constant time against the runtime's password. A wrong
      one answers `28P01` and closes. Nothing about the user or the
      database is checked: the credential is the whole gate, as the API's
      Bearer key is.
-  3. **ready** — every `Query` runs through `SmolqueryPg.Session`, and the
-     answer ends with `ReadyForQuery` carrying the transaction status.
-
-  A message of the extended query protocol answers `0A000` in this layer
-  and the handler discards everything until the client's `Sync`, as
-  Postgres does after an error, so a driver's connection setup fails
-  cleanly instead of desynchronising.
+  3. **ready** — every message runs through `SmolqueryPg.Session`. A
+     simple `Query` answers with `ReadyForQuery` at its end. The extended
+     protocol's messages each answer their completion, and `Sync` answers
+     `ReadyForQuery`. After an error in the extended protocol the handler
+     discards every message until `Sync`, as Postgres does, so a client's
+     pipeline fails as one unit instead of desynchronising.
   """
 
   use ThousandIsland.Handler
@@ -68,7 +68,11 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
-  defp startup(_socket, {:cancel_request, _pid, _key}, state), do: {:close, state}
+  defp startup(_socket, {:cancel_request, pid, key}, state) do
+    :ok = Session.cancel(state.runtime, pid, key)
+
+    {:close, state}
+  end
 
   defp startup(socket, {:startup, params}, state) do
     case Socket.send(socket, Protocol.authentication_cleartext()) do
@@ -120,13 +124,47 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
+  defp handle(socket, :flush, state), do: drain(socket, state)
+
+  defp handle(socket, {:parse, name, sql, oids}, state),
+    do: extended(socket, state, Session.parse(state.session, name, sql, oids))
+
+  defp handle(socket, {:bind, portal, statement, param_formats, values, formats}, state) do
+    extended(
+      socket,
+      state,
+      Session.bind(state.session, portal, statement, param_formats, values, formats)
+    )
+  end
+
+  defp handle(socket, {:describe, kind, name}, state),
+    do: extended(socket, state, Session.describe(state.session, kind, name))
+
+  defp handle(socket, {:execute, portal, max_rows}, state),
+    do: extended(socket, state, Session.execute_portal(state.session, portal, max_rows))
+
+  defp handle(socket, {:close, kind, name}, state),
+    do: extended(socket, state, Session.close(state.session, kind, name))
+
   defp handle(socket, {:unknown, tag, _body}, state) do
-    message =
-      "message type #{inspect(<<tag>>)} is not supported; " <>
-        "this edge speaks the simple query protocol only"
+    message = "message type #{inspect(<<tag>>)} is not supported"
 
     case Socket.send(socket, Protocol.error_response("0A000", message)) do
       :ok -> drain(socket, %{state | discard: true})
+      {:error, _reason} -> {:close, state}
+    end
+  end
+
+  defp extended(socket, state, {:ok, messages, session}) do
+    case Socket.send(socket, messages) do
+      :ok -> drain(socket, %{state | session: session})
+      {:error, _reason} -> {:close, state}
+    end
+  end
+
+  defp extended(socket, state, {:error, {code, message}, session}) do
+    case Socket.send(socket, Protocol.error_response(code, message)) do
+      :ok -> drain(socket, %{state | session: session, discard: true})
       {:error, _reason} -> {:close, state}
     end
   end
