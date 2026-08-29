@@ -59,6 +59,8 @@ defmodule SmolqueryPg.Session do
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
+  alias Smolquery.QueryService.Statistics
+  alias SmolqueryPg.Cursors
   alias SmolqueryPg.Errors
   alias SmolqueryPg.Params
   alias SmolqueryPg.PgCatalog
@@ -100,7 +102,8 @@ defmodule SmolqueryPg.Session do
     txn: :idle,
     settings: %{},
     statements: %{},
-    portals: %{}
+    portals: %{},
+    cursors: %{}
   ]
 
   @typedoc """
@@ -133,7 +136,8 @@ defmodule SmolqueryPg.Session do
           txn: Protocol.ready_status(),
           settings: %{String.t() => String.t()},
           statements: %{String.t() => prepared()},
-          portals: %{String.t() => portal()}
+          portals: %{String.t() => portal()},
+          cursors: %{String.t() => %{outcome: outcome(), offset: non_neg_integer()}}
         }
 
   @doc """
@@ -488,8 +492,8 @@ defmodule SmolqueryPg.Session do
   @spec run(t(), String.t()) :: {:ok, outcome(), t()} | {:error, Errors.wire_error(), t()}
   def run(%__MODULE__{txn: :failed} = session, statement) do
     case classify(statement) do
-      class when class in [:commit, :rollback] ->
-        transaction(session, class)
+      class when class in [:commit, :rollback, :rollback_to] ->
+        transaction_or_savepoint(session, class)
 
       _blocked ->
         {:error,
@@ -499,16 +503,31 @@ defmodule SmolqueryPg.Session do
     end
   end
 
-  def run(%__MODULE__{} = session, statement) do
-    case classify(statement) do
-      :query -> query(session, statement)
-      :set -> set(session, statement)
-      :reset -> {:ok, command("RESET"), session}
-      :show -> show(session, statement)
-      class when class in [:begin, :commit, :rollback] -> transaction(session, class)
-      {:unsupported, keyword} -> unsupported(session, keyword)
-    end
-  end
+  def run(%__MODULE__{} = session, statement),
+    do: dispatch(classify(statement), session, statement)
+
+  defp dispatch(:query, session, statement), do: query(session, statement)
+  defp dispatch(:set, session, statement), do: set(session, statement)
+  defp dispatch(:reset, session, _statement), do: {:ok, command("RESET"), session}
+  defp dispatch(:show, session, statement), do: show(session, statement)
+
+  defp dispatch(class, session, _statement) when class in [:begin, :commit, :rollback],
+    do: transaction(session, class)
+
+  defp dispatch(:savepoint, session, statement), do: savepoint(session, statement)
+  defp dispatch(:rollback_to, session, _statement), do: {:ok, command("ROLLBACK"), session}
+  defp dispatch(:declare, session, statement), do: declare(session, statement)
+  defp dispatch(:fetch, session, statement), do: fetch(session, statement)
+  defp dispatch(:close_cursor, session, statement), do: close_cursor(session, statement)
+  defp dispatch(:deallocate, session, statement), do: deallocate(session, statement)
+  defp dispatch(:discard, session, statement), do: discard(session, statement)
+  defp dispatch(:explain, session, statement), do: explain(session, statement)
+  defp dispatch({:unsupported, keyword}, session, _statement), do: unsupported(session, keyword)
+
+  defp transaction_or_savepoint(session, :rollback_to),
+    do: {:ok, command("ROLLBACK"), %{session | txn: :transaction}}
+
+  defp transaction_or_savepoint(session, class), do: transaction(session, class)
 
   defp command(tag, pre \\ []), do: outcome_map(nil, [], tag, pre)
 
@@ -518,8 +537,15 @@ defmodule SmolqueryPg.Session do
   defp classify(statement) do
     case Statements.leading_keyword(statement) do
       "" -> {:unsupported, statement}
+      "rollback" -> rollback_class(statement)
       keyword -> class(keyword)
     end
+  end
+
+  defp rollback_class(statement) do
+    if Regex.match?(~r/\Arollback\s+(?:work\s+|transaction\s+)?to\b/i, String.trim(statement)),
+      do: :rollback_to,
+      else: :rollback
   end
 
   defp class(keyword) when keyword in ["select", "with", "values", "("], do: :query
@@ -528,6 +554,13 @@ defmodule SmolqueryPg.Session do
   defp class("show"), do: :show
   defp class(keyword) when keyword in ["begin", "start"], do: :begin
   defp class(keyword) when keyword in ["commit", "end"], do: :commit
+  defp class(keyword) when keyword in ["savepoint", "release"], do: :savepoint
+  defp class("declare"), do: :declare
+  defp class(keyword) when keyword in ["fetch", "move"], do: :fetch
+  defp class("close"), do: :close_cursor
+  defp class("deallocate"), do: :deallocate
+  defp class("discard"), do: :discard
+  defp class("explain"), do: :explain
   defp class(keyword) when keyword in ["rollback", "abort"], do: :rollback
   defp class(keyword), do: {:unsupported, String.upcase(keyword)}
 
@@ -738,6 +771,128 @@ defmodule SmolqueryPg.Session do
 
   defp tag(:commit), do: "COMMIT"
   defp tag(:rollback), do: "ROLLBACK"
+
+  defp savepoint(session, statement) do
+    tag =
+      case Statements.leading_keyword(statement) do
+        "savepoint" -> "SAVEPOINT"
+        "release" -> "RELEASE"
+      end
+
+    {:ok, command(tag), session}
+  end
+
+  defp declare(%__MODULE__{} = session, statement) do
+    with {:ok, name, query_sql} <- Cursors.parse_declare(statement),
+         {:ok, outcome, session} <- run(session, query_sql) do
+      cursors = Map.put(session.cursors, name, %{outcome: outcome, offset: 0})
+
+      {:ok, command("DECLARE CURSOR"), %{session | cursors: cursors}}
+    else
+      :error -> {:error, {"42601", "syntax error in DECLARE"}, failed(session)}
+      {:error, error, session} -> {:error, error, session}
+    end
+  end
+
+  defp fetch(%__MODULE__{} = session, statement) do
+    with {:ok, verb, count, name} <- Cursors.parse_fetch(statement),
+         {:ok, cursor} <- fetch_cursor(session, name) do
+      taken = page_size(cursor, count)
+      page = cursor.outcome.rows |> Enum.drop(cursor.offset) |> Enum.take(taken)
+      cursors = Map.put(session.cursors, name, %{cursor | offset: cursor.offset + length(page)})
+      session = %{session | cursors: cursors}
+
+      case verb do
+        :move ->
+          {:ok, command("MOVE #{length(page)}"), session}
+
+        :fetch ->
+          {:ok, outcome_map(cursor.outcome.columns, page, "FETCH #{length(page)}", []), session}
+      end
+    else
+      :error -> {:error, {"42601", "syntax error in FETCH"}, failed(session)}
+      {:error, error} -> {:error, error, failed(session)}
+    end
+  end
+
+  defp page_size(cursor, :all), do: length(cursor.outcome.rows) - cursor.offset
+  defp page_size(_cursor, count), do: count
+
+  defp fetch_cursor(session, name) do
+    case Map.fetch(session.cursors, name) do
+      {:ok, %{outcome: %{columns: columns}} = cursor} when columns != nil -> {:ok, cursor}
+      {:ok, _no_rows} -> {:error, {"42P01", ~s|cursor "#{name}" holds no rows|}}
+      :error -> {:error, {"34000", ~s|cursor "#{name}" does not exist|}}
+    end
+  end
+
+  defp close_cursor(%__MODULE__{} = session, statement) do
+    case Cursors.parse_close(statement) do
+      {:ok, :all} ->
+        {:ok, command("CLOSE CURSOR ALL"), %{session | cursors: %{}}}
+
+      {:ok, name} ->
+        if Map.has_key?(session.cursors, name) do
+          {:ok, command("CLOSE CURSOR"), %{session | cursors: Map.delete(session.cursors, name)}}
+        else
+          {:error, {"34000", ~s|cursor "#{name}" does not exist|}, failed(session)}
+        end
+
+      :error ->
+        {:error, {"42601", "syntax error in CLOSE"}, failed(session)}
+    end
+  end
+
+  defp deallocate(%__MODULE__{} = session, _statement),
+    do: {:ok, command("DEALLOCATE ALL"), %{session | statements: %{}, portals: %{}}}
+
+  defp discard(%__MODULE__{} = session, _statement) do
+    {:ok, command("DISCARD ALL"),
+     %{session | statements: %{}, portals: %{}, cursors: %{}, settings: reset_settings(session)}}
+  end
+
+  defp reset_settings(%__MODULE__{settings: settings}) do
+    Map.merge(@defaults, Map.take(settings, ["session_authorization", "application_name"]))
+  end
+
+  defp explain(%__MODULE__{runtime: runtime} = session, statement) do
+    sql = statement |> strip_explain() |> String.trim()
+
+    case Client.query(runtime.query_name, sql, explain: :plan, timeout_ms: timeout_ms(session)) do
+      {:ok, %Job{state: :done} = job, _frame} ->
+        rows = estimated_rows(job)
+
+        {:ok,
+         text_rows(
+           ["QUERY PLAN"],
+           [
+             %{
+               "QUERY PLAN" =>
+                 "Foreign Scan  (cost=100.00..#{100 + rows}.00 rows=#{rows} width=64)"
+             }
+           ],
+           "EXPLAIN"
+         ), session}
+
+      {:ok, %Job{error: reason}, _frame} ->
+        fail(session, reason)
+
+      {:error, reason} ->
+        fail(session, reason)
+    end
+  end
+
+  defp strip_explain(statement) do
+    trimmed = String.trim(statement)
+    <<_explain::binary-size(7), rest::binary>> = trimmed
+
+    Regex.replace(~r/\A\s*(?:\((?:[^)]*)\)\s*|VERBOSE\s+|ANALYZE\s+)*/i, rest, "")
+  end
+
+  defp estimated_rows(%Job{statistics: nil}), do: 1000
+
+  defp estimated_rows(%Job{statistics: statistics}),
+    do: max(Statistics.rows_scanned(statistics), 1)
 
   defp unsupported(session, keyword) do
     {:error,

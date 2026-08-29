@@ -10,7 +10,7 @@ psql "host=127.0.0.1 port=5432 user=smolquery password=$SMOLQUERY_API_KEY"
 smolquery=> SELECT count(*) AS n FROM analytics.events;
 ```
 
-## What works today (layers 1 to 3)
+## What works today (layers 1 to 4)
 
 - **Startup and cleartext password auth.** The password is the API key
   (`SMOLQUERY_API_KEY`), or `SMOLQUERY_PG_PASSWORD` when set. The user and
@@ -60,16 +60,39 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   qualifications drop, `reg*` casts become `BIGINT`, and
   `current_setting('x')` inlines the session's value.
 
+- **`postgres_fdw`.** A Postgres database attaches smolquery as a foreign
+  server. `IMPORT FOREIGN SCHEMA <dataset>` builds the foreign tables with
+  the right types; scans, joins, and aggregates run through cursors
+  (`DECLARE`/`FETCH`/`MOVE`/`CLOSE`), inside the fdw's `REPEATABLE READ`
+  block with its savepoints; `EXPLAIN` answers one `Foreign Scan` cost
+  line with the plan's real row estimate, for `use_remote_estimate`.
+  `DEALLOCATE ALL` and `DISCARD ALL` reset a pooled connection.
+
+  ```sql
+  CREATE SERVER smol FOREIGN DATA WRAPPER postgres_fdw
+    OPTIONS (host 'smolquery-host', port '5432', dbname 'smolquery');
+  CREATE USER MAPPING FOR CURRENT_USER SERVER smol
+    OPTIONS (user 'smolquery', password '<the API key>');
+  IMPORT FOREIGN SCHEMA analytics FROM SERVER smol INTO analytics;
+  SELECT count(*) FROM analytics.events;
+  ```
+
+  Two caveats. A scan is bounded by `result_max_rows` (10,000): the whole
+  result materializes at `DECLARE`, and a larger one fails with `54000` —
+  push the aggregation down, or raise `SMOLQUERY_MAX_RESULT_ROWS`. And a
+  transaction block pins nothing: each statement reads its own snapshot.
+
 Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
 ## Not yet
 
 Each is a layer of PL-58, in order:
 
-- Cursors (`DECLARE`/`FETCH`), `EXPLAIN`, and `postgres_fdw`.
 - SCRAM-SHA-256 and TLS.
 - `information_schema` breadth for BI tools (T-412): the three core views
   exist; the long tail does not.
+- Result streaming past `result_max_rows` (T-411): a `FETCH` loop could
+  page an unbounded result; today the cap applies at `DECLARE`.
 
 ## Types
 
