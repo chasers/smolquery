@@ -65,16 +65,26 @@ defmodule Smolquery.Cluster.PgGroup.MemberTest do
   end
 
   defp start_scope do
-    {:ok, pid} =
-      case :pg.start(Cluster.pg_scope()) do
-        {:ok, pid} -> {:ok, pid}
-        {:error, {:already_started, pid}} -> {:ok, pid}
-      end
-
-    pid
+    case :pg.start(Cluster.pg_scope()) do
+      {:ok, pid} -> pid
+      {:error, {:already_started, pid}} -> fresh_scope(pid)
+    end
   end
 
-  defp wait_until(check, budget_ms \\ 2_000) do
+  defp fresh_scope(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      2_000 -> raise "the leaked :pg scope did not die"
+    end
+
+    start_scope()
+  end
+
+  defp wait_until(check, budget_ms \\ 5_000) do
     cond do
       check.() ->
         true

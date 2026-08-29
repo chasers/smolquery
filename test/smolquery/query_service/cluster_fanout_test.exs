@@ -155,7 +155,7 @@ defmodule Smolquery.QueryService.ClusterFanoutTest do
   end
 
   defp ensure_pg_scope! do
-    case :pg.start_link(Cluster.pg_scope()) do
+    case :pg.start(Cluster.pg_scope()) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end
