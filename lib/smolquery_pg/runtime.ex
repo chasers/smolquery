@@ -33,6 +33,7 @@ defmodule SmolqueryPg.Runtime do
   """
 
   alias Smolquery.Catalog
+  alias SmolqueryPg.Scram
 
   @enforce_keys [:name, :password]
   @derive {Inspect, except: [:password]}
@@ -43,8 +44,10 @@ defmodule SmolqueryPg.Runtime do
     :catalog_opts,
     :tls_cert,
     :tls_key,
+    :scram,
     query_name: Smolquery.QueryService,
     auth: :scram_sha_256,
+    auth_timeout_ms: 30_000,
     ip: {127, 0, 0, 1},
     port: 5432
   ]
@@ -56,8 +59,10 @@ defmodule SmolqueryPg.Runtime do
           catalog_opts: keyword() | nil,
           query_name: atom(),
           auth: :scram_sha_256 | :cleartext,
+          auth_timeout_ms: pos_integer(),
           tls_cert: Path.t() | nil,
           tls_key: Path.t() | nil,
+          scram: Scram.verifier(),
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -94,20 +99,43 @@ defmodule SmolqueryPg.Runtime do
           role: :pg
         )
     }
-    |> struct!(Keyword.take(config, [:query_name, :auth, :tls_cert, :tls_key, :ip, :port]))
+    |> struct!(
+      Keyword.take(config, [:query_name, :auth, :auth_timeout_ms, :tls_cert, :tls_key, :ip, :port])
+    )
+    |> derive_scram()
     |> validate_tls()
   end
+
+  defp derive_scram(%__MODULE__{password: password} = runtime),
+    do: %{runtime | scram: Scram.verifier(password)}
 
   defp validate_tls(%__MODULE__{tls_cert: nil, tls_key: nil} = runtime), do: runtime
 
   defp validate_tls(%__MODULE__{tls_cert: cert, tls_key: key} = runtime)
-       when is_binary(cert) and is_binary(key),
-       do: runtime
+       when is_binary(cert) and is_binary(key) do
+    validate_pem!("tls_cert", cert)
+    validate_pem!("tls_key", key)
+
+    runtime
+  end
 
   defp validate_tls(_runtime) do
     raise ArgumentError,
           "the Postgres wire edge takes tls_cert and tls_key together " <>
             "(SMOLQUERY_PG_TLS_CERT and SMOLQUERY_PG_TLS_KEY), or neither"
+  end
+
+  defp validate_pem!(label, path) do
+    case File.read(path) do
+      {:ok, pem} ->
+        if :public_key.pem_decode(pem) == [] do
+          raise ArgumentError, "the Postgres wire edge's #{label} holds no PEM entries: #{path}"
+        end
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "the Postgres wire edge cannot read its #{label} (#{inspect(reason)}): #{path}"
+    end
   end
 
   @doc """

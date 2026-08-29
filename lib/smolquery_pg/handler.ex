@@ -4,25 +4,41 @@ defmodule SmolqueryPg.Handler do
 
   A `ThousandIsland.Handler`, so one process per connection, and the
   process is idle between messages. The handler buffers bytes, decodes
-  complete messages through `SmolqueryPg.Protocol`, and moves through three
-  phases:
+  complete messages through `SmolqueryPg.Protocol`, and moves through the
+  phases: startup, authentication, ready.
 
-  1. **startup** — the first packet. `SSLRequest` and `GSSENCRequest` are
-     declined with `N`, and the client sends its real startup next. A
-     `CancelRequest` cancels the job its key names through
-     `SmolqueryPg.Session.cancel/3` and closes. A startup packet moves to
-     the password phase.
-  2. **password** — `AuthenticationCleartextPassword` was sent; the answer
-     is compared in constant time against the runtime's password. A wrong
-     one answers `28P01` and closes. Nothing about the user or the
-     database is checked: the credential is the whole gate, as the API's
-     Bearer key is.
-  3. **ready** — every message runs through `SmolqueryPg.Session`. A
-     simple `Query` answers with `ReadyForQuery` at its end. The extended
-     protocol's messages each answer their completion, and `Sync` answers
-     `ReadyForQuery`. After an error in the extended protocol the handler
-     discards every message until `Sync`, as Postgres does, so a client's
-     pipeline fails as one unit instead of desynchronising.
+  ## Startup and TLS
+
+  `SSLRequest` upgrades the connection when the runtime holds a
+  certificate: the handler answers `S` and returns ThousandIsland's
+  `:switch_transport` continuation, which runs the TLS handshake while
+  the socket is passive — no window where a client byte can slip past the
+  upgrade. Three refusals guard the boundary: bytes buffered alongside
+  the `SSLRequest` (a plaintext-injection vector across the upgrade), a
+  second `SSLRequest` inside an upgraded session, and — without a
+  certificate — the request itself, declined with `N`. `GSSENCRequest`
+  is always declined. A `CancelRequest` cancels the job its key names
+  through `SmolqueryPg.Session.cancel/3` and closes.
+
+  ## Authentication
+
+  SCRAM-SHA-256 by default (`SmolqueryPg.Scram`, against the verifier the
+  runtime derived at boot), or the cleartext password message when the
+  runtime says `auth: :cleartext`. Either way the whole exchange — TLS
+  handshake included — must finish inside the runtime's `auth_timeout_ms`:
+  a timer closes the socket from outside the process, so a client that
+  goes silent mid-handshake cannot pin the connection and its file
+  descriptor. Authentication cancels the timer.
+
+  ## Ready
+
+  Every message runs through `SmolqueryPg.Session`. A simple `Query`
+  answers with `ReadyForQuery` at its end. The extended protocol's
+  messages each answer their completion, and `Sync` answers
+  `ReadyForQuery`. After an error in the extended protocol the handler
+  discards every message until `Sync`, as Postgres does, so a client's
+  pipeline fails as one unit instead of desynchronising. Any message no
+  phase expects answers `08P01`, never a crash.
   """
 
   use ThousandIsland.Handler
@@ -36,9 +52,22 @@ defmodule SmolqueryPg.Handler do
   alias ThousandIsland.Socket
 
   @impl ThousandIsland.Handler
-  def handle_connection(_socket, %Runtime{} = runtime) do
+  def handle_connection(socket, %Runtime{} = runtime) do
+    {:ok, timer} =
+      :timer.apply_after(runtime.auth_timeout_ms, ThousandIsland.Socket, :close, [socket])
+
     {:continue,
-     %{runtime: runtime, buffer: <<>>, phase: :startup, params: %{}, session: nil, discard: false}}
+     %{
+       runtime: runtime,
+       buffer: <<>>,
+       phase: :startup,
+       params: %{},
+       session: nil,
+       scram: nil,
+       discard: false,
+       tls: false,
+       auth_timer: timer
+     }}
   end
 
   @impl ThousandIsland.Handler
@@ -62,13 +91,22 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
-  defp startup(socket, :ssl_request, state) do
-    if Runtime.tls?(state.runtime) do
-      send(self(), :tls_upgrade)
+  defp startup(socket, :ssl_request, %{tls: true} = state),
+    do: refuse(socket, state, "08P01", "duplicate SSLRequest inside a TLS session")
 
-      {:continue, state}
+  defp startup(socket, :ssl_request, %{buffer: buffer} = state) when buffer != <<>>,
+    do: refuse(socket, state, "08P01", "unexpected data after SSLRequest")
+
+  defp startup(socket, :ssl_request, state) do
+    with true <- Runtime.tls?(state.runtime),
+         :ok <- Socket.send(socket, "S") do
+      {:switch_transport,
+       {ThousandIsland.Transports.SSL,
+        certfile: String.to_charlist(state.runtime.tls_cert),
+        keyfile: String.to_charlist(state.runtime.tls_key)}, %{state | tls: true}}
     else
-      deny_encryption(socket, state)
+      false -> deny_encryption(socket, state)
+      {:error, _reason} -> {:close, state}
     end
   end
 
@@ -121,7 +159,7 @@ defmodule SmolqueryPg.Handler do
   end
 
   defp handle(socket, {:auth_response, body}, %{phase: :password} = state) do
-    password = body |> :binary.split(<<0>>) |> hd()
+    password = Protocol.cstring(body)
 
     if Plug.Crypto.secure_compare(password, state.runtime.password) do
       open_session(socket, state, [])
@@ -133,22 +171,24 @@ defmodule SmolqueryPg.Handler do
   defp handle(socket, {:auth_response, body}, %{phase: :sasl_initial} = state) do
     with {:ok, mechanism, client_first} <- Protocol.decode_sasl_initial(body),
          true <- mechanism == Scram.mechanism(),
-         {:ok, server_first, scram} <-
-           Scram.server_first(client_first, state.runtime.password) do
+         {:ok, server_first, scram} <- Scram.server_first(client_first, state.runtime.scram) do
       case Socket.send(socket, Protocol.authentication_sasl_continue(server_first)) do
-        :ok -> drain(socket, %{state | phase: {:sasl_final, scram}})
+        :ok -> drain(socket, %{state | phase: :sasl_final, scram: scram})
         {:error, _reason} -> {:close, state}
       end
     else
       false ->
         refuse(socket, state, "28000", "unsupported SASL mechanism; use #{Scram.mechanism()}")
 
-      _malformed_or_error ->
+      {:error, reason} ->
+        refuse(socket, state, "28000", reason)
+
+      _malformed ->
         refuse(socket, state, "28000", "malformed SASL initial response")
     end
   end
 
-  defp handle(socket, {:auth_response, body}, %{phase: {:sasl_final, scram}} = state) do
+  defp handle(socket, {:auth_response, body}, %{phase: :sasl_final, scram: scram} = state) do
     case Scram.server_final(body, scram) do
       {:ok, server_final} ->
         open_session(socket, state, [Protocol.authentication_sasl_final(server_final)])
@@ -161,7 +201,7 @@ defmodule SmolqueryPg.Handler do
   defp handle(_socket, :terminate, state), do: {:close, state}
 
   defp handle(socket, _message, %{phase: phase} = state)
-       when phase in [:password, :sasl_initial] or is_tuple(phase),
+       when phase in [:password, :sasl_initial, :sasl_final],
        do: refuse(socket, state, "08P01", "expected an authentication response")
 
   defp handle(socket, :sync, state) do
@@ -213,6 +253,9 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
+  defp handle(socket, _message, state),
+    do: refuse(socket, state, "08P01", "unexpected message for this phase")
+
   defp extended(socket, state, {:ok, messages, session}) do
     case Socket.send(socket, messages) do
       :ok -> drain(socket, %{state | session: session})
@@ -228,6 +271,7 @@ defmodule SmolqueryPg.Handler do
   end
 
   defp open_session(socket, state, prelude) do
+    {:ok, :cancel} = :timer.cancel(state.auth_timer)
     session = Session.new(state.runtime, state.params)
 
     messages =

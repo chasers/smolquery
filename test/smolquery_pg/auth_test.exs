@@ -62,7 +62,8 @@ defmodule SmolqueryPg.AuthTest do
     end
 
     test "the exchange verifies both directions" do
-      {:ok, server_first, state} = Scram.server_first("n,,n=,r=clientnonce", @password)
+      {:ok, server_first, state} =
+        Scram.server_first("n,,n=,r=clientnonce", Scram.verifier(@password))
 
       assert server_first =~ "r=clientnonce"
       assert %{"r" => nonce, "s" => salt, "i" => "4096"} = scram_map(server_first)
@@ -88,6 +89,9 @@ defmodule SmolqueryPg.AuthTest do
       assert {:error, "SCRAM nonce mismatch"} =
                Scram.server_final("c=biws,r=other,p=" <> proof, state)
 
+      assert {:error, "SCRAM channel-binding echo does not match the GS2 header" <> _rest} =
+               Scram.server_final("c=eSws,r=" <> nonce <> ",p=" <> proof, state)
+
       assert {:error, "password authentication failed"} =
                Scram.server_final(
                  without_proof <> ",p=" <> Base.encode64(:binary.copy(<<0>>, 32)),
@@ -96,8 +100,35 @@ defmodule SmolqueryPg.AuthTest do
     end
 
     test "a channel-binding-required client is refused" do
-      assert {:error, message} = Scram.server_first("p=tls-server-end-point,,n=,r=x", @password)
+      assert {:error, message} =
+               Scram.server_first("p=tls-server-end-point,,n=,r=x", Scram.verifier(@password))
+
       assert message =~ "channel binding"
+    end
+
+    test "a decomposed-Unicode password authenticates: the server normalizes to NFKC" do
+      decomposed = "cafe\u0301!"
+      composed = :unicode.characters_to_nfkc_binary(decomposed)
+      port = start_edge(password: decomposed)
+
+      assert {:ok, _socket, _params} = PgClient.connect(port, password: composed)
+    end
+
+    test "cleartext mode still answers a legacy client" do
+      port = start_edge(auth: :cleartext)
+
+      {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+      assert %{results: [%{rows: [["1"]]}]} = PgClient.query(socket, "SELECT 1")
+      assert {:error, %{"C" => "28P01"}} = PgClient.connect(port, password: "wrong")
+    end
+
+    test "an unauthenticated connection is closed at the auth deadline" do
+      port = start_edge(auth_timeout_ms: 200)
+
+      {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+
+      assert {:error, :closed} = :gen_tcp.recv(socket, 0, 5_000)
     end
   end
 
@@ -127,6 +158,44 @@ defmodule SmolqueryPg.AuthTest do
       assert_raise ArgumentError, ~r/tls_cert and tls_key together/, fn ->
         SmolqueryPg.Runtime.new(password: @password, tls_cert: @cert)
       end
+    end
+
+    test "an unreadable or empty certificate file refuses to boot" do
+      assert_raise ArgumentError, ~r/cannot read its tls_cert/, fn ->
+        SmolqueryPg.Runtime.new(password: @password, tls_cert: "/nope.pem", tls_key: @key)
+      end
+
+      empty = Path.join(System.tmp_dir!(), "empty-#{System.unique_integer([:positive])}.pem")
+      File.write!(empty, "not pem")
+
+      assert_raise ArgumentError, ~r/holds no PEM entries/, fn ->
+        SmolqueryPg.Runtime.new(password: @password, tls_cert: empty, tls_key: @key)
+      end
+    end
+
+    test "a second SSLRequest inside the TLS session is refused" do
+      port = start_edge(tls_cert: @cert, tls_key: @key)
+
+      {:ok, tcp} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      :ok = :gen_tcp.send(tcp, <<8::32, 80_877_103::32>>)
+      assert {:ok, "S"} = :gen_tcp.recv(tcp, 1, 5_000)
+      {:ok, tls} = :ssl.connect(tcp, [verify: :verify_none, active: false], 5_000)
+
+      :ok = :ssl.send(tls, <<8::32, 80_877_103::32>>)
+      assert {:ok, <<?E, _length::32, body::binary>>} = :ssl.recv(tls, 0, 5_000)
+      assert %{"C" => "08P01"} = PgClient.fields(body)
+    end
+
+    test "bytes pipelined behind an SSLRequest are refused, never carried across the upgrade" do
+      port = start_edge(tls_cert: @cert, tls_key: @key)
+
+      {:ok, tcp} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      startup = IO.iodata_to_binary(PgClient.startup([{"user", "mitm"}]))
+      :ok = :gen_tcp.send(tcp, <<8::32, 80_877_103::32>> <> startup)
+
+      assert {:ok, <<?E, _length::32, body::binary>>} = :gen_tcp.recv(tcp, 0, 5_000)
+      assert %{"C" => "08P01", "M" => message} = PgClient.fields(body)
+      assert message =~ "after SSLRequest"
     end
   end
 

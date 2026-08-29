@@ -162,7 +162,12 @@ defmodule SmolqueryPg.Protocol do
   defp target(?S), do: :statement
   defp target(?P), do: :portal
 
-  defp cstring(body), do: body |> take_cstring() |> elem(0)
+  @doc """
+  The text before the first NUL of `body` — how the protocol carries a
+  string.
+  """
+  @spec cstring(binary()) :: String.t()
+  def cstring(body), do: body |> take_cstring() |> elem(0)
 
   defp take_cstring(body) do
     case :binary.split(body, <<0>>) do
