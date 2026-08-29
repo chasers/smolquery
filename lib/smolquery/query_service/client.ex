@@ -46,6 +46,7 @@ defmodule Smolquery.QueryService.Client do
           | {:distributed, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
+          | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
 
   @submit_option_keys [
     :timeout_ms,
@@ -54,7 +55,8 @@ defmodule Smolquery.QueryService.Client do
     :trace,
     :distributed,
     :snapshot,
-    :hot_before_ms
+    :hot_before_ms,
+    :hot_ids
   ]
 
   @doc """
@@ -72,10 +74,14 @@ defmodule Smolquery.QueryService.Client do
   for this job only (PL-49); a distributed answer settles with the shard
   count on `job.scatter`, and a refusal or failure falls back silently.
   `snapshot:` pins the sealed tier at that catalog version instead of the
-  current one, and `hot_before_ms:` excludes micro-segments stamped after
-  the bound — together, a caller's repeatable read across several jobs
-  (PL-58 layer 7): pass the first job's `job.snapshot` and its submit time
-  to every later job.
+  current one; `hot_ids:` pins each named table's hot tier to exactly
+  those micro-segment ids; and `hot_before_ms:` excludes micro-segments
+  stamped after the bound from any table `hot_ids:` does not name.
+  Together they are a caller's repeatable read across several jobs
+  (PL-58 layers 7 and 8): pass the first job's `job.snapshot` and its
+  submit time to every later job, and each table's `job.hot_members`
+  from the job that first touched it. A pinned id the hot tier no longer
+  holds fails the job with `{:pinned_hot_retired, ref, ids}`.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which

@@ -24,15 +24,20 @@ defmodule SmolqueryPg.Session do
   | empty | `EmptyQueryResponse` |
   | anything else | `0A000 feature_not_supported` |
 
-  A transaction block pins its read (PL-58 layer 7): the block's first
-  query captures a hot-tier time bound at submit and the snapshot the job
-  ran at, and every later query in the block passes both through
-  `Smolquery.QueryService.Client` — so two statements in one `BEGIN`, or
-  the several cursors of a `postgres_fdw` join, read the same data. The
+  A transaction block pins its read (PL-58 layers 7 and 8): the block's
+  first query captures a hot-tier time bound at submit and the snapshot
+  the job ran at, and each table's first touch in the block captures the
+  exact micro-segment ids that job read (`job.hot_members`). Every later
+  query in the block passes all three through
+  `Smolquery.QueryService.Client` — the id set as `hot_ids:` for a table
+  already touched, the time bound for one not yet touched — so two
+  statements in one `BEGIN`, or the several cursors of a `postgres_fdw`
+  join, read the same data, whatever the buffer nodes' clocks say. The
   pin forms lazily at the first query, as Postgres's `REPEATABLE READ`
   does, and clears when the block ends (`ROLLBACK TO` keeps it; so does a
-  failed block, until it ends). Outside a block each statement reads its
-  own snapshot, as an HTTP query does.
+  failed block, until it ends). A pinned segment that has been retired
+  out of the hot tier answers `72000`: the block is too old. Outside a
+  block each statement reads its own snapshot, as an HTTP query does.
 
   ## The extended protocol
 
@@ -128,13 +133,20 @@ defmodule SmolqueryPg.Session do
 
   @typedoc """
   One transaction block's state: its isolation level, the lazily formed
-  read pin (`REPEATABLE READ` and `SERIALIZABLE` only), the savepoint
-  names it holds, and the original values `SET LOCAL` must restore when
-  the block ends.
+  read pin (`REPEATABLE READ` and `SERIALIZABLE` only) — the snapshot,
+  the hot-tier time bound, and per table the micro-segment ids its first
+  touch read — the savepoint names it holds, and the original values
+  `SET LOCAL` must restore when the block ends.
   """
   @type block :: %{
           isolation: :read_committed | :repeatable_read | :serializable,
-          pin: %{snapshot: term() | nil, hot_before_ms: pos_integer()} | nil,
+          pin:
+            %{
+              snapshot: term() | nil,
+              hot_before_ms: pos_integer(),
+              tables: %{Smolquery.Catalog.table_ref() => [String.t()]}
+            }
+            | nil,
           savepoints: MapSet.t(String.t()),
           locals: %{String.t() => String.t()}
         }
@@ -664,12 +676,12 @@ defmodule SmolqueryPg.Session do
        when isolation in [:repeatable_read, :serializable] do
     case block.pin do
       nil ->
-        pin = %{snapshot: nil, hot_before_ms: System.system_time(:millisecond)}
+        pin = %{snapshot: nil, hot_before_ms: System.system_time(:millisecond), tables: %{}}
 
         {[hot_before_ms: pin.hot_before_ms], %{session | block: %{block | pin: pin}}}
 
       pin ->
-        {[hot_before_ms: pin.hot_before_ms] ++ snapshot_opt(pin), session}
+        {[hot_before_ms: pin.hot_before_ms] ++ snapshot_opt(pin) ++ tables_opt(pin), session}
     end
   end
 
@@ -678,12 +690,21 @@ defmodule SmolqueryPg.Session do
   defp snapshot_opt(%{snapshot: nil}), do: []
   defp snapshot_opt(%{snapshot: snapshot}), do: [snapshot: snapshot]
 
+  defp tables_opt(%{tables: tables}) when map_size(tables) == 0, do: []
+  defp tables_opt(%{tables: tables}), do: [hot_ids: tables]
+
   defp remember_pin(
-         %__MODULE__{txn: :transaction, block: %{pin: %{snapshot: nil} = pin} = block} = session,
-         %Job{snapshot: snapshot}
-       )
-       when snapshot != nil,
-       do: %{session | block: %{block | pin: %{pin | snapshot: snapshot}}}
+         %__MODULE__{txn: :transaction, block: %{pin: %{} = pin} = block} = session,
+         %Job{} = job
+       ) do
+    pin = %{
+      pin
+      | snapshot: pin.snapshot || job.snapshot,
+        tables: Map.merge(job.hot_members, pin.tables)
+    }
+
+    %{session | block: %{block | pin: pin}}
+  end
 
   defp remember_pin(session, _job), do: session
 

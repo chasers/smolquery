@@ -52,6 +52,12 @@ defmodule SmolqueryPg.Errors do
   def from_reason({:hot_tier_unavailable, _reason}),
     do: {"57P03", "a buffer node the query needs did not answer"}
 
+  def from_reason({:pinned_hot_retired, {dataset, table}, _ids}),
+    do:
+      {"72000",
+       "a hot segment the transaction pinned for #{dataset}.#{table} has been retired; " <>
+         "the transaction block is too old, start a new one"}
+
   def from_reason(:timeout), do: {"57014", "canceling statement due to statement timeout"}
   def from_reason(:cancelled), do: {"57014", "canceling statement due to user request"}
   def from_reason(:too_many_jobs), do: {"53000", "too many queries in flight; retry later"}

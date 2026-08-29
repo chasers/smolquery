@@ -12,6 +12,7 @@ defmodule Smolquery.QueryService.PlannerTest do
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.Trace
   alias Smolquery.Schema
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Test.FixedCatalog
   alias Smolquery.Test.ManifestServer
@@ -47,7 +48,11 @@ defmodule Smolquery.QueryService.PlannerTest do
   defp ids(entries), do: Enum.map(entries, & &1["id"])
 
   defp runtime(entries, opts \\ []) do
-    agent = start_supervised!({Agent, fn -> entries end}, id: make_ref())
+    agent =
+      Keyword.get_lazy(opts, :agent, fn ->
+        start_supervised!({Agent, fn -> entries end}, id: make_ref())
+      end)
+
     server = start_supervised!(ManifestServer.bandit_spec(agent), id: make_ref())
 
     answers =
@@ -471,6 +476,52 @@ defmodule Smolquery.QueryService.PlannerTest do
       [_schema, view] = plan.statements
       assert view =~ "01B.parquet"
       refute view =~ "01A.parquet"
+    end
+
+    test "hot_members is the membership before pruning, so a later WHERE prunes from the whole set (T-418)" do
+      stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
+      runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events WHERE id > 100")
+
+      assert ids(plan.hot[@table]) == ["01B"]
+      assert plan.hot_members == %{@table => ["01A", "01B"]}
+    end
+
+    test "hot_ids: reads a table by id, so a segment stamped before the bound that lands later stays out (T-418)" do
+      sql = "SELECT * FROM analytics.events"
+      bound = System.system_time(:millisecond)
+      first = Id.generate(bound - 10)
+      agent = start_supervised!({Agent, fn -> [entry(first)] end}, id: make_ref())
+      runtime = runtime([], agent: agent)
+
+      assert {:ok, first_touch} = Planner.plan(runtime, @conn, sql, hot_before_ms: bound)
+      assert first_touch.hot_members == %{@table => [first]}
+
+      skewed = Id.generate(bound - 5)
+      Agent.update(agent, &(&1 ++ [entry(skewed)]))
+
+      assert {:ok, by_time} = Planner.plan(runtime, @conn, sql, hot_before_ms: bound)
+      assert ids(by_time.hot[@table]) == [first, skewed]
+
+      assert {:ok, by_id} =
+               Planner.plan(runtime, @conn, sql,
+                 hot_before_ms: bound,
+                 hot_ids: first_touch.hot_members
+               )
+
+      assert ids(by_id.hot[@table]) == [first]
+      assert by_id.hot_members == first_touch.hot_members
+    end
+
+    test "a pinned id the manifest no longer holds fails the plan rather than reading elsewhere (T-418)" do
+      runtime = runtime([entry("01A")])
+
+      assert {:error, {:pinned_hot_retired, @table, ["01GONE"]}} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events",
+                 hot_ids: %{@table => ["01A", "01GONE"]}
+               )
     end
 
     test "stats that leave a chance keep their entry" do

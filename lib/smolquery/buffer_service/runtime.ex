@@ -167,9 +167,12 @@ defmodule Smolquery.BufferService.Runtime do
   merge. Sealed segments may then land out of input order within the ref;
   every consumer of the manifest is per-entry, so nothing reads that order.
 
-  `retire_grace_ms` must exceed the longest query a planner can hold open. It is
-  how long a retired micro-segment stays readable after a sealer committed it, and
-  deleting one out from under an in-flight scan is exactly what it prevents.
+  `retire_grace_ms` must exceed the longest query a planner can hold open — and,
+  on the Postgres wire, the longest transaction block a client holds open, since
+  a `REPEATABLE READ` block pins its hot tier by id (PL-58 layer 8). It is how
+  long a retired micro-segment stays readable after a sealer committed it, and
+  deleting one out from under an in-flight scan is exactly what it prevents;
+  the wire's `idle_in_transaction_session_timeout` (5 minutes) sits inside it.
 
   `fullsweep_after` is the spawn option that `TableBuffer` and its `Committer`
   start under (T-330). Both processes are long lived and both take a whole
