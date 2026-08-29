@@ -35,9 +35,14 @@ defmodule SmolqueryPg.Session do
   join, read the same data, whatever the buffer nodes' clocks say. The
   pin forms lazily at the first query, as Postgres's `REPEATABLE READ`
   does, and clears when the block ends (`ROLLBACK TO` keeps it; so does a
-  failed block, until it ends). A pinned segment that has been retired
-  out of the hot tier answers `72000`: the block is too old. Outside a
-  block each statement reads its own snapshot, as an HTTP query does.
+  failed block, until it ends — but a statement that fails before the pin
+  has a snapshot drops the half-formed pin, so the block re-pins whole at
+  its next query). `EXPLAIN` in a block pins and reads the pin like a
+  query, as `postgres_fdw`'s remote estimates need. A block older than
+  the query service's `hot_pin_max_age_ms`, or one whose pinned segment
+  has been retired out of the hot tier, answers `72000`: the block is
+  too old. Outside a block each statement reads its own snapshot, as an
+  HTTP query does.
 
   ## The extended protocol
 
@@ -699,7 +704,7 @@ defmodule SmolqueryPg.Session do
        ) do
     pin = %{
       pin
-      | snapshot: pin.snapshot || job.snapshot,
+      | snapshot: job.snapshot,
         tables: Map.merge(job.hot_members, pin.tables)
     }
 
@@ -742,8 +747,13 @@ defmodule SmolqueryPg.Session do
 
   defp fail(session, reason), do: {:error, Errors.from_reason(reason), failed(session)}
 
-  defp failed(%__MODULE__{txn: :transaction} = session), do: %{session | txn: :failed}
+  defp failed(%__MODULE__{txn: :transaction, block: block} = session),
+    do: %{session | txn: :failed, block: drop_unformed_pin(block)}
+
   defp failed(session), do: session
+
+  defp drop_unformed_pin(%{pin: %{snapshot: nil}} = block), do: %{block | pin: nil}
+  defp drop_unformed_pin(block), do: block
 
   defp set(session, statement) do
     {:word, "set", rest} = Sql.next_token(statement)
@@ -1317,8 +1327,10 @@ defmodule SmolqueryPg.Session do
 
   defp explain(%__MODULE__{runtime: runtime} = session, statement) do
     sql = statement |> strip_explain() |> String.trim()
+    {pin, session} = block_pin(session)
+    opts = [explain: :plan, timeout_ms: timeout_ms(session)] ++ pin
 
-    case Client.query(runtime.query_name, sql, explain: :plan, timeout_ms: timeout_ms(session)) do
+    case Client.query(runtime.query_name, sql, opts) do
       {:ok, %Job{state: :done} = job, _frame} ->
         rows = estimated_rows(job)
 
@@ -1332,7 +1344,7 @@ defmodule SmolqueryPg.Session do
              }
            ],
            "EXPLAIN"
-         ), session}
+         ), remember_pin(session, job)}
 
       {:ok, %Job{error: reason}, _frame} ->
         fail(session, reason)

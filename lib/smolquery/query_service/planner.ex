@@ -79,13 +79,18 @@ defmodule Smolquery.QueryService.Planner do
 
   The bound leans on ULID timestamps, so cross-node clock skew is its
   precision — but only once per table, at first touch; after that the id
-  set is exact. A pinned id the manifest no longer holds (the segment was
-  sealed and then retired past `retire_grace_ms`) fails the plan with
-  `{:pinned_hot_retired, ref, ids}` — never a silent re-read from another
-  tier — so `retire_grace_ms` must exceed the longest block a caller holds
-  open. A snapshot older than `SMOLQUERY_SNAPSHOT_KEEP_MS` can likewise
-  expire under a long block; both surface as a query error, never as
-  wrong rows.
+  set is exact.
+
+  A pin has a lifetime, `Runtime.hot_pin_max_age_ms`: a micro-segment is
+  reaped from the hot tier `retire_grace_ms` after its seal, and a read
+  past that point — by id or by time — could come back short with no
+  error. So a `hot_before_ms:` older than the lifetime is refused with
+  `{:pinned_hot_expired, age_ms, max_age_ms}` before any manifest is read,
+  and a pinned id the manifest no longer holds inside the lifetime fails
+  with `{:pinned_hot_retired, ref, ids}` — never a silent re-read from
+  another tier. A snapshot older than `SMOLQUERY_SNAPSHOT_KEEP_MS` can
+  likewise expire under a long block; all three surface as a query error,
+  never as wrong rows.
 
   Entries that survive the membership rule then pass through
   `Smolquery.QueryService.Pruner`: a micro-segment whose min-max stats prove
@@ -254,9 +259,11 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
+         :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          {:ok, manifests} <-
            Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end),
-         {:ok, members} <- members(refs, tables, manifests, pin) do
+         {:ok, members} <-
+           Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
       pruned = Trace.span(:prune, fn -> pruned(members, Pruner.conjuncts(statement, refs)) end)
       hot = bounded(runtime, connection, statement, refs, tables, pruned)
 
@@ -269,6 +276,14 @@ defmodule Smolquery.QueryService.Planner do
 
   defp pinned_snapshot(runtime, nil), do: Catalog.current_snapshot(runtime.catalog)
   defp pinned_snapshot(_runtime, snapshot), do: {:ok, snapshot}
+
+  defp fresh_pin(_runtime, nil), do: :ok
+
+  defp fresh_pin(%Runtime{hot_pin_max_age_ms: max_age_ms}, hot_before_ms) do
+    age_ms = System.system_time(:millisecond) - hot_before_ms
+
+    if age_ms <= max_age_ms, do: :ok, else: {:error, {:pinned_hot_expired, age_ms, max_age_ms}}
+  end
 
   defp members(refs, tables, manifests, pin) do
     hot_ids = Keyword.get(pin, :hot_ids, %{})
@@ -657,7 +672,9 @@ defmodule Smolquery.QueryService.Planner do
       federated: attaches != [],
       hot: hot,
       hot_members:
-        Map.new(members, fn {ref, entries} -> {ref, Enum.map(entries, & &1["id"])} end),
+        Map.new(members, fn {ref, entries} ->
+          {ref, Enum.map(entries, &:binary.copy(&1["id"]))}
+        end),
       schemas: Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end),
       statistics: statistics(members, hot, tables)
     }

@@ -47,12 +47,12 @@ defmodule Smolquery.QueryService.PlannerTest do
 
   defp ids(entries), do: Enum.map(entries, & &1["id"])
 
-  defp runtime(entries, opts \\ []) do
-    agent =
-      Keyword.get_lazy(opts, :agent, fn ->
-        start_supervised!({Agent, fn -> entries end}, id: make_ref())
-      end)
+  defp runtime(entries_or_agent, opts \\ [])
 
+  defp runtime(entries, opts) when is_list(entries),
+    do: runtime(start_supervised!({Agent, fn -> entries end}, id: make_ref()), opts)
+
+  defp runtime(agent, opts) when is_pid(agent) do
     server = start_supervised!(ManifestServer.bandit_spec(agent), id: make_ref())
 
     answers =
@@ -494,7 +494,7 @@ defmodule Smolquery.QueryService.PlannerTest do
       bound = System.system_time(:millisecond)
       first = Id.generate(bound - 10)
       agent = start_supervised!({Agent, fn -> [entry(first)] end}, id: make_ref())
-      runtime = runtime([], agent: agent)
+      runtime = runtime(agent)
 
       assert {:ok, first_touch} = Planner.plan(runtime, @conn, sql, hot_before_ms: bound)
       assert first_touch.hot_members == %{@table => [first]}
@@ -513,6 +513,31 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert ids(by_id.hot[@table]) == [first]
       assert by_id.hot_members == first_touch.hot_members
+    end
+
+    test "a pin older than hot_pin_max_age_ms is refused before any manifest is read (T-418)" do
+      runtime = runtime([entry("01A")], runtime: [hot_pin_max_age_ms: 1_000])
+      stale = System.system_time(:millisecond) - 5_000
+
+      assert {:error, {:pinned_hot_expired, age_ms, 1_000}} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events",
+                 hot_before_ms: stale
+               )
+
+      assert age_ms >= 5_000
+
+      assert {:ok, _plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events",
+                 hot_before_ms: System.system_time(:millisecond)
+               )
+    end
+
+    test "hot_members ids are copies, not slices of the manifest page (T-418)" do
+      runtime = runtime([entry("01A")])
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+      assert [id] = plan.hot_members[@table]
+      assert :binary.referenced_byte_size(id) == byte_size(id)
     end
 
     test "a pinned id the manifest no longer holds fails the plan rather than reading elsewhere (T-418)" do

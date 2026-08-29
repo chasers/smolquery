@@ -126,8 +126,9 @@ micro-segment ids that query read, and every later statement in the
 block — the several cursors of a `postgres_fdw` join included, and a
 nested-loop rescan of one — reads the same data. The pin forms lazily at
 the first query, as Postgres does, and clears when the block ends. The
-data is append-only, so this closes the only per-statement anomaly a
-block could see: rows inserted mid-block appear only after `COMMIT`. A
+data is append-only, so this closes the per-statement anomaly a block
+could see: rows inserted mid-block appear only after `COMMIT`, per
+table from its first touch. A
 plain `BEGIN` is `READ COMMITTED`, as in Postgres, and reads fresh per
 statement; `SHOW transaction_isolation` reports the block's level.
 
@@ -149,14 +150,21 @@ the cap. And a block older than `SMOLQUERY_SNAPSHOT_KEEP_MS`
 (24 hours) can lose its snapshot to expiry — that surfaces as a query
 error, never as wrong rows.
 
-The hot tier's own bound is the buffer's `retire_grace_ms` (10 minutes):
-a micro-segment the block pinned stays readable that long after a sealer
-retires it, and the idle timeout sits inside it. A block that outlives
-the grace answers `72000 snapshot_too_old` on its next query — never a
-silent re-read of the rows from the sealed tier, which would not be the
-same read. Only a table's first touch keys on micro-segment ULID
-timestamps, where cross-node clock skew is the precision; from then on
-the block reads that table by id.
+A block also has a lifetime: the query service's
+`SMOLQUERY_HOT_PIN_MAX_AGE_MS` (5 minutes). A micro-segment the block
+pinned is reaped from the hot tier `retire_grace_ms` (10 minutes) after
+a sealer retires it, and a read past that point could come back short
+with no error — so the lifetime must sit below the grace, and a block
+older than it answers `72000 snapshot_too_old` on its next statement.
+The idle timeout re-arms per statement, so it bounds idle gaps, not
+block length; the lifetime is what bounds the block. A pinned segment
+gone from the hot tier inside the lifetime answers the same `72000` —
+never a silent re-read of the rows from the sealed tier, which would not
+be the same read. `EXPLAIN` inside a block pins and reads the pin like a
+query, since `postgres_fdw` estimates before it scans. Only a table's
+first touch keys on micro-segment ULID timestamps, where cross-node
+clock skew is the precision; from then on the block reads that table by
+id.
 
 ## Security
 

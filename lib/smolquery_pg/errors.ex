@@ -52,6 +52,12 @@ defmodule SmolqueryPg.Errors do
   def from_reason({:hot_tier_unavailable, _reason}),
     do: {"57P03", "a buffer node the query needs did not answer"}
 
+  def from_reason({:pinned_hot_expired, age_ms, max_age_ms}),
+    do:
+      {"72000",
+       "the transaction block is #{age_ms} ms old, past the server's #{max_age_ms} ms " <>
+         "pinned-read lifetime; start a new one"}
+
   def from_reason({:pinned_hot_retired, {dataset, table}, _ids}),
     do:
       {"72000",
