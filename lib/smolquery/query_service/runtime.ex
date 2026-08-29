@@ -120,6 +120,14 @@ defmodule Smolquery.QueryService.Runtime do
   fewer than n matching rows, probes the newest whose rows cover this many.
   `1_000_000` by default; `0` turns the bound off.
 
+  `hot_pin_max_age_ms` (PL-58 layer 8, T-418) is how long a caller's hot-tier
+  pin stays honest: a job whose `hot_before_ms:` is older than this is refused
+  with `{:pinned_hot_expired, age_ms, max_age_ms}` rather than planned. A
+  micro-segment the pin needs may be retired and reaped from the hot tier
+  `retire_grace_ms` after it was sealed, and a plan past that point would read
+  short with no error. `300_000` by default; it must sit below the buffer's
+  `retire_grace_ms` (`600_000`) by more than the cluster's clock skew.
+
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
   a job's own `distributed:` option overrides it either way. `min_files` is
@@ -174,6 +182,7 @@ defmodule Smolquery.QueryService.Runtime do
     warm_engine_max_age_ms: 300_000,
     warm_probe: "SELECT 1",
     top_n_probe_rows: 1_000_000,
+    hot_pin_max_age_ms: 300_000,
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -207,6 +216,7 @@ defmodule Smolquery.QueryService.Runtime do
           warm_engine_max_age_ms: pos_integer(),
           warm_probe: String.t(),
           top_n_probe_rows: non_neg_integer(),
+          hot_pin_max_age_ms: pos_integer(),
           store: Store.t() | nil,
           distributed: %{
             enabled: boolean(),
@@ -233,7 +243,8 @@ defmodule Smolquery.QueryService.Runtime do
     :write_partitions,
     :warm_engines,
     :warm_engine_max_age_ms,
-    :top_n_probe_rows
+    :top_n_probe_rows,
+    :hot_pin_max_age_ms
   ]
 
   @doc """

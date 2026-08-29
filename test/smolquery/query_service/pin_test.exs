@@ -33,4 +33,12 @@ defmodule Smolquery.QueryService.PinTest do
 
     assert job.snapshot == 7
   end
+
+  test "hot_ids: rides through submission, and a hot-less job settles with no hot members (T-418)",
+       %{name: name} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(name, "SELECT 1", hot_ids: %{{"analytics", "events"} => ["01A"]})
+
+    assert job.hot_members == %{}
+  end
 end

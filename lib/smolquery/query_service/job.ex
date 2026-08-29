@@ -17,6 +17,14 @@ defmodule Smolquery.QueryService.Job do
   single-engine scan — including every fallback, so a caller can tell a
   distributed answer from a quiet refusal. Like `statistics`, history does
   not persist it.
+
+  `hot_members` is the exact hot tier the plan read: per table, the ids of
+  the micro-segments that passed the membership rule (PL-58 layer 8,
+  T-418). A caller that must read the same hot tier again — a wire
+  transaction block, at each table's first touch — passes it back as
+  `hot_ids:`. It is in-memory only, like `statistics`, `trace`, and
+  `scatter`: history does not persist it, and nothing in the metadata
+  database records it.
   """
 
   alias Smolquery.Catalog
@@ -39,7 +47,8 @@ defmodule Smolquery.QueryService.Job do
     :trace,
     :scatter,
     :error,
-    json_columns: []
+    json_columns: [],
+    hot_members: %{}
   ]
 
   @type state :: :pending | :running | :done | :error | :cancelled
@@ -58,7 +67,8 @@ defmodule Smolquery.QueryService.Job do
           trace: [Trace.span()] | nil,
           scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
           error: term(),
-          json_columns: [String.t()]
+          json_columns: [String.t()],
+          hot_members: %{Catalog.table_ref() => [String.t()]}
         }
 
   @doc """
@@ -105,6 +115,18 @@ defmodule Smolquery.QueryService.Job do
           t()
   def explained(%__MODULE__{} = job, snapshot, duration_ms, statistics, explain),
     do: finish(job, snapshot, duration_ms, statistics, explain: explain)
+
+  @doc """
+  The job, finished with a `DESCRIBE` of the query instead of rows.
+
+  A describe job (`describe: true`) plans for real and answers the query's
+  columns as its result frame, without executing it, so it finishes with no
+  `row_count` — the frame is a description, not a result. History does not
+  record it: it answered a wire `Describe`, not a query.
+  """
+  @spec described(t(), Catalog.snapshot(), non_neg_integer(), Statistics.t() | nil) :: t()
+  def described(%__MODULE__{} = job, snapshot, duration_ms, statistics),
+    do: finish(job, snapshot, duration_ms, statistics, [])
 
   defp finish(%__MODULE__{} = job, snapshot, duration_ms, statistics, fields) do
     struct!(

@@ -12,6 +12,14 @@ defmodule SmolqueryPg.ErrorsTest do
     assert message =~ "10"
     assert {"57014", _message} = Errors.from_reason(:timeout)
     assert {"57P03", _message} = Errors.from_reason(:query_service_unavailable)
+
+    assert {"72000", message} =
+             Errors.from_reason({:pinned_hot_retired, {"analytics", "events"}, ["01A"]})
+
+    assert message =~ "analytics.events"
+
+    assert {"72000", message} = Errors.from_reason({:pinned_hot_expired, 9_000, 5_000})
+    assert message =~ "9000 ms"
   end
 
   test "a DuckDB error keeps its message and takes the code its class implies" do

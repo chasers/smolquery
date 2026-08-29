@@ -63,7 +63,7 @@ defmodule SmolqueryPg.Types do
           | :neg_infinity
           | {:text, String.t()}
           | {:numeric, String.t()}
-          | {:timestamp, NaiveDateTime.t()}
+          | {:timestamp, NaiveDateTime.t() | :infinity | :neg_infinity}
           | {:date, Date.t()}
           | {:json, String.t()}
           | {:bytea, binary()}
@@ -303,8 +303,17 @@ defmodule SmolqueryPg.Types do
   defp decode_binary_param(16, <<0>>), do: {:ok, false}
   defp decode_binary_param(16, <<_true>>), do: {:ok, true}
 
+  defp decode_binary_param(oid, <<0x7FFFFFFFFFFFFFFF::64-signed>>) when oid in [1114, 1184],
+    do: {:ok, {:timestamp, :infinity}}
+
+  defp decode_binary_param(oid, <<-0x8000000000000000::64-signed>>) when oid in [1114, 1184],
+    do: {:ok, {:timestamp, :neg_infinity}}
+
   defp decode_binary_param(oid, <<us::64-signed>>) when oid in [1114, 1184] do
-    {:ok, {:timestamp, DateTime.from_unix!(us + @epoch_us, :microsecond) |> DateTime.to_naive()}}
+    case DateTime.from_unix(us + @epoch_us, :microsecond) do
+      {:ok, value} -> {:ok, {:timestamp, DateTime.to_naive(value)}}
+      {:error, _reason} -> {:error, {:timestamp_out_of_range, us}}
+    end
   end
 
   defp decode_binary_param(1082, <<days::32-signed>>),

@@ -79,6 +79,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:distributed, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
+          | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -125,7 +126,7 @@ defmodule Smolquery.QueryService.Runner do
       timeout_ms: timeout_ms,
       job: job,
       explain: mode(opts),
-      pin: Keyword.take(opts, [:snapshot, :hot_before_ms]),
+      pin: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids]),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
       engine: nil,
@@ -200,7 +201,14 @@ defmodule Smolquery.QueryService.Runner do
     {job, result} =
       case outcome do
         {:ok, %{result: {:explain, text}} = done} ->
-          {Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, text), nil}
+          job = Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, text)
+
+          {%{job | hot_members: done.hot_members}, nil}
+
+        {:ok, %{result: {:frame, frame}} = done} when state.explain == :describe ->
+          job = Job.described(state.job, done.snapshot, done.duration_ms, done.statistics)
+
+          {%{job | hot_members: done.hot_members}, frame}
 
         {:ok, %{result: {:frame, frame}} = done} ->
           job =
@@ -212,7 +220,12 @@ defmodule Smolquery.QueryService.Runner do
               done.statistics
             )
 
-          {%{job | scatter: done.scatter, json_columns: done.json_columns}, frame}
+          {%{
+             job
+             | scatter: done.scatter,
+               json_columns: done.json_columns,
+               hot_members: done.hot_members
+           }, frame}
 
         {:error, reason} ->
           {Job.failed(state.job, reason), nil}
@@ -286,6 +299,7 @@ defmodule Smolquery.QueryService.Runner do
          scatter: scatter,
          json_columns: json_columns,
          snapshot: plan.snapshot,
+         hot_members: plan.hot_members,
          duration_ms: duration,
          statistics: plan.statistics
        }}
@@ -486,7 +500,7 @@ defmodule Smolquery.QueryService.Runner do
     job = traced(state, job)
     stop_engine(state.engine)
     remove_partials(state.runtime, job)
-    record_history(state.runtime, job)
+    if state.explain != :describe, do: record_history(state.runtime, job)
 
     :telemetry.execute(
       [:smolquery, :query, :job],

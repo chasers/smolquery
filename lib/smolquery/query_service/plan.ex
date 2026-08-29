@@ -10,7 +10,13 @@ defmodule Smolquery.QueryService.Plan do
 
   `hot` carries the micro-segment entries that survived the membership rule
   and the pruner, keyed by table: their row counts and stats are what query
-  statistics and pruning decisions are made of. `statistics` is those
+  statistics and pruning decisions are made of. `hot_members` is the ids of
+  the entries that survived the membership rule alone, before pruning —
+  the exact hot tier this plan read, keyed by table. A caller that wants a
+  later plan to read the same hot tier passes it back as `hot_ids:`
+  (PL-58 layer 8, T-418); it is the pruner's input, not its output, so a
+  later query with a different `WHERE` still prunes from the whole set.
+  `statistics` is those
   decisions counted (`Smolquery.QueryService.Statistics`) — what the plan
   reads, per tier, reported out with the finished job; `nil` when the
   catalog could not answer the sizes, because statistics are reporting and
@@ -43,6 +49,7 @@ defmodule Smolquery.QueryService.Plan do
     tables: [],
     statements: [],
     hot: %{},
+    hot_members: %{},
     schemas: %{},
     federated: false
   ]
@@ -54,6 +61,7 @@ defmodule Smolquery.QueryService.Plan do
           tables: [Catalog.table_ref()],
           statements: [String.t()],
           hot: %{Catalog.table_ref() => [HotClient.entry()]},
+          hot_members: %{Catalog.table_ref() => [String.t()]},
           schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
           statistics: Statistics.t() | nil,
           federated: boolean()

@@ -91,6 +91,20 @@ defmodule SmolqueryPg.TypesBinaryTest do
     end
   end
 
+  test "the binary timestamp infinities decode to literals DuckDB accepts" do
+    assert {:ok, {:timestamp, :infinity}} =
+             Types.decode_param(1114, 1, <<0x7FFFFFFFFFFFFFFF::64-signed>>)
+
+    assert {:ok, {:timestamp, :neg_infinity}} =
+             Types.decode_param(1184, 1, <<-0x8000000000000000::64-signed>>)
+
+    assert {:error, {:timestamp_out_of_range, _us}} =
+             Types.decode_param(1114, 1, <<0x7FFFFFFFFFFFFFFE::64-signed>>)
+
+    assert SmolqueryPg.Params.literal({:timestamp, :infinity}) == "TIMESTAMP 'infinity'"
+    assert SmolqueryPg.Params.literal({:timestamp, :neg_infinity}) == "TIMESTAMP '-infinity'"
+  end
+
   test "describes DuckDB type names as Postgres types" do
     assert Types.describe({:duckdb, "BIGINT"}, false) == {20, 8, -1}
     assert Types.describe({:duckdb, "VARCHAR"}, false) == {25, -1, -1}

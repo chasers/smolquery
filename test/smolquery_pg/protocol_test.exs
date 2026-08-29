@@ -35,6 +35,20 @@ defmodule SmolqueryPg.ProtocolTest do
   end
 
   describe "decode/1" do
+    test "a malformed extended-protocol message is an error, never a crash" do
+      truncated_bind = IO.iodata_to_binary(PgClient.frame(?B, [0, 0, <<0::16>>, <<5::16>>]))
+      assert {:error, {:malformed_message, "B"}} = Protocol.decode(truncated_bind)
+
+      unknown_target = IO.iodata_to_binary(PgClient.frame(?D, [?X, "s", 0]))
+      assert {:error, {:malformed_message, "D"}} = Protocol.decode(unknown_target)
+
+      empty_describe = IO.iodata_to_binary(PgClient.frame(?D, []))
+      assert {:error, {:malformed_message, "D"}} = Protocol.decode(empty_describe)
+
+      short_execute = IO.iodata_to_binary(PgClient.frame(?E, ["p", 0]))
+      assert {:error, {:malformed_message, "E"}} = Protocol.decode(short_execute)
+    end
+
     test "reads a query and leaves the rest of the buffer" do
       buffer = IO.iodata_to_binary([PgClient.frame(?Q, ["SELECT 1", 0]), PgClient.frame(?X, [])])
 

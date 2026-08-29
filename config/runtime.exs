@@ -451,6 +451,15 @@ if rows = System.get_env("SMOLQUERY_TOP_N_PROBE_ROWS") do
       Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_TOP_N_PROBE_ROWS", rows)
 end
 
+# `SMOLQUERY_HOT_PIN_MAX_AGE_MS` (PL-58 layer 8) is how long a pinned read —
+# a Postgres wire REPEATABLE READ block — may live before the query service
+# refuses it as too old; it must sit below the buffer's retire_grace_ms.
+if age = System.get_env("SMOLQUERY_HOT_PIN_MAX_AGE_MS") do
+  config :smolquery, Smolquery.QueryService,
+    hot_pin_max_age_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_HOT_PIN_MAX_AGE_MS", age)
+end
+
 # Distributed queries (PL-49) are on by default: a decomposable aggregate
 # query scatters its file list across several DuckDB instances — the query
 # service's group members when clustering is on,

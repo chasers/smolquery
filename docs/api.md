@@ -134,6 +134,7 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
   {"name": "snapshot",       "startUs": 42250, "durationUs": 1100,  "meta": {}},
   {"name": "resolve",        "startUs": 43380, "durationUs": 2900,  "meta": {}},
   {"name": "manifests",      "startUs": 46300, "durationUs": 8100,  "meta": {}},
+  {"name": "members",        "startUs": 54400, "durationUs": 20,    "meta": {}},
   {"name": "manifest_fetch", "startUs": 46310, "durationUs": 7900,  "meta": {"url": "http://buffer-0:4321"}},
   {"name": "prune",          "startUs": 54420, "durationUs": 60,    "meta": {}},
   {"name": "build",          "startUs": 54500, "durationUs": 350,   "meta": {}},
@@ -142,7 +143,7 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
 ]}}
 ```
 
-A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `prune` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read. A probe that was skipped or raised reports the same three keys with `bounded` false. `prune` is the membership rule and the WHERE pruner, on every query.
+A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `prune` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read. A probe that was skipped or raised reports the same three keys with `bounded` false. `members` is the membership rule — which micro-segments the snapshot has not sealed yet, or exactly the ids a pinned caller named — and `prune` is the WHERE pruner, on every query.
 
 A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 

@@ -63,17 +63,34 @@ defmodule Smolquery.QueryService.Planner do
   Hot rows have no snapshot: an unclaimed micro-segment is always included.
   That is read-your-writes, not an inconsistency.
 
-  ## A pinned plan (PL-58 layer 7)
+  ## A pinned plan (PL-58 layers 7 and 8)
 
-  `plan/4` takes a pin: `snapshot:` reads the sealed tier at that version
+  `plan/4` takes a pin. `snapshot:` reads the sealed tier at that version
   instead of the current one — the membership rule is exact for any fixed
-  `S` — and `hot_before_ms:` drops micro-segments whose ULID was stamped
-  after the bound. Together they are what a wire transaction block pins at
-  its first query, so every later statement in the block (a `postgres_fdw`
-  join's second cursor, say) reads the same data. The bound leans on ULID
-  timestamps, so cross-node clock skew is its precision; a snapshot older
-  than `SMOLQUERY_SNAPSHOT_KEEP_MS` can expire under a long block, which
-  surfaces as a query error, never as wrong rows.
+  `S`. `hot_ids:` names, per table, the exact micro-segment ids a table's
+  hot tier is: membership is then "the manifest entries with those ids",
+  with no timestamp comparison, so a repeat read is a repeat read (T-418).
+  A table absent from `hot_ids:` falls back to `hot_before_ms:`, which
+  drops micro-segments whose ULID was stamped after the bound. Together
+  they are what a wire transaction block pins: the block's first query
+  supplies the bound and every table's first touch supplies its id set
+  (`Plan.hot_members`), so every later statement in the block (a
+  `postgres_fdw` join's second cursor, say) reads the same data.
+
+  The bound leans on ULID timestamps, so cross-node clock skew is its
+  precision — but only once per table, at first touch; after that the id
+  set is exact.
+
+  A pin has a lifetime, `Runtime.hot_pin_max_age_ms`: a micro-segment is
+  reaped from the hot tier `retire_grace_ms` after its seal, and a read
+  past that point — by id or by time — could come back short with no
+  error. So a `hot_before_ms:` older than the lifetime is refused with
+  `{:pinned_hot_expired, age_ms, max_age_ms}` before any manifest is read,
+  and a pinned id the manifest no longer holds inside the lifetime fails
+  with `{:pinned_hot_retired, ref, ids}` — never a silent re-read from
+  another tier. A snapshot older than `SMOLQUERY_SNAPSHOT_KEEP_MS` can
+  likewise expire under a long block; all three surface as a query error,
+  never as wrong rows.
 
   Entries that survive the membership rule then pass through
   `Smolquery.QueryService.Pruner`: a micro-segment whose min-max stats prove
@@ -242,15 +259,12 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
+         :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          {:ok, manifests} <-
-           Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
-      {members, pruned} =
-        Trace.span(:prune, fn ->
-          members = members(refs, tables, manifests, Keyword.get(pin, :hot_before_ms))
-
-          {members, pruned(members, Pruner.conjuncts(statement, refs))}
-        end)
-
+           Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end),
+         {:ok, members} <-
+           Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
+      pruned = Trace.span(:prune, fn -> pruned(members, Pruner.conjuncts(statement, refs)) end)
       hot = bounded(runtime, connection, statement, refs, tables, pruned)
 
       {:ok,
@@ -263,14 +277,49 @@ defmodule Smolquery.QueryService.Planner do
   defp pinned_snapshot(runtime, nil), do: Catalog.current_snapshot(runtime.catalog)
   defp pinned_snapshot(_runtime, snapshot), do: {:ok, snapshot}
 
-  defp members(refs, tables, manifests, hot_before_ms) do
-    Map.new(refs, fn ref ->
-      {ref,
-       Enum.filter(
-         manifests[ref],
-         &(include?(&1, tables[ref].sealed) and stamped_before?(&1, hot_before_ms))
-       )}
+  defp fresh_pin(_runtime, nil), do: :ok
+
+  defp fresh_pin(%Runtime{hot_pin_max_age_ms: max_age_ms}, hot_before_ms) do
+    age_ms = System.system_time(:millisecond) - hot_before_ms
+
+    if age_ms <= max_age_ms, do: :ok, else: {:error, {:pinned_hot_expired, age_ms, max_age_ms}}
+  end
+
+  defp members(refs, tables, manifests, pin) do
+    hot_ids = Keyword.get(pin, :hot_ids, %{})
+    hot_before_ms = Keyword.get(pin, :hot_before_ms)
+
+    Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
+      case ref_members(ref, manifests[ref], tables[ref].sealed, hot_ids, hot_before_ms) do
+        {:ok, entries} -> {:cont, {:ok, Map.put(acc, ref, entries)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
+  end
+
+  defp ref_members(ref, manifest, sealed, hot_ids, hot_before_ms) do
+    case Map.fetch(hot_ids, ref) do
+      {:ok, ids} ->
+        pinned_members(ref, manifest, sealed, ids)
+
+      :error ->
+        {:ok,
+         Enum.filter(
+           manifest,
+           &(include?(&1, sealed) and stamped_before?(&1, hot_before_ms))
+         )}
+    end
+  end
+
+  defp pinned_members(ref, manifest, sealed, ids) do
+    pinned = MapSet.new(ids)
+    entries = Enum.filter(manifest, &MapSet.member?(pinned, &1["id"]))
+
+    missing = MapSet.difference(pinned, MapSet.new(entries, & &1["id"]))
+
+    if MapSet.size(missing) == 0,
+      do: {:ok, Enum.filter(entries, &include?(&1, sealed))},
+      else: {:error, {:pinned_hot_retired, ref, Enum.sort(missing)}}
   end
 
   defp stamped_before?(_entry, nil), do: true
@@ -622,6 +671,10 @@ defmodule Smolquery.QueryService.Planner do
       statements: attaches ++ statements,
       federated: attaches != [],
       hot: hot,
+      hot_members:
+        Map.new(members, fn {ref, entries} ->
+          {ref, Enum.map(entries, &:binary.copy(&1["id"]))}
+        end),
       schemas: Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end),
       statistics: statistics(members, hot, tables)
     }

@@ -33,7 +33,8 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   a larger result answers `54000`). The same table references apply:
   `dataset.table`, or a registered connection's `catalog.schema.table`.
 - **Session statements.** `SET`, `RESET`, and `SHOW` keep values in the
-  session. `SET statement_timeout = <ms>` bounds each query. `BEGIN`,
+  session. `SET statement_timeout = <ms>` bounds each query (Postgres
+  units — `30s`, `5min`, `1h` — are accepted and stored as ms). `BEGIN`,
   `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, and `ABORT` track the
   status the prompt shows. A failed statement inside a block aborts the
   block (`25P02`) until it ends, as Postgres does.
@@ -65,7 +66,9 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   `information_schema.tables`/`columns`/`schemata` answer;
   `SELECT version()` says PostgreSQL. A dialect rewrite bridges the rest:
   Postgres's `~` operators become `regexp_matches`, `pg_catalog.`
-  qualifications drop, `reg*` casts become `BIGINT`, and
+  qualifications drop, a name literal cast to `regclass` or `regtype`
+  becomes the catalog `oid` lookup it means, other `reg*` casts become
+  `BIGINT`, and
   `current_setting('x')` inlines the session's value.
 
 - **`postgres_fdw`.** A Postgres database attaches smolquery as a foreign
@@ -121,14 +124,16 @@ arrives as `bigint`.
 
 A `REPEATABLE READ` or `SERIALIZABLE` block gives repeatable reads: the
 block's first query captures the catalog snapshot it ran at and a
-hot-tier time bound, and every later statement in the block — the several
-cursors of a `postgres_fdw` join included — reads the same data. The pin
-forms lazily at the first query, as Postgres does, and clears when the
-block ends. The data is append-only, so this closes the only
-per-statement anomaly a block could see: rows inserted mid-block appear
-only after `COMMIT`. A plain `BEGIN` is `READ COMMITTED`, as in Postgres,
-and reads fresh per statement; `SHOW transaction_isolation` reports the
-block's level.
+hot-tier time bound, each table's first touch captures the exact set of
+micro-segment ids that query read, and every later statement in the
+block — the several cursors of a `postgres_fdw` join included, and a
+nested-loop rescan of one — reads the same data. The pin forms lazily at
+the first query, as Postgres does, and clears when the block ends. The
+data is append-only, so this closes the per-statement anomaly a block
+could see: rows inserted mid-block appear only after `COMMIT`, per
+table from its first touch. A
+plain `BEGIN` is `READ COMMITTED`, as in Postgres, and reads fresh per
+statement; `SHOW transaction_isolation` reports the block's level.
 
 The block surface is honest about what it does not do. Explicit
 `READ WRITE` (in `BEGIN` or `SET TRANSACTION`) answers `25006` — the
@@ -146,8 +151,23 @@ server's bound, and cannot disable it — the timeout guards the server's
 pinned snapshots, so a raise past the cap answers a warning and stores
 the cap. And a block older than `SMOLQUERY_SNAPSHOT_KEEP_MS`
 (24 hours) can lose its snapshot to expiry — that surfaces as a query
-error, never as wrong rows. The hot bound keys on micro-segment ULID
-timestamps, so cross-node clock skew is its precision.
+error, never as wrong rows.
+
+A block also has a lifetime: the query service's
+`SMOLQUERY_HOT_PIN_MAX_AGE_MS` (5 minutes). A micro-segment the block
+pinned is reaped from the hot tier `retire_grace_ms` (10 minutes) after
+a sealer retires it, and a read past that point could come back short
+with no error — so the lifetime must sit below the grace, and a block
+older than it answers `72000 snapshot_too_old` on its next statement.
+The idle timeout re-arms per statement, so it bounds idle gaps, not
+block length; the lifetime is what bounds the block. A pinned segment
+gone from the hot tier inside the lifetime answers the same `72000` —
+never a silent re-read of the rows from the sealed tier, which would not
+be the same read. `EXPLAIN` inside a block pins and reads the pin like a
+query, since `postgres_fdw` estimates before it scans. Only a table's
+first touch keys on micro-segment ULID timestamps, where cross-node
+clock skew is the precision; from then on the block reads that table by
+id.
 
 ## Security
 

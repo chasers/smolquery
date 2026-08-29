@@ -114,6 +114,8 @@ defmodule SmolqueryPg.Params do
   def literal({:text, text}), do: Identifier.sql_string(text)
   def literal({:numeric, text}), do: text
   def literal({:timestamp, %NaiveDateTime{} = value}), do: "TIMESTAMP '#{value}'"
+  def literal({:timestamp, :infinity}), do: "TIMESTAMP 'infinity'"
+  def literal({:timestamp, :neg_infinity}), do: "TIMESTAMP '-infinity'"
   def literal({:date, %Date{} = value}), do: "DATE '#{value}'"
   def literal({:json, text}), do: Identifier.sql_string(text) <> "::JSON"
   def literal({:bytea, bytes}), do: "'\\x#{Base.encode16(bytes, case: :lower)}'::BLOB"
