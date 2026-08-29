@@ -209,7 +209,13 @@ defmodule SmolqueryPg.PgCatalog do
 
       Engine.frame(
         engine,
-        "SELECT " <> Enum.join(aliases, ", ") <> " FROM (" <> sql <> ") AS q",
+        IO.iodata_to_binary([
+          "SELECT ",
+          Enum.intersperse(aliases, ", "),
+          " FROM (",
+          sql,
+          ") AS q"
+        ]),
         params
       )
     end
