@@ -4,8 +4,9 @@
   <img src="docs/assets/banner.svg" alt="smolquery — an open source BigQuery alternative, powered by DuckDB and Elixir" width="100%">
 </p>
 
-> An open source BigQuery alternative — datasets, tables, streaming inserts, and
-> async query jobs over an HTTP API, in one self-hostable BEAM release.
+> An open source BigQuery alternative — datasets, tables, streaming inserts,
+> async query jobs over an HTTP API, and a Postgres wire listener, in one
+> self-hostable BEAM release.
 
 [![CI](https://github.com/chasers/smolquery/actions/workflows/ci.yml/badge.svg)](https://github.com/chasers/smolquery/actions/workflows/ci.yml)
 [![Cluster](https://github.com/chasers/smolquery/actions/workflows/cluster.yml/badge.svg)](https://github.com/chasers/smolquery/actions/workflows/cluster.yml)
@@ -90,6 +91,10 @@ without them refuses to boot.
 - **A BigQuery-shaped API.** Datasets, tables, streaming inserts, batch loads
   (NDJSON / CSV / Parquet), sync queries and async jobs with paged results. One
   Bearer token, plain JSON, no SDK required.
+- **A Postgres wire listener.** `psql` connects to port 5432 with the API key
+  as the password and runs the same `SELECT` an HTTP query would. The
+  extended protocol, `pg_catalog`, and `postgres_fdw` are in progress — see
+  [docs/postgres-wire.md](docs/postgres-wire.md).
 - **Attribute bags as columns.** `MAP(STRING, STRING)` (ClickHouse's
   `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
   scalars. Both have limits a caller must know — they are listed in
@@ -114,8 +119,8 @@ without them refuses to boot.
 - **Storage maintains itself.** Sealing merges micro-segments into large ones,
   compaction re-merges the undersized residue, per-table retention policies age
   data out segment-by-segment, snapshot expiry and GC reclaim the files.
-- **Elastic by role.** One release, six roles (`api`, `ingest`, `buffer`,
-  `storage`, `query`, `web`). A node starts only the subtrees it is given, and
+- **Elastic by role.** One release, seven roles (`api`, `ingest`, `buffer`,
+  `storage`, `query`, `web`, `pg`). A node starts only the subtrees it is given, and
   only buffer nodes hold state.
 - **A cluster is one Postgres.** Point every node at the same database and they
   discover each other, share a catalog, fan queries across buffer owners, and
@@ -365,6 +370,9 @@ tla/                           # TLA+ models of the safety-critical algorithms (
   included.
 - [**HTTP API**](docs/api.md) — the `/v1` surface, schema types and their
   limits, and the error envelope.
+- [**Postgres wire protocol**](docs/postgres-wire.md) — the `:pg` edge:
+  what a Postgres client can run today, the type mapping, and the layers
+  still to come.
 - [**Glossary**](docs/glossary.md) — the terms each service uses, defined in
   one place.
 - [**Benchmarks**](docs/benchmarks.md) — the measurements the design decisions

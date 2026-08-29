@@ -984,8 +984,9 @@ is a ~500k-group group-by.
 
 ## Roles
 
-One release holds four services plus two edges: the HTTP front door and the
-web UI (user interface). A node starts only the subtrees its roles name.
+One release holds four services plus three edges: the HTTP front door, the
+web UI (user interface), and the Postgres wire listener. A node starts only
+the subtrees its roles name.
 `SMOLQUERY_ROLES` is a comma-separated list, or `all`:
 
 ```sh
@@ -1003,6 +1004,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 | `storage` | `Smolquery.StorageService` — seal, compact, retention, GC |
 | `query` | `Smolquery.QueryService` — query jobs, and a scatter worker for every other query node's jobs |
 | `web` | `SmolqueryWeb` — the LiveView UI |
+| `pg` | `SmolqueryPg` — the Postgres wire listener, a `ThousandIsland` server that runs `SELECT` through the node's query service ([postgres-wire.md](postgres-wire.md)) |
 
 Unknown role names fail the boot. They do not silently start nothing. See
 `Smolquery.Roles`.
@@ -1125,6 +1127,11 @@ tables*. Inter-node traffic can switch to mutual TLS (`GEN_RPC_TLS`,
 `DIST_TLS`). Verification is chain-only against the cluster CA (certificate
 authority), so the CA is the trust boundary.
 
+The Postgres wire edge requires a password on every connection
+(`SMOLQUERY_PG_PASSWORD`, or the API key). Layer 1 of PL-58 authenticates
+in cleartext and declines `SSLRequest`, so the listener binds loopback by
+default. A node with the `:pg` role refuses to boot without the password.
+
 The web UI requires its own basic-auth credential (`SMOLQUERY_WEB_USERNAME` /
 `SMOLQUERY_WEB_PASSWORD`). The credential is not the API key, so a UI rotation
 does not break an ingest client. A rotation also revokes existing UI sessions.
@@ -1136,4 +1143,5 @@ without the credential.
 - [Configuration reference](configuration.md) — every environment variable and
   application-config key.
 - [HTTP API](api.md) — the `/v1` surface.
+- [Postgres wire protocol](postgres-wire.md) — the `:pg` edge.
 - [Benchmarks](benchmarks.md) — the measurements behind these decisions.

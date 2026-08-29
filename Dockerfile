@@ -41,7 +41,7 @@ ENV HOME=/data \
     SMOLQUERY_EXTENSION_DIRECTORY=/app/duckdb-extensions
 
 VOLUME /data
-EXPOSE 4000 4002
+EXPOSE 4000 4002 5432
 
 ENTRYPOINT ["/app/bin/smolquery"]
 CMD ["start"]

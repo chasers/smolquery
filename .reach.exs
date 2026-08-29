@@ -5,7 +5,8 @@
     ingest_service: "Smolquery.IngestService.*",
     buffer_service: "Smolquery.BufferService.*",
     storage_service: "Smolquery.StorageService.*",
-    query_service: "Smolquery.QueryService.*"
+    query_service: "Smolquery.QueryService.*",
+    pg: "SmolqueryPg.*"
   ],
   deps: [
     forbidden: [
@@ -20,7 +21,11 @@
       {:buffer_service, :api},
       {:storage_service, :api},
       {:query_service, :api},
-      {:ingest_service, :api}
+      {:ingest_service, :api},
+      {:buffer_service, :pg},
+      {:storage_service, :pg},
+      {:query_service, :pg},
+      {:ingest_service, :pg}
     ]
   ],
   calls: [

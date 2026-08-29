@@ -59,6 +59,8 @@ config :smolquery, SmolqueryApi.Endpoint,
   render_errors: [formats: [json: SmolqueryApi.ErrorJSON], layout: false],
   server: true
 
+config :smolquery, SmolqueryPg, ip: {127, 0, 0, 1}, port: 5432
+
 config :smolquery, SmolqueryWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

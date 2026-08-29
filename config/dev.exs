@@ -4,6 +4,8 @@ config :logger, level: :debug
 
 config :smolquery, SmolqueryApi, api_key: "smolquery-dev"
 
+config :smolquery, SmolqueryPg, port: 15_432
+
 config :smolquery, SmolqueryWeb,
   username: "smolquery",
   password: "smolquery"
