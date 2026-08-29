@@ -22,6 +22,7 @@ ENV SMOLQUERY_EXTENSION_DIRECTORY=/app/duckdb-extensions
 RUN mix run --no-start -e '{:ok, _pid} = Smolquery.Engine.start_link(name: Smolquery.DockerExtensions, extensions: [:httpfs, :json, :ducklake, :aws, :postgres]); IO.puts("installed: " <> Enum.join(File.ls!(hd(Path.wildcard("/app/duckdb-extensions/*/*"))), " "))'
 COPY assets assets
 COPY priv/static priv/static
+COPY priv/pg_catalog priv/pg_catalog
 RUN mix assets.deploy
 COPY rel rel
 RUN mix release
