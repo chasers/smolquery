@@ -214,14 +214,22 @@ defmodule SmolqueryPg.Session do
   end
 
   @doc """
-  The session's idle-in-transaction budget in milliseconds — `0` disables
-  it. `SET idle_in_transaction_session_timeout = <ms>` changes it live.
+  The session's idle-in-transaction budget in milliseconds.
+
+  `SET idle_in_transaction_session_timeout = <ms>` may lower it, never
+  raise it past the runtime's bound, and cannot disable it: the timeout
+  guards the server's pinned snapshots and file descriptors, not the
+  client's patience. A value of `0`, a value over the bound, or an
+  unparsable one all mean the bound. Only an operator bound of `0`
+  disables the timer.
   """
   @spec idle_in_transaction_timeout_ms(t()) :: non_neg_integer()
-  def idle_in_transaction_timeout_ms(%__MODULE__{settings: settings}) do
-    case Integer.parse(Map.get(settings, "idle_in_transaction_session_timeout", "0")) do
-      {ms, _rest} when ms > 0 -> ms
-      _off_or_invalid -> 0
+  def idle_in_transaction_timeout_ms(%__MODULE__{runtime: runtime, settings: settings}) do
+    cap = runtime.idle_in_transaction_timeout_ms
+
+    case Integer.parse(Map.get(settings, "idle_in_transaction_session_timeout", "")) do
+      {ms, _rest} when ms > 0 and ms < cap -> ms
+      _at_or_past_the_cap -> cap
     end
   end
 
@@ -784,11 +792,37 @@ defmodule SmolqueryPg.Session do
 
       value ->
         key = canonical(session, name)
+        {value, notices} = capped(session, key, value)
         session = session |> local_backup(key, scope) |> put_setting(name, value)
 
-        {:ok, command("SET", set_reported(session, key)), session}
+        {:ok, command("SET", set_reported(session, key) ++ notices), session}
     end
   end
+
+  defp capped(
+         %__MODULE__{runtime: runtime},
+         "idle_in_transaction_session_timeout",
+         value
+       ) do
+    cap = runtime.idle_in_transaction_timeout_ms
+
+    case Integer.parse(unquote_value(value)) do
+      {ms, ""} when ms > 0 and ms < cap ->
+        {value, []}
+
+      _zero_invalid_or_past_the_cap ->
+        notice =
+          Protocol.notice_response(
+            "01000",
+            "idle_in_transaction_session_timeout is capped at the server's #{cap} ms " <>
+              "and cannot be disabled"
+          )
+
+        {Integer.to_string(cap), [notice]}
+    end
+  end
+
+  defp capped(_session, _key, value), do: {value, []}
 
   defp local_backup(%__MODULE__{block: %{locals: locals} = block} = session, key, :local) do
     original = Map.get(session.settings, key, "")

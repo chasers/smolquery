@@ -417,6 +417,28 @@ defmodule SmolqueryPg.WireTest do
       assert %{results: [%{rows: [["1"]]}]} = PgClient.query(socket, "SELECT 1")
     end
 
+    test "the timeout cannot be raised past the server's bound or disabled", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{notices: [%{"C" => "01000"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 99999999")
+
+      assert %{results: [%{rows: [["300000"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+
+      assert %{notices: [%{"C" => "01000"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 0")
+
+      assert %{results: [%{rows: [["300000"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+
+      assert %{notices: []} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 250")
+
+      assert %{results: [%{rows: [["250"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+    end
+
     test "activity inside the block re-arms the clock", %{port: port} do
       {socket, _params} = connect(port)
 

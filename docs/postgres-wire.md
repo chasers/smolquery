@@ -139,9 +139,12 @@ savepoint outside a block answers `25P01`. `SET TRANSACTION ISOLATION
 LEVEL` works until the block's first query, then answers `25001`.
 
 Two bounds protect the pin. `idle_in_transaction_session_timeout`
-(default 5 minutes, `SET`-able, `SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS`)
-terminates a connection that sits idle inside a block, with Postgres's
-own `FATAL 25P03`. And a block older than `SMOLQUERY_SNAPSHOT_KEEP_MS`
+(default 5 minutes, `SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS`) terminates a
+connection that sits idle inside a block, with Postgres's own
+`FATAL 25P03`. A session may `SET` it lower, never higher than the
+server's bound, and cannot disable it — the timeout guards the server's
+pinned snapshots, so a raise past the cap answers a warning and stores
+the cap. And a block older than `SMOLQUERY_SNAPSHOT_KEEP_MS`
 (24 hours) can lose its snapshot to expiry — that surfaces as a query
 error, never as wrong rows. The hot bound keys on micro-segment ULID
 timestamps, so cross-node clock skew is its precision.
