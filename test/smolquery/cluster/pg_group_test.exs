@@ -85,7 +85,7 @@ defmodule Smolquery.Cluster.PgGroupTest do
   defp unique_name, do: :"pg_group_test_#{:erlang.unique_integer([:positive])}"
 
   defp ensure_pg_scope! do
-    case :pg.start_link(Cluster.pg_scope()) do
+    case :pg.start(Cluster.pg_scope()) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end

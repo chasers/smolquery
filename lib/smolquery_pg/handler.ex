@@ -31,6 +31,7 @@ defmodule SmolqueryPg.Handler do
 
   alias SmolqueryPg.Protocol
   alias SmolqueryPg.Runtime
+  alias SmolqueryPg.Scram
   alias SmolqueryPg.Session
   alias ThousandIsland.Socket
 
@@ -61,12 +62,17 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
-  defp startup(socket, request, state) when request in [:ssl_request, :gssenc_request] do
-    case Socket.send(socket, Protocol.deny_encryption()) do
-      :ok -> drain(socket, state)
-      {:error, _reason} -> {:close, state}
+  defp startup(socket, :ssl_request, state) do
+    if Runtime.tls?(state.runtime) do
+      send(self(), :tls_upgrade)
+
+      {:continue, state}
+    else
+      deny_encryption(socket, state)
     end
   end
+
+  defp startup(socket, :gssenc_request, state), do: deny_encryption(socket, state)
 
   defp startup(_socket, {:cancel_request, pid, key}, state) do
     :ok = Session.cancel(state.runtime, pid, key)
@@ -74,37 +80,89 @@ defmodule SmolqueryPg.Handler do
     {:close, state}
   end
 
-  defp startup(socket, {:startup, params}, state) do
+  defp startup(socket, {:startup, params}, %{runtime: %Runtime{auth: :cleartext}} = state) do
     case Socket.send(socket, Protocol.authentication_cleartext()) do
       :ok -> drain(socket, %{state | phase: :password, params: params})
       {:error, _reason} -> {:close, state}
     end
   end
 
-  defp handle(socket, {:password, password}, %{phase: :password} = state) do
+  defp startup(socket, {:startup, params}, state) do
+    case Socket.send(socket, Protocol.authentication_sasl([Scram.mechanism()])) do
+      :ok -> drain(socket, %{state | phase: :sasl_initial, params: params})
+      {:error, _reason} -> {:close, state}
+    end
+  end
+
+  defp deny_encryption(socket, state) do
+    case Socket.send(socket, Protocol.deny_encryption()) do
+      :ok -> drain(socket, state)
+      {:error, _reason} -> {:close, state}
+    end
+  end
+
+  @impl GenServer
+  def handle_info(:tls_upgrade, {socket, state}) do
+    with :ok <- Socket.setopts(socket, active: false),
+         :ok <- Socket.send(socket, "S"),
+         {:ok, upgraded} <-
+           Socket.upgrade(socket, ThousandIsland.Transports.SSL,
+             certfile: String.to_charlist(state.runtime.tls_cert),
+             keyfile: String.to_charlist(state.runtime.tls_key)
+           ),
+         :ok <- Socket.setopts(upgraded, active: :once) do
+      {:noreply, {upgraded, state}}
+    else
+      error ->
+        Logger.warning("pg wire: TLS upgrade failed: #{inspect(error)}")
+
+        {:stop, {:shutdown, :tls_upgrade_failed}, {socket, state}}
+    end
+  end
+
+  defp handle(socket, {:auth_response, body}, %{phase: :password} = state) do
+    password = body |> :binary.split(<<0>>) |> hd()
+
     if Plug.Crypto.secure_compare(password, state.runtime.password) do
-      session = Session.new(state.runtime, state.params)
+      open_session(socket, state, [])
+    else
+      refuse_auth(socket, state)
+    end
+  end
 
-      messages =
-        [Protocol.authentication_ok()] ++
-          Session.startup_messages(session) ++ [Protocol.ready_for_query(:idle)]
-
-      case Socket.send(socket, messages) do
-        :ok -> drain(socket, %{state | phase: :ready, session: session})
+  defp handle(socket, {:auth_response, body}, %{phase: :sasl_initial} = state) do
+    with {:ok, mechanism, client_first} <- Protocol.decode_sasl_initial(body),
+         true <- mechanism == Scram.mechanism(),
+         {:ok, server_first, scram} <-
+           Scram.server_first(client_first, state.runtime.password) do
+      case Socket.send(socket, Protocol.authentication_sasl_continue(server_first)) do
+        :ok -> drain(socket, %{state | phase: {:sasl_final, scram}})
         {:error, _reason} -> {:close, state}
       end
     else
-      user = Map.get(state.params, "user", "")
-      Logger.warning("pg wire: password authentication failed for user #{inspect(user)}")
+      false ->
+        refuse(socket, state, "28000", "unsupported SASL mechanism; use #{Scram.mechanism()}")
 
-      refuse(socket, state, "28P01", ~s|password authentication failed for user "#{user}"|)
+      _malformed_or_error ->
+        refuse(socket, state, "28000", "malformed SASL initial response")
+    end
+  end
+
+  defp handle(socket, {:auth_response, body}, %{phase: {:sasl_final, scram}} = state) do
+    case Scram.server_final(body, scram) do
+      {:ok, server_final} ->
+        open_session(socket, state, [Protocol.authentication_sasl_final(server_final)])
+
+      {:error, _reason} ->
+        refuse_auth(socket, state)
     end
   end
 
   defp handle(_socket, :terminate, state), do: {:close, state}
 
-  defp handle(socket, _message, %{phase: :password} = state),
-    do: refuse(socket, state, "08P01", "expected a password message")
+  defp handle(socket, _message, %{phase: phase} = state)
+       when phase in [:password, :sasl_initial] or is_tuple(phase),
+       do: refuse(socket, state, "08P01", "expected an authentication response")
 
   defp handle(socket, :sync, state) do
     case Socket.send(socket, Protocol.ready_for_query(state.session.txn)) do
@@ -167,6 +225,27 @@ defmodule SmolqueryPg.Handler do
       :ok -> drain(socket, %{state | session: session, discard: true})
       {:error, _reason} -> {:close, state}
     end
+  end
+
+  defp open_session(socket, state, prelude) do
+    session = Session.new(state.runtime, state.params)
+
+    messages =
+      prelude ++
+        [Protocol.authentication_ok()] ++
+        Session.startup_messages(session) ++ [Protocol.ready_for_query(:idle)]
+
+    case Socket.send(socket, messages) do
+      :ok -> drain(socket, %{state | phase: :ready, session: session})
+      {:error, _reason} -> {:close, state}
+    end
+  end
+
+  defp refuse_auth(socket, state) do
+    user = Map.get(state.params, "user", "")
+    Logger.warning("pg wire: password authentication failed for user #{inspect(user)}")
+
+    refuse(socket, state, "28P01", ~s|password authentication failed for user "#{user}"|)
   end
 
   defp refuse(socket, state, {:message_too_large, length}),

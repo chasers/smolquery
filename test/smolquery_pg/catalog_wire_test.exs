@@ -44,7 +44,12 @@ defmodule SmolqueryPg.CatalogWireTest do
 
     start_supervised!(
       {SmolqueryPg.Supervisor,
-       name: pg, password: @password, query_name: query, port: 0, catalog: catalog},
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: query,
+       port: 0,
+       catalog: catalog},
       id: pg
     )
 

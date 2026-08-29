@@ -31,7 +31,7 @@ defmodule SmolqueryPg.Protocol do
 
   @type frontend ::
           {:query, String.t()}
-          | {:password, String.t()}
+          | {:auth_response, binary()}
           | {:parse, String.t(), String.t(), [non_neg_integer()]}
           | {:bind, String.t(), String.t(), [0 | 1], [binary() | nil], [0 | 1]}
           | {:describe, :statement | :portal, String.t()}
@@ -126,7 +126,7 @@ defmodule SmolqueryPg.Protocol do
   def decode(_buffer), do: :incomplete
 
   defp message(?Q, body), do: {:query, cstring(body)}
-  defp message(?p, body), do: {:password, cstring(body)}
+  defp message(?p, body), do: {:auth_response, body}
   defp message(?X, _body), do: :terminate
   defp message(?S, _body), do: :sync
   defp message(?H, _body), do: :flush
@@ -210,6 +210,43 @@ defmodule SmolqueryPg.Protocol do
   """
   @spec authentication_cleartext() :: iodata()
   def authentication_cleartext, do: frame(?R, <<3::32>>)
+
+  @doc """
+  `AuthenticationSASL`: the mechanisms the server offers.
+  """
+  @spec authentication_sasl([String.t()]) :: iodata()
+  def authentication_sasl(mechanisms),
+    do: frame(?R, [<<10::32>>, Enum.map(mechanisms, &[&1, 0]), 0])
+
+  @doc """
+  `AuthenticationSASLContinue` with the server's challenge.
+  """
+  @spec authentication_sasl_continue(iodata()) :: iodata()
+  def authentication_sasl_continue(data), do: frame(?R, [<<11::32>>, data])
+
+  @doc """
+  `AuthenticationSASLFinal` with the server's signature.
+  """
+  @spec authentication_sasl_final(iodata()) :: iodata()
+  def authentication_sasl_final(data), do: frame(?R, [<<12::32>>, data])
+
+  @doc """
+  The body of a `SASLInitialResponse`: the chosen mechanism and the
+  client's first message.
+  """
+  @spec decode_sasl_initial(binary()) :: {:ok, String.t(), binary()} | :error
+  def decode_sasl_initial(body) do
+    case :binary.split(body, <<0>>) do
+      [mechanism, <<size::32-signed, rest::binary>>] when size >= 0 and byte_size(rest) == size ->
+        {:ok, mechanism, rest}
+
+      [mechanism, <<-1::32-signed>>] ->
+        {:ok, mechanism, <<>>}
+
+      _malformed ->
+        :error
+    end
+  end
 
   @doc """
   `ParameterStatus`, one per session parameter the server reports.
