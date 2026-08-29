@@ -91,9 +91,11 @@ without them refuses to boot.
 - **A BigQuery-shaped API.** Datasets, tables, streaming inserts, batch loads
   (NDJSON / CSV / Parquet), sync queries and async jobs with paged results. One
   Bearer token, plain JSON, no SDK required.
-- **A Postgres wire listener.** `psql` connects to port 5432 with the API key
-  as the password and runs the same `SELECT` an HTTP query would. The
-  extended protocol, `pg_catalog`, and `postgres_fdw` are in progress — see
+- **A Postgres wire listener.** `psql`, Postgrex, and `postgres_fdw` connect
+  to port 5432 (`15432` in dev) with the API key as the password and run the
+  same `SELECT` an HTTP query would: the simple and extended protocols,
+  `pg_catalog` for drivers and `psql`'s backslash commands, SCRAM-SHA-256
+  and TLS, and `REPEATABLE READ` blocks that pin their read — see
   [docs/postgres-wire.md](docs/postgres-wire.md).
 - **Attribute bags as columns.** `MAP(STRING, STRING)` (ClickHouse's
   `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
