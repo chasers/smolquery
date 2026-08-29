@@ -44,8 +44,18 @@ defmodule Smolquery.QueryService.Client do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
+          | {:snapshot, Smolquery.Catalog.snapshot()}
+          | {:hot_before_ms, pos_integer()}
 
-  @submit_option_keys [:timeout_ms, :explain, :describe, :trace, :distributed]
+  @submit_option_keys [
+    :timeout_ms,
+    :explain,
+    :describe,
+    :trace,
+    :distributed,
+    :snapshot,
+    :hot_before_ms
+  ]
 
   @doc """
   Runs `sql` and waits for its result.
@@ -61,6 +71,11 @@ defmodule Smolquery.QueryService.Client do
   `distributed: true | false` overrides the runtime's distributed default
   for this job only (PL-49); a distributed answer settles with the shard
   count on `job.scatter`, and a refusal or failure falls back silently.
+  `snapshot:` pins the sealed tier at that catalog version instead of the
+  current one, and `hot_before_ms:` excludes micro-segments stamped after
+  the bound — together, a caller's repeatable read across several jobs
+  (PL-58 layer 7): pass the first job's `job.snapshot` and its submit time
+  to every later job.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which

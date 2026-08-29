@@ -48,6 +48,7 @@ defmodule SmolqueryPg.Runtime do
     query_name: Smolquery.QueryService,
     auth: :scram_sha_256,
     auth_timeout_ms: 30_000,
+    idle_in_transaction_timeout_ms: 300_000,
     ip: {127, 0, 0, 1},
     port: 5432
   ]
@@ -60,6 +61,7 @@ defmodule SmolqueryPg.Runtime do
           query_name: atom(),
           auth: :scram_sha_256 | :cleartext,
           auth_timeout_ms: pos_integer(),
+          idle_in_transaction_timeout_ms: non_neg_integer(),
           tls_cert: Path.t() | nil,
           tls_key: Path.t() | nil,
           scram: Scram.verifier(),
@@ -100,7 +102,16 @@ defmodule SmolqueryPg.Runtime do
         )
     }
     |> struct!(
-      Keyword.take(config, [:query_name, :auth, :auth_timeout_ms, :tls_cert, :tls_key, :ip, :port])
+      Keyword.take(config, [
+        :query_name,
+        :auth,
+        :auth_timeout_ms,
+        :idle_in_transaction_timeout_ms,
+        :tls_cert,
+        :tls_key,
+        :ip,
+        :port
+      ])
     )
     |> derive_scram()
     |> validate_tls()

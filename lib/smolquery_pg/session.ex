@@ -24,12 +24,15 @@ defmodule SmolqueryPg.Session do
   | empty | `EmptyQueryResponse` |
   | anything else | `0A000 feature_not_supported` |
 
-  A transaction pins nothing: each statement reads its own snapshot, as an
-  HTTP query does. The status exists because clients track it — a `BEGIN`
-  answered with an error would abort a driver's connection setup, and a
-  failed statement inside a block must fail every later one until the
-  block ends, or a client that expects Postgres's behaviour reads a
-  half-applied batch as whole.
+  A transaction block pins its read (PL-58 layer 7): the block's first
+  query captures a hot-tier time bound at submit and the snapshot the job
+  ran at, and every later query in the block passes both through
+  `Smolquery.QueryService.Client` — so two statements in one `BEGIN`, or
+  the several cursors of a `postgres_fdw` join, read the same data. The
+  pin forms lazily at the first query, as Postgres's `REPEATABLE READ`
+  does, and clears when the block ends (`ROLLBACK TO` keeps it; so does a
+  failed block, until it ends). Outside a block each statement reads its
+  own snapshot, as an HTTP query does.
 
   ## The extended protocol
 
@@ -66,6 +69,7 @@ defmodule SmolqueryPg.Session do
   alias SmolqueryPg.PgCatalog
   alias SmolqueryPg.Protocol
   alias SmolqueryPg.Runtime
+  alias SmolqueryPg.Sql
   alias SmolqueryPg.Statements
   alias SmolqueryPg.Types
 
@@ -85,6 +89,7 @@ defmodule SmolqueryPg.Session do
     "search_path" => "public",
     "transaction_isolation" => "read committed",
     "statement_timeout" => "0",
+    "idle_in_transaction_session_timeout" => "300000",
     "extra_float_digits" => "1"
   }
 
@@ -100,6 +105,7 @@ defmodule SmolqueryPg.Session do
     :backend_pid,
     :secret_key,
     txn: :idle,
+    block: nil,
     settings: %{},
     statements: %{},
     portals: %{},
@@ -120,6 +126,19 @@ defmodule SmolqueryPg.Session do
 
   @type prepared :: %{sql: String.t(), oids: [pos_integer()], outcome: outcome() | nil}
 
+  @typedoc """
+  One transaction block's state: its isolation level, the lazily formed
+  read pin (`REPEATABLE READ` and `SERIALIZABLE` only), the savepoint
+  names it holds, and the original values `SET LOCAL` must restore when
+  the block ends.
+  """
+  @type block :: %{
+          isolation: :read_committed | :repeatable_read | :serializable,
+          pin: %{snapshot: term() | nil, hot_before_ms: pos_integer()} | nil,
+          savepoints: MapSet.t(String.t()),
+          locals: %{String.t() => String.t()}
+        }
+
   @type portal :: %{
           sql: String.t(),
           formats: [0 | 1],
@@ -134,6 +153,7 @@ defmodule SmolqueryPg.Session do
           backend_pid: pos_integer(),
           secret_key: pos_integer(),
           txn: Protocol.ready_status(),
+          block: block() | nil,
           settings: %{String.t() => String.t()},
           statements: %{String.t() => prepared()},
           portals: %{String.t() => portal()},
@@ -156,6 +176,10 @@ defmodule SmolqueryPg.Session do
       secret_key: :rand.uniform(2_147_483_647),
       settings:
         @defaults
+        |> Map.put(
+          "idle_in_transaction_session_timeout",
+          Integer.to_string(runtime.idle_in_transaction_timeout_ms)
+        )
         |> Map.put("application_name", Map.get(params, "application_name", ""))
         |> Map.put("session_authorization", user)
     }
@@ -187,6 +211,26 @@ defmodule SmolqueryPg.Session do
   def startup_messages(%__MODULE__{} = session) do
     Enum.map(@reported, &Protocol.parameter_status(&1, Map.fetch!(session.settings, &1))) ++
       [Protocol.backend_key_data(session.backend_pid, session.secret_key)]
+  end
+
+  @doc """
+  The session's idle-in-transaction budget in milliseconds.
+
+  `SET idle_in_transaction_session_timeout = <ms>` may lower it, never
+  raise it past the runtime's bound, and cannot disable it: the timeout
+  guards the server's pinned snapshots and file descriptors, not the
+  client's patience. A value of `0`, a value over the bound, or an
+  unparsable one all mean the bound. Only an operator bound of `0`
+  disables the timer.
+  """
+  @spec idle_in_transaction_timeout_ms(t()) :: non_neg_integer()
+  def idle_in_transaction_timeout_ms(%__MODULE__{runtime: runtime, settings: settings}) do
+    cap = runtime.idle_in_transaction_timeout_ms
+
+    case Integer.parse(Map.get(settings, "idle_in_transaction_session_timeout", "")) do
+      {ms, _rest} when ms > 0 and ms < cap -> ms
+      _at_or_past_the_cap -> cap
+    end
   end
 
   @doc """
@@ -492,8 +536,11 @@ defmodule SmolqueryPg.Session do
   @spec run(t(), String.t()) :: {:ok, outcome(), t()} | {:error, Errors.wire_error(), t()}
   def run(%__MODULE__{txn: :failed} = session, statement) do
     case classify(statement) do
-      class when class in [:commit, :rollback, :rollback_to] ->
-        transaction_or_savepoint(session, class)
+      class when class in [:commit, :rollback] ->
+        end_block(session, class, statement)
+
+      :rollback_to ->
+        rollback_to(session, statement)
 
       _blocked ->
         {:error,
@@ -511,11 +558,13 @@ defmodule SmolqueryPg.Session do
   defp dispatch(:reset, session, _statement), do: {:ok, command("RESET"), session}
   defp dispatch(:show, session, statement), do: show(session, statement)
 
-  defp dispatch(class, session, _statement) when class in [:begin, :commit, :rollback],
-    do: transaction(session, class)
+  defp dispatch(:begin, session, statement), do: begin_block(session, statement)
+
+  defp dispatch(class, session, statement) when class in [:commit, :rollback],
+    do: end_block(session, class, statement)
 
   defp dispatch(:savepoint, session, statement), do: savepoint(session, statement)
-  defp dispatch(:rollback_to, session, _statement), do: {:ok, command("ROLLBACK"), session}
+  defp dispatch(:rollback_to, session, statement), do: rollback_to(session, statement)
   defp dispatch(:declare, session, statement), do: declare(session, statement)
   defp dispatch(:fetch, session, statement), do: fetch(session, statement)
   defp dispatch(:close_cursor, session, statement), do: close_cursor(session, statement)
@@ -523,16 +572,6 @@ defmodule SmolqueryPg.Session do
   defp dispatch(:discard, session, statement), do: discard(session, statement)
   defp dispatch(:explain, session, statement), do: explain(session, statement)
   defp dispatch({:unsupported, keyword}, session, _statement), do: unsupported(session, keyword)
-
-  defp transaction_or_savepoint(session, :rollback_to),
-    do: {:ok, command("ROLLBACK"), %{session | txn: :transaction}}
-
-  defp transaction_or_savepoint(session, class), do: transaction(session, class)
-
-  defp command(tag, pre \\ []), do: outcome_map(nil, [], tag, pre)
-
-  defp outcome_map(columns, rows, tag, pre),
-    do: %{columns: columns, rows: rows, tag: tag, pre: pre}
 
   defp classify(statement) do
     case Statements.leading_keyword(statement) do
@@ -543,9 +582,13 @@ defmodule SmolqueryPg.Session do
   end
 
   defp rollback_class(statement) do
-    if Regex.match?(~r/\Arollback\s+(?:work\s+|transaction\s+)?to\b/i, String.trim(statement)),
-      do: :rollback_to,
-      else: :rollback
+    {:word, "rollback", rest} = Sql.next_token(statement)
+    rest = Sql.skip_words(rest, ["work", "transaction"])
+
+    case Sql.next_token(rest) do
+      {:word, "to", _rest} -> :rollback_to
+      _other -> :rollback
+    end
   end
 
   defp class(keyword) when keyword in ["select", "with", "values", "("], do: :query
@@ -553,7 +596,8 @@ defmodule SmolqueryPg.Session do
   defp class("reset"), do: :reset
   defp class("show"), do: :show
   defp class(keyword) when keyword in ["begin", "start"], do: :begin
-  defp class(keyword) when keyword in ["commit", "end"], do: :commit
+  defp class("commit"), do: :commit
+  defp class("end"), do: :commit
   defp class(keyword) when keyword in ["savepoint", "release"], do: :savepoint
   defp class("declare"), do: :declare
   defp class(keyword) when keyword in ["fetch", "move"], do: :fetch
@@ -561,8 +605,13 @@ defmodule SmolqueryPg.Session do
   defp class("deallocate"), do: :deallocate
   defp class("discard"), do: :discard
   defp class("explain"), do: :explain
-  defp class(keyword) when keyword in ["rollback", "abort"], do: :rollback
+  defp class("abort"), do: :rollback
   defp class(keyword), do: {:unsupported, String.upcase(keyword)}
+
+  defp command(tag, pre \\ []), do: outcome_map(nil, [], tag, pre)
+
+  defp outcome_map(columns, rows, tag, pre),
+    do: %{columns: columns, rows: rows, tag: tag, pre: pre}
 
   defp query(%__MODULE__{runtime: runtime} = session, sql) do
     if PgCatalog.catalog_statement?(runtime.name, sql),
@@ -587,14 +636,15 @@ defmodule SmolqueryPg.Session do
 
   defp user_query(%__MODULE__{runtime: runtime} = session, sql) do
     timeout = timeout_ms(session)
+    {pin, session} = block_pin(session)
 
-    with {:ok, job} <- Client.submit(runtime.query_name, sql, timeout_ms: timeout),
+    with {:ok, job} <- Client.submit(runtime.query_name, sql, [timeout_ms: timeout] ++ pin),
          :ok <- publish(session, {runtime.query_name, job.id}),
          awaited <- Client.await(runtime.query_name, job.id, timeout),
          :ok <- publish(session, nil) do
       case awaited do
         {:ok, %Job{state: :done} = job, %DataFrame{} = frame} ->
-          {:ok, outcome(job, frame), session}
+          {:ok, outcome(job, frame), remember_pin(session, job)}
 
         {:ok, %Job{state: :cancelled}, _frame} ->
           fail(session, :cancelled)
@@ -609,6 +659,33 @@ defmodule SmolqueryPg.Session do
       {:error, reason} -> fail(session, reason)
     end
   end
+
+  defp block_pin(%__MODULE__{txn: :transaction, block: %{isolation: isolation} = block} = session)
+       when isolation in [:repeatable_read, :serializable] do
+    case block.pin do
+      nil ->
+        pin = %{snapshot: nil, hot_before_ms: System.system_time(:millisecond)}
+
+        {[hot_before_ms: pin.hot_before_ms], %{session | block: %{block | pin: pin}}}
+
+      pin ->
+        {[hot_before_ms: pin.hot_before_ms] ++ snapshot_opt(pin), session}
+    end
+  end
+
+  defp block_pin(session), do: {[], session}
+
+  defp snapshot_opt(%{snapshot: nil}), do: []
+  defp snapshot_opt(%{snapshot: snapshot}), do: [snapshot: snapshot]
+
+  defp remember_pin(
+         %__MODULE__{txn: :transaction, block: %{pin: %{snapshot: nil} = pin} = block} = session,
+         %Job{snapshot: snapshot}
+       )
+       when snapshot != nil,
+       do: %{session | block: %{block | pin: %{pin | snapshot: snapshot}}}
+
+  defp remember_pin(session, _job), do: session
 
   defp publish(session, value) do
     Registry.update_value(Runtime.cancels(session.runtime.name), cancel_key(session), fn _ ->
@@ -647,19 +724,159 @@ defmodule SmolqueryPg.Session do
   defp failed(%__MODULE__{txn: :transaction} = session), do: %{session | txn: :failed}
   defp failed(session), do: session
 
-  @set ~r/^SET\s+(?:SESSION\s+|LOCAL\s+)?(?:TIME\s+ZONE\s+(?<zone>.+)|NAMES\s+(?<names>.+)|(?<name>[A-Za-z_][\w.]*)\s*(?:=|\s+TO\s+)\s*(?<value>.+))$/is
-
   defp set(session, statement) do
-    session =
-      case Regex.named_captures(@set, String.trim(statement)) do
-        %{"zone" => zone} when zone != "" -> put_setting(session, "TimeZone", zone)
-        %{"names" => names} when names != "" -> put_setting(session, "client_encoding", names)
-        %{"name" => name, "value" => value} when name != "" -> put_setting(session, name, value)
-        nil -> session
-      end
+    {:word, "set", rest} = Sql.next_token(statement)
 
-    {:ok, command("SET", reported(session, statement)), session}
+    case Sql.next_token(rest) do
+      {:word, "transaction", next} -> set_transaction(session, next)
+      {:word, "session", next} -> set_session(session, next)
+      {:word, "local", next} -> set_assignment(session, next, :local)
+      _other -> set_assignment(session, rest, :session)
+    end
   end
+
+  defp set_session(session, rest) do
+    case Sql.next_token(rest) do
+      {:word, "characteristics", next} ->
+        with {:word, "as", next} <- Sql.next_token(next),
+             {:word, "transaction", next} <- Sql.next_token(next),
+             {:ok, _isolation} <- transaction_modes(next, nil) do
+          {:ok, command("SET"), session}
+        else
+          {:error, :read_write} -> read_write_refusal(session)
+          _malformed -> set_syntax_error(session)
+        end
+
+      _other ->
+        set_assignment(session, rest, :session)
+    end
+  end
+
+  defp set_assignment(%__MODULE__{txn: :idle} = session, _rest, :local) do
+    notice =
+      Protocol.notice_response("25P01", "SET LOCAL can only be used in transaction blocks")
+
+    {:ok, command("SET", [notice]), session}
+  end
+
+  defp set_assignment(session, rest, scope) do
+    case Sql.next_token(rest) do
+      {:word, "time", next} -> set_time_zone(session, next, scope)
+      {:word, "names", next} -> assign(session, "client_encoding", next, scope)
+      {:word, _name, _next} -> named_assignment(session, rest, scope)
+      _other -> set_syntax_error(session)
+    end
+  end
+
+  defp set_time_zone(session, rest, scope) do
+    case Sql.next_token(rest) do
+      {:word, "zone", next} -> assign(session, "TimeZone", next, scope)
+      _malformed -> set_syntax_error(session)
+    end
+  end
+
+  defp named_assignment(session, rest, scope) do
+    {:ok, name, next} = Sql.setting_name(rest)
+
+    case Sql.next_token(next) do
+      {:symbol, "=", value} -> assign(session, name, value, scope)
+      {:word, "to", value} -> assign(session, name, value, scope)
+      _malformed -> set_syntax_error(session)
+    end
+  end
+
+  defp assign(session, name, value_rest, scope) do
+    case String.trim(value_rest) do
+      "" ->
+        set_syntax_error(session)
+
+      value ->
+        key = canonical(session, name)
+        {value, notices} = capped(session, key, value)
+        session = session |> local_backup(key, scope) |> put_setting(name, value)
+
+        {:ok, command("SET", set_reported(session, key) ++ notices), session}
+    end
+  end
+
+  defp capped(
+         %__MODULE__{runtime: runtime},
+         "idle_in_transaction_session_timeout",
+         value
+       ) do
+    cap = runtime.idle_in_transaction_timeout_ms
+
+    case Integer.parse(unquote_value(value)) do
+      {ms, ""} when ms > 0 and ms < cap ->
+        {value, []}
+
+      _zero_invalid_or_past_the_cap ->
+        notice =
+          Protocol.notice_response(
+            "01000",
+            "idle_in_transaction_session_timeout is capped at the server's #{cap} ms " <>
+              "and cannot be disabled"
+          )
+
+        {Integer.to_string(cap), [notice]}
+    end
+  end
+
+  defp capped(_session, _key, value), do: {value, []}
+
+  defp local_backup(%__MODULE__{block: %{locals: locals} = block} = session, key, :local) do
+    original = Map.get(session.settings, key, "")
+
+    %{session | block: %{block | locals: Map.put_new(locals, key, original)}}
+  end
+
+  defp local_backup(session, _key, _scope), do: session
+
+  defp set_reported(session, key) do
+    if key in @reported,
+      do: [Protocol.parameter_status(key, session.settings[key])],
+      else: []
+  end
+
+  defp set_syntax_error(session),
+    do: {:error, {"42601", "syntax error in SET"}, failed(session)}
+
+  defp set_transaction(session, rest) do
+    case transaction_modes(rest, nil) do
+      {:error, :read_write} -> read_write_refusal(session)
+      {:error, :syntax} -> set_syntax_error(session)
+      {:ok, nil} -> {:ok, command("SET"), session}
+      {:ok, isolation} -> apply_block_isolation(session, isolation)
+    end
+  end
+
+  defp apply_block_isolation(%__MODULE__{txn: :idle} = session, _isolation) do
+    notice =
+      Protocol.notice_response("25P01", "SET TRANSACTION applies inside a transaction block")
+
+    {:ok, command("SET", [notice]), session}
+  end
+
+  defp apply_block_isolation(%__MODULE__{block: %{pin: pin}} = session, _isolation)
+       when pin != nil do
+    {:error,
+     {"25001", "SET TRANSACTION ISOLATION LEVEL must be called before any query in the block"},
+     failed(session)}
+  end
+
+  defp apply_block_isolation(session, isolation) do
+    session =
+      put_in_settings(
+        %{session | block: %{session.block | isolation: isolation}},
+        "transaction_isolation",
+        isolation_name(isolation)
+      )
+
+    {:ok, command("SET"), session}
+  end
+
+  defp put_in_settings(session, key, value),
+    do: %{session | settings: Map.put(session.settings, key, value)}
 
   defp put_setting(session, name, value) do
     key = canonical(session, name)
@@ -693,38 +910,42 @@ defmodule SmolqueryPg.Session do
     end
   end
 
-  defp reported(session, statement) do
-    case Regex.named_captures(@set, String.trim(statement)) do
-      %{"zone" => zone} when zone != "" ->
-        [Protocol.parameter_status("TimeZone", session.settings["TimeZone"])]
-
-      %{"names" => names} when names != "" ->
-        [Protocol.parameter_status("client_encoding", session.settings["client_encoding"])]
-
-      %{"name" => name} when name != "" ->
-        key = canonical(session, name)
-
-        if key in @reported,
-          do: [Protocol.parameter_status(key, session.settings[key])],
-          else: []
-
-      nil ->
-        []
-    end
-  end
-
-  @show ~r/^SHOW\s+(?<name>ALL|TIME\s+ZONE|[A-Za-z_][\w.]*)$/is
-
   defp show(session, statement) do
-    case Regex.named_captures(@show, String.trim(statement)) do
-      %{"name" => all} when all in ["ALL", "all"] -> show_all(session)
-      %{"name" => name} -> show_one(session, name)
-      nil -> {:error, {"42601", "syntax error in SHOW"}, failed(session)}
+    {:word, "show", rest} = Sql.next_token(statement)
+
+    case Sql.next_token(rest) do
+      {:word, "all", next} -> show_when_done(session, "", next, &show_all/1)
+      {:word, "time", next} -> show_time_zone(session, next)
+      {:word, _name, _next} -> show_named(session, rest)
+      _other -> show_syntax_error(session)
     end
   end
+
+  defp show_time_zone(session, rest) do
+    case Sql.next_token(rest) do
+      {:word, "zone", next} ->
+        show_when_done(session, "TimeZone", next, &show_one(&1, "TimeZone"))
+
+      _malformed ->
+        show_syntax_error(session)
+    end
+  end
+
+  defp show_named(session, rest) do
+    {:ok, name, next} = Sql.setting_name(rest)
+
+    show_when_done(session, name, next, &show_one(&1, name))
+  end
+
+  defp show_when_done(session, _name, rest, answer) do
+    if eof?(rest), do: answer.(session), else: show_syntax_error(session)
+  end
+
+  defp show_syntax_error(session),
+    do: {:error, {"42601", "syntax error in SHOW"}, failed(session)}
 
   defp show_one(session, name) do
-    key = canonical(session, String.replace(name, ~r/^time\s+zone$/i, "TimeZone"))
+    key = canonical(session, name)
 
     case Map.fetch(session.settings, key) do
       {:ok, value} ->
@@ -749,38 +970,249 @@ defmodule SmolqueryPg.Session do
   defp text_rows(names, rows, tag),
     do: outcome_map(Enum.map(names, &{&1, :string, false}), rows, tag, [])
 
-  defp transaction(%__MODULE__{txn: :idle} = session, :begin),
-    do: {:ok, command("BEGIN"), %{session | txn: :transaction}}
+  defp begin_block(session, statement) do
+    {:word, _begin_or_start, rest} = Sql.next_token(statement)
+    rest = Sql.skip_words(rest, ["work", "transaction"])
 
-  defp transaction(session, :begin) do
-    notice = Protocol.notice_response("25001", "there is already a transaction in progress")
+    case transaction_modes(rest, :read_committed) do
+      {:ok, isolation} when session.txn == :idle ->
+        {:ok, command("BEGIN"), open_block(session, isolation)}
 
-    {:ok, command("BEGIN", [notice]), session}
+      {:ok, _isolation} ->
+        notice = Protocol.notice_response("25001", "there is already a transaction in progress")
+
+        {:ok, command("BEGIN", [notice]), session}
+
+      {:error, :read_write} ->
+        read_write_refusal(session)
+
+      {:error, :syntax} ->
+        {:error, {"42601", "syntax error in BEGIN"}, failed(session)}
+    end
   end
 
-  defp transaction(%__MODULE__{txn: :idle} = session, class) do
+  defp transaction_modes(rest, isolation) do
+    case Sql.next_token(rest) do
+      :eof -> {:ok, isolation}
+      token -> transaction_mode(token, isolation)
+    end
+  end
+
+  defp transaction_mode({:symbol, ",", next}, isolation), do: transaction_modes(next, isolation)
+
+  defp transaction_mode({:word, "isolation", next}, _isolation) do
+    with {:word, "level", next} <- Sql.next_token(next),
+         {:ok, isolation, next} <- isolation_level(next) do
+      transaction_modes(next, isolation)
+    else
+      _malformed -> {:error, :syntax}
+    end
+  end
+
+  defp transaction_mode({:word, "read", next}, isolation) do
+    case Sql.next_token(next) do
+      {:word, "only", next} -> transaction_modes(next, isolation)
+      {:word, "write", _next} -> {:error, :read_write}
+      _malformed -> {:error, :syntax}
+    end
+  end
+
+  defp transaction_mode({:word, "not", next}, isolation) do
+    case Sql.next_token(next) do
+      {:word, "deferrable", next} -> transaction_modes(next, isolation)
+      _malformed -> {:error, :syntax}
+    end
+  end
+
+  defp transaction_mode({:word, "deferrable", next}, isolation),
+    do: transaction_modes(next, isolation)
+
+  defp transaction_mode(_other, _isolation), do: {:error, :syntax}
+
+  defp isolation_level(rest) do
+    case Sql.next_token(rest) do
+      {:word, "serializable", next} ->
+        {:ok, :serializable, next}
+
+      {:word, "repeatable", next} ->
+        case Sql.next_token(next) do
+          {:word, "read", next} -> {:ok, :repeatable_read, next}
+          _malformed -> :error
+        end
+
+      {:word, "read", next} ->
+        case Sql.next_token(next) do
+          {:word, level, next} when level in ["committed", "uncommitted"] ->
+            {:ok, :read_committed, next}
+
+          _malformed ->
+            :error
+        end
+
+      _other ->
+        :error
+    end
+  end
+
+  defp read_write_refusal(session) do
+    {:error,
+     {"25006", "smolquery is read-only over the wire; a read-write transaction is not available"},
+     failed(session)}
+  end
+
+  defp open_block(session, isolation) do
+    settings =
+      Map.put(session.settings, "transaction_isolation", isolation_name(isolation))
+
+    %{
+      session
+      | txn: :transaction,
+        settings: settings,
+        block: %{isolation: isolation, pin: nil, savepoints: MapSet.new(), locals: %{}}
+    }
+  end
+
+  defp isolation_name(:repeatable_read), do: "repeatable read"
+  defp isolation_name(:serializable), do: "serializable"
+  defp isolation_name(:read_committed), do: "read committed"
+
+  defp end_block(session, class, statement) do
+    {:word, _keyword, rest} = Sql.next_token(statement)
+    rest = Sql.skip_words(rest, ["work", "transaction"])
+
+    case Sql.next_token(rest) do
+      :eof ->
+        finish_block(session, class, false)
+
+      {:word, "prepared", _next} ->
+        {:error, {"0A000", "prepared (two-phase) transactions are not supported"},
+         failed(session)}
+
+      {:word, "and", next} ->
+        end_block_chain(session, class, next)
+
+      _other ->
+        {:error, {"42601", "syntax error in #{tag(class)}"}, failed(session)}
+    end
+  end
+
+  defp end_block_chain(session, class, rest) do
+    case Sql.next_token(rest) do
+      {:word, "chain", _next} ->
+        finish_block(session, class, true)
+
+      {:word, "no", next} ->
+        case Sql.next_token(next) do
+          {:word, "chain", _next} -> finish_block(session, class, false)
+          _malformed -> {:error, {"42601", "syntax error in #{tag(class)}"}, failed(session)}
+        end
+
+      _other ->
+        {:error, {"42601", "syntax error in #{tag(class)}"}, failed(session)}
+    end
+  end
+
+  defp finish_block(%__MODULE__{txn: :idle} = session, class, _chain?) do
     notice = Protocol.notice_response("25P01", "there is no transaction in progress")
 
     {:ok, command(tag(class), [notice]), session}
   end
 
-  defp transaction(%__MODULE__{txn: :failed} = session, :commit),
-    do: {:ok, command("ROLLBACK"), %{session | txn: :idle}}
-
-  defp transaction(session, class), do: {:ok, command(tag(class)), %{session | txn: :idle}}
-
-  defp tag(:commit), do: "COMMIT"
-  defp tag(:rollback), do: "ROLLBACK"
-
-  defp savepoint(session, statement) do
-    tag =
-      case Statements.leading_keyword(statement) do
-        "savepoint" -> "SAVEPOINT"
-        "release" -> "RELEASE"
-      end
+  defp finish_block(session, class, chain?) do
+    tag = if session.txn == :failed and class == :commit, do: "ROLLBACK", else: tag(class)
+    isolation = session.block.isolation
+    session = close_block(session)
+    session = if chain?, do: open_block(session, isolation), else: session
 
     {:ok, command(tag), session}
   end
+
+  defp close_block(%__MODULE__{block: block} = session) do
+    settings =
+      session.settings
+      |> Map.merge(block_locals(block))
+      |> Map.put("transaction_isolation", @defaults["transaction_isolation"])
+
+    %{session | txn: :idle, block: nil, settings: settings}
+  end
+
+  defp block_locals(nil), do: %{}
+  defp block_locals(%{locals: locals}), do: locals
+
+  defp savepoint(%__MODULE__{txn: :idle} = session, statement) do
+    verb = statement |> Statements.leading_keyword() |> String.upcase()
+
+    {:error, {"25P01", "#{verb} can only be used in transaction blocks"}, session}
+  end
+
+  defp savepoint(%__MODULE__{block: block} = session, statement) do
+    {:word, verb, rest} = Sql.next_token(statement)
+
+    case verb do
+      "savepoint" ->
+        case single_identifier(rest) do
+          {:ok, name} ->
+            savepoints = MapSet.put(block.savepoints, name)
+
+            {:ok, command("SAVEPOINT"), %{session | block: %{block | savepoints: savepoints}}}
+
+          :error ->
+            {:error, {"42601", "syntax error in SAVEPOINT"}, failed(session)}
+        end
+
+      "release" ->
+        case single_identifier(Sql.skip_words(rest, ["savepoint"])) do
+          {:ok, name} -> release_savepoint(session, block, name)
+          :error -> {:error, {"42601", "syntax error in RELEASE"}, failed(session)}
+        end
+    end
+  end
+
+  defp single_identifier(rest) do
+    with {kind, name, next} when kind in [:word, :quoted] <- Sql.next_token(rest),
+         true <- eof?(next) do
+      {:ok, name}
+    else
+      _malformed -> :error
+    end
+  end
+
+  defp eof?(rest), do: Sql.next_token(rest) == :eof
+
+  defp release_savepoint(session, block, name) do
+    if MapSet.member?(block.savepoints, name) do
+      savepoints = MapSet.delete(block.savepoints, name)
+
+      {:ok, command("RELEASE"), %{session | block: %{block | savepoints: savepoints}}}
+    else
+      {:error, {"3B001", ~s|savepoint "#{name}" does not exist|}, failed(session)}
+    end
+  end
+
+  defp rollback_to(%__MODULE__{txn: :idle} = session, _statement) do
+    {:error, {"25P01", "ROLLBACK TO can only be used in transaction blocks"}, session}
+  end
+
+  defp rollback_to(%__MODULE__{block: block} = session, statement) do
+    {:word, "rollback", rest} = Sql.next_token(statement)
+    rest = Sql.skip_words(rest, ["work", "transaction"])
+    {:word, "to", rest} = Sql.next_token(rest)
+
+    case single_identifier(Sql.skip_words(rest, ["savepoint"])) do
+      {:ok, name} ->
+        if MapSet.member?(block.savepoints, name) do
+          {:ok, command("ROLLBACK"), %{session | txn: :transaction}}
+        else
+          {:error, {"3B001", ~s|savepoint "#{name}" does not exist|}, failed(session)}
+        end
+
+      :error ->
+        {:error, {"42601", "syntax error in ROLLBACK TO"}, failed(session)}
+    end
+  end
+
+  defp tag(:commit), do: "COMMIT"
+  defp tag(:rollback), do: "ROLLBACK"
 
   defp declare(%__MODULE__{} = session, statement) do
     with {:ok, name, query_sql} <- Cursors.parse_declare(statement),
@@ -848,7 +1280,14 @@ defmodule SmolqueryPg.Session do
 
   defp discard(%__MODULE__{} = session, _statement) do
     {:ok, command("DISCARD ALL"),
-     %{session | statements: %{}, portals: %{}, cursors: %{}, settings: reset_settings(session)}}
+     %{
+       session
+       | statements: %{},
+         portals: %{},
+         cursors: %{},
+         block: nil,
+         settings: reset_settings(session)
+     }}
   end
 
   defp reset_settings(%__MODULE__{settings: settings}) do
@@ -883,10 +1322,17 @@ defmodule SmolqueryPg.Session do
   end
 
   defp strip_explain(statement) do
-    trimmed = String.trim(statement)
-    <<_explain::binary-size(7), rest::binary>> = trimmed
+    {:word, "explain", rest} = Sql.next_token(statement)
 
-    Regex.replace(~r/\A\s*(?:\((?:[^)]*)\)\s*|VERBOSE\s+|ANALYZE\s+)*/i, rest, "")
+    explain_tail(rest)
+  end
+
+  defp explain_tail(rest) do
+    case Sql.next_token(rest) do
+      {:symbol, "(", next} -> explain_tail(Sql.skip_parens(next))
+      {:word, word, next} when word in ["analyze", "verbose"] -> explain_tail(next)
+      _query -> Sql.skip_trivia(rest)
+    end
   end
 
   defp estimated_rows(%Job{statistics: nil}), do: 1000

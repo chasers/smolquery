@@ -78,6 +78,15 @@ if pg_tls_key = System.get_env("SMOLQUERY_PG_TLS_KEY") do
   config :smolquery, SmolqueryPg, tls_key: pg_tls_key
 end
 
+if pg_idle_txn = System.get_env("SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS") do
+  config :smolquery, SmolqueryPg,
+    idle_in_transaction_timeout_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!(
+        "SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS",
+        pg_idle_txn
+      )
+end
+
 if pg_auth = System.get_env("SMOLQUERY_PG_AUTH") do
   config :smolquery, SmolqueryPg,
     auth:

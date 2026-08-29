@@ -66,16 +66,57 @@ defmodule SmolqueryPg.Handler do
        scram: nil,
        discard: false,
        tls: false,
-       auth_timer: timer
+       auth_timer: timer,
+       idle_txn_ref: nil
      }}
   end
+
+  @impl GenServer
+  def handle_info({:idle_txn_timeout, ref}, {socket, %{idle_txn_ref: ref} = state}) do
+    if state.session != nil and state.session.txn != :idle do
+      _ =
+        Socket.send(
+          socket,
+          Protocol.fatal_response(
+            "25P03",
+            "terminating connection due to idle-in-transaction timeout"
+          )
+        )
+
+      {:stop, {:shutdown, :idle_in_transaction_timeout}, {socket, state}}
+    else
+      {:noreply, {socket, state}}
+    end
+  end
+
+  def handle_info({:idle_txn_timeout, _stale}, {socket, state}),
+    do: {:noreply, {socket, state}}
 
   @impl ThousandIsland.Handler
   def handle_data(data, socket, state) do
     drain(socket, %{state | buffer: state.buffer <> data})
   end
 
-  defp drain(socket, %{phase: :startup} = state) do
+  defp drain(socket, state), do: state |> arm_idle_txn_timer() |> drain_messages(socket)
+
+  defp arm_idle_txn_timer(%{session: nil} = state), do: state
+
+  defp arm_idle_txn_timer(%{session: session} = state) do
+    budget = Session.idle_in_transaction_timeout_ms(session)
+
+    if session.txn != :idle and budget > 0 do
+      ref = make_ref()
+      Process.send_after(self(), {:idle_txn_timeout, ref}, budget)
+
+      %{state | idle_txn_ref: ref}
+    else
+      %{state | idle_txn_ref: nil}
+    end
+  end
+
+  defp drain_messages(state, socket), do: do_drain(socket, state)
+
+  defp do_drain(socket, %{phase: :startup} = state) do
     case Protocol.decode_startup(state.buffer) do
       {:ok, message, rest} -> startup(socket, message, %{state | buffer: rest})
       :incomplete -> {:continue, state}
@@ -83,7 +124,7 @@ defmodule SmolqueryPg.Handler do
     end
   end
 
-  defp drain(socket, state) do
+  defp do_drain(socket, state) do
     case Protocol.decode(state.buffer) do
       {:ok, message, rest} -> handle(socket, message, %{state | buffer: rest})
       :incomplete -> {:continue, state}
@@ -136,25 +177,6 @@ defmodule SmolqueryPg.Handler do
     case Socket.send(socket, Protocol.deny_encryption()) do
       :ok -> drain(socket, state)
       {:error, _reason} -> {:close, state}
-    end
-  end
-
-  @impl GenServer
-  def handle_info(:tls_upgrade, {socket, state}) do
-    with :ok <- Socket.setopts(socket, active: false),
-         :ok <- Socket.send(socket, "S"),
-         {:ok, upgraded} <-
-           Socket.upgrade(socket, ThousandIsland.Transports.SSL,
-             certfile: String.to_charlist(state.runtime.tls_cert),
-             keyfile: String.to_charlist(state.runtime.tls_key)
-           ),
-         :ok <- Socket.setopts(upgraded, active: :once) do
-      {:noreply, {upgraded, state}}
-    else
-      error ->
-        Logger.warning("pg wire: TLS upgrade failed: #{inspect(error)}")
-
-        {:stop, {:shutdown, :tls_upgrade_failed}, {socket, state}}
     end
   end
 

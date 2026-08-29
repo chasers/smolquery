@@ -226,6 +226,121 @@ defmodule SmolqueryPg.Sql do
 
   defp word(rest, acc), do: {acc |> Enum.reverse() |> List.to_string(), rest}
 
+  @typedoc """
+  One token of a statement: a bare word (down-cased, as Postgres folds
+  unquoted identifiers), a quoted identifier (case preserved, `""`
+  unescaped), a run of digits, or any other single character. The third
+  element is always the untouched remainder of the input, so a caller can
+  take "everything after this token" verbatim.
+  """
+  @type statement_token ::
+          {:word, String.t(), binary()}
+          | {:quoted, String.t(), binary()}
+          | {:number, String.t(), binary()}
+          | {:symbol, String.t(), binary()}
+          | :eof
+
+  @doc """
+  The next token of `statement`, past whitespace and comments. Binary
+  matching, no regex: statement parsing runs on this.
+  """
+  @spec next_token(binary()) :: statement_token()
+  def next_token(statement), do: statement |> skip_trivia() |> token()
+
+  defp token(<<>>), do: :eof
+
+  defp token(<<?", rest::binary>>), do: quoted_token(rest, [])
+
+  defp token(<<digit, _rest::binary>> = statement) when digit in ?0..?9 do
+    {number, rest} = digits(statement, [])
+
+    {:number, number, rest}
+  end
+
+  defp token(<<?_, _rest::binary>> = statement), do: word_token(statement)
+
+  defp token(<<char, _rest::binary>> = statement)
+       when char in ?a..?z or char in ?A..?Z,
+       do: word_token(statement)
+
+  defp token(<<char, rest::binary>>), do: {:symbol, <<char>>, rest}
+
+  defp word_token(statement) do
+    {word, rest} = word(statement, [])
+
+    {:word, String.downcase(word), rest}
+  end
+
+  defp quoted_token(<<?", ?", rest::binary>>, acc), do: quoted_token(rest, [?" | acc])
+
+  defp quoted_token(<<?", rest::binary>>, acc),
+    do: {:quoted, acc |> Enum.reverse() |> List.to_string(), rest}
+
+  defp quoted_token(<<char, rest::binary>>, acc), do: quoted_token(rest, [char | acc])
+  defp quoted_token(<<>>, acc), do: {:quoted, acc |> Enum.reverse() |> List.to_string(), <<>>}
+
+  defp digits(<<digit, rest::binary>>, acc) when digit in ?0..?9,
+    do: digits(rest, [digit | acc])
+
+  defp digits(rest, acc), do: {acc |> Enum.reverse() |> List.to_string(), rest}
+
+  @doc """
+  The remainder of `statement` past any leading words in `allowed` — how a
+  parser skips optional keyword noise (`WORK`, `SAVEPOINT`, `FROM`).
+  """
+  @spec skip_words(binary(), [String.t()]) :: binary()
+  def skip_words(rest, allowed) do
+    case next_token(rest) do
+      {:word, word, next} -> if word in allowed, do: skip_words(next, allowed), else: rest
+      _other -> rest
+    end
+  end
+
+  @doc """
+  A configuration-parameter name at the head of `statement`: a word,
+  optionally dotted (`app.setting`). Answers the name (down-cased) and the
+  remainder, or `:error` when no word starts it.
+  """
+  @spec setting_name(binary()) :: {:ok, String.t(), binary()} | :error
+  def setting_name(statement) do
+    case next_token(statement) do
+      {:word, word, rest} -> dotted(word, rest)
+      _other -> :error
+    end
+  end
+
+  defp dotted(name, <<?., rest::binary>>) do
+    case token(rest) do
+      {:word, word, rest} -> dotted(name <> "." <> word, rest)
+      _other -> {:ok, name, rest}
+    end
+  end
+
+  defp dotted(name, rest), do: {:ok, name, rest}
+
+  @doc """
+  The remainder of `statement` past a `(`-opened group, honouring nesting.
+  """
+  @spec skip_parens(binary()) :: binary()
+  def skip_parens(statement), do: parens(statement, 1)
+
+  defp parens(<<>>, _depth), do: <<>>
+  defp parens(<<?), rest::binary>>, 1), do: rest
+  defp parens(<<?), rest::binary>>, depth), do: parens(rest, depth - 1)
+  defp parens(<<?(, rest::binary>>, depth), do: parens(rest, depth + 1)
+  defp parens(<<_char, rest::binary>>, depth), do: parens(rest, depth)
+
+  @doc """
+  `statement` past leading whitespace and comments.
+  """
+  @spec skip_trivia(binary()) :: binary()
+  def skip_trivia(<<space, rest::binary>>) when space in [?\s, ?\t, ?\n, ?\r],
+    do: skip_trivia(rest)
+
+  def skip_trivia(<<"--", rest::binary>>), do: skip_trivia(past_line(rest))
+  def skip_trivia(<<"/*", rest::binary>>), do: skip_trivia(past_block(rest, 1))
+  def skip_trivia(statement), do: statement
+
   @doc """
   The leading keyword of `statement` — past whitespace and comments, in
   lower case — or `""` when none starts it. Binary matching: this runs per
@@ -234,19 +349,20 @@ defmodule SmolqueryPg.Sql do
   @spec leading_keyword(String.t()) :: String.t()
   def leading_keyword(statement), do: keyword(statement)
 
-  defp keyword(<<space, rest::binary>>) when space in [?\s, ?\t, ?\n, ?\r], do: keyword(rest)
+  defp keyword(statement) do
+    case skip_trivia(statement) do
+      <<?(, _rest::binary>> -> "("
+      trimmed -> keyword_start(trimmed)
+    end
+  end
 
-  defp keyword(<<"--", rest::binary>>), do: keyword(past_line(rest))
-  defp keyword(<<"/*", rest::binary>>), do: keyword(past_block(rest, 1))
-  defp keyword(<<?(, _rest::binary>>), do: "("
+  defp keyword_start(<<?_, _rest::binary>> = statement), do: keyword_word(statement)
 
-  defp keyword(<<?_, _rest::binary>> = statement), do: keyword_word(statement)
-
-  defp keyword(<<char, _rest::binary>> = statement)
+  defp keyword_start(<<char, _rest::binary>> = statement)
        when char in ?a..?z or char in ?A..?Z,
        do: keyword_word(statement)
 
-  defp keyword(_other), do: ""
+  defp keyword_start(_other), do: ""
 
   defp keyword_word(statement) do
     {word, _rest} = word(statement, [])

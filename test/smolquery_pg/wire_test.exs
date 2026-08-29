@@ -392,6 +392,68 @@ defmodule SmolqueryPg.WireTest do
     end
   end
 
+  describe "idle-in-transaction timeout" do
+    test "terminates an idle block with FATAL 25P03, and SET tunes it", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{results: [%{tag: "SET"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 150")
+
+      assert %{results: [%{tag: "BEGIN"}], status: ?T} = PgClient.query(socket, "BEGIN")
+
+      assert {:ok, {?E, body}} = PgClient.recv(socket)
+      assert %{"S" => "FATAL", "C" => "25P03"} = PgClient.fields(body)
+      assert {:error, :closed} = :gen_tcp.recv(socket, 0, 5_000)
+    end
+
+    test "an idle session outside a block is never terminated", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{results: [%{tag: "SET"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 100")
+
+      Process.sleep(300)
+
+      assert %{results: [%{rows: [["1"]]}]} = PgClient.query(socket, "SELECT 1")
+    end
+
+    test "the timeout cannot be raised past the server's bound or disabled", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{notices: [%{"C" => "01000"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 99999999")
+
+      assert %{results: [%{rows: [["300000"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+
+      assert %{notices: [%{"C" => "01000"}]} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 0")
+
+      assert %{results: [%{rows: [["300000"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+
+      assert %{notices: []} =
+               PgClient.query(socket, "SET idle_in_transaction_session_timeout = 250")
+
+      assert %{results: [%{rows: [["250"]]}]} =
+               PgClient.query(socket, "SHOW idle_in_transaction_session_timeout")
+    end
+
+    test "activity inside the block re-arms the clock", %{port: port} do
+      {socket, _params} = connect(port)
+
+      PgClient.query(socket, "SET idle_in_transaction_session_timeout = 400")
+      PgClient.query(socket, "BEGIN")
+
+      for _keepalive <- 1..3 do
+        Process.sleep(150)
+        assert %{results: [%{rows: [["1"]]}], status: ?T} = PgClient.query(socket, "SELECT 1")
+      end
+
+      assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.query(socket, "COMMIT")
+    end
+  end
+
   test "refuses to boot without a password" do
     Application.put_env(:smolquery, SmolqueryApi, [])
 
@@ -522,19 +584,82 @@ defmodule SmolqueryPg.FdwStatementsTest do
     assert String.to_integer(rows) >= 1
   end
 
-  test "a failed statement aborts the block for cursors too", %{socket: socket} do
+  test "a failed statement aborts the block, and ROLLBACK TO a real savepoint recovers it", %{
+    socket: socket
+  } do
     PgClient.query(socket, "BEGIN")
+    assert %{results: [%{tag: "SAVEPOINT"}]} = PgClient.query(socket, "SAVEPOINT s")
     assert %{errors: [%{"C" => "42601"}], status: ?E} = PgClient.query(socket, "SELECT FROM")
 
     assert %{errors: [%{"C" => "25P02"}]} =
              PgClient.query(socket, "DECLARE c4 CURSOR FOR SELECT 1")
 
-    assert %{errors: [%{"C" => "25P02"}]} = PgClient.query(socket, "SAVEPOINT s")
+    assert %{errors: [%{"C" => "25P02"}]} = PgClient.query(socket, "SAVEPOINT s2")
 
     assert %{results: [%{tag: "ROLLBACK"}], status: ?T} =
              PgClient.query(socket, "ROLLBACK TO SAVEPOINT s")
 
     assert %{results: [%{rows: [["1"]]}], status: ?T} = PgClient.query(socket, "SELECT 1")
     assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.query(socket, "COMMIT")
+  end
+
+  test "unsupported transaction shapes error instead of quietly succeeding", %{socket: socket} do
+    assert %{errors: [%{"C" => "25006"}], status: ?I} = PgClient.query(socket, "BEGIN READ WRITE")
+
+    assert %{errors: [%{"C" => "0A000"}]} = PgClient.query(socket, "COMMIT PREPARED 'gid'")
+    assert %{errors: [%{"C" => "25P01"}]} = PgClient.query(socket, "SAVEPOINT lonely")
+
+    assert %{errors: [%{"C" => "25P01"}]} =
+             PgClient.query(socket, "ROLLBACK TO SAVEPOINT lonely")
+
+    PgClient.query(socket, "BEGIN")
+    assert %{errors: [%{"C" => "3B001"}]} = PgClient.query(socket, "RELEASE SAVEPOINT ghost")
+    PgClient.query(socket, "ROLLBACK")
+
+    PgClient.query(socket, "BEGIN")
+
+    assert %{errors: [%{"C" => "25006"}], status: ?E} =
+             PgClient.query(socket, "SET TRANSACTION READ WRITE")
+
+    PgClient.query(socket, "ROLLBACK")
+  end
+
+  test "SET TRANSACTION ISOLATION LEVEL works before the first query, errors after", %{
+    socket: socket
+  } do
+    PgClient.query(socket, "BEGIN")
+
+    assert %{results: [%{tag: "SET"}]} =
+             PgClient.query(socket, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+
+    assert %{results: [%{rows: [["repeatable read"]]}]} =
+             PgClient.query(socket, "SHOW transaction_isolation")
+
+    assert %{results: [%{rows: [["1"]]}]} = PgClient.query(socket, "SELECT 1")
+
+    assert %{errors: [%{"C" => "25001"}]} =
+             PgClient.query(socket, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+
+    PgClient.query(socket, "ROLLBACK")
+
+    assert %{results: [%{rows: [["read committed"]]}]} =
+             PgClient.query(socket, "SHOW transaction_isolation")
+  end
+
+  test "SET LOCAL reverts at block end, and warns outside one", %{socket: socket} do
+    assert %{results: [%{tag: "SET"}], notices: [%{"C" => "25P01"}]} =
+             PgClient.query(socket, "SET LOCAL statement_timeout = 123")
+
+    assert %{results: [%{rows: [["0"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
+
+    PgClient.query(socket, "BEGIN")
+
+    assert %{results: [%{tag: "SET"}]} =
+             PgClient.query(socket, "SET LOCAL statement_timeout = 456")
+
+    assert %{results: [%{rows: [["456"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
+    PgClient.query(socket, "COMMIT")
+
+    assert %{results: [%{rows: [["0"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
   end
 end
