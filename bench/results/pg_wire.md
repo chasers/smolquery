@@ -1,48 +1,47 @@
-# pg_wire — extended-protocol queries per second
+# pg_wire — the wire edge's parser, in isolation
 
 | | |
 |---|---|
 | Run | 2026-08-28 |
-| Commit | 871b8a6 (pg-wire-layer-6, PL-58 layers 1-5) |
+| Commit | pg-wire-layer-6 (PL-58 layers 1-6) |
 | Command | `SMOLQUERY_ROLES=query mix run bench/pg_wire.exs` |
 | Machine | Apple M1 Max, 10 cores, 64 GiB, macOS 26.6.1 |
 | Runtime | Elixir 1.20.2 / OTP 29, 10 schedulers |
 
 ```
-Extended-protocol queries per second — port 49677, 100 queries per connection, fleets of 1 / 4 / 8
-shape                      conns      qps   p50 ms   p95 ms   p99 ms
-postgrex SELECT 1              1    153.2     3.43    10.19    15.03
-postgrex SELECT 1              4    382.7     11.3     16.7    22.14
-postgrex SELECT 1              8    353.1    19.84    38.76   108.85
-postgrex 2 params              1     56.1    17.67    23.61    42.91
-postgrex 2 params              4    100.1    36.44    63.68    77.04
-postgrex 2 params              8    140.8    40.41   127.94   157.28
-raw portal, no describe        1    187.1     3.47    12.15    18.14
-raw portal, no describe        4    408.4    10.36    15.43    20.75
-raw portal, no describe        8    529.3    15.31    21.79    26.75
+Wire-edge parser, no pipeline — 200000 reps per row, small query 37 B, big query 3583 B
+operation                                        ops/s    us/op     MB/s
+decode extended batch, small (5 msgs)         769835.0      1.3     91.6
+decode extended batch, big (5 msgs)           773051.0     1.29   2833.2
+decode simple Query message                  4413257.0     0.23    189.8
+split multi-statement Query (3 stmts)         480899.0     2.08     43.8
+split big single statement                     21299.0    46.95     76.3
+leading_keyword                              6186970.0     0.16    228.9
+params: oids (2 casts)                        188190.0     5.31
+params: substitute 2 binary params            392024.0     2.55
 ```
 
-The job engines ran with `engine_extensions: []`. With the default
-(`[:httpfs]`), the single-connection `SELECT 1` shape measured 60.6 qps at
-a 4.08 ms p50 with a 43 ms p95 — extension `LOAD` time — and the 8-connection
-two-param shape aborted the VM in DuckDB's extension signature check
-(T-415) before finishing.
+An earlier revision of this script measured the whole pipeline through
+real sockets (`git log bench/pg_wire.exs`): ~150 qps on one Postgrex
+connection, ~530 qps at 8 raw connections, all of it the query service's
+per-job engine floor.
 
 ## What this settles
 
-- **The wire edge adds no meaningful overhead to a query.** The raw-portal
-  shape (one job per query, no driver) and Postgrex's `SELECT 1` (one job,
-  full Parse/Describe/Bind/Execute) sit within ~20% of each other; both are
-  the query service's per-job floor (`bench/query.exs`), not the protocol.
-- **A driver-shaped no-param query costs one job** (~3.4 ms p50 hot on this
-  machine), because `Describe` runs the statement once and the portal serves
-  the cached rows (T-405's design). A parameterised query costs two jobs —
-  the describe job then the execute job — and halves throughput: the number
-  that motivates native parameter binding (T-410).
-- **Fleets scale to the admission bound, then flatten**: 1 → 4 connections
-  scales ~2.5x; 4 → 8 adds little and lengthens the tail. The knob is
-  `max_concurrent_jobs` (default 8) and the cost behind it is one private
-  DuckDB engine per job.
-- **Extension `LOAD` dominates cold per-job engine cost** (~2.5x qps once
-  removed), and concurrent `LOAD`s across starting engines can abort the
-  whole VM — filed as T-415.
+- **The parser is nowhere near the bottleneck.** A driver-shaped query
+  costs the parsing layer ~9 µs end to end (batch decode 1.3 + oids 5.3 +
+  substitute 2.6); the job pipeline behind it costs ~3,400 µs. The wire
+  edge could parse ~100k queries per second per scheduler before this
+  layer mattered.
+- **The binary decoders are effectively free**: one five-message extended
+  batch decodes in 1.3 µs regardless of SQL size (2.8 GB/s on the big
+  query — the SQL rides through `Parse` as one binary, uncopied).
+- **The one soft spot is the lexer on large SQL**: `Statements.split` on
+  a 3.6 KB statement costs 47 µs because `SmolqueryPg.Sql` accumulates
+  reversed character lists per token. At 76 MB/s it still parses a
+  thousand such statements per scheduler-millisecond-budget, so nothing
+  needs to change until something feeds the edge very large SQL at rate;
+  the fix, if ever needed, is sub-binary slicing instead of char
+  accumulation.
+- **`Params.oids` (5.3 µs) runs once per `Parse`**, not per `Execute`, so
+  prepared-statement reuse already amortizes the priciest parser op.

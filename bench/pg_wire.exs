@@ -1,189 +1,152 @@
 Code.require_file("support.exs", __DIR__)
-Code.require_file("../test/support/fixed_catalog.ex", __DIR__)
-Code.require_file("../test/support/map_catalog.ex", __DIR__)
 Code.require_file("../test/support/pg_client.ex", __DIR__)
 
 defmodule Bench.PgWire do
   @moduledoc """
-  How many extended-protocol queries per second the Postgres wire edge
-  answers (PL-58).
+  What the Postgres wire edge's *parsing* layer costs, in isolation
+  (PL-58).
 
-  Every query is a full `Smolquery.QueryService` job — engine checkout,
-  plan, execute, frame — so this measures the edge's protocol overhead *on
-  top of* the job floor `bench/query.exs` priced, and how far concurrent
-  connections scale past one caller's floor.
+  No sockets and no query service: this measures the pure functions a
+  query passes through before any job runs — the binary message decode
+  (`SmolqueryPg.Protocol`), the statement splitter and keyword classifier
+  (`SmolqueryPg.Statements` / `SmolqueryPg.Sql`), and the per-`Bind`
+  parameter work (`SmolqueryPg.Params`). The whole-pipeline bench (this
+  script's previous life, `git log bench/pg_wire.exs`) showed the job
+  machinery dominates end-to-end latency; this answers the narrower
+  question of how much headroom the parser itself has.
 
-  The fleets default to 1, 4, and 8 connections — 8 is the query
-  service's own `max_concurrent_jobs` default. The bound gets `+ 4` of
-  headroom over the fleet so a describe-and-execute pair straddling two
-  connections is never shed: shedding is not what this measures. The job
-  engines load no extensions: this bench has no hot tier to read, and
-  concurrent extension `LOAD`s across starting engines abort the VM in
-  DuckDB's signature check (tracked separately) — also not what this
-  measures.
+  Each row is one operation timed over `REPS` iterations: operations per
+  second, microseconds per operation, and — where the input is bytes —
+  megabytes per second.
 
-  Three shapes, each at 1, `CONNS_MID`, and `CONNS` connections:
-
-    * **Postgrex, no parameters** — `Postgrex.query!(conn, "SELECT 1", [])`.
-      The driver sends Parse/Describe/Bind/Execute/Sync; the edge runs the
-      job once at Describe and the portal serves the cached rows: one job
-      per query.
-    * **Postgrex, two parameters** — `SELECT $1::bigint + $2::bigint`.
-      Describe must type the columns before values exist, so the edge runs
-      a describe job and then the real job: two jobs per query.
-    * **Raw portal** — the test client's Bind/Describe(portal)/Execute/Sync
-      without a statement describe: one job per query, no driver overhead.
-
-      SMOLQUERY_ROLES=query mix run bench/pg_wire.exs
-      CONNS=64 REPS=200 mix run bench/pg_wire.exs
+      mix run bench/pg_wire.exs
+      REPS=1000000 mix run bench/pg_wire.exs
   """
 
   import Bench.Support
 
-  alias Smolquery.QueryService
-  alias Smolquery.Test.FixedCatalog
-  alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.PgClient
+  alias SmolqueryPg.Params
+  alias SmolqueryPg.Protocol
+  alias SmolqueryPg.Sql
+  alias SmolqueryPg.Statements
 
-  @password "bench"
+  @small_sql "SELECT $1::bigint + $2::bigint AS sum"
+  @multi_sql "BEGIN; SELECT id, ts FROM analytics.events WHERE name = 'a;b' -- trailing; comment\n; COMMIT"
 
   def main do
-    Logger.configure(level: :warning)
+    reps = env("REPS", 200_000)
 
-    reps = env("REPS", 100)
-    conns_mid = env("CONNS_MID", 4)
-    conns = env("CONNS", 8)
-
-    query = start_query!(conns)
-    port = start_edge!(query)
+    big_sql = big_sql()
+    small_batch = extended_batch(@small_sql)
+    big_batch = extended_batch(big_sql)
+    two_params = [{20, 1, <<40::64-signed>>}, {20, 1, <<2::64-signed>>}]
+    small_oids = Params.oids(@small_sql, [0, 0])
 
     heading(
-      "Extended-protocol queries per second — port #{port}, " <>
-        "#{reps} queries per connection, fleets of 1 / #{conns_mid} / #{conns}"
+      "Wire-edge parser, no pipeline — #{reps} reps per row, " <>
+        "small query #{byte_size(@small_sql)} B, big query #{byte_size(big_sql)} B"
     )
 
     IO.puts(
-      label("shape", 26) <>
-        pad("conns", 6) <>
-        pad("qps", 9) <> pad("p50 ms", 9) <> pad("p95 ms", 9) <> pad("p99 ms", 9)
+      label("operation", 42) <>
+        pad("ops/s", 12) <> pad("us/op", 9) <> pad("MB/s", 9)
     )
 
-    for fleet <- [1, conns_mid, conns] do
-      run("postgrex SELECT 1", fleet, reps, fn -> postgrex_worker(port, "SELECT 1", []) end)
-    end
+    row("decode extended batch, small (5 msgs)", reps, byte_size(small_batch), fn ->
+      decode_all(small_batch)
+    end)
 
-    for fleet <- [1, conns_mid, conns] do
-      run(
-        "postgrex 2 params",
-        fleet,
-        reps,
-        fn -> postgrex_worker(port, "SELECT $1::bigint + $2::bigint AS sum", [40, 2]) end
-      )
-    end
+    row("decode extended batch, big (5 msgs)", reps, byte_size(big_batch), fn ->
+      decode_all(big_batch)
+    end)
 
-    for fleet <- [1, conns_mid, conns] do
-      run("raw portal, no describe", fleet, reps, fn -> raw_worker(port) end)
-    end
+    row("decode simple Query message", reps, byte_size(query_message(@small_sql)), fn ->
+      {:ok, _message, _rest} = Protocol.decode(query_message(@small_sql))
+    end)
+
+    row("split multi-statement Query (3 stmts)", reps, byte_size(@multi_sql), fn ->
+      [_a, _b, _c] = Statements.split(@multi_sql)
+    end)
+
+    row("split big single statement", reps, byte_size(big_sql), fn ->
+      [_one] = Statements.split(big_sql)
+    end)
+
+    row("leading_keyword", reps, byte_size(@small_sql), fn ->
+      "select" = Sql.leading_keyword(@small_sql)
+    end)
+
+    row("params: oids (2 casts)", reps, nil, fn ->
+      [20, 20] = Params.oids(@small_sql, [0, 0])
+    end)
+
+    row("params: substitute 2 binary params", reps, nil, fn ->
+      {:ok, _sql} = Params.substitute(@small_sql, typed(small_oids, two_params))
+    end)
 
     IO.puts("")
   end
 
-  defp run(shape, fleet, reps, worker) do
-    started = System.monotonic_time(:microsecond)
-
-    samples =
-      1..fleet
-      |> Task.async_stream(fn _connection -> worker.().(reps) end,
-        max_concurrency: fleet,
-        timeout: 300_000
-      )
-      |> Enum.flat_map(fn {:ok, samples} -> samples end)
-
-    elapsed_us = System.monotonic_time(:microsecond) - started
-    qps = Float.round(length(samples) * 1_000_000 / elapsed_us, 1)
-    sorted = Enum.sort(samples)
-
-    IO.puts(
-      label(shape, 26) <>
-        pad(fleet, 6) <>
-        pad(qps, 9) <>
-        pad(to_ms(percentile(sorted, 0.50)), 9) <>
-        pad(to_ms(percentile(sorted, 0.95)), 9) <> pad(to_ms(percentile(sorted, 0.99)), 9)
-    )
+  defp typed(oids, values) do
+    Enum.zip_with(oids, values, fn oid, {_oid, format, bytes} -> {oid, format, bytes} end)
   end
 
-  defp to_ms(us), do: Float.round(us / 1_000, 2)
+  defp row(name, reps, bytes, fun) do
+    fun.()
+    {us, :ok} = :timer.tc(fn -> loop(reps, fun) end)
+    ops = Float.round(reps * 1_000_000 / us, 0)
+    per_op = Float.round(us / reps, 2)
 
-  defp percentile(sorted, fraction) do
-    index = min(round(fraction * length(sorted)), length(sorted) - 1)
+    throughput =
+      if bytes, do: Float.round(bytes * reps / us, 1), else: ""
 
-    Enum.at(sorted, index)
+    IO.puts(label(name, 42) <> pad(ops, 12) <> pad(per_op, 9) <> pad(throughput, 9))
   end
 
-  defp postgrex_worker(port, sql, params) do
-    {:ok, conn} =
-      Postgrex.start_link(
-        hostname: "127.0.0.1",
-        port: port,
-        username: "bench",
-        password: @password,
-        database: "smolquery"
-      )
+  defp loop(0, _fun), do: :ok
 
-    Postgrex.query!(conn, sql, params)
-
-    fn reps ->
-      for _rep <- 1..reps do
-        started = System.monotonic_time(:microsecond)
-        Postgrex.query!(conn, sql, params)
-
-        System.monotonic_time(:microsecond) - started
-      end
-    end
+  defp loop(n, fun) do
+    fun.()
+    loop(n - 1, fun)
   end
 
-  defp raw_worker(port) do
-    {:ok, socket, _params} = PgClient.connect(port, password: @password)
-    %{errors: []} = PgClient.extended(socket, "SELECT 1", [])
+  defp decode_all(<<>>), do: :ok
 
-    fn reps ->
-      for _rep <- 1..reps do
-        started = System.monotonic_time(:microsecond)
-        %{errors: []} = PgClient.extended(socket, "SELECT 1", [])
+  defp decode_all(buffer) do
+    {:ok, _message, rest} = Protocol.decode(buffer)
 
-        System.monotonic_time(:microsecond) - started
-      end
-    end
+    decode_all(rest)
   end
 
-  defp start_query!(conns) do
-    name = __MODULE__.Query
+  defp query_message(sql), do: IO.iodata_to_binary(PgClient.frame(?Q, [sql, 0]))
 
-    {:ok, _pid} =
-      QueryService.Supervisor.start_link(
-        name: name,
-        catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
-        engine_extensions: [],
-        max_concurrent_jobs: conns + 4
-      )
-
-    name
+  defp extended_batch(sql) do
+    IO.iodata_to_binary([
+      PgClient.parse("", sql, [20, 20]),
+      PgClient.bind("", "", [{20, 1, <<40::64-signed>>}, {20, 1, <<2::64-signed>>}], [1]),
+      PgClient.describe(?P, ""),
+      PgClient.execute("", 0),
+      PgClient.frame(?S, [])
+    ])
   end
 
-  defp start_edge!(query) do
-    {:ok, _pid} =
-      SmolqueryPg.Supervisor.start_link(
-        name: __MODULE__.Edge,
-        password: @password,
-        auth: :cleartext,
-        query_name: query,
-        port: 0,
-        catalog: MapCatalog.new()
-      )
+  defp big_sql do
+    predicates =
+      Enum.map_join(1..40, " AND ", fn n ->
+        "(events.col_#{n} > #{n} OR events.name_#{n} = 'value with a fairly long string #{n}')"
+      end)
 
-    {:ok, {_ip, port}} = SmolqueryPg.Supervisor.bound(__MODULE__.Edge)
-
-    port
+    """
+    SELECT events.id, events.ts, events.name, sum(events.amount) AS total,
+           count(*) AS n, avg(events.duration_ms) AS avg_ms
+    FROM analytics.events AS events
+    JOIN analytics.clicks AS clicks ON clicks.id = events.id
+    WHERE events.ts > TIMESTAMP '2026-01-01 00:00:00' AND #{predicates}
+    GROUP BY events.id, events.ts, events.name
+    ORDER BY total DESC
+    LIMIT 100
+    """
   end
 end
 
