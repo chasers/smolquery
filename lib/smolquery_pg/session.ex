@@ -61,12 +61,13 @@ defmodule SmolqueryPg.Session do
   alias Smolquery.QueryService.Job
   alias SmolqueryPg.Errors
   alias SmolqueryPg.Params
+  alias SmolqueryPg.PgCatalog
   alias SmolqueryPg.Protocol
   alias SmolqueryPg.Runtime
   alias SmolqueryPg.Statements
   alias SmolqueryPg.Types
 
-  @server_version "16.0"
+  @server_version "14.10"
 
   @defaults %{
     "server_version" => @server_version,
@@ -514,12 +515,10 @@ defmodule SmolqueryPg.Session do
   defp outcome_map(columns, rows, tag, pre),
     do: %{columns: columns, rows: rows, tag: tag, pre: pre}
 
-  @leading_keyword ~r/^\s*(?:(?:--[^\n]*\n|\/\*.*?\*\/)\s*)*([A-Za-z_]+|\()/s
-
   defp classify(statement) do
-    case Regex.run(@leading_keyword, statement, capture: :all_but_first) do
-      [keyword] -> class(String.downcase(keyword))
-      nil -> {:unsupported, statement}
+    case Statements.leading_keyword(statement) do
+      "" -> {:unsupported, statement}
+      keyword -> class(keyword)
     end
   end
 
@@ -533,6 +532,27 @@ defmodule SmolqueryPg.Session do
   defp class(keyword), do: {:unsupported, String.upcase(keyword)}
 
   defp query(%__MODULE__{runtime: runtime} = session, sql) do
+    if PgCatalog.catalog_statement?(runtime.name, sql),
+      do: catalog_query(session, sql),
+      else: user_query(session, sql)
+  end
+
+  defp catalog_query(%__MODULE__{runtime: runtime} = session, sql) do
+    case PgCatalog.query(runtime.name, sql, session.settings) do
+      {:ok, columns, rows} ->
+        columns = Enum.map(columns, &pg_array_column/1)
+
+        {:ok, outcome_map(columns, rows, "SELECT #{length(rows)}", []), session}
+
+      {:error, reason} ->
+        fail(session, reason)
+    end
+  end
+
+  defp pg_array_column({name, {:list, inner}, json?}), do: {name, {:pg_array, inner}, json?}
+  defp pg_array_column(column), do: column
+
+  defp user_query(%__MODULE__{runtime: runtime} = session, sql) do
     timeout = timeout_ms(session)
 
     with {:ok, job} <- Client.submit(runtime.query_name, sql, timeout_ms: timeout),

@@ -10,7 +10,7 @@ psql "host=127.0.0.1 port=5432 user=smolquery password=$SMOLQUERY_API_KEY"
 smolquery=> SELECT count(*) AS n FROM analytics.events;
 ```
 
-## What works today (layers 1 and 2)
+## What works today (layers 1 to 3)
 
 - **Startup and cleartext password auth.** The password is the API key
   (`SMOLQUERY_API_KEY`), or `SMOLQUERY_PG_PASSWORD` when set. The user and
@@ -46,6 +46,19 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   binds it serves the same rows: one job per driver-shaped query.
 - **Cancellation.** `BackendKeyData` is real: a `CancelRequest` quoting it
   cancels the session's running job (`57014`).
+- **`pg_catalog`.** A statement whose tables all live in `pg_catalog` or
+  `information_schema` runs in an emulation engine (`SmolqueryPg.PgCatalog`)
+  instead of the query service: a static `pg_type`/`pg_range`/`pg_collation`
+  snapshot from a real Postgres — so the OIDs drivers key on are the real
+  ones — plus `pg_namespace`, `pg_class`, and `pg_attribute` generated from
+  the smolquery catalog, the neighbouring catalogs as empty tables, and the
+  functions the client corpus calls as macros. Postgrex connects and its
+  type bootstrap answers; `psql`'s `\dn`, `\dt`, `\d table` work;
+  `information_schema.tables`/`columns`/`schemata` answer;
+  `SELECT version()` says PostgreSQL. A dialect rewrite bridges the rest:
+  Postgres's `~` operators become `regexp_matches`, `pg_catalog.`
+  qualifications drop, `reg*` casts become `BIGINT`, and
+  `current_setting('x')` inlines the session's value.
 
 Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
@@ -53,11 +66,10 @@ Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
 Each is a layer of PL-58, in order:
 
-- `pg_catalog` and `information_schema`. Drivers that bootstrap from
-  `pg_type` — Postgrex, psycopg's binary adapters — and `psql`'s `\d`
-  commands do not answer yet.
 - Cursors (`DECLARE`/`FETCH`), `EXPLAIN`, and `postgres_fdw`.
 - SCRAM-SHA-256 and TLS.
+- `information_schema` breadth for BI tools (T-412): the three core views
+  exist; the long tail does not.
 
 ## Types
 
