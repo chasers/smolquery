@@ -274,10 +274,10 @@ defmodule Smolquery.QueryService.Planner do
 
       hot = bounded(runtime, connection, statement, refs, tables, pruned, params)
 
+      query = %{sql: sql, canonical: canonical, params: params}
+
       {:ok,
-       Trace.span(:build, fn ->
-         build(sql, canonical, snapshot, refs, tables, members, hot, attaches, params)
-       end)}
+       Trace.span(:build, fn -> build(query, snapshot, refs, tables, members, hot, attaches) end)}
     end
   end
 
@@ -668,17 +668,17 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(sql, canonical, snapshot, refs, tables, members, hot, attaches, params) do
+  defp build(query, snapshot, refs, tables, members, hot, attaches) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
 
     %Plan{
-      sql: sql,
-      canonical_sql: canonical,
+      sql: query.sql,
+      canonical_sql: query.canonical,
       snapshot: snapshot,
       tables: refs,
       statements: attaches ++ statements,
       federated: attaches != [],
-      params: params,
+      params: query.params,
       hot: hot,
       hot_members:
         Map.new(members, fn {ref, entries} ->

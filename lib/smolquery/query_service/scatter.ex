@@ -127,17 +127,7 @@ defmodule Smolquery.QueryService.Scatter do
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
-      run(
-        runtime,
-        connection,
-        decomposition,
-        plan.params,
-        ref,
-        schema,
-        shards,
-        job_id,
-        timeout_ms
-      )
+      run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
     else
       {:refused, reason} ->
         Logger.debug(fn -> "distributed query refused: #{inspect(reason)}" end)
@@ -216,23 +206,13 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp run(runtime, connection, decomposition, params, ref, schema, shards, job_id, timeout_ms) do
+  defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
 
     try do
       with {:ok, paths} <-
-             gather(
-               runtime,
-               decomposition,
-               params,
-               ref,
-               schema,
-               shards,
-               partials_dir,
-               job_id,
-               timeout_ms
-             ),
+             gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
         measurements = %{
           shards: length(shards),
@@ -260,17 +240,7 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp gather(
-         runtime,
-         decomposition,
-         params,
-         ref,
-         schema,
-         shards,
-         partials_dir,
-         job_id,
-         timeout_ms
-       ) do
+  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms) do
     shards
     |> Enum.with_index()
     |> Task.async_stream(
@@ -278,7 +248,7 @@ defmodule Smolquery.QueryService.Scatter do
         request = %{
           statements: Views.table_view(ref, schema, Views.parquet_select(files)),
           partial_sql: decomposition.partial_sql,
-          params: params,
+          params: decomposition.params,
           allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
           timeout_ms: timeout_ms
         }

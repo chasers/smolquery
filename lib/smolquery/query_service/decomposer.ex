@@ -78,10 +78,11 @@ defmodule Smolquery.QueryService.Decomposer do
                gen_random_uuid setseed nextval currval)
 
   @enforce_keys [:partial_sql, :final_select, :final_group, :final_tail]
-  defstruct [:partial_sql, :final_select, :final_group, :final_tail]
+  defstruct [:partial_sql, :final_select, :final_group, :final_tail, params: []]
 
   @type t :: %__MODULE__{
           partial_sql: String.t(),
+          params: [term()],
           final_select: String.t(),
           final_group: String.t(),
           final_tail: String.t()
@@ -114,6 +115,7 @@ defmodule Smolquery.QueryService.Decomposer do
       {:ok,
        %__MODULE__{
          partial_sql: partial_sql,
+         params: params,
          final_select: final_select(items, outputs),
          final_group: final_group(keys),
          final_tail: tail
