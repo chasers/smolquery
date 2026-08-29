@@ -98,8 +98,12 @@ defmodule Smolquery.QueryService.Decomposer do
   partial for the integer-exactness cast — three round trips, no data
   touched. The partial references the planned view name, so the connection
   must already hold the plan's views.
+
+  `params` bind the query's `$n` placeholders: the `DESCRIBE` that checks
+  the partial binds them, and they ride the result as `params` so each
+  scatter partial binds the same values.
   """
-  @spec decompose(GenServer.server(), String.t(), [output()], [String.t()]) ::
+  @spec decompose(GenServer.server(), String.t(), [output()], [String.t()], [term()]) ::
           {:ok, t()} | {:error, term()}
   def decompose(connection, sql, outputs, table_columns, params \\ []) do
     with :ok <- gate_columns(table_columns),

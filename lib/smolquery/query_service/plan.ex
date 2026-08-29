@@ -34,8 +34,8 @@ defmodule Smolquery.QueryService.Plan do
   placeholders (T-410). They ride the plan so every consumer that prepares
   the statement — the runner's frame, a `DESCRIBE`, a scatter partial's
   `COPY` — binds the same values, and so the pruner and the Top-N bound
-  can read them where the SQL says `$n`. They never reach the job or its
-  history.
+  can read them where the SQL says `$n`. They never enter the job's stored
+  SQL; an engine error message can still quote a bound value.
 
   `federated` says whether `statements` opens with `ATTACH`es for registered
   Postgres connections (T-324). The runner reads it to decide whether the job

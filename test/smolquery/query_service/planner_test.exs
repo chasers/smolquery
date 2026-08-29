@@ -579,6 +579,27 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert ids(unbound.hot[@table]) == ["01A", "01B"]
     end
 
+    test "a DateTime bound as $1 prunes by its UTC instant, as the engine binds it (T-426)" do
+      stats = %{
+        "ts" => %{
+          "min" => %{"type" => "naive_datetime", "value" => "2026-01-01T00:00:00"},
+          "max" => %{"type" => "naive_datetime", "value" => "2026-01-01T01:00:00"},
+          "null_count" => 0
+        }
+      }
+
+      runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])
+      sql = "SELECT * FROM analytics.events WHERE ts > $1"
+
+      half_past_midnight_utc =
+        ~N[2026-01-01 02:30:00]
+        |> DateTime.from_naive!("Etc/UTC")
+        |> Map.merge(%{time_zone: "Etc/GMT-2", zone_abbr: "+02", utc_offset: 7200})
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql, params: [half_past_midnight_utc])
+      assert ids(plan.hot[@table]) == ["01A", "01B"]
+    end
+
     test "stats that leave a chance keep their entry" do
       stats = %{"id" => %{"min" => 1, "max" => 200, "null_count" => 0}}
       runtime = runtime([entry("01A", %{"stats" => stats})])
@@ -835,6 +856,22 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert %{meta: %{bounded: false, rounds: 0}} =
                collector |> Trace.stop() |> Enum.find(&(&1.name == :top_n))
+    end
+
+    @tag :tmp_dir
+    test "a $n outside the WHERE skips the probe, which could not bind it (T-426)", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+
+      sql =
+        "SELECT ts, $2 AS label FROM analytics.events WHERE project = $1 ORDER BY ts DESC LIMIT 3"
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql, params: ["c", "x"])
+          assert ids(plan.hot[@table]) == ids(entries)
+        end)
+
+      refute log =~ "top-n probe failed"
     end
 
     @tag :tmp_dir

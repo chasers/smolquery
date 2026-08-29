@@ -61,6 +61,54 @@ defmodule SmolqueryPg.CatalogWireTest do
     %{socket: socket, catalog: catalog}
   end
 
+  test "two result columns of one name both answer: the re-select labels them (T-426)", %{
+    socket: socket
+  } do
+    assert %{
+             errors: [],
+             results: [
+               %{columns: [%{name: "count_star()"}, %{name: "count_star()_1"}], rows: [[n, n]]}
+             ]
+           } =
+             PgClient.query(
+               socket,
+               "SELECT count(*), count(*) FROM pg_catalog.pg_class WHERE relname = 'events'"
+             )
+
+    assert n == "1"
+  end
+
+  test "to_regclass resolves a qualified name to its schema's table (T-426)", %{
+    socket: socket,
+    catalog: catalog
+  } do
+    :ok = Catalog.create_dataset(catalog, "billing")
+    :ok = Catalog.create_table(catalog, {"billing", "events"}, Schema.new!([{"id", :int64}]))
+
+    assert %{errors: [], results: [%{rows: [["billing"]]}]} =
+             PgClient.query(
+               socket,
+               "SELECT n.nspname FROM pg_catalog.pg_class c " <>
+                 "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " <>
+                 "WHERE c.oid = to_regclass('billing.events')"
+             )
+
+    assert %{errors: [], results: [%{rows: [[_oid]]}]} =
+             PgClient.query(
+               socket,
+               "SELECT to_regclass('events') FROM pg_catalog.pg_namespace LIMIT 1"
+             )
+  end
+
+  test "pg_settings and current_setting answer the same value (T-426)", %{socket: socket} do
+    assert %{errors: [], results: [%{rows: [["public", "public"]]}]} =
+             PgClient.query(
+               socket,
+               "SELECT setting, current_setting('search_path') FROM pg_catalog.pg_settings " <>
+                 "WHERE name = 'search_path'"
+             )
+  end
+
   test "a catalog query binds its parameters on the catalog engine (T-410)", %{socket: socket} do
     assert %{errors: [], results: [%{rows: [["events"]]}]} =
              PgClient.extended(

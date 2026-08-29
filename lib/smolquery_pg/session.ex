@@ -103,6 +103,14 @@ defmodule SmolqueryPg.Session do
     "extra_float_digits" => "1"
   }
 
+  @doc """
+  The settings a new session starts with. `SmolqueryPg.PgCatalog` builds
+  its `pg_settings` rows from this map and the server settings, so the
+  table and `current_setting` agree.
+  """
+  @spec defaults() :: %{String.t() => String.t()}
+  def defaults, do: @defaults
+
   @reported ~w(server_version server_encoding client_encoding DateStyle IntervalStyle TimeZone
                integer_datetimes standard_conforming_strings is_superuser application_name
                session_authorization)
@@ -529,7 +537,9 @@ defmodule SmolqueryPg.Session do
 
   @doc """
   Runs one statement and answers its outcome. An error marks an open
-  transaction block failed.
+  transaction block failed. `params` bind the statement's `$n`
+  placeholders: a `SELECT`, an `EXPLAIN`, and a `DECLARE ... CURSOR FOR`
+  take them; any other class with parameters answers `0A000`.
   """
   @spec run(t(), String.t(), [term()]) ::
           {:ok, outcome(), t()} | {:error, Errors.wire_error(), t()}
@@ -551,20 +561,19 @@ defmodule SmolqueryPg.Session do
     end
   end
 
-  def run(%__MODULE__{} = session, statement, []),
-    do: dispatch(classify(statement), session, statement)
+  def run(%__MODULE__{} = session, statement, params),
+    do: dispatch(classify(statement), session, statement, params)
 
-  def run(%__MODULE__{} = session, statement, params) do
-    case classify(statement) do
-      :query ->
-        query(session, statement, params)
+  defp dispatch(:query, session, statement, params), do: query(session, statement, params)
+  defp dispatch(:explain, session, statement, params), do: explain(session, statement, params)
+  defp dispatch(:declare, session, statement, params), do: declare(session, statement, params)
+  defp dispatch(class, session, statement, []), do: dispatch(class, session, statement)
 
-      _not_a_query ->
-        {:error, {"0A000", "bind parameters are supported in a SELECT only"}, failed(session)}
-    end
+  defp dispatch(_class, session, _statement, _params) do
+    {:error, {"0A000", "bind parameters are supported in SELECT, EXPLAIN, and DECLARE only"},
+     failed(session)}
   end
 
-  defp dispatch(:query, session, statement), do: query(session, statement)
   defp dispatch(:set, session, statement), do: set(session, statement)
   defp dispatch(:reset, session, _statement), do: {:ok, command("RESET"), session}
   defp dispatch(:show, session, statement), do: show(session, statement)
@@ -576,12 +585,10 @@ defmodule SmolqueryPg.Session do
 
   defp dispatch(:savepoint, session, statement), do: savepoint(session, statement)
   defp dispatch(:rollback_to, session, statement), do: rollback_to(session, statement)
-  defp dispatch(:declare, session, statement), do: declare(session, statement)
   defp dispatch(:fetch, session, statement), do: fetch(session, statement)
   defp dispatch(:close_cursor, session, statement), do: close_cursor(session, statement)
   defp dispatch(:deallocate, session, statement), do: deallocate(session, statement)
   defp dispatch(:discard, session, statement), do: discard(session, statement)
-  defp dispatch(:explain, session, statement), do: explain(session, statement)
   defp dispatch({:unsupported, keyword}, session, _statement), do: unsupported(session, keyword)
 
   defp classify(statement) do
@@ -624,7 +631,7 @@ defmodule SmolqueryPg.Session do
   defp outcome_map(columns, rows, tag, pre),
     do: %{columns: columns, rows: rows, tag: tag, pre: pre}
 
-  defp query(%__MODULE__{runtime: runtime} = session, sql, params \\ []) do
+  defp query(%__MODULE__{runtime: runtime} = session, sql, params) do
     if PgCatalog.catalog_statement?(runtime.name, sql),
       do: catalog_query(session, sql, params),
       else: user_query(session, sql, params)
@@ -1280,9 +1287,9 @@ defmodule SmolqueryPg.Session do
   defp tag(:commit), do: "COMMIT"
   defp tag(:rollback), do: "ROLLBACK"
 
-  defp declare(%__MODULE__{} = session, statement) do
+  defp declare(%__MODULE__{} = session, statement, params) do
     with {:ok, name, query_sql} <- Cursors.parse_declare(statement),
-         {:ok, outcome, session} <- run(session, query_sql) do
+         {:ok, outcome, session} <- run(session, query_sql, params) do
       cursors = Map.put(session.cursors, name, %{outcome: outcome, offset: 0})
 
       {:ok, command("DECLARE CURSOR"), %{session | cursors: cursors}}
@@ -1364,10 +1371,10 @@ defmodule SmolqueryPg.Session do
     Map.merge(@defaults, Map.take(settings, ["session_authorization", "application_name"]))
   end
 
-  defp explain(session, statement) do
+  defp explain(session, statement, params) do
     sql = statement |> strip_explain() |> String.trim()
 
-    case run_job(session, sql, explain: :plan, timeout_ms: timeout_ms(session)) do
+    case run_job(session, sql, explain: :plan, params: params, timeout_ms: timeout_ms(session)) do
       {:ok, job, _frame, session} ->
         rows = estimated_rows(job)
 

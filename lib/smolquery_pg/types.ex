@@ -120,7 +120,7 @@ defmodule SmolqueryPg.Types do
     "TIMESTAMP" => {1114, 8, -1},
     "TIMESTAMP WITH TIME ZONE" => {1184, 8, -1},
     "TIMESTAMPTZ" => {1184, 8, -1},
-    "JSON" => {3802, -1, -1},
+    "JSON" => {25, -1, -1},
     "VARIANT" => {3802, -1, -1}
   }
   @duckdb_integers Map.new(
@@ -255,6 +255,12 @@ defmodule SmolqueryPg.Types do
       do: {:ok, {:numeric, text}},
       else: parse_float(text)
   end
+
+  defp decode_text_param(oid, "infinity") when oid in [1114, 1184],
+    do: {:ok, {:timestamp, :infinity}}
+
+  defp decode_text_param(oid, "-infinity") when oid in [1114, 1184],
+    do: {:ok, {:timestamp, :neg_infinity}}
 
   defp decode_text_param(oid, text) when oid in [1114, 1184] do
     case NaiveDateTime.from_iso8601(String.replace(text, ~r/[+-]\d\d(:?\d\d)?$/, "")) do

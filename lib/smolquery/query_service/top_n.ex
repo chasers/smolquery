@@ -134,6 +134,10 @@ defmodule Smolquery.QueryService.TopN do
 
   `refs` are the statement's resolved table references; the FROM table must
   be one of them.
+
+  A `$n` outside the `WHERE` and the first ordering key makes the query
+  ineligible: the probe drops the select list and the later keys, and
+  DuckDB refuses a bind with more values than placeholders.
   """
   @spec spec(map(), [Catalog.table_ref()]) :: t() | nil
   def spec(%{"node" => %{"type" => "SELECT_NODE"} = node} = statement, refs) do
@@ -141,6 +145,7 @@ defmodule Smolquery.QueryService.TopN do
          true <- simple?(node),
          true <- single_reference?(statement),
          {:ok, modifiers} <- modifiers(node["modifiers"]),
+         true <- parameter_free?(node["select_list"], modifiers.order["orders"]),
          {:ok, column, direction} <- order(modifiers.order, source),
          true <- stored_column?(node["select_list"], column),
          {:ok, limit} <- limit(modifiers.limit) do
@@ -486,6 +491,14 @@ defmodule Smolquery.QueryService.TopN do
        do: {:ok, column}
 
   defp column(_expression, _source), do: :error
+
+  defp parameter_free?(select_list, orders),
+    do: not parameter?([select_list, Enum.drop(orders, 1)])
+
+  defp parameter?(%{"class" => "PARAMETER"}), do: true
+  defp parameter?(%{} = node), do: Enum.any?(node, fn {_key, child} -> parameter?(child) end)
+  defp parameter?(list) when is_list(list), do: Enum.any?(list, &parameter?/1)
+  defp parameter?(_leaf), do: false
 
   defp stored_column?(select_list, column) do
     Enum.all?(select_list, fn item ->

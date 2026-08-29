@@ -38,6 +38,7 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
   textually because DuckDB reserves the `information_schema` name.
   """
 
+  alias Smolquery.Identifier
   alias SmolqueryPg.Sql
 
   @doc """
@@ -78,7 +79,10 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
          [_all, tail_rest] <- Regex.run(~r/^\s*(?:,\s*(?:true|false)\s*)?\)(.*)$/is, tail) do
       value = setting_literal(settings, String.trim(string, "'"))
 
-      rewrite_setting_calls([{:code, tail_rest} | rest], settings, [{:code, head <> value} | acc])
+      rewrite_setting_calls([{:code, tail_rest} | rest], settings, [
+        {:string, value},
+        {:code, head} | acc
+      ])
     else
       nil ->
         rewrite_setting_calls([{:string, string}, {:code, tail} | rest], settings, [
@@ -92,8 +96,7 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
 
   defp rewrite_setting_calls([], _settings, acc), do: Enum.reverse(acc)
 
-  defp setting_literal(settings, name),
-    do: "'" <> String.replace(setting_value(settings, name), "'", "''") <> "'"
+  defp setting_literal(settings, name), do: Identifier.sql_string(setting_value(settings, name))
 
   @reg_lookups %{
     "regclass" => {"pg_class", "relname"},
@@ -180,6 +183,16 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
     "default_transaction_read_only" => "off",
     "in_hot_standby" => "off"
   }
+
+  @doc """
+  The server-level settings `current_setting` answers when the session has
+  no value of its own: the constants a driver probes (`max_index_keys`,
+  `server_version_num`, ...). `SmolqueryPg.PgCatalog` builds its
+  `pg_settings` rows from this map and the session defaults, so the table
+  and the function agree.
+  """
+  @spec server_settings() :: %{String.t() => String.t()}
+  def server_settings, do: @server_settings
 
   defp setting_value(settings, name) do
     Map.get_lazy(settings, name, fn -> insensitive_setting(settings, name) end) ||

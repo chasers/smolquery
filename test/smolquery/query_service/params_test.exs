@@ -53,8 +53,10 @@ defmodule Smolquery.QueryService.ParamsTest do
     assert [%{"column_name" => "n", "column_type" => "BIGINT"}] = DataFrame.to_rows(frame)
   end
 
-  test "explain: with params is refused: DuckDB cannot prepare an EXPLAIN (T-410)", %{name: name} do
-    assert {:ok, %{state: :error, error: :explain_with_params}, nil} =
+  test "explain: binds its parameters to the EXPLAIN (T-426)", %{name: name} do
+    assert {:ok, %{state: :done, explain: plan}, nil} =
              Client.query(name, "SELECT $1 AS n", explain: :plan, params: [1])
+
+    assert plan =~ "PROJECTION"
   end
 end

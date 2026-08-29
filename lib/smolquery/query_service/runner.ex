@@ -127,8 +127,7 @@ defmodule Smolquery.QueryService.Runner do
       timeout_ms: timeout_ms,
       job: job,
       explain: mode(opts),
-      pin: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids]),
-      params: Keyword.get(opts, :params, []),
+      plan_opts: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids, :params]),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
       engine: nil,
@@ -158,7 +157,7 @@ defmodule Smolquery.QueryService.Runner do
         runtime = state.runtime
         sql = state.job.sql
         explain = state.explain
-        opts = state.pin ++ [params: state.params]
+        opts = state.plan_opts
         connection = engine.connection
         job_id = state.job.id
         timeout_ms = state.timeout_ms
@@ -275,8 +274,7 @@ defmodule Smolquery.QueryService.Runner do
   defp execute(runtime, connection, sql, explain, opts, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
-    with :ok <- bindable(explain, Keyword.fetch!(opts, :params)),
-         {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
+    with {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
@@ -309,11 +307,6 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
-  defp bindable(explain, [_ | _]) when explain in [:plan, :analyze],
-    do: {:error, :explain_with_params}
-
-  defp bindable(_explain, _params), do: :ok
-
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
     with {:ok, prepared} <- variants(connection, plan) do
       run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms)
@@ -329,7 +322,7 @@ defmodule Smolquery.QueryService.Runner do
 
   defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id, _timeout_ms) do
     with {:ok, result} <-
-           Connection.query(connection, explain_sql(explain, plan.sql), [], :infinity) do
+           Connection.query(connection, explain_sql(explain, plan.sql), plan.params, :infinity) do
       {:ok, {{:explain, explain_text(result)}, nil, []}}
     end
   end

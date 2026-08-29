@@ -375,13 +375,50 @@ defmodule SmolqueryPg.WireTest do
       assert %{results: [%{rows: [["1"]]}]} = PgClient.extended(socket, "SELECT 1")
     end
 
-    test "EXPLAIN with bind parameters answers 0A000: it cannot be prepared", %{port: port} do
+    test "EXPLAIN binds its parameters and answers a plan (T-426)", %{port: port} do
       {socket, _params} = connect(port)
 
-      assert %{errors: [%{"C" => "0A000"}]} =
+      assert %{errors: [], results: [%{rows: [[plan]]}]} =
                PgClient.extended(socket, "EXPLAIN SELECT $1", [{20, 0, "1"}])
 
-      assert %{results: [%{rows: [["1"]]}]} = PgClient.extended(socket, "SELECT 1")
+      assert plan =~ "Foreign Scan"
+    end
+
+    test "a NULL binds typed; a json value is text, as every JSON expression is (T-426)", %{
+      port: port
+    } do
+      {socket, _params} = connect(port)
+
+      assert %{errors: [], results: [%{rows: [[nil]]}]} =
+               PgClient.extended(socket, "SELECT 1 + $1 AS n", [{20, 0, nil}])
+
+      assert %{errors: [], results: [%{columns: [%{name: "j", oid: 25}], rows: [[json]]}]} =
+               PgClient.extended(socket, "SELECT $1 AS j", [{3802, 0, ~s({"a":1})}])
+
+      assert json == ~s({"a":1})
+
+      assert %{results: [%{columns: [%{oid: 25}]}]} =
+               PgClient.query(socket, ~s|SELECT '{"a":1}'::JSON AS j|)
+    end
+
+    test "a DECLARE binds its parameters; a SET with parameters answers 0A000 (T-426)", %{
+      port: port
+    } do
+      {socket, _params} = connect(port)
+      assert %{results: [%{tag: "BEGIN"}]} = PgClient.query(socket, "BEGIN")
+
+      assert %{errors: [], results: [%{tag: "DECLARE CURSOR"}]} =
+               PgClient.extended(
+                 socket,
+                 "DECLARE c CURSOR FOR SELECT range AS n FROM range(5) WHERE range > $1",
+                 [{20, 0, "2"}]
+               )
+
+      assert %{results: [%{rows: [["3"], ["4"]], tag: "FETCH 2"}]} =
+               PgClient.query(socket, "FETCH ALL FROM c")
+
+      assert %{errors: [%{"C" => "0A000"}]} =
+               PgClient.extended(socket, "SET application_name = $1", [{25, 0, "x"}])
     end
 
     test "a wrong parameter count is a protocol error", %{port: port} do
