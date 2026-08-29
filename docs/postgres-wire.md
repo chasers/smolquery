@@ -130,6 +130,16 @@ the node only with `SMOLQUERY_PG_TLS_CERT`/`_KEY` set, or behind a TLS
 terminator. The `ErrorResponse` for a wrong password names the user,
 never the password.
 
+The edge holds a few more lines. The SCRAM verifier derives once at boot,
+so an unauthenticated reconnect storm cannot buy PBKDF2 CPU with garbage
+proofs. The password normalizes to NFKC before the derivation — the core
+of SASLprep, which libpq applies client-side; the prohibited-character
+tables are not enforced. Bytes pipelined behind an `SSLRequest` are
+refused rather than carried across the upgrade, and a connection that has
+not authenticated within 30 seconds (`auth_timeout_ms`) is closed, TLS
+handshake included. Certificate and key files are read and PEM-checked at
+boot, so a typo'd path fails the node instead of every client.
+
 Every SQL string is untrusted, the same as on the HTTP API: the planner's
 gate and the job engine's lockdown apply unchanged.
 

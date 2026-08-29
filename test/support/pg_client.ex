@@ -56,7 +56,6 @@ defmodule Smolquery.Test.PgClient do
   defp auth_outcome(socket) do
     case recv(socket) do
       {:ok, {?R, <<0::32>>}} -> {:ok, socket}
-      {:ok, {?R, <<12::32, _final::binary>>}} -> auth_outcome(socket)
       {:ok, {?E, body}} -> {:error, fields(body)}
       other -> {:error, other}
     end
@@ -75,9 +74,25 @@ defmodule Smolquery.Test.PgClient do
 
     case recv(socket) do
       {:ok, {?R, <<11::32, server_first::binary>>}} ->
-        :ok = :gen_tcp.send(socket, client_final(password, client_first_bare, server_first))
+        {message, expected_signature} = client_final(password, client_first_bare, server_first)
+        :ok = :gen_tcp.send(socket, message)
 
-        auth_outcome(socket)
+        verify_server(socket, expected_signature)
+
+      {:ok, {?E, body}} ->
+        {:error, fields(body)}
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp verify_server(socket, expected_signature) do
+    case recv(socket) do
+      {:ok, {?R, <<12::32, "v=", signature::binary>>}} ->
+        if Base.decode64!(signature) == expected_signature,
+          do: auth_outcome(socket),
+          else: {:error, :server_signature_mismatch}
 
       {:ok, {?E, body}} ->
         {:error, fields(body)}
@@ -98,16 +113,13 @@ defmodule Smolquery.Test.PgClient do
     auth_message = Enum.join([client_first_bare, server_first, without_proof], ",")
     signature = :crypto.mac(:hmac, :sha256, stored_key, auth_message)
     proof = Base.encode64(:crypto.exor(client_key, signature))
+    server_key = :crypto.mac(:hmac, :sha256, salted, "Server Key")
+    expected_signature = :crypto.mac(:hmac, :sha256, server_key, auth_message)
 
-    frame(?p, [without_proof, ",p=", proof])
+    {frame(?p, [without_proof, ",p=", proof]), expected_signature}
   end
 
-  defp scram_attributes(message) do
-    for part <- String.split(message, ","), part != "", into: %{} do
-      <<key, ?=, value::binary>> = part
-      {<<key>>, value}
-    end
-  end
+  defp scram_attributes(message), do: SmolqueryPg.Scram.attributes(message)
 
   @doc """
   The `BackendKeyData` the server sent this socket at startup.
