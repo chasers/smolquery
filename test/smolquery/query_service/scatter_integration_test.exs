@@ -134,9 +134,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp both(control, distributed, sql) do
-    assert {:ok, %{state: :done}, control_frame} = Client.query(control, sql)
-    assert {:ok, %{state: :done}, distributed_frame} = Client.query(distributed, sql)
+  defp both(control, distributed, sql, opts \\ []) do
+    assert {:ok, %{state: :done}, control_frame} = Client.query(control, sql, opts)
+    assert {:ok, %{state: :done}, distributed_frame} = Client.query(distributed, sql, opts)
 
     assert DataFrame.names(control_frame) == DataFrame.names(distributed_frame)
 
@@ -231,6 +231,20 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       control,
       distributed,
       "SELECT count(*) AS n FROM analytics.events WHERE id > 6"
+    )
+
+    assert_received {:scatter, _measurements, _meta}
+  end
+
+  test "a filtered aggregate binds its parameter on every partial (T-410)", %{
+    control: control,
+    distributed: distributed
+  } do
+    both(
+      control,
+      distributed,
+      "SELECT count(*) AS n FROM analytics.events WHERE id > $1",
+      params: [6]
     )
 
     assert_received {:scatter, _measurements, _meta}

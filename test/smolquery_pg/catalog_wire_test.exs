@@ -61,6 +61,15 @@ defmodule SmolqueryPg.CatalogWireTest do
     %{socket: socket, catalog: catalog}
   end
 
+  test "a catalog query binds its parameters on the catalog engine (T-410)", %{socket: socket} do
+    assert %{errors: [], results: [%{rows: [["events"]]}]} =
+             PgClient.extended(
+               socket,
+               "SELECT relname FROM pg_catalog.pg_class WHERE relname = $1",
+               [{25, 0, "events"}]
+             )
+  end
+
   test "answers Postgrex's type bootstrap with real Postgres OIDs", %{socket: socket} do
     bootstrap = """
     SELECT t.oid, t.typname, t.typsend, t.typreceive, t.typoutput, t.typinput,

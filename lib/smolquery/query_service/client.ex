@@ -47,6 +47,7 @@ defmodule Smolquery.QueryService.Client do
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
           | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
+          | {:params, [term()]}
 
   @submit_option_keys [
     :timeout_ms,
@@ -56,7 +57,8 @@ defmodule Smolquery.QueryService.Client do
     :distributed,
     :snapshot,
     :hot_before_ms,
-    :hot_ids
+    :hot_ids,
+    :params
   ]
 
   @doc """
@@ -82,6 +84,12 @@ defmodule Smolquery.QueryService.Client do
   submit time to every later job, and each table's `job.hot_members`
   from the job that first touched it. A pinned id the hot tier no longer
   holds fails the job with `{:pinned_hot_retired, ref, ids}`.
+  `params:` binds the query's `$n` placeholders positionally (T-410) —
+  integers, floats, strings, booleans, `Decimal`, `Date`, `NaiveDateTime`,
+  or an `Adbc.Column` for a blob — as engine parameters, never as SQL
+  text; the pruner and the Top-N bound read them where the `WHERE` names
+  a `$n`. An `explain:` job cannot bind parameters (DuckDB cannot prepare
+  an `EXPLAIN`) and fails with `:explain_with_params`.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which

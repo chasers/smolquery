@@ -42,12 +42,16 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   `Close`, `Flush`, `Sync`; named prepared statements and portals; an
   `Execute` row limit answers `PortalSuspended` and a later `Execute`
   continues the portal. Results in binary format on request, every type.
-- **Parameters.** A `Bind` value becomes a typed SQL literal in place of
-  its `$n` (`SmolqueryPg.Params`) — text and binary formats, decoded by the
-  declared OID, so a text value can never leave its quotes. The edge
-  infers no types: an undeclared parameter is `text`, and a cast the
-  client writes (`$1::bigint`) is read as its declaration. Native binding
-  through the query service replaces the substitution later (T-410).
+- **Parameters.** A `Bind` value is decoded by its declared OID and
+  format (`SmolqueryPg.Params`) and bound as an engine parameter through
+  the query service (T-410): the SQL keeps its `$n`, DuckDB prepares it,
+  and no client value is ever SQL text. The pruner and the Top-N bound
+  read the bound values where the `WHERE` names a `$n`, so a
+  driver-shaped time-range query keeps its hot-tier optimisations. The
+  edge infers no types: an undeclared parameter is `text`, and a cast the
+  client writes (`$1::bigint`) is read as its declaration. Parameters
+  bind in a `SELECT` only; `EXPLAIN` of a parameterised statement answers
+  `0A000`, since DuckDB cannot prepare an `EXPLAIN`.
 - **`Describe` before `Bind`.** A statement with parameters is described
   through the query service's `describe` mode — the planner plans it for
   real, and DuckDB's `DESCRIBE` names the columns without running the

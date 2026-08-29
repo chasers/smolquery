@@ -123,11 +123,21 @@ defmodule Smolquery.QueryService.Scatter do
   defp attempt(runtime, connection, plan, job_id, timeout_ms, outputs) do
     with {:ok, ref} <- single_table(plan),
          {:ok, schema} <- planned_schema(plan, ref),
-         {:ok, outputs} <- describe(connection, plan.canonical_sql, outputs),
+         {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
-      run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
+      run(
+        runtime,
+        connection,
+        decomposition,
+        plan.params,
+        ref,
+        schema,
+        shards,
+        job_id,
+        timeout_ms
+      )
     else
       {:refused, reason} ->
         Logger.debug(fn -> "distributed query refused: #{inspect(reason)}" end)
@@ -148,10 +158,10 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp describe(_connection, _canonical_sql, outputs) when is_list(outputs), do: {:ok, outputs}
+  defp describe(_connection, _plan, outputs) when is_list(outputs), do: {:ok, outputs}
 
-  defp describe(connection, canonical_sql, nil),
-    do: Connection.describe(connection, canonical_sql, :infinity)
+  defp describe(connection, %Plan{} = plan, nil),
+    do: Connection.describe(connection, plan.canonical_sql, plan.params, :infinity)
 
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
   defp single_table(%Plan{tables: [ref]}), do: {:ok, ref}
@@ -160,7 +170,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp decompose(connection, plan, outputs, schema) do
     columns = Enum.map(schema.fields, & &1.name)
 
-    case Decomposer.decompose(connection, plan.canonical_sql, outputs, columns) do
+    case Decomposer.decompose(connection, plan.canonical_sql, outputs, columns, plan.params) do
       {:ok, decomposition} -> {:ok, decomposition}
       {:error, reason} -> {:refused, reason}
     end
@@ -206,13 +216,23 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
+  defp run(runtime, connection, decomposition, params, ref, schema, shards, job_id, timeout_ms) do
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
 
     try do
       with {:ok, paths} <-
-             gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms),
+             gather(
+               runtime,
+               decomposition,
+               params,
+               ref,
+               schema,
+               shards,
+               partials_dir,
+               job_id,
+               timeout_ms
+             ),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
         measurements = %{
           shards: length(shards),
@@ -240,7 +260,17 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms) do
+  defp gather(
+         runtime,
+         decomposition,
+         params,
+         ref,
+         schema,
+         shards,
+         partials_dir,
+         job_id,
+         timeout_ms
+       ) do
     shards
     |> Enum.with_index()
     |> Task.async_stream(
@@ -248,6 +278,7 @@ defmodule Smolquery.QueryService.Scatter do
         request = %{
           statements: Views.table_view(ref, schema, Views.parquet_select(files)),
           partial_sql: decomposition.partial_sql,
+          params: params,
           allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
           timeout_ms: timeout_ms
         }

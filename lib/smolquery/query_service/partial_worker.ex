@@ -44,7 +44,8 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:statements) => [String.t()],
           required(:partial_sql) => String.t(),
           required(:allowed_paths) => [String.t()],
-          optional(:timeout_ms) => timeout()
+          optional(:timeout_ms) => timeout(),
+          optional(:params) => [term()]
         }
 
   @doc """
@@ -83,6 +84,7 @@ defmodule Smolquery.QueryService.PartialWorker do
             copy_out(
               engine.connection,
               request.partial_sql,
+              Map.get(request, :params, []),
               path,
               Map.get(request, :timeout_ms, :infinity)
             )
@@ -134,10 +136,10 @@ defmodule Smolquery.QueryService.PartialWorker do
     "[" <> Enum.map_join(values, ", ", &Identifier.sql_string/1) <> "]"
   end
 
-  defp copy_out(connection, partial_sql, path, timeout_ms) do
+  defp copy_out(connection, partial_sql, params, path, timeout_ms) do
     statement = "COPY (#{partial_sql}) TO #{Identifier.sql_string(path)} (FORMAT parquet)"
 
-    with {:ok, result} <- Connection.query(connection, statement, [], timeout_ms) do
+    with {:ok, result} <- Connection.query(connection, statement, params, timeout_ms) do
       {:ok, %{parquet: File.read!(path), rows: copied_rows(result)}}
     end
   end

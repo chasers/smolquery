@@ -52,6 +52,9 @@ defmodule SmolqueryPg.Errors do
   def from_reason({:hot_tier_unavailable, _reason}),
     do: {"57P03", "a buffer node the query needs did not answer"}
 
+  def from_reason(:explain_with_params),
+    do: {"0A000", "EXPLAIN of a statement with bind parameters is not supported"}
+
   def from_reason({:pinned_hot_expired, age_ms, max_age_ms}),
     do:
       {"72000",

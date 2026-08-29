@@ -70,7 +70,8 @@ defmodule Smolquery.QueryService.VariantResults do
   end
 
   defp describe_and_cast(connection, plan) do
-    with {:ok, columns} <- Connection.describe(connection, plan.canonical_sql, :infinity),
+    with {:ok, columns} <-
+           Connection.describe(connection, plan.canonical_sql, plan.params, :infinity),
          :ok <- refuse_nested(columns) do
       {:ok, cast(plan, columns, variant_columns(columns))}
     end
@@ -103,7 +104,8 @@ defmodule Smolquery.QueryService.VariantResults do
   @spec explain_export_failure(GenServer.server(), Plan.t(), Exception.t()) :: term()
   def explain_export_failure(connection, %Plan{} = plan, error) do
     with true <- arrow_failure?(error),
-         {:ok, columns} <- Connection.describe(connection, plan.canonical_sql, :infinity),
+         {:ok, columns} <-
+           Connection.describe(connection, plan.canonical_sql, plan.params, :infinity),
          [name | _rest] <- variant_columns(columns) do
       {:invalid_query,
        "column #{inspect(name)} is a VARIANT with no table column behind it, which cannot " <>

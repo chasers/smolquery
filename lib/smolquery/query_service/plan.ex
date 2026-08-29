@@ -30,6 +30,13 @@ defmodule Smolquery.QueryService.Plan do
   column that needs casting before it crosses Arrow
   (`Smolquery.QueryService.VariantResults`).
 
+  `params` are the query's bind parameters, positional for its `$n`
+  placeholders (T-410). They ride the plan so every consumer that prepares
+  the statement — the runner's frame, a `DESCRIBE`, a scatter partial's
+  `COPY` — binds the same values, and so the pruner and the Top-N bound
+  can read them where the SQL says `$n`. They never reach the job or its
+  history.
+
   `federated` says whether `statements` opens with `ATTACH`es for registered
   Postgres connections (T-324). The runner reads it to decide whether the job
   engine needs DuckDB's `postgres` extension — loading that extension is not
@@ -51,7 +58,8 @@ defmodule Smolquery.QueryService.Plan do
     hot: %{},
     hot_members: %{},
     schemas: %{},
-    federated: false
+    federated: false,
+    params: []
   ]
 
   @type t :: %__MODULE__{
@@ -64,6 +72,7 @@ defmodule Smolquery.QueryService.Plan do
           hot_members: %{Catalog.table_ref() => [String.t()]},
           schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
           statistics: Statistics.t() | nil,
-          federated: boolean()
+          federated: boolean(),
+          params: [term()]
         }
 end

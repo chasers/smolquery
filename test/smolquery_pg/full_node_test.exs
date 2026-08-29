@@ -60,6 +60,29 @@ defmodule SmolqueryPg.FullNodeTest do
              PgClient.query(socket, "SELECT count(*) AS n FROM analytics.events")
   end
 
+  test "a bind parameter reaches the hot tier as an engine parameter (T-410)", %{
+    node: node,
+    port: port
+  } do
+    {:ok, _ack} = write(node, 1..9)
+
+    {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+    assert %{errors: [], results: [%{rows: [["3"]]}]} =
+             PgClient.extended(
+               socket,
+               "SELECT count(*) AS n FROM analytics.events WHERE id > $1",
+               [{20, 0, "6"}]
+             )
+
+    assert %{errors: [], results: [%{rows: [["9"]]}]} =
+             PgClient.extended(
+               socket,
+               "SELECT count(*) AS n FROM analytics.events WHERE id > $1",
+               [{25, 0, "0"}]
+             )
+  end
+
   test "a transaction block pins its read: mid-block inserts appear only after COMMIT", %{
     node: node,
     port: port

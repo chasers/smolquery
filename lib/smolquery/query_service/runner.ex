@@ -80,6 +80,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
           | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
+          | {:params, [term()]}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -127,6 +128,7 @@ defmodule Smolquery.QueryService.Runner do
       job: job,
       explain: mode(opts),
       pin: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids]),
+      params: Keyword.get(opts, :params, []),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
       engine: nil,
@@ -156,14 +158,14 @@ defmodule Smolquery.QueryService.Runner do
         runtime = state.runtime
         sql = state.job.sql
         explain = state.explain
-        pin = state.pin
+        opts = state.pin ++ [params: state.params]
         connection = engine.connection
         job_id = state.job.id
         timeout_ms = state.timeout_ms
 
         task =
           Task.async(fn ->
-            execute(runtime, connection, sql, explain, pin, job_id, timeout_ms)
+            execute(runtime, connection, sql, explain, opts, job_id, timeout_ms)
           end)
 
         {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
@@ -270,10 +272,11 @@ defmodule Smolquery.QueryService.Runner do
     :ok
   end
 
-  defp execute(runtime, connection, sql, explain, pin, job_id, timeout_ms) do
+  defp execute(runtime, connection, sql, explain, opts, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
-    with {:ok, plan} <- Planner.plan(runtime, connection, sql, pin),
+    with :ok <- bindable(explain, Keyword.fetch!(opts, :params)),
+         {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
@@ -306,6 +309,11 @@ defmodule Smolquery.QueryService.Runner do
     end
   end
 
+  defp bindable(explain, [_ | _]) when explain in [:plan, :analyze],
+    do: {:error, :explain_with_params}
+
+  defp bindable(_explain, _params), do: :ok
+
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
     with {:ok, prepared} <- variants(connection, plan) do
       run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms)
@@ -313,7 +321,8 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp outcome(_runtime, connection, plan, _max_rows, :describe, _job_id, _timeout_ms) do
-    with {:ok, frame} <- Connection.frame(connection, "DESCRIBE " <> plan.sql, [], :infinity) do
+    with {:ok, frame} <-
+           Connection.frame(connection, "DESCRIBE " <> plan.sql, plan.params, :infinity) do
       {:ok, {{:frame, frame}, nil, []}}
     end
   end
@@ -357,7 +366,7 @@ defmodule Smolquery.QueryService.Runner do
     do: Scatter.execute(runtime, connection, plan, job_id, timeout_ms, outputs)
 
   defp frame(connection, plan, sql) do
-    case Connection.frame(connection, sql, [], :infinity) do
+    case Connection.frame(connection, sql, plan.params, :infinity) do
       {:ok, frame} -> {:ok, frame}
       {:error, error} -> {:error, VariantResults.explain_export_failure(connection, plan, error)}
     end

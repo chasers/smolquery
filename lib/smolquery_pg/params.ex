@@ -2,14 +2,12 @@ defmodule SmolqueryPg.Params do
   @moduledoc """
   Bind parameters, from the wire to the SQL the query service runs (PL-58).
 
-  `Smolquery.QueryService.Client` takes SQL only. Until it binds parameters
-  natively (T-410), each `Bind` value becomes a typed SQL literal in place
-  of its `$n`, through `SmolqueryPg.Sql` so a `$1` inside a string or a
-  comment stays text. The literal is built from the value's *decoded* term,
-  never from client bytes pasted into SQL: a text value goes through
-  `Smolquery.Identifier.sql_string/1`, a number is validated as one, a
-  timestamp is rendered from the parsed term. That is what keeps the
-  substitution from being an injection.
+  A `Bind` value decodes by its declared OID and format into the term
+  `Smolquery.QueryService.Client` binds as an engine parameter (T-410):
+  the SQL keeps its `$n` and the engine prepares it, so no client value is
+  ever SQL text. Only `Describe` before `Bind` still rewrites the SQL — to
+  typed `NULL`s, so the engine can name the columns of a statement whose
+  values do not exist yet.
 
   ## Parameter types
 
@@ -20,7 +18,6 @@ defmodule SmolqueryPg.Params do
   comparison needs it.
   """
 
-  alias Smolquery.Identifier
   alias SmolqueryPg.Sql
   alias SmolqueryPg.Types
 
@@ -54,18 +51,39 @@ defmodule SmolqueryPg.Params do
   end
 
   @doc """
-  `sql` with each `$n` replaced by the literal for `values`' n-th entry.
+  The bind values `values` decode to, as engine parameters in `$n` order.
 
-  A value the edge cannot decode is an error naming the parameter.
+  Each wire value decodes by its OID and format (`SmolqueryPg.Types`) into
+  the term `Smolquery.QueryService.Client` binds natively: an integer, a
+  float, a boolean, a string, a `Decimal`, a `Date`, a `NaiveDateTime`, or
+  an `Adbc.Column` for a blob. No value ever becomes SQL text. A value the
+  edge cannot decode is an error naming the parameter.
   """
-  @spec substitute(String.t(), [value()]) :: {:ok, String.t()} | {:error, term()}
-  def substitute(sql, values) do
-    with {:ok, literals} <- literals(values) do
-      lookup = literals |> Enum.with_index(1) |> Map.new(fn {literal, n} -> {n, literal} end)
-
-      {:ok, Sql.map_placeholders(sql, &Map.get(lookup, &1, "$#{&1}"))}
+  @spec values([value()]) :: {:ok, [term()]} | {:error, term()}
+  def values(values) do
+    values
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, []}, fn {{oid, format, bytes}, index}, {:ok, acc} ->
+      case Types.decode_param(oid, format, bytes) do
+        {:ok, term} -> {:cont, {:ok, [bindable(term) | acc]}}
+        {:error, reason} -> {:halt, {:error, {:invalid_parameter, index, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
     end
   end
+
+  defp bindable({:text, text}), do: text
+  defp bindable({:json, text}), do: text
+  defp bindable({:numeric, text}), do: Decimal.new(text)
+  defp bindable({:timestamp, %NaiveDateTime{} = value}), do: value
+  defp bindable({:timestamp, :infinity}), do: "infinity"
+  defp bindable({:timestamp, :neg_infinity}), do: "-infinity"
+  defp bindable({:date, %Date{} = value}), do: value
+  defp bindable({:bytea, bytes}), do: Adbc.Column.binary([bytes])
+  defp bindable(term), do: term
 
   @doc """
   `sql` with each `$n` replaced by a `NULL` cast to its declared type, so
@@ -83,40 +101,4 @@ defmodule SmolqueryPg.Params do
       end
     end)
   end
-
-  defp literals(values) do
-    values
-    |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, []}, fn {{oid, format, bytes}, index}, {:ok, acc} ->
-      case Types.decode_param(oid, format, bytes) do
-        {:ok, term} -> {:cont, {:ok, [literal(term) | acc]}}
-        {:error, reason} -> {:halt, {:error, {:invalid_parameter, index, reason}}}
-      end
-    end)
-    |> case do
-      {:ok, acc} -> {:ok, Enum.reverse(acc)}
-      error -> error
-    end
-  end
-
-  @doc """
-  The SQL literal for a decoded parameter term.
-  """
-  @spec literal(Types.param()) :: String.t()
-  def literal(nil), do: "NULL"
-  def literal(true), do: "TRUE"
-  def literal(false), do: "FALSE"
-  def literal(int) when is_integer(int), do: Integer.to_string(int)
-  def literal(float) when is_float(float), do: Float.to_string(float)
-  def literal(:nan), do: "'NaN'::DOUBLE"
-  def literal(:infinity), do: "'Infinity'::DOUBLE"
-  def literal(:neg_infinity), do: "'-Infinity'::DOUBLE"
-  def literal({:text, text}), do: Identifier.sql_string(text)
-  def literal({:numeric, text}), do: text
-  def literal({:timestamp, %NaiveDateTime{} = value}), do: "TIMESTAMP '#{value}'"
-  def literal({:timestamp, :infinity}), do: "TIMESTAMP 'infinity'"
-  def literal({:timestamp, :neg_infinity}), do: "TIMESTAMP '-infinity'"
-  def literal({:date, %Date{} = value}), do: "DATE '#{value}'"
-  def literal({:json, text}), do: Identifier.sql_string(text) <> "::JSON"
-  def literal({:bytea, bytes}), do: "'\\x#{Base.encode16(bytes, case: :lower)}'::BLOB"
 end
