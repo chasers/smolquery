@@ -13,7 +13,9 @@ defmodule SmolqueryPg.PgCatalog do
   where an unqualified `pg_class` resolves before DuckDB's built-in one:
 
   - **Static fixtures** from a real Postgres, loaded once from
-    `priv/pg_catalog/`: `pg_type` (with each type's `format_type` text),
+    `priv/pg_catalog/` (`fixture_dir/0`, resolved at runtime: a compile-time
+    lookup bakes the builder's `_build` path into the release, and the edge
+    then dies at boot): `pg_type` (with each type's `format_type` text),
     `pg_range`, `pg_collation`, and the column shapes of the catalog tables
     the corpus touches — those load empty, so a join against `pg_index` or
     `pg_trigger` answers no rows instead of no relation.
@@ -45,7 +47,6 @@ defmodule SmolqueryPg.PgCatalog do
 
   @refresh_ttl_ms 1_000
   @call_timeout_ms 30_000
-  @fixture_dir Application.app_dir(:smolquery, "priv/pg_catalog")
   @namespace_base 16_000
   @relation_base 100_000
   @oid_span 1_000_000_000
@@ -57,6 +58,13 @@ defmodule SmolqueryPg.PgCatalog do
 
   @doc false
   def child_spec(runtime), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [runtime]}}
+
+  @doc """
+  The directory of the static catalog fixtures, under the running
+  application's `priv/`.
+  """
+  @spec fixture_dir() :: Path.t()
+  def fixture_dir, do: Application.app_dir(:smolquery, "priv/pg_catalog")
 
   @doc """
   Whether `sql` is a catalog query: every base table it references lives in
@@ -222,7 +230,7 @@ defmodule SmolqueryPg.PgCatalog do
           {"pg_range.csv", "pg_range"},
           {"pg_collation.csv", "pg_collation"}
         ] do
-      path = Path.join(@fixture_dir, file)
+      path = Path.join(fixture_dir(), file)
 
       Engine.query!(
         engine,
@@ -238,7 +246,7 @@ defmodule SmolqueryPg.PgCatalog do
   end
 
   defp shapes do
-    Path.join(@fixture_dir, "catalog_shapes.csv")
+    Path.join(fixture_dir(), "catalog_shapes.csv")
     |> File.stream!()
     |> Stream.drop(1)
     |> Enum.reduce(%{}, fn line, acc ->
