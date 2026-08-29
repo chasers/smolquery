@@ -3,8 +3,9 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   Federated Postgres connections, managed (T-325).
 
   Lists the registered connections, registers and edits them, removes them,
-  and tests one without leaving the page. Reads and writes go straight through
-  `Smolquery.Catalog`, the same layering rule as `SmolqueryApi` (PL-12 D4).
+  tests one without leaving the page, and opens the editor on one. Reads and
+  writes go straight through `Smolquery.Catalog`, the same layering rule as
+  `SmolqueryApi` (PL-12 D4).
 
   ## The password field is write-only, here as everywhere
 
@@ -21,6 +22,20 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   `POST /v1/connections/:name/test` calls. The button therefore exercises the
   statement a query will run, not an approximation of it, and its failure text
   is the scrubbed reason — never the connection string.
+
+  ## Test runs off the LiveView process
+
+  The probe reaches a remote database, and the wait is its own, not the
+  page's. It runs under `start_async`, that connection's button is disabled
+  until the answer lands (`@busy` holds the names in flight), and the outcome
+  goes to the flash like every other outcome on the page. Removing or saving
+  a connection cancels its probe, so a verdict never lands for a row that is
+  gone or changed.
+
+  ## Query is a link
+
+  The Query button opens the editor on `Smolquery.Federation.discovery_query/1`
+  — the connection's user tables ranked by live rows (PL-59 D1).
   """
 
   use SmolqueryWeb, :live_view
@@ -42,7 +57,8 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       |> assign(:sslmodes, Connection.sslmodes())
       |> assign(:editing, nil)
       |> assign(:form, blank_form())
-      |> assign(:probe, nil)
+      |> assign(:form_open, false)
+      |> assign(:busy, MapSet.new())
       |> load_connections()
 
     {:ok, socket}
@@ -53,14 +69,22 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
     {:noreply, assign(socket, :form, params)}
   end
 
+  def handle_event("new", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:editing, nil)
+     |> assign(:form, blank_form())
+     |> assign(:form_open, true)}
+  end
+
   def handle_event("edit", %{"name" => name}, socket) do
     case Catalog.connection(socket.assigns.runtime.catalog, name) do
       {:ok, connection} ->
         {:noreply,
          socket
          |> assign(:editing, name)
-         |> assign(:probe, nil)
-         |> assign(:form, form_from(connection))}
+         |> assign(:form, form_from(connection))
+         |> assign(:form_open, true)}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, message(reason))}
@@ -68,7 +92,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   end
 
   def handle_event("cancel", _params, socket) do
-    {:noreply, socket |> assign(:editing, nil) |> assign(:form, blank_form())}
+    {:noreply, close_form(socket)}
   end
 
   def handle_event("save", %{"connection" => params}, socket) do
@@ -78,10 +102,9 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       {:ok, name} ->
         {:noreply,
          socket
+         |> cancel_test(name)
          |> put_flash(:info, "Connection #{name} saved")
-         |> assign(:editing, nil)
-         |> assign(:form, blank_form())
-         |> assign(:probe, nil)
+         |> close_form()
          |> load_connections()}
 
       {:error, reason} ->
@@ -94,8 +117,8 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       :ok ->
         {:noreply,
          socket
+         |> cancel_test(name)
          |> put_flash(:info, "Connection #{name} removed")
-         |> assign(:probe, nil)
          |> load_connections()}
 
       {:error, reason} ->
@@ -104,18 +127,60 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   end
 
   def handle_event("test", %{"name" => name}, socket) do
-    result =
-      with {:ok, connection} <- Catalog.connection(socket.assigns.runtime.catalog, name) do
-        Federation.probe(connection)
-      end
+    {:noreply, test(socket, name)}
+  end
 
-    probe =
-      case result do
-        :ok -> {name, :ok}
-        {:error, reason} -> {name, {:error, message(reason)}}
-      end
+  @impl Phoenix.LiveView
+  def handle_async({:test, name}, {:ok, :ok}, socket) do
+    {:noreply, socket |> finish_test(name) |> put_flash(:info, "#{name} answered")}
+  end
 
-    {:noreply, assign(socket, :probe, probe)}
+  def handle_async({:test, name}, {:ok, {:error, reason}}, socket) do
+    {:noreply, socket |> finish_test(name) |> put_flash(:error, message(reason))}
+  end
+
+  def handle_async({:test, name}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> finish_test(name)
+     |> put_flash(:error, message({:federation_error, name, :unavailable}))}
+  end
+
+  defp test(socket, name) do
+    if MapSet.member?(socket.assigns.busy, name) do
+      socket
+    else
+      start_test(socket, name)
+    end
+  end
+
+  defp start_test(socket, name) do
+    case Catalog.connection(socket.assigns.runtime.catalog, name) do
+      {:ok, connection} ->
+        socket
+        |> update(:busy, &MapSet.put(&1, name))
+        |> start_async({:test, name}, fn -> Federation.probe(connection) end)
+
+      {:error, reason} ->
+        put_flash(socket, :error, message(reason))
+    end
+  end
+
+  defp cancel_test(socket, name) do
+    if MapSet.member?(socket.assigns.busy, name) do
+      socket |> cancel_async({:test, name}) |> finish_test(name)
+    else
+      socket
+    end
+  end
+
+  defp finish_test(socket, name), do: update(socket, :busy, &MapSet.delete(&1, name))
+
+  defp close_form(socket) do
+    socket
+    |> assign(:editing, nil)
+    |> assign(:form, blank_form())
+    |> assign(:form_open, false)
   end
 
   defp save(catalog, nil, params) do
@@ -228,6 +293,9 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
     <Layouts.app flash={@flash}>
       <div class="flex items-center justify-between">
         <h1 class="text-xl font-semibold">Connections</h1>
+        <button type="button" class="btn btn-primary btn-sm" phx-click="new">
+          <.icon name="hero-plus" class="size-4" /> New connection
+        </button>
       </div>
 
       <div :if={!Secrets.configured?()} class="alert alert-warning">
@@ -238,7 +306,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       </div>
 
       <div :if={@connections == []} class="text-sm opacity-70">
-        No connections yet — register one below to join a Postgres database in a query.
+        No connections yet — register one to join a Postgres database in a query.
       </div>
 
       <div :if={@connections != []} class="card bg-base-200 border border-base-300">
@@ -262,13 +330,21 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
                 <td class="font-mono">{connection.username}</td>
                 <td class="font-mono">{connection.sslmode}</td>
                 <td class="flex gap-2 justify-end">
+                  <.link
+                    navigate={~p"/query?#{[sql: Federation.discovery_query(connection.name)]}"}
+                    class="btn btn-ghost btn-xs"
+                  >
+                    Query
+                  </.link>
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs"
                     phx-click="test"
                     phx-value-name={connection.name}
+                    phx-disable-with="Testing…"
+                    disabled={MapSet.member?(@busy, connection.name)}
                   >
-                    Test
+                    {if MapSet.member?(@busy, connection.name), do: "Testing…", else: "Test"}
                   </button>
                   <button
                     type="button"
@@ -291,89 +367,77 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
               </tr>
             </tbody>
           </table>
+        </div>
+      </div>
 
-          <div :if={@probe} class="text-sm">
-            <span :if={match?({_name, :ok}, @probe)} class="text-success">
-              {elem(@probe, 0)} answered.
-            </span>
-            <span :if={match?({_name, {:error, _reason}}, @probe)} class="text-error">
-              {elem(elem(@probe, 1), 1)}
-            </span>
+      <.modal
+        :if={@form_open}
+        id="connection-modal"
+        title={if @editing, do: "Edit #{@editing}", else: "New connection"}
+        on_close="cancel"
+      >
+        <form id="connection-form" phx-change="form_changed" phx-submit="save" class="space-y-2">
+          <div class="grid gap-2 md:grid-cols-2">
+            <input
+              type="text"
+              name="connection[name]"
+              value={@form["name"]}
+              disabled={@editing != nil}
+              placeholder="name — the catalog a query qualifies with"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="text"
+              name="connection[host]"
+              value={@form["host"]}
+              placeholder="host"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="number"
+              name="connection[port]"
+              value={@form["port"]}
+              placeholder="port"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="text"
+              name="connection[database]"
+              value={@form["database"]}
+              placeholder="database"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="text"
+              name="connection[username]"
+              value={@form["username"]}
+              placeholder="username"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="password"
+              name="connection[password]"
+              value={@form["password"]}
+              placeholder={if @editing, do: "password — blank keeps the stored one", else: "password"}
+              class="input input-bordered input-sm font-mono"
+            />
+            <select name="connection[sslmode]" class="select select-bordered select-sm font-mono">
+              <option :for={mode <- @sslmodes} value={mode} selected={@form["sslmode"] == mode}>
+                {mode}
+              </option>
+            </select>
           </div>
-        </div>
-      </div>
 
-      <div class="card bg-base-200 border border-base-300">
-        <div class="card-body py-4">
-          <h2 class="card-title text-base">
-            {if @editing, do: "Edit #{@editing}", else: "New connection"}
-          </h2>
-
-          <form id="connection-form" phx-change="form_changed" phx-submit="save" class="space-y-2">
-            <div class="grid gap-2 md:grid-cols-2">
-              <input
-                type="text"
-                name="connection[name]"
-                value={@form["name"]}
-                disabled={@editing != nil}
-                placeholder="name — the catalog a query qualifies with"
-                class="input input-bordered input-sm font-mono"
-              />
-              <input
-                type="text"
-                name="connection[host]"
-                value={@form["host"]}
-                placeholder="host"
-                class="input input-bordered input-sm font-mono"
-              />
-              <input
-                type="number"
-                name="connection[port]"
-                value={@form["port"]}
-                placeholder="port"
-                class="input input-bordered input-sm font-mono"
-              />
-              <input
-                type="text"
-                name="connection[database]"
-                value={@form["database"]}
-                placeholder="database"
-                class="input input-bordered input-sm font-mono"
-              />
-              <input
-                type="text"
-                name="connection[username]"
-                value={@form["username"]}
-                placeholder="username"
-                class="input input-bordered input-sm font-mono"
-              />
-              <input
-                type="password"
-                name="connection[password]"
-                value={@form["password"]}
-                placeholder={
-                  if @editing, do: "password — blank keeps the stored one", else: "password"
-                }
-                class="input input-bordered input-sm font-mono"
-              />
-              <select name="connection[sslmode]" class="select select-bordered select-sm font-mono">
-                <option :for={mode <- @sslmodes} value={mode} selected={@form["sslmode"] == mode}>
-                  {mode}
-                </option>
-              </select>
-            </div>
-
-            <div class="flex gap-2">
-              <button type="submit" class="btn btn-primary btn-sm">
-                {if @editing, do: "Save", else: "Register"}
-              </button>
-              <button :if={@editing} type="button" class="btn btn-ghost btn-sm" phx-click="cancel">
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+          <div class="flex gap-2">
+            <button type="submit" class="btn btn-primary btn-sm">
+              {if @editing, do: "Save", else: "Register"}
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" phx-click="cancel">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </.modal>
     </Layouts.app>
     """
   end

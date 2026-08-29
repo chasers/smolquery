@@ -63,7 +63,7 @@ defmodule SmolqueryWeb.CoreComponents do
       id={@id}
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
       role="alert"
-      class="toast toast-top toast-end z-50"
+      class="toast toast-top toast-end z-[1000]"
       {@rest}
     >
       <div class={[
@@ -422,6 +422,54 @@ defmodule SmolqueryWeb.CoreComponents do
         </div>
       </li>
     </ul>
+    """
+  end
+
+  @doc """
+  A modal the server opens and closes.
+
+  Render it under `:if` on one boolean assign; there is no client state. The
+  close button and the Escape key send `on_close`. A click on the backdrop
+  does nothing, so a half-typed form is not lost to a stray click.
+
+  ## Examples
+
+      <.modal :if={@form_open} id="connection-modal" title="New connection" on_close="cancel">
+        <form ...>
+      </.modal>
+  """
+  attr :id, :string, required: true
+  attr :title, :string, required: true
+  attr :on_close, :string, required: true, doc: "the event the close button and Escape send"
+  slot :inner_block, required: true
+
+  def modal(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class="modal modal-open"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={"#{@id}-title"}
+      phx-window-keydown={@on_close}
+      phx-key="Escape"
+    >
+      <div class="modal-box max-w-3xl space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 id={"#{@id}-title"} class="text-base font-semibold">{@title}</h2>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm btn-circle"
+            phx-click={@on_close}
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+        {render_slot(@inner_block)}
+      </div>
+      <div class="modal-backdrop"></div>
+    </div>
     """
   end
 
