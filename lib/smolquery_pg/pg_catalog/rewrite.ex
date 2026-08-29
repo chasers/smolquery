@@ -17,8 +17,11 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
   - `OPERATOR(pg_catalog.~)` does not parse; it becomes the bare operator.
   - `pg_catalog.` qualifications (including `::pg_catalog.text` casts) do
     not parse; they drop. The emulated tables live unqualified in `main`.
-  - The `reg*` and `oid` cast targets do not exist; they become `BIGINT`.
-    `name` and `"char"` become `VARCHAR`.
+  - A name literal cast to `regclass` or `regtype` (`'pg_class'::regclass`,
+    DBeaver's join shape) becomes the catalog lookup it means: a subquery
+    for the `oid` whose `relname` or `typname` is the literal's last dotted
+    component. The other `reg*` and `oid` cast targets do not exist; they
+    become `BIGINT`. `name` and `"char"` become `VARCHAR`.
   - `COLLATE <name>` names collations DuckDB does not have; it drops.
   - `pg_partition_ancestors(x) WITH ORDINALITY` does not parse; it becomes
     an empty two-column subquery.
@@ -45,17 +48,48 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
   """
   @spec pre(String.t(), %{String.t() => String.t()}) :: String.t()
   def pre(sql, settings) do
-    Sql.map_code(sql, fn code ->
-      code
-      |> strip_operator_calls()
-      |> strip_qualifications()
-      |> rewrite_settings(settings)
-      |> rewrite_session_constants()
-      |> strip_collate()
-      |> rewrite_casts()
-      |> rewrite_partition_ancestors()
+    sql
+    |> Sql.tokens()
+    |> rewrite_reg_literals([])
+    |> Enum.map(fn
+      {:code, code} -> pre_code(code, settings)
+      {_kind, text} -> text
     end)
+    |> IO.iodata_to_binary()
   end
+
+  defp pre_code(code, settings) do
+    code
+    |> strip_operator_calls()
+    |> strip_qualifications()
+    |> rewrite_settings(settings)
+    |> rewrite_session_constants()
+    |> strip_collate()
+    |> rewrite_casts()
+    |> rewrite_partition_ancestors()
+  end
+
+  @reg_lookups %{
+    "regclass" => {"pg_class", "relname"},
+    "regtype" => {"pg_type", "typname"}
+  }
+
+  defp rewrite_reg_literals([{:string, string}, {:code, code} | rest], acc) do
+    case Regex.run(~r/^::\s*(regclass|regtype)\b(.*)$/is, code) do
+      [_all, target, tail] ->
+        {table, column} = Map.fetch!(@reg_lookups, String.downcase(target))
+        name = string |> String.trim("'") |> String.split(".") |> List.last()
+        lookup = "(SELECT oid FROM #{table} WHERE #{column} = '#{name}')"
+
+        rewrite_reg_literals([{:code, tail} | rest], [{:code, lookup} | acc])
+
+      nil ->
+        rewrite_reg_literals([{:code, code} | rest], [{:string, string} | acc])
+    end
+  end
+
+  defp rewrite_reg_literals([token | rest], acc), do: rewrite_reg_literals(rest, [token | acc])
+  defp rewrite_reg_literals([], acc), do: Enum.reverse(acc)
 
   @doc """
   The post-parse pass over the canonical SQL `json_deserialize_sql`

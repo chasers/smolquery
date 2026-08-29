@@ -116,6 +116,18 @@ defmodule Smolquery.QueryService.Job do
   def explained(%__MODULE__{} = job, snapshot, duration_ms, statistics, explain),
     do: finish(job, snapshot, duration_ms, statistics, explain: explain)
 
+  @doc """
+  The job, finished with a `DESCRIBE` of the query instead of rows.
+
+  A describe job (`describe: true`) plans for real and answers the query's
+  columns as its result frame, without executing it, so it finishes with no
+  `row_count` — the frame is a description, not a result. History does not
+  record it: it answered a wire `Describe`, not a query.
+  """
+  @spec described(t(), Catalog.snapshot(), non_neg_integer(), Statistics.t() | nil) :: t()
+  def described(%__MODULE__{} = job, snapshot, duration_ms, statistics),
+    do: finish(job, snapshot, duration_ms, statistics, [])
+
   defp finish(%__MODULE__{} = job, snapshot, duration_ms, statistics, fields) do
     struct!(
       %{

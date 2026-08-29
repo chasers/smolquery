@@ -209,6 +209,30 @@ defmodule SmolqueryPg.WireTest do
                PgClient.query(socket, "ROLLBACK")
     end
 
+    test "SET statement_timeout takes Postgres units and refuses what it cannot parse", %{
+      port: port
+    } do
+      {socket, _params} = connect(port)
+
+      assert %{results: [%{tag: "SET"}]} = PgClient.query(socket, "SET statement_timeout = '30s'")
+      assert %{results: [%{rows: [["30000"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
+
+      assert %{results: [%{tag: "SET"}]} =
+               PgClient.query(socket, "SET statement_timeout = '2min'")
+
+      assert %{results: [%{rows: [["120000"]]}]} =
+               PgClient.query(socket, "SHOW statement_timeout")
+
+      assert %{results: [%{tag: "SET"}]} = PgClient.query(socket, "SET statement_timeout = 0")
+      assert %{results: [%{rows: [["0"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
+
+      assert %{errors: [%{"C" => "22023"}]} =
+               PgClient.query(socket, "SET statement_timeout = 'abc'")
+
+      assert %{errors: [%{"C" => "22023"}]} = PgClient.query(socket, "SET statement_timeout = -1")
+      assert %{results: [%{rows: [["0"]]}]} = PgClient.query(socket, "SHOW statement_timeout")
+    end
+
     test "a statement_timeout cancels a slow query with 57014", %{port: port} do
       {socket, _params} = connect(port)
 
@@ -558,6 +582,28 @@ defmodule SmolqueryPg.FdwStatementsTest do
              PgClient.query(socket, "RELEASE SAVEPOINT s1")
 
     assert %{results: [%{tag: "COMMIT"}], status: ?I} = PgClient.query(socket, "COMMIT")
+  end
+
+  test "DISCARD ALL cannot run inside a transaction block", %{socket: socket} do
+    assert %{results: [%{tag: "BEGIN"}], status: ?T} = PgClient.query(socket, "BEGIN")
+    assert %{errors: [%{"C" => "25001"}], status: ?E} = PgClient.query(socket, "DISCARD ALL")
+    assert %{results: [%{tag: "ROLLBACK"}], status: ?I} = PgClient.query(socket, "ROLLBACK")
+  end
+
+  test "Describe of an empty prepared statement answers NoData without running anything", %{
+    socket: socket
+  } do
+    :ok =
+      PgClient.send_raw(socket, [
+        PgClient.parse("empty", "", []),
+        PgClient.describe(?S, "empty"),
+        PgClient.frame(?S, [])
+      ])
+
+    assert {:ok, {?1, _}} = PgClient.recv(socket)
+    assert {:ok, {?t, <<0::16>>}} = PgClient.recv(socket)
+    assert {:ok, {?n, _}} = PgClient.recv(socket)
+    assert {:ok, {?Z, "I"}} = PgClient.recv(socket)
   end
 
   test "DEALLOCATE ALL and DISCARD ALL clear the session's state", %{socket: socket} do

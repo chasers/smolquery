@@ -300,7 +300,7 @@ defmodule Smolquery.QueryService.Planner do
   defp ref_members(ref, manifest, sealed, hot_ids, hot_before_ms) do
     case Map.fetch(hot_ids, ref) do
       {:ok, ids} ->
-        pinned_members(ref, manifest, ids)
+        pinned_members(ref, manifest, sealed, ids)
 
       :error ->
         {:ok,
@@ -311,14 +311,14 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp pinned_members(ref, manifest, ids) do
+  defp pinned_members(ref, manifest, sealed, ids) do
     pinned = MapSet.new(ids)
     entries = Enum.filter(manifest, &MapSet.member?(pinned, &1["id"]))
 
     missing = MapSet.difference(pinned, MapSet.new(entries, & &1["id"]))
 
     if MapSet.size(missing) == 0,
-      do: {:ok, entries},
+      do: {:ok, Enum.filter(entries, &include?(&1, sealed))},
       else: {:error, {:pinned_hot_retired, ref, Enum.sort(missing)}}
   end
 

@@ -515,6 +515,23 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert by_id.hot_members == first_touch.hot_members
     end
 
+    test "a pinned entry whose seal is registered at the pinned snapshot is read from the sealed tier only (T-418)" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+
+      runtime =
+        runtime(
+          [entry("01A", %{"claim_keys" => ["analytics/events/01SEALED.parquet"]}), entry("01B")],
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
+        )
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events",
+                 hot_ids: %{@table => ["01A", "01B"]}
+               )
+
+      assert ids(plan.hot[@table]) == ["01B"]
+    end
+
     test "a pin older than hot_pin_max_age_ms is refused before any manifest is read (T-418)" do
       runtime = runtime([entry("01A")], runtime: [hot_pin_max_age_ms: 1_000])
       stale = System.system_time(:millisecond) - 5_000

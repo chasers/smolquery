@@ -67,7 +67,8 @@ defmodule SmolqueryPg.Handler do
        discard: false,
        tls: false,
        auth_timer: timer,
-       idle_txn_ref: nil
+       idle_txn_ref: nil,
+       idle_txn_timer: nil
      }}
   end
 
@@ -92,6 +93,9 @@ defmodule SmolqueryPg.Handler do
   def handle_info({:idle_txn_timeout, _stale}, {socket, state}),
     do: {:noreply, {socket, state}}
 
+  def handle_info({:EXIT, port, _reason}, {socket, state}) when is_port(port),
+    do: {:stop, {:shutdown, :closed}, {socket, state}}
+
   @impl ThousandIsland.Handler
   def handle_data(data, socket, state) do
     drain(socket, %{state | buffer: state.buffer <> data})
@@ -103,15 +107,24 @@ defmodule SmolqueryPg.Handler do
 
   defp arm_idle_txn_timer(%{session: session} = state) do
     budget = Session.idle_in_transaction_timeout_ms(session)
+    state = cancel_idle_txn_timer(state)
 
     if session.txn != :idle and budget > 0 do
       ref = make_ref()
-      Process.send_after(self(), {:idle_txn_timeout, ref}, budget)
+      timer = Process.send_after(self(), {:idle_txn_timeout, ref}, budget)
 
-      %{state | idle_txn_ref: ref}
+      %{state | idle_txn_ref: ref, idle_txn_timer: timer}
     else
-      %{state | idle_txn_ref: nil}
+      state
     end
+  end
+
+  defp cancel_idle_txn_timer(%{idle_txn_timer: nil} = state), do: %{state | idle_txn_ref: nil}
+
+  defp cancel_idle_txn_timer(%{idle_txn_timer: timer} = state) do
+    Process.cancel_timer(timer)
+
+    %{state | idle_txn_ref: nil, idle_txn_timer: nil}
   end
 
   defp drain_messages(state, socket), do: do_drain(socket, state)

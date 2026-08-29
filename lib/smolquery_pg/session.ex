@@ -134,7 +134,7 @@ defmodule SmolqueryPg.Session do
           pre: [iodata()]
         }
 
-  @type prepared :: %{sql: String.t(), oids: [pos_integer()], outcome: outcome() | nil}
+  @type prepared :: %{sql: String.t(), oids: [pos_integer()]}
 
   @typedoc """
   One transaction block's state: its isolation level, the lazily formed
@@ -334,11 +334,8 @@ defmodule SmolqueryPg.Session do
     end
   end
 
-  defp put_statement(session, name, sql, oids) do
-    statement = %{sql: sql, oids: oids, outcome: nil}
-
-    %{session | statements: Map.put(session.statements, name, statement)}
-  end
+  defp put_statement(session, name, sql, oids),
+    do: %{session | statements: Map.put(session.statements, name, %{sql: sql, oids: oids})}
 
   @doc """
   `Bind`: opens portal `portal` over statement `statement` with `values`
@@ -351,8 +348,7 @@ defmodule SmolqueryPg.Session do
          :ok <- arity(prepared, values),
          {:ok, sql} <-
            Params.substitute(prepared.sql, typed(prepared.oids, param_formats, values)) do
-      {session, outcome} = take_outcome(session, statement, prepared, values)
-      opened = %{sql: sql, formats: formats, outcome: outcome, offset: 0}
+      opened = %{sql: sql, formats: formats, outcome: nil, offset: 0}
 
       {:ok, [Protocol.bind_complete()],
        %{session | portals: Map.put(session.portals, portal, opened)}}
@@ -395,14 +391,6 @@ defmodule SmolqueryPg.Session do
     end)
   end
 
-  defp take_outcome(session, name, %{outcome: outcome} = prepared, []) when outcome != nil do
-    statements = Map.put(session.statements, name, %{prepared | outcome: nil})
-
-    {%{session | statements: statements}, outcome}
-  end
-
-  defp take_outcome(session, _name, _prepared, _values), do: {session, nil}
-
   @doc """
   `Describe`: a statement's parameters and columns, or a portal's columns.
   """
@@ -434,30 +422,26 @@ defmodule SmolqueryPg.Session do
   defp description(nil, _formats), do: Protocol.no_data()
   defp description(columns, formats), do: Protocol.row_description(fields(columns, formats))
 
-  defp statement_columns(session, _name, %{outcome: %{columns: columns}}),
-    do: {:ok, columns, session}
+  defp statement_columns(session, _name, %{sql: ""}), do: {:ok, nil, session}
 
-  defp statement_columns(session, name, %{sql: sql, oids: []} = prepared) do
-    case run(session, sql) do
-      {:ok, outcome, session} ->
-        statements = Map.put(session.statements, name, %{prepared | outcome: outcome})
-
-        {:ok, outcome.columns, %{session | statements: statements}}
-
-      {:error, error, session} ->
-        {:error, error, session}
+  defp statement_columns(%__MODULE__{runtime: runtime} = session, _name, %{sql: sql, oids: oids}) do
+    cond do
+      classify(sql) != :query -> {:ok, nil, session}
+      PgCatalog.catalog_statement?(runtime.name, sql) -> catalog_columns(session, sql, oids)
+      true -> describe_query(session, Params.with_typed_nulls(sql, oids))
     end
   end
 
-  defp statement_columns(session, _name, %{sql: sql, oids: oids}) do
-    if classify(sql) == :query,
-      do: describe_query(session, Params.with_typed_nulls(sql, oids)),
-      else: {:ok, nil, session}
+  defp catalog_columns(session, sql, oids) do
+    case catalog_query(session, Params.with_typed_nulls(sql, oids)) do
+      {:ok, outcome, session} -> {:ok, outcome.columns, session}
+      {:error, error, session} -> {:error, error, session}
+    end
   end
 
   defp describe_query(session, sql) do
-    case Client.query(session.runtime.query_name, sql, describe: true) do
-      {:ok, %Job{state: :done}, %DataFrame{} = frame} ->
+    case run_job(session, sql, describe: true, timeout_ms: timeout_ms(session)) do
+      {:ok, _job, %DataFrame{} = frame, session} ->
         columns =
           frame
           |> DataFrame.to_rows()
@@ -467,11 +451,8 @@ defmodule SmolqueryPg.Session do
 
         {:ok, columns, session}
 
-      {:ok, %Job{error: reason}, _frame} ->
-        fail(session, reason)
-
-      {:error, reason} ->
-        fail(session, reason)
+      {:error, reason, session} ->
+        {:error, Errors.from_reason(reason), failed(session)}
     end
   end
 
@@ -651,29 +632,29 @@ defmodule SmolqueryPg.Session do
   defp pg_array_column({name, {:list, inner}, json?}), do: {name, {:pg_array, inner}, json?}
   defp pg_array_column(column), do: column
 
-  defp user_query(%__MODULE__{runtime: runtime} = session, sql) do
-    timeout = timeout_ms(session)
+  defp user_query(session, sql) do
+    case run_job(session, sql, timeout_ms: timeout_ms(session)) do
+      {:ok, job, %DataFrame{} = frame, session} -> {:ok, outcome(job, frame), session}
+      {:error, reason, session} -> fail(session, reason)
+    end
+  end
+
+  defp run_job(%__MODULE__{runtime: runtime} = session, sql, opts) do
+    timeout = Keyword.fetch!(opts, :timeout_ms)
     {pin, session} = block_pin(session)
 
-    with {:ok, job} <- Client.submit(runtime.query_name, sql, [timeout_ms: timeout] ++ pin),
+    with {:ok, job} <- Client.submit(runtime.query_name, sql, opts ++ pin),
          :ok <- publish(session, {runtime.query_name, job.id}),
          awaited <- Client.await(runtime.query_name, job.id, timeout),
          :ok <- publish(session, nil) do
       case awaited do
-        {:ok, %Job{state: :done} = job, %DataFrame{} = frame} ->
-          {:ok, outcome(job, frame), remember_pin(session, job)}
-
-        {:ok, %Job{state: :cancelled}, _frame} ->
-          fail(session, :cancelled)
-
-        {:ok, %Job{error: reason}, _frame} ->
-          fail(session, reason)
-
-        {:error, reason} ->
-          fail(session, reason)
+        {:ok, %Job{state: :done} = job, frame} -> {:ok, job, frame, remember_pin(session, job)}
+        {:ok, %Job{state: :cancelled}, _frame} -> {:error, :cancelled, session}
+        {:ok, %Job{error: reason}, _frame} -> {:error, reason, session}
+        {:error, reason} -> {:error, reason, session}
       end
     else
-      {:error, reason} -> fail(session, reason)
+      {:error, reason} -> {:error, reason, session}
     end
   end
 
@@ -817,31 +798,46 @@ defmodule SmolqueryPg.Session do
   end
 
   defp assign(session, name, value_rest, scope) do
-    case String.trim(value_rest) do
-      "" ->
-        set_syntax_error(session)
+    key = canonical(session, name)
 
-      value ->
-        key = canonical(session, name)
-        {value, notices} = capped(session, key, value)
-        session = session |> local_backup(key, scope) |> put_setting(name, value)
+    with {:ok, value} <- present(value_rest),
+         {:ok, value, notices} <- validated(session, key, value) do
+      session = session |> local_backup(key, scope) |> put_setting(name, value)
 
-        {:ok, command("SET", set_reported(session, key) ++ notices), session}
+      {:ok, command("SET", set_reported(session, key) ++ notices), session}
+    else
+      :blank -> set_syntax_error(session)
+      {:error, error} -> {:error, error, failed(session)}
     end
   end
 
-  defp capped(
-         %__MODULE__{runtime: runtime},
+  defp present(value_rest) do
+    case String.trim(value_rest) do
+      "" -> :blank
+      value -> {:ok, value}
+    end
+  end
+
+  defp validated(session, "statement_timeout", value) do
+    case duration_ms(unquote_value(value)) do
+      {:ok, ms} -> {:ok, Integer.to_string(ms), []}
+      :default -> {:ok, value, []}
+      :error -> invalid_setting("statement_timeout", value, session)
+    end
+  end
+
+  defp validated(
+         %__MODULE__{runtime: runtime} = session,
          "idle_in_transaction_session_timeout",
          value
        ) do
     cap = runtime.idle_in_transaction_timeout_ms
 
-    case Integer.parse(unquote_value(value)) do
-      {ms, ""} when ms > 0 and ms < cap ->
-        {value, []}
+    case duration_ms(unquote_value(value)) do
+      {:ok, ms} when ms > 0 and ms < cap ->
+        {:ok, Integer.to_string(ms), []}
 
-      _zero_invalid_or_past_the_cap ->
+      {:ok, _zero_or_past_the_cap} ->
         notice =
           Protocol.notice_response(
             "01000",
@@ -849,11 +845,37 @@ defmodule SmolqueryPg.Session do
               "and cannot be disabled"
           )
 
-        {Integer.to_string(cap), [notice]}
+        {:ok, Integer.to_string(cap), [notice]}
+
+      :default ->
+        {:ok, value, []}
+
+      :error ->
+        invalid_setting("idle_in_transaction_session_timeout", value, session)
     end
   end
 
-  defp capped(_session, _key, value), do: {value, []}
+  defp validated(_session, _key, value), do: {:ok, value, []}
+
+  defp invalid_setting(key, value, _session),
+    do: {:error, {"22023", ~s|invalid value for parameter "#{key}": #{value}|}}
+
+  @duration_units %{"" => 1, "ms" => 1, "s" => 1_000, "min" => 60_000, "h" => 3_600_000}
+
+  defp duration_ms(:default), do: :default
+
+  defp duration_ms(text) do
+    case Integer.parse(String.trim(text)) do
+      {ms, unit} when ms >= 0 ->
+        case Map.fetch(@duration_units, unit |> String.trim() |> String.downcase()) do
+          {:ok, factor} -> {:ok, ms * factor}
+          :error -> :error
+        end
+
+      _negative_or_not_a_number ->
+        :error
+    end
+  end
 
   defp local_backup(%__MODULE__{block: %{locals: locals} = block} = session, key, :local) do
     original = Map.get(session.settings, key, "")
@@ -1309,6 +1331,10 @@ defmodule SmolqueryPg.Session do
   defp deallocate(%__MODULE__{} = session, _statement),
     do: {:ok, command("DEALLOCATE ALL"), %{session | statements: %{}, portals: %{}}}
 
+  defp discard(%__MODULE__{txn: txn} = session, _statement) when txn != :idle do
+    {:error, {"25001", "DISCARD ALL cannot run inside a transaction block"}, failed(session)}
+  end
+
   defp discard(%__MODULE__{} = session, _statement) do
     {:ok, command("DISCARD ALL"),
      %{
@@ -1325,13 +1351,11 @@ defmodule SmolqueryPg.Session do
     Map.merge(@defaults, Map.take(settings, ["session_authorization", "application_name"]))
   end
 
-  defp explain(%__MODULE__{runtime: runtime} = session, statement) do
+  defp explain(session, statement) do
     sql = statement |> strip_explain() |> String.trim()
-    {pin, session} = block_pin(session)
-    opts = [explain: :plan, timeout_ms: timeout_ms(session)] ++ pin
 
-    case Client.query(runtime.query_name, sql, opts) do
-      {:ok, %Job{state: :done} = job, _frame} ->
+    case run_job(session, sql, explain: :plan, timeout_ms: timeout_ms(session)) do
+      {:ok, job, _frame, session} ->
         rows = estimated_rows(job)
 
         {:ok,
@@ -1344,12 +1368,9 @@ defmodule SmolqueryPg.Session do
              }
            ],
            "EXPLAIN"
-         ), remember_pin(session, job)}
+         ), session}
 
-      {:ok, %Job{error: reason}, _frame} ->
-        fail(session, reason)
-
-      {:error, reason} ->
+      {:error, reason, session} ->
         fail(session, reason)
     end
   end

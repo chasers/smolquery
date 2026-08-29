@@ -122,6 +122,10 @@ defmodule Smolquery.QueryService.Client do
         {:error, reason} -> {:error, reason}
       end
     end
+  rescue
+    ArgumentError -> {:error, :query_service_unavailable}
+  catch
+    :exit, _restarting -> {:error, :query_service_unavailable}
   end
 
   @doc """

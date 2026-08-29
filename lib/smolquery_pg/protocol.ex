@@ -121,9 +121,15 @@ defmodule SmolqueryPg.Protocol do
     <<body::binary-size(^body_size), remainder::binary>> = rest
 
     {:ok, message(tag, body), remainder}
+  rescue
+    MatchError -> {:error, {:malformed_message, <<tag>>}}
+    FunctionClauseError -> {:error, {:malformed_message, <<tag>>}}
+    ArgumentError -> {:error, {:malformed_message, <<tag>>}}
   end
 
   def decode(_buffer), do: :incomplete
+
+  @known_tags [?Q, ?p, ?X, ?S, ?H, ?P, ?B, ?D, ?C, ?E]
 
   defp message(?Q, body), do: {:query, cstring(body)}
   defp message(?p, body), do: {:auth_response, body}
@@ -156,6 +162,9 @@ defmodule SmolqueryPg.Protocol do
 
     {:execute, portal, max_rows}
   end
+
+  defp message(tag, _body) when tag in @known_tags,
+    do: raise(ArgumentError, "malformed #{<<tag>>} message")
 
   defp message(tag, body), do: {:unknown, tag, body}
 

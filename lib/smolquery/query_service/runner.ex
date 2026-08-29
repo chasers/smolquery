@@ -205,6 +205,11 @@ defmodule Smolquery.QueryService.Runner do
 
           {%{job | hot_members: done.hot_members}, nil}
 
+        {:ok, %{result: {:frame, frame}} = done} when state.explain == :describe ->
+          job = Job.described(state.job, done.snapshot, done.duration_ms, done.statistics)
+
+          {%{job | hot_members: done.hot_members}, frame}
+
         {:ok, %{result: {:frame, frame}} = done} ->
           job =
             Job.done(
@@ -495,7 +500,7 @@ defmodule Smolquery.QueryService.Runner do
     job = traced(state, job)
     stop_engine(state.engine)
     remove_partials(state.runtime, job)
-    record_history(state.runtime, job)
+    if state.explain != :describe, do: record_history(state.runtime, job)
 
     :telemetry.execute(
       [:smolquery, :query, :job],

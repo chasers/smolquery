@@ -33,7 +33,8 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   a larger result answers `54000`). The same table references apply:
   `dataset.table`, or a registered connection's `catalog.schema.table`.
 - **Session statements.** `SET`, `RESET`, and `SHOW` keep values in the
-  session. `SET statement_timeout = <ms>` bounds each query. `BEGIN`,
+  session. `SET statement_timeout = <ms>` bounds each query (Postgres
+  units — `30s`, `5min`, `1h` — are accepted and stored as ms). `BEGIN`,
   `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, and `ABORT` track the
   status the prompt shows. A failed statement inside a block aborts the
   block (`25P02`) until it ends, as Postgres does.
@@ -65,7 +66,9 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   `information_schema.tables`/`columns`/`schemata` answer;
   `SELECT version()` says PostgreSQL. A dialect rewrite bridges the rest:
   Postgres's `~` operators become `regexp_matches`, `pg_catalog.`
-  qualifications drop, `reg*` casts become `BIGINT`, and
+  qualifications drop, a name literal cast to `regclass` or `regtype`
+  becomes the catalog `oid` lookup it means, other `reg*` casts become
+  `BIGINT`, and
   `current_setting('x')` inlines the session's value.
 
 - **`postgres_fdw`.** A Postgres database attaches smolquery as a foreign

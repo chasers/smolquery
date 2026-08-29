@@ -27,6 +27,7 @@ defmodule Smolquery.QueryService.DescribeTest do
 
     assert {:ok, job, frame} = Client.query(name, sql, describe: true)
     assert job.state == :done
+    assert job.row_count == nil
 
     rows = DataFrame.to_rows(frame)
 
