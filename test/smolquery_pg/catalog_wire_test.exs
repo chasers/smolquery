@@ -231,6 +231,213 @@ defmodule SmolqueryPg.CatalogWireTest do
            ] = rows
   end
 
+  test "information_schema.columns carries the detail pgjdbc and psqlODBC read (T-412)", %{
+    socket: socket
+  } do
+    assert %{errors: [], results: [%{rows: rows}]} =
+             PgClient.query(
+               socket,
+               "SELECT column_name, udt_name, numeric_precision, numeric_scale, " <>
+                 "datetime_precision, character_maximum_length, column_default, is_identity, " <>
+                 "is_generated FROM information_schema.columns " <>
+                 "WHERE table_schema = 'analytics' AND table_name = 'events' ORDER BY ordinal_position"
+             )
+
+    assert [
+             ["id", "int8", "64", "0", nil, nil, nil, "NO", "NEVER"],
+             ["ts", "timestamp", nil, nil, "6", nil, nil, "NO", "NEVER"],
+             ["amount", "numeric", "38", "2", nil, nil, nil, "NO", "NEVER"]
+           ] = rows
+  end
+
+  test "pgjdbc's getTables and getColumns (Metabase, DBeaver) bind and answer (T-412)", %{
+    socket: socket
+  } do
+    tables = """
+    SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,
+      CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema'
+        WHEN true THEN CASE WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema'
+          THEN CASE c.relkind WHEN 'r' THEN 'SYSTEM TABLE' WHEN 'v' THEN 'SYSTEM VIEW'
+            WHEN 'i' THEN 'SYSTEM INDEX' ELSE NULL END
+          WHEN n.nspname = 'pg_toast' THEN CASE c.relkind WHEN 'r' THEN 'SYSTEM TOAST TABLE'
+            WHEN 'i' THEN 'SYSTEM TOAST INDEX' ELSE NULL END
+          ELSE CASE c.relkind WHEN 'r' THEN 'TEMPORARY TABLE' WHEN 'p' THEN 'TEMPORARY TABLE'
+            WHEN 'i' THEN 'TEMPORARY INDEX' WHEN 'S' THEN 'TEMPORARY SEQUENCE'
+            WHEN 'v' THEN 'TEMPORARY VIEW' ELSE NULL END END
+        WHEN false THEN CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE'
+          WHEN 'i' THEN 'INDEX' WHEN 'P' then 'PARTITIONED INDEX' WHEN 'S' THEN 'SEQUENCE'
+          WHEN 'v' THEN 'VIEW' WHEN 'c' THEN 'TYPE' WHEN 'f' THEN 'FOREIGN TABLE'
+          WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE NULL END
+        ELSE NULL END AS TABLE_TYPE, d.description AS REMARKS,
+      '' as TYPE_CAT, '' as TYPE_SCHEM, '' as TYPE_NAME, '' AS SELF_REFERENCING_COL_NAME,
+      '' AS REF_GENERATION
+    FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c
+      LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0
+        and d.classoid = 'pg_class'::regclass)
+    WHERE c.relnamespace = n.oid
+      AND (false OR ( c.relkind = 'r' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' ) )
+    ORDER BY TABLE_TYPE,TABLE_SCHEM,TABLE_NAME
+    """
+
+    assert %{errors: [], results: [%{rows: [[nil, "analytics", "events", "TABLE" | _rest]]}]} =
+             PgClient.query(socket, tables)
+
+    columns = """
+    SELECT * FROM (SELECT n.nspname,c.relname,a.attname,a.atttypid,
+      a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,a.atttypmod,a.attlen,
+      t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum,
+      nullif(a.attidentity, '') as attidentity,nullif(a.attgenerated, '') as attgenerated,
+      pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype
+    FROM pg_catalog.pg_namespace n
+      JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid)
+      JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid)
+      JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid)
+      LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum)
+      LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid)
+      LEFT JOIN pg_catalog.pg_class dc ON (dc.oid=dsc.classoid AND dc.relname='pg_class')
+      LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace=dn.oid AND dn.nspname='pg_catalog')
+    WHERE c.relkind in ('r','p','v','f','m') and a.attnum > 0 AND NOT a.attisdropped
+      AND n.nspname LIKE 'analytics' AND c.relname LIKE 'events') c
+    WHERE true ORDER BY nspname,c.relname,attnum
+    """
+
+    assert %{errors: [], results: [%{rows: rows}]} = PgClient.query(socket, columns)
+
+    assert [["analytics", "events", "id", "20", "t", "-1", "8", "-1", "1" | _], _ts, _amount] =
+             rows
+  end
+
+  test "pgjdbc's getPrimaryKeys expands the index key array, and finds none (T-412)", %{
+    socket: socket
+  } do
+    primary_keys = """
+    SELECT result.TABLE_CAT, result.TABLE_SCHEM, result.TABLE_NAME, result.COLUMN_NAME,
+      result.KEY_SEQ, result.PK_NAME
+    FROM (SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, ct.relname AS TABLE_NAME,
+        a.attname AS COLUMN_NAME, (information_schema._pg_expandarray(i.indkey)).n AS KEY_SEQ,
+        ci.relname AS PK_NAME, information_schema._pg_expandarray(i.indkey) AS KEYS,
+        a.attnum AS A_ATTNUM
+      FROM pg_catalog.pg_class ct
+        JOIN pg_catalog.pg_attribute a ON (ct.oid = a.attrelid)
+        JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid)
+        JOIN pg_catalog.pg_index i ON ( a.attrelid = i.indrelid)
+        JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid)
+      WHERE true AND n.nspname = 'analytics' AND ct.relname = 'events' AND i.indisprimary) result
+    where result.A_ATTNUM = (result.KEYS).x
+    ORDER BY result.table_name, result.pk_name, result.key_seq
+    """
+
+    assert %{errors: [], results: [%{rows: []}]} = PgClient.query(socket, primary_keys)
+  end
+
+  test "Metabase's foreign-key sync and schema filter bind (T-412)", %{socket: socket} do
+    fks = """
+    SELECT tc.table_schema AS fk_table_schema, tc.table_name AS fk_table_name,
+      kcu.column_name AS fk_column_name, ccu.table_schema AS pk_table_schema,
+      ccu.table_name AS pk_table_name, ccu.column_name AS pk_column_name
+    FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.referential_constraints rc ON tc.constraint_name = rc.constraint_name
+      JOIN information_schema.constraint_column_usage ccu ON rc.unique_constraint_name = ccu.constraint_name
+    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+    """
+
+    assert %{errors: [], results: [%{rows: []}]} = PgClient.query(socket, fks)
+
+    constraints = """
+    SELECT fk_ns.nspname AS "fk-table-schema", fk_table.relname AS "fk-table-name",
+      fk_column.attname AS "fk-column-name", pk_ns.nspname AS "pk-table-schema",
+      pk_table.relname AS "pk-table-name", pk_column.attname AS "pk-column-name"
+    FROM pg_constraint c
+      JOIN pg_class fk_table ON c.conrelid = fk_table.oid
+      JOIN pg_namespace fk_ns ON c.connamespace = fk_ns.oid
+      JOIN pg_attribute fk_column ON c.conrelid = fk_column.attrelid AND fk_column.attnum = ANY(c.conkey)
+      JOIN pg_class pk_table ON c.confrelid = pk_table.oid
+      JOIN pg_namespace pk_ns ON pk_table.relnamespace = pk_ns.oid
+      JOIN pg_attribute pk_column ON c.confrelid = pk_column.attrelid AND pk_column.attnum = ANY(c.confkey)
+    WHERE c.contype = 'f' AND fk_ns.nspname !~ '^information_schema|catalog_history|pg_'
+    """
+
+    assert %{errors: [], results: [%{rows: []}]} = PgClient.query(socket, constraints)
+
+    schemas = """
+    SELECT schema_name FROM information_schema.schemata
+    WHERE has_schema_privilege(schema_name, 'USAGE')
+      AND schema_name NOT IN ('pg_catalog', 'information_schema') ORDER BY schema_name
+    """
+
+    assert %{errors: [], results: [%{rows: rows}]} = PgClient.query(socket, schemas)
+    assert ["analytics"] in rows
+  end
+
+  test "DBeaver's table read and view definition bind (T-412)", %{socket: socket} do
+    assert %{results: [%{rows: [[oid]]}]} =
+             PgClient.query(socket, "SELECT oid FROM pg_class WHERE relname = 'events'")
+
+    tables = """
+    SELECT c.oid,c.*,d.description,pg_catalog.pg_get_expr(c.relpartbound, c.oid) as partition_expr,
+      pg_catalog.pg_get_partkeydef(c.oid) as partition_key
+    FROM pg_catalog.pg_class c
+      LEFT OUTER JOIN pg_catalog.pg_description d ON d.objoid=c.oid AND d.objsubid=0
+        AND d.classoid='pg_class'::regclass
+    WHERE c.relkind not in ('i','I','c') AND c.oid = #{oid}
+    """
+
+    assert %{errors: [], results: [%{columns: columns, rows: [row]}]} =
+             PgClient.query(socket, tables)
+
+    names = Enum.map(columns, & &1.name)
+    assert "relispopulated" in names and "relacl" in names and "reloptions" in names
+    assert length(row) == length(names)
+
+    assert %{errors: [], results: [%{rows: [[nil]]}]} =
+             PgClient.query(socket, "SELECT pg_catalog.pg_get_viewdef(#{oid}, true)")
+
+    assert %{errors: [], results: [%{rows: []}]} =
+             PgClient.query(
+               socket,
+               "SELECT * FROM pg_catalog.pg_views WHERE schemaname = 'analytics'"
+             )
+
+    assert %{errors: [], results: [%{rows: [["analytics", "events" | _]]}]} =
+             PgClient.query(socket, "SELECT * FROM pg_tables WHERE schemaname = 'analytics'")
+  end
+
+  test "psqlODBC's SQLColumns (Tableau) and its session probes bind (T-412)", %{socket: socket} do
+    columns = """
+    select n.nspname, c.relname, a.attname, a.atttypid, t.typname, a.attnum, a.attlen, a.atttypmod,
+      a.attnotnull, c.relhasrules, c.relkind, c.oid, pg_get_expr(d.adbin, d.adrelid),
+      case t.typtype when 'd' then t.typbasetype else 0 end, t.typtypmod, attidentity
+    from (((pg_catalog.pg_class c inner join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      and c.relname like 'events' and n.nspname like 'analytics')
+      inner join pg_catalog.pg_attribute a on (not a.attisdropped) and a.attnum > 0 and a.attrelid = c.oid)
+      inner join pg_catalog.pg_type t on t.oid = a.atttypid)
+      left outer join pg_attrdef d on a.atthasdef and d.adrelid = a.attrelid and d.adnum = a.attnum
+    order by n.nspname, c.relname, attnum
+    """
+
+    assert %{errors: [], results: [%{rows: rows}]} = PgClient.query(socket, columns)
+    assert [["analytics", "events", "id", "20", "int8", "1", "8" | _] | _rest] = rows
+
+    assert %{errors: [], results: [%{rows: [[xid]]}]} =
+             PgClient.query(socket, "SELECT txid_current()")
+
+    assert {_xid, ""} = Integer.parse(xid)
+
+    assert %{errors: [], results: [%{rows: [["32"]]}]} =
+             PgClient.query(socket, "SELECT current_setting('max_index_keys')::int")
+
+    assert %{errors: [], results: [%{rows: [["32"]]}]} =
+             PgClient.query(
+               socket,
+               "SELECT setting FROM pg_settings WHERE name = 'max_index_keys'"
+             )
+
+    assert %{errors: [], results: [%{rows: [["off"]]}]} =
+             PgClient.query(socket, "SELECT set_config('search_path', 'off', false)")
+  end
+
   test "a user query still reaches the query service", %{socket: socket} do
     assert %{results: [%{rows: [["2"]]}]} = PgClient.query(socket, "SELECT 1 + 1")
 

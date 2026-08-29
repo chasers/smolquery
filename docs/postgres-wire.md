@@ -67,8 +67,18 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   the smolquery catalog, the neighbouring catalogs as empty tables, and the
   functions the client corpus calls as macros. Postgrex connects and its
   type bootstrap answers; `psql`'s `\dn`, `\dt`, `\d table` work;
-  `information_schema.tables`/`columns`/`schemata` answer;
-  `SELECT version()` says PostgreSQL. A dialect rewrite bridges the rest:
+  `SELECT version()` says PostgreSQL. `information_schema` has the breadth
+  a BI tool's schema sync reads (T-412): `tables`, `schemata`, `columns`
+  with `udt_name`, precision, scale, and the identity and generation
+  columns, `table_privileges`, and — empty, since smolquery has none of
+  them — `views`, `table_constraints`, `key_column_usage`,
+  `referential_constraints`, `constraint_column_usage`, `sequences`,
+  `routines`, `parameters`; `pg_tables`, `pg_views`, `pg_indexes`,
+  `pg_stat_user_tables`, `pg_settings`, and the `has_*_privilege`,
+  `pg_get_viewdef`, `txid_current`, `to_regclass`, and
+  `information_schema._pg_expandarray` functions answer what pgjdbc
+  (Metabase, DBeaver) and psqlODBC (Tableau) send on connect and on sync.
+  A dialect rewrite bridges the rest:
   Postgres's `~` operators become `regexp_matches`, `pg_catalog.`
   qualifications drop, a name literal cast to `regclass` or `regtype`
   becomes the catalog `oid` lookup it means, other `reg*` casts become
@@ -102,8 +112,6 @@ Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
 ## Not yet
 
-- `information_schema` breadth for BI tools (T-412): the three core views
-  exist; the long tail does not.
 - Result streaming past `result_max_rows` (T-411): a `FETCH` loop could
   page an unbounded result; today the cap applies at `DECLARE`.
 

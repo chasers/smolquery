@@ -18,14 +18,31 @@ defmodule SmolqueryPg.PgCatalog do
     then dies at boot): `pg_type` (with each type's `format_type` text),
     `pg_range`, `pg_collation`, and the column shapes of the catalog tables
     the corpus touches — those load empty, so a join against `pg_index` or
-    `pg_trigger` answers no rows instead of no relation.
+    `pg_trigger` answers no rows instead of no relation. A few carry the
+    rows a driver expects of any server: `pg_database`, `pg_roles` and
+    `pg_authid` (one role), `pg_language`, and the `pg_settings` a client
+    probes (`max_index_keys`, `server_version_num`, ...).
   - **Generated tables**, rebuilt from `Smolquery.Catalog` when a query
     arrives and the last build is older than `@refresh_ttl_ms`:
     `pg_namespace` from the datasets, `pg_class` and `pg_attribute` from
-    the tables and their schemas. OIDs are stable hashes of the names, so
-    the OID `psql` reads in one query still resolves in its next.
+    the tables and their schemas — with the full column shape a tool's
+    `c.*` reads. OIDs are stable hashes of the names, so the OID `psql`
+    reads in one query still resolves in its next. The views over them
+    rebuild with them: `information_schema`'s `tables`, `schemata`,
+    `columns` (with `udt_name`, precision, scale, and the identity and
+    generation columns pgjdbc and psqlODBC read), `table_privileges`,
+    and `pg_tables`, `pg_stat_all_tables`, `pg_stat_user_tables`.
+  - **Empty views** for what smolquery has none of — constraints, views,
+    sequences, routines, indexes (`information_schema.table_constraints`,
+    `key_column_usage`, `referential_constraints`, `views`, `sequences`,
+    `routines`, `pg_views`, `pg_indexes`, ...) — so a BI tool's schema
+    sync binds and finds nothing, rather than failing on a missing
+    relation (T-412).
   - **Macros** for the functions the corpus calls: `version()`,
-    `format_type`, `pg_get_expr`, `pg_table_is_visible`, and the rest.
+    `format_type`, `pg_get_expr`, `pg_table_is_visible`, the
+    `has_*_privilege` family (always true), `pg_get_viewdef`,
+    `txid_current`, `to_regclass`, `information_schema._pg_expandarray`
+    (as `is__pg_expandarray`, the name the rewrite yields), and the rest.
 
   Every query is rewritten by `SmolqueryPg.PgCatalog.Rewrite` first, and
   every call runs through this server, so a refresh never interleaves with
@@ -137,6 +154,7 @@ defmodule SmolqueryPg.PgCatalog do
     load_fixtures(engine)
     create_macros(engine)
     create_static_rows(engine)
+    create_static_views(engine)
 
     {:ok, %{runtime: runtime, engine: engine, refreshed_at: 0}}
   end
@@ -156,11 +174,57 @@ defmodule SmolqueryPg.PgCatalog do
     state = ensure_fresh(state)
 
     with {:ok, _ast, canonical} <- serialize(state.engine, Rewrite.pre(sql, settings)),
-         {:ok, frame} <- Engine.frame(state.engine, Rewrite.post(canonical), params) do
+         {:ok, frame} <- run(state.engine, Rewrite.post(canonical), params) do
       {:reply, {:ok, columns(frame), rows(frame)}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  defp run(engine, sql, params) do
+    case Engine.frame(engine, sql, params) do
+      {:error, reason} = error ->
+        if duplicate_columns?(reason), do: deduplicated(engine, sql, params), else: error
+
+      ok ->
+        ok
+    end
+  end
+
+  defp duplicate_columns?(%{message: message}), do: duplicate_columns?(message)
+  defp duplicate_columns?(message) when is_binary(message), do: message =~ "duplicate"
+  defp duplicate_columns?(_reason), do: false
+
+  defp deduplicated(engine, sql, params) do
+    with {:ok, %{rows: rows}} <- Engine.query(engine, "DESCRIBE " <> sql, params) do
+      {aliases, _seen} =
+        rows
+        |> Enum.map(&hd/1)
+        |> Enum.with_index(1)
+        |> Enum.map_reduce(MapSet.new(), fn {name, position}, seen ->
+          alias = unique_alias(name, seen)
+
+          {"##{position} AS #{Identifier.quote_name!(alias)}", MapSet.put(seen, alias)}
+        end)
+
+      Engine.frame(
+        engine,
+        "SELECT " <> Enum.join(aliases, ", ") <> " FROM (" <> sql <> ") AS q",
+        params
+      )
+    end
+  end
+
+  defp unique_alias(name, seen), do: unique_alias(name, seen, 0)
+
+  defp unique_alias(name, seen, 0) do
+    if MapSet.member?(seen, name), do: unique_alias(name, seen, 1), else: name
+  end
+
+  defp unique_alias(name, seen, n) do
+    candidate = "#{name}_#{n}"
+
+    if MapSet.member?(seen, candidate), do: unique_alias(name, seen, n + 1), else: candidate
   end
 
   defp columns(frame) do
@@ -237,6 +301,10 @@ defmodule SmolqueryPg.PgCatalog do
         "CREATE TABLE #{name} AS SELECT * FROM read_csv(#{Identifier.sql_string(path)}, header = true)"
       )
     end
+
+    Engine.query!(engine, "ALTER TABLE pg_type ADD COLUMN typtypmod BIGINT DEFAULT -1")
+    Engine.query!(engine, "ALTER TABLE pg_type ADD COLUMN typndims BIGINT DEFAULT 0")
+    Engine.query!(engine, "ALTER TABLE pg_type ADD COLUMN typdefault VARCHAR DEFAULT NULL")
 
     for {table, shape_columns} <- shapes() do
       columns = Enum.map_join(shape_columns, ", ", fn {column, type} -> "#{column} #{type}" end)
@@ -321,6 +389,90 @@ defmodule SmolqueryPg.PgCatalog do
                              datistemplate, datallowconn, datconnlimit)
     VALUES (1, 'smolquery', 10, 6, 'C', 'C', FALSE, TRUE, -1)
     """)
+
+    Engine.query!(engine, """
+    INSERT INTO pg_authid (oid, rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
+                           rolcanlogin, rolreplication, rolbypassrls, rolconnlimit)
+    VALUES (10, 'smolquery', FALSE, TRUE, FALSE, FALSE, TRUE, FALSE, FALSE, -1)
+    """)
+
+    Engine.query!(engine, """
+    INSERT INTO pg_language (oid, lanname, lanowner, lanispl, lanpltrusted)
+    VALUES (12, 'internal', 10, FALSE, FALSE), (13, 'c', 10, FALSE, FALSE),
+           (14, 'sql', 10, FALSE, TRUE)
+    """)
+
+    Engine.query!(engine, """
+    INSERT INTO pg_settings (name, setting, category, context, vartype, source,
+                             boot_val, reset_val, pending_restart)
+    VALUES
+      ('max_index_keys', '32', 'Preset Options', 'internal', 'integer', 'default', '32', '32', FALSE),
+      ('max_identifier_length', '63', 'Preset Options', 'internal', 'integer', 'default', '63', '63', FALSE),
+      ('server_version', '14.10', 'Preset Options', 'internal', 'string', 'default', '14.10', '14.10', FALSE),
+      ('server_version_num', '140010', 'Preset Options', 'internal', 'integer', 'default', '140010', '140010', FALSE),
+      ('server_encoding', 'UTF8', 'Client Connection Defaults', 'internal', 'string', 'default', 'UTF8', 'UTF8', FALSE),
+      ('client_encoding', 'UTF8', 'Client Connection Defaults', 'user', 'string', 'default', 'UTF8', 'UTF8', FALSE),
+      ('TimeZone', 'UTC', 'Client Connection Defaults', 'user', 'string', 'default', 'UTC', 'UTC', FALSE),
+      ('DateStyle', 'ISO, MDY', 'Client Connection Defaults', 'user', 'string', 'default', 'ISO, MDY', 'ISO, MDY', FALSE),
+      ('integer_datetimes', 'on', 'Preset Options', 'internal', 'bool', 'default', 'on', 'on', FALSE),
+      ('standard_conforming_strings', 'on', 'Version and Platform Compatibility', 'user', 'bool', 'default', 'on', 'on', FALSE),
+      ('search_path', '"$user", public', 'Client Connection Defaults', 'user', 'string', 'default', '"$user", public', '"$user", public', FALSE),
+      ('is_superuser', 'off', 'Preset Options', 'internal', 'bool', 'default', 'off', 'off', FALSE)
+    """)
+  end
+
+  @empty_views %{
+    "is_views" =>
+      ~w(table_catalog table_schema table_name view_definition check_option is_updatable is_insertable_into is_trigger_updatable is_trigger_deletable is_trigger_insertable_into),
+    "is_table_constraints" =>
+      ~w(constraint_catalog constraint_schema constraint_name table_catalog table_schema table_name constraint_type is_deferrable initially_deferred enforced),
+    "is_key_column_usage" =>
+      ~w(constraint_catalog constraint_schema constraint_name table_catalog table_schema table_name column_name ordinal_position:BIGINT position_in_unique_constraint:BIGINT),
+    "is_referential_constraints" =>
+      ~w(constraint_catalog constraint_schema constraint_name unique_constraint_catalog unique_constraint_schema unique_constraint_name match_option update_rule delete_rule),
+    "is_constraint_column_usage" =>
+      ~w(table_catalog table_schema table_name column_name constraint_catalog constraint_schema constraint_name),
+    "is_check_constraints" =>
+      ~w(constraint_catalog constraint_schema constraint_name check_clause),
+    "is_sequences" =>
+      ~w(sequence_catalog sequence_schema sequence_name data_type numeric_precision:BIGINT numeric_precision_radix:BIGINT numeric_scale:BIGINT start_value minimum_value maximum_value increment cycle_option),
+    "is_routines" =>
+      ~w(specific_catalog specific_schema specific_name routine_catalog routine_schema routine_name routine_type data_type type_udt_catalog type_udt_schema type_udt_name routine_body routine_definition external_name external_language is_deterministic sql_data_access is_null_call security_type),
+    "is_parameters" =>
+      ~w(specific_catalog specific_schema specific_name ordinal_position:BIGINT parameter_mode is_result as_locator parameter_name data_type udt_catalog udt_schema udt_name parameter_default),
+    "pg_views" => ~w(schemaname viewname viewowner definition),
+    "pg_indexes" => ~w(schemaname tablename indexname tablespace indexdef)
+  }
+
+  defp create_static_views(engine) do
+    empty =
+      Enum.map(@empty_views, fn {view, columns} ->
+        "CREATE VIEW #{view} AS SELECT " <> empty_columns(columns) <> " WHERE FALSE"
+      end)
+
+    statements =
+      empty ++
+        [
+          "CREATE VIEW is_character_sets AS SELECT CAST(NULL AS VARCHAR) AS character_set_catalog, " <>
+            "CAST(NULL AS VARCHAR) AS character_set_schema, 'UTF8' AS character_set_name, " <>
+            "'UCS' AS character_repertoire, 'UTF8' AS form_of_use, " <>
+            "'smolquery' AS default_collate_catalog, 'pg_catalog' AS default_collate_schema, " <>
+            "'default' AS default_collate_name",
+          "CREATE VIEW is_collations AS SELECT 'smolquery' AS collation_catalog, " <>
+            "'pg_catalog' AS collation_schema, collname AS collation_name, " <>
+            "'NO PAD' AS pad_attribute FROM pg_collation"
+        ]
+
+    Enum.each(statements, &Engine.query!(engine, &1))
+  end
+
+  defp empty_columns(columns) do
+    Enum.map_join(columns, ", ", fn column ->
+      case String.split(column, ":") do
+        [name, type] -> "CAST(NULL AS #{type}) AS #{name}"
+        [name] -> "CAST(NULL AS VARCHAR) AS #{name}"
+      end
+    end)
   end
 
   defp create_macros(engine) do
@@ -352,7 +504,6 @@ defmodule SmolqueryPg.PgCatalog do
       "CREATE MACRO obj_description(o) AS CAST(NULL AS VARCHAR), (o, c) AS CAST(NULL AS VARCHAR)",
       "CREATE MACRO shobj_description(o, c) AS CAST(NULL AS VARCHAR)",
       "CREATE MACRO col_description(o, n) AS CAST(NULL AS VARCHAR)",
-      "CREATE MACRO pg_get_indexdef(o, n, p) AS CAST(NULL AS VARCHAR)",
       "CREATE MACRO pg_get_constraintdef(o) AS CAST(NULL AS VARCHAR), (o, p) AS CAST(NULL AS VARCHAR)",
       "CREATE MACRO pg_get_triggerdef(o, p) AS CAST(NULL AS VARCHAR)",
       "CREATE MACRO pg_get_statisticsobjdef_columns(o) AS CAST(NULL AS VARCHAR)",
@@ -366,7 +517,45 @@ defmodule SmolqueryPg.PgCatalog do
       "CREATE MACRO pg_total_relation_size(o) AS CAST(0 AS BIGINT)",
       "CREATE MACRO pg_size_pretty(b) AS CAST(b AS VARCHAR) || ' bytes'",
       "CREATE MACRO pg_my_temp_schema() AS 0",
-      "CREATE MACRO pg_postmaster_start_time() AS now()"
+      "CREATE MACRO pg_postmaster_start_time() AS now()",
+      "CREATE MACRO pg_conf_load_time() AS now()",
+      "CREATE MACRO pg_get_viewdef(o) AS CAST(NULL AS VARCHAR), (o, p) AS CAST(NULL AS VARCHAR), " <>
+        "(o, p, w) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_indexdef(o) AS CAST(NULL AS VARCHAR), (o, n) AS CAST(NULL AS VARCHAR), " <>
+        "(o, n, p) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_partkeydef(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_serial_sequence(t, c) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_functiondef(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_function_arguments(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_function_result(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_function_identity_arguments(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_get_ruledef(o) AS CAST(NULL AS VARCHAR), (o, p) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_relation_filepath(o) AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO pg_tablespace_location(o) AS ''",
+      "CREATE MACRO pg_database_size(d) AS CAST(0 AS BIGINT)",
+      "CREATE MACRO pg_is_in_recovery() AS FALSE",
+      "CREATE MACRO pg_is_other_temp_schema(o) AS FALSE",
+      "CREATE MACRO pg_current_xact_id() AS txid_current()",
+      "CREATE MACRO set_config(n, v, l) AS v",
+      "CREATE MACRO pg_typeof(x) AS typeof(x)",
+      "CREATE MACRO inet_server_addr() AS CAST(NULL AS VARCHAR)",
+      "CREATE MACRO inet_server_port() AS 5432",
+      "CREATE MACRO has_schema_privilege(s, p) AS TRUE, (u, s, p) AS TRUE",
+      "CREATE MACRO has_table_privilege(t, p) AS TRUE, (u, t, p) AS TRUE",
+      "CREATE MACRO has_any_column_privilege(t, p) AS TRUE, (u, t, p) AS TRUE",
+      "CREATE MACRO has_column_privilege(t, c, p) AS TRUE, (u, t, c, p) AS TRUE",
+      "CREATE MACRO has_database_privilege(d, p) AS TRUE, (u, d, p) AS TRUE",
+      "CREATE MACRO has_sequence_privilege(s, p) AS TRUE, (u, s, p) AS TRUE",
+      "CREATE MACRO has_function_privilege(f, p) AS TRUE, (u, f, p) AS TRUE",
+      "CREATE MACRO has_language_privilege(l, p) AS TRUE, (u, l, p) AS TRUE",
+      "CREATE MACRO has_tablespace_privilege(t, p) AS TRUE, (u, t, p) AS TRUE",
+      "CREATE MACRO pg_has_role(r, p) AS TRUE, (u, r, p) AS TRUE",
+      "CREATE MACRO to_regclass(n) AS " <>
+        "(SELECT oid FROM pg_class WHERE relname = regexp_extract(n, '([^.]+)$', 1))",
+      "CREATE MACRO to_regtype(n) AS " <>
+        "(SELECT oid FROM pg_type WHERE typname = regexp_extract(n, '([^.]+)$', 1))",
+      "CREATE MACRO is__pg_expandarray(a) AS " <>
+        "unnest(list_transform(a, lambda v, i: {'x': v, 'n': i}))"
     ]
 
     Enum.each(statements, &Engine.query!(engine, &1))
@@ -385,17 +574,73 @@ defmodule SmolqueryPg.PgCatalog do
       "CREATE OR REPLACE TABLE pg_attribute AS " <> attribute_rows(tables),
       "CREATE OR REPLACE VIEW is_tables AS " <>
         "SELECT 'smolquery' AS table_catalog, n.nspname AS table_schema, c.relname AS table_name, " <>
-        "'BASE TABLE' AS table_type FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+        "'BASE TABLE' AS table_type, CAST(NULL AS VARCHAR) AS self_referencing_column_name, " <>
+        "CAST(NULL AS VARCHAR) AS reference_generation, " <>
+        "CAST(NULL AS VARCHAR) AS user_defined_type_catalog, " <>
+        "CAST(NULL AS VARCHAR) AS user_defined_type_schema, " <>
+        "CAST(NULL AS VARCHAR) AS user_defined_type_name, 'NO' AS is_insertable_into, " <>
+        "'NO' AS is_typed, CAST(NULL AS VARCHAR) AS commit_action " <>
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
       "CREATE OR REPLACE VIEW is_schemata AS " <>
-        "SELECT 'smolquery' AS catalog_name, nspname AS schema_name, 'smolquery' AS schema_owner " <>
+        "SELECT 'smolquery' AS catalog_name, nspname AS schema_name, 'smolquery' AS schema_owner, " <>
+        "CAST(NULL AS VARCHAR) AS default_character_set_catalog, " <>
+        "CAST(NULL AS VARCHAR) AS default_character_set_schema, " <>
+        "CAST(NULL AS VARCHAR) AS default_character_set_name, CAST(NULL AS VARCHAR) AS sql_path " <>
         "FROM pg_namespace",
       "CREATE OR REPLACE VIEW is_columns AS " <>
         "SELECT 'smolquery' AS table_catalog, n.nspname AS table_schema, c.relname AS table_name, " <>
         "a.attname AS column_name, CAST(a.attnum AS BIGINT) AS ordinal_position, " <>
+        "CAST(NULL AS VARCHAR) AS column_default, " <>
+        "CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, " <>
         "format_type(a.atttypid, a.atttypmod) AS data_type, " <>
-        "CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable " <>
+        "CAST(CASE WHEN a.atttypid = 1043 AND a.atttypmod >= 4 THEN a.atttypmod - 4 END AS BIGINT) " <>
+        "AS character_maximum_length, " <>
+        "CAST(CASE WHEN a.atttypid IN (25, 1043, 1042) THEN 1073741824 END AS BIGINT) " <>
+        "AS character_octet_length, " <>
+        "CAST(CASE a.atttypid WHEN 20 THEN 64 WHEN 701 THEN 53 WHEN 1700 THEN (a.atttypmod - 4) >> 16 END " <>
+        "AS BIGINT) AS numeric_precision, " <>
+        "CAST(CASE a.atttypid WHEN 20 THEN 2 WHEN 701 THEN 2 WHEN 1700 THEN 10 END AS BIGINT) " <>
+        "AS numeric_precision_radix, " <>
+        "CAST(CASE a.atttypid WHEN 20 THEN 0 WHEN 1700 THEN (a.atttypmod - 4) & 65535 END AS BIGINT) " <>
+        "AS numeric_scale, " <>
+        "CAST(CASE a.atttypid WHEN 1114 THEN 6 WHEN 1184 THEN 6 WHEN 1082 THEN 0 END AS BIGINT) " <>
+        "AS datetime_precision, CAST(NULL AS VARCHAR) AS interval_type, " <>
+        "CAST(NULL AS VARCHAR) AS collation_name, CAST(NULL AS VARCHAR) AS domain_name, " <>
+        "'smolquery' AS udt_catalog, 'pg_catalog' AS udt_schema, t.typname AS udt_name, " <>
+        "CAST(a.attnum AS VARCHAR) AS dtd_identifier, 'NO' AS is_self_referencing, " <>
+        "'NO' AS is_identity, CAST(NULL AS VARCHAR) AS identity_generation, " <>
+        "CAST(NULL AS VARCHAR) AS identity_start, CAST(NULL AS VARCHAR) AS identity_increment, " <>
+        "CAST(NULL AS VARCHAR) AS identity_maximum, CAST(NULL AS VARCHAR) AS identity_minimum, " <>
+        "CAST(NULL AS VARCHAR) AS identity_cycle, 'NEVER' AS is_generated, " <>
+        "CAST(NULL AS VARCHAR) AS generation_expression, 'YES' AS is_updatable " <>
         "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid " <>
-        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.attnum > 0"
+        "JOIN pg_namespace n ON n.oid = c.relnamespace " <>
+        "LEFT JOIN pg_type t ON t.oid = a.atttypid WHERE a.attnum > 0",
+      "CREATE OR REPLACE VIEW is_table_privileges AS " <>
+        "SELECT 'smolquery' AS grantor, 'smolquery' AS grantee, 'smolquery' AS table_catalog, " <>
+        "n.nspname AS table_schema, c.relname AS table_name, 'SELECT' AS privilege_type, " <>
+        "'YES' AS is_grantable, 'YES' AS with_hierarchy " <>
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+      "CREATE OR REPLACE VIEW pg_tables AS " <>
+        "SELECT n.nspname AS schemaname, c.relname AS tablename, 'smolquery' AS tableowner, " <>
+        "CAST(NULL AS VARCHAR) AS tablespace, c.relhasindex AS hasindexes, " <>
+        "c.relhasrules AS hasrules, c.relhastriggers AS hastriggers, " <>
+        "c.relrowsecurity AS rowsecurity " <>
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+      "CREATE OR REPLACE VIEW pg_stat_all_tables AS " <>
+        "SELECT c.oid AS relid, n.nspname AS schemaname, c.relname AS relname, " <>
+        "CAST(0 AS BIGINT) AS seq_scan, CAST(0 AS BIGINT) AS seq_tup_read, " <>
+        "CAST(0 AS BIGINT) AS idx_scan, CAST(0 AS BIGINT) AS idx_tup_fetch, " <>
+        "CAST(0 AS BIGINT) AS n_tup_ins, CAST(0 AS BIGINT) AS n_tup_upd, " <>
+        "CAST(0 AS BIGINT) AS n_tup_del, CAST(0 AS BIGINT) AS n_tup_hot_upd, " <>
+        "CAST(0 AS BIGINT) AS n_live_tup, CAST(0 AS BIGINT) AS n_dead_tup, " <>
+        "CAST(0 AS BIGINT) AS n_mod_since_analyze, CAST(0 AS BIGINT) AS n_ins_since_vacuum, " <>
+        "CAST(NULL AS TIMESTAMP) AS last_vacuum, CAST(NULL AS TIMESTAMP) AS last_autovacuum, " <>
+        "CAST(NULL AS TIMESTAMP) AS last_analyze, CAST(NULL AS TIMESTAMP) AS last_autoanalyze, " <>
+        "CAST(0 AS BIGINT) AS vacuum_count, CAST(0 AS BIGINT) AS autovacuum_count, " <>
+        "CAST(0 AS BIGINT) AS analyze_count, CAST(0 AS BIGINT) AS autoanalyze_count " <>
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+      "CREATE OR REPLACE VIEW pg_stat_user_tables AS SELECT * FROM pg_stat_all_tables"
     ])
   end
 
@@ -433,7 +678,11 @@ defmodule SmolqueryPg.PgCatalog do
           "0 AS reltablespace, CAST('p' AS VARCHAR) AS relpersistence, " <>
           "CAST('d' AS VARCHAR) AS relreplident, 0 AS reltoastrelid, " <>
           "#{length(schema.fields)} AS relnatts, CAST(-1 AS DOUBLE) AS reltuples, " <>
-          "0 AS relpages, 0 AS relfilenode"
+          "0 AS relpages, 0 AS relfilenode, 0 AS reltype, 0 AS relallvisible, " <>
+          "FALSE AS relisshared, FALSE AS relhassubclass, TRUE AS relispopulated, " <>
+          "0 AS relfrozenxid, 0 AS relminmxid, 0 AS relrewrite, " <>
+          "CAST(NULL AS VARCHAR[]) AS relacl, CAST(NULL AS VARCHAR[]) AS reloptions, " <>
+          "CAST(NULL AS VARCHAR) AS relpartbound"
       end)
 
     values
@@ -447,13 +696,21 @@ defmodule SmolqueryPg.PgCatalog do
       |> Enum.with_index(1)
       |> Enum.map_join(" UNION ALL ", fn {field, index} ->
         {atttypid, atttypmod} = attribute_type(field.type)
+        {attlen, attbyval, attalign, attstorage} = attribute_layout(field.type)
 
         "SELECT #{relation_oid(dataset, table)} AS attrelid, " <>
           "#{Identifier.sql_string(field.name)} AS attname, " <>
           "#{atttypid} AS atttypid, #{atttypmod} AS atttypmod, #{index} AS attnum, " <>
           "#{not field.nullable} AS attnotnull, FALSE AS attisdropped, " <>
           "FALSE AS atthasdef, 0 AS attcollation, CAST('' AS VARCHAR) AS attidentity, " <>
-          "CAST('' AS VARCHAR) AS attgenerated, 0 AS attndims"
+          "CAST('' AS VARCHAR) AS attgenerated, 0 AS attndims, " <>
+          "#{attlen} AS attlen, #{attbyval} AS attbyval, " <>
+          "CAST('#{attalign}' AS VARCHAR) AS attalign, " <>
+          "CAST('#{attstorage}' AS VARCHAR) AS attstorage, " <>
+          "CAST('' AS VARCHAR) AS attcompression, -1 AS attstattarget, -1 AS attcacheoff, " <>
+          "FALSE AS atthasmissing, TRUE AS attislocal, 0 AS attinhcount, " <>
+          "CAST(NULL AS VARCHAR[]) AS attacl, CAST(NULL AS VARCHAR[]) AS attoptions, " <>
+          "CAST(NULL AS VARCHAR[]) AS attfdwoptions, CAST(NULL AS VARCHAR[]) AS attmissingval"
       end)
     end)
   end
@@ -468,6 +725,13 @@ defmodule SmolqueryPg.PgCatalog do
   defp attribute_type(:timestamp), do: {1114, -1}
   defp attribute_type(:date), do: {1082, -1}
   defp attribute_type(_map_or_variant), do: {3802, -1}
+
+  defp attribute_layout(:int64), do: {8, true, "d", "p"}
+  defp attribute_layout(:float64), do: {8, true, "d", "p"}
+  defp attribute_layout(:bool), do: {1, true, "c", "p"}
+  defp attribute_layout(:timestamp), do: {8, true, "d", "p"}
+  defp attribute_layout(:date), do: {4, true, "i", "p"}
+  defp attribute_layout(_varlena), do: {-1, false, "i", "x"}
 
   defp namespace_oid(dataset), do: @namespace_base + stable_oid(dataset)
 

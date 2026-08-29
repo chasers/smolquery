@@ -51,23 +51,49 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
     sql
     |> Sql.tokens()
     |> rewrite_reg_literals([])
+    |> rewrite_setting_calls(settings, [])
     |> Enum.map(fn
-      {:code, code} -> pre_code(code, settings)
+      {:code, code} -> pre_code(code)
       {_kind, text} -> text
     end)
     |> IO.iodata_to_binary()
   end
 
-  defp pre_code(code, settings) do
+  defp pre_code(code) do
     code
     |> strip_operator_calls()
     |> strip_qualifications()
-    |> rewrite_settings(settings)
     |> rewrite_session_constants()
     |> strip_collate()
     |> rewrite_casts()
     |> rewrite_partition_ancestors()
   end
+
+  defp rewrite_setting_calls(
+         [{:code, code}, {:string, string}, {:code, tail} | rest],
+         settings,
+         acc
+       ) do
+    with [_all, head] <- Regex.run(~r/^(.*)\bcurrent_setting\s*\(\s*$/is, code),
+         [_all, tail_rest] <- Regex.run(~r/^\s*(?:,\s*(?:true|false)\s*)?\)(.*)$/is, tail) do
+      value = setting_literal(settings, String.trim(string, "'"))
+
+      rewrite_setting_calls([{:code, tail_rest} | rest], settings, [{:code, head <> value} | acc])
+    else
+      nil ->
+        rewrite_setting_calls([{:string, string}, {:code, tail} | rest], settings, [
+          {:code, code} | acc
+        ])
+    end
+  end
+
+  defp rewrite_setting_calls([token | rest], settings, acc),
+    do: rewrite_setting_calls(rest, settings, [token | acc])
+
+  defp rewrite_setting_calls([], _settings, acc), do: Enum.reverse(acc)
+
+  defp setting_literal(settings, name),
+    do: "'" <> String.replace(setting_value(settings, name), "'", "''") <> "'"
 
   @reg_lookups %{
     "regclass" => {"pg_class", "relname"},
@@ -140,23 +166,35 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
 
   defp strip_qualifications(code), do: Regex.replace(~r/\bpg_catalog\./i, code, "")
 
-  defp rewrite_settings(code, settings) do
-    Regex.replace(~r/current_setting\s*\(\s*'((?:[^']|'')*)'\s*\)/i, code, fn _match, name ->
-      "'" <> String.replace(setting_value(settings, name), "'", "''") <> "'"
-    end)
-  end
+  @server_settings %{
+    "max_index_keys" => "32",
+    "max_identifier_length" => "63",
+    "server_version_num" => "140010",
+    "block_size" => "8192",
+    "segment_size" => "131072",
+    "wal_block_size" => "8192",
+    "data_checksums" => "off",
+    "lc_collate" => "C",
+    "lc_ctype" => "C",
+    "bytea_output" => "hex",
+    "default_transaction_read_only" => "off",
+    "in_hot_standby" => "off"
+  }
 
   defp setting_value(settings, name) do
-    Map.get_lazy(settings, name, fn -> insensitive_setting(settings, name) end) || ""
+    Map.get_lazy(settings, name, fn -> insensitive_setting(settings, name) end) ||
+      server_setting(name)
   end
 
   defp insensitive_setting(settings, name) do
     lower = String.downcase(name)
 
-    Enum.find_value(settings, "", fn {key, value} ->
+    Enum.find_value(settings, nil, fn {key, value} ->
       if String.downcase(key) == lower, do: value
     end)
   end
+
+  defp server_setting(name), do: Map.get(@server_settings, String.downcase(name), "")
 
   @session_constants [
     {~r/\bcurrent_database\s*\(\s*\)/i, "'smolquery'"},
