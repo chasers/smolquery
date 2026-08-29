@@ -63,6 +63,18 @@ defmodule Smolquery.QueryService.Planner do
   Hot rows have no snapshot: an unclaimed micro-segment is always included.
   That is read-your-writes, not an inconsistency.
 
+  ## A pinned plan (PL-58 layer 7)
+
+  `plan/4` takes a pin: `snapshot:` reads the sealed tier at that version
+  instead of the current one — the membership rule is exact for any fixed
+  `S` — and `hot_before_ms:` drops micro-segments whose ULID was stamped
+  after the bound. Together they are what a wire transaction block pins at
+  its first query, so every later statement in the block (a `postgres_fdw`
+  join's second cursor, say) reads the same data. The bound leans on ULID
+  timestamps, so cross-node clock skew is its precision; a snapshot older
+  than `SMOLQUERY_SNAPSHOT_KEEP_MS` can expire under a long block, which
+  surfaces as a query error, never as wrong rows.
+
   Entries that survive the membership rule then pass through
   `Smolquery.QueryService.Pruner`: a micro-segment whose min-max stats prove
   the query's WHERE conjuncts unsatisfiable is dropped before its URL is
@@ -205,6 +217,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.TopN
   alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.Views
+  alias Smolquery.Segments.Id
 
   @allowed_table_functions ~w(generate_series range repeat unnest)
 
@@ -218,21 +231,22 @@ defmodule Smolquery.QueryService.Planner do
   hot tier (`Smolquery.QueryService.TopN.bound/6`). The runner passes its own
   job engine's connection, so neither queues behind another job's scan.
   """
-  @spec plan(Runtime.t(), GenServer.server(), String.t()) :: {:ok, Plan.t()} | {:error, term()}
-  def plan(%Runtime{} = runtime, connection, sql) do
+  @spec plan(Runtime.t(), GenServer.server(), String.t(), keyword()) ::
+          {:ok, Plan.t()} | {:error, term()}
+  def plan(%Runtime{} = runtime, connection, sql, pin \\ []) do
     with {:ok, ast, canonical} <- Trace.span(:serialize, fn -> serialize(connection, sql) end),
          {:ok, statement} <- gate(ast),
          :ok <- gate_table_functions(statement, runtime.lockdown),
          {:ok, refs, federated} <- classified(statement),
          {:ok, attaches} <- Trace.span(:federated, fn -> federated(runtime, federated) end),
          {:ok, snapshot} <-
-           Trace.span(:snapshot, fn -> Catalog.current_snapshot(runtime.catalog) end),
+           Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
          {:ok, manifests} <-
            Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end) do
       {members, pruned} =
         Trace.span(:prune, fn ->
-          members = members(refs, tables, manifests)
+          members = members(refs, tables, manifests, Keyword.get(pin, :hot_before_ms))
 
           {members, pruned(members, Pruner.conjuncts(statement, refs))}
         end)
@@ -246,10 +260,26 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp members(refs, tables, manifests) do
+  defp pinned_snapshot(runtime, nil), do: Catalog.current_snapshot(runtime.catalog)
+  defp pinned_snapshot(_runtime, snapshot), do: {:ok, snapshot}
+
+  defp members(refs, tables, manifests, hot_before_ms) do
     Map.new(refs, fn ref ->
-      {ref, Enum.filter(manifests[ref], &include?(&1, tables[ref].sealed))}
+      {ref,
+       Enum.filter(
+         manifests[ref],
+         &(include?(&1, tables[ref].sealed) and stamped_before?(&1, hot_before_ms))
+       )}
     end)
+  end
+
+  defp stamped_before?(_entry, nil), do: true
+
+  defp stamped_before?(entry, hot_before_ms) do
+    case Id.timestamp(entry["id"]) do
+      {:ok, stamped_ms} -> stamped_ms <= hot_before_ms
+      :error -> true
+    end
   end
 
   defp pruned(members, conjuncts) do

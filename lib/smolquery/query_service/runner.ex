@@ -77,6 +77,8 @@ defmodule Smolquery.QueryService.Runner do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
+          | {:snapshot, Smolquery.Catalog.snapshot()}
+          | {:hot_before_ms, pos_integer()}
 
   @doc """
   Starts a runner for `job`, registered by the job's id.
@@ -123,6 +125,7 @@ defmodule Smolquery.QueryService.Runner do
       timeout_ms: timeout_ms,
       job: job,
       explain: mode(opts),
+      pin: Keyword.take(opts, [:snapshot, :hot_before_ms]),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
       engine: nil,
@@ -152,12 +155,15 @@ defmodule Smolquery.QueryService.Runner do
         runtime = state.runtime
         sql = state.job.sql
         explain = state.explain
+        pin = state.pin
         connection = engine.connection
         job_id = state.job.id
         timeout_ms = state.timeout_ms
 
         task =
-          Task.async(fn -> execute(runtime, connection, sql, explain, job_id, timeout_ms) end)
+          Task.async(fn ->
+            execute(runtime, connection, sql, explain, pin, job_id, timeout_ms)
+          end)
 
         {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
 
@@ -251,10 +257,10 @@ defmodule Smolquery.QueryService.Runner do
     :ok
   end
 
-  defp execute(runtime, connection, sql, explain, job_id, timeout_ms) do
+  defp execute(runtime, connection, sql, explain, pin, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
-    with {:ok, plan} <- Planner.plan(runtime, connection, sql),
+    with {:ok, plan} <- Planner.plan(runtime, connection, sql, pin),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->

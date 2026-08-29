@@ -85,10 +85,11 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   SELECT count(*) FROM analytics.events;
   ```
 
-  Two caveats. A scan is bounded by `result_max_rows` (10,000): the whole
-  result materializes at `DECLARE`, and a larger one fails with `54000` —
-  push the aggregation down, or raise `SMOLQUERY_MAX_RESULT_ROWS`. And a
-  transaction block pins nothing: each statement reads its own snapshot.
+  One caveat: a scan is bounded by `result_max_rows` (10,000) — the whole
+  result materializes at `DECLARE`, and a larger one fails with `54000`;
+  push the aggregation down, or raise `SMOLQUERY_MAX_RESULT_ROWS`. The
+  fdw's `REPEATABLE READ` block is honored: every cursor in it reads the
+  block's pinned snapshot.
 
 Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 
@@ -116,11 +117,34 @@ Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
 A computed list or struct also arrives as `jsonb`. A smaller integer
 arrives as `bigint`.
 
-## Transactions pin nothing
+## Transactions pin their read
 
-A transaction block is status only. Each statement reads its own catalog
-snapshot, exactly as an HTTP query does. Two `SELECT`s inside one `BEGIN`
-can see different snapshots if a seal lands between them.
+A `REPEATABLE READ` or `SERIALIZABLE` block gives repeatable reads: the
+block's first query captures the catalog snapshot it ran at and a
+hot-tier time bound, and every later statement in the block — the several
+cursors of a `postgres_fdw` join included — reads the same data. The pin
+forms lazily at the first query, as Postgres does, and clears when the
+block ends. The data is append-only, so this closes the only
+per-statement anomaly a block could see: rows inserted mid-block appear
+only after `COMMIT`. A plain `BEGIN` is `READ COMMITTED`, as in Postgres,
+and reads fresh per statement; `SHOW transaction_isolation` reports the
+block's level.
+
+The block surface is honest about what it does not do. Explicit
+`READ WRITE` (in `BEGIN` or `SET TRANSACTION`) answers `25006` — the
+server is read-only. Two-phase commit (`COMMIT PREPARED`) answers
+`0A000`. `SET LOCAL` reverts at block end; savepoint names are tracked,
+so `RELEASE` or `ROLLBACK TO` an unknown one answers `3B001`, and a
+savepoint outside a block answers `25P01`. `SET TRANSACTION ISOLATION
+LEVEL` works until the block's first query, then answers `25001`.
+
+Two bounds protect the pin. `idle_in_transaction_session_timeout`
+(default 5 minutes, `SET`-able, `SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS`)
+terminates a connection that sits idle inside a block, with Postgres's
+own `FATAL 25P03`. And a block older than `SMOLQUERY_SNAPSHOT_KEEP_MS`
+(24 hours) can lose its snapshot to expiry — that surfaces as a query
+error, never as wrong rows. The hot bound keys on micro-segment ULID
+timestamps, so cross-node clock skew is its precision.
 
 ## Security
 
@@ -169,6 +193,7 @@ A DuckDB error keeps its message and takes the code its class implies:
 |---|---|
 | `SMOLQUERY_PG_PASSWORD` | The password every client must present (the API key) |
 | `SMOLQUERY_PG_AUTH` | `scram-sha-256` (default) or `cleartext` |
+| `SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS` | Terminate a connection idle inside a transaction block (`300000`; `0` disables) |
 | `SMOLQUERY_PG_TLS_CERT` / `SMOLQUERY_PG_TLS_KEY` | PEM certificate and key; set both to accept `SSLRequest` |
 | `SMOLQUERY_PG_IP` / `SMOLQUERY_PG_PORT` | The bind address and port (`127.0.0.1` / `5432`) |
 

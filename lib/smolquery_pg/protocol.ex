@@ -355,6 +355,13 @@ defmodule SmolqueryPg.Protocol do
   def error_response(code, message), do: frame(?E, fields("ERROR", code, message))
 
   @doc """
+  `ErrorResponse` with the `FATAL` severity — the server closes the
+  connection after it.
+  """
+  @spec fatal_response(String.t(), String.t()) :: iodata()
+  def fatal_response(code, message), do: frame(?E, fields("FATAL", code, message))
+
+  @doc """
   `NoticeResponse` with a `WARNING` severity.
   """
   @spec notice_response(String.t(), String.t()) :: iodata()
