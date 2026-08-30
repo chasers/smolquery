@@ -41,6 +41,7 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   alias Smolquery.BufferService
   alias Smolquery.Catalog
+  alias Smolquery.Identifier
   alias Smolquery.Lifecycle
   alias Smolquery.Partitions
   alias Smolquery.QueryService
@@ -317,6 +318,10 @@ defmodule SmolqueryWeb.TableLive.Show do
     end
   end
 
+  defp editor_query(dataset, table) do
+    "select * from #{Identifier.quote_name!(dataset)}.#{Identifier.quote_name!(table)} limit 10;"
+  end
+
   defp preview_sql(dataset, table) do
     ~s(SELECT * FROM #{quote_ident(dataset)}.#{quote_ident(table)} LIMIT #{@preview_rows})
   end
@@ -476,11 +481,19 @@ defmodule SmolqueryWeb.TableLive.Show do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <div class="flex items-center gap-2">
-        <.link navigate={~p"/tables"} class="btn btn-ghost btn-sm">
-          <.icon name="hero-arrow-left" class="size-4" />
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <.link navigate={~p"/tables"} class="btn btn-ghost btn-sm">
+            <.icon name="hero-arrow-left" class="size-4" />
+          </.link>
+          <h1 class="text-xl font-semibold font-mono">{@dataset}.{@table}</h1>
+        </div>
+        <.link
+          navigate={~p"/query?#{[sql: editor_query(@dataset, @table)]}"}
+          class="btn btn-primary btn-sm"
+        >
+          Query
         </.link>
-        <h1 class="text-xl font-semibold font-mono">{@dataset}.{@table}</h1>
       </div>
 
       <div class="card bg-base-200 border border-base-300">

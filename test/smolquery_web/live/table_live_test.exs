@@ -39,15 +39,36 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert html =~ "No datasets yet"
     end
 
-    test "creates a dataset", %{conn: conn} do
+    test "creates a dataset from the modal and closes it", %{conn: conn} do
       runtime = start_web!()
+
+      {:ok, lv, html} = live(conn, ~p"/tables")
+
+      refute html =~ "create-dataset"
+
+      lv |> element("button[phx-click=new_dataset]") |> render_click()
+
+      html =
+        lv
+        |> form("#create-dataset", dataset: %{"name" => "fresh"})
+        |> render_submit()
+
+      assert html =~ "fresh"
+      refute has_element?(lv, "#dataset-modal")
+      assert Catalog.list_datasets(runtime.catalog) == {:ok, ["fresh"]}
+    end
+
+    test "cancel closes the dataset modal", %{conn: conn} do
+      start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/tables")
 
-      html = render_submit(lv, "create_dataset", %{"dataset" => %{"name" => "fresh"}})
+      lv |> element("button[phx-click=new_dataset]") |> render_click()
+      assert has_element?(lv, "#create-dataset")
 
-      assert html =~ "fresh"
-      assert Catalog.list_datasets(runtime.catalog) == {:ok, ["fresh"]}
+      lv |> element("#create-dataset button[phx-click=cancel_dataset]") |> render_click()
+
+      refute has_element?(lv, "#dataset-modal")
     end
 
     test "rejects a blank dataset name", %{conn: conn} do
@@ -101,16 +122,6 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert html =~ "at least one field"
     end
 
-    test "each table links to the editor with a sample query", %{conn: conn} do
-      runtime = start_web!()
-      seed(runtime)
-
-      {:ok, lv, _html} = live(conn, ~p"/tables")
-
-      sql = ~s|select * from "analytics"."events" limit 10;|
-      assert has_element?(lv, ~s|a[href="#{~p"/query?#{[sql: sql]}"}"]|, "Query")
-    end
-
     test "the table form is closed until New table opens it", %{conn: conn} do
       start_web!()
 
@@ -143,6 +154,16 @@ defmodule SmolqueryWeb.TableLiveTest do
   end
 
   describe "show" do
+    test "links to the editor with a sample query", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables/analytics/events")
+
+      sql = ~s|select * from "analytics"."events" limit 10;|
+      assert has_element?(lv, ~s|a.btn-primary[href="#{~p"/query?#{[sql: sql]}"}"]|, "Query")
+    end
+
     test "renders the schema and an absent retention policy", %{conn: conn} do
       runtime = start_web!()
       seed(runtime)

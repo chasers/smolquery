@@ -73,7 +73,7 @@ curl -H "$auth" -H "$json" \
 The full surface is in [`docs/api.md`](docs/api.md); a LiveView UI for the same
 thing is on [`localhost:4002`](http://localhost:4002), behind the basic-auth
 credential you just set. Federated Postgres connections have their own page
-there, at `/connections`. Every table in the list and every connection has a
+there, at `/connections`. A table's page and every connection have a
 **Query** button that opens the SQL editor on it: a table gets
 `select * ... limit 10`, a connection gets its tables ranked by row count.
 
