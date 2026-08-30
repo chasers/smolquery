@@ -207,10 +207,15 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp literal(_node, _params), do: :error
 
+  @epoch ~N[1970-01-01 00:00:00]
+
   defp bound(value) when is_number(value) or is_binary(value), do: {:ok, value}
   defp bound(%NaiveDateTime{} = value), do: {:ok, value}
   defp bound(%Date{} = value), do: {:ok, value}
-  defp bound(%DateTime{} = value), do: {:ok, DateTime.to_naive(value)}
+
+  defp bound(%DateTime{} = value),
+    do: {:ok, NaiveDateTime.add(@epoch, DateTime.to_unix(value, :microsecond), :microsecond)}
+
   defp bound(_opaque), do: :error
 
   defp constant(%{"type" => %{"id" => id}, "value" => value})

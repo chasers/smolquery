@@ -63,6 +63,16 @@ defmodule SmolqueryPg.ParamsTest do
       assert Decimal.equal?(decimal, Decimal.new("123456.78"))
     end
 
+    test "a NULL binds typed by its declared OID; an undeclared one stays untyped (T-426)" do
+      assert {:ok, [%Adbc.Column{field: %Adbc.Field{type: :s64}}, nil]} =
+               Params.values([{20, 0, nil}, {25, 0, nil}])
+    end
+
+    test "a timestamp infinity binds as the engine's sentinel, never as text (T-426)" do
+      assert {:ok, [%NaiveDateTime{year: 294_247}, %NaiveDateTime{year: -290_308}]} =
+               Params.values([{1114, 0, "infinity"}, {1114, 0, "-infinity"}])
+    end
+
     test "a bytea binds as a blob column, never as text" do
       assert {:ok, [%Adbc.Column{field: %Adbc.Field{type: :binary}}]} =
                Params.values([{17, 1, <<0, 255>>}])

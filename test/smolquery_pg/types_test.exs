@@ -101,10 +101,11 @@ defmodule SmolqueryPg.TypesBinaryTest do
     assert {:error, {:timestamp_out_of_range, _us}} =
              Types.decode_param(1114, 1, <<0x7FFFFFFFFFFFFFFE::64-signed>>)
 
-    assert SmolqueryPg.Params.values([
-             {1114, 1, <<0x7FFFFFFFFFFFFFFF::64-signed>>},
-             {1114, 1, <<-0x8000000000000000::64-signed>>}
-           ]) == {:ok, ["infinity", "-infinity"]}
+    assert {:ok, [%NaiveDateTime{year: 294_247}, %NaiveDateTime{year: -290_308}]} =
+             SmolqueryPg.Params.values([
+               {1114, 1, <<0x7FFFFFFFFFFFFFFF::64-signed>>},
+               {1114, 1, <<-0x8000000000000000::64-signed>>}
+             ])
   end
 
   test "describes DuckDB type names as Postgres types" do

@@ -49,9 +49,13 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   read the bound values where the `WHERE` names a `$n`, so a
   driver-shaped time-range query keeps its hot-tier optimisations. The
   edge infers no types: an undeclared parameter is `text`, and a cast the
-  client writes (`$1::bigint`) is read as its declaration. Parameters
-  bind in a `SELECT` only; `EXPLAIN` of a parameterised statement answers
-  `0A000`, since DuckDB cannot prepare an `EXPLAIN`.
+  client writes (`$1::bigint`) is read as its declaration. A `NULL` binds
+  typed by its declared OID, so `1 + $1` stays arithmetic. A `json` value
+  binds as text, and a `JSON` expression is described as `text` too: the
+  wire has no JSON type, as the [API](api.md) has none (`VARIANT` covers
+  it). Parameters bind in a `SELECT`, an `EXPLAIN`, and a
+  `DECLARE ... CURSOR FOR`; any other statement class with parameters
+  answers `0A000`.
 - **`Describe` before `Bind`.** A statement with parameters is described
   through the query service's `describe` mode — the planner plans it for
   real, and DuckDB's `DESCRIBE` names the columns without running the

@@ -20,8 +20,10 @@ defmodule SmolqueryPg.PgCatalog do
     the corpus touches — those load empty, so a join against `pg_index` or
     `pg_trigger` answers no rows instead of no relation. A few carry the
     rows a driver expects of any server: `pg_database`, `pg_roles` and
-    `pg_authid` (one role), `pg_language`, and the `pg_settings` a client
-    probes (`max_index_keys`, `server_version_num`, ...).
+    `pg_authid` (one role), `pg_language`, and `pg_settings`, built from
+    the same two maps `current_setting` reads — the server settings in
+    `SmolqueryPg.PgCatalog.Rewrite` and the session defaults in
+    `SmolqueryPg.Session` — so the table and the function agree.
   - **Generated tables**, rebuilt from `Smolquery.Catalog` when a query
     arrives and the last build is older than `@refresh_ttl_ms`:
     `pg_namespace` from the datasets, `pg_class` and `pg_attribute` from
@@ -61,6 +63,7 @@ defmodule SmolqueryPg.PgCatalog do
   alias Smolquery.Identifier
   alias SmolqueryPg.PgCatalog.Rewrite
   alias SmolqueryPg.Runtime
+  alias SmolqueryPg.Session
 
   @refresh_ttl_ms 1_000
   @call_timeout_ms 30_000
@@ -204,7 +207,7 @@ defmodule SmolqueryPg.PgCatalog do
         |> Enum.map_reduce(MapSet.new(), fn {name, position}, seen ->
           alias = unique_alias(name, seen)
 
-          {"##{position} AS #{Identifier.quote_name!(alias)}", MapSet.put(seen, alias)}
+          {"##{position} AS #{Identifier.quote_label(alias)}", MapSet.put(seen, alias)}
         end)
 
       Engine.frame(
@@ -408,23 +411,40 @@ defmodule SmolqueryPg.PgCatalog do
            (14, 'sql', 10, FALSE, TRUE)
     """)
 
-    Engine.query!(engine, """
-    INSERT INTO pg_settings (name, setting, category, context, vartype, source,
-                             boot_val, reset_val, pending_restart)
-    VALUES
-      ('max_index_keys', '32', 'Preset Options', 'internal', 'integer', 'default', '32', '32', FALSE),
-      ('max_identifier_length', '63', 'Preset Options', 'internal', 'integer', 'default', '63', '63', FALSE),
-      ('server_version', '14.10', 'Preset Options', 'internal', 'string', 'default', '14.10', '14.10', FALSE),
-      ('server_version_num', '140010', 'Preset Options', 'internal', 'integer', 'default', '140010', '140010', FALSE),
-      ('server_encoding', 'UTF8', 'Client Connection Defaults', 'internal', 'string', 'default', 'UTF8', 'UTF8', FALSE),
-      ('client_encoding', 'UTF8', 'Client Connection Defaults', 'user', 'string', 'default', 'UTF8', 'UTF8', FALSE),
-      ('TimeZone', 'UTC', 'Client Connection Defaults', 'user', 'string', 'default', 'UTC', 'UTC', FALSE),
-      ('DateStyle', 'ISO, MDY', 'Client Connection Defaults', 'user', 'string', 'default', 'ISO, MDY', 'ISO, MDY', FALSE),
-      ('integer_datetimes', 'on', 'Preset Options', 'internal', 'bool', 'default', 'on', 'on', FALSE),
-      ('standard_conforming_strings', 'on', 'Version and Platform Compatibility', 'user', 'bool', 'default', 'on', 'on', FALSE),
-      ('search_path', '"$user", public', 'Client Connection Defaults', 'user', 'string', 'default', '"$user", public', '"$user", public', FALSE),
-      ('is_superuser', 'off', 'Preset Options', 'internal', 'bool', 'default', 'off', 'off', FALSE)
-    """)
+    Engine.query!(
+      engine,
+      "INSERT INTO pg_settings (name, setting, category, context, vartype, source, " <>
+        "boot_val, reset_val, pending_restart) VALUES " <>
+        Enum.map_join(settings_rows(), ", ", &setting_row/1)
+    )
+  end
+
+  defp settings_rows do
+    server =
+      Enum.map(Rewrite.server_settings(), fn {name, value} ->
+        {name, value, "Preset Options", "internal"}
+      end)
+
+    session =
+      Enum.map(Session.defaults(), fn {name, value} ->
+        {name, value, "Client Connection Defaults", "user"}
+      end)
+
+    server ++ session
+  end
+
+  defp setting_row({name, value, category, context}) do
+    fields = [name, value, category, context, vartype(value), "default", value, value]
+
+    "(" <> Enum.map_join(fields, ", ", &Identifier.sql_string/1) <> ", FALSE)"
+  end
+
+  defp vartype(value) do
+    cond do
+      value in ["on", "off"] -> "bool"
+      match?({_integer, ""}, Integer.parse(value)) -> "integer"
+      true -> "string"
+    end
   end
 
   @empty_views %{
@@ -556,10 +576,13 @@ defmodule SmolqueryPg.PgCatalog do
       "CREATE MACRO has_language_privilege(l, p) AS TRUE, (u, l, p) AS TRUE",
       "CREATE MACRO has_tablespace_privilege(t, p) AS TRUE, (u, t, p) AS TRUE",
       "CREATE MACRO pg_has_role(r, p) AS TRUE, (u, r, p) AS TRUE",
-      "CREATE MACRO to_regclass(n) AS " <>
-        "(SELECT oid FROM pg_class WHERE relname = regexp_extract(n, '([^.]+)$', 1))",
-      "CREATE MACRO to_regtype(n) AS " <>
-        "(SELECT oid FROM pg_type WHERE typname = regexp_extract(n, '([^.]+)$', 1))",
+      "CREATE MACRO to_regclass(n) AS (SELECT c.oid FROM pg_class c " <>
+        "LEFT JOIN pg_namespace ns ON ns.oid = c.relnamespace " <>
+        "WHERE c.relname = regexp_extract(n, '([^.]+)$', 1) " <>
+        "ORDER BY ns.nspname = regexp_extract(n, '^([^.]+)\\.', 1) DESC NULLS LAST, c.oid " <>
+        "LIMIT 1)",
+      "CREATE MACRO to_regtype(n) AS (SELECT oid FROM pg_type " <>
+        "WHERE typname = regexp_extract(n, '([^.]+)$', 1) ORDER BY oid LIMIT 1)",
       "CREATE MACRO is__pg_expandarray(a) AS " <>
         "unnest(list_transform(a, lambda v, i: {'x': v, 'n': i}))"
     ]

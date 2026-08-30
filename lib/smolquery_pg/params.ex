@@ -7,7 +7,8 @@ defmodule SmolqueryPg.Params do
   the SQL keeps its `$n` and the engine prepares it, so no client value is
   ever SQL text. Only `Describe` before `Bind` still rewrites the SQL — to
   typed `NULL`s, so the engine can name the columns of a statement whose
-  values do not exist yet.
+  values do not exist yet. A `NULL` binds typed by its declared OID, so
+  `1 + $1` stays arithmetic.
 
   ## Parameter types
 
@@ -20,6 +21,10 @@ defmodule SmolqueryPg.Params do
 
   alias SmolqueryPg.Sql
   alias SmolqueryPg.Types
+
+  @epoch ~N[1970-01-01 00:00:00]
+  @timestamp_infinity NaiveDateTime.add(@epoch, 9_223_372_036_854_775_807, :microsecond)
+  @timestamp_neg_infinity NaiveDateTime.add(@epoch, -9_223_372_036_854_775_807, :microsecond)
 
   @type value :: {oid :: non_neg_integer(), format :: 0 | 1, binary() | nil}
 
@@ -56,8 +61,9 @@ defmodule SmolqueryPg.Params do
   Each wire value decodes by its OID and format (`SmolqueryPg.Types`) into
   the term `Smolquery.QueryService.Client` binds natively: an integer, a
   float, a boolean, a string, a `Decimal`, a `Date`, a `NaiveDateTime`, or
-  an `Adbc.Column` for a blob. No value ever becomes SQL text. A value the
-  edge cannot decode is an error naming the parameter.
+  an `Adbc.Column` for a blob or for a `NULL` typed by its OID. No value
+  ever becomes SQL text. A value the edge cannot decode is an error naming
+  the parameter.
   """
   @spec values([value()]) :: {:ok, [term()]} | {:error, term()}
   def values(values) do
@@ -65,7 +71,7 @@ defmodule SmolqueryPg.Params do
     |> Enum.with_index(1)
     |> Enum.reduce_while({:ok, []}, fn {{oid, format, bytes}, index}, {:ok, acc} ->
       case Types.decode_param(oid, format, bytes) do
-        {:ok, term} -> {:cont, {:ok, [bindable(term) | acc]}}
+        {:ok, term} -> {:cont, {:ok, [bindable(term, oid) | acc]}}
         {:error, reason} -> {:halt, {:error, {:invalid_parameter, index, reason}}}
       end
     end)
@@ -75,15 +81,29 @@ defmodule SmolqueryPg.Params do
     end
   end
 
-  defp bindable({:text, text}), do: text
-  defp bindable({:json, text}), do: text
-  defp bindable({:numeric, text}), do: Decimal.new(text)
-  defp bindable({:timestamp, %NaiveDateTime{} = value}), do: value
-  defp bindable({:timestamp, :infinity}), do: "infinity"
-  defp bindable({:timestamp, :neg_infinity}), do: "-infinity"
-  defp bindable({:date, %Date{} = value}), do: value
-  defp bindable({:bytea, bytes}), do: Adbc.Column.binary([bytes])
-  defp bindable(term), do: term
+  defp bindable(nil, oid), do: null(oid)
+  defp bindable({:text, text}, _oid), do: text
+  defp bindable({:json, text}, _oid), do: text
+  defp bindable({:numeric, text}, _oid), do: Decimal.new(text)
+  defp bindable({:timestamp, %NaiveDateTime{} = value}, _oid), do: value
+  defp bindable({:timestamp, :infinity}, _oid), do: @timestamp_infinity
+  defp bindable({:timestamp, :neg_infinity}, _oid), do: @timestamp_neg_infinity
+  defp bindable({:date, %Date{} = value}, _oid), do: value
+  defp bindable({:bytea, bytes}, _oid), do: Adbc.Column.binary([bytes])
+  defp bindable(term, _oid), do: term
+
+  @dialyzer {:nowarn_function, null: 1}
+  defp null(oid) do
+    case Types.duckdb_type_for_oid(oid) do
+      "BIGINT" -> Adbc.Column.s64([nil])
+      "DOUBLE" -> Adbc.Column.f64([nil])
+      "DECIMAL" <> _precision -> Adbc.Column.f64([nil])
+      "BOOLEAN" -> Adbc.Column.boolean([nil])
+      "DATE" -> Adbc.Column.date32([nil])
+      "TIMESTAMP" <> _zone -> Adbc.Column.timestamp([nil], :microseconds, "")
+      _text_or_blob -> nil
+    end
+  end
 
   @doc """
   `sql` with each `$n` replaced by a `NULL` cast to its declared type, so

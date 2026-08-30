@@ -33,4 +33,12 @@ defmodule SmolqueryPg.PgCatalog.RewriteTest do
     assert Rewrite.pre("SELECT current_setting('no_such_setting', true) AS v", %{}) ==
              "SELECT '' AS v"
   end
+
+  test "an inlined setting is a string token: later rewrites leave its text alone (T-426)" do
+    value = "svc::name current_database() pg_catalog.x"
+
+    assert Rewrite.pre("SELECT current_setting('application_name')", %{
+             "application_name" => value
+           }) == "SELECT '#{value}'"
+  end
 end

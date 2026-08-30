@@ -88,8 +88,7 @@ defmodule Smolquery.QueryService.Client do
   integers, floats, strings, booleans, `Decimal`, `Date`, `NaiveDateTime`,
   or an `Adbc.Column` for a blob — as engine parameters, never as SQL
   text; the pruner and the Top-N bound read them where the `WHERE` names
-  a `$n`. An `explain:` job cannot bind parameters (DuckDB cannot prepare
-  an `EXPLAIN`) and fails with `:explain_with_params`.
+  a `$n`, and an `explain:` job binds them to its `EXPLAIN`.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which
