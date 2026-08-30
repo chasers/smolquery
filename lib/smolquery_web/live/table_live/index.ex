@@ -7,14 +7,13 @@ defmodule SmolqueryWeb.TableLive.Index do
   Reads and writes go straight through `Smolquery.Catalog` — the same layering
   rule as `SmolqueryApi` (PL-12 D4).
 
-  The table form lives in a modal the "New table" button opens (PL-59). Each
-  table links to the editor with a `select * ... limit 10` on it.
+  The dataset and table forms live in modals the "New dataset" and "New
+  table" buttons open (PL-59).
   """
 
   use SmolqueryWeb, :live_view
 
   alias Smolquery.Catalog
-  alias Smolquery.Identifier
   alias Smolquery.IngestService
   alias Smolquery.Schema
   alias SmolqueryWeb.Runtime
@@ -41,6 +40,7 @@ defmodule SmolqueryWeb.TableLive.Index do
       |> assign(:runtime, runtime)
       |> assign(:types, @types)
       |> assign(:table_params, blank_table_params())
+      |> assign(:dataset_form_open, false)
       |> assign(:table_form_open, false)
       |> load_listing()
 
@@ -48,6 +48,14 @@ defmodule SmolqueryWeb.TableLive.Index do
   end
 
   @impl Phoenix.LiveView
+  def handle_event("new_dataset", _params, socket) do
+    {:noreply, assign(socket, :dataset_form_open, true)}
+  end
+
+  def handle_event("cancel_dataset", _params, socket) do
+    {:noreply, assign(socket, :dataset_form_open, false)}
+  end
+
   def handle_event("create_dataset", %{"dataset" => %{"name" => name}}, socket) do
     case String.trim(name) do
       "" ->
@@ -59,6 +67,7 @@ defmodule SmolqueryWeb.TableLive.Index do
             {:noreply,
              socket
              |> put_flash(:info, "Dataset #{dataset} created")
+             |> assign(:dataset_form_open, false)
              |> load_listing()}
 
           {:error, reason} ->
@@ -192,10 +201,6 @@ defmodule SmolqueryWeb.TableLive.Index do
 
   defp blank_field, do: %{"name" => "", "type" => "STRING", "nullable" => "true"}
 
-  defp sample_query(dataset, table) do
-    "select * from #{Identifier.quote_name!(dataset)}.#{Identifier.quote_name!(table)} limit 10;"
-  end
-
   defp sorted_fields(params) do
     params
     |> Map.get("fields", %{})
@@ -208,13 +213,18 @@ defmodule SmolqueryWeb.TableLive.Index do
     <Layouts.app flash={@flash}>
       <div class="flex items-center justify-between">
         <h1 class="text-xl font-semibold">Tables</h1>
-        <button type="button" class="btn btn-primary btn-sm" phx-click="new_table">
-          <.icon name="hero-plus" class="size-4" /> New table
-        </button>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-primary btn-sm" phx-click="new_dataset">
+            <.icon name="hero-plus" class="size-4" /> New dataset
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" phx-click="new_table">
+            <.icon name="hero-plus" class="size-4" /> New table
+          </button>
+        </div>
       </div>
 
       <div :if={@listing == []} class="text-sm opacity-70">
-        No datasets yet — create one below.
+        No datasets yet — create one to hold tables.
       </div>
 
       <div :for={{dataset, tables} <- @listing} class="card bg-base-200 border border-base-300">
@@ -222,35 +232,34 @@ defmodule SmolqueryWeb.TableLive.Index do
           <h2 class="card-title text-base font-mono">{dataset}</h2>
           <div :if={tables == []} class="text-sm opacity-70">No tables in this dataset.</div>
           <ul class="space-y-1">
-            <li :for={table <- tables} class="flex items-center justify-between gap-2">
+            <li :for={table <- tables}>
               <.link navigate={~p"/tables/#{dataset}/#{table}"} class="link link-hover font-mono">
                 {table}
-              </.link>
-              <.link
-                navigate={~p"/query?#{[sql: sample_query(dataset, table)]}"}
-                class="btn btn-ghost btn-xs"
-              >
-                Query
               </.link>
             </li>
           </ul>
         </div>
       </div>
 
-      <div class="card bg-base-200 border border-base-300">
-        <div class="card-body py-4">
-          <h2 class="card-title text-base">New dataset</h2>
-          <form id="create-dataset" phx-submit="create_dataset" class="flex gap-2">
-            <input
-              type="text"
-              name="dataset[name]"
-              placeholder="dataset name"
-              class="input input-bordered input-sm flex-1 font-mono"
-            />
-            <button type="submit" class="btn btn-primary btn-sm">Create</button>
-          </form>
-        </div>
-      </div>
+      <.modal
+        :if={@dataset_form_open}
+        id="dataset-modal"
+        title="New dataset"
+        on_close="cancel_dataset"
+      >
+        <form id="create-dataset" phx-submit="create_dataset" class="flex gap-2">
+          <input
+            type="text"
+            name="dataset[name]"
+            placeholder="dataset name"
+            class="input input-bordered input-sm flex-1 font-mono"
+          />
+          <button type="submit" class="btn btn-primary btn-sm">Create</button>
+          <button type="button" phx-click="cancel_dataset" class="btn btn-ghost btn-sm">
+            Cancel
+          </button>
+        </form>
+      </.modal>
 
       <.modal :if={@table_form_open} id="table-modal" title="New table" on_close="cancel_table">
         <form
