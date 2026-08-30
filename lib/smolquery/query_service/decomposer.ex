@@ -78,10 +78,11 @@ defmodule Smolquery.QueryService.Decomposer do
                gen_random_uuid setseed nextval currval)
 
   @enforce_keys [:partial_sql, :final_select, :final_group, :final_tail]
-  defstruct [:partial_sql, :final_select, :final_group, :final_tail]
+  defstruct [:partial_sql, :final_select, :final_group, :final_tail, params: []]
 
   @type t :: %__MODULE__{
           partial_sql: String.t(),
+          params: [term()],
           final_select: String.t(),
           final_group: String.t(),
           final_tail: String.t()
@@ -100,7 +101,7 @@ defmodule Smolquery.QueryService.Decomposer do
   """
   @spec decompose(GenServer.server(), String.t(), [output()], [String.t()]) ::
           {:ok, t()} | {:error, term()}
-  def decompose(connection, sql, outputs, table_columns) do
+  def decompose(connection, sql, outputs, table_columns, params \\ []) do
     with :ok <- gate_columns(table_columns),
          {:ok, node} <- select_node(connection, sql),
          :ok <- gate_shape(node),
@@ -110,10 +111,11 @@ defmodule Smolquery.QueryService.Decomposer do
          {:ok, items} <- classified_items(node, keys),
          :ok <- gate_outputs(items, outputs),
          {:ok, tail} <- tail(node, outputs),
-         {:ok, partial_sql} <- partial(connection, node, keys, items) do
+         {:ok, partial_sql} <- partial(connection, node, keys, items, params) do
       {:ok,
        %__MODULE__{
          partial_sql: partial_sql,
+         params: params,
          final_select: final_select(items, outputs),
          final_group: final_group(keys),
          final_tail: tail
@@ -369,7 +371,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp normalize(node) when is_list(node), do: Enum.map(node, &normalize/1)
   defp normalize(leaf), do: leaf
 
-  defp partial(connection, node, keys, items) do
+  defp partial(connection, node, keys, items, params) do
     select_list =
       Enum.with_index(keys, fn key, index -> Map.put(key, "alias", "#{@prefix}g#{index}") end) ++
         Enum.with_index(items, fn item, index -> partial_aggregates(item, index) end)
@@ -386,12 +388,12 @@ defmodule Smolquery.QueryService.Decomposer do
       |> Map.put("modifiers", [])
 
     with {:ok, sql} <- deserialize(connection, partial_node) do
-      exact(connection, sql)
+      exact(connection, sql, params)
     end
   end
 
-  defp exact(connection, partial_sql) do
-    with {:ok, columns} <- Connection.describe(connection, partial_sql, :infinity) do
+  defp exact(connection, partial_sql, params) do
+    with {:ok, columns} <- Connection.describe(connection, partial_sql, params, :infinity) do
       cond do
         Enum.any?(columns, fn {name, type} ->
           type == "HUGEINT" and not String.starts_with?(name, "#{@prefix}a")

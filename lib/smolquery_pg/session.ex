@@ -158,6 +158,7 @@ defmodule SmolqueryPg.Session do
 
   @type portal :: %{
           sql: String.t(),
+          params: [term()],
           formats: [0 | 1],
           outcome: outcome() | nil,
           offset: non_neg_integer()
@@ -346,9 +347,8 @@ defmodule SmolqueryPg.Session do
   def bind(%__MODULE__{} = session, portal, statement, param_formats, values, formats) do
     with {:ok, prepared} <- fetch_statement(session, statement),
          :ok <- arity(prepared, values),
-         {:ok, sql} <-
-           Params.substitute(prepared.sql, typed(prepared.oids, param_formats, values)) do
-      opened = %{sql: sql, formats: formats, outcome: nil, offset: 0}
+         {:ok, params} <- Params.values(typed(prepared.oids, param_formats, values)) do
+      opened = %{sql: prepared.sql, params: params, formats: formats, outcome: nil, offset: 0}
 
       {:ok, [Protocol.bind_complete()],
        %{session | portals: Map.put(session.portals, portal, opened)}}
@@ -500,7 +500,7 @@ defmodule SmolqueryPg.Session do
   defp ensure_run(session, _name, %{sql: ""} = portal), do: {:ok, portal, session}
 
   defp ensure_run(session, name, portal) do
-    case run(session, portal.sql) do
+    case run(session, portal.sql, portal.params) do
       {:ok, outcome, session} ->
         portal = %{portal | outcome: outcome}
 
@@ -531,8 +531,11 @@ defmodule SmolqueryPg.Session do
   Runs one statement and answers its outcome. An error marks an open
   transaction block failed.
   """
-  @spec run(t(), String.t()) :: {:ok, outcome(), t()} | {:error, Errors.wire_error(), t()}
-  def run(%__MODULE__{txn: :failed} = session, statement) do
+  @spec run(t(), String.t(), [term()]) ::
+          {:ok, outcome(), t()} | {:error, Errors.wire_error(), t()}
+  def run(session, statement, params \\ [])
+
+  def run(%__MODULE__{txn: :failed} = session, statement, _params) do
     case classify(statement) do
       class when class in [:commit, :rollback] ->
         end_block(session, class, statement)
@@ -548,8 +551,18 @@ defmodule SmolqueryPg.Session do
     end
   end
 
-  def run(%__MODULE__{} = session, statement),
+  def run(%__MODULE__{} = session, statement, []),
     do: dispatch(classify(statement), session, statement)
+
+  def run(%__MODULE__{} = session, statement, params) do
+    case classify(statement) do
+      :query ->
+        query(session, statement, params)
+
+      _not_a_query ->
+        {:error, {"0A000", "bind parameters are supported in a SELECT only"}, failed(session)}
+    end
+  end
 
   defp dispatch(:query, session, statement), do: query(session, statement)
   defp dispatch(:set, session, statement), do: set(session, statement)
@@ -611,14 +624,14 @@ defmodule SmolqueryPg.Session do
   defp outcome_map(columns, rows, tag, pre),
     do: %{columns: columns, rows: rows, tag: tag, pre: pre}
 
-  defp query(%__MODULE__{runtime: runtime} = session, sql) do
+  defp query(%__MODULE__{runtime: runtime} = session, sql, params \\ []) do
     if PgCatalog.catalog_statement?(runtime.name, sql),
-      do: catalog_query(session, sql),
-      else: user_query(session, sql)
+      do: catalog_query(session, sql, params),
+      else: user_query(session, sql, params)
   end
 
-  defp catalog_query(%__MODULE__{runtime: runtime} = session, sql) do
-    case PgCatalog.query(runtime.name, sql, session.settings) do
+  defp catalog_query(%__MODULE__{runtime: runtime} = session, sql, params \\ []) do
+    case PgCatalog.query(runtime.name, sql, session.settings, params) do
       {:ok, columns, rows} ->
         columns = Enum.map(columns, &pg_array_column/1)
 
@@ -632,8 +645,8 @@ defmodule SmolqueryPg.Session do
   defp pg_array_column({name, {:list, inner}, json?}), do: {name, {:pg_array, inner}, json?}
   defp pg_array_column(column), do: column
 
-  defp user_query(session, sql) do
-    case run_job(session, sql, timeout_ms: timeout_ms(session)) do
+  defp user_query(session, sql, params) do
+    case run_job(session, sql, timeout_ms: timeout_ms(session), params: params) do
       {:ok, job, %DataFrame{} = frame, session} -> {:ok, outcome(job, frame), session}
       {:error, reason, session} -> fail(session, reason)
     end

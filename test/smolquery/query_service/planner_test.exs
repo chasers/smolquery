@@ -566,6 +566,19 @@ defmodule Smolquery.QueryService.PlannerTest do
                )
     end
 
+    test "a $1 in the WHERE prunes by its bound value, and keeps everything when unbound (T-410)" do
+      stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
+      runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])
+      sql = "SELECT * FROM analytics.events WHERE id > $1"
+
+      assert {:ok, bound} = Planner.plan(runtime, @conn, sql, params: [100])
+      assert ids(bound.hot[@table]) == ["01B"]
+      assert bound.params == [100]
+
+      assert {:ok, unbound} = Planner.plan(runtime, @conn, sql)
+      assert ids(unbound.hot[@table]) == ["01A", "01B"]
+    end
+
     test "stats that leave a chance keep their entry" do
       stats = %{"id" => %{"min" => 1, "max" => 200, "null_count" => 0}}
       runtime = runtime([entry("01A", %{"stats" => stats})])

@@ -244,7 +244,8 @@ defmodule Smolquery.QueryService.TopN do
   """
   @spec bound(GenServer.server(), map(), t(), Schema.t(), [HotClient.entry()],
           budget: non_neg_integer(),
-          lockdown: boolean()
+          lockdown: boolean(),
+          params: [term()]
         ) :: {[HotClient.entry()], outcome()}
   def bound(connection, statement, spec, schema, entries, opts) do
     budget = Keyword.fetch!(opts, :budget)
@@ -257,17 +258,18 @@ defmodule Smolquery.QueryService.TopN do
         schema,
         entries,
         budget,
-        Keyword.get(opts, :lockdown, true)
+        Keyword.get(opts, :lockdown, true),
+        Keyword.get(opts, :params, [])
       )
     else
       {entries, skipped()}
     end
   end
 
-  defp probe(connection, statement, spec, schema, entries, budget, lockdown) do
+  defp probe(connection, statement, spec, schema, entries, budget, lockdown, params) do
     with :ok <- restrain(connection, lockdown),
          {:ok, sql} <- probe_sql(connection, statement, spec) do
-      probe = %{connection: connection, probe: sql, spec: spec, schema: schema}
+      probe = %{connection: connection, probe: sql, spec: spec, schema: schema, params: params}
 
       rounds(
         probe,
@@ -359,13 +361,21 @@ defmodule Smolquery.QueryService.TopN do
       Enum.map_join(@stable, ", ", &Identifier.sql_string/1) <> "))"
   end
 
-  defp measure(%{connection: connection, probe: probe, spec: spec, schema: schema}, candidates) do
+  defp measure(
+         %{connection: connection, probe: probe, spec: spec, schema: schema} = state,
+         candidates
+       ) do
     urls = Enum.map(candidates, & &1["url"])
     from = padding(schema) <> " UNION ALL BY NAME " <> Views.parquet_select(urls)
 
     with :ok <- define(connection, Views.table_view(spec.ref, schema, from)),
          {:ok, %Result{rows: [[count, bound]]}} <-
-           Connection.query(connection, measurement(probe, spec.direction), [], :infinity) do
+           Connection.query(
+             connection,
+             measurement(probe, spec.direction),
+             state.params,
+             :infinity
+           ) do
       {:ok, {count, bound}}
     else
       {:ok, result} -> {:error, {:probe_not_measured, result}}

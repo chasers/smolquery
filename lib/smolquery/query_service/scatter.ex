@@ -123,7 +123,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp attempt(runtime, connection, plan, job_id, timeout_ms, outputs) do
     with {:ok, ref} <- single_table(plan),
          {:ok, schema} <- planned_schema(plan, ref),
-         {:ok, outputs} <- describe(connection, plan.canonical_sql, outputs),
+         {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
@@ -148,10 +148,10 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp describe(_connection, _canonical_sql, outputs) when is_list(outputs), do: {:ok, outputs}
+  defp describe(_connection, _plan, outputs) when is_list(outputs), do: {:ok, outputs}
 
-  defp describe(connection, canonical_sql, nil),
-    do: Connection.describe(connection, canonical_sql, :infinity)
+  defp describe(connection, %Plan{} = plan, nil),
+    do: Connection.describe(connection, plan.canonical_sql, plan.params, :infinity)
 
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
   defp single_table(%Plan{tables: [ref]}), do: {:ok, ref}
@@ -160,7 +160,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp decompose(connection, plan, outputs, schema) do
     columns = Enum.map(schema.fields, & &1.name)
 
-    case Decomposer.decompose(connection, plan.canonical_sql, outputs, columns) do
+    case Decomposer.decompose(connection, plan.canonical_sql, outputs, columns, plan.params) do
       {:ok, decomposition} -> {:ok, decomposition}
       {:error, reason} -> {:refused, reason}
     end
@@ -248,6 +248,7 @@ defmodule Smolquery.QueryService.Scatter do
         request = %{
           statements: Views.table_view(ref, schema, Views.parquet_select(files)),
           partial_sql: decomposition.partial_sql,
+          params: decomposition.params,
           allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
           timeout_ms: timeout_ms
         }

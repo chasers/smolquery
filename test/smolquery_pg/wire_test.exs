@@ -375,6 +375,15 @@ defmodule SmolqueryPg.WireTest do
       assert %{results: [%{rows: [["1"]]}]} = PgClient.extended(socket, "SELECT 1")
     end
 
+    test "EXPLAIN with bind parameters answers 0A000: it cannot be prepared", %{port: port} do
+      {socket, _params} = connect(port)
+
+      assert %{errors: [%{"C" => "0A000"}]} =
+               PgClient.extended(socket, "EXPLAIN SELECT $1", [{20, 0, "1"}])
+
+      assert %{results: [%{rows: [["1"]]}]} = PgClient.extended(socket, "SELECT 1")
+    end
+
     test "a wrong parameter count is a protocol error", %{port: port} do
       {socket, _params} = connect(port)
 

@@ -96,10 +96,10 @@ defmodule SmolqueryPg.PgCatalog do
   session renders. `settings` supplies the session values the rewrite
   inlines.
   """
-  @spec query(atom(), String.t(), %{String.t() => String.t()}) ::
+  @spec query(atom(), String.t(), %{String.t() => String.t()}, [term()]) ::
           {:ok, [{String.t(), term(), boolean()}], [map()]} | {:error, term()}
-  def query(name, sql, settings) do
-    GenServer.call(Runtime.pg_catalog(name), {:query, sql, settings}, @call_timeout_ms)
+  def query(name, sql, settings, params \\ []) do
+    GenServer.call(Runtime.pg_catalog(name), {:query, sql, settings, params}, @call_timeout_ms)
   catch
     :exit, reason -> {:error, {:pg_catalog_unavailable, reason}}
   end
@@ -152,11 +152,11 @@ defmodule SmolqueryPg.PgCatalog do
     {:reply, reply, state}
   end
 
-  def handle_call({:query, sql, settings}, _from, state) do
+  def handle_call({:query, sql, settings, params}, _from, state) do
     state = ensure_fresh(state)
 
     with {:ok, _ast, canonical} <- serialize(state.engine, Rewrite.pre(sql, settings)),
-         {:ok, frame} <- Engine.frame(state.engine, Rewrite.post(canonical)) do
+         {:ok, frame} <- Engine.frame(state.engine, Rewrite.post(canonical), params) do
       {:reply, {:ok, columns(frame), rows(frame)}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}

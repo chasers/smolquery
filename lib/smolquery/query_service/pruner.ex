@@ -48,19 +48,26 @@ defmodule Smolquery.QueryService.Pruner do
   Tables appear only when at least one conjunct resolved to them; a query this
   module cannot read (set operations, OR-rooted WHERE, subquery-derived
   tables) yields an empty map, which prunes nothing.
+
+  A `$n` placeholder resolves to the n-th of `params` (T-410) when that value
+  is a number, a string, a date, or a timestamp; any other bound value leaves
+  its conjunct unread, which keeps every entry.
   """
-  @spec conjuncts(map(), [Catalog.table_ref()]) :: %{Catalog.table_ref() => [conjunct()]}
-  def conjuncts(%{"node" => %{"type" => "SELECT_NODE"} = node}, refs) do
+  @spec conjuncts(map(), [Catalog.table_ref()], [term()]) ::
+          %{Catalog.table_ref() => [conjunct()]}
+  def conjuncts(statement, refs, params \\ [])
+
+  def conjuncts(%{"node" => %{"type" => "SELECT_NODE"} = node}, refs, params) do
     aliases = aliases(Map.get(node, "from_table"), refs)
 
     node
     |> Map.get("where_clause")
     |> split()
-    |> Enum.flat_map(&parse(&1, aliases))
+    |> Enum.flat_map(&parse(&1, aliases, params))
     |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
   end
 
-  def conjuncts(_statement, _refs), do: %{}
+  def conjuncts(_statement, _refs, _params), do: %{}
 
   @doc """
   Whether `entry`'s stats leave any chance a row matches every conjunct.
@@ -125,34 +132,34 @@ defmodule Smolquery.QueryService.Pruner do
   defp split(nil), do: []
   defp split(node), do: [node]
 
-  defp parse(%{"class" => "COMPARISON", "type" => type} = node, aliases) do
+  defp parse(%{"class" => "COMPARISON", "type" => type} = node, aliases, params) do
     case Map.fetch(@operators, type) do
-      {:ok, op} -> comparison(node, op, aliases)
+      {:ok, op} -> comparison(node, op, aliases, params)
       :error -> []
     end
   end
 
-  defp parse(%{"class" => "BETWEEN"} = node, aliases) do
+  defp parse(%{"class" => "BETWEEN"} = node, aliases, params) do
     with {:ok, ref, name} <- column(node["input"], aliases),
-         {:ok, lower} <- literal(node["lower"]),
-         {:ok, upper} <- literal(node["upper"]) do
+         {:ok, lower} <- literal(node["lower"], params),
+         {:ok, upper} <- literal(node["upper"], params) do
       [{ref, {name, :ge, lower}}, {ref, {name, :le, upper}}]
     else
       _unparseable -> []
     end
   end
 
-  defp parse(_node, _aliases), do: []
+  defp parse(_node, _aliases, _params), do: []
 
-  defp comparison(node, op, aliases) do
-    case {column(node["left"], aliases), literal(node["right"])} do
+  defp comparison(node, op, aliases, params) do
+    case {column(node["left"], aliases), literal(node["right"], params)} do
       {{:ok, ref, name}, {:ok, value}} -> [{ref, {name, op, value}}]
-      _not_column_op_literal -> mirrored_comparison(node, op, aliases)
+      _not_column_op_literal -> mirrored_comparison(node, op, aliases, params)
     end
   end
 
-  defp mirrored_comparison(node, op, aliases) do
-    case {literal(node["left"]), column(node["right"], aliases)} do
+  defp mirrored_comparison(node, op, aliases, params) do
+    case {literal(node["left"], params), column(node["right"], aliases)} do
       {{:ok, value}, {:ok, ref, name}} -> [{ref, {name, @mirrored[op], value}}]
       _unparseable -> []
     end
@@ -171,14 +178,17 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp column(_node, _aliases), do: :error
 
-  defp literal(%{"class" => "CONSTANT", "value" => %{"is_null" => false} = value}),
+  defp literal(%{"class" => "CONSTANT", "value" => %{"is_null" => false} = value}, _params),
     do: constant(value)
 
-  defp literal(%{
-         "class" => "CAST",
-         "cast_type" => %{"id" => cast},
-         "child" => %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => text}}
-       })
+  defp literal(
+         %{
+           "class" => "CAST",
+           "cast_type" => %{"id" => cast},
+           "child" => %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => text}}
+         },
+         _params
+       )
        when cast in ["TIMESTAMP", "DATE"] and is_binary(text) do
     case cast do
       "TIMESTAMP" -> text |> String.replace(" ", "T") |> naive()
@@ -186,7 +196,22 @@ defmodule Smolquery.QueryService.Pruner do
     end
   end
 
-  defp literal(_node), do: :error
+  defp literal(%{"class" => "PARAMETER", "identifier" => identifier}, params) do
+    with {index, ""} <- Integer.parse(identifier),
+         {:ok, value} <- Enum.fetch(params, index - 1) do
+      bound(value)
+    else
+      _named_or_absent -> :error
+    end
+  end
+
+  defp literal(_node, _params), do: :error
+
+  defp bound(value) when is_number(value) or is_binary(value), do: {:ok, value}
+  defp bound(%NaiveDateTime{} = value), do: {:ok, value}
+  defp bound(%Date{} = value), do: {:ok, value}
+  defp bound(%DateTime{} = value), do: {:ok, DateTime.to_naive(value)}
+  defp bound(_opaque), do: :error
 
   defp constant(%{"type" => %{"id" => id}, "value" => value})
        when id in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"] and

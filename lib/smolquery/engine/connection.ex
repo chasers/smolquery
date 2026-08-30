@@ -107,10 +107,10 @@ defmodule Smolquery.Engine.Connection do
   The columns `sql` would produce, as `{name, type}` pairs in result order —
   a `DESCRIBE`, which binds the statement without running it.
   """
-  @spec describe(GenServer.server(), String.t(), timeout()) ::
+  @spec describe(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, Exception.t()}
-  def describe(conn, sql, timeout \\ 30_000) do
-    with {:ok, result} <- query(conn, "DESCRIBE " <> sql, [], timeout) do
+  def describe(conn, sql, params \\ [], timeout \\ 30_000) do
+    with {:ok, result} <- query(conn, "DESCRIBE " <> sql, params, timeout) do
       {:ok,
        Enum.map(result.rows, fn row ->
          fields = result.columns |> Enum.zip(row) |> Map.new()
