@@ -22,4 +22,15 @@ defmodule SmolqueryPg.PgCatalog.RewriteTest do
   test "a string not followed by a reg cast is left alone" do
     assert Rewrite.pre("SELECT 'pg_class'::text", %{}) == "SELECT 'pg_class'::text"
   end
+
+  test "current_setting inlines the session's value, or the server's, as a literal (T-412)" do
+    assert Rewrite.pre("SELECT current_setting('TimeZone')", %{"TimeZone" => "UTC"}) ==
+             "SELECT 'UTC'"
+
+    assert Rewrite.pre("SELECT current_setting('max_index_keys')::int", %{}) ==
+             "SELECT '32'::int"
+
+    assert Rewrite.pre("SELECT current_setting('no_such_setting', true) AS v", %{}) ==
+             "SELECT '' AS v"
+  end
 end
