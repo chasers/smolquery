@@ -49,7 +49,10 @@ defmodule Smolquery.Federation do
 
   The engine is private and short-lived, like a query job's. A connection that
   cannot be reached is an error the operator can act on, and never a crash —
-  a bad host is the expected case here, not an exceptional one.
+  a bad host is the expected case here, not an exceptional one. A call that
+  times out is caught for the same reason: the exit reason carries the
+  `ATTACH` statement, password and all, so it must reach `scrub/2` rather
+  than a crash report.
   """
   @spec probe(Connection.t()) :: :ok | {:error, term()}
   def probe(%Connection{} = connection) do
@@ -68,6 +71,25 @@ defmodule Smolquery.Federation do
           {:error, scrub(reason, connection)}
       end
     end
+  end
+
+  @doc """
+  The SQL that ranks a connection's user tables by live rows, ten at most.
+
+  The connections page opens the editor on it. The planner takes one SELECT,
+  so a page cannot hand the editor a script that finds the largest table and
+  then reads it; this is the first half, and the operator writes the second.
+  `pg_stat_user_tables` is read through the attached catalog, so the statement
+  runs through the planner like any federated query.
+  """
+  @spec discovery_query(String.t()) :: String.t()
+  def discovery_query(name) do
+    """
+    select schemaname, relname, n_live_tup
+    from #{Identifier.quote_name!(name)}.pg_catalog.pg_stat_user_tables
+    order by n_live_tup desc
+    limit 10;
+    """
   end
 
   @doc """
@@ -123,9 +145,9 @@ defmodule Smolquery.Federation do
   end
 
   defp run_probe(name, statement, connection) do
-    with {:ok, _attached} <- Engine.query(name, statement, [], @probe_timeout_ms),
+    with {:ok, _attached} <- Engine.try_query(name, statement, [], @probe_timeout_ms),
          {:ok, _row} <-
-           Engine.query(
+           Engine.try_query(
              name,
              "SELECT 1 FROM #{Identifier.quote_name!(connection.name)}.information_schema.schemata LIMIT 1",
              [],

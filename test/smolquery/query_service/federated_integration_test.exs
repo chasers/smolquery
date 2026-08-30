@@ -19,6 +19,7 @@ defmodule Smolquery.QueryService.FederatedIntegrationTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Federation
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
   alias Smolquery.Schema
@@ -117,6 +118,15 @@ defmodule Smolquery.QueryService.FederatedIntegrationTest do
     columns = DataFrame.to_columns(frame)
     assert columns["event_name"] == ["first", "second"]
     assert columns["email"] == ["one@example.test", "two@example.test"]
+  end
+
+  test "the UI's discovery query ranks the remote user tables", %{query: query} do
+    sql = Federation.discovery_query("warehouse")
+
+    assert {:ok, job, frame} = Client.query(query, sql)
+
+    assert job.state == :done
+    assert @remote_table in DataFrame.to_columns(frame)["relname"]
   end
 
   test "an unregistered catalog is still refused", %{query: query} do

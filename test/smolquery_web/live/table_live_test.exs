@@ -101,10 +101,38 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert html =~ "at least one field"
     end
 
+    test "each table links to the editor with a sample query", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/tables")
+
+      sql = ~s|select * from "analytics"."events" limit 10;|
+      assert has_element?(lv, ~s|a[href="#{~p"/query?#{[sql: sql]}"}"]|, "Query")
+    end
+
+    test "the table form is closed until New table opens it", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, html} = live(conn, ~p"/tables")
+
+      refute html =~ "create-table"
+
+      html = lv |> element("button[phx-click=new_table]") |> render_click()
+
+      assert html =~ "New table"
+      assert has_element?(lv, "#create-table")
+
+      lv |> element("#create-table button[phx-click=cancel_table]") |> render_click()
+
+      refute has_element?(lv, "#create-table")
+    end
+
     test "adds and removes schema field rows", %{conn: conn} do
       start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/tables")
+      lv |> element("button[phx-click=new_table]") |> render_click()
 
       html = render_click(lv, "add_field")
       assert html =~ "table[fields][1][name]"

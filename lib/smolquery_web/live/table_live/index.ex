@@ -6,11 +6,15 @@ defmodule SmolqueryWeb.TableLive.Index do
   from a schema built field by field over `Smolquery.Schema`'s logical types.
   Reads and writes go straight through `Smolquery.Catalog` — the same layering
   rule as `SmolqueryApi` (PL-12 D4).
+
+  The table form lives in a modal the "New table" button opens (PL-59). Each
+  table links to the editor with a `select * ... limit 10` on it.
   """
 
   use SmolqueryWeb, :live_view
 
   alias Smolquery.Catalog
+  alias Smolquery.Identifier
   alias Smolquery.IngestService
   alias Smolquery.Schema
   alias SmolqueryWeb.Runtime
@@ -37,6 +41,7 @@ defmodule SmolqueryWeb.TableLive.Index do
       |> assign(:runtime, runtime)
       |> assign(:types, @types)
       |> assign(:table_params, blank_table_params())
+      |> assign(:table_form_open, false)
       |> load_listing()
 
     {:ok, socket}
@@ -60,6 +65,17 @@ defmodule SmolqueryWeb.TableLive.Index do
             {:noreply, put_flash(socket, :error, "Could not create dataset: #{inspect(reason)}")}
         end
     end
+  end
+
+  def handle_event("new_table", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:table_params, blank_table_params())
+     |> assign(:table_form_open, true)}
+  end
+
+  def handle_event("cancel_table", _params, socket) do
+    {:noreply, socket |> assign(:table_form_open, false)}
   end
 
   def handle_event("table_changed", %{"table" => params}, socket) do
@@ -176,6 +192,10 @@ defmodule SmolqueryWeb.TableLive.Index do
 
   defp blank_field, do: %{"name" => "", "type" => "STRING", "nullable" => "true"}
 
+  defp sample_query(dataset, table) do
+    "select * from #{Identifier.quote_name!(dataset)}.#{Identifier.quote_name!(table)} limit 10;"
+  end
+
   defp sorted_fields(params) do
     params
     |> Map.get("fields", %{})
@@ -188,6 +208,9 @@ defmodule SmolqueryWeb.TableLive.Index do
     <Layouts.app flash={@flash}>
       <div class="flex items-center justify-between">
         <h1 class="text-xl font-semibold">Tables</h1>
+        <button type="button" class="btn btn-primary btn-sm" phx-click="new_table">
+          <.icon name="hero-plus" class="size-4" /> New table
+        </button>
       </div>
 
       <div :if={@listing == []} class="text-sm opacity-70">
@@ -199,121 +222,125 @@ defmodule SmolqueryWeb.TableLive.Index do
           <h2 class="card-title text-base font-mono">{dataset}</h2>
           <div :if={tables == []} class="text-sm opacity-70">No tables in this dataset.</div>
           <ul class="space-y-1">
-            <li :for={table <- tables}>
+            <li :for={table <- tables} class="flex items-center justify-between gap-2">
               <.link navigate={~p"/tables/#{dataset}/#{table}"} class="link link-hover font-mono">
                 {table}
+              </.link>
+              <.link
+                navigate={~p"/query?#{[sql: sample_query(dataset, table)]}"}
+                class="btn btn-ghost btn-xs"
+              >
+                Query
               </.link>
             </li>
           </ul>
         </div>
       </div>
 
-      <div class="grid gap-6 md:grid-cols-2">
-        <div class="card bg-base-200 border border-base-300">
-          <div class="card-body py-4">
-            <h2 class="card-title text-base">New dataset</h2>
-            <form id="create-dataset" phx-submit="create_dataset" class="flex gap-2">
-              <input
-                type="text"
-                name="dataset[name]"
-                placeholder="dataset name"
-                class="input input-bordered input-sm flex-1 font-mono"
-              />
-              <button type="submit" class="btn btn-primary btn-sm">Create</button>
-            </form>
-          </div>
-        </div>
-
-        <div class="card bg-base-200 border border-base-300">
-          <div class="card-body py-4">
-            <h2 class="card-title text-base">New table</h2>
-            <form
-              id="create-table"
-              phx-change="table_changed"
-              phx-submit="create_table"
-              class="space-y-2"
-            >
-              <div class="flex gap-2">
-                <select name="table[dataset]" class="select select-bordered select-sm font-mono">
-                  <option value="">dataset…</option>
-                  <option
-                    :for={{dataset, _tables} <- @listing}
-                    value={dataset}
-                    selected={@table_params["dataset"] == dataset}
-                  >
-                    {dataset}
-                  </option>
-                </select>
-                <input
-                  type="text"
-                  name="table[name]"
-                  value={@table_params["name"]}
-                  placeholder="table name"
-                  class="input input-bordered input-sm flex-1 font-mono"
-                />
-              </div>
-
-              <div
-                :for={{index, field} <- sorted_fields(@table_params)}
-                class="flex gap-2 items-center"
-              >
-                <input
-                  type="text"
-                  name={"table[fields][#{index}][name]"}
-                  value={field["name"]}
-                  placeholder="field name"
-                  class="input input-bordered input-sm flex-1 font-mono"
-                />
-                <select
-                  name={"table[fields][#{index}][type]"}
-                  class="select select-bordered select-sm font-mono"
-                >
-                  <option :for={type <- @types} value={type} selected={field["type"] == type}>
-                    {type}
-                  </option>
-                </select>
-                <label class="label cursor-pointer gap-1 text-xs">
-                  <input type="hidden" name={"table[fields][#{index}][nullable]"} value="false" />
-                  <input
-                    type="checkbox"
-                    name={"table[fields][#{index}][nullable]"}
-                    value="true"
-                    checked={field["nullable"] == "true"}
-                    class="checkbox checkbox-sm"
-                  /> null
-                </label>
-                <button
-                  type="button"
-                  phx-click="remove_field"
-                  phx-value-index={index}
-                  class="btn btn-ghost btn-xs"
-                >
-                  <.icon name="hero-x-mark" class="size-4" />
-                </button>
-              </div>
-
-              <div class="flex gap-2">
-                <button type="button" phx-click="add_field" class="btn btn-ghost btn-sm">
-                  <.icon name="hero-plus" class="size-4" /> Field
-                </button>
-                <button type="submit" class="btn btn-primary btn-sm">Create table</button>
-              </div>
-
-              <p class="text-xs opacity-70">
-                MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
-                pruning on a key, NDJSON loads only.
-                <a
-                  href="https://github.com/chasers/smolquery/blob/main/docs/api.md#schema-types"
-                  target="_blank"
-                  class="link"
-                >
-                  Read them before you choose one.
-                </a>
-              </p>
-            </form>
-          </div>
+      <div class="card bg-base-200 border border-base-300">
+        <div class="card-body py-4">
+          <h2 class="card-title text-base">New dataset</h2>
+          <form id="create-dataset" phx-submit="create_dataset" class="flex gap-2">
+            <input
+              type="text"
+              name="dataset[name]"
+              placeholder="dataset name"
+              class="input input-bordered input-sm flex-1 font-mono"
+            />
+            <button type="submit" class="btn btn-primary btn-sm">Create</button>
+          </form>
         </div>
       </div>
+
+      <.modal :if={@table_form_open} id="table-modal" title="New table" on_close="cancel_table">
+        <form
+          id="create-table"
+          phx-change="table_changed"
+          phx-submit="create_table"
+          class="space-y-2"
+        >
+          <div class="flex gap-2">
+            <select name="table[dataset]" class="select select-bordered select-sm font-mono">
+              <option value="">dataset…</option>
+              <option
+                :for={{dataset, _tables} <- @listing}
+                value={dataset}
+                selected={@table_params["dataset"] == dataset}
+              >
+                {dataset}
+              </option>
+            </select>
+            <input
+              type="text"
+              name="table[name]"
+              value={@table_params["name"]}
+              placeholder="table name"
+              class="input input-bordered input-sm flex-1 font-mono"
+            />
+          </div>
+
+          <div
+            :for={{index, field} <- sorted_fields(@table_params)}
+            class="flex gap-2 items-center"
+          >
+            <input
+              type="text"
+              name={"table[fields][#{index}][name]"}
+              value={field["name"]}
+              placeholder="field name"
+              class="input input-bordered input-sm flex-1 font-mono"
+            />
+            <select
+              name={"table[fields][#{index}][type]"}
+              class="select select-bordered select-sm font-mono"
+            >
+              <option :for={type <- @types} value={type} selected={field["type"] == type}>
+                {type}
+              </option>
+            </select>
+            <label class="label cursor-pointer gap-1 text-xs">
+              <input type="hidden" name={"table[fields][#{index}][nullable]"} value="false" />
+              <input
+                type="checkbox"
+                name={"table[fields][#{index}][nullable]"}
+                value="true"
+                checked={field["nullable"] == "true"}
+                class="checkbox checkbox-sm"
+              /> null
+            </label>
+            <button
+              type="button"
+              phx-click="remove_field"
+              phx-value-index={index}
+              class="btn btn-ghost btn-xs"
+            >
+              <.icon name="hero-x-mark" class="size-4" />
+            </button>
+          </div>
+
+          <div class="flex gap-2">
+            <button type="button" phx-click="add_field" class="btn btn-ghost btn-sm">
+              <.icon name="hero-plus" class="size-4" /> Field
+            </button>
+            <button type="submit" class="btn btn-primary btn-sm">Create table</button>
+            <button type="button" phx-click="cancel_table" class="btn btn-ghost btn-sm">
+              Cancel
+            </button>
+          </div>
+
+          <p class="text-xs opacity-70">
+            MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
+            pruning on a key, NDJSON loads only.
+            <a
+              href="https://github.com/chasers/smolquery/blob/main/docs/api.md#schema-types"
+              target="_blank"
+              class="link"
+            >
+              Read them before you choose one.
+            </a>
+          </p>
+        </form>
+      </.modal>
     </Layouts.app>
     """
   end

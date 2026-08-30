@@ -3,6 +3,8 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Federation
+  alias Smolquery.Test.Postgres
 
   setup do
     previous = Application.get_env(:smolquery, :credential_key)
@@ -39,6 +41,8 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
   end
 
   defp edit_params(overrides), do: overrides |> form_params() |> Map.delete("name")
+
+  defp open_new(lv), do: lv |> element("button[phx-click=new]") |> render_click()
 
   defp form_params(overrides \\ %{}) do
     Map.merge(
@@ -99,6 +103,7 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       runtime = start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
 
       html =
         lv
@@ -106,15 +111,30 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
         |> render_submit()
 
       assert html =~ "Connection warehouse saved"
+      refute has_element?(lv, "#connection-form")
       assert {:ok, [stored]} = Catalog.list_connections(runtime.catalog)
       assert stored.name == "warehouse"
       assert stored.host == "db.internal"
+    end
+
+    test "the form is closed until New connection opens it", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, html} = live(conn, ~p"/connections")
+
+      refute html =~ "connection-form"
+
+      html = open_new(lv)
+
+      assert html =~ "New connection"
+      assert has_element?(lv, "#connection-form")
     end
 
     test "the submitted password never renders back", %{conn: conn} do
       start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
 
       html =
         lv
@@ -128,6 +148,7 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
 
       html =
         lv
@@ -141,6 +162,7 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       start_web!()
 
       {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
 
       html =
         lv
@@ -202,16 +224,30 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       assert string =~ "password=correcthorse"
     end
 
-    test "cancel returns to the new-connection form", %{conn: conn} do
+    test "cancel closes the form", %{conn: conn} do
       runtime = start_web!()
       seed(runtime)
 
       {:ok, lv, _html} = live(conn, ~p"/connections")
 
       lv |> element("button[phx-click=edit][phx-value-name=warehouse]") |> render_click()
-      html = lv |> element("button[phx-click=cancel]") |> render_click()
+      assert has_element?(lv, "#connection-form")
 
-      assert html =~ "New connection"
+      lv |> element("#connection-form button[phx-click=cancel]") |> render_click()
+
+      refute has_element?(lv, "#connection-form")
+      refute has_element?(lv, "#connection-modal")
+    end
+
+    test "the modal's close button closes the form too", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
+
+      lv |> element("#connection-modal button[aria-label=Close]") |> render_click()
+
+      refute has_element?(lv, "#connection-modal")
     end
   end
 
@@ -239,8 +275,46 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
 
       html = lv |> element("button[phx-click=test][phx-value-name=warehouse]") |> render_click()
 
+      assert html =~ ~r/phx-click="test"[^>]*\sdisabled[^>]*>\s*Testing…/
+
+      html = render_async(lv, 30_000)
+
       assert html =~ "Could not open connection warehouse"
       refute html =~ "sup3rsecret"
+      refute has_element?(lv, "button[phx-click=test][disabled]")
+    end
+
+    @tag :integration
+    test "a reachable database answers in the flash", %{conn: conn} do
+      runtime = start_web!()
+      options = Postgres.ensure_database!()
+
+      seed(runtime, %{
+        "host" => options[:hostname],
+        "port" => options[:port],
+        "database" => options[:database],
+        "username" => options[:username],
+        "password" => options[:password],
+        "sslmode" => "disable"
+      })
+
+      {:ok, lv, _html} = live(conn, ~p"/connections")
+
+      lv |> element("button[phx-click=test][phx-value-name=warehouse]") |> render_click()
+
+      assert render_async(lv, 30_000) =~ "warehouse answered"
+    end
+  end
+
+  describe "querying" do
+    test "links to the editor with the table discovery query", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      {:ok, lv, _html} = live(conn, ~p"/connections")
+
+      sql = Federation.discovery_query("warehouse")
+      assert has_element?(lv, ~s|a[href="#{~p"/query?#{[sql: sql]}"}"]|, "Query")
     end
   end
 end
