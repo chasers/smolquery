@@ -1,0 +1,189 @@
+{{- define "smolquery.statefulset" -}}
+{{- $root := .root -}}
+{{- $role := .role -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "smolquery.roleName" . }}
+  labels:
+    {{- include "smolquery.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  serviceName: {{ include "smolquery.headless" $root }}
+  replicas: {{ include "smolquery.roleReplicas" . }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "smolquery.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- with $root.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- include "smolquery.labels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+      annotations:
+        {{- with $root.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/config: {{ include "smolquery.checksum" $root }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      {{- if or $root.Values.serviceAccount.create $root.Values.serviceAccount.name }}
+      serviceAccountName: {{ include "smolquery.serviceAccountName" $root }}
+      {{- end }}
+      automountServiceAccountToken: {{ if and $root.Values.podOperations.enabled (or (eq $role "api") (eq $role "server")) }}true{{ else }}false{{ end }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $root.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: smolquery
+          image: {{ include "smolquery.image" $root | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          ports:
+            {{- include "smolquery.rolePorts" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ $root.Values.existingSecret.name | quote }}
+            - configMapRef:
+                name: {{ include "smolquery.fullname" $root }}-config
+          env:
+            - name: SMOLQUERY_ROLES
+              value: {{ include "smolquery.roleRoles" . | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- with $root.Values.commonExtraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with index $root.Values.roleExtraEnv $role }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- if $root.Values.tls.enabled }}
+            - name: gen-rpc-tls
+              mountPath: /etc/smolquery/gen-rpc-tls
+              readOnly: true
+          {{- end }}
+          {{- with $root.Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or (eq $role "buffer") (eq $role "server") }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /app/bin/smolquery
+                  - rpc
+                  - ":ok = Smolquery.BufferService.Drain.handoff(Smolquery.BufferService)"
+          {{- end }}
+          {{- if eq $role "api" }}
+          readinessProbe:
+            {{- toYaml $root.Values.probes.api.readiness | nindent 12 }}
+          livenessProbe:
+            {{- toYaml $root.Values.probes.api.liveness | nindent 12 }}
+          {{- else if eq $role "server" }}
+          readinessProbe:
+            {{- toYaml $root.Values.probes.server.readiness | nindent 12 }}
+          livenessProbe:
+            {{- toYaml $root.Values.probes.server.liveness | nindent 12 }}
+          {{- else if eq $role "buffer" }}
+          readinessProbe:
+            {{- toYaml $root.Values.probes.buffer.readiness | nindent 12 }}
+          livenessProbe:
+            {{- toYaml $root.Values.probes.buffer.liveness | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if or (eq $role "api") (eq $role "storage") $root.Values.tls.enabled $root.Values.extraVolumes }}
+      volumes:
+        {{- if or (eq $role "api") (eq $role "storage") }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if $root.Values.tls.enabled }}
+        - name: gen-rpc-tls
+          secret:
+            secretName: {{ $root.Values.tls.secretName | quote }}
+            defaultMode: 0400
+        {{- end }}
+        {{- with $root.Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+{{- if or (eq $role "buffer") (eq $role "server") }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "smolquery.labels" $root | nindent 10 }}
+          app.kubernetes.io/component: {{ $role }}
+        {{- with $root.Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml $root.Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $root.Values.persistence.size | quote }}
+        {{- with $root.Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+{{- end }}
+{{- end }}
+
+{{- if eq .Values.topology "split" }}
+{{ include "smolquery.statefulset" (dict "root" . "role" "api") }}
+---
+{{ include "smolquery.statefulset" (dict "root" . "role" "buffer") }}
+---
+{{ include "smolquery.statefulset" (dict "root" . "role" "storage") }}
+{{- else }}
+{{ include "smolquery.statefulset" (dict "root" . "role" "server") }}
+{{- end }}

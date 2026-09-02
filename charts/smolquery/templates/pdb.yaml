@@ -1,0 +1,32 @@
+{{- define "smolquery.pdb" -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "smolquery.roleName" . }}
+  labels:
+    {{- include "smolquery.labels" .root | nindent 4 }}
+    app.kubernetes.io/component: {{ .role }}
+spec:
+  minAvailable: {{ (index .root.Values.pdb .role).minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "smolquery.selector" .root | nindent 6 }}
+      app.kubernetes.io/component: {{ .role }}
+{{- end }}
+{{- if eq .Values.topology "split" }}
+{{- if .Values.pdb.api.enabled }}
+{{ include "smolquery.pdb" (dict "root" . "role" "api") }}
+---
+{{- end }}
+{{- if .Values.pdb.buffer.enabled }}
+{{ include "smolquery.pdb" (dict "root" . "role" "buffer") }}
+---
+{{- end }}
+{{- if .Values.pdb.storage.enabled }}
+{{ include "smolquery.pdb" (dict "root" . "role" "storage") }}
+{{- end }}
+{{- else }}
+{{- if .Values.pdb.server.enabled }}
+{{ include "smolquery.pdb" (dict "root" . "role" "server") }}
+{{- end }}
+{{- end }}
