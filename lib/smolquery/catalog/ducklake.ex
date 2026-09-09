@@ -199,7 +199,8 @@ defmodule Smolquery.Catalog.DuckLake do
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
       create_clustering_statement(catalog),
       create_partitions_statement(catalog),
-      create_connections_statement(catalog)
+      create_connections_statement(catalog),
+      create_dropped_columns_statement(catalog)
     ]
 
     config
@@ -774,6 +775,61 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def alter_table(%__MODULE__{} = config, {dataset, table} = ref, {:add_column, %Field{} = field}) do
+    with {:ok, name} <- table_name(config, ref),
+         {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- not_tombstoned(config, dataset, table, field.name),
+         {:ok, definition} <- Schema.column_definition(field) do
+      transact(config, ["ALTER TABLE #{name} ADD COLUMN #{definition}"])
+    end
+  end
+
+  def alter_table(%__MODULE__{} = config, {dataset, table} = ref, {:drop_column, column}) do
+    with {:ok, name} <- table_name(config, ref),
+         {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         {:ok, column} <- Identifier.validate(column),
+         :ok <- transact(config, tombstone_sqls(config, dataset, table, column)) do
+      transact(config, ["ALTER TABLE #{name} DROP COLUMN #{Identifier.quote_name!(column)}"])
+    end
+  end
+
+  defp transact(config, statements) do
+    case Engine.transaction(config.engine, statements) do
+      :ok -> :ok
+      {:error, error} -> {:error, classify(error)}
+    end
+  end
+
+  defp not_tombstoned(config, dataset, table, column) do
+    sql =
+      "SELECT 1 FROM #{dropped_columns_table(config.catalog)} " <>
+        "WHERE dataset = $1 AND table_name = $2 AND column_name = $3"
+
+    case query(config, sql, [dataset, table, column]) do
+      {:ok, %{rows: []}} -> :ok
+      {:ok, _tombstoned} -> {:error, {:column_tombstoned, column}}
+      {:error, error} -> {:error, classify(error)}
+    end
+  end
+
+  defp tombstone_sqls(config, dataset, table, column) do
+    tombstones = dropped_columns_table(config.catalog)
+
+    key =
+      "#{Identifier.sql_string(dataset)}, #{Identifier.sql_string(table)}, " <>
+        "#{Identifier.sql_string(column)}"
+
+    [
+      "DELETE FROM #{tombstones} WHERE dataset = #{Identifier.sql_string(dataset)} " <>
+        "AND table_name = #{Identifier.sql_string(table)} " <>
+        "AND column_name = #{Identifier.sql_string(column)}",
+      "INSERT INTO #{tombstones} VALUES (#{key}, #{System.system_time(:millisecond)})"
+    ]
+  end
+
+  @impl Catalog
   def expire_snapshots(%__MODULE__{} = config, older_than_ms)
       when is_integer(older_than_ms) and older_than_ms > 0 do
     sql =
@@ -861,6 +917,41 @@ defmodule Smolquery.Catalog.DuckLake do
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
       "partition_count INTEGER NOT NULL, " <>
       "PRIMARY KEY (dataset, table_name))"
+  end
+
+  defp dropped_columns_table(catalog),
+    do: "#{metadata_schema(catalog)}.smolquery_dropped_columns"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its dropped-column
+  tombstones (PL-61).
+
+  A row here is a column name `alter_table/3` refuses to add back, for the
+  reason `Smolquery.Catalog.alter_table/3` gives: the sealer projects a
+  claim's inputs onto the schema by name, so a re-added name would take the
+  dropped column's old values into a sealed file.
+
+  The tombstone and the `DROP COLUMN` cannot share a transaction: DuckDB lets
+  one transaction write a single attached database, and the lake and the
+  metadata database it is attached through count as two. So they are two
+  commits, tombstone first, because the two failure orders are not symmetric.
+  A tombstone for a column that still exists is harmless — adding that name
+  is refused anyway, because it exists, and the next drop rewrites the row —
+  while a dropped column with no tombstone is the hazard itself. An operator
+  who knows a table holds no unsealed data older than the drop clears a
+  tombstone by deleting its row.
+
+  Bootstrap SQL like `create_clustering_statement/1`, for the same reason:
+  a lazy `CREATE TABLE IF NOT EXISTS` on Postgres metadata can fail a
+  concurrent first use outright. The primary key is the replica identity for
+  a published Postgres metadata database, as on the others.
+  """
+  @spec create_dropped_columns_statement(String.t()) :: String.t()
+  def create_dropped_columns_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{dropped_columns_table(catalog)} (" <>
+      "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
+      "column_name VARCHAR NOT NULL, dropped_at BIGINT NOT NULL, " <>
+      "PRIMARY KEY (dataset, table_name, column_name))"
   end
 
   defp connections_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_connections"

@@ -41,7 +41,9 @@ defmodule Smolquery.Catalog do
   """
 
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Partitions
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Segment
 
   @enforce_keys [:impl, :config]
@@ -120,6 +122,13 @@ defmodule Smolquery.Catalog do
           optional(:partitions) => partitions()
         }
 
+  @typedoc """
+  One change to a table's columns (PL-61). An added column is appended; a
+  dropped column leaves the schema but not the files, and its name is
+  tombstoned so it cannot be re-added — see `alter_table/3`.
+  """
+  @type column_change :: {:add_column, Field.t()} | {:drop_column, String.t()}
+
   @callback create_dataset(config :: term(), dataset :: String.t()) :: :ok | {:error, term()}
   @callback list_datasets(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback create_table(config :: term(), table_ref(), Schema.t()) :: :ok | {:error, term()}
@@ -156,6 +165,7 @@ defmodule Smolquery.Catalog do
               {:ok, partitions() | nil} | {:error, term()}
   @callback put_table_options(config :: term(), table_ref(), table_options()) ::
               :ok | {:error, term()}
+  @callback alter_table(config :: term(), table_ref(), column_change()) :: :ok | {:error, term()}
   @callback expire_snapshots(config :: term(), older_than_ms :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
   @callback put_connection(config :: term(), Connection.t()) :: :ok | {:error, term()}
@@ -165,6 +175,7 @@ defmodule Smolquery.Catalog do
   @callback delete_connection(config :: term(), name :: String.t()) :: :ok | {:error, term()}
 
   @optional_callbacks put_table_options: 3,
+                      alter_table: 3,
                       put_connection: 2,
                       connection: 2,
                       list_connections: 1,
@@ -437,6 +448,68 @@ defmodule Smolquery.Catalog do
     do: put_partitions(catalog, table, count)
 
   defp sequential_put(_catalog, _table, _options, _key), do: :ok
+
+  @doc """
+  Adds or drops one column of a table (PL-61).
+
+  The checks that need only the schema and the retention policy run here, so
+  every implementation refuses the same things with the same reasons and a
+  caller can map them to a response:
+
+    * the ref must be a table, never a partition — partitions are buffer
+      identities under one catalog table (`Smolquery.Partitions`)
+    * an added column must be nullable: DuckLake cannot add a constrained
+      column, and nullable is the only claim that is true of the rows that
+      already exist
+    * an added column's name must be new (`Smolquery.Schema.add_field/2`)
+    * a dropped column must exist, must not be the last column, must not be a
+      clustering column (`Smolquery.Schema.drop_field/2`), and must not be
+      the retention column — clear the key or the policy first, the way
+      `put_table_options/3` already lets you
+
+  What the implementation adds is the one check only it can make: a dropped
+  column's name is tombstoned, and adding it again is refused
+  (`{:error, {:column_tombstoned, name}}`). The sealer projects a claim's
+  inputs onto the catalog schema **by name**, so re-adding a name while
+  unsealed micro-segments still carry the old column would cast the old
+  values into the new one and bake them into a sealed file. DuckLake itself
+  reads such a column as `NULL` — it tracks columns by field id — which is
+  why this rule is stricter than DuckLake's, and why it is not optional.
+
+  Changing a table's columns does not rewrite a file. A file written before
+  an add reads the column as `NULL`; a file written before a drop keeps the
+  bytes, which stay visible to a read pinned at an earlier snapshot.
+
+  An implementation without the callback answers
+  `{:error, :alter_table_unsupported}`.
+  """
+  @spec alter_table(t(), table_ref(), column_change()) :: :ok | {:error, term()}
+  def alter_table(%__MODULE__{} = catalog, table, change) do
+    with :ok <- table_not_partition(table),
+         {:ok, schema} <- table_schema(catalog, table),
+         {:ok, policy} <- retention(catalog, table),
+         :ok <- admissible(schema, policy, change) do
+      if function_exported?(catalog.impl, :alter_table, 3),
+        do: catalog.impl.alter_table(catalog.config, table, change),
+        else: {:error, :alter_table_unsupported}
+    end
+  end
+
+  defp table_not_partition({_dataset, table} = ref) do
+    if Partitions.reserved?(table), do: {:error, {:partition_ref, ref}}, else: :ok
+  end
+
+  defp admissible(_schema, _policy, {:add_column, %Field{nullable: false, name: name}}),
+    do: {:error, {:column_must_be_nullable, name}}
+
+  defp admissible(schema, _policy, {:add_column, %Field{} = field}),
+    do: with({:ok, _schema} <- Schema.add_field(schema, field), do: :ok)
+
+  defp admissible(_schema, %{column: name}, {:drop_column, name}),
+    do: {:error, {:retention_column, name}}
+
+  defp admissible(schema, _policy, {:drop_column, name}) when is_binary(name),
+    do: with({:ok, _schema} <- Schema.drop_field(schema, name), do: :ok)
 
   @doc """
   Registers `connection`, replacing any connection of the same name.
