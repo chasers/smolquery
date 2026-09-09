@@ -12,6 +12,12 @@ defmodule Smolquery.QueryService.AlterColumnIntegrationTest do
 
   The seal valve is two files, as in the variant-column test, so no seal is
   committing while the read runs.
+
+  Each test settles the node with one query before its first `ALTER`: at
+  boot the query service's warm engines attach the same SQLite catalog, and
+  a column change that races that storm can lose the file lock more times
+  than a commit retries. One answered query means an engine is attached,
+  which is the state an operator's `ALTER` meets in practice.
   """
   use ExUnit.Case, async: false
 
@@ -50,6 +56,8 @@ defmodule Smolquery.QueryService.AlterColumnIntegrationTest do
   end
 
   test "rows sealed before the column read NULL; a row written after carries it", %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
     {:ok, _one} =
       Client.write_batch(node.buffer, @table, %{schema: schema(), rows: [%{"id" => 1}]})
 
@@ -78,6 +86,8 @@ defmodule Smolquery.QueryService.AlterColumnIntegrationTest do
   end
 
   test "a dropped column disappears from every tier the view serves", %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
     :ok = Catalog.alter_table(node.catalog, @table, {:add_column, Field.new!("label", :string)})
     {:ok, widened} = Catalog.table_schema(node.catalog, @table)
 
