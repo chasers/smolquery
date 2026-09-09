@@ -22,6 +22,9 @@ defmodule Smolquery.Schema.FieldTest do
       assert {:ok, %Field{materialized: %{expression: "epoch_ms(ts_int)", canonical: nil}}} =
                Field.new("ts", :timestamp, materialized: " epoch_ms(ts_int) ")
 
+      assert Field.new("ts", :timestamp, materialized: "epoch_ms(ts_int)", nullable: false) ==
+               {:error, {:column_must_be_nullable, "ts"}}
+
       assert Field.new("ts", :timestamp, materialized: "  ") ==
                {:error, {:invalid_materialized, :one_expression}}
 

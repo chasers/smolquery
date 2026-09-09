@@ -770,6 +770,23 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Schema.same_columns?(read, schema)
     end
 
+    test "re-creating a table cannot turn one of its plain columns materialized (PL-61 L4 review)",
+         %{catalog: catalog} do
+      again =
+        Schema.new!([
+          {"id", :int64, nullable: false},
+          {"ts", :timestamp, materialized: "epoch_ms(id)"},
+          {"name", :string},
+          {"amount", {:numeric, 38, 2}}
+        ])
+
+      assert Catalog.create_table(catalog, @table, again) == :ok
+
+      {:ok, read} = Catalog.table_schema(catalog, @table)
+      assert Enum.map(read.fields, &Schema.materialized?/1) == [false, false, false, false]
+      refute Schema.same_columns?(read, again)
+    end
+
     test "a materialized expression the gates refuse adds nothing (PL-61 L4)", %{catalog: catalog} do
       assert {:error, {:invalid_materialized, {:inconsistent_function, "now"}}} =
                Catalog.alter_table(

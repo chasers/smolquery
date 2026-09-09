@@ -104,6 +104,14 @@ defmodule Smolquery.Schema.MaterializedTest do
     end
   end
 
+  describe "gate 1: the statement shape" do
+    test "a FROM, WHERE, modifier or alias is refused as more than one expression" do
+      for tail <- ["id FROM t", "id WHERE ts_int > 1", "DISTINCT id", "id LIMIT 1", "id AS x"] do
+        assert {:error, {:invalid_materialized, :one_expression}} = validate(tail, :int64), tail
+      end
+    end
+  end
+
   describe "gate 2: determinism" do
     test "now(), random() and gen_random_uuid() are refused" do
       assert {:error, {:invalid_materialized, {:inconsistent_function, "now"}}} =
@@ -118,8 +126,35 @@ defmodule Smolquery.Schema.MaterializedTest do
   end
 
   describe "gate 3: the locked-down probe" do
-    test "a table function's stability is unknown, so it never reaches the probe" do
-      assert {:error, {:invalid_materialized, {:inconsistent_function, "read_text"}}} =
+    test "an aggregate passes no gate: it is not a scalar function, and it would fail every write" do
+      assert {:error, {:invalid_materialized, {:not_scalar, "sum", ["aggregate"]}}} =
+               validate("sum(ts_int)", :int64)
+
+      assert {:error, {:invalid_materialized, {:not_scalar, "count_star", ["aggregate"]}}} =
+               validate("count(*)", :int64)
+    end
+
+    test "wall-clock and environment readers are refused by name whatever their stability" do
+      assert {:error, {:invalid_materialized, {:unsupported_function, "current_localtimestamp"}}} =
+               validate("current_localtimestamp()")
+
+      assert {:error, {:invalid_materialized, {:unsupported_function, "version"}}} =
+               validate("version()", :string)
+    end
+
+    test "a time-zone-dependent value is refused: a cast to TIMESTAMPTZ, or a function that yields one" do
+      assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
+               validate("CAST(epoch_ms(ts_int) AS TIMESTAMPTZ)::VARCHAR", :string)
+
+      assert {:error, {:invalid_materialized, {:unsupported_function, "to_timestamp"}}} =
+               validate("to_timestamp(ts_int)")
+
+      assert {:error, {:invalid_materialized, {:unsupported_function, "timezone"}}} =
+               validate("make_timestamp(ts_int) AT TIME ZONE 'UTC'")
+    end
+
+    test "a table function is not a scalar function, so it never reaches the probe" do
+      assert {:error, {:invalid_materialized, {:not_scalar, "read_text", ["table"]}}} =
                validate("read_text('/etc/hostname')", :string)
     end
 
