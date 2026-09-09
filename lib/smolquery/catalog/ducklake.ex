@@ -584,7 +584,10 @@ defmodule Smolquery.Catalog.DuckLake do
              config,
              "SELECT df.path, df.path_is_relative, " <>
                "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-               "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot " <>
+               "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot, " <>
+               "(SELECT list(fcs.column_id ORDER BY fcs.column_id) " <>
+               "FROM #{metadata_schema(config.catalog)}.ducklake_file_column_stats fcs " <>
+               "WHERE fcs.data_file_id = df.data_file_id AND fcs.table_id = df.table_id) " <>
                "FROM #{metadata_schema(config.catalog)}.ducklake_data_file df " <>
                "JOIN #{metadata_schema(config.catalog)}.ducklake_table t " <>
                "ON t.table_id = df.table_id " <>
@@ -605,10 +608,13 @@ defmodule Smolquery.Catalog.DuckLake do
   defp segment_file_rows(rows) do
     rows
     |> Enum.reduce_while({:ok, []}, fn
-      [path, relative, rows, bytes, snapshot], {:ok, files} when relative in [false, 0] ->
-        {:cont, {:ok, [%{path: path, rows: rows, bytes: bytes, snapshot: snapshot} | files]}}
+      [path, relative, rows, bytes, snapshot, column_ids], {:ok, files}
+      when relative in [false, 0] ->
+        file = %{path: path, rows: rows, bytes: bytes, snapshot: snapshot, column_ids: column_ids}
 
-      [path, _relative, _rows, _bytes, _snapshot], _acc ->
+        {:cont, {:ok, [file | files]}}
+
+      [path, _relative, _rows, _bytes, _snapshot, _column_ids], _acc ->
         {:halt, {:error, {:relative_segment_path, path}}}
     end)
     |> case do
@@ -660,6 +666,20 @@ defmodule Smolquery.Catalog.DuckLake do
              add_statement(config, ref, add)
            ]) do
       {:ok, :committed}
+    end
+  end
+
+  @impl Catalog
+  def schema_version(%__MODULE__{} = config) do
+    sql =
+      "SELECT schema_version FROM #{metadata_schema(config.catalog)}.ducklake_snapshot " <>
+        "ORDER BY snapshot_id DESC LIMIT 1"
+
+    with {:ok, result} <- query(config, sql) do
+      case result.rows do
+        [[version]] -> {:ok, version}
+        rows -> {:error, {:unexpected_snapshot_result, rows}}
+      end
     end
   end
 

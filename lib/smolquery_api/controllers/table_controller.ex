@@ -261,8 +261,9 @@ defmodule SmolqueryApi.TableController do
 
   @doc """
   Drops this node's cached schema for `table_ref`, so the next insert here
-  reads the catalog. Every route that changes a table calls it; other nodes
-  converge within `schema_cache_ttl_ms`.
+  reads the catalog. Every route that changes a table calls it; a column
+  change also broadcasts cluster-wide, so every other node drops the table
+  as the broadcast lands, with `schema_cache_ttl_ms` the backstop.
   """
   @spec invalidate_schema_cache(Plug.Conn.t(), Catalog.table_ref()) :: :ok
   def invalidate_schema_cache(conn, table_ref) do

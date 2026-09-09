@@ -26,12 +26,17 @@ defmodule Smolquery.Schema.Materialized do
      are refused. What is stored for evaluation is the canonical text DuckDB
      hands back (`json_deserialize_sql`), never the raw bytes: a comment or a
      stray semicolon cannot survive the round trip.
-  2. Every function is `CONSISTENT` in `duckdb_functions().stability`, every
-     overload of it. That is what makes L5 sound — a rewrite recomputes the
-     value, so it must be the same value — and what refuses `now()`
+  2. Every function is a *scalar* function — never an aggregate, a table
+     function or a macro — and `CONSISTENT` in `duckdb_functions().stability`,
+     every overload of it. That is what makes L5 sound — a rewrite recomputes
+     the value, so it must be the same value — and what refuses `now()`
      (`CONSISTENT_WITHIN_QUERY`), `random()` and `gen_random_uuid()`
-     (`VOLATILE`). `current_setting` is consistent and refused by name: it
-     reads the engine's configuration.
+     (`VOLATILE`). What DuckDB calls consistent but reads the clock, the
+     environment or the time zone — `current_localtimestamp()`,
+     `getvariable()`, `current_setting()`, `version()`, `to_timestamp()`,
+     `timezone()` and their kin — is refused by name, and a cast to a
+     time-zoned type, or an expression that yields one, is refused too: its
+     value would follow the engine's `TimeZone`.
   3. A type probe on a throwaway engine with `enable_external_access` off:
      `SELECT CAST(<expr> AS <type>) FROM (SELECT NULL::t1 AS c1, ...)`. An
      expression that does not bind there — an unknown function, a function
@@ -158,7 +163,8 @@ defmodule Smolquery.Schema.Materialized do
 
     with :ok <- allowed(nodes),
          :ok <- named_functions(nodes),
-         :ok <- unzoned(nodes) do
+         :ok <- unzoned(nodes),
+         :ok <- unzoned_formats(nodes) do
       sources(nodes, schema, regular)
     end
   end
@@ -192,6 +198,28 @@ defmodule Smolquery.Schema.Materialized do
     |> case do
       nil -> :ok
       type -> refuse({:zoned_type, type})
+    end
+  end
+
+  # `strptime` with `%Z` or `%z` yields a zoned timestamp from text, the one
+  # producer a cast check and a result type cannot see once it is wrapped in
+  # `hour(...)` or cast back to TIMESTAMP — and its value follows the engine's
+  # `TimeZone`.
+  defp unzoned_formats(nodes) do
+    nodes
+    |> Enum.filter(
+      &(&1["class"] == "FUNCTION" and &1["function_name"] in ~w(strptime try_strptime))
+    )
+    |> Enum.flat_map(
+      &Ast.collect(&1, fn
+        %{"class" => "CONSTANT", "value" => %{"value" => value}} -> [value]
+        _node -> []
+      end)
+    )
+    |> Enum.find(&(is_binary(&1) and String.contains?(&1, ["%Z", "%z"])))
+    |> case do
+      nil -> :ok
+      format -> refuse({:zoned_format, format})
     end
   end
 
@@ -245,7 +273,7 @@ defmodule Smolquery.Schema.Materialized do
 
     sql =
       "SELECT function_name, list(DISTINCT function_type), " <>
-        "list(DISTINCT coalesce(stability, 'UNKNOWN')) " <>
+        "list(DISTINCT coalesce(stability, 'UNKNOWN')) FILTER (WHERE function_type = 'scalar') " <>
         "FROM duckdb_functions() WHERE function_name IN (#{placeholders}) GROUP BY ALL"
 
     with {:ok, %{rows: rows}} <- Engine.query(engine, sql, functions) do
@@ -255,13 +283,19 @@ defmodule Smolquery.Schema.Materialized do
     end
   end
 
-  defp stable(_function, {["scalar"], ["CONSISTENT"]}, :ok), do: {:cont, :ok}
   defp stable(function, nil, :ok), do: {:halt, refuse({:unknown_function, function})}
 
-  defp stable(function, {types, _stabilities}, :ok) do
-    if types == ["scalar"],
-      do: {:halt, refuse({:inconsistent_function, function})},
-      else: {:halt, refuse({:not_scalar, function, types})}
+  defp stable(function, {types, stabilities}, :ok) do
+    cond do
+      "scalar" not in types or "aggregate" in types ->
+        {:halt, refuse({:not_scalar, function, types})}
+
+      stabilities != ["CONSISTENT"] ->
+        {:halt, refuse({:inconsistent_function, function})}
+
+      true ->
+        {:cont, :ok}
+    end
   end
 
   defp bound(engine, canonical, type, regular) do
@@ -324,6 +358,10 @@ defmodule Smolquery.Schema.Materialized do
   def message({:not_scalar, function, types}),
     do:
       "materialized expression may only call scalar functions; #{function}() is #{Enum.join(types, "/")}"
+
+  def message({:zoned_format, format}),
+    do:
+      "materialized expression parses a time zone (#{format}): the value would depend on the engine's time zone"
 
   def message({:zoned_type, type}),
     do:

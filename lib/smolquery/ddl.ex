@@ -20,8 +20,9 @@ defmodule Smolquery.Ddl do
   The edge modules carry a SQL lexer (`SmolqueryPg.Sql`), but the query
   service may not depend on an edge (`.reach.exs`), so this module scans for
   itself: words, quoted identifiers, integers, and the four punctuation marks
-  the grammar needs. The accepted grammar has no comments and no string
-  literals, so there is nothing else to scan — except a `MATERIALIZED`
+  the grammar needs. The accepted grammar has no comments inside it and no
+  string literals — leading whitespace and comments are stripped before the
+  scan, as the wire's own lexer strips them — so there is nothing else to scan — except a `MATERIALIZED`
   expression, which is arbitrary SQL and is therefore kept as the raw text
   after the keyword for `Smolquery.Catalog` to validate through DuckDB.
 
@@ -141,11 +142,26 @@ defmodule Smolquery.Ddl do
   end
 
   defp trivia_stripped(sql) do
-    case Regex.replace(~r/\A(?:\s+|--[^\n]*(?:\n|\z)|\/\*.*?\*\/)+/s, sql, "", global: false) do
-      ^sql -> sql
-      stripped -> trivia_stripped(stripped)
+    case sql do
+      <<char, rest::binary>> when char in [?\s, ?\t, ?\n, ?\r] -> trivia_stripped(rest)
+      "--" <> rest -> rest |> line_comment_end() |> trivia_stripped()
+      "/*" <> rest -> rest |> block_comment_end(1) |> trivia_stripped()
+      _other -> sql
     end
   end
+
+  defp line_comment_end(rest) do
+    case String.split(rest, "\n", parts: 2) do
+      [_comment, after_line] -> after_line
+      [_comment] -> ""
+    end
+  end
+
+  defp block_comment_end(rest, 0), do: rest
+  defp block_comment_end("", _depth), do: ""
+  defp block_comment_end("/*" <> rest, depth), do: block_comment_end(rest, depth + 1)
+  defp block_comment_end("*/" <> rest, depth), do: block_comment_end(rest, depth - 1)
+  defp block_comment_end(<<_char, rest::binary>>, depth), do: block_comment_end(rest, depth)
 
   @doc """
   Runs a parsed statement against the catalog.

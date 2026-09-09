@@ -108,6 +108,7 @@ defmodule Smolquery.Catalog do
   file names its columns (PL-62).
   """
   @type segment_file :: %{
+          optional(:column_ids) => [pos_integer()] | nil,
           path: String.t(),
           rows: non_neg_integer(),
           bytes: non_neg_integer(),
@@ -155,6 +156,7 @@ defmodule Smolquery.Catalog do
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
+  @callback schema_version(config :: term()) :: {:ok, non_neg_integer()} | {:error, term()}
   @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback put_retention(config :: term(), table_ref(), retention() | nil) ::
               :ok | {:error, term()}
@@ -181,6 +183,7 @@ defmodule Smolquery.Catalog do
 
   @optional_callbacks put_table_options: 3,
                       alter_table: 3,
+                      schema_version: 1,
                       put_connection: 2,
                       connection: 2,
                       list_connections: 1,
@@ -350,6 +353,24 @@ defmodule Smolquery.Catalog do
   @spec current_snapshot(t()) :: {:ok, snapshot()} | {:error, term()}
   def current_snapshot(%__MODULE__{} = catalog),
     do: catalog.impl.current_snapshot(catalog.config)
+
+  @doc """
+  A number that moves when, and only when, a table's columns change — a
+  create, an add, a drop — and stays put across registrations and swaps.
+
+  The cheapest read that says whether a schema a caller holds may be stale
+  (T-439): a buffer keys its memo of confirmed column ids on it, so a lake
+  that seals continuously does not cost a schema read per batch. DuckLake
+  keeps it on every snapshot as `schema_version`. An implementation without
+  the callback answers its current snapshot, which moves more often and is
+  never wrong.
+  """
+  @spec schema_version(t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def schema_version(%__MODULE__{} = catalog) do
+    if function_exported?(catalog.impl, :schema_version, 1),
+      do: catalog.impl.schema_version(catalog.config),
+      else: current_snapshot(catalog)
+  end
 
   @doc """
   Every segment path the catalog has ever referenced, at any snapshot.

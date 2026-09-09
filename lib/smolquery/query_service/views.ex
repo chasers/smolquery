@@ -159,11 +159,15 @@ defmodule Smolquery.QueryService.Views do
   The materialized columns some of `sources` may not carry, by name — the
   ones `table_view/4` must read as their expression.
 
-  A source with `"field_ids"` lacks a column when its id is absent. A source
-  without ids registered at a `"snapshot"` lacks a column that began after
-  that snapshot (`Smolquery.Schema.Field.since`). A source with neither, or
-  a column whose beginning the catalog does not date, may lack it, and is
-  read as the expression to be safe.
+  A source with `"field_ids"` lacks a column when its id is absent. A sealed
+  source with `"column_ids"` — the columns the catalog recorded for the file
+  when it was registered (`Smolquery.Catalog.segment_files/3`) — lacks a
+  column whose id is not among them, which is exact even for a file a seal
+  wrote across the `ALTER` and registered after it. A source with only a
+  `"snapshot"` lacks a column that began after that snapshot
+  (`Smolquery.Schema.Field.since`). A source with none of these, or a column
+  whose beginning the catalog does not date, may lack it, and is read as the
+  expression to be safe.
   """
   @spec recomputed(Schema.t(), [map()]) :: [String.t()]
   def recomputed(%Schema{} = schema, sources) do
@@ -174,6 +178,10 @@ defmodule Smolquery.QueryService.Views do
 
   defp may_lack?(%{"field_ids" => ids}, %Schema.Field{id: id}) when is_map(ids),
     do: id not in Map.values(ids)
+
+  defp may_lack?(%{"column_ids" => ids}, %Schema.Field{id: id})
+       when is_list(ids) and is_integer(id),
+       do: id not in ids
 
   defp may_lack?(%{"snapshot" => snapshot}, %Schema.Field{since: since})
        when is_integer(snapshot) and is_integer(since),

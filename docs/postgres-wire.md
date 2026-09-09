@@ -113,14 +113,20 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   block's pinned snapshot.
 
 - **`ALTER TABLE`** (PL-61 L3). `ALTER TABLE dataset.table ADD [COLUMN]
-  [IF NOT EXISTS] name TYPE` and `DROP [COLUMN] [IF EXISTS] name` run as
+  [IF NOT EXISTS] name TYPE [MATERIALIZED expr]` and `DROP [COLUMN] [IF EXISTS] name` run as
   the same query job the HTTP route runs them as ([API](api.md#ddl)), and
   answer the `ALTER TABLE` command tag; a guarded no-op adds Postgres's
-  own `NOTICE` (`already exists, skipping`). The refusals answer the codes
+  own `NOTICE` (`already exists, skipping` / `does not exist, skipping`). The refusals answer the codes
   Postgres gives them: `42703` for an unknown column, `42701` for a
   duplicate, `55000` for a column that cannot be added or dropped as asked
-  (the last column, a clustering column, the retention column). Each
-  statement is one catalog commit, so inside a transaction block it is
+  (the last column, a clustering column, the retention column, a column
+  another is materialized from, a partition ref, a `NOT NULL` add), `42P17`
+  for a `MATERIALIZED` expression the gates refuse. A guarded `DROP` of a
+  column that is not there notices the same way. `statement_timeout` does
+  not stop an `ALTER`: past it the session answers `57014` while the change
+  lands anyway — re-read the table before retrying. Each statement is one
+  catalog commit (two for a materialized column), so inside a transaction
+  block it is
   refused (`25001`) rather than pretended transactional. Bind parameters
   are refused as for any non-`SELECT`.
 
@@ -231,7 +237,7 @@ Every failure is an `ErrorResponse` with a SQLSTATE a client can act on:
 | `42601` | the query does not parse, or is not one `SELECT` |
 | `42P01` | an unknown `dataset.table` |
 | `54000` | the result exceeds `result_max_rows` |
-| `57014` | the statement timeout cancelled the query |
+| `57014` | the statement timeout cancelled the query — an `ALTER TABLE` past it still lands; re-read the table before retrying |
 | `57P03` | the query service, or a buffer node it needs, is not available |
 | `25P02` | a statement inside an aborted transaction block |
 | `42703`, `42701`, `42704`, `42602`, `55000`, `42P17`, `25001` | an `ALTER TABLE` refused: unknown column, duplicate column, unknown type, bad identifier, a column that cannot be added or dropped as asked, a `MATERIALIZED` expression the gates refuse, inside a transaction block |

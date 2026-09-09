@@ -134,25 +134,35 @@ defmodule Smolquery.QueryService.PartialWorker do
         {:ok, files}
 
       sealed ->
-        urls = Enum.map(sealed, & &1["url"])
-
-        with {:ok, result} <-
-               Connection.query(connection, FieldIds.sql(length(urls)), urls, :infinity) do
-          described = FieldIds.by_file(result.rows)
-
-          {:ok,
-           known ++
-             Enum.map(sealed, fn %{"url" => url} = file ->
-               case Map.get(described, url) do
-                 %{ids: ids, columns: columns} ->
-                   file |> Map.put("field_ids", ids) |> Map.put("columns", columns)
-
-                 nil ->
-                   file
-               end
-             end)}
-        end
+        with(
+          {:ok, described} <- read_ids(connection, sealed),
+          do: attach_ids(known, sealed, described)
+        )
     end
+  end
+
+  defp read_ids(connection, sealed) do
+    urls = Enum.map(sealed, & &1["url"])
+
+    with {:ok, result} <-
+           Connection.query(connection, FieldIds.sql(length(urls)), urls, :infinity) do
+      {:ok, FieldIds.by_file(result.rows)}
+    end
+  end
+
+  defp attach_ids(known, sealed, described) do
+    case Enum.find(sealed, &(not Map.has_key?(described, &1["url"]))) do
+      nil -> {:ok, known ++ Enum.map(sealed, &describe_file(&1, described))}
+      %{"url" => url} -> {:error, {:undescribed_file, url}}
+    end
+  end
+
+  # A file the query did not describe is an error, never a by-name read: the
+  # silent fallback would be the leak this projection exists to close.
+  defp describe_file(%{"url" => url} = file, described) do
+    %{ids: ids, columns: columns} = Map.fetch!(described, url)
+
+    file |> Map.put("field_ids", ids) |> Map.put("columns", columns)
   end
 
   defp settings(%Runtime{} = runtime) do

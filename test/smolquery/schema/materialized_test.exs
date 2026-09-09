@@ -134,6 +134,20 @@ defmodule Smolquery.Schema.MaterializedTest do
                validate("count(*)", :int64)
     end
 
+    test "a scalar with a table-function twin is a scalar; an aggregate twin is not" do
+      assert {:ok, %Materialized{}} = validate("repeat(label, 2)", :string)
+
+      assert {:error, {:invalid_materialized, {:not_scalar, "sum", ["aggregate"]}}} =
+               validate("sum(ts_int)", :int64)
+    end
+
+    test "strptime with a zone in its format is refused, even wrapped or cast back" do
+      assert {:error, {:invalid_materialized, {:zoned_format, "%Y-%m-%d %H:%M:%S %Z"}}} =
+               validate("hour(strptime(label, '%Y-%m-%d %H:%M:%S %Z'))", :int64)
+
+      assert {:ok, %Materialized{}} = validate("strptime(label, '%Y-%m-%d')")
+    end
+
     test "wall-clock and environment readers are refused by name whatever their stability" do
       assert {:error, {:invalid_materialized, {:unsupported_function, "current_localtimestamp"}}} =
                validate("current_localtimestamp()")

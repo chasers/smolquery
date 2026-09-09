@@ -564,7 +564,15 @@ defmodule Smolquery.QueryService.Planner do
 
       _materialized ->
         with {:ok, files} <- Catalog.segment_files(runtime.catalog, ref, snapshot) do
-          {:ok, Enum.map(files, &%{"url" => &1.path, "snapshot" => &1.snapshot})}
+          {:ok,
+           Enum.map(
+             files,
+             &%{
+               "url" => &1.path,
+               "snapshot" => &1.snapshot,
+               "column_ids" => Map.get(&1, :column_ids)
+             }
+           )}
         end
     end
   end

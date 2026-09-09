@@ -72,7 +72,7 @@ defmodule Smolquery.Test.StubCatalog do
         owner,
         :segment_files,
         [table, snapshot],
-        {:ok, [%{path: "/stub.parquet", rows: 10, bytes: 100}]}
+        {:ok, [%{path: "/stub.parquet", rows: 10, bytes: 100, snapshot: snapshot}]}
       )
 
   @impl Catalog

@@ -263,8 +263,8 @@ does not reach. The one change a stale cache could turn into silent loss —
 a name dropped and added again, so a write under the old id reads `NULL`
 under the new column — is closed at the buffer (T-439): the table's owner
 confirms a batch's ids against the catalog before writing them, one
-`current_snapshot` read per batch and the schema again only when the
-snapshot moved, and refuses a stale batch so the ingest edge retries with
+`schema_version` read per micro-segment (a group commit has one schema) and the schema again only when that
+version moved, and refuses a stale batch so the ingest edge retries with
 the schema the catalog holds now. A buffer configured without a catalog
 trusts its writers. Each `ALTER` is one DuckLake commit, atomic on its own and
 unrelated to any client transaction: the Postgres wire refuses one inside a
@@ -282,8 +282,9 @@ ingest schema cache. The buffer's `Smolquery.Segments.Writer` evaluates the
 canonical expression in the `COPY`'s select list, over the body's regular
 columns and wrapped in `TRY`, so the micro-segment carries the value and a
 row the expression cannot take stores `NULL`; the stats are read off the file,
-so the column prunes like any other. The validator refuses a row that
-supplies a value for it.
+so the column prunes like any other. The row-validating insert refuses a row
+that supplies a value for it; the NDJSON path, which parses nothing per row,
+ignores the key at the write.
 
 The expression is the one place user SQL reaches an engine that is not
 locked down — the write engine has its spool, and after L5 the storage
@@ -291,10 +292,14 @@ engine has the lake — so `Smolquery.Schema.Materialized.validate/2` is the
 security boundary, run once at definition and never again: DuckDB parses the
 expression and an allowlist walks the AST (a column reference must name a
 regular column of this table; no subquery, window, star, parameter, or
-lambda); every function is `CONSISTENT` in `duckdb_functions().stability`,
-which is what makes a recompute at every rewrite sound and what refuses
-`now()` and `random()`; and the expression binds and casts to the column's
-type on a throwaway engine with `enable_external_access` off, which is what
+lambda, cast to a time-zoned type); every function is a *scalar* function
+and `CONSISTENT` in `duckdb_functions()`, which is what makes a recompute at
+every rewrite sound and what refuses an aggregate, `now()` and `random()`,
+with the wall-clock, environment and time-zone readers DuckDB calls
+consistent (`current_localtimestamp()`, `version()`, `to_timestamp()`, ...)
+refused by name; and the expression binds, casts to the column's type, and
+yields no time-zoned value on a throwaway engine with `enable_external_access`
+off, which is what
 refuses an unknown function and anything that reads the file system. The
 side row is written after the `ALTER` commits, in the metadata database's
 own commit, because DuckDB's one-database-per-transaction rule keeps the two
@@ -677,11 +682,13 @@ TO staged
   catalog's columns instead: each declared column in the catalog's order, cast
   to the catalog's type. A column the inputs do not carry becomes a typed
   `NULL`. The sealed file matches the table by construction.
-- **A column the inputs carry and the catalog does not is an error**
-  (`{:error, {:undeclared_columns, names}}`). The merge refuses it before any
-  byte moves. A projection that drops it would silently drop a column of acked
-  rows. That is worse than a stuck claim. To widen the table is the catalog's
-  call, not the sealer's.
+- **A column the inputs carry and the catalog does not is projected away**
+  (T-430). It is a dropped column's data: the catalog has said it is no longer
+  wanted, the query view already stops showing it, and the seal is what stops
+  storing it. This used to be refused, on the argument that dropping acked
+  data is worse than a stuck claim; with a way to drop a column the refusal
+  inverted its own purpose, since a claim's input set is frozen and every
+  retry met the same column.
 - **The output key comes from the claim, not from the merge.** A retry is
   therefore an idempotent overwrite of identical rows, not a second segment.
 - **An input the manifest no longer lists is skipped, not fatal.** Its rows
@@ -1136,7 +1143,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 |---|---|
 | `api` | `SmolqueryApi` — the HTTP front door, a Phoenix endpoint on Bandit |
 | `ingest` | `Smolquery.IngestService` — schema lookup and batching; validation is deferred to flush/salvage |
-| `buffer` | `Smolquery.BufferService` — the hot tier and `HotServer` |
+| `buffer` | `Smolquery.BufferService` — the hot tier and `HotServer`; since T-439 it holds a catalog engine of its own, to confirm a batch's column ids before writing them |
 | `storage` | `Smolquery.StorageService` — seal, compact, retention, GC |
 | `query` | `Smolquery.QueryService` — query jobs, and a scatter worker for every other query node's jobs |
 | `web` | `SmolqueryWeb` — the LiveView UI |

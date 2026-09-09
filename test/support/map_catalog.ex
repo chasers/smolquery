@@ -33,7 +33,9 @@ defmodule Smolquery.Test.MapCatalog do
           partitions: %{},
           connections: %{},
           next_ids: %{},
-          snapshot: 0
+          snapshot: 0,
+          schema_version: 0,
+          schema_reads: 0
         }
       end)
 
@@ -97,7 +99,8 @@ defmodule Smolquery.Test.MapCatalog do
           state
           | tables: Map.put(state.tables, table_ref, identified),
             next_ids: Map.put(state.next_ids, table_ref, length(identified.fields) + 1),
-            snapshot: state.snapshot + 1
+            snapshot: state.snapshot + 1,
+            schema_version: state.schema_version + 1
         }
       end
     end)
@@ -146,7 +149,7 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def table_schema(agent, table_ref) do
-    state = Agent.get(agent, & &1)
+    state = Agent.get_and_update(agent, &{&1, %{&1 | schema_reads: &1.schema_reads + 1}})
 
     case Map.fetch(state.tables, table_ref) do
       {:ok, schema} ->
@@ -243,7 +246,8 @@ defmodule Smolquery.Test.MapCatalog do
          state
          | tables: Map.put(state.tables, table_ref, schema),
            next_ids: Map.put(state.next_ids, table_ref, id + 1),
-           snapshot: state.snapshot + 1
+           snapshot: state.snapshot + 1,
+           schema_version: state.schema_version + 1
        }}
     else
       {:error, reason} -> {{:error, reason}, state}
@@ -291,6 +295,22 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def current_snapshot(agent), do: {:ok, Agent.get(agent, & &1.snapshot)}
+
+  @impl Catalog
+  def schema_version(agent), do: {:ok, Agent.get(agent, & &1.schema_version)}
+
+  @doc """
+  How many times `table_schema/2` has been asked — what a memo test counts.
+  """
+  @spec schema_reads(Catalog.t()) :: non_neg_integer()
+  def schema_reads(%Catalog{config: agent}), do: Agent.get(agent, & &1.schema_reads)
+
+  @doc """
+  Moves the snapshot without touching any schema — what a registration does.
+  """
+  @spec bump_snapshot(Catalog.t()) :: :ok
+  def bump_snapshot(%Catalog{config: agent}),
+    do: Agent.update(agent, &%{&1 | snapshot: &1.snapshot + 1})
 
   @impl Catalog
   def known_segments(_agent), do: {:error, :not_supported}

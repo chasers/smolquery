@@ -224,6 +224,12 @@ defmodule Smolquery.CatalogTest do
       assert_received {:called, :drop_segments, [{"ds", "t"}, ["/p.parquet"]]}
     end
 
+    test "schema_version/1 falls back to the current snapshot for an implementation without it",
+         %{catalog: catalog} do
+      assert Catalog.schema_version(catalog) == {:ok, StubCatalog.snapshot()}
+      assert_received {:called, :current_snapshot, []}
+    end
+
     test "current_snapshot/1 reaches the implementation", %{catalog: catalog} do
       assert Catalog.current_snapshot(catalog) == {:ok, StubCatalog.snapshot()}
       assert_received {:called, :current_snapshot, []}

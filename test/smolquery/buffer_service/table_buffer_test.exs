@@ -6,6 +6,7 @@ defmodule Smolquery.BufferService.TableBufferTest do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.TableBuffer.Committer
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
@@ -813,6 +814,34 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       entry = Enum.find(HotManifest.entries(runtime.manifest, @table), &(&1.id == ack.segment_id))
       assert entry.field_ids["ts"] == 3
+    end
+
+    test "a second batch under confirmed ids costs no schema read; a seal moves the snapshot, not the version",
+         %{name: name, catalog: catalog, identified: schema} do
+      assert {:ok, _ack} = Client.write_batch(name, @table, %{schema: schema, rows: rows(1..1)})
+      reads = MapCatalog.schema_reads(catalog)
+
+      MapCatalog.bump_snapshot(catalog)
+      assert {:ok, _ack} = Client.write_batch(name, @table, %{schema: schema, rows: rows(2..2)})
+      assert MapCatalog.schema_reads(catalog) == reads
+
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+      altered = MapCatalog.schema_reads(catalog)
+      assert {:ok, _ack} = Client.write_batch(name, @table, %{schema: schema, rows: rows(3..3)})
+      assert MapCatalog.schema_reads(catalog) == altered + 1
+    end
+
+    test "a catalog that cannot answer refuses the batch as unavailable, and the buffer lives",
+         context do
+      dead = DuckLake.new(engine: :"no_such_engine_#{System.unique_integer([:positive])}")
+
+      %{name: name} =
+        start_buffer_service(context, catalog: dead, dir: Path.join(context.tmp_dir, "dead"))
+
+      assert {:error, {:catalog_unavailable, _reason}} =
+               Client.write_batch(name, @table, %{schema: context.identified, rows: rows(1..1)})
+
+      assert {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
     end
 
     test "a batch without ids, and a buffer without a catalog, are not checked", context do

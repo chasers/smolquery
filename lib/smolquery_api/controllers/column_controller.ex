@@ -5,11 +5,13 @@ defmodule SmolqueryApi.ColumnController do
   Sub-resources rather than a full-schema `PATCH`, so a drop is always an
   explicit request — a client that re-sends yesterday's schema cannot drop a
   column by omission. Both routes answer the whole table body, as `PATCH`
-  does, and both invalidate this node's ingest schema cache. Other nodes
-  converge within `schema_cache_ttl_ms`, the same window `docs/api.md`
-  documents for a partition raise: until then an insert there that carries an
-  added column is rejected per row as unknown, and one that carries a dropped
-  column is accepted and the value discarded at the write.
+  does, and both invalidate this node's ingest schema cache at once; every
+  other node's drops the table when the change's broadcast lands
+  (`Smolquery.Lifecycle`), with `schema_cache_ttl_ms` the backstop for a node
+  the broadcast does not reach. A stale cache cannot lose data either way:
+  the buffer that owns the table confirms a batch's column ids before writing
+  them (T-439), so a write under a re-used name's old id is refused and
+  retried, never stored under the wrong column.
 
   Every refusal is `Smolquery.Catalog.alter_table/3`'s, mapped to a status
   here: 404 for a table or column that does not exist; 409 for a name the

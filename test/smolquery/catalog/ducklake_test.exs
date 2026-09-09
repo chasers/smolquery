@@ -466,6 +466,33 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Enum.all?(files, &(&1.bytes > 0))
     end
 
+    test "carries the columns the catalog recorded for each file, so a file registered without one says so (T-440)",
+         %{catalog: catalog, segments_dir: dir} do
+      full = write_segment(dir, 1, 2)
+      lagging = Schema.new!([{"id", :int64}, {"ts", :timestamp}, {"name", :string}])
+
+      {:ok, narrow} =
+        SegmentFixture.write([%{"id" => 9, "name" => "n"}], lagging, store: Local.new(dir: dir))
+
+      {:ok, snapshot} = Catalog.register_segments(catalog, @table, [full, narrow])
+      {:ok, files} = Catalog.segment_files(catalog, @table, snapshot)
+
+      assert Enum.find(files, &(&1.path == full.path)).column_ids == [1, 2, 3, 4]
+      assert Enum.find(files, &(&1.path == narrow.path)).column_ids == [1, 2, 3]
+    end
+
+    test "schema_version moves on a column change and not on a registration (T-439)", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      {:ok, before} = Catalog.schema_version(catalog)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [write_segment(dir, 1, 1)])
+      assert Catalog.schema_version(catalog) == {:ok, before}
+
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+      assert Catalog.schema_version(catalog) == {:ok, before + 1}
+    end
+
     test "a table that never registered anything lists nothing", %{catalog: catalog} do
       {:ok, snapshot} = Catalog.current_snapshot(catalog)
 

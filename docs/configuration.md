@@ -24,11 +24,11 @@ received value, and the accepted shape.
 | variable | effect (default) |
 |---|---|
 | `SMOLQUERY_ROLES` | Selects the service subtrees that start (`all`). Use `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web,pg`. An unknown name fails the boot |
-| `SMOLQUERY_API_KEY` | The Bearer key that every `/v1` route requires. A node with the `:api` role and no key refuses to boot |
+| `SMOLQUERY_API_KEY` | The Bearer key that every `/v1` route requires. It is also the credential that changes a table's columns: there is no separate privilege for `ALTER TABLE` or the column routes. A node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | The API (application programming interface) bind address and port (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` | The most ingest-body bytes that an API node admits at once (T-245). `SmolqueryApi.Admission` counts `POST .../insert` bodies by the declared `content-length` before it reads any body. Past the limit, it refuses a request with a 429 and `retry-after: 1`. The refusal costs a header read, never a body. A client burst thus sheds load instead of an out-of-memory (OOM) kill of the pod. Unset, the limit is a quarter of the container's cgroup memory limit, with a floor of one NDJSON (newline-delimited JSON) body (`SMOLQUERY_INSERT_MAX_NDJSON_BYTES`). Without a cgroup limit, the value is `268435456`. An idle counter always admits one request; the route's own body cap decides what is too large |
 | `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` | The largest `POST .../insert` body an API node reads (`8000000`). A larger body is a 413 that names the cap. The value is also what `SmolqueryApi.Admission` reserves for an insert that declares no `content-length`, and the floor of the derived in-flight limit. Raise it only with the memory to match: the route holds the whole body in heap before it parses |
-| `SMOLQUERY_PG_PASSWORD` | The password every Postgres wire client must present (PL-58). Unset, the edge takes the API key, so one credential opens both front doors. A node with the `:pg` role and neither refuses to boot |
+| `SMOLQUERY_PG_PASSWORD` | The password every Postgres wire client must present (PL-58). It opens `ALTER TABLE` as well as `SELECT`. Unset, the edge takes the API key, so one credential opens both front doors. A node with the `:pg` role and neither refuses to boot |
 | `SMOLQUERY_PG_AUTH` | How the Postgres wire password crosses: `scram-sha-256` (default — it does not cross at all) or `cleartext` for a legacy client |
 | `SMOLQUERY_PG_IDLE_TXN_TIMEOUT_MS` | Terminates a Postgres wire connection that sits idle inside a transaction block (`300000` ms; `0` disables). A block pins its snapshot (PL-58 layer 7), and an abandoned block would hold that pin; the refusal is Postgres's own `FATAL 25P03`. A session may `SET idle_in_transaction_session_timeout` lower, never higher, and cannot disable it |
 | `SMOLQUERY_PG_TLS_CERT` / `SMOLQUERY_PG_TLS_KEY` | PEM certificate and key for the Postgres wire listener. Set both and `SSLRequest` upgrades the connection; set neither and the edge declines it. One without the other fails the boot |
@@ -48,7 +48,7 @@ received value, and the accepted shape.
 |---|---|
 | `SMOLQUERY_DATA_DIR` | The one directory that holds everything durable (`/data` in the image) |
 | `SMOLQUERY_BUFFER_DIR` / `SMOLQUERY_SEALED_DIR` | Splits a tier onto its own disk (default: under the data dir) |
-| `SMOLQUERY_CATALOG` | The DuckLake metadata database, for example `postgres:dbname=smolquery` (default: the data dir's SQLite) |
+| `SMOLQUERY_CATALOG` | The DuckLake metadata database, for example `postgres:dbname=smolquery` (default: the data dir's SQLite). Every role that starts resolves it — the buffer too, since T-439: a buffer node attaches the metadata database to confirm a batch's column ids before writing them, so a buffer-only node needs the same reach to it that a storage node has |
 | `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` | `true` lets an attach migrate the catalog to the extension's newer format (`false`). The migration is one-way. Nodes on the old extension cannot read the result. See [deployment.md](deployment.md#catalog-format-upgrades) |
 | `SMOLQUERY_SNAPSHOT_KEEP_MS` | The time-travel promise (`86400000`). The value must exceed the longest pinned query. It must also exceed `retire_grace_ms` |
 | `SMOLQUERY_SEAL_ROW_GROUP_SIZE` | Sets `ROW_GROUP_SIZE` on every sealed Parquet `COPY`, for seal and compaction alike (`1048576`, T-280). A sealed-tier scan over `httpfs` pays roughly one range request per row group. This value thus sets a query's request count per segment. Smaller groups buy finer clustered-key pruning at that cost. The setting applies to newly written segments only. Compaction never revisits a healthy-sized segment, so old data keeps its old row groups. The seal path has no OOM adaptation. A claim's inputs are frozen. A seal `COPY` that deterministically OOMs at this size therefore retries forever. On a memory-tight node, lower this value or raise `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
@@ -230,6 +230,14 @@ explicitly. That is the control for a container whose CPU quota the scheduler
 count does not see.
 
 ### The buffer service
+
+`:catalog` is where the buffer confirms a batch's column ids before writing
+them (T-439): a `Smolquery.Catalog` handle, DuckLake options, or nothing —
+then `SMOLQUERY_CATALOG` / `CATALOG_DATABASE_URL` resolve it as they do for
+every other role, and the buffer starts a catalog engine of its own. `:none`
+runs the buffer without one, trusting the ids a writer sends; a configuration
+that names no metadata database at all runs the same way. Application config
+only: `config :smolquery, Smolquery.BufferService, catalog: :none`.
 
 `:dir` is the buffer's root. Micro-segments go to a `Store.Local` beneath
 `segments/`. Manifest logs go to `manifests/`. They are separate because they

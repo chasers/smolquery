@@ -103,6 +103,15 @@ without them refuses to boot.
   `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
   scalars. Both have limits a caller must know — they are listed in
   [docs/api.md](docs/api.md#schema-types).
+- **Columns that change, and columns that compute themselves.** Add or drop a
+  column on a live table over the API or as `ALTER TABLE` SQL on either edge;
+  nothing is rewritten, a dropped name is free to reuse, and every file is
+  read by column *id*, so a re-used name never resurrects old data. A
+  `MATERIALIZED` column — ClickHouse's — is computed from the row as it
+  lands (`ts TIMESTAMP MATERIALIZED epoch_ms(ts_int)`), reads as its
+  expression wherever a file predates it, and is stored at every rewrite.
+  The expression is validated once, at definition, on a locked-down engine —
+  see [docs/api.md](docs/api.md#materialized-columns).
 - **Durable and queryable are the same event.** An insert acks only once its
   rows are fsynced into a Parquet micro-segment *and* into the table's manifest
   log — the same manifest a query plans against. Read-your-writes with no second
