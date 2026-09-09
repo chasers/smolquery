@@ -177,6 +177,25 @@ defmodule Smolquery.SchemaTest do
                   ~s|CAST(NULL AS BIGINT) AS "n"|}
     end
 
+    test "projection_as_of/3 NULLs a column that began after the file was registered, whatever the file names it" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1, since: 2),
+          Field.new!("ts_int", :string, id: 3, since: 9)
+        ])
+
+      assert Schema.projection_as_of(schema, ["id", "ts_int"], 5) ==
+               {:ok, ~s|CAST("id" AS BIGINT) AS "id", CAST(NULL AS VARCHAR) AS "ts_int"|}
+
+      assert Schema.projection_as_of(schema, ["id", "ts_int"], 9) ==
+               {:ok, ~s|CAST("id" AS BIGINT) AS "id", CAST("ts_int" AS VARCHAR) AS "ts_int"|}
+
+      undated = Schema.new!([{"id", :int64}])
+
+      assert Schema.projection_as_of(undated, ["id"], 1) ==
+               {:ok, ~s|CAST("id" AS BIGINT) AS "id"|}
+    end
+
     test "projection_by_id/2 falls back to the name for a field the catalog gave no id" do
       schema = Schema.new!([{"id", :int64}])
 

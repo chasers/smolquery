@@ -105,14 +105,14 @@ defmodule Smolquery.CatalogTest do
       assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) == :ok
     end
 
-    test "a dropped name is tombstoned: it cannot come back, other names can", %{catalog: catalog} do
+    test "a dropped name comes back as a new column with a new id (PL-62)", %{catalog: catalog} do
       :ok = Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"})
 
       assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("ts", :int64)}) ==
-               {:error, {:column_tombstoned, "ts"}}
-
-      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("ts2", :int64)}) ==
                :ok
+
+      {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
+      assert Enum.map(schema.fields, &{&1.name, &1.id}) == [{"id", 1}, {"ts", 2}]
     end
 
     test "an unknown table is the catalog's error", %{catalog: catalog} do

@@ -134,8 +134,8 @@ defmodule SmolqueryApi.Docs do
         "summary" =>
           "Add a column, appended last and always nullable. Nothing is rewritten: " <>
             "a segment written before the add reads the column as NULL. A name the " <>
-            "table has answers 409, and so does a name it once had — a dropped " <>
-            "column's name cannot be reused. Answers the table body.",
+            "table has answers 409; a name it once had is a new column. Answers the " <>
+            "table body.",
         "request" => %{
           "name" => "string",
           "type" => "schema type",
@@ -149,8 +149,8 @@ defmodule SmolqueryApi.Docs do
         "summary" =>
           "Drop a column. Refused for the last column, a clustering column, or the " <>
             "retention column — clear those first. Files are not rewritten; the " <>
-            "column stays visible to a read pinned at an earlier snapshot, and its " <>
-            "name cannot be reused. Answers the table body."
+            "column stays visible to a read pinned at an earlier snapshot. Answers " <>
+            "the table body."
       },
       %{
         "method" => "DELETE",

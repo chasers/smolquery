@@ -224,8 +224,19 @@ scan, as before. The pruner resolves a query's column to its id and the id to
 the file's name for it, so a bound from a dropped column never prunes its
 successor. A file without ids is read by name, as it always was.
 
-The sealed tier's compactor still projects by name; that, and the retirement
-of the dropped-name tombstone from T-430, is the layer after this one.
+The sealed tier reads by id too. The compactor learns each input's ids from
+the file itself — one `parquet_schema()` per chunk, top-level columns only —
+and projects through the same grouped primitive. A sealed file written
+before ids existed is projected by name *as of the snapshot it was
+registered at* (`Catalog.segment_files/3` carries it): a column that began
+after that snapshot cannot be in the file, so a column of that name there
+is a dropped column's data and reads `NULL`. That rule is exact for the
+sealed tier because DuckLake dates every column; the hot tier has no such
+date for a legacy micro-segment, which reads by name until it seals — so the
+one operational rule left is to wait one seal cycle after upgrading before
+re-adding a name dropped earlier. With every tier reading by id, T-430's
+dropped-name tombstone is gone: a dropped name is free again, and the column
+that takes it is a new column.
 
 ## The hot tier
 

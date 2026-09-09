@@ -2,7 +2,7 @@ defmodule SmolqueryApi.ColumnsIntegrationTest do
   @moduledoc """
   The column routes over a real listener and a real DuckLake catalog (PL-61
   L2): curl-shaped requests, and answers that come back from the lake's own
-  `information_schema`, tombstones included.
+  `information_schema`.
 
   Tagged `:integration` because it downloads the `ducklake` extension on
   first use and writes a catalog database to disk.
@@ -59,7 +59,7 @@ defmodule SmolqueryApi.ColumnsIntegrationTest do
 
   defp names(response), do: Enum.map(response.body["schema"], & &1["name"])
 
-  test "add, drop, and the tombstone, all through the lake", %{req: req} do
+  test "add, drop, and add the dropped name again, all through the lake", %{req: req} do
     added =
       Req.post!(req, url: @table <> "/columns", json: %{"name" => "country", "type" => "STRING"})
 
@@ -73,7 +73,7 @@ defmodule SmolqueryApi.ColumnsIntegrationTest do
     assert names(Req.get!(req, url: @table)) == ["id", "country"]
 
     again = Req.post!(req, url: @table <> "/columns", json: %{"name" => "ts", "type" => "INT64"})
-    assert again.status == 409
-    assert again.body["error"]["message"] =~ "dropped"
+    assert again.status == 200
+    assert names(again) == ["id", "country", "ts"]
   end
 end

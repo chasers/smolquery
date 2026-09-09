@@ -177,17 +177,6 @@ defmodule SmolqueryApi.Errors do
     send_error(conn, 422, "FAILED_PRECONDITION", "connection #{name} could not be opened")
   end
 
-  def from_reason(conn, {:column_tombstoned, name}) do
-    send_error(
-      conn,
-      409,
-      "ALREADY_EXISTS",
-      "column #{name} was dropped, and a dropped column's name cannot be reused: " <>
-        "unsealed data may still carry the old column, and a re-add would bake its values " <>
-        "into the new one"
-    )
-  end
-
   def from_reason(conn, {:unknown_column, name}) do
     send_error(conn, 404, "NOT_FOUND", "column #{name} does not exist")
   end

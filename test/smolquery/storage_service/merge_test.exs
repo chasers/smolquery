@@ -108,19 +108,6 @@ defmodule Smolquery.StorageService.MergeTest do
     end
   end
 
-  defp clear_tombstones(runtime) do
-    engine = Runtime.catalog_engine(runtime.name)
-
-    [[catalog, schema]] =
-      Engine.query!(
-        engine,
-        "SELECT table_catalog, table_schema FROM information_schema.tables " <>
-          "WHERE table_name = 'smolquery_dropped_columns'"
-      ).rows
-
-    Engine.query!(engine, ~s|DELETE FROM "#{catalog}"."#{schema}".smolquery_dropped_columns|)
-  end
-
   defp columns_in(runtime, segment, projection) do
     Runtime.engine(runtime.name)
     |> Engine.query!("SELECT #{projection} FROM read_parquet($1) ORDER BY id", [
@@ -296,7 +283,6 @@ defmodule Smolquery.StorageService.MergeTest do
       Client.write_batch(buffer, @table, %{schema: before, rows: [%{"id" => 1, "ts_int" => 1700}]})
 
     :ok = Catalog.alter_table(catalog, @table, {:drop_column, "ts_int"})
-    clear_tombstones(runtime)
 
     :ok =
       Catalog.alter_table(
