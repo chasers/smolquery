@@ -122,6 +122,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Partitions
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Schema.Materialized
   alias Smolquery.Segments.Store
 
   @enforce_keys [:engine, :catalog]
@@ -199,7 +200,8 @@ defmodule Smolquery.Catalog.DuckLake do
       attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
       create_clustering_statement(catalog),
       create_partitions_statement(catalog),
-      create_connections_statement(catalog)
+      create_connections_statement(catalog),
+      create_materialized_statement(catalog)
     ]
 
     config
@@ -329,9 +331,73 @@ defmodule Smolquery.Catalog.DuckLake do
   def create_table(%__MODULE__{} = config, table, %Schema{} = schema) do
     with {:ok, name} <- table_name(config, table),
          {:ok, columns} <- Schema.column_definitions(schema),
+         {:ok, definitions} <- validated_materialized(schema),
          {:ok, _result} <- query(config, "CREATE TABLE IF NOT EXISTS #{name} (#{columns})") do
-      :ok
+      record_materialized(config, table, definitions)
     end
+  end
+
+  defp validated_materialized(%Schema{} = schema) do
+    regular = %{schema | fields: Schema.regular_fields(schema)}
+
+    schema
+    |> Schema.materialized_fields()
+    |> Enum.reduce_while({:ok, []}, fn %Field{} = field, {:ok, acc} ->
+      case Materialized.validate(regular, field) do
+        {:ok, definition} -> {:cont, {:ok, [{field.name, definition} | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp record_materialized(_config, _table, []), do: :ok
+
+  defp record_materialized(config, table, definitions) do
+    with {:ok, %Schema{} = created} <- table_schema(config, table) do
+      definitions
+      |> Enum.reject(fn {name, _definition} -> recorded?(created, name) end)
+      |> Enum.map(fn {name, definition} -> materialized_row(created, name, definition) end)
+      |> materialized_inserts(config, table)
+    end
+  end
+
+  defp recorded?(%Schema{} = schema, name) do
+    match?(
+      {:ok, %Field{materialized: %Materialized{canonical: canonical}}} when is_binary(canonical),
+      Schema.field(schema, name)
+    )
+  end
+
+  defp materialized_row(%Schema{} = schema, name, %Materialized{} = definition) do
+    {:ok, %Field{id: id}} = Schema.field(schema, name)
+
+    sources =
+      Enum.map(definition.sources, fn
+        source when is_integer(source) -> source
+        source when is_binary(source) -> elem(Schema.field(schema, source), 1).id
+      end)
+
+    {id, %{definition | sources: sources}}
+  end
+
+  defp materialized_inserts([], _config, _table), do: :ok
+
+  defp materialized_inserts(rows, config, {dataset, table}) do
+    statements =
+      Enum.map(rows, fn {id, %Materialized{} = definition} ->
+        values = [
+          Identifier.sql_string(dataset),
+          Identifier.sql_string(table),
+          Integer.to_string(id),
+          Identifier.sql_string(definition.expression),
+          Identifier.sql_string(definition.canonical),
+          Identifier.sql_string(Enum.map_join(definition.sources, ",", &Integer.to_string/1))
+        ]
+
+        "INSERT INTO #{materialized_table(config.catalog)} VALUES (#{Enum.join(values, ", ")})"
+      end)
+
+    Engine.transaction(config.engine, statements)
   end
 
   @impl Catalog
@@ -352,32 +418,57 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, table} <- Identifier.validate(table),
          {:ok, result} <- query(config, columns_sql(config), [config.catalog, dataset, table]),
          {:ok, schema} <- build_schema(result.rows, {dataset, table}),
-         {:ok, clustering, partitions} <- side_options(config, {dataset, table}) do
-      {:ok, %{schema | clustering: clustering, partitions: partitions}}
+         {:ok, clustering, partitions, materialized} <- side_options(config, {dataset, table}) do
+      {:ok,
+       %{
+         schema
+         | fields: attach_materialized(schema.fields, materialized),
+           clustering: clustering,
+           partitions: partitions
+       }}
     end
   end
 
   defp side_options(config, {dataset, table}) do
     sql =
-      "SELECT 0 AS kind, column_name AS name, position AS value " <>
+      "SELECT 0 AS kind, column_name AS name, position AS value, NULL AS expression, " <>
+        "NULL AS canonical, NULL AS sources " <>
         "FROM #{clustering_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
-        "UNION ALL SELECT 1, NULL, partition_count " <>
+        "UNION ALL SELECT 1, NULL, partition_count, NULL, NULL, NULL " <>
         "FROM #{partitions_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
+        "UNION ALL SELECT 2, NULL, column_id, expression, canonical, sources " <>
+        "FROM #{materialized_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
         "ORDER BY kind, value"
 
     with {:ok, result} <- query(config, sql, [dataset, table]) do
-      {clustering_rows, partition_rows} =
-        Enum.split_with(result.rows, fn [kind, _name, _value] -> kind == 0 end)
+      rows = Enum.group_by(result.rows, &hd/1)
+      clustering = Enum.map(Map.get(rows, 0, []), fn [_kind, name | _rest] -> name end)
 
-      clustering = Enum.map(clustering_rows, fn [_kind, name, _position] -> name end)
+      materialized =
+        Map.new(Map.get(rows, 2, []), fn [_kind, _name, id, expression, canonical, sources] ->
+          {id,
+           %Materialized{
+             expression: expression,
+             canonical: canonical,
+             sources: source_ids(sources)
+           }}
+        end)
 
-      case partition_rows do
-        [] -> {:ok, clustering, nil}
-        [[_kind, _name, count]] -> {:ok, clustering, count}
-        rows -> {:error, {:ambiguous_partitions, rows}}
+      case Map.get(rows, 1, []) do
+        [] -> {:ok, clustering, nil, materialized}
+        [[_kind, _name, count | _rest]] -> {:ok, clustering, count, materialized}
+        partition_rows -> {:error, {:ambiguous_partitions, partition_rows}}
       end
     end
   end
+
+  defp source_ids(""), do: []
+  defp source_ids(sources), do: sources |> String.split(",") |> Enum.map(&String.to_integer/1)
+
+  defp attach_materialized(fields, materialized) when map_size(materialized) == 0, do: fields
+
+  defp attach_materialized(fields, materialized),
+    do: Enum.map(fields, &%{&1 | materialized: Map.get(materialized, &1.id)})
 
   @impl Catalog
   def register_segments(%__MODULE__{} = config, {dataset, table}, segments) do
@@ -767,19 +858,57 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def alter_table(%__MODULE__{} = config, ref, {:add_column, %Field{} = field}) do
+  def alter_table(%__MODULE__{} = config, ref, {:add_column, %Field{materialized: nil} = field}) do
     with {:ok, name} <- table_name(config, ref),
          {:ok, definition} <- Schema.column_definition(field) do
       transact(config, ["ALTER TABLE #{name} ADD COLUMN #{definition}"])
     end
   end
 
-  def alter_table(%__MODULE__{} = config, ref, {:drop_column, column}) do
+  def alter_table(%__MODULE__{} = config, ref, {:add_column, %Field{} = field}) do
     with {:ok, name} <- table_name(config, ref),
-         {:ok, column} <- Identifier.validate(column) do
-      transact(config, ["ALTER TABLE #{name} DROP COLUMN #{Identifier.quote_name!(column)}"])
+         {:ok, definition} <- Schema.column_definition(field),
+         {:ok, %Schema{} = before} <- table_schema(config, ref),
+         {:ok, validated} <- Materialized.validate(before, field),
+         :ok <- transact(config, ["ALTER TABLE #{name} ADD COLUMN #{definition}"]) do
+      case record_materialized(config, ref, [{field.name, validated}]) do
+        :ok ->
+          :ok
+
+        {:error, _reason} = failure ->
+          _compensated = alter_table(config, ref, {:drop_column, field.name})
+          failure
+      end
     end
   end
+
+  def alter_table(%__MODULE__{} = config, ref, {:drop_column, column}) do
+    with {:ok, name} <- table_name(config, ref),
+         {:ok, column} <- Identifier.validate(column),
+         {:ok, %Schema{} = before} <- table_schema(config, ref),
+         :ok <-
+           transact(config, ["ALTER TABLE #{name} DROP COLUMN #{Identifier.quote_name!(column)}"]) do
+      forget_materialized(config, ref, Schema.field(before, column))
+    end
+  end
+
+  defp forget_materialized(
+         config,
+         {dataset, table},
+         {:ok, %Field{materialized: %Materialized{}, id: id}}
+       ) do
+    with {:ok, _result} <-
+           query(
+             config,
+             "DELETE FROM #{materialized_table(config.catalog)} " <>
+               "WHERE dataset = $1 AND table_name = $2 AND column_id = $3",
+             [dataset, table, id]
+           ) do
+      :ok
+    end
+  end
+
+  defp forget_materialized(_config, _ref, _field), do: :ok
 
   defp transact(config, statements) do
     with_commit_retries(fn ->
@@ -858,6 +987,27 @@ defmodule Smolquery.Catalog.DuckLake do
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
       "column_name VARCHAR NOT NULL, position INTEGER NOT NULL, " <>
       "PRIMARY KEY (dataset, table_name, position))"
+  end
+
+  defp materialized_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_materialized"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its materialized-column
+  side table (PL-61 L4). Bootstrap SQL like `create_clustering_statement/1`,
+  and for the same reason: `table_schema/2` reads it on the query path.
+
+  A row is keyed by the column's id, not its name (PL-62): a name can be
+  dropped and given to a plain column, and a row keyed by the name would
+  attach the old expression to the new column. `sources` is the ids of the
+  columns the expression reads, comma-joined.
+  """
+  @spec create_materialized_statement(String.t()) :: String.t()
+  def create_materialized_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{materialized_table(catalog)} (" <>
+      "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
+      "column_id BIGINT NOT NULL, expression VARCHAR NOT NULL, " <>
+      "canonical VARCHAR NOT NULL, sources VARCHAR NOT NULL, " <>
+      "PRIMARY KEY (dataset, table_name, column_id))"
   end
 
   defp partitions_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_partitions"

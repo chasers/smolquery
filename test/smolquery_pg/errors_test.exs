@@ -34,7 +34,8 @@ defmodule SmolqueryPg.ErrorsTest do
     assert {"42601", _message} = Errors.from_reason({:unqualified_table, "events"})
     assert {"55000", _message} = Errors.from_reason({:clustering_column, "ts"})
     assert {"55000", _message} = Errors.from_reason(:last_column)
-    assert {"0A000", _message} = Errors.from_reason(:materialized_unsupported)
+    assert {"42P17", _message} = Errors.from_reason({:invalid_materialized, :one_expression})
+    assert {"55000", _message} = Errors.from_reason({:materialized_source, "id", "x"})
     assert {"0A000", _message} = Errors.from_reason(:ddl_takes_no_params)
   end
 

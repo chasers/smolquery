@@ -19,6 +19,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Schema.Materialized
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.SegmentFixture
 
@@ -711,6 +712,80 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       result = Engine.query!(@engine, ~s|SELECT name FROM lake."analytics"."events"|)
       assert result.rows == [[nil], [nil]]
+    end
+
+    test "a materialized column round-trips: canonical text and source ids, keyed by column id (PL-61 L4)",
+         %{catalog: catalog} do
+      derived = Field.new!("day", :date, materialized: "CAST(ts AS DATE)")
+      assert Catalog.alter_table(catalog, @table, {:add_column, derived}) == :ok
+
+      {:ok, read} = Catalog.table_schema(catalog, @table)
+
+      assert %Field{
+               name: "day",
+               id: 5,
+               materialized: %Materialized{
+                 expression: "CAST(ts AS DATE)",
+                 canonical: "CAST(ts AS DATE)",
+                 sources: [2]
+               }
+             } = List.last(read.fields)
+
+      assert Enum.map(read.fields, &Schema.materialized?/1) == [false, false, false, false, true]
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "ts"}) ==
+               {:error, {:materialized_source, "ts", "day"}}
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "day"}) == :ok
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("day", :date)}) == :ok
+
+      {:ok, plain} = Catalog.table_schema(catalog, @table)
+      assert %Field{name: "day", id: 6, materialized: nil} = List.last(plain.fields)
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "ts"}) == :ok
+    end
+
+    test "a table created with a materialized column records it once the ids exist (PL-61 L4)",
+         %{catalog: catalog} do
+      schema =
+        Schema.new!([
+          {"id", :int64, nullable: false},
+          {"ts_int", :int64},
+          {"ts", :timestamp, materialized: "epoch_ms(ts_int)"}
+        ])
+
+      assert Catalog.create_table(catalog, {"analytics", "computed"}, schema) == :ok
+      assert Catalog.create_table(catalog, {"analytics", "computed"}, schema) == :ok
+
+      {:ok, read} = Catalog.table_schema(catalog, {"analytics", "computed"})
+
+      assert [
+               %Field{name: "id", materialized: nil},
+               %Field{name: "ts_int", id: 2, materialized: nil},
+               %Field{
+                 name: "ts",
+                 materialized: %Materialized{canonical: "epoch_ms(ts_int)", sources: [2]}
+               }
+             ] = read.fields
+
+      assert Schema.same_columns?(read, schema)
+    end
+
+    test "a materialized expression the gates refuse adds nothing (PL-61 L4)", %{catalog: catalog} do
+      assert {:error, {:invalid_materialized, {:inconsistent_function, "now"}}} =
+               Catalog.alter_table(
+                 catalog,
+                 @table,
+                 {:add_column, Field.new!("seen", :timestamp, materialized: "now()")}
+               )
+
+      assert {:error, {:invalid_materialized, {:unknown_column, "nope"}}} =
+               Catalog.alter_table(
+                 catalog,
+                 @table,
+                 {:add_column, Field.new!("d", :int64, materialized: "nope + 1")}
+               )
+
+      assert column_names() == ["id", "ts", "name", "amount"]
     end
 
     test "refuses what the shared checks refuse, and nothing changes", %{catalog: catalog} do

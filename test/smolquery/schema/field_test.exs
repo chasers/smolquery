@@ -18,6 +18,17 @@ defmodule Smolquery.Schema.FieldTest do
       assert Field.new("bad name", :int64) == {:error, {:invalid_identifier, "bad name"}}
     end
 
+    test "takes a materialized expression as text, trimmed, and refuses an empty one (PL-61 L4)" do
+      assert {:ok, %Field{materialized: %{expression: "epoch_ms(ts_int)", canonical: nil}}} =
+               Field.new("ts", :timestamp, materialized: " epoch_ms(ts_int) ")
+
+      assert Field.new("ts", :timestamp, materialized: "  ") ==
+               {:error, {:invalid_materialized, :one_expression}}
+
+      assert {:error, {:invalid_materialized, {:unparseable, _}}} =
+               Field.new("ts", :timestamp, materialized: 1)
+    end
+
     test "rejects an unknown type" do
       assert Field.new("id", :int128) == {:error, {:unsupported_type, :int128}}
     end

@@ -149,6 +149,31 @@ defmodule Smolquery.SchemaTest do
       assert Schema.field_ids(Schema.new!([{"id", :int64}])) == nil
     end
 
+    test "drop_field/2 refuses a column another column is materialized from (PL-61 L4)" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1),
+          Field.new!("ts_int", :int64, id: 2),
+          Field.new!("ts", :timestamp,
+            id: 3,
+            materialized: %Smolquery.Schema.Materialized{
+              expression: "epoch_ms(ts_int)",
+              canonical: "epoch_ms(ts_int)",
+              sources: [2]
+            }
+          )
+        ])
+
+      assert Schema.drop_field(schema, "ts_int") ==
+               {:error, {:materialized_source, "ts_int", "ts"}}
+
+      assert {:ok, %Schema{}} = Schema.drop_field(schema, "id")
+      assert {:ok, dropped} = Schema.drop_field(schema, "ts")
+      assert {:ok, %Schema{}} = Schema.drop_field(dropped, "ts_int")
+      assert Schema.regular_fields(schema) |> Enum.map(& &1.name) == ["id", "ts_int"]
+      assert Schema.materialized_fields(schema) |> Enum.map(& &1.name) == ["ts"]
+    end
+
     test "same_columns?/2 compares what a client declared, never the ids" do
       declared = Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
 
@@ -161,6 +186,14 @@ defmodule Smolquery.SchemaTest do
       assert Schema.same_columns?(read_back, declared)
       refute Schema.same_columns?(read_back, Schema.new!([{"id", :int64}, {"ts", :timestamp}]))
       refute Schema.same_columns?(read_back, Schema.new!([{"ts", :timestamp}, {"id", :int64}]))
+
+      refute Schema.same_columns?(
+               read_back,
+               Schema.new!([
+                 {"id", :int64, nullable: false},
+                 {"ts", :timestamp, materialized: "epoch_ms(id)"}
+               ])
+             )
     end
 
     test "projection_by_id/2 sources each column by id, whatever the input named it, and NULLs a same-named different id" do

@@ -83,6 +83,35 @@ defmodule SmolqueryApi.ColumnControllerTest do
                3
     end
 
+    test "a materialized column carries its expression, and takes no insert value (PL-61 L4)",
+         %{name: name} do
+      response =
+        add(name, %{"name" => "day", "type" => "DATE", "materialized" => "CAST(ts AS DATE)"})
+
+      assert response.status == 200
+
+      assert List.last(schema_of(response)) == %{
+               "name" => "day",
+               "type" => "DATE",
+               "nullable" => true,
+               "materialized" => "CAST(ts AS DATE)"
+             }
+
+      assert List.last(schema_of(get_json(name, "/v1/datasets/analytics/tables/events"))) ==
+               %{
+                 "name" => "day",
+                 "type" => "DATE",
+                 "nullable" => true,
+                 "materialized" => "CAST(ts AS DATE)"
+               }
+
+      assert {422, "FAILED_PRECONDITION", message} = error_of(drop(name, "ts"))
+      assert message =~ "read by the materialized column day"
+
+      assert drop(name, "day").status == 200
+      assert drop(name, "ts").status == 200
+    end
+
     test "refuses a column that is not nullable", %{name: name} do
       response = add(name, %{"name" => "flag", "type" => "BOOL", "nullable" => false})
 

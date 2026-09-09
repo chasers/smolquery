@@ -140,7 +140,7 @@ defmodule SmolqueryApi.DdlTest do
     assert {400, %{"error" => %{"message" => "events: a table is named dataset.table"}}} =
              query(name, "ALTER TABLE events DROP COLUMN ts")
 
-    assert {501, %{"error" => %{"status" => "UNIMPLEMENTED"}}} =
+    assert {200, %{"job" => %{"ddl" => %{"column" => "t", "performed" => true}}}} =
              query(
                name,
                "ALTER TABLE analytics.events ADD COLUMN t TIMESTAMP MATERIALIZED epoch_ms(id)"

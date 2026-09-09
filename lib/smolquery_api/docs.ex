@@ -139,7 +139,10 @@ defmodule SmolqueryApi.Docs do
         "request" => %{
           "name" => "string",
           "type" => "schema type",
-          "nullable" => "true, the default; false answers 422"
+          "nullable" => "true, the default; false answers 422",
+          "materialized" =>
+            "optional SQL expression over the table's regular columns; the column is " <>
+              "computed as rows land and takes no insert value (PL-61 L4)"
         }
       },
       %{
@@ -147,7 +150,8 @@ defmodule SmolqueryApi.Docs do
         "path" => "/v1/datasets/:dataset/tables/:table/columns/:column",
         "auth" => "bearer",
         "summary" =>
-          "Drop a column. Refused for the last column, a clustering column, or the " <>
+          "Drop a column. Refused for the last column, a clustering column, a column " <>
+            "another is materialized from, or the " <>
             "retention column — clear those first. Files are not rewritten; the " <>
             "column stays visible to a read pinned at an earlier snapshot. Answers " <>
             "the table body."
@@ -244,7 +248,7 @@ defmodule SmolqueryApi.Docs do
             "504 when the query outlives timeoutMs.",
         "request" => %{
           "query" =>
-            "SQL: one SELECT, or one ALTER TABLE dataset.table ADD COLUMN [IF NOT EXISTS] name TYPE " <>
+            "SQL: one SELECT, or one ALTER TABLE dataset.table ADD COLUMN [IF NOT EXISTS] name TYPE [MATERIALIZED expr] " <>
               "| DROP COLUMN [IF EXISTS] name (answers the job with statementType ALTER_TABLE and " <>
               "its ddl outcome; no rows)",
           "maxResults" => "page size, default 1000",

@@ -66,6 +66,7 @@ defmodule Smolquery.Ddl do
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Schema.Materialized
 
   defmodule AlterTable do
     @moduledoc """
@@ -74,12 +75,11 @@ defmodule Smolquery.Ddl do
     """
 
     @enforce_keys [:table, :change]
-    defstruct [:table, :change, :materialized, if_exists: false]
+    defstruct [:table, :change, if_exists: false]
 
     @type t :: %__MODULE__{
             table: Smolquery.Catalog.table_ref(),
             change: Smolquery.Catalog.column_change(),
-            materialized: String.t() | nil,
             if_exists: boolean()
           }
   end
@@ -151,9 +151,6 @@ defmodule Smolquery.Ddl do
   Runs a parsed statement against the catalog.
   """
   @spec execute(Catalog.t(), AlterTable.t()) :: {:ok, outcome()} | {:error, term()}
-  def execute(_catalog, %AlterTable{materialized: expression}) when is_binary(expression),
-    do: {:error, :materialized_unsupported}
-
   def execute(%Catalog{} = catalog, %AlterTable{table: table, change: change} = ddl) do
     case {change, Catalog.alter_table(catalog, table, change)} do
       {_change, :ok} -> {:ok, outcome(ddl, true)}
@@ -176,6 +173,7 @@ defmodule Smolquery.Ddl do
              :unqualified_table,
              :unsupported_type,
              :invalid_identifier,
+             :invalid_materialized,
              :duplicate_columns,
              :unknown_column,
              :column_must_be_nullable,
@@ -186,12 +184,13 @@ defmodule Smolquery.Ddl do
            ],
       do: true
 
+  def error?({:materialized_source, _name, _dependent}), do: true
+
   def error?(reason)
       when reason in [
              :last_column,
              :multiple_statements,
              :alter_table_unsupported,
-             :materialized_unsupported,
              :ddl_not_explainable,
              :ddl_takes_no_params
            ],
@@ -234,7 +233,11 @@ defmodule Smolquery.Ddl do
   def message(:alter_table_unsupported),
     do: "this catalog does not support changing a table's columns"
 
-  def message(:materialized_unsupported), do: "MATERIALIZED columns are not supported yet"
+  def message({:invalid_materialized, detail}), do: Materialized.message(detail)
+
+  def message({:materialized_source, name, dependent}),
+    do: "column #{name} is read by the materialized column #{dependent}; drop that one first"
+
   def message(:ddl_not_explainable), do: "ALTER TABLE cannot be explained or described"
   def message(:ddl_takes_no_params), do: "ALTER TABLE takes no bind parameters"
   def message(reason), do: inspect(reason)
@@ -289,15 +292,9 @@ defmodule Smolquery.Ddl do
 
     with {:ok, column, rest} <- column(rest),
          {:ok, type, rest} <- type(rest),
-         {:ok, field} <- Field.new(column, type),
-         {:ok, materialized} <- tail(rest, remainder) do
-      {:ok,
-       %AlterTable{
-         table: table,
-         change: {:add_column, field},
-         materialized: materialized,
-         if_exists: if_not_exists
-       }}
+         {:ok, materialized} <- tail(rest, remainder),
+         {:ok, field} <- Field.new(column, type, materialized: materialized) do
+      {:ok, %AlterTable{table: table, change: {:add_column, field}, if_exists: if_not_exists}}
     end
   end
 

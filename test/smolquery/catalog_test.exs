@@ -112,7 +112,7 @@ defmodule Smolquery.CatalogTest do
                :ok
 
       {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
-      assert Enum.map(schema.fields, &{&1.name, &1.id}) == [{"id", 1}, {"ts", 2}]
+      assert Enum.map(schema.fields, &{&1.name, &1.id}) == [{"id", 1}, {"ts", 3}]
     end
 
     test "a change that lands emits the schema_change event, a refusal does not (PL-61 L3)",
@@ -162,7 +162,7 @@ defmodule Smolquery.CatalogTest do
       :ok = Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("label", :string)})
 
       {:ok, widened} = Catalog.table_schema(catalog, {"ds", "t"})
-      assert Enum.map(widened.fields, &{&1.name, &1.id}) == [{"id", 1}, {"label", 2}]
+      assert Enum.map(widened.fields, &{&1.name, &1.id}) == [{"id", 1}, {"label", 3}]
     end
   end
 

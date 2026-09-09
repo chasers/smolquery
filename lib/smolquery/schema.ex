@@ -229,7 +229,32 @@ defmodule Smolquery.Schema do
   def same_columns?(%__MODULE__{fields: left}, %__MODULE__{fields: right}),
     do: Enum.map(left, &declaration/1) == Enum.map(right, &declaration/1)
 
-  defp declaration(%Field{name: name, type: type, nullable: nullable}), do: {name, type, nullable}
+  defp declaration(%Field{name: name, type: type, nullable: nullable} = field),
+    do: {name, type, nullable, expression(field)}
+
+  defp expression(%Field{materialized: nil}), do: nil
+  defp expression(%Field{materialized: %{expression: expression}}), do: expression
+
+  @doc """
+  The columns a client supplies values for — every column that is not
+  materialized (`Smolquery.Schema.Materialized`). What the write path reads
+  from a body, and what an insert may carry.
+  """
+  @spec regular_fields(t()) :: [Field.t()]
+  def regular_fields(%__MODULE__{fields: fields}), do: Enum.reject(fields, &materialized?/1)
+
+  @doc """
+  The columns computed from the row, in schema order.
+  """
+  @spec materialized_fields(t()) :: [Field.t()]
+  def materialized_fields(%__MODULE__{fields: fields}), do: Enum.filter(fields, &materialized?/1)
+
+  @doc """
+  Whether `field` is computed rather than supplied.
+  """
+  @spec materialized?(Field.t()) :: boolean()
+  def materialized?(%Field{materialized: nil}), do: false
+  def materialized?(%Field{}), do: true
 
   @doc """
   Every column's id by name, or `nil` when any column has none.
@@ -318,11 +343,14 @@ defmodule Smolquery.Schema do
   @doc """
   The schema without the column named `name`.
 
-  Two drops are refused here because no caller could want them: the last
+  Three drops are refused here because no caller could want them: the last
   column, since a table with no columns is not a table (`new/1` refuses the
-  same shape), and a clustering column, since the key would then name a column
-  the table does not have. `clustering_columns/1` tolerates that state when it
-  finds it; this is the seam that stops it from being created.
+  same shape); a clustering column, since the key would then name a column
+  the table does not have — `clustering_columns/1` tolerates that state when
+  it finds it, and this is the seam that stops it from being created; and a
+  column another column is materialized from (`Smolquery.Schema.Materialized`),
+  since the expression would then read a column that is gone — drop the
+  materialized column first.
   """
   @spec drop_field(t(), String.t()) :: {:ok, t()} | {:error, term()}
   def drop_field(%__MODULE__{fields: fields, clustering: clustering} = schema, name) do
@@ -330,7 +358,21 @@ defmodule Smolquery.Schema do
       name not in names(schema) -> {:error, {:unknown_column, name}}
       match?([_only], fields) -> {:error, :last_column}
       name in clustering -> {:error, {:clustering_column, name}}
-      true -> {:ok, %{schema | fields: Enum.reject(fields, &(&1.name == name))}}
+      true -> drop_unless_source(schema, name)
+    end
+  end
+
+  defp drop_unless_source(%__MODULE__{fields: fields} = schema, name) do
+    {:ok, %Field{id: id}} = field(schema, name)
+
+    schema
+    |> materialized_fields()
+    |> Enum.find(fn %Field{materialized: %{sources: sources}} ->
+      id in sources or name in sources
+    end)
+    |> case do
+      nil -> {:ok, %{schema | fields: Enum.reject(fields, &(&1.name == name))}}
+      %Field{name: dependent} -> {:error, {:materialized_source, name, dependent}}
     end
   end
 

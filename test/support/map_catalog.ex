@@ -31,7 +31,8 @@ defmodule Smolquery.Test.MapCatalog do
           retention: %{},
           clustering: %{},
           partitions: %{},
-          connections: %{}
+          connections: %{},
+          next_ids: %{}
         }
       end)
 
@@ -85,7 +86,19 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def create_table(agent, table_ref, %Schema{} = schema) do
-    Agent.update(agent, &%{&1 | tables: Map.put_new(&1.tables, table_ref, identified(schema))})
+    Agent.update(agent, fn state ->
+      if Map.has_key?(state.tables, table_ref) do
+        state
+      else
+        identified = identified(schema)
+
+        %{
+          state
+          | tables: Map.put(state.tables, table_ref, identified),
+            next_ids: Map.put(state.next_ids, table_ref, length(identified.fields) + 1)
+        }
+      end
+    end)
   end
 
   defp identified(%Schema{fields: fields} = schema) do
@@ -94,10 +107,27 @@ defmodule Smolquery.Test.MapCatalog do
       |> Enum.with_index(1)
       |> Enum.map(fn {field, id} -> %{field | id: id} end)
 
-    %{schema | fields: fields}
+    %{schema | fields: Enum.map(fields, &accepted(&1, fields))}
   end
 
-  defp next_id(%Schema{fields: fields}), do: Enum.max_by(fields, & &1.id).id + 1
+  defp accepted(%Schema.Field{materialized: nil} = field, _fields), do: field
+
+  defp accepted(%Schema.Field{materialized: %{expression: expression}} = field, fields) do
+    sources =
+      for %Schema.Field{name: name, id: id} <- fields,
+          name != field.name,
+          String.contains?(expression, name),
+          do: id
+
+    %{
+      field
+      | materialized: %Schema.Materialized{
+          expression: expression,
+          canonical: expression,
+          sources: sources
+        }
+    }
+  end
 
   @impl Catalog
   def list_tables(agent, dataset) do
@@ -202,9 +232,16 @@ defmodule Smolquery.Test.MapCatalog do
   end
 
   defp alter(state, table_ref, {:add_column, %Schema.Field{} = field}) do
+    id = Map.get(state.next_ids, table_ref, 1)
+
     with {:ok, schema} <- fetch_table(state, table_ref),
-         {:ok, schema} <- Schema.add_field(schema, %{field | id: next_id(schema)}) do
-      {:ok, %{state | tables: Map.put(state.tables, table_ref, schema)}}
+         {:ok, schema} <- Schema.add_field(schema, accepted(%{field | id: id}, schema.fields)) do
+      {:ok,
+       %{
+         state
+         | tables: Map.put(state.tables, table_ref, schema),
+           next_ids: Map.put(state.next_ids, table_ref, id + 1)
+       }}
     else
       {:error, reason} -> {{:error, reason}, state}
     end

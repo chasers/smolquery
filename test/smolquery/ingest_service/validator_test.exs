@@ -30,6 +30,27 @@ defmodule Smolquery.IngestService.ValidatorTest do
              ]
     end
 
+    test "a row that supplies a materialized column is rejected; one that does not proceeds without it (PL-61 L4)" do
+      schema =
+        Schema.new!([
+          {"id", :int64},
+          {"ts_int", :int64},
+          {"ts", :timestamp, materialized: "epoch_ms(ts_int)"}
+        ])
+
+      {valid, errors} =
+        Validator.validate(schema, [
+          %{"id" => 1, "ts_int" => 5, "ts" => "2026-08-01T10:00:00"},
+          %{"id" => 2, "ts_int" => 6}
+        ])
+
+      assert valid == [%{"id" => 2, "ts_int" => 6}]
+
+      assert errors == [
+               %{index: 0, errors: [%{message: "column ts is materialized; it takes no value"}]}
+             ]
+    end
+
     test "a missing nullable column is simply absent" do
       {[row], []} = Validator.validate(@schema, [%{"id" => 1}])
 

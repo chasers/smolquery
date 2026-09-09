@@ -8,9 +8,13 @@ defmodule Smolquery.IngestService.Validator do
   original index with every problem found — a client fixing a batch fixes it
   once, not one error at a time.
 
-  A valid row comes out with only the schema's columns, each value coerced by
-  `Smolquery.Schema.value_from_json/2`; a column the row does not carry is
-  simply absent, which the segment writer stores as `NULL`.
+  A valid row comes out with only the schema's regular columns, each value
+  coerced by `Smolquery.Schema.value_from_json/2`; a column the row does not
+  carry is simply absent, which the segment writer stores as `NULL`. A
+  materialized column (`Smolquery.Schema.Materialized`) takes no value: a row
+  that supplies one is rejected, the way one naming an unknown column is —
+  the value is the expression's to compute, and a client-supplied one would
+  be overwritten at the next rewrite anyway.
   """
 
   alias Smolquery.Schema
@@ -28,10 +32,11 @@ defmodule Smolquery.IngestService.Validator do
   @spec validate(Schema.t(), [term()]) :: {[Writer.row()], [row_errors()]}
   def validate(%Schema{} = schema, rows) when is_list(rows) do
     names = MapSet.new(Schema.names(schema))
+    computed = MapSet.new(Schema.materialized_fields(schema), & &1.name)
 
     {valid, errors, _count} =
       Enum.reduce(rows, {[], [], 0}, fn row, {valid, errors, index} ->
-        case validate_row(schema, names, row) do
+        case validate_row(schema, names, computed, row) do
           {:ok, row} -> {[row | valid], errors, index + 1}
           {:error, messages} -> {valid, [%{index: index, errors: messages} | errors], index + 1}
         end
@@ -40,16 +45,16 @@ defmodule Smolquery.IngestService.Validator do
     {Enum.reverse(valid), Enum.reverse(errors)}
   end
 
-  defp validate_row(schema, names, row) when is_map(row) do
+  defp validate_row(schema, names, computed, row) when is_map(row) do
     {pairs, problems} = coerce_fields(schema, row)
 
-    case unknown_columns(names, row) ++ problems do
+    case unknown_columns(names, row) ++ supplied_computed(computed, row) ++ problems do
       [] -> {:ok, Map.new(pairs)}
       problems -> {:error, Enum.map(problems, &%{message: &1})}
     end
   end
 
-  defp validate_row(_schema, _names, row) do
+  defp validate_row(_schema, _names, _computed, row) do
     {:error, [%{message: "row must be a JSON object, got: #{inspect(row)}"}]}
   end
 
@@ -61,9 +66,17 @@ defmodule Smolquery.IngestService.Validator do
     |> Enum.map(&"unknown column: #{inspect(&1)}")
   end
 
+  defp supplied_computed(computed, row) do
+    row
+    |> Map.keys()
+    |> Enum.filter(&MapSet.member?(computed, &1))
+    |> Enum.sort()
+    |> Enum.map(&"column #{&1} is materialized; it takes no value")
+  end
+
   defp coerce_fields(schema, row) do
     {pairs, problems} =
-      Enum.reduce(schema.fields, {[], []}, fn %Field{} = field, acc ->
+      Enum.reduce(Schema.regular_fields(schema), {[], []}, fn %Field{} = field, acc ->
         coerce_field(field, Map.get(row, field.name), acc)
       end)
 

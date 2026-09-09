@@ -29,6 +29,16 @@ defmodule Smolquery.Segments.Writer do
   by the rest instead of failing the write. That function documents why the two
   can differ.
 
+  ## Materialized columns
+
+  A column computed from the row (`Smolquery.Schema.Materialized`, PL-61 L4)
+  is not read from the body: the `COPY`'s select list evaluates its
+  canonical expression over the body's regular columns, wrapped in `TRY`, so
+  the file carries the value and a row whose values the expression cannot
+  take stores `NULL` rather than failing the batch. The stats are read off
+  the written file, so a materialized column is bounded like any other.
+  `readable_ndjson?/3` reads the regular columns only, as the `COPY` does.
+
   ## Usage
 
       schema = Smolquery.Schema.new!([{"id", :int64}, {"ts", :timestamp}])
@@ -138,12 +148,15 @@ defmodule Smolquery.Segments.Writer do
   """
   @spec ndjson_problem(atom(), Path.t(), Schema.t()) ::
           :ok | {:refused, String.t()} | {:error, {:engine_failed, String.t()}}
-  def ndjson_problem(engine, path, %Schema{fields: fields} = schema) do
+  def ndjson_problem(engine, path, %Schema{} = schema) do
     # `count(*)` is not enough: it needs no column values, so DuckDB is free to
     # skip the casts and answer a row count for a body it could not actually
     # read. Counting every column forces each one to be evaluated, which is the
     # work a `COPY` would do, without writing a Parquet file to find out.
-    counts = Enum.map_join(fields, ", ", &"count(#{Identifier.quote_name!(&1.name)})")
+    counts =
+      schema
+      |> Schema.regular_fields()
+      |> Enum.map_join(", ", &"count(#{Identifier.quote_name!(&1.name)})")
 
     sql = """
     SELECT #{counts} FROM read_json([$1],
@@ -192,7 +205,7 @@ defmodule Smolquery.Segments.Writer do
 
     sql = """
     COPY (
-      SELECT * FROM read_json([#{placeholders(count)}],
+      SELECT #{select_list(schema)} FROM read_json([#{placeholders(count)}],
         format = 'newline_delimited',
         columns = {#{columns_spec(schema)}})#{order_clause(schema)}
     )
@@ -267,11 +280,28 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
-  defp columns_spec(%Schema{fields: fields}) do
-    Enum.map_join(fields, ", ", fn %Field{} = field ->
+  defp columns_spec(%Schema{} = schema) do
+    schema
+    |> Schema.regular_fields()
+    |> Enum.map_join(", ", fn %Field{} = field ->
       {:ok, type} = Schema.duckdb_type(field.type)
 
       "'#{field.name}': '#{type}'"
+    end)
+  end
+
+  defp select_list(%Schema{fields: fields}) do
+    Enum.map_join(fields, ", ", fn %Field{} = field ->
+      name = Identifier.quote_name!(field.name)
+
+      case field.materialized do
+        nil ->
+          name
+
+        %{canonical: canonical} when is_binary(canonical) ->
+          {:ok, type} = Schema.duckdb_type(field.type)
+          "TRY(CAST((#{canonical}) AS #{type})) AS #{name}"
+      end
     end)
   end
 

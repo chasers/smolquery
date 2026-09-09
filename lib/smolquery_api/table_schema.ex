@@ -10,7 +10,9 @@ defmodule SmolqueryApi.TableSchema do
       ]
 
   Type names are `Smolquery.Schema`'s API vocabulary; `nullable` defaults to
-  `true`, matching the `Field` default. Everything else about a field —
+  `true`, matching the `Field` default. A `"materialized"` expression makes
+  the column a computed one (`Smolquery.Schema.Materialized`, PL-61 L4),
+  echoed back as the client wrote it; a field without one has no key. Everything else about a field —
   identifier rules, duplicate columns, an empty list — is rejected by
   `Smolquery.Schema.new/1`, so a schema that parses here is one the catalog
   will accept.
@@ -32,7 +34,12 @@ defmodule SmolqueryApi.TableSchema do
     Enum.map(fields, fn %Field{} = field ->
       {:ok, type} = Schema.api_type(field.type)
 
-      %{"name" => field.name, "type" => type, "nullable" => field.nullable}
+      json = %{"name" => field.name, "type" => type, "nullable" => field.nullable}
+
+      case field.materialized do
+        nil -> json
+        %{expression: expression} -> Map.put(json, "materialized", expression)
+      end
     end)
   end
 
@@ -63,12 +70,21 @@ defmodule SmolqueryApi.TableSchema do
   @spec field_from_json(term()) :: {:ok, Field.t()} | {:error, term()}
   def field_from_json(%{"name" => name, "type" => type} = field) do
     with {:ok, type} <- Schema.type_from_api(type),
-         {:ok, nullable} <- nullable(field) do
-      Field.new(name, type, nullable: nullable)
+         {:ok, nullable} <- nullable(field),
+         {:ok, materialized} <- materialized(field) do
+      Field.new(name, type, nullable: nullable, materialized: materialized)
     end
   end
 
   def field_from_json(other), do: {:error, {:invalid_field, other}}
+
+  defp materialized(field) do
+    case Map.get(field, "materialized") do
+      nil -> {:ok, nil}
+      expression when is_binary(expression) -> {:ok, expression}
+      other -> {:error, {:invalid_field, %{"materialized" => other}}}
+    end
+  end
 
   defp nullable(field) do
     case Map.get(field, "nullable", true) do

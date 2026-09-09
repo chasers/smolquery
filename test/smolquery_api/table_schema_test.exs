@@ -31,6 +31,29 @@ defmodule SmolqueryApi.TableSchemaTest do
       assert TableSchema.from_json(@json) == {:ok, @schema}
     end
 
+    test "a materialized expression rides on the field, and is absent when there is none (PL-61 L4)" do
+      assert {:ok, schema} =
+               TableSchema.from_json([
+                 %{"name" => "ts_int", "type" => "INT64"},
+                 %{"name" => "ts", "type" => "TIMESTAMP", "materialized" => "epoch_ms(ts_int)"}
+               ])
+
+      assert TableSchema.to_json(schema) == [
+               %{"name" => "ts_int", "type" => "INT64", "nullable" => true},
+               %{
+                 "name" => "ts",
+                 "type" => "TIMESTAMP",
+                 "nullable" => true,
+                 "materialized" => "epoch_ms(ts_int)"
+               }
+             ]
+
+      assert TableSchema.from_json([
+               %{"name" => "ts", "type" => "TIMESTAMP", "materialized" => 1}
+             ]) ==
+               {:error, {:invalid_field, %{"materialized" => 1}}}
+    end
+
     test "nullable defaults to true" do
       assert {:ok, schema} = TableSchema.from_json([%{"name" => "id", "type" => "INT64"}])
       assert schema == Schema.new!([{"id", :int64}])

@@ -263,6 +263,36 @@ does not reach. Each `ALTER` is one DuckLake commit, atomic on its own and
 unrelated to any client transaction: the Postgres wire refuses one inside a
 `BEGIN` block rather than pretend a `ROLLBACK` could undo it.
 
+
+### Materialized columns (PL-61 L4)
+
+A materialized column is a normal nullable column in DuckLake plus one row in
+`smolquery_materialized`, keyed by the column's id (PL-62): the expression
+as written, DuckDB's canonical rendering of it, and the ids of the columns it
+reads. `Catalog.table_schema/2` attaches it the way it attaches clustering,
+so `Smolquery.Schema.Field.materialized` reaches the write path through the
+ingest schema cache. The buffer's `Smolquery.Segments.Writer` evaluates the
+canonical expression in the `COPY`'s select list, over the body's regular
+columns and wrapped in `TRY`, so the micro-segment carries the value and a
+row the expression cannot take stores `NULL`; the stats are read off the file,
+so the column prunes like any other. The validator refuses a row that
+supplies a value for it.
+
+The expression is the one place user SQL reaches an engine that is not
+locked down — the write engine has its spool, and after L5 the storage
+engine has the lake — so `Smolquery.Schema.Materialized.validate/2` is the
+security boundary, run once at definition and never again: DuckDB parses the
+expression and an allowlist walks the AST (a column reference must name a
+regular column of this table; no subquery, window, star, parameter, or
+lambda); every function is `CONSISTENT` in `duckdb_functions().stability`,
+which is what makes a recompute at every rewrite sound and what refuses
+`now()` and `random()`; and the expression binds and casts to the column's
+type on a throwaway engine with `enable_external_access` off, which is what
+refuses an unknown function and anything that reads the file system. The
+side row is written after the `ALTER` commits, in the metadata database's
+own commit, because DuckDB's one-database-per-transaction rule keeps the two
+apart; a side row that cannot be written drops the column again.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:
