@@ -60,8 +60,14 @@ defmodule Smolquery.QueryService.Runner do
   `Smolquery.Ddl.parse/1` sees the SQL before anything else. An `ALTER
   TABLE` never acquires an engine: the job is the catalog call
   (`Smolquery.Ddl.execute/2` over the runtime's catalog), run in the same
-  task shape so cancel, deadline, and await behave as for a query, and it
-  settles with the outcome on `job.ddl` and no frame. A statement that
+  task shape so await and history behave as for a query, and it settles
+  with the outcome on `job.ddl` and no frame. A DDL job is not cancelled and
+  has no deadline: the catalog commit runs in the catalog engine's own
+  process, so killing the task could not stop it, only lose its answer — a
+  cancel or a timeout would report a change that had landed as one that had
+  not, and the schema-change broadcast would never fire. A cancel answers
+  `:ok` and the job settles when the catalog answers, which a commit retry
+  bounds. A statement that
   begins with `ALTER` but is not one of the two accepted shapes fails the
   job with the parser's reason; one asked to explain, describe, or bind
   parameters is refused before the catalog is touched.
@@ -139,6 +145,7 @@ defmodule Smolquery.QueryService.Runner do
       timeout_ms: timeout_ms,
       job: job,
       explain: mode(opts),
+      ddl: false,
       plan_opts: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids, :params]),
       trace: Keyword.get(opts, :trace, false),
       collector: nil,
@@ -177,7 +184,7 @@ defmodule Smolquery.QueryService.Runner do
 
     task = Task.async(fn -> alter(runtime, parsed, explain, params) end)
 
-    %{state | task: task, job: Job.running(state.job)}
+    %{state | task: task, ddl: true, job: Job.running(state.job)}
   end
 
   defp alter(_runtime, {:error, reason}, _explain, _params), do: {:error, reason}
@@ -233,7 +240,7 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   def handle_call(:cancel, _from, state) do
-    if Job.terminal?(state.job) do
+    if Job.terminal?(state.job) or state.ddl do
       {:reply, :ok, state}
     else
       {:reply, :ok, state |> halt() |> settle(Job.cancelled(state.job, :cancelled))}
@@ -288,7 +295,7 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   def handle_info(:deadline, state) do
-    if Job.terminal?(state.job) do
+    if Job.terminal?(state.job) or state.ddl do
       {:noreply, state}
     else
       {:noreply, state |> halt() |> settle(Job.cancelled(state.job, :timeout))}

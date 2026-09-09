@@ -125,7 +125,9 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   are refused as for any non-`SELECT`.
 
 Otherwise reads only. Other DDL, DML, and `COPY` answer
-`0A000 feature_not_supported`.
+`0A000 feature_not_supported`. There is no separate privilege for `ALTER
+TABLE`: the password that can `SELECT` can change a table's columns, as the
+API key can over HTTP.
 
 ## Not yet
 
@@ -232,7 +234,7 @@ Every failure is an `ErrorResponse` with a SQLSTATE a client can act on:
 | `57014` | the statement timeout cancelled the query |
 | `57P03` | the query service, or a buffer node it needs, is not available |
 | `25P02` | a statement inside an aborted transaction block |
-| `42703`, `42701`, `55000`, `25001` | an `ALTER TABLE` refused: unknown column, duplicate column, a column that cannot be added or dropped as asked, inside a transaction block |
+| `42703`, `42701`, `42704`, `42602`, `55000`, `25001` | an `ALTER TABLE` refused: unknown column, duplicate column, unknown type, bad identifier, a column that cannot be added or dropped as asked, inside a transaction block |
 | `0A000` | a statement or a protocol message this layer does not serve, or an `ALTER TABLE` clause it recognises and refuses (`NOT NULL`, `RENAME`) |
 | `XX000` | anything else; the message is the reason's inspected form |
 

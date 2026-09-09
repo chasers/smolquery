@@ -125,7 +125,7 @@ It is the column routes' change with the same rules — appended last, always nu
 
 The refusals are the column routes': 404 for a table or column that does not exist, 409 for a name the table has, 422 for the last column, a clustering column, the retention column, or a partition; and 400 for a statement the parser does not accept. A `MATERIALIZED` clause parses and answers 501 until PL-61 L4.
 
-Each statement is one catalog commit. There is no transaction around several, and a `BEGIN` block over the Postgres wire refuses it (`25001`). Dropping a table is not supported.
+Each statement is one catalog commit. There is no transaction around several, and a `BEGIN` block over the Postgres wire refuses it (`25001`). Dropping a table is not supported. A DDL job cannot be cancelled and ignores `timeoutMs`: the commit runs in the catalog's own process, so a cancel could only lose the answer — the job settles when the catalog answers, which a commit retry bounds. There is no separate privilege for it: the API key that can query can change a table's columns.
 
 ## Explain
 

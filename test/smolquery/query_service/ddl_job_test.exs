@@ -107,4 +107,16 @@ defmodule Smolquery.QueryService.DdlJobTest do
 
     assert Enum.map(spans, & &1.name) == [:ddl]
   end
+
+  test "a DDL job is not cancelled and has no deadline: it settles with the catalog's answer",
+       %{name: name, catalog: catalog} do
+    {:ok, job} = Client.submit(name, "ALTER TABLE ds.t ADD COLUMN label STRING", timeout_ms: 1)
+    :ok = Client.cancel(name, job.id)
+
+    assert {:ok, %{state: :done, ddl: %{performed: true}}, nil} =
+             Client.await(name, job.id, 5_000)
+
+    {:ok, schema} = Catalog.table_schema(catalog, @table)
+    assert "label" in Schema.names(schema)
+  end
 end
