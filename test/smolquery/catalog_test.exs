@@ -3,11 +3,122 @@ defmodule Smolquery.CatalogTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Segment
+  alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.StubCatalog
 
   setup do
     %{catalog: StubCatalog.new(self())}
+  end
+
+  describe "alter_table/3: the checks every implementation shares" do
+    test "refuses a partition ref before touching the catalog", %{catalog: catalog} do
+      assert Catalog.alter_table(catalog, {"ds", "t__p1"}, {:drop_column, "id"}) ==
+               {:error, {:partition_ref, {"ds", "t__p1"}}}
+
+      refute_received {:called, :table_schema, _args}
+    end
+
+    test "refuses to add a column that is not nullable", %{catalog: catalog} do
+      field = Field.new!("label", :string, nullable: false)
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, field}) ==
+               {:error, {:column_must_be_nullable, "label"}}
+    end
+
+    test "refuses to add a name the table already has", %{catalog: catalog} do
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("id", :string)}) ==
+               {:error, {:duplicate_columns, ["id"]}}
+    end
+
+    test "refuses to drop an unknown column, or the last one", %{catalog: catalog} do
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "missing"}) ==
+               {:error, {:unknown_column, "missing"}}
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "id"}) ==
+               {:error, :last_column}
+    end
+
+    test "an implementation without the callback answers unsupported", %{catalog: catalog} do
+      field = Field.new!("label", :string)
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, field}) ==
+               {:error, :alter_table_unsupported}
+
+      assert_received {:called, :table_schema, [{"ds", "t"}]}
+      assert_received {:called, :retention, [{"ds", "t"}]}
+    end
+  end
+
+  describe "alter_table/3 against an implementation" do
+    setup do
+      catalog = MapCatalog.new()
+      :ok = Catalog.create_dataset(catalog, "ds")
+
+      :ok =
+        Catalog.create_table(
+          catalog,
+          {"ds", "t"},
+          Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
+        )
+
+      %{catalog: catalog}
+    end
+
+    test "adds last and drops by name, and the schema reads back changed", %{catalog: catalog} do
+      assert Catalog.alter_table(
+               catalog,
+               {"ds", "t"},
+               {:add_column, Field.new!("label", :string)}
+             ) ==
+               :ok
+
+      assert {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
+      assert Schema.names(schema) == ["id", "ts", "label"]
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) == :ok
+
+      assert {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
+      assert Schema.names(schema) == ["id", "label"]
+    end
+
+    test "refuses to drop the retention column until the policy is cleared", %{catalog: catalog} do
+      :ok = Catalog.put_retention(catalog, {"ds", "t"}, %{column: "ts", ttl_ms: 1_000})
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) ==
+               {:error, {:retention_column, "ts"}}
+
+      :ok = Catalog.put_retention(catalog, {"ds", "t"}, nil)
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) == :ok
+    end
+
+    test "refuses to drop a clustering column until the key is cleared", %{catalog: catalog} do
+      :ok = Catalog.put_clustering(catalog, {"ds", "t"}, ["ts"])
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) ==
+               {:error, {:clustering_column, "ts"}}
+
+      :ok = Catalog.put_clustering(catalog, {"ds", "t"}, [])
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"}) == :ok
+    end
+
+    test "a dropped name is tombstoned: it cannot come back, other names can", %{catalog: catalog} do
+      :ok = Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"})
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("ts", :int64)}) ==
+               {:error, {:column_tombstoned, "ts"}}
+
+      assert Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("ts2", :int64)}) ==
+               :ok
+    end
+
+    test "an unknown table is the catalog's error", %{catalog: catalog} do
+      assert Catalog.alter_table(catalog, {"ds", "nope"}, {:drop_column, "id"}) ==
+               {:error, {:unknown_table, {"ds", "nope"}}}
+    end
   end
 
   describe "dispatch" do

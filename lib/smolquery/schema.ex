@@ -252,6 +252,36 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
+  The schema with `field` appended, the way `ALTER TABLE ... ADD COLUMN`
+  appends it: last, so every existing column keeps its position.
+  """
+  @spec add_field(t(), Field.t()) :: {:ok, t()} | {:error, {:duplicate_columns, [String.t()]}}
+  def add_field(%__MODULE__{fields: fields} = schema, %Field{} = field) do
+    if field.name in names(schema),
+      do: {:error, {:duplicate_columns, [field.name]}},
+      else: {:ok, %{schema | fields: fields ++ [field]}}
+  end
+
+  @doc """
+  The schema without the column named `name`.
+
+  Two drops are refused here because no caller could want them: the last
+  column, since a table with no columns is not a table (`new/1` refuses the
+  same shape), and a clustering column, since the key would then name a column
+  the table does not have. `clustering_columns/1` tolerates that state when it
+  finds it; this is the seam that stops it from being created.
+  """
+  @spec drop_field(t(), String.t()) :: {:ok, t()} | {:error, term()}
+  def drop_field(%__MODULE__{fields: fields, clustering: clustering} = schema, name) do
+    cond do
+      name not in names(schema) -> {:error, {:unknown_column, name}}
+      match?([_only], fields) -> {:error, :last_column}
+      name in clustering -> {:error, {:clustering_column, name}}
+      true -> {:ok, %{schema | fields: Enum.reject(fields, &(&1.name == name))}}
+    end
+  end
+
+  @doc """
   Returns `type` when it is a supported logical type.
   """
   @spec validate_type(term()) :: {:ok, logical_type()} | {:error, {:unsupported_type, term()}}
@@ -524,7 +554,12 @@ defmodule Smolquery.Schema do
     end
   end
 
-  defp column_definition(%Field{} = field) do
+  @doc """
+  One column's definition — name, DuckDB type, and nullability — as
+  `CREATE TABLE` and `ALTER TABLE ... ADD COLUMN` both spell it.
+  """
+  @spec column_definition(Field.t()) :: {:ok, String.t()} | {:error, term()}
+  def column_definition(%Field{} = field) do
     with {:ok, type} <- duckdb_type(field.type) do
       null = if field.nullable, do: "", else: " NOT NULL"
       {:ok, "#{Identifier.quote_name!(field.name)} #{type}#{null}"}

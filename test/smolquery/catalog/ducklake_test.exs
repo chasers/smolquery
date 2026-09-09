@@ -554,6 +554,126 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "alter_table/3 (PL-61)" do
+    alias Smolquery.Schema.Field
+
+    defp column_names do
+      {:ok, schema} = Catalog.table_schema(DuckLake.new(engine: @engine), @table)
+      Schema.names(schema)
+    end
+
+    defp tombstone_table do
+      [[catalog, schema]] =
+        Engine.query!(
+          @engine,
+          "SELECT table_catalog, table_schema FROM information_schema.tables " <>
+            "WHERE table_name = 'smolquery_dropped_columns'"
+        ).rows
+
+      ~s|"#{catalog}"."#{schema}".smolquery_dropped_columns|
+    end
+
+    defp tombstones do
+      Engine.query!(
+        @engine,
+        "SELECT dataset, table_name, column_name FROM #{tombstone_table()} ORDER BY 3"
+      ).rows
+    end
+
+    test "adds a column last, and a file written before it reads NULL", context do
+      catalog = context.catalog
+      segment = write_segment(context.segments_dir, 1, 3)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("country", :string)}) ==
+               :ok
+
+      assert column_names() == ["id", "ts", "name", "amount", "country"]
+
+      result = Engine.query!(@engine, ~s|SELECT country FROM lake."analytics"."events"|)
+      assert result.rows == [[nil], [nil], [nil]]
+      assert row_count() == 3
+    end
+
+    test "drops a column: gone now, still there at the earlier snapshot, and tombstoned",
+         context do
+      catalog = context.catalog
+      segment = write_segment(context.segments_dir, 1, 2)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+      {:ok, before} = Catalog.current_snapshot(catalog)
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "name"}) == :ok
+      assert column_names() == ["id", "ts", "amount"]
+
+      pinned =
+        Engine.query!(
+          @engine,
+          ~s|SELECT name FROM lake."analytics"."events" AT (VERSION => #{before}) ORDER BY name|
+        )
+
+      assert pinned.rows == [["row-1"], ["row-2"]]
+
+      assert {:error, _unknown_column} =
+               Engine.query(@engine, ~s|SELECT name FROM lake."analytics"."events"|, [])
+
+      assert tombstones() == [["analytics", "events", "name"]]
+    end
+
+    test "a dropped name cannot come back, even with a different type", %{catalog: catalog} do
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :int64)}) ==
+               {:error, {:column_tombstoned, "name"}}
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("label", :string)}) ==
+               :ok
+
+      assert column_names() == ["id", "ts", "amount", "label"]
+    end
+
+    test "an operator clears a tombstone by deleting its row", %{catalog: catalog} do
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
+
+      Engine.query!(@engine, "DELETE FROM #{tombstone_table()} WHERE column_name = 'name'")
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :string)}) ==
+               :ok
+    end
+
+    test "refuses what the shared checks refuse, and nothing changes", %{catalog: catalog} do
+      required = Field.new!("flag", :bool, nullable: false)
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, required}) ==
+               {:error, {:column_must_be_nullable, "flag"}}
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("id", :string)}) ==
+               {:error, {:duplicate_columns, ["id"]}}
+
+      :ok = Catalog.put_clustering(catalog, @table, ["ts"])
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "ts"}) ==
+               {:error, {:clustering_column, "ts"}}
+
+      :ok = Catalog.put_retention(catalog, @table, %{column: "amount", ttl_ms: 1_000})
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "amount"}) ==
+               {:error, {:retention_column, "amount"}}
+
+      assert Catalog.alter_table(catalog, {"analytics", "events__p1"}, {:drop_column, "name"}) ==
+               {:error, {:partition_ref, {"analytics", "events__p1"}}}
+
+      assert column_names() == ["id", "ts", "name", "amount"]
+      assert tombstones() == []
+    end
+
+    test "the tombstone lands before the drop, so no dropped column is ever without one",
+         %{catalog: catalog} do
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "name"}) == :ok
+      assert column_names() == ["id", "ts", "amount"]
+      assert tombstones() == [["analytics", "events", "name"]]
+    end
+  end
+
   describe "clustering key" do
     test "round-trips a key through the metadata database", %{catalog: catalog} do
       assert Catalog.clustering(catalog, @table) == {:ok, []}

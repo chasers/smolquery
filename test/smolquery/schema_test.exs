@@ -87,6 +87,60 @@ defmodule Smolquery.SchemaTest do
     end
   end
 
+  describe "add_field/2" do
+    test "appends the field last, keeping every existing position" do
+      schema = Schema.new!([{"id", :int64}, {"ts", :timestamp}])
+
+      assert {:ok, added} = Schema.add_field(schema, Field.new!("label", :string))
+      assert Schema.names(added) == ["id", "ts", "label"]
+      assert Schema.names(schema) == ["id", "ts"]
+    end
+
+    test "refuses a name the schema already has" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert Schema.add_field(schema, Field.new!("id", :string)) ==
+               {:error, {:duplicate_columns, ["id"]}}
+    end
+  end
+
+  describe "drop_field/2" do
+    test "removes the named column and nothing else" do
+      schema = Schema.new!([{"id", :int64}, {"ts", :timestamp}, {"label", :string}])
+
+      assert {:ok, dropped} = Schema.drop_field(schema, "ts")
+      assert Schema.names(dropped) == ["id", "label"]
+    end
+
+    test "refuses a column the schema does not have" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert Schema.drop_field(schema, "missing") == {:error, {:unknown_column, "missing"}}
+    end
+
+    test "refuses the last column" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert Schema.drop_field(schema, "id") == {:error, :last_column}
+    end
+
+    test "refuses a clustering column" do
+      schema = %{Schema.new!([{"id", :int64}, {"ts", :timestamp}]) | clustering: ["ts"]}
+
+      assert Schema.drop_field(schema, "ts") == {:error, {:clustering_column, "ts"}}
+      assert {:ok, _dropped} = Schema.drop_field(schema, "id")
+    end
+  end
+
+  describe "column_definition/1" do
+    test "spells a nullable and a required column as CREATE TABLE does" do
+      assert Schema.column_definition(Field.new!("label", :string)) == {:ok, ~s("label" VARCHAR)}
+
+      assert Schema.column_definition(Field.new!("id", :int64, nullable: false)) ==
+               {:ok, ~s("id" BIGINT NOT NULL)}
+    end
+  end
+
   describe "field/2" do
     test "finds a field by name" do
       schema = Schema.new!([{"id", :int64}])
