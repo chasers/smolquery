@@ -174,6 +174,28 @@ defmodule Smolquery.SchemaTest do
       assert Schema.materialized_fields(schema) |> Enum.map(& &1.name) == ["ts"]
     end
 
+    test "computed_select/1 names a regular column and recomputes a materialized one, in order (PL-61 L5)" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64),
+          Field.new!("ts_int", :int64),
+          Field.new!("ts", :timestamp,
+            materialized: %Smolquery.Schema.Materialized{
+              expression: "epoch_ms(ts_int) -- as written",
+              canonical: "epoch_ms(ts_int)",
+              sources: [2]
+            }
+          ),
+          Field.new!("raw", :string, materialized: "CAST(id AS VARCHAR)")
+        ])
+
+      assert Schema.computed_select(schema) ==
+               ~s|"id", "ts_int", TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP)) AS "ts", | <>
+                 ~s|TRY(CAST((CAST(id AS VARCHAR)) AS VARCHAR)) AS "raw"|
+
+      assert Schema.computed_select(Schema.new!([{"id", :int64}])) == ~s|"id"|
+    end
+
     test "same_columns?/2 compares what a client declared, never the ids" do
       declared = Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
 

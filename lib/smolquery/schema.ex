@@ -662,6 +662,36 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
+  The `SELECT` list that writes this schema from a relation already carrying
+  its regular columns under their own names: every column in schema order,
+  a regular one by name and a materialized one recomputed from its
+  expression (`Smolquery.Schema.Materialized`, PL-61 L5).
+
+  Every writer renders through it — the buffer's `COPY` over a spooled body,
+  the sealer's and the compactor's `COPY` over their projected inputs — so a
+  materialized value is `expr(row)` wherever a file is written, and a row
+  that predates its column carries the value after its first rewrite. The
+  expression is wrapped in `TRY`: a row the expression cannot take stores
+  `NULL`, never fails the file. A definition the catalog has not
+  canonicalised evaluates as written.
+  """
+  @spec computed_select(t()) :: String.t()
+  def computed_select(%__MODULE__{fields: fields}) do
+    Enum.map_join(fields, ", ", fn %Field{} = field ->
+      name = Identifier.quote_name!(field.name)
+
+      case field.materialized do
+        nil ->
+          name
+
+        %{expression: expression, canonical: canonical} ->
+          {:ok, type} = duckdb_type(field.type)
+          "TRY(CAST((#{canonical || expression}) AS #{type})) AS #{name}"
+      end
+    end)
+  end
+
+  @doc """
   The `SELECT` list that projects a relation carrying `columns` onto this schema.
 
   Every declared column appears, in the schema's own order and cast to the type

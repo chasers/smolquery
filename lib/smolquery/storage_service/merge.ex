@@ -143,6 +143,18 @@ defmodule Smolquery.StorageService.Merge do
   a crashed merge free to retry, and it is why this module never generates an
   id.
 
+  ## A materialized column is recomputed, not copied
+
+  The final `COPY` renders through `Smolquery.Schema.computed_select/1`
+  (PL-61 L5): a regular column by name, a materialized one from its
+  expression over the projected inputs. So a claim whose micro-segments
+  predate the column seals with the value computed, and a compaction of
+  files that carried it recomputes it identically — the definition-time
+  determinism gate is what makes the two the same value. The inner
+  projection still sources the column from an input that has it, but the
+  outer select overrides it, so nothing stored can disagree with the
+  expression.
+
   ## What it does not do
 
   No catalog commit and no retirement: this produces a `Smolquery.Segments.Segment`
@@ -547,7 +559,7 @@ defmodule Smolquery.StorageService.Merge do
 
   defp copy(runtime, schema, select, urls, staged) do
     sql = """
-    COPY (SELECT * FROM (#{select})#{order_by(schema)})
+    COPY (SELECT #{Schema.computed_select(schema)} FROM (#{select})#{order_by(schema)})
     TO $#{length(urls) + 1} (#{parquet_options(runtime, schema)})
     """
 
