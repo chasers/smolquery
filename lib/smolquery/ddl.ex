@@ -121,15 +121,29 @@ defmodule Smolquery.Ddl do
   Parses `sql` as one of the accepted `ALTER TABLE` forms.
 
   `:not_ddl` when the statement does not begin with `ALTER` — the planner's
-  business, not this module's. `{:error, reason}` when it does and is not one
+  business, not this module's. Leading whitespace and comments are skipped
+  first, as the wire's own lexer skips them, so the two agree on what is
+  DDL; a statement that is not valid UTF-8 is refused rather than scanned. `{:error, reason}` when it does and is not one
   of the two shapes; the reasons are the ones `error?/1` recognises.
   """
   @spec parse(String.t()) :: {:ok, AlterTable.t()} | :not_ddl | {:error, term()}
   def parse(sql) when is_binary(sql) do
-    if Regex.match?(@leading, sql) do
-      with {:ok, tokens, remainder} <- scan(sql), do: alter(tokens, remainder)
-    else
-      :not_ddl
+    cond do
+      not String.valid?(sql) ->
+        {:error, {:invalid_ddl, "the statement is not valid UTF-8"}}
+
+      not Regex.match?(@leading, trivia_stripped(sql)) ->
+        :not_ddl
+
+      true ->
+        with({:ok, tokens, remainder} <- scan(trivia_stripped(sql)), do: alter(tokens, remainder))
+    end
+  end
+
+  defp trivia_stripped(sql) do
+    case Regex.replace(~r/\A(?:\s+|--[^\n]*(?:\n|\z)|\/\*.*?\*\/)+/s, sql, "", global: false) do
+      ^sql -> sql
+      stripped -> trivia_stripped(stripped)
     end
   end
 
@@ -193,7 +207,8 @@ defmodule Smolquery.Ddl do
   def message({:invalid_ddl, detail}), do: detail
   def message({:unsupported_ddl, clause}), do: "#{clause} is not supported in ALTER TABLE"
   def message({:unqualified_table, name}), do: "#{name}: a table is named dataset.table"
-  def message({:unsupported_type, type}), do: "unsupported type: #{type}"
+  def message({:unsupported_type, type}) when is_binary(type), do: "unsupported type: #{type}"
+  def message({:unsupported_type, type}), do: "unsupported type: #{inspect(type)}"
   def message({:invalid_identifier, name}), do: "invalid identifier: #{inspect(name)}"
   def message({:duplicate_columns, [name | _rest]}), do: "column #{name} already exists"
   def message({:unknown_column, name}), do: "column #{name} does not exist"

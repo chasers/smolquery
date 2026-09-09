@@ -772,7 +772,8 @@ defmodule SmolqueryPg.Session do
     do: [
       Protocol.notice_response(
         "42701",
-        ~s|column "#{column}" of relation "#{dataset}.#{table}" already exists, skipping|
+        ~s|column "#{column}" of relation "#{dataset}.#{table}" already exists, skipping|,
+        "NOTICE"
       )
     ]
 
@@ -780,7 +781,8 @@ defmodule SmolqueryPg.Session do
     do: [
       Protocol.notice_response(
         "42703",
-        ~s|column "#{column}" of relation "#{dataset}.#{table}" does not exist, skipping|
+        ~s|column "#{column}" of relation "#{dataset}.#{table}" does not exist, skipping|,
+        "NOTICE"
       )
     ]
 

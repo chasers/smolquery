@@ -70,6 +70,8 @@ defmodule SmolqueryPg.DdlWireTest do
                "ALTER TABLE analytics.events ADD COLUMN IF NOT EXISTS label TEXT"
              )
 
+    assert notice["S"] == "NOTICE"
+
     assert notice["M"] =~
              ~s|column "label" of relation "analytics.events" already exists, skipping|
 

@@ -14,6 +14,7 @@ defmodule Smolquery.DdlTest do
       assert Ddl.parse("  with x as (select 1) select * from x") == :not_ddl
       assert Ddl.parse("CREATE TABLE analytics.events (id BIGINT)") == :not_ddl
       assert Ddl.parse("-- ALTER TABLE in a comment\nSELECT 1") == :not_ddl
+      assert Ddl.parse("/* ALTER */ SELECT 1") == :not_ddl
       assert Ddl.parse("alteration") == :not_ddl
     end
   end
@@ -118,6 +119,27 @@ defmodule Smolquery.DdlTest do
     test "anything after the column is refused" do
       assert Ddl.parse("ALTER TABLE ds.t DROP COLUMN c CASCADE") ==
                {:error, {:unsupported_ddl, "CASCADE"}}
+    end
+  end
+
+  describe "parse/1: what precedes ALTER, and what is not text" do
+    test "leading whitespace and comments are skipped, as the wire lexer skips them" do
+      assert {:ok, %AlterTable{change: {:drop_column, "c"}}} =
+               Ddl.parse("-- a note\n\n/* and\nanother */ ALTER TABLE ds.t DROP COLUMN c")
+
+      assert Ddl.parse("-- ALTER TABLE ds.t DROP COLUMN c") == :not_ddl
+    end
+
+    test "a statement that is not valid UTF-8 is refused, never scanned" do
+      assert Ddl.parse("ALTER TABLE ds.t DROP COLUMN caf" <> <<0xE9>>) ==
+               {:error, {:invalid_ddl, "the statement is not valid UTF-8"}}
+    end
+
+    test "a type the API vocabulary refuses is reported, even as a tuple" do
+      assert {:error, {:unsupported_type, {:numeric, 39, 2}} = reason} =
+               Ddl.parse("ALTER TABLE ds.t ADD COLUMN c NUMERIC(39,2)")
+
+      assert Ddl.message(reason) == "unsupported type: {:numeric, 39, 2}"
     end
   end
 

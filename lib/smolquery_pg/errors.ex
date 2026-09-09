@@ -14,9 +14,11 @@ defmodule SmolqueryPg.Errors do
 
   An `ALTER TABLE` (PL-61 L3) fails with `Smolquery.Ddl`'s reasons, which
   take the codes Postgres gives the same refusals: `42703` for an unknown
-  column, `42701` for a duplicate, `42601` for a statement the parser does
-  not accept, `0A000` for a clause it recognises and refuses, `55000` for a column that cannot be added or dropped as asked,
-  and `0A000` for what this release does not do. The message is
+  column, `42701` for a duplicate, `42704` for an unknown type, `42602` for
+  a bad identifier, `42601` for a statement the parser does not accept,
+  `55000` for a column that cannot be added or dropped as asked, and
+  `0A000` for a clause it recognises and refuses or what this release does
+  not do. The message is
   `Smolquery.Ddl.message/1`, the wording the HTTP envelope shares.
   """
 

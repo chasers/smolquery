@@ -371,10 +371,12 @@ defmodule SmolqueryPg.Protocol do
   def fatal_response(code, message), do: frame(?E, fields("FATAL", code, message))
 
   @doc """
-  `NoticeResponse` with a `WARNING` severity.
+  `NoticeResponse`, with a `WARNING` severity unless the caller says
+  `NOTICE` — what Postgres sends for a guarded no-op it skipped.
   """
-  @spec notice_response(String.t(), String.t()) :: iodata()
-  def notice_response(code, message), do: frame(?N, fields("WARNING", code, message))
+  @spec notice_response(String.t(), String.t(), String.t()) :: iodata()
+  def notice_response(code, message, severity \\ "WARNING"),
+    do: frame(?N, fields(severity, code, message))
 
   defp fields(severity, code, message),
     do: [?S, severity, 0, ?V, severity, 0, ?C, code, 0, ?M, message, 0, 0]
