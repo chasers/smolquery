@@ -235,6 +235,39 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert lake_stamps(context.storage) == [[1, ~N[2023-11-14 22:13:20.000000]], [2, nil]]
   end
 
+  test "the chunked merge recomputes a materialized column too (PL-61 L5 review)", context do
+    runtime = start_compactor(context, merge_inputs_per_call: 2)
+    catalog = context.catalog
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
+    {:ok, plain} = Catalog.table_schema(catalog, @table)
+
+    for n <- 1..3 do
+      register_written(
+        runtime,
+        catalog,
+        n,
+        plain,
+        [%{"id" => n, "ts_int" => 1_700_000_000_000 + n * 60_000}],
+        context.tmp_dir
+      )
+    end
+
+    :ok =
+      Catalog.alter_table(
+        catalog,
+        @table,
+        {:add_column, Field.new!("ts", :timestamp, materialized: "epoch_ms(ts_int)")}
+      )
+
+    assert {:ok, %{compacted: [%{replaced: 3}], failed: []}} = Compactor.sweep(context.storage)
+
+    assert lake_stamps(context.storage) == [
+             [1, ~N[2023-11-14 22:14:20.000000]],
+             [2, ~N[2023-11-14 22:15:20.000000]],
+             [3, ~N[2023-11-14 22:16:20.000000]]
+           ]
+  end
+
   defp lake_stamps(storage) do
     Runtime.catalog_engine(storage)
     |> Engine.query!(~s|SELECT id, ts FROM lake."analytics"."events" ORDER BY id|)

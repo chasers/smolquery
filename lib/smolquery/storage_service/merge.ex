@@ -145,9 +145,10 @@ defmodule Smolquery.StorageService.Merge do
 
   ## A materialized column is recomputed, not copied
 
-  The final `COPY` renders through `Smolquery.Schema.computed_select/1`
-  (PL-61 L5): a regular column by name, a materialized one from its
-  expression over the projected inputs. So a claim whose micro-segments
+  Both final `COPY`s — the direct one over the projected inputs and the
+  staged one over the session temp table — render through
+  `Smolquery.Schema.computed_select/1` (PL-61 L5): a regular column by
+  name, a materialized one from its expression over the projected inputs. So a claim whose micro-segments
   predate the column seals with the value computed, and a compaction of
   files that carried it recomputes it identically — the definition-time
   determinism gate is what makes the two the same value. The inner
@@ -408,7 +409,7 @@ defmodule Smolquery.StorageService.Merge do
 
   defp copy_staged(runtime, schema, table, staged) do
     sql = """
-    COPY (SELECT * FROM #{table}#{order_by(schema)})
+    COPY (SELECT #{Schema.computed_select(schema)} FROM #{table}#{order_by(schema)})
     TO $1 (#{parquet_options(runtime, schema)})
     """
 
