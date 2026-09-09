@@ -372,7 +372,11 @@ defmodule Smolquery.QueryService.TopN do
        ) do
     from = padding(schema) <> " UNION ALL BY NAME " <> Views.sources_select(schema, candidates)
 
-    with :ok <- define(connection, Views.table_view(spec.ref, schema, from)),
+    with :ok <-
+           define(
+             connection,
+             Views.table_view(spec.ref, schema, from, Views.recomputed(schema, candidates))
+           ),
          {:ok, %Result{rows: [[count, bound]]}} <-
            Connection.query(
              connection,

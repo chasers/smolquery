@@ -540,15 +540,33 @@ defmodule Smolquery.QueryService.Planner do
   defp resolve(runtime, refs, snapshot) do
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
       with {:ok, schema} <- Catalog.table_schema(runtime.catalog, ref),
-           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot) do
+           {:ok, paths} <- Catalog.registered_through(runtime.catalog, ref, snapshot),
+           {:ok, files} <- sealed_files(runtime, ref, snapshot, schema) do
         sealed = MapSet.new(paths, &Path.basename/1)
         stats = segment_stats(runtime, ref, snapshot)
 
-        {:cont, {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed, stats: stats})}}
+        {:cont,
+         {:ok, Map.put(acc, ref, %{schema: schema, sealed: sealed, stats: stats, files: files})}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # A table with a materialized column reads the registration snapshot of
+  # each sealed file, so the view can tell which files predate the column
+  # and read it as its expression there (`Views.recomputed/2`); a table
+  # without one pays nothing.
+  defp sealed_files(runtime, ref, snapshot, schema) do
+    case Smolquery.Schema.materialized_fields(schema) do
+      [] ->
+        {:ok, []}
+
+      _materialized ->
+        with {:ok, files} <- Catalog.segment_files(runtime.catalog, ref, snapshot) do
+          {:ok, Enum.map(files, &%{"url" => &1.path, "snapshot" => &1.snapshot})}
+        end
+    end
   end
 
   defp segment_stats(runtime, ref, snapshot) do
@@ -719,7 +737,7 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp view({dataset, table} = ref, snapshot, %{schema: schema}, entries) do
+  defp view({dataset, table} = ref, snapshot, %{schema: schema, files: files}, entries) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
     lake = Identifier.quote_name!(DuckLake.default_catalog())
@@ -732,6 +750,6 @@ defmodule Smolquery.QueryService.Planner do
         entries -> sealed <> " UNION ALL BY NAME " <> Views.sources_select(schema, entries)
       end
 
-    Views.table_view(ref, schema, union)
+    Views.table_view(ref, schema, union, Views.recomputed(schema, files ++ entries))
   end
 end

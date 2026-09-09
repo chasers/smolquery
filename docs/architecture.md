@@ -300,6 +300,20 @@ side row is written after the `ALTER` commits, in the metadata database's
 own commit, because DuckDB's one-database-per-transaction rule keeps the two
 apart; a side row that cannot be written drops the column again.
 
+The value is `expr(row)` always. Every writer renders its `COPY` through
+`Smolquery.Schema.computed_select/1`, which names a regular column and
+recomputes a materialized one, so the sealer and the compactor store the
+column over their projected inputs as a matter of course (L5), and nothing
+stored can disagree with the expression — which is what the determinism
+gate is for. A read does not wait for that: `Views.table_view/4` renders the
+column as `coalesce(stored, expression)` wherever a file in the read may
+lack it (T-440) — a hot entry whose ids miss the column's, a sealed file
+registered before the column began, a file with neither — so a query is
+exact the moment the column exists, and reads the stored column plainly
+once no such file remains, which is what keeps DuckDB's row-group pruning
+on the sealed tier. The planner learns which sealed files predate a column
+from `Catalog.segment_files/3`, read only for a table that has one.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:

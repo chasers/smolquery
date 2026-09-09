@@ -111,12 +111,24 @@ defmodule Smolquery.QueryService.Views do
   The view replaces one of the same name: the planner's Top-N probe
   (`Smolquery.QueryService.TopN`) defines the table over its candidate
   entries first, and the runner's statements then define it for real.
+
+  A materialized column named in `recompute` is read as
+  `coalesce(stored, expression)` over the relation's regular columns: the
+  value a file carries when it has one, the expression when it does not
+  (PL-61). The two never disagree — every write and rewrite computes the
+  same deterministic expression — so a read is exact the moment the column
+  exists, before any file is rewritten. `recomputed/2` says which columns
+  need it for a given set of sources; one that no source lacks reads the
+  stored column plainly, which is what lets DuckDB prune the sealed tier on
+  its row-group stats. A `coalesce` is opaque to that pruning, so it is
+  rendered only while a file that predates the column is still in the read.
   """
-  @spec table_view(Smolquery.Catalog.table_ref(), Schema.t(), String.t()) :: [String.t()]
-  def table_view({dataset, table}, schema, from_sql) do
+  @spec table_view(Smolquery.Catalog.table_ref(), Schema.t(), String.t(), [String.t()]) ::
+          [String.t()]
+  def table_view({dataset, table}, schema, from_sql, recompute \\ []) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
-    columns = Enum.map_join(schema.fields, ", ", &column_expression/1)
+    columns = Enum.map_join(schema.fields, ", ", &column_expression(&1, recompute))
 
     [
       "CREATE SCHEMA IF NOT EXISTS #{ds}",
@@ -124,12 +136,48 @@ defmodule Smolquery.QueryService.Views do
     ]
   end
 
-  defp column_expression(%Schema.Field{name: name, type: type}) do
+  defp column_expression(%Schema.Field{name: name, type: type} = field, recompute) do
     quoted = Identifier.quote_name!(name)
 
-    case Schema.view_cast(type) do
-      {:cast, queried} -> "#{quoted}::#{queried} AS #{quoted}"
-      :none -> quoted
+    cond do
+      name in recompute and Schema.materialized?(field) ->
+        {:ok, duckdb} = Schema.duckdb_type(type)
+        %{expression: expression, canonical: canonical} = field.materialized
+
+        "coalesce(#{quoted}, TRY(CAST((#{canonical || expression}) AS #{duckdb}))) AS #{quoted}"
+
+      match?({:cast, _queried}, Schema.view_cast(type)) ->
+        {:cast, queried} = Schema.view_cast(type)
+        "#{quoted}::#{queried} AS #{quoted}"
+
+      true ->
+        quoted
     end
   end
+
+  @doc """
+  The materialized columns some of `sources` may not carry, by name — the
+  ones `table_view/4` must read as their expression.
+
+  A source with `"field_ids"` lacks a column when its id is absent. A source
+  without ids registered at a `"snapshot"` lacks a column that began after
+  that snapshot (`Smolquery.Schema.Field.since`). A source with neither, or
+  a column whose beginning the catalog does not date, may lack it, and is
+  read as the expression to be safe.
+  """
+  @spec recomputed(Schema.t(), [map()]) :: [String.t()]
+  def recomputed(%Schema{} = schema, sources) do
+    for %Schema.Field{name: name} = field <- Schema.materialized_fields(schema),
+        Enum.any?(sources, &may_lack?(&1, field)),
+        do: name
+  end
+
+  defp may_lack?(%{"field_ids" => ids}, %Schema.Field{id: id}) when is_map(ids),
+    do: id not in Map.values(ids)
+
+  defp may_lack?(%{"snapshot" => snapshot}, %Schema.Field{since: since})
+       when is_integer(snapshot) and is_integer(since),
+       do: snapshot < since
+
+  defp may_lack?(_source, _field), do: true
 end

@@ -49,7 +49,7 @@ defmodule Smolquery.Test.FixedCatalog do
   @impl Catalog
   def segment_files(answers, table, snapshot) do
     with {:ok, paths} <- segments(answers, table, snapshot) do
-      {:ok, Enum.map(paths, &%{path: &1, rows: 0, bytes: 0})}
+      {:ok, Enum.map(paths, &%{path: &1, rows: 0, bytes: 0, snapshot: snapshot})}
     end
   end
 

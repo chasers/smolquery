@@ -117,7 +117,13 @@ defmodule Smolquery.QueryService.PartialWorker do
   defp view(_request, []), do: []
 
   defp view(%{table_ref: ref, schema: schema}, files),
-    do: Views.table_view(ref, schema, Views.sources_select(schema, files))
+    do:
+      Views.table_view(
+        ref,
+        schema,
+        Views.sources_select(schema, files),
+        Views.recomputed(schema, files)
+      )
 
   defp described(connection, files) do
     {unknown, known} =
