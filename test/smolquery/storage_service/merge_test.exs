@@ -253,6 +253,25 @@ defmodule Smolquery.StorageService.MergeTest do
     assert rows_in(runtime, segment) == [1, 2, 3, 4]
   end
 
+  test "stamps the sealed segment with the catalog's column ids, whatever the inputs carried (PL-62)",
+       %{buffer: buffer, runtime: runtime} do
+    {:ok, first} = Client.write_batch(buffer, @table, batch(1..2))
+    {:ok, segment} = merge(runtime, @table, claim([first.segment_id]))
+
+    {:ok, declared} = Catalog.table_schema(runtime.catalog, @table)
+    assert %{"id" => id} = Schema.field_ids(declared)
+
+    stamped =
+      Runtime.engine(runtime.name)
+      |> Engine.query!(
+        "SELECT name, field_id FROM parquet_schema($1) WHERE name != 'duckdb_schema'",
+        [Store.location(runtime.store, segment.key)]
+      )
+      |> Map.fetch!(:rows)
+
+    assert stamped == [["id", id]]
+  end
+
   test "writes to the key the claim already named, so a retry overwrites", %{
     buffer: buffer,
     runtime: runtime

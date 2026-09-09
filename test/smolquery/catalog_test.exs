@@ -119,6 +119,18 @@ defmodule Smolquery.CatalogTest do
       assert Catalog.alter_table(catalog, {"ds", "nope"}, {:drop_column, "id"}) ==
                {:error, {:unknown_table, {"ds", "nope"}}}
     end
+
+    test "columns get ids at creation, and an added column a fresh one (PL-62)",
+         %{catalog: catalog} do
+      {:ok, created} = Catalog.table_schema(catalog, {"ds", "t"})
+      assert Enum.map(created.fields, &{&1.name, &1.id}) == [{"id", 1}, {"ts", 2}]
+
+      :ok = Catalog.alter_table(catalog, {"ds", "t"}, {:drop_column, "ts"})
+      :ok = Catalog.alter_table(catalog, {"ds", "t"}, {:add_column, Field.new!("label", :string)})
+
+      {:ok, widened} = Catalog.table_schema(catalog, {"ds", "t"})
+      assert Enum.map(widened.fields, &{&1.name, &1.id}) == [{"id", 1}, {"label", 2}]
+    end
   end
 
   describe "dispatch" do

@@ -195,7 +195,7 @@ defmodule Smolquery.Segments.Writer do
         format = 'newline_delimited',
         columns = {#{columns_spec(schema)}})#{order_clause(schema)}
     )
-    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)})
+    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)}#{field_ids_option(schema)})
     """
 
     case Engine.query(engine, sql, paths ++ [staged]) do
@@ -272,6 +272,13 @@ defmodule Smolquery.Segments.Writer do
 
       "'#{field.name}': '#{type}'"
     end)
+  end
+
+  defp field_ids_option(%Schema{} = schema) do
+    case Schema.parquet_field_ids(schema) do
+      nil -> ""
+      literal -> ", FIELD_IDS #{literal}"
+    end
   end
 
   defp placeholders(count), do: Enum.map_join(1..count, ", ", &"$#{&1}")

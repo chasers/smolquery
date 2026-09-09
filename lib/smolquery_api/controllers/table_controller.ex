@@ -45,7 +45,7 @@ defmodule SmolqueryApi.TableController do
          :ok <- Catalog.create_table(catalog, {dataset, id}, schema),
          :ok <- invalidate_schema_cache(conn, {dataset, id}),
          {:ok, existing} <- Catalog.table_schema(catalog, {dataset, id}) do
-      if existing.fields == schema.fields do
+      if Schema.same_columns?(existing, schema) do
         Json.send_json(conn, 200, %{"id" => id, "schema" => TableSchema.to_json(schema)})
       else
         Errors.send_error(

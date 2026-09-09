@@ -351,14 +351,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def table_schema(%__MODULE__{} = config, {dataset, table}) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         {:ok, result} <-
-           query(
-             config,
-             "SELECT column_name, data_type, is_nullable FROM information_schema.columns " <>
-               "WHERE table_catalog = $1 AND table_schema = $2 AND table_name = $3 " <>
-               "ORDER BY ordinal_position",
-             [config.catalog, dataset, table]
-           ),
+         {:ok, result} <- query(config, columns_sql(config), [config.catalog, dataset, table]),
          {:ok, schema} <- build_schema(result.rows, {dataset, table}),
          {:ok, clustering, partitions} <- side_options(config, {dataset, table}) do
       {:ok, %{schema | clustering: clustering, partitions: partitions}}
@@ -486,7 +479,7 @@ defmodule Smolquery.Catalog.DuckLake do
              config,
              "SELECT df.path, df.path_is_relative, " <>
                "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-               "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT) " <>
+               "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot " <>
                "FROM #{metadata_schema(config.catalog)}.ducklake_data_file df " <>
                "JOIN #{metadata_schema(config.catalog)}.ducklake_table t " <>
                "ON t.table_id = df.table_id " <>
@@ -507,10 +500,10 @@ defmodule Smolquery.Catalog.DuckLake do
   defp segment_file_rows(rows) do
     rows
     |> Enum.reduce_while({:ok, []}, fn
-      [path, relative, rows, bytes], {:ok, files} when relative in [false, 0] ->
-        {:cont, {:ok, [%{path: path, rows: rows, bytes: bytes} | files]}}
+      [path, relative, rows, bytes, snapshot], {:ok, files} when relative in [false, 0] ->
+        {:cont, {:ok, [%{path: path, rows: rows, bytes: bytes, snapshot: snapshot} | files]}}
 
-      [path, _relative, _rows, _bytes], _acc ->
+      [path, _relative, _rows, _bytes, _snapshot], _acc ->
         {:halt, {:error, {:relative_segment_path, path}}}
     end)
     |> case do
@@ -1158,14 +1151,37 @@ defmodule Smolquery.Catalog.DuckLake do
   defp snapshot_argument(snapshot) when is_integer(snapshot),
     do: ["snapshot_version => #{snapshot}"]
 
+  defp columns_sql(config) do
+    metadata = metadata_schema(config.catalog)
+
+    "SELECT ic.column_name, ic.data_type, ic.is_nullable, dc.column_id, dc.begin_snapshot " <>
+      "FROM information_schema.columns ic " <>
+      "JOIN #{metadata}.ducklake_schema ds ON ds.schema_name = ic.table_schema " <>
+      "AND ds.end_snapshot IS NULL " <>
+      "JOIN #{metadata}.ducklake_table dt ON dt.schema_id = ds.schema_id " <>
+      "AND dt.table_name = ic.table_name AND dt.end_snapshot IS NULL " <>
+      "JOIN #{metadata}.ducklake_column dc ON dc.table_id = dt.table_id " <>
+      "AND dc.column_name = ic.column_name AND dc.end_snapshot IS NULL " <>
+      "AND dc.parent_column IS NULL " <>
+      "WHERE ic.table_catalog = $1 AND ic.table_schema = $2 AND ic.table_name = $3 " <>
+      "ORDER BY ic.ordinal_position"
+  end
+
   defp build_schema([], ref), do: {:error, {:unknown_table, ref}}
 
   defp build_schema(rows, _ref) do
     rows
-    |> Enum.reduce_while({:ok, []}, fn [name, type, nullable], {:ok, fields} ->
+    |> Enum.reduce_while({:ok, []}, fn [name, type, nullable, id, since], {:ok, fields} ->
       case Schema.logical_from_duckdb(type) do
         {:ok, logical} ->
-          field = %Field{name: name, type: logical, nullable: nullable == "YES"}
+          field = %Field{
+            name: name,
+            type: logical,
+            nullable: nullable == "YES",
+            id: id,
+            since: since
+          }
+
           {:cont, {:ok, [field | fields]}}
 
         {:error, reason} ->
