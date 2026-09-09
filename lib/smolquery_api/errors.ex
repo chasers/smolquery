@@ -177,6 +177,66 @@ defmodule SmolqueryApi.Errors do
     send_error(conn, 422, "FAILED_PRECONDITION", "connection #{name} could not be opened")
   end
 
+  def from_reason(conn, {:column_tombstoned, name}) do
+    send_error(
+      conn,
+      409,
+      "ALREADY_EXISTS",
+      "column #{name} was dropped, and a dropped column's name cannot be reused: " <>
+        "unsealed data may still carry the old column, and a re-add would bake its values " <>
+        "into the new one"
+    )
+  end
+
+  def from_reason(conn, {:unknown_column, name}) do
+    send_error(conn, 404, "NOT_FOUND", "column #{name} does not exist")
+  end
+
+  def from_reason(conn, {:column_must_be_nullable, name}) do
+    send_error(
+      conn,
+      422,
+      "INVALID_ARGUMENT",
+      "column #{name} must be nullable: an added column has no value for the rows that " <>
+        "already exist"
+    )
+  end
+
+  def from_reason(conn, :last_column) do
+    send_error(conn, 422, "FAILED_PRECONDITION", "a table needs at least one column")
+  end
+
+  def from_reason(conn, {:clustering_column, name}) do
+    send_error(
+      conn,
+      422,
+      "FAILED_PRECONDITION",
+      "column #{name} is in the clustering key; clear the key before dropping it"
+    )
+  end
+
+  def from_reason(conn, {:retention_column, name}) do
+    send_error(
+      conn,
+      422,
+      "FAILED_PRECONDITION",
+      "column #{name} is the retention column; clear the policy before dropping it"
+    )
+  end
+
+  def from_reason(conn, {:partition_ref, {dataset, table}}) do
+    send_error(conn, 422, "INVALID_ARGUMENT", "#{dataset}.#{table} is a partition, not a table")
+  end
+
+  def from_reason(conn, :alter_table_unsupported) do
+    send_error(
+      conn,
+      501,
+      "UNIMPLEMENTED",
+      "this catalog does not support changing a table's columns"
+    )
+  end
+
   def from_reason(conn, :commit_conflict) do
     send_error(
       conn,
