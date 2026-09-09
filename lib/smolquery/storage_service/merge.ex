@@ -115,14 +115,19 @@ defmodule Smolquery.StorageService.Merge do
   narrower fix, and it settles column order and type at the same time rather than
   only presence.
 
-  The reverse — a column the inputs carry and the catalog does not, because the
-  buffer accepted a wider batch before the table was altered — is rejected here as
-  `{:error, {:undeclared_columns, names}}`, before any byte moves. Registration
-  would reject it too (`Column "…" exists in file … but was not found in table`),
-  and projecting it away instead would drop a column of acked rows silently, which
-  is the one outcome worse than a stuck claim. Widening the table is the catalog's
-  call to make, not the sealer's — the same reason a table the catalog does not
-  hold is an error here rather than something to create.
+  The reverse — a column the inputs carry and the catalog does not — is projected
+  away, and this is where a dropped column's data leaves the system. After
+  `DROP COLUMN` (T-430) every micro-segment written before the drop still carries
+  the column; the catalog has said that data is no longer wanted, the query view
+  already stops showing it, and the seal is what stops storing it. This used to be
+  refused as `{:error, {:undeclared_columns, names}}`, on the argument that
+  projecting away a column of acked rows is worse than a stuck claim. With a way
+  to drop a column, that refusal inverted its own purpose: the claim's input set
+  is frozen, so every retry met the same column, the seal never retired, and the
+  table's tail stayed in the hot tier for good — the T-54 failure, reached from
+  the other side. Nothing but a drop can put an undeclared column in an input:
+  registration validates every name it accepts, and the buffer writes only the
+  schema it was handed.
 
   ## The output is already named
 
@@ -440,12 +445,7 @@ defmodule Smolquery.StorageService.Merge do
   defp input(entry), do: {:error, {:invalid_manifest_entry, entry}}
 
   defp projection(runtime, schema, urls) do
-    with {:ok, columns} <- input_columns(runtime, urls) do
-      case columns -- Schema.names(schema) do
-        [] -> Schema.projection(schema, columns)
-        undeclared -> {:error, {:undeclared_columns, undeclared}}
-      end
-    end
+    with {:ok, columns} <- input_columns(runtime, urls), do: Schema.projection(schema, columns)
   end
 
   defp input_columns(runtime, urls) do
