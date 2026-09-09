@@ -102,12 +102,16 @@ defmodule Smolquery.Catalog do
         }
 
   @typedoc """
-  One sealed segment's path and weight, for `segment_files/3`.
+  One sealed segment's path and weight, for `segment_files/3`, and the
+  snapshot it was registered at — which bounds the columns it can hold: a
+  column that began after that snapshot cannot be in the file, whatever the
+  file names its columns (PL-62).
   """
   @type segment_file :: %{
           path: String.t(),
           rows: non_neg_integer(),
-          bytes: non_neg_integer()
+          bytes: non_neg_integer(),
+          snapshot: snapshot()
         }
 
   @typedoc """

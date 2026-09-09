@@ -358,7 +358,7 @@ defmodule Smolquery.StorageService.Merge do
   defp copy_staged(runtime, schema, table, staged) do
     sql = """
     COPY (SELECT * FROM #{table}#{order_by(schema)})
-    TO $1 (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
+    TO $1 (#{parquet_options(runtime, schema)})
     """
 
     with {:ok, _result} <- query(runtime, sql, [staged], runtime.merge_copy_timeout_ms),
@@ -464,11 +464,22 @@ defmodule Smolquery.StorageService.Merge do
   defp copy(runtime, schema, projection, urls, staged) do
     sql = """
     COPY (SELECT #{projection} FROM #{scan(urls)}#{order_by(schema)})
-    TO $#{length(urls) + 1} (FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, ROW_GROUP_SIZE #{runtime.seal_row_group_size})
+    TO $#{length(urls) + 1} (#{parquet_options(runtime, schema)})
     """
 
     with {:ok, _result} <- query(runtime, sql, urls ++ [staged], runtime.merge_copy_timeout_ms),
          do: :ok
+  end
+
+  defp parquet_options(runtime, %Schema{} = schema) do
+    field_ids =
+      case Schema.parquet_field_ids(schema) do
+        nil -> ""
+        literal -> ", FIELD_IDS #{literal}"
+      end
+
+    "FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, " <>
+      "ROW_GROUP_SIZE #{runtime.seal_row_group_size}#{field_ids}"
   end
 
   defp order_by(%Schema{} = schema) do

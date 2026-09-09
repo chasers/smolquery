@@ -132,6 +132,46 @@ defmodule Smolquery.SchemaTest do
     end
   end
 
+  describe "field identity (PL-62)" do
+    test "a field carries the id and snapshot the catalog gave it, or neither" do
+      assert %Field{id: nil, since: nil} = Field.new!("id", :int64)
+      assert %Field{id: 7, since: 3} = Field.new!("id", :int64, id: 7, since: 3)
+    end
+
+    test "field_ids/1 is every id by name, or nothing when any is missing" do
+      identified =
+        Schema.new!([Field.new!("id", :int64, id: 1), Field.new!("ts", :timestamp, id: 4)])
+
+      assert Schema.field_ids(identified) == %{"id" => 1, "ts" => 4}
+
+      partial = Schema.new!([Field.new!("id", :int64, id: 1), Field.new!("ts", :timestamp)])
+      assert Schema.field_ids(partial) == nil
+      assert Schema.field_ids(Schema.new!([{"id", :int64}])) == nil
+    end
+
+    test "same_columns?/2 compares what a client declared, never the ids" do
+      declared = Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
+
+      read_back =
+        Schema.new!([
+          Field.new!("id", :int64, nullable: false, id: 1, since: 2),
+          Field.new!("ts", :timestamp, id: 2, since: 2)
+        ])
+
+      assert Schema.same_columns?(read_back, declared)
+      refute Schema.same_columns?(read_back, Schema.new!([{"id", :int64}, {"ts", :timestamp}]))
+      refute Schema.same_columns?(read_back, Schema.new!([{"ts", :timestamp}, {"id", :int64}]))
+    end
+
+    test "parquet_field_ids/1 is the FIELD_IDS literal a COPY stamps, quoted per name" do
+      identified =
+        Schema.new!([Field.new!("id", :int64, id: 1), Field.new!("ts", :timestamp, id: 4)])
+
+      assert Schema.parquet_field_ids(identified) == "{'id': 1, 'ts': 4}"
+      assert Schema.parquet_field_ids(Schema.new!([{"id", :int64}])) == nil
+    end
+  end
+
   describe "column_definition/1" do
     test "spells a nullable and a required column as CREATE TABLE does" do
       assert Schema.column_definition(Field.new!("label", :string)) == {:ok, ~s("label" VARCHAR)}

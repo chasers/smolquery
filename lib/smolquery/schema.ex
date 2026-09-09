@@ -217,6 +217,59 @@ defmodule Smolquery.Schema do
   def names(%__MODULE__{fields: fields}), do: Enum.map(fields, & &1.name)
 
   @doc """
+  Whether two schemas declare the same columns — names, types, nullability,
+  in order — ignoring the identity the catalog assigns.
+
+  This is the comparison a client can make. A schema read back from the
+  catalog carries each column's `id` and `since`; a schema a client sent never
+  does, and a client that re-creates a table with the same field list has
+  asked for the same table, ids notwithstanding.
+  """
+  @spec same_columns?(t(), t()) :: boolean()
+  def same_columns?(%__MODULE__{fields: left}, %__MODULE__{fields: right}),
+    do: Enum.map(left, &declaration/1) == Enum.map(right, &declaration/1)
+
+  defp declaration(%Field{name: name, type: type, nullable: nullable}), do: {name, type, nullable}
+
+  @doc """
+  Every column's id by name, or `nil` when any column has none.
+
+  All or nothing, because a file is stamped with ids for every column or for
+  none: a Parquet file whose ids cover half its columns is one nobody can
+  project by id, and the writer would rather leave the file unstamped —
+  readable by name, as every file was before PL-62 — than stamp it wrong.
+  """
+  @spec field_ids(t()) :: %{String.t() => pos_integer()} | nil
+  def field_ids(%__MODULE__{fields: fields}) do
+    if Enum.all?(fields, &is_integer(&1.id)),
+      do: Map.new(fields, &{&1.name, &1.id}),
+      else: nil
+  end
+
+  @doc """
+  The `FIELD_IDS` struct literal a Parquet `COPY` stamps the columns with, or
+  `nil` when `field_ids/1` has none to stamp.
+
+  A stamped id is the column's identity inside the file — what DuckDB's
+  `parquet_schema()` reads back as `field_id` — so a reader that knows the
+  catalog's ids can tell a column apart from a later one that took its name
+  (PL-62). DuckLake ignores the stamp when it registers a file, mapping by
+  name; the stamp is for smolquery's own projections.
+  """
+  @spec parquet_field_ids(t()) :: String.t() | nil
+  def parquet_field_ids(%__MODULE__{} = schema) do
+    case field_ids(schema) do
+      nil ->
+        nil
+
+      ids ->
+        "{" <>
+          Enum.map_join(ids, ", ", fn {name, id} -> "#{Identifier.sql_string(name)}: #{id}" end) <>
+          "}"
+    end
+  end
+
+  @doc """
   The clustering key's columns that this schema actually declares, in the key's
   own order — what a write point sorts by.
 

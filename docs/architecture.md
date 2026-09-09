@@ -191,6 +191,29 @@ view, because DuckLake does not register DuckDB's variant Parquet encoding.
 The caller-facing limits of both are listed once, in the
 [API doc](api.md#schema-types).
 
+### Column identity (PL-62)
+
+A column's name is not its identity. A name can be dropped and given to a new
+column (T-430); the column that had it before is a different column, and any
+file still carrying the old one must not be read as if it held the new one.
+The identity is DuckLake's own `column_id`, read from `ducklake_column` with
+the snapshot the column began at, and carried on every
+`Smolquery.Schema.Field` as `id` and `since`. The API never shows it.
+
+Every Parquet file smolquery writes — a micro-segment from the buffer, a
+sealed segment from the merge — stamps those ids into the file as Parquet
+field ids (`COPY ... (FIELD_IDS {...})`), which DuckDB's `parquet_schema()`
+reads back. DuckLake ignores the stamp when it registers a file, mapping by
+name; so a sealed file keeps the catalog's current names, and the id is for
+smolquery's own projections. A file written before this existed carries no
+ids and is readable by name, as it always was: the writer stamps all of a
+schema's columns or none, never some.
+
+What reads the ids is the projections — the planner's hot read, the sealer,
+the compactor — which land in the two layers after this one. Until they do,
+the dropped-name tombstone from T-430 is what keeps a re-added name from
+reading an old file's values.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:

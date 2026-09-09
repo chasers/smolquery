@@ -77,6 +77,9 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     result.rows |> List.flatten() |> List.first()
   end
 
+  defp anonymous(%Schema{fields: fields} = schema),
+    do: %{schema | fields: Enum.map(fields, &%{&1 | id: nil, since: nil})}
+
   describe "datasets and tables" do
     test "creates and lists a dataset", %{catalog: catalog} do
       assert {:ok, datasets} = Catalog.list_datasets(catalog)
@@ -92,7 +95,46 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
 
     test "reads back the schema it was given", %{catalog: catalog} do
-      assert Catalog.table_schema(catalog, @table) == {:ok, schema()}
+      assert {:ok, read} = Catalog.table_schema(catalog, @table)
+      assert anonymous(read) == schema()
+    end
+
+    test "every column carries DuckLake's id and the snapshot it began at (PL-62)",
+         %{catalog: catalog} do
+      {:ok, created_at} = Catalog.current_snapshot(catalog)
+      assert {:ok, read} = Catalog.table_schema(catalog, @table)
+
+      assert Enum.map(read.fields, &{&1.name, &1.id, &1.since}) == [
+               {"id", 1, created_at},
+               {"ts", 2, created_at},
+               {"name", 3, created_at},
+               {"amount", 4, created_at}
+             ]
+
+      assert Schema.field_ids(read) == %{"id" => 1, "ts" => 2, "name" => 3, "amount" => 4}
+    end
+
+    test "a re-added name is a new column: the id moves on, the old one is gone for good",
+         %{catalog: catalog} do
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
+      {:ok, after_drop} = Catalog.table_schema(catalog, @table)
+      assert Enum.map(after_drop.fields, & &1.id) == [1, 2, 4]
+
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("label", :string)})
+      {:ok, snapshot} = Catalog.current_snapshot(catalog)
+      {:ok, widened} = Catalog.table_schema(catalog, @table)
+
+      assert %Field{name: "label", id: 5, since: ^snapshot} = List.last(widened.fields)
+      assert Enum.map(widened.fields, & &1.id) == [1, 2, 4, 5]
+    end
+
+    test "a MAP column's key and value are not columns of the table", %{catalog: catalog} do
+      schema = Schema.new!([{"id", :int64}, {"attrs", {:map, :string, :string}}, {"n", :int64}])
+      :ok = Catalog.create_table(catalog, {"analytics", "mapped"}, schema)
+
+      assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "mapped"})
+      assert Schema.names(read) == ["id", "attrs", "n"]
+      assert Enum.map(read.fields, & &1.id) == [1, 2, 5]
     end
 
     test "reports a table it does not have", %{catalog: catalog} do
@@ -609,8 +651,6 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   end
 
   describe "alter_table/3 (PL-61)" do
-    alias Smolquery.Schema.Field
-
     defp column_names do
       {:ok, schema} = Catalog.table_schema(DuckLake.new(engine: @engine), @table)
       Schema.names(schema)
@@ -1075,7 +1115,8 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       schema = Schema.new!([{"id", :int64, nullable: false}, {"attrs", {:map, :string, :string}}])
 
       assert :ok = Catalog.create_table(catalog, {"analytics", "attributed"}, schema)
-      assert Catalog.table_schema(catalog, {"analytics", "attributed"}) == {:ok, schema}
+      assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "attributed"})
+      assert anonymous(read) == schema
     end
   end
 
@@ -1084,7 +1125,8 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       schema = Schema.new!([{"id", :int64, nullable: false}, {"attrs", :variant}])
 
       assert :ok = Catalog.create_table(catalog, {"analytics", "varied"}, schema)
-      assert Catalog.table_schema(catalog, {"analytics", "varied"}) == {:ok, schema}
+      assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "varied"})
+      assert anonymous(read) == schema
     end
   end
 end

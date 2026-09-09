@@ -86,8 +86,19 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def create_table(agent, table_ref, %Schema{} = schema) do
-    Agent.update(agent, &%{&1 | tables: Map.put_new(&1.tables, table_ref, schema)})
+    Agent.update(agent, &%{&1 | tables: Map.put_new(&1.tables, table_ref, identified(schema))})
   end
+
+  defp identified(%Schema{fields: fields} = schema) do
+    fields =
+      fields
+      |> Enum.with_index(1)
+      |> Enum.map(fn {field, id} -> %{field | id: id} end)
+
+    %{schema | fields: fields}
+  end
+
+  defp next_id(%Schema{fields: fields}), do: Enum.max_by(fields, & &1.id).id + 1
 
   @impl Catalog
   def list_tables(agent, dataset) do
@@ -194,7 +205,7 @@ defmodule Smolquery.Test.MapCatalog do
   defp alter(state, table_ref, {:add_column, %Schema.Field{} = field}) do
     with {:ok, schema} <- fetch_table(state, table_ref),
          :ok <- not_tombstoned(state, table_ref, field.name),
-         {:ok, schema} <- Schema.add_field(schema, field) do
+         {:ok, schema} <- Schema.add_field(schema, %{field | id: next_id(schema)}) do
       {:ok, %{state | tables: Map.put(state.tables, table_ref, schema)}}
     else
       {:error, reason} -> {{:error, reason}, state}
