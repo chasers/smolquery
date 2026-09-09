@@ -55,7 +55,9 @@ defmodule Smolquery.BufferService.Runtime do
   configuration is resolved, as every other service resolves it, and the
   buffer starts a catalog engine of its own. `:none` runs the buffer without
   one, trusting the ids a writer sends; the test configuration does, so a
-  buffer under test does not attach a lake it never reads.
+  buffer under test does not attach a lake it never reads, and a node whose
+  configuration names no metadata database at all — a test peer brought up
+  from a bare environment — runs the same way rather than fail to boot.
 
   `:write_pool_size` is how many DuckDB instances the flush spreads
   its encodes over — see `engine_for/2` for why it hashes on the segment id,
@@ -464,6 +466,13 @@ defmodule Smolquery.BufferService.Runtime do
   end
 
   defp resolve_catalog(:none, _name), do: {nil, nil}
+
+  defp resolve_catalog(nil, name) do
+    if Keyword.has_key?(Application.get_env(:smolquery, Catalog.DuckLake, []), :metadata),
+      do: resolve_catalog([], name),
+      else: {nil, nil}
+  end
+
   defp resolve_catalog(catalog, name), do: Catalog.DuckLake.resolve(catalog, catalog_engine(name))
 
   @doc """
