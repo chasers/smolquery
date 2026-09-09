@@ -110,6 +110,7 @@ defmodule Smolquery.Segments.Writer do
          path: put.location,
          row_count: row_count,
          byte_size: put.byte_size,
+         field_ids: Schema.field_ids(schema),
          stats: stats
        }}
     end

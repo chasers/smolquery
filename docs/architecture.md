@@ -209,10 +209,23 @@ smolquery's own projections. A file written before this existed carries no
 ids and is readable by name, as it always was: the writer stamps all of a
 schema's columns or none, never some.
 
-What reads the ids is the projections — the planner's hot read, the sealer,
-the compactor — which land in the two layers after this one. Until they do,
-the dropped-name tombstone from T-430 is what keeps a re-added name from
-reading an old file's values.
+The hot tier reads by id. A micro-segment's manifest entry records the ids
+its file was written under (`"field_ids"`, in the log and over the hot
+server), and every read of the hot tier — the planner's view, the Top-N
+probe, a distributed shard, and the sealer projecting a claim — renders
+through one primitive: `Smolquery.Schema.projection_by_id/2` sources each
+catalog column from the input column carrying its *id*, whatever that column
+is named, and a typed `NULL` where no input carries it, including when the
+input has a column of the same name under another id. `read_parquet` unions
+files by name, so `Smolquery.QueryService.Views.sources_select/2` groups
+files by their `field_ids` and unions the groups only after each is projected
+onto the catalog's names; in steady state every file agrees and it is one
+scan, as before. The pruner resolves a query's column to its id and the id to
+the file's name for it, so a bound from a dropped column never prunes its
+successor. A file without ids is read by name, as it always was.
+
+The sealed tier's compactor still projects by name; that, and the retirement
+of the dropped-name tombstone from T-430, is the layer after this one.
 
 ## The hot tier
 

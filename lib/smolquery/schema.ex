@@ -650,6 +650,47 @@ defmodule Smolquery.Schema do
     end
   end
 
+  @doc """
+  The `SELECT` list that projects a relation whose columns were written under
+  `field_ids` — the file's column names to the ids they carried — onto this
+  schema, matching by id (PL-62).
+
+  Every declared column appears, in the schema's own order and cast to its
+  declared type. A declared column is sourced from the input column that
+  carries its id, *whatever that column is named in the input*; a declared
+  column whose id no input column carries becomes a typed `NULL` — including
+  when the input has a column of the same name under a different id, because
+  that is a dropped column's data and the reason ids exist. An input column
+  whose id nothing declares is dropped. A declared column with no id of its
+  own — a schema from a catalog that assigns none — falls back to its name.
+  """
+  @spec projection_by_id(t(), %{String.t() => pos_integer()}) ::
+          {:ok, String.t()} | {:error, term()}
+  def projection_by_id(%__MODULE__{fields: fields}, field_ids) when is_map(field_ids) do
+    by_id = Map.new(field_ids, fn {name, id} -> {id, name} end)
+
+    with {:ok, expressions} <- map_fields(fields, &projected_by_id(&1, by_id, field_ids)) do
+      {:ok, Enum.join(expressions, ", ")}
+    end
+  end
+
+  defp projected_by_id(%Field{} = field, by_id, field_ids) do
+    with {:ok, type} <- duckdb_type(field.type) do
+      source =
+        case source_for(field, by_id, field_ids) do
+          nil -> "NULL"
+          input -> Identifier.quote_name!(input)
+        end
+
+      {:ok, "CAST(#{source} AS #{type}) AS #{Identifier.quote_name!(field.name)}"}
+    end
+  end
+
+  defp source_for(%Field{id: nil, name: name}, _by_id, field_ids),
+    do: if(Map.has_key?(field_ids, name), do: name, else: nil)
+
+  defp source_for(%Field{id: id}, by_id, _field_ids), do: Map.get(by_id, id)
+
   defp build_fields(specs) do
     map_fields(specs, fn
       %Field{} = field -> {:ok, field}

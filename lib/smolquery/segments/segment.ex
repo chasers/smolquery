@@ -15,7 +15,7 @@ defmodule Smolquery.Segments.Segment do
   """
 
   @enforce_keys [:id, :key, :path, :row_count, :byte_size]
-  defstruct [:id, :key, :path, :row_count, :byte_size, stats: %{}]
+  defstruct [:id, :key, :path, :row_count, :byte_size, :field_ids, stats: %{}]
 
   @type column_stats :: %{
           min: term(),
@@ -23,12 +23,20 @@ defmodule Smolquery.Segments.Segment do
           null_count: non_neg_integer()
         }
 
+  @typedoc """
+  The column id each of the file's columns was written under, by the name it
+  has in the file — `Smolquery.Schema.field_ids/1` of the schema at write
+  time — or `nil` for a file written without ids (PL-62).
+  """
+  @type field_ids :: %{String.t() => pos_integer()} | nil
+
   @type t :: %__MODULE__{
           id: String.t(),
           key: String.t(),
           path: String.t(),
           row_count: non_neg_integer(),
           byte_size: non_neg_integer(),
+          field_ids: field_ids(),
           stats: %{optional(String.t()) => column_stats()}
         }
 

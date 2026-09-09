@@ -72,6 +72,17 @@ defmodule Smolquery.BufferService.HotManifest.EntryTest do
       assert round_trip(entry) == entry
     end
 
+    test "keep the ids the segment was written under, and none for one written without (PL-62)" do
+      identified = Entry.from_segment(%{segment() | field_ids: %{"id" => 1, "ts" => 4}}, 1)
+      assert identified.field_ids == %{"id" => 1, "ts" => 4}
+      assert round_trip(identified) == identified
+      assert Entry.to_manifest(identified, stats: false)["field_ids"] == %{"id" => 1, "ts" => 4}
+
+      anonymous = Entry.from_segment(segment(), 1)
+      assert anonymous.field_ids == nil
+      assert round_trip(anonymous) == anonymous
+    end
+
     test "bring timestamp and date bounds back as comparable terms" do
       decoded = segment() |> Entry.from_segment(1) |> round_trip()
 

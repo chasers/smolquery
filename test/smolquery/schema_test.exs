@@ -163,6 +163,30 @@ defmodule Smolquery.SchemaTest do
       refute Schema.same_columns?(read_back, Schema.new!([{"ts", :timestamp}, {"id", :int64}]))
     end
 
+    test "projection_by_id/2 sources each column by id, whatever the input named it, and NULLs a same-named different id" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1),
+          Field.new!("label", :string, id: 3),
+          Field.new!("n", :int64, id: 9)
+        ])
+
+      assert Schema.projection_by_id(schema, %{"id" => 1, "old_label" => 3, "label" => 2}) ==
+               {:ok,
+                ~s|CAST("id" AS BIGINT) AS "id", CAST("old_label" AS VARCHAR) AS "label", | <>
+                  ~s|CAST(NULL AS BIGINT) AS "n"|}
+    end
+
+    test "projection_by_id/2 falls back to the name for a field the catalog gave no id" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert Schema.projection_by_id(schema, %{"id" => 7}) ==
+               {:ok, ~s|CAST("id" AS BIGINT) AS "id"|}
+
+      assert Schema.projection_by_id(schema, %{"other" => 7}) ==
+               {:ok, ~s|CAST(NULL AS BIGINT) AS "id"|}
+    end
+
     test "parquet_field_ids/1 is the FIELD_IDS literal a COPY stamps, quoted per name" do
       identified =
         Schema.new!([Field.new!("id", :int64, id: 1), Field.new!("ts", :timestamp, id: 4)])

@@ -38,6 +38,7 @@ defmodule Smolquery.StorageService.MergeTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.HotTier
@@ -105,6 +106,19 @@ defmodule Smolquery.StorageService.MergeTest do
            HotTier.manifest(runtime, table_ref, nil, ids: claim.ids, stats: false) do
       Merge.run(runtime, table_ref, claim, entries)
     end
+  end
+
+  defp clear_tombstones(runtime) do
+    engine = Runtime.catalog_engine(runtime.name)
+
+    [[catalog, schema]] =
+      Engine.query!(
+        engine,
+        "SELECT table_catalog, table_schema FROM information_schema.tables " <>
+          "WHERE table_name = 'smolquery_dropped_columns'"
+      ).rows
+
+    Engine.query!(engine, ~s|DELETE FROM "#{catalog}"."#{schema}".smolquery_dropped_columns|)
   end
 
   defp columns_in(runtime, segment, projection) do
@@ -270,6 +284,38 @@ defmodule Smolquery.StorageService.MergeTest do
       |> Map.fetch!(:rows)
 
     assert stamped == [["id", id]]
+  end
+
+  @tag declares: Schema.new!([{"id", :int64}, {"ts_int", :int64}])
+  test "projects a claim by column id: a re-added name does not inherit the old column's values (PL-62)",
+       %{buffer: buffer, runtime: runtime} do
+    catalog = runtime.catalog
+    {:ok, before} = Catalog.table_schema(catalog, @table)
+
+    {:ok, first} =
+      Client.write_batch(buffer, @table, %{schema: before, rows: [%{"id" => 1, "ts_int" => 1700}]})
+
+    :ok = Catalog.alter_table(catalog, @table, {:drop_column, "ts_int"})
+    clear_tombstones(runtime)
+
+    :ok =
+      Catalog.alter_table(
+        catalog,
+        @table,
+        {:add_column, Field.new!("ts_int", :string)}
+      )
+
+    {:ok, after_readd} = Catalog.table_schema(catalog, @table)
+
+    {:ok, second} =
+      Client.write_batch(buffer, @table, %{
+        schema: after_readd,
+        rows: [%{"id" => 2, "ts_int" => "x"}]
+      })
+
+    {:ok, segment} = merge(runtime, @table, claim([first.segment_id, second.segment_id]))
+
+    assert columns_in(runtime, segment, "id, ts_int") == [[1, nil], [2, "x"]]
   end
 
   test "writes to the key the claim already named, so a retry overwrites", %{

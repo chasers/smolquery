@@ -168,8 +168,8 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp units(runtime, plan, ref) do
     with {:ok, sealed} <- Catalog.segments(runtime.catalog, ref, plan.snapshot) do
-      hot = plan.hot |> Map.get(ref, []) |> Enum.map(& &1["url"])
-      units = sealed ++ hot
+      hot = plan.hot |> Map.get(ref, []) |> Enum.map(&Map.take(&1, ["url", "field_ids"]))
+      units = Enum.map(sealed, &%{"url" => &1}) ++ hot
 
       if length(units) >= runtime.distributed.min_files do
         {:ok, units}
@@ -246,10 +246,11 @@ defmodule Smolquery.QueryService.Scatter do
     |> Task.async_stream(
       fn {{peer, files}, index} ->
         request = %{
-          statements: Views.table_view(ref, schema, Views.parquet_select(files)),
+          statements: Views.table_view(ref, schema, Views.sources_select(schema, files)),
           partial_sql: decomposition.partial_sql,
           params: decomposition.params,
-          allowed_paths: Enum.filter(files, &String.starts_with?(&1, "http")),
+          allowed_paths:
+            files |> Enum.map(& &1["url"]) |> Enum.filter(&String.starts_with?(&1, "http")),
           timeout_ms: timeout_ms
         }
 
