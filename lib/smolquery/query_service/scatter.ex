@@ -18,8 +18,11 @@ defmodule Smolquery.QueryService.Scatter do
      just created, so the names and types are exactly the single-engine
      result's.
   2. The shard units are the sealed file list at the plan's pinned snapshot
-     (`Smolquery.Catalog.segments/3`) plus the plan's surviving hot entry
-     URLs. Fewer than `min_files` units is a refusal: the fixed costs
+     (`Smolquery.Catalog.segment_files/3`, each with the snapshot it was
+     registered at) plus the plan's surviving hot entries, ids included. The
+     worker projects each file by its column ids (PL-62), reading a sealed
+     file's ids from the file itself — see
+     `Smolquery.QueryService.PartialWorker`. Fewer than `min_files` units is a refusal: the fixed costs
      (engine start per worker, partial transfer) outweigh a small scan
      (PL-48).
   3. Units go round-robin across the workers. With clustering on, the
@@ -167,9 +170,9 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp units(runtime, plan, ref) do
-    with {:ok, sealed} <- Catalog.segments(runtime.catalog, ref, plan.snapshot) do
+    with {:ok, sealed} <- Catalog.segment_files(runtime.catalog, ref, plan.snapshot) do
       hot = plan.hot |> Map.get(ref, []) |> Enum.map(&Map.take(&1, ["url", "field_ids"]))
-      units = Enum.map(sealed, &%{"url" => &1}) ++ hot
+      units = Enum.map(sealed, &%{"url" => &1.path, "snapshot" => &1.snapshot}) ++ hot
 
       if length(units) >= runtime.distributed.min_files do
         {:ok, units}
@@ -246,7 +249,9 @@ defmodule Smolquery.QueryService.Scatter do
     |> Task.async_stream(
       fn {{peer, files}, index} ->
         request = %{
-          statements: Views.table_view(ref, schema, Views.sources_select(schema, files)),
+          table_ref: ref,
+          schema: schema,
+          files: files,
           partial_sql: decomposition.partial_sql,
           params: decomposition.params,
           allowed_paths:

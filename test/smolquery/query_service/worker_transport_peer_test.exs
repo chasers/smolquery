@@ -16,7 +16,13 @@ defmodule Smolquery.QueryService.WorkerTransportPeerTest do
 
   @primary_port 15_371
   @peer_port 15_373
-  @request %{statements: [], partial_sql: "SELECT 1", allowed_paths: []}
+  @request %{
+    table_ref: {"analytics", "events"},
+    schema: Smolquery.Schema.new!([{"id", :int64}]),
+    files: [],
+    partial_sql: "SELECT 1",
+    allowed_paths: []
+  }
 
   setup do
     ensure_distributed()

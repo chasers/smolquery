@@ -26,6 +26,26 @@ defmodule Smolquery.QueryService.ViewsTest do
                  ~s|FROM read_parquet(['http://a/2.parquet'], union_by_name := true)|
     end
 
+    test "a sealed file without ids is projected as of its registration snapshot; later columns read NULL" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1, since: 2),
+          Field.new!("label", :string, id: 7, since: 9)
+        ])
+
+      sources = [
+        %{"url" => "/sealed/old.parquet", "snapshot" => 5, "columns" => ["id", "label"]},
+        %{"url" => "/sealed/new.parquet", "field_ids" => %{"id" => 1, "label" => 7}}
+      ]
+
+      assert Views.sources_select(schema, sources) ==
+               ~s|SELECT CAST("id" AS BIGINT) AS "id", CAST(NULL AS VARCHAR) AS "label" | <>
+                 ~s|FROM read_parquet(['/sealed/old.parquet'], union_by_name := true)| <>
+                 " UNION ALL BY NAME " <>
+                 ~s|SELECT CAST("id" AS BIGINT) AS "id", CAST("label" AS VARCHAR) AS "label" | <>
+                 ~s|FROM read_parquet(['/sealed/new.parquet'], union_by_name := true)|
+    end
+
     test "files that agree share one scan" do
       schema = Schema.new!([Field.new!("id", :int64, id: 1)])
       ids = %{"id" => 1}

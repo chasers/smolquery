@@ -7,9 +7,17 @@ defmodule Smolquery.QueryService.PartialWorker do
   path stops the worker when its caller gives up, so the request carries
   the job's deadline, and the partial query runs under it: a shard whose
   coordinator gave up stops at that deadline, and the `after` below kills
-  its engine. The request also carries everything shard-specific: the view statements that define the planned table name
-  over this shard's files, the partial SQL that reads it, and the hot-tier
-  URLs the shard may fetch. Everything node-local comes from this node's own
+  its engine. The request also carries everything shard-specific: the table
+  and its planned schema, this shard's files, the partial SQL that reads the
+  planned table name, and the hot-tier URLs the shard may fetch. The view
+  that defines the table over the files is rendered here, not on the
+  coordinator, because a sealed file's column ids live in the file (PL-62):
+  the worker reads them with one `parquet_schema()` over its shard —
+  footers the scan is about to read anyway — and projects each file by id,
+  or a file without ids as of the snapshot it was registered at, through
+  `Smolquery.QueryService.Views.sources_select/2`, exactly as the planner's
+  own view and the compactor do. A hot micro-segment brings its ids in its
+  manifest entry and is not asked. Everything node-local comes from this node's own
   published `Smolquery.QueryService.Runtime`: the engine extensions and the
   same hot-tier and sealed-tier secrets a job engine gets.
 
@@ -39,9 +47,13 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.Identifier
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Views
+  alias Smolquery.Segments.FieldIds
 
   @type request :: %{
-          required(:statements) => [String.t()],
+          required(:table_ref) => Smolquery.Catalog.table_ref(),
+          required(:schema) => Smolquery.Schema.t(),
+          required(:files) => [map()],
           required(:partial_sql) => String.t(),
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
@@ -74,13 +86,16 @@ defmodule Smolquery.QueryService.PartialWorker do
         "smolquery-partial-#{System.unique_integer([:positive])}.parquet"
       )
 
-    statements =
-      settings(runtime) ++ request.statements ++ lockdown(runtime, path, request.allowed_paths)
-
     case JobEngine.acquire(runtime) do
       {:ok, engine, _source} ->
         try do
-          with :ok <- apply_statements(engine.connection, statements) do
+          with :ok <- apply_statements(engine.connection, settings(runtime)),
+               {:ok, files} <- described(engine.connection, request.files),
+               :ok <-
+                 apply_statements(
+                   engine.connection,
+                   view(request, files) ++ lockdown(runtime, path, request.allowed_paths)
+                 ) do
             copy_out(
               engine.connection,
               request.partial_sql,
@@ -96,6 +111,41 @@ defmodule Smolquery.QueryService.PartialWorker do
 
       {:error, reason} ->
         {:error, {:engine_failed, reason}}
+    end
+  end
+
+  defp view(_request, []), do: []
+
+  defp view(%{table_ref: ref, schema: schema}, files),
+    do: Views.table_view(ref, schema, Views.sources_select(schema, files))
+
+  defp described(connection, files) do
+    {unknown, known} =
+      Enum.split_with(files, &(Map.get(&1, "field_ids") == nil and Map.has_key?(&1, "snapshot")))
+
+    case unknown do
+      [] ->
+        {:ok, files}
+
+      sealed ->
+        urls = Enum.map(sealed, & &1["url"])
+
+        with {:ok, result} <-
+               Connection.query(connection, FieldIds.sql(length(urls)), urls, :infinity) do
+          described = FieldIds.by_file(result.rows)
+
+          {:ok,
+           known ++
+             Enum.map(sealed, fn %{"url" => url} = file ->
+               case Map.get(described, url) do
+                 %{ids: ids, columns: columns} ->
+                   file |> Map.put("field_ids", ids) |> Map.put("columns", columns)
+
+                 nil ->
+                   file
+               end
+             end)}
+        end
     end
   end
 

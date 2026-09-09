@@ -29,6 +29,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.SegmentFixture
 
@@ -94,7 +95,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     attach_telemetry()
 
-    %{control: control, distributed: distributed}
+    %{control: control, distributed: distributed, catalog: catalog}
   end
 
   defp schema do
@@ -115,9 +116,10 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     {:ok, _snapshot} = Catalog.register_segments(catalog, @table, segments)
 
     hot = for i <- 13..15, do: %{"id" => i, "name" => "g-#{rem(i, 3)}"}
+    {:ok, identified} = Catalog.table_schema(catalog, @table)
 
     {:ok, _ack} =
-      BufferService.Client.write_batch(buffer, @table, %{schema: schema(), rows: hot})
+      BufferService.Client.write_batch(buffer, @table, %{schema: identified, rows: hot})
   end
 
   defp attach_telemetry do
@@ -255,6 +257,37 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              Client.query(control, "SELECT count(*) AS n FROM analytics.events")
 
     refute_received {:scatter, _measurements, _meta}
+  end
+
+  test "a dropped name re-added as a new column reads NULL from sealed files on every shard (PL-62)",
+       %{control: control, distributed: distributed, catalog: catalog} do
+    :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :int64)})
+
+    both(control, distributed, "SELECT count(name) AS named, count(*) AS n FROM analytics.events")
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(
+               distributed,
+               "SELECT count(name) AS named, sum(name) AS s FROM analytics.events"
+             )
+
+    assert %{shards: 3} = job.scatter
+    assert DataFrame.to_columns(frame) == %{"named" => [0], "s" => [nil]}
+  end
+
+  test "a column added after the files sealed still scatters, and reads NULL from them (PL-61)",
+       %{distributed: distributed, catalog: catalog} do
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(
+               distributed,
+               "SELECT count(late) AS late, count(*) AS n FROM analytics.events"
+             )
+
+    assert %{shards: 3} = job.scatter
+    assert DataFrame.to_columns(frame) == %{"late" => [0], "n" => [15]}
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do

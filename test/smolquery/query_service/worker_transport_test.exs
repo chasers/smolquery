@@ -4,7 +4,13 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
   alias Smolquery.QueryService.WorkerTransport
 
   @peer :"query1@elsewhere.invalid"
-  @request %{statements: [], partial_sql: "SELECT 1", allowed_paths: []}
+  @request %{
+    table_ref: {"analytics", "events"},
+    schema: Smolquery.Schema.new!([{"id", :int64}]),
+    files: [],
+    partial_sql: "SELECT 1",
+    allowed_paths: []
+  }
 
   describe "call/5" do
     test "runs a local shard as a direct call against this node's runtime" do
