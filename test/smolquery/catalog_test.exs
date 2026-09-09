@@ -115,6 +115,39 @@ defmodule Smolquery.CatalogTest do
       assert Enum.map(schema.fields, &{&1.name, &1.id}) == [{"id", 1}, {"ts", 2}]
     end
 
+    test "a change that lands emits the schema_change event, a refusal does not (PL-61 L3)",
+         %{catalog: catalog} do
+      handler = "catalog-schema-change-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:smolquery, :catalog, :schema_change],
+          fn _event, measurements, meta, nil ->
+            send(parent, {:schema_change, measurements, meta})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      probe = {"ds", "schema_change_probe"}
+      :ok = Catalog.create_table(catalog, probe, Schema.new!([{"id", :int64}]))
+      :ok = Catalog.alter_table(catalog, probe, {:add_column, Field.new!("label", :string)})
+
+      assert_receive {:schema_change, %{count: 1},
+                      %{table_ref: ^probe, change: :add_column, column: "label", result: :ok}}
+
+      :ok = Catalog.alter_table(catalog, probe, {:drop_column, "label"})
+      assert_receive {:schema_change, _measurements, %{table_ref: ^probe, change: :drop_column}}
+
+      {:error, {:unknown_column, "label"}} =
+        Catalog.alter_table(catalog, probe, {:drop_column, "label"})
+
+      refute_receive {:schema_change, _measurements, %{table_ref: ^probe}}, 50
+    end
+
     test "an unknown table is the catalog's error", %{catalog: catalog} do
       assert Catalog.alter_table(catalog, {"ds", "nope"}, {:drop_column, "id"}) ==
                {:error, {:unknown_table, {"ds", "nope"}}}

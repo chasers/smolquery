@@ -238,6 +238,31 @@ re-adding a name dropped earlier. With every tier reading by id, T-430's
 dropped-name tombstone is gone: a dropped name is free again, and the column
 that takes it is a new column.
 
+### Changing columns (PL-61)
+
+A column is added or dropped through `Smolquery.Catalog.alter_table/3`,
+which the column routes call directly and `ALTER TABLE` reaches as a query
+job: `Smolquery.QueryService.Runner` hands the SQL to `Smolquery.Ddl` before
+the planner, and a statement it accepts runs the catalog call in the job's
+task, without an engine, settling with the outcome on `job.ddl`. One
+implementation, two surfaces — the HTTP query routes and the Postgres wire
+both answer it, with the column routes' refusals mapped to their own
+statuses and SQLSTATEs. `Smolquery.Ddl` is a parser of its own because the
+planner's read-only gate is DuckDB's `json_serialize_sql`, which refuses
+anything but a `SELECT`; the DDL grammar is two shapes, so the parser knows
+exactly those and calls everything else the planner's.
+
+A change that lands emits `[:smolquery, :catalog, :schema_change]`, which
+`Smolquery.Lifecycle` rebroadcasts on the table's topic and on a
+schema-wide topic. Every node's ingest schema cache subscribes to the latter
+and drops the table the moment the broadcast lands, so a column added on
+one node — or by a DDL job on a query node, which has no ingest cache of its
+own to invalidate — is insertable on every node without waiting out
+`schema_cache_ttl_ms`; the TTL remains the backstop for a node the broadcast
+does not reach. Each `ALTER` is one DuckLake commit, atomic on its own and
+unrelated to any client transaction: the Postgres wire refuses one inside a
+`BEGIN` block rather than pretend a `ROLLBACK` could undo it.
+
 ## The hot tier
 
 `Smolquery.BufferService` owns the promise the rest of the system depends on:

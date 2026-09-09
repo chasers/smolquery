@@ -112,7 +112,20 @@ smolquery=> SELECT count(*) AS n FROM analytics.events;
   fdw's `REPEATABLE READ` block is honored: every cursor in it reads the
   block's pinned snapshot.
 
-Reads only. DDL, DML, and `COPY` answer `0A000 feature_not_supported`.
+- **`ALTER TABLE`** (PL-61 L3). `ALTER TABLE dataset.table ADD [COLUMN]
+  [IF NOT EXISTS] name TYPE` and `DROP [COLUMN] [IF EXISTS] name` run as
+  the same query job the HTTP route runs them as ([API](api.md#ddl)), and
+  answer the `ALTER TABLE` command tag; a guarded no-op adds Postgres's
+  own `NOTICE` (`already exists, skipping`). The refusals answer the codes
+  Postgres gives them: `42703` for an unknown column, `42701` for a
+  duplicate, `55000` for a column that cannot be added or dropped as asked
+  (the last column, a clustering column, the retention column). Each
+  statement is one catalog commit, so inside a transaction block it is
+  refused (`25001`) rather than pretended transactional. Bind parameters
+  are refused as for any non-`SELECT`.
+
+Otherwise reads only. Other DDL, DML, and `COPY` answer
+`0A000 feature_not_supported`.
 
 ## Not yet
 
@@ -219,7 +232,8 @@ Every failure is an `ErrorResponse` with a SQLSTATE a client can act on:
 | `57014` | the statement timeout cancelled the query |
 | `57P03` | the query service, or a buffer node it needs, is not available |
 | `25P02` | a statement inside an aborted transaction block |
-| `0A000` | a statement or a protocol message this layer does not serve |
+| `42703`, `42701`, `55000`, `25001` | an `ALTER TABLE` refused: unknown column, duplicate column, a column that cannot be added or dropped as asked, inside a transaction block |
+| `0A000` | a statement or a protocol message this layer does not serve, or an `ALTER TABLE` clause it recognises and refuses (`NOT NULL`, `RENAME`) |
 | `XX000` | anything else; the message is the reason's inspected form |
 
 A DuckDB error keeps its message and takes the code its class implies:

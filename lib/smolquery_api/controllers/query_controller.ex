@@ -15,11 +15,19 @@ defmodule SmolqueryApi.QueryController do
   honesty, T-94). The distinction is the difference between "fix your query" and
   "retry this", which is not something a client should have to infer from an
   error string.
+
+  An `ALTER TABLE` (PL-61 L3) is the same job: it answers the finished job
+  with `statementType: "ALTER_TABLE"` and its `ddl` outcome, and no rows. Its
+  refusals are the column routes' refusals with the same statuses — 404 for a
+  table or column that does not exist, 409 for a name the table has, 422 for
+  a column that cannot be added or dropped as asked — plus 400 for a
+  statement the parser does not accept (`Smolquery.Ddl`).
   """
 
   use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
+  alias Smolquery.Ddl
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
   alias SmolqueryApi.Errors
@@ -53,6 +61,10 @@ defmodule SmolqueryApi.QueryController do
     Json.send_json(conn, 200, %{"job" => JobController.job_json(job, false)})
   end
 
+  defp answer(conn, %Job{state: :done, ddl: %{}} = job, nil) do
+    Json.send_json(conn, 200, %{"job" => JobController.job_json(job, false)})
+  end
+
   defp answer(conn, %Job{state: :done} = job, %DataFrame{} = frame) do
     body =
       job
@@ -67,21 +79,31 @@ defmodule SmolqueryApi.QueryController do
   end
 
   defp answer(conn, %Job{state: :error, error: error} = job, _frame) do
-    if hot_tier_unavailable?(error) do
-      Errors.send_error(
-        conn,
-        503,
-        "UNAVAILABLE",
-        "a buffer node holding unsealed rows for this query could not be reached"
-      )
-    else
-      Errors.send_error(conn, 400, "INVALID_QUERY", error_message(job))
+    cond do
+      hot_tier_unavailable?(error) ->
+        Errors.send_error(
+          conn,
+          503,
+          "UNAVAILABLE",
+          "a buffer node holding unsealed rows for this query could not be reached"
+        )
+
+      Ddl.error?(error) ->
+        ddl_error(conn, error)
+
+      true ->
+        Errors.send_error(conn, 400, "INVALID_QUERY", error_message(job))
     end
   end
 
   defp answer(conn, %Job{} = job, _frame) do
     Errors.send_error(conn, 409, "FAILED_PRECONDITION", "job finished #{job.state}")
   end
+
+  defp ddl_error(conn, {:duplicate_columns, _names} = error),
+    do: Errors.send_error(conn, 409, "ALREADY_EXISTS", Ddl.message(error))
+
+  defp ddl_error(conn, error), do: Errors.from_reason(conn, error)
 
   defp error_message(%Job{error: {:invalid_query, message}}) when is_binary(message), do: message
 

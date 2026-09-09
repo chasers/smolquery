@@ -226,6 +226,23 @@ defmodule SmolqueryApi.Errors do
     )
   end
 
+  def from_reason(conn, {tag, _detail} = reason)
+      when tag in [:invalid_ddl, :unsupported_ddl, :unqualified_table] do
+    send_error(conn, 400, "INVALID_QUERY", Smolquery.Ddl.message(reason))
+  end
+
+  def from_reason(conn, :multiple_statements) do
+    send_error(conn, 400, "INVALID_QUERY", Smolquery.Ddl.message(:multiple_statements))
+  end
+
+  def from_reason(conn, reason) when reason in [:ddl_not_explainable, :ddl_takes_no_params] do
+    send_error(conn, 400, "INVALID_ARGUMENT", Smolquery.Ddl.message(reason))
+  end
+
+  def from_reason(conn, :materialized_unsupported) do
+    send_error(conn, 501, "UNIMPLEMENTED", Smolquery.Ddl.message(:materialized_unsupported))
+  end
+
   def from_reason(conn, :commit_conflict) do
     send_error(
       conn,

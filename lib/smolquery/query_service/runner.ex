@@ -54,11 +54,23 @@ defmodule Smolquery.QueryService.Runner do
   the difference, and it is already the only parser here. ORDER BY survives
   the wrap: DuckDB preserves a subquery's order through the outer LIMIT,
   the same insertion-order guarantee paging already leans on.
+
+  ## DDL (PL-61 L3)
+
+  `Smolquery.Ddl.parse/1` sees the SQL before anything else. An `ALTER
+  TABLE` never acquires an engine: the job is the catalog call
+  (`Smolquery.Ddl.execute/2` over the runtime's catalog), run in the same
+  task shape so cancel, deadline, and await behave as for a query, and it
+  settles with the outcome on `job.ddl` and no frame. A statement that
+  begins with `ALTER` but is not one of the two accepted shapes fails the
+  job with the parser's reason; one asked to explain, describe, or bind
+  parameters is refused before the catalog is touched.
   """
 
   use GenServer, restart: :temporary
 
   alias Explorer.DataFrame
+  alias Smolquery.Ddl
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Federation
@@ -152,6 +164,39 @@ defmodule Smolquery.QueryService.Runner do
   def handle_continue(:run, state) do
     state = %{state | collector: collector(state)}
 
+    case Ddl.parse(state.job.sql) do
+      :not_ddl -> {:noreply, start_query(state)}
+      parsed -> {:noreply, start_ddl(state, parsed)}
+    end
+  end
+
+  defp start_ddl(state, parsed) do
+    runtime = state.runtime
+    explain = state.explain
+    params = Keyword.get(state.plan_opts, :params, [])
+
+    task = Task.async(fn -> alter(runtime, parsed, explain, params) end)
+
+    %{state | task: task, job: Job.running(state.job)}
+  end
+
+  defp alter(_runtime, {:error, reason}, _explain, _params), do: {:error, reason}
+
+  defp alter(_runtime, {:ok, _ddl}, explain, _params) when explain != nil,
+    do: {:error, :ddl_not_explainable}
+
+  defp alter(_runtime, {:ok, _ddl}, _explain, [_ | _]), do: {:error, :ddl_takes_no_params}
+
+  defp alter(runtime, {:ok, ddl}, nil, []) do
+    started = System.monotonic_time(:millisecond)
+
+    with {:ok, outcome} <- Trace.span(:ddl, fn -> Ddl.execute(runtime.catalog, ddl) end) do
+      {:ok,
+       %{result: {:ddl, outcome}, duration_ms: System.monotonic_time(:millisecond) - started}}
+    end
+  end
+
+  defp start_query(state) do
     case Trace.span(:engine_start, fn -> JobEngine.acquire(state.runtime) end) do
       {:ok, engine, _source} ->
         runtime = state.runtime
@@ -167,10 +212,10 @@ defmodule Smolquery.QueryService.Runner do
             execute(runtime, connection, sql, explain, opts, job_id, timeout_ms)
           end)
 
-        {:noreply, %{state | engine: engine, task: task, job: Job.running(state.job)}}
+        %{state | engine: engine, task: task, job: Job.running(state.job)}
 
       {:error, reason} ->
-        {:noreply, settle(state, Job.failed(state.job, {:engine_failed, reason}))}
+        settle(state, Job.failed(state.job, {:engine_failed, reason}))
     end
   end
 
@@ -201,6 +246,9 @@ defmodule Smolquery.QueryService.Runner do
 
     {job, result} =
       case outcome do
+        {:ok, %{result: {:ddl, outcome}} = done} ->
+          {Job.altered(state.job, outcome, done.duration_ms), nil}
+
         {:ok, %{result: {:explain, text}} = done} ->
           job = Job.explained(state.job, done.snapshot, done.duration_ms, done.statistics, text)
 

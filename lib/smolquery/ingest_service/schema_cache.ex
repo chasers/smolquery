@@ -3,12 +3,15 @@ defmodule Smolquery.IngestService.SchemaCache do
   Table schemas, cached so the insert hot path does not pay a catalog query
   per request.
 
-  A public named ETS table owned by a GenServer that does nothing else —
-  reads and misses run entirely in the caller, so the cache adds no process
-  hop. Entries expire after the runtime's `schema_cache_ttl_ms`; the API's
-  CRUD routes invalidate eagerly on the node they run on, and the TTL bounds
-  staleness for everything else (another node's CRUD, out-of-band catalog
-  changes).
+  A public named ETS table owned by a GenServer that does nothing else but
+  listen — reads and misses run entirely in the caller, so the cache adds no
+  process hop. Entries expire after the runtime's `schema_cache_ttl_ms`; the
+  API's CRUD routes invalidate eagerly on the node they run on; and the owner
+  subscribes to `Smolquery.Lifecycle.subscribe_schema/0`, so a column added
+  or dropped anywhere in the cluster — another node's API, an `ALTER TABLE`
+  on the query path — drops the table here as soon as the broadcast lands
+  (PL-61 L3). The TTL bounds staleness for whatever no broadcast reaches: a
+  node partitioned from the PubSub, an out-of-band catalog change.
 
   A miss reads through `Smolquery.Catalog.table_schema/2` and caches only
   success — an unknown table stays a per-request catalog answer rather than a
@@ -19,6 +22,7 @@ defmodule Smolquery.IngestService.SchemaCache do
 
   alias Smolquery.Catalog
   alias Smolquery.IngestService.Runtime
+  alias Smolquery.Lifecycle
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
 
@@ -63,7 +67,26 @@ defmodule Smolquery.IngestService.SchemaCache do
         read_concurrency: true
       ])
 
+    _subscribed = subscribe_schema()
+
     {:ok, table}
+  end
+
+  @impl GenServer
+  def handle_info({:lifecycle, %{kind: :schema_change, table_ref: table_ref}}, table) do
+    :ets.delete(table, table_ref)
+
+    {:noreply, table}
+  end
+
+  def handle_info(_message, table), do: {:noreply, table}
+
+  defp subscribe_schema do
+    Lifecycle.subscribe_schema()
+  rescue
+    ArgumentError -> {:error, :pubsub_unavailable}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp read_through(runtime, table, table_ref) do

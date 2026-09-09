@@ -48,7 +48,7 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 | `PATCH /v1/connections/:name` | Change the fields the body names. An **absent** `password` leaves the stored one untouched, which is what lets you correct a host or a port without re-entering a credential you cannot read back. An empty-string password is a 400, not a clear: a connection with no password cannot open. |
 | `DELETE /v1/connections/:name` | Remove a connection. Removing one that is already absent is a 200. |
 | `POST /v1/connections/:name/test` | Attach the connection in a throwaway engine and read one row through it. 422 when the remote database does not answer. The reason names the connection and never quotes its connection string — a failed `ATTACH` otherwise echoes the password back. |
-| `POST /v1/queries` | Sync query. The response is the finished job plus its first page of rows (`maxResults`, default 1000). The server cancels a query that outlives `timeoutMs`. It answers that query with a 504. `"explain": "plan"` answers the engine's query plan instead of rows. `"explain": "analyze"` executes the query, then answers the profiled plan. In both cases the text arrives as `explain` on the job. The response carries no rows. `"trace": true` returns the query's phase spans on the job, for a waterfall view. |
+| `POST /v1/queries` | Sync query. The response is the finished job plus its first page of rows (`maxResults`, default 1000). The server cancels a query that outlives `timeoutMs`. It answers that query with a 504. `"explain": "plan"` answers the engine's query plan instead of rows. `"explain": "analyze"` executes the query, then answers the profiled plan. In both cases the text arrives as `explain` on the job. The response carries no rows. `"trace": true` returns the query's phase spans on the job, for a waterfall view. The query may also be one `ALTER TABLE` statement — see [DDL](#ddl). |
 | `POST /v1/jobs` | The same query as an async job. The response returns the job pending. The route takes the same `explain` and `trace` options. Their output lands on `GET /v1/jobs/:id`. |
 | `GET /v1/jobs/:id` | Status and stats. Once the result time to live (TTL) expires, the answer comes from durable job history. |
 | `GET /v1/jobs/:id/results` | Page a finished job's rows with `max_results` + `page_token`. Expired results are a 410. Unknown jobs are a 404. |
@@ -108,9 +108,24 @@ Insert rows are JSON objects keyed by column name. Values coerce by the table's 
 - `MAP(STRING, STRING)` takes a JSON object. Every value is stored as a string — see its limits under [Schema types](#schema-types).
 - `VARIANT` takes any JSON value, unchanged.
 
-The ingest edge validates each row against a **cached schema** (`schema_cache_ttl_ms`). Create, read, update, and delete (CRUD) operations on the same node invalidate the cache. A column added or dropped through one node is still the old schema on every other node's cache for up to `schema_cache_ttl_ms`: an insert there that carries a just-added column is rejected per row as an unknown column (in `insertErrors`, not silently), and one that carries a just-dropped column is accepted and the value discarded at the write. Send the inserts that depend on a column change to the node that made it, or wait out the window. The edge forwards one request as one forward-batch. It never acknowledges from memory: the response returns when the rows are on the buffer node's disk and in its hot manifest.
+The ingest edge validates each row against a **cached schema** (`schema_cache_ttl_ms`). Create, read, update, and delete (CRUD) operations on the same node invalidate the cache. A column added or dropped — through the column routes or an `ALTER TABLE` — is broadcast cluster-wide (`Smolquery.Lifecycle`), and every node's cache drops the table as the broadcast lands, so the new schema is insertable everywhere within a message hop. The TTL is the backstop for a node the broadcast does not reach: until it expires there, an insert that carries a just-added column is rejected per row as an unknown column (in `insertErrors`, not silently), and one that carries a just-dropped column is accepted and the value discarded at the write. The edge forwards one request as one forward-batch. It never acknowledges from memory: the response returns when the rows are on the buffer node's disk and in its hot manifest.
 
 Query results page from the frame the runner holds until `result_ttl_ms`. Temporal values arrive as ISO 8601 strings; decimal values arrive as decimal strings; a map arrives as a JSON object; a variant arrives as the JSON value it holds. This mirrors what inserts accept. The limits of a map or variant in a result are under [Schema types](#schema-types). A result larger than `result_max_rows` (default 10,000, the same as the `maxResults` ceiling — see [configuration](configuration.md)) fails the query with `400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
+
+## DDL
+
+The query routes take one `ALTER TABLE` statement as well as one `SELECT` (PL-61 L3):
+
+```sql
+ALTER TABLE analytics.events ADD [COLUMN] [IF NOT EXISTS] country STRING
+ALTER TABLE analytics.events DROP [COLUMN] [IF EXISTS] country
+```
+
+It is the column routes' change with the same rules — appended last, always nullable, nothing rewritten, a dropped name free to use again — as a query job: same submit, same `GET /v1/jobs/:id`, same history row. Types take the API's spelling (`INT64`, `STRING`, `NUMERIC(38,2)`) or DuckDB's (`BIGINT`, `VARCHAR`, `DECIMAL(38,2)`); `NOT NULL` and `DEFAULT` are refused with the clause named, not ignored. The finished job carries `statementType: "ALTER_TABLE"` and its outcome on **`ddl`**: `{"operation": "ADD_COLUMN", "targetTable": "analytics.events", "column": "country", "performed": true}`. `performed` is `false` only under `IF [NOT] EXISTS`, when the column already was, or already was not, there. `rowCount` and `snapshot` are null; there is nothing to page, and `GET /v1/jobs/:id/results` answers 409. `explain`, and bind parameters over the Postgres wire, are refused: the statement has nothing to plan.
+
+The refusals are the column routes': 404 for a table or column that does not exist, 409 for a name the table has, 422 for the last column, a clustering column, the retention column, or a partition; and 400 for a statement the parser does not accept. A `MATERIALIZED` clause parses and answers 501 until PL-61 L4.
+
+Each statement is one catalog commit. There is no transaction around several, and a `BEGIN` block over the Postgres wire refuses it (`25001`). Dropping a table is not supported.
 
 ## Explain
 
