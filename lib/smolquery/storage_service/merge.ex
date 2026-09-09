@@ -109,11 +109,16 @@ defmodule Smolquery.StorageService.Merge do
   inputs do not carry is a typed `NULL`. The sealed file matches the table by
   construction, which is the invariant registration needs.
 
-  DuckDB offers `allow_missing => true` on registration instead, which would take
-  the narrow file as it is. That relaxes the check for every file the catalog ever
-  accepts, to fix a file this module is the one writing — the projection is the
-  narrower fix, and it settles column order and type at the same time rather than
-  only presence.
+  Registration also takes `allow_missing => true, ignore_extra_columns => true`
+  (T-430), and the two are not redundant. The projection settles column order
+  and type, and fixes what this module writes when its inputs are narrow. The
+  registration options cover the race the projection cannot see: a column
+  change that lands *between* this module reading the schema and the handoff
+  registering the file. The output key is write-once, so a refusal there would
+  meet the same bytes on every retry — the stuck tail again, reached from the
+  output side — where the tolerant registration takes the file as it is, and
+  the column the change touched reads `NULL` or is ignored, exactly as a file
+  written a moment earlier would.
 
   The reverse — a column the inputs carry and the catalog does not — is projected
   away, and this is where a dropped column's data leaves the system. After
