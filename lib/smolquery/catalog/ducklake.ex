@@ -1100,7 +1100,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
     "CALL ducklake_add_data_files(" <>
       "#{Identifier.sql_string(config.catalog)}, #{Identifier.sql_string(table)}, " <>
-      "[#{literals}], schema => #{Identifier.sql_string(dataset)})"
+      "[#{literals}], schema => #{Identifier.sql_string(dataset)}, " <>
+      "allow_missing => true, ignore_extra_columns => true)"
   end
 
   defp delete_statement(name, paths) do

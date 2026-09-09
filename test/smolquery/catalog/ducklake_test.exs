@@ -18,6 +18,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.SegmentFixture
 
@@ -170,16 +171,63 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert row_count() == 10
     end
 
-    test "rejects a segment whose schema does not match the table", %{
+    test "rejects a segment whose column types do not match the table", %{
       catalog: catalog,
       segments_dir: dir
     } do
-      narrow = Schema.new!([{"id", :int64}])
-      {:ok, segment} = SegmentFixture.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
+      wrong =
+        Schema.new!([
+          {"id", :string},
+          {"ts", :timestamp},
+          {"name", :string},
+          {"amount", {:numeric, 38, 2}}
+        ])
 
-      assert {:error, error} = Catalog.register_segments(catalog, @table, [segment])
-      assert Exception.message(error) =~ "not found in file"
+      {:ok, segment} =
+        SegmentFixture.write([%{"id" => "1", "name" => "x"}], wrong, store: Local.new(dir: dir))
+
+      assert {:error, _error} = Catalog.register_segments(catalog, @table, [segment])
       assert row_count() == 0
+    end
+
+    test "registers a segment written across a column change: a column the table dropped since is ignored, one it added since reads NULL (T-430)",
+         %{catalog: catalog, segments_dir: dir} do
+      narrow =
+        Schema.new!([
+          {"id", :int64},
+          {"ts", :timestamp},
+          {"name", :string},
+          {"amount", {:numeric, 38, 2}},
+          {"extra", :string}
+        ])
+
+      {:ok, segment} =
+        SegmentFixture.write([%{"id" => 1, "name" => "x", "extra" => "gone"}], narrow,
+          store: Local.new(dir: dir)
+        )
+
+      assert {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+      assert row_count() == 1
+
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+
+      lagging =
+        Schema.new!([
+          {"id", :int64},
+          {"ts", :timestamp},
+          {"name", :string},
+          {"amount", {:numeric, 38, 2}}
+        ])
+
+      {:ok, lagging_segment} =
+        SegmentFixture.write([%{"id" => 2, "name" => "y"}], lagging, store: Local.new(dir: dir))
+
+      assert {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [lagging_segment])
+
+      result =
+        Engine.query!(@engine, ~s|SELECT id, late FROM lake."analytics"."events" ORDER BY id|)
+
+      assert result.rows == [[1, nil], [2, nil]]
     end
   end
 
@@ -461,11 +509,17 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       a = write_segment(dir, 1, 10)
       {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
 
-      narrow = Schema.new!([{"id", :int64}])
-      {:ok, bad} = SegmentFixture.write([%{"id" => 1}], narrow, store: Local.new(dir: dir))
+      wrong =
+        Schema.new!([
+          {"id", :string},
+          {"ts", :timestamp},
+          {"name", :string},
+          {"amount", {:numeric, 38, 2}}
+        ])
 
-      assert {:error, error} = Catalog.replace_segments(catalog, @table, [bad], [a.path])
-      assert Exception.message(error) =~ "not found in file"
+      {:ok, bad} = SegmentFixture.write([%{"id" => "1"}], wrong, store: Local.new(dir: dir))
+
+      assert {:error, _error} = Catalog.replace_segments(catalog, @table, [bad], [a.path])
       assert Catalog.segments(catalog, @table, :current) == {:ok, [a.path]}
       assert row_count() == 10
     end

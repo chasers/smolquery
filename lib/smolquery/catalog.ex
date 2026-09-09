@@ -243,6 +243,14 @@ defmodule Smolquery.Catalog do
   Registration is idempotent by segment path: re-registering a segment the
   catalog already holds is a no-op that still reports a snapshot, so a sealer
   that crashed between committing and retiring can safely retry.
+
+  A file is registered by column name, and a column change that lands between
+  the moment a writer read the schema and the moment it registers is not a
+  refusal (T-430): a column the file carries that the table has since dropped
+  is ignored, and one the table has since added reads `NULL` from the file. A
+  writer's output key is write-once, so a refusal there would be permanent —
+  the same claim would fail identically on every retry. A file whose column
+  *types* disagree with the table is still refused.
   """
   @spec register_segments(t(), table_ref(), [Segment.t()]) :: {:ok, snapshot()} | {:error, term()}
   def register_segments(%__MODULE__{} = catalog, table, segments),
