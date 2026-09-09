@@ -168,6 +168,24 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   def with_log(committer, fun, timeout \\ :infinity),
     do: GenServer.call(committer, {:with_log, fun}, timeout)
 
+  @doc """
+  Compacts the table's manifest log, reopening the handle around the rewrite.
+
+  This is where compaction has to happen. `HotManifest.compact/2` renames a
+  fresh file over the log, so the descriptor this process holds is left
+  addressing an unlinked inode — appends through it would land nowhere and be
+  lost without an error. Running the rewrite here, as a call, serializes it
+  against every commit and every `with_log/3` append the way the single-writer
+  rule requires, and keeps the close and the reopen on either side of it.
+
+  The handle is reopened whether or not the rewrite succeeded, because a
+  committer without one cannot append at all — a failed compaction leaves the
+  old log in place, and the next append must still find it.
+  """
+  @spec compact(GenServer.server(), timeout()) :: :ok | {:error, term()}
+  def compact(committer, timeout \\ :infinity),
+    do: GenServer.call(committer, :compact, timeout)
+
   @impl GenServer
   def init({buffer, opts}) do
     Process.flag(:trap_exit, true)
@@ -199,6 +217,22 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   def handle_call({:with_log, fun}, _from, state), do: {:reply, fun.(state.log), state}
+
+  def handle_call(:compact, _from, state) do
+    HotManifest.close_log(state.log)
+
+    compacted = HotManifest.compact(state.runtime.manifest, state.table_ref)
+
+    case HotManifest.open_log(state.runtime.manifest, state.table_ref) do
+      {:ok, log} ->
+        {:reply, compacted, %{state | log: log}}
+
+      {:error, reason} ->
+        failure = {:log_reopen_failed, reason}
+
+        {:stop, failure, {:error, failure}, %{state | log: nil}}
+    end
+  end
 
   @impl GenServer
   def handle_cast({:commit, commit}, state) do

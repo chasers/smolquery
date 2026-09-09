@@ -157,6 +157,49 @@ defmodule Smolquery.BufferService.HotManifest do
   Nothing bounds the index; `max_buffered_rows` and `max_buffered_bytes` bound
   the accumulator, not this.
 
+  ## How the *log* shrinks, which is a different question (T-319)
+
+  The index above shrinks. The log behind it did not: every mutation appends a
+  line and nothing ever removed one, so a table's `manifest.log` grew with the
+  node's lifetime write count rather than with the tail it describes. `drop/4`
+  is itself an appended record, not a rewrite.
+
+  That costs nothing on the commit path — an append through `held_fd/1` lands
+  at the end of the file in O(1) whatever its length — and everything on
+  recovery, which is the durability path: `recover/2` reads the whole file and
+  replays every record. Measured on the sandbox, a buffer node held 814 MB of
+  logs across 106 tables, **105 of them describing nothing at all**; the
+  adopter replays all of it in `init/1` before the hot server listens, so a
+  buffer pod took ~30 s to become Ready against ~3 s for storage.
+
+  So the size of a table's log is tracked as it is appended to, and `compact/2`
+  runs when the log has outgrown what a rewrite would cost:
+
+    * `log_size/2` is an O(1) counter read, kept by `append/4` on every write
+      and re-derived — never patched — whenever `compact/2` or `recover/2`
+      establishes a new ground truth
+    * `compaction_due?/4` compares the live size against the `baseline` the
+      last compaction left behind. A table whose entries all sealed has a
+      baseline near zero, so it compacts as soon as it passes the floor; a busy
+      table carrying a real backlog has a large baseline and must grow by the
+      whole ratio again, which is what stops a compaction storm at depth
+
+  Both numbers live in one `{table_ref, bytes, baseline}` tuple in a table
+  keyed by table ref alone, so the ceiling is a three-word tuple per table this
+  node has ever written for — the same bound, and the same shape, as the
+  live-claim cache below. Nothing in it grows with a table's traffic or its
+  backlog.
+
+  The trigger is deliberately not a timer: a time-based tick compacts idle
+  tables for nothing and starves busy ones. It is measured against bytes
+  actually appended, and it is checked on the maintenance tick, immediately
+  after the reap that is the routine reason a log's live set shrinks.
+
+  Because `compact/2` renames a fresh file into place, the caller holding the
+  log open must close and reopen around it — see the single-writer rule below.
+  `Smolquery.BufferService.TableBuffer.Committer.compact/2` is the one place
+  that sequence lives.
+
   ## The live claim is cached, because the maintenance tick asks every commit
 
   `live_claim/2` used to derive its answer by scanning the table. It runs on
@@ -261,6 +304,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.new(retired(name), @index_options ++ [:ordered_set, :named_table])
     :ets.new(tombstones(name), @index_options ++ [:set, :named_table])
     :ets.new(owed(name), @index_options ++ [:set, :named_table])
+    :ets.new(sizes(name), @index_options ++ [:set, :named_table])
 
     {:ok, name}
   end
@@ -856,17 +900,45 @@ defmodule Smolquery.BufferService.HotManifest do
   Returns what it found: how many entries are live, which store objects were
   deleted for having no record, and which records were dropped for having no
   object.
+
+  It also re-establishes the log's tracked size from the file itself, with a
+  baseline of zero. Zero is the honest baseline: recovery has just read the
+  whole log and knows its length, but not what a rewrite of it would cost, and
+  claiming the current length would tell `compaction_due?/4` that a log full of
+  dead history is already as small as it gets. Starting at zero leaves the floor
+  as the only gate, so a log the node just paid to replay is rewritten on the
+  first maintenance tick — which is the boot cost this exists to remove.
   """
   @spec recover(t(), Store.table_ref()) :: {:ok, map()} | {:error, term()}
   def recover(%__MODULE__{} = manifest, table_ref) do
     with {:ok, records} <- read_log(manifest, table_ref),
          {:ok, logged, tombstones, owed_ids} <- replay(records),
          {:ok, prefix} <- Store.prefix(table_ref),
-         {:ok, keys} <- Store.list(manifest.store, prefix) do
-      replace_tombstones(manifest, table_ref, tombstones)
-      replace_owed(manifest, table_ref, owed_ids)
-      reconcile(manifest, table_ref, logged, keys)
+         {:ok, keys} <- Store.list(manifest.store, prefix),
+         {:ok, report} <-
+           reconcile_recovered(manifest, table_ref, logged, keys, tombstones, owed_ids) do
+      seed_size(manifest, table_ref)
+
+      {:ok, report}
     end
+  end
+
+  defp reconcile_recovered(manifest, table_ref, logged, keys, tombstones, owed_ids) do
+    replace_tombstones(manifest, table_ref, tombstones)
+    replace_owed(manifest, table_ref, owed_ids)
+    reconcile(manifest, table_ref, logged, keys)
+  end
+
+  defp seed_size(%__MODULE__{table: table} = manifest, table_ref) do
+    bytes =
+      with {:ok, path} <- log_path(manifest, table_ref),
+           {:ok, %File.Stat{size: size}} <- File.stat(path) do
+        size
+      else
+        _absent -> 0
+      end
+
+    :ets.insert(sizes(table), {table_ref, bytes, 0})
   end
 
   @doc """
@@ -898,6 +970,15 @@ defmodule Smolquery.BufferService.HotManifest do
   distinct from `release` records, whose replay would clear the re-derived
   claims off the rewritten entries — so compaction cannot silently forget a
   release that still awaits reconciliation (T-386).
+
+  The caller must own the table's log — see the single-writer rule in the
+  moduledoc — and must close and reopen any held descriptor around the call,
+  because the rename leaves the old handle pointing at an unlinked inode.
+
+  On success the table's tracked size becomes the size of what was written, and
+  that size is also the new baseline `compaction_due?/4` measures growth from.
+  Both are re-derived here rather than adjusted, so a compaction cannot leave
+  the counter disagreeing with the file.
   """
   @spec compact(t(), Store.table_ref()) :: :ok | {:error, term()}
   def compact(%__MODULE__{} = manifest, table_ref) do
@@ -909,17 +990,85 @@ defmodule Smolquery.BufferService.HotManifest do
           (manifest |> tombstones(table_ref) |> Enum.map(&tombstone_record/1)) ++
           owed_records(manifest, table_ref)
 
-      with :ok <- File.mkdir_p(Path.dirname(path)),
-           :ok <- write_records(staged, records),
-           :ok <- File.rename(staged, path) do
-        :ok
-      else
-        {:error, reason} ->
-          File.rm(staged)
-          {:error, {:compaction_failed, reason}}
-      end
+      %{bytes: before} = log_size(manifest, table_ref)
+
+      Telemetry.span(
+        [:smolquery, :hot_manifest, :compaction],
+        &compaction_measurements(&1, manifest, table_ref, before, length(records)),
+        fn -> rewrite_log(manifest, table_ref, path, staged, records) end
+      )
     end
   end
+
+  defp rewrite_log(manifest, table_ref, path, staged, records) do
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, bytes} <- write_records(staged, records),
+         :ok <- File.rename(staged, path) do
+      set_size(manifest, table_ref, bytes)
+
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(staged)
+        {:error, {:compaction_failed, reason}}
+    end
+  end
+
+  defp compaction_measurements(:ok, manifest, table_ref, before, records) do
+    %{bytes: written} = log_size(manifest, table_ref)
+
+    {%{bytes_before: before, bytes_after: written, records: records}, %{table_ref: table_ref}}
+  end
+
+  defp compaction_measurements(_failed, _manifest, table_ref, before, records) do
+    {%{bytes_before: before, bytes_after: before, records: records}, %{table_ref: table_ref}}
+  end
+
+  @doc """
+  A table's log size, and the size the last compaction left it at.
+
+  An O(1) counter read. `bytes` is what `append/4` has written since the log
+  was last established by `compact/2` or `recover/2`, plus what that left
+  behind; `baseline` is that starting point on its own. A table this node has
+  never opened a log for reads as zero for both.
+  """
+  @spec log_size(t(), Store.table_ref()) :: %{
+          bytes: non_neg_integer(),
+          baseline: non_neg_integer()
+        }
+  def log_size(%__MODULE__{table: table}, table_ref) do
+    case :ets.lookup(sizes(table), table_ref) do
+      [{_ref, bytes, baseline}] -> %{bytes: bytes, baseline: baseline}
+      [] -> %{bytes: 0, baseline: 0}
+    end
+  end
+
+  @doc """
+  Whether a table's log has outgrown what rewriting it would cost.
+
+  True once the log is at least `min_bytes` **and** has grown to `ratio` times
+  the baseline the last compaction left. The floor is what keeps a small log
+  from being rewritten for nothing; the ratio is what makes the check
+  self-scaling, so a table holding a real backlog is not compacted on every
+  tick just because its live set is legitimately large.
+
+  A baseline of zero — a table whose entries have all sealed and reaped, which
+  is the case that grew a 147 MB log describing nothing — leaves the floor as
+  the only gate, so such a log is rewritten as soon as it is worth the write.
+
+  An empty log is never due, whatever the thresholds: a table this node has
+  written nothing for has nothing to reclaim, and rewriting it would only
+  replace one empty file with another.
+  """
+  @spec compaction_due?(t(), Store.table_ref(), non_neg_integer(), number()) :: boolean()
+  def compaction_due?(%__MODULE__{} = manifest, table_ref, min_bytes, ratio) do
+    %{bytes: bytes, baseline: baseline} = log_size(manifest, table_ref)
+
+    bytes > 0 and bytes >= min_bytes and bytes >= baseline * ratio
+  end
+
+  defp set_size(%__MODULE__{table: table}, table_ref, bytes),
+    do: :ets.insert(sizes(table), {table_ref, bytes, bytes})
 
   @doc """
   The path of a table's manifest log.
@@ -1117,6 +1266,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp owed(table) when is_atom(table), do: Module.concat(table, Owed)
 
+  defp sizes(table) when is_atom(table), do: Module.concat(table, Sizes)
+
   defp id_spec(table_ref), do: [{{{table_ref, :"$1"}, :_}, [], [:"$1"]}]
 
   defp index_retired(%__MODULE__{table: table}, table_ref, %Entry{retired_at: at, id: id})
@@ -1267,16 +1418,22 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp append(%__MODULE__{} = manifest, table_ref, record, nil) do
     with {:ok, path} <- log_path(manifest, table_ref) do
-      path |> write_line(record) |> tag_append()
+      path |> write_line(record) |> tag_append(manifest, table_ref)
     end
   end
 
-  defp append(%__MODULE__{}, _table_ref, record, {:hot_log, fd}) do
-    fd |> write_sync(record) |> tag_append()
+  defp append(%__MODULE__{} = manifest, table_ref, record, {:hot_log, fd}) do
+    fd |> write_sync(record) |> tag_append(manifest, table_ref)
   end
 
-  defp tag_append(:ok), do: :ok
-  defp tag_append({:error, reason}), do: {:error, {:log_append_failed, reason}}
+  defp tag_append({:ok, bytes}, %__MODULE__{table: table}, table_ref) do
+    :ets.update_counter(sizes(table), table_ref, {2, bytes}, {table_ref, 0, 0})
+
+    :ok
+  end
+
+  defp tag_append({:error, reason}, _manifest, _table_ref),
+    do: {:error, {:log_append_failed, reason}}
 
   defp write_line(path, record) do
     with {:ok, fd} <- held_fd(path) do
@@ -1289,7 +1446,12 @@ defmodule Smolquery.BufferService.HotManifest do
   end
 
   defp write_sync(fd, record) do
-    with :ok <- :file.write(fd, [JSON.encode!(record), "\n"]), do: :file.sync(fd)
+    line = [JSON.encode!(record), "\n"]
+
+    with :ok <- :file.write(fd, line),
+         :ok <- :file.sync(fd) do
+      {:ok, IO.iodata_length(line)}
+    end
   end
 
   defp held_fd(path) do
@@ -1302,7 +1464,11 @@ defmodule Smolquery.BufferService.HotManifest do
     with {:ok, fd} <- :file.open(path, [:write, :raw, :binary]) do
       lines = Enum.map(records, &[JSON.encode!(&1), "\n"])
 
-      result = with :ok <- :file.write(fd, lines), do: :file.sync(fd)
+      result =
+        with :ok <- :file.write(fd, lines),
+             :ok <- :file.sync(fd) do
+          {:ok, IO.iodata_length(lines)}
+        end
 
       :file.close(fd)
 

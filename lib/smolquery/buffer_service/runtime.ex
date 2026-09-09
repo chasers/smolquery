@@ -34,6 +34,8 @@ defmodule Smolquery.BufferService.Runtime do
         max_live_claims: 1,
         retire_grace_ms: 600_000,
         maintenance_interval_ms: 5_000,
+        manifest_compact_min_bytes: 1_048_576,
+        manifest_compact_ratio: 4,
         seal_consumer: {Smolquery.BufferService.SealLog, []},
         compression: :lz4raw,
         ring: [:"buffer1@host"]
@@ -174,6 +176,24 @@ defmodule Smolquery.BufferService.Runtime do
   stays readable after a sealer committed it, and deleting one out from under
   an in-flight scan or a pinned block is exactly what it prevents.
 
+  `manifest_compact_min_bytes` and `manifest_compact_ratio` decide when a
+  table's manifest log is rewritten to hold only what it still describes
+  (T-319). The log is append-only, so without this it grows with the node's
+  lifetime write count and never with the tail it holds: a sandbox buffer node
+  carried 814 MB across 106 logs, 105 of which described nothing, and paid to
+  replay all of it on every restart before its hot server could listen.
+
+  A log is compacted once it passes `manifest_compact_min_bytes` **and** has
+  grown to `manifest_compact_ratio` times what the previous compaction left
+  behind. The floor keeps a small log from being rewritten for no gain; the
+  ratio makes the trigger scale with the table, so one carrying a genuinely
+  large live set is not rewritten on every maintenance tick. A default of 4
+  bounds the waste at 4x the live set, and the default floor of 1 MiB is
+  roughly 350 records at the ~2,860 bytes/record measured on a 32-column
+  table. Setting the floor to `0` compacts on the ratio alone; a ratio of `1`
+  compacts on every tick that clears the floor, which is a benchmark setting
+  rather than a production one.
+
   `fullsweep_after` is the spawn option that `TableBuffer` and its `Committer`
   start under (T-330). Both processes are long lived and both take a whole
   payload onto their heap per group commit, so the OTP default of 65,535 keeps
@@ -231,6 +251,8 @@ defmodule Smolquery.BufferService.Runtime do
     max_live_claims: 1,
     retire_grace_ms: 600_000,
     maintenance_interval_ms: 5_000,
+    manifest_compact_min_bytes: 1_048_576,
+    manifest_compact_ratio: 4,
     seal_consumer: {Smolquery.BufferService.SealLog, []},
     compression: :zstd,
     encode_concurrency: 2,
@@ -268,6 +290,8 @@ defmodule Smolquery.BufferService.Runtime do
           max_live_claims: pos_integer(),
           retire_grace_ms: pos_integer(),
           maintenance_interval_ms: pos_integer(),
+          manifest_compact_min_bytes: non_neg_integer(),
+          manifest_compact_ratio: number(),
           seal_consumer: {module(), term()},
           compression: atom(),
           encode_concurrency: pos_integer(),
@@ -299,6 +323,8 @@ defmodule Smolquery.BufferService.Runtime do
     :max_live_claims,
     :retire_grace_ms,
     :maintenance_interval_ms,
+    :manifest_compact_min_bytes,
+    :manifest_compact_ratio,
     :seal_consumer,
     :compression,
     :encode_concurrency,
