@@ -128,8 +128,9 @@ defmodule Smolquery.Catalog do
 
   @typedoc """
   One change to a table's columns (PL-61). An added column is appended; a
-  dropped column leaves the schema but not the files, and its name is
-  tombstoned so it cannot be re-added — see `alter_table/3`.
+  dropped column leaves the schema but not the files, and its name is free
+  again — a column added under it later is a new column with a new id, and
+  nothing that reads a file confuses the two (PL-62). See `alter_table/3`.
   """
   @type column_change :: {:add_column, Field.t()} | {:drop_column, String.t()}
 
@@ -479,14 +480,15 @@ defmodule Smolquery.Catalog do
       the retention column — clear the key or the policy first, the way
       `put_table_options/3` already lets you
 
-  What the implementation adds is the one check only it can make: a dropped
-  column's name is tombstoned, and adding it again is refused
-  (`{:error, {:column_tombstoned, name}}`). The sealer projects a claim's
-  inputs onto the catalog schema **by name**, so re-adding a name while
-  unsealed micro-segments still carry the old column would cast the old
-  values into the new one and bake them into a sealed file. DuckLake itself
-  reads such a column as `NULL` — it tracks columns by field id — which is
-  why this rule is stricter than DuckLake's, and why it is not optional.
+  A dropped column's name may be added again. The column that takes it is a
+  new column with a new id, and every read of a file — the planner's hot
+  read, the sealer, the compactor — matches columns to the catalog by id, so
+  a file still carrying the old column reads `NULL` in the new one (PL-62).
+  A file written before ids existed is read by name: in the sealed tier as of
+  the snapshot it was registered at, so a column that began later is `NULL`
+  whatever the file names it; in the hot tier plainly, until it seals. The one
+  operational rule that leaves is for an upgrade: wait one seal cycle after
+  deploying before re-adding a name dropped earlier.
 
   Changing a table's columns does not rewrite a file. A file written before
   an add reads the column as `NULL`; a file written before a drop keeps the

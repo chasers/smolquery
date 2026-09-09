@@ -13,10 +13,10 @@ defmodule SmolqueryApi.ColumnController do
 
   Every refusal is `Smolquery.Catalog.alter_table/3`'s, mapped to a status
   here: 404 for a table or column that does not exist; 409 for a name the
-  table has, and for a name it once had — a dropped name is tombstoned, since
-  the sealer projects by name and a re-add would bake the old column's values
-  into a sealed file; 422 for a column that cannot be added or dropped as
-  asked, with the reason in the message.
+  table has; 422 for a column that cannot be added or dropped as asked, with
+  the reason in the message. A name the table once had is not a refusal: the
+  column that takes it is a new column, told apart from the old one by id in
+  every file (PL-62).
   """
 
   use SmolqueryApi, :controller

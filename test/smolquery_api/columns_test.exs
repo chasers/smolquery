@@ -97,14 +97,16 @@ defmodule SmolqueryApi.ColumnControllerTest do
       assert message =~ "already exists"
     end
 
-    test "a name the table once had is a 409 that says why", %{name: name} do
+    test "a name the table once had is a new column (PL-62)", %{name: name} do
       assert drop(name, "ts").status == 200
 
-      assert {409, "ALREADY_EXISTS", message} =
-               error_of(add(name, %{"name" => "ts", "type" => "INT64"}))
+      response = add(name, %{"name" => "ts", "type" => "INT64"})
+      assert response.status == 200
 
-      assert message =~ "dropped"
-      assert add(name, %{"name" => "ts2", "type" => "INT64"}).status == 200
+      assert schema_of(response) == [
+               %{"name" => "id", "type" => "INT64", "nullable" => false},
+               %{"name" => "ts", "type" => "INT64", "nullable" => true}
+             ]
     end
 
     test "a malformed field, an unsupported type, and a bad name are 400s", %{name: name} do

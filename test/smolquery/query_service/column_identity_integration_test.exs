@@ -6,21 +6,17 @@ defmodule Smolquery.QueryService.ColumnIdentityIntegrationTest do
   projecting by id, not by name.
 
   The seal valves are wide open, so both micro-segments stay hot and the read
-  is the planner's grouped hot read alone. The tombstone from T-430 is cleared
-  by hand between the drop and the re-add, the way an operator would today;
-  IDS-3 retires it.
+  is the planner's grouped hot read alone.
   """
 
   use ExUnit.Case, async: false
 
   alias Smolquery.BufferService.Client
   alias Smolquery.Catalog
-  alias Smolquery.Engine
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
-  alias Smolquery.StorageService.Runtime, as: StorageRuntime
   alias Smolquery.Test.FullNode
 
   @moduletag :integration
@@ -46,19 +42,6 @@ defmodule Smolquery.QueryService.ColumnIdentityIntegrationTest do
     Frame.to_rows(frame, json_columns: job.json_columns)
   end
 
-  defp clear_tombstones(node) do
-    engine = StorageRuntime.catalog_engine(node.storage)
-
-    [[catalog, schema]] =
-      Engine.query!(
-        engine,
-        "SELECT table_catalog, table_schema FROM information_schema.tables " <>
-          "WHERE table_name = 'smolquery_dropped_columns'"
-      ).rows
-
-    Engine.query!(engine, ~s|DELETE FROM "#{catalog}"."#{schema}".smolquery_dropped_columns|)
-  end
-
   test "a micro-segment written under a dropped column reads NULL in its re-added namesake",
        %{node: node} do
     assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
@@ -77,7 +60,6 @@ defmodule Smolquery.QueryService.ColumnIdentityIntegrationTest do
            ]
 
     :ok = Catalog.alter_table(node.catalog, @table, {:drop_column, "ts_int"})
-    clear_tombstones(node)
     :ok = Catalog.alter_table(node.catalog, @table, {:add_column, Field.new!("ts_int", :string)})
     {:ok, after_readd} = Catalog.table_schema(node.catalog, @table)
 

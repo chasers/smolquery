@@ -16,8 +16,10 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
+  alias Smolquery.Segments.Writer
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
@@ -113,6 +115,93 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Catalog.segments(context.catalog, @table, :current) == {:ok, [merged]}
     assert lake_rows(context.storage) == 30
     assert Enum.all?([a, b, c], &File.exists?(&1.path))
+  end
+
+  defp register_fixture(runtime, catalog, index, schema, rows) do
+    {:ok, prefix} = Store.prefix(@table)
+
+    {:ok, segment} =
+      SegmentFixture.write(rows, schema,
+        store: runtime.store,
+        prefix: prefix,
+        id: Id.generate(index * 1_000)
+      )
+
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+    segment
+  end
+
+  defp register_written(runtime, catalog, index, schema, rows, dir) do
+    {:ok, prefix} = Store.prefix(@table)
+    spool = Path.join(dir, "spool-#{index}.ndjson")
+    File.write!(spool, Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n")
+
+    {:ok, segment} =
+      Writer.write({:ndjson, [spool]}, schema,
+        store: runtime.store,
+        engine: Runtime.engine(runtime.name),
+        prefix: prefix,
+        id: Id.generate(index * 1_000)
+      )
+
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+    segment
+  end
+
+  defp lake_pairs(storage) do
+    Runtime.catalog_engine(storage)
+    |> Engine.query!(~s|SELECT id, ts_int FROM lake."analytics"."events" ORDER BY id|)
+    |> Map.fetch!(:rows)
+  end
+
+  test "a legacy input without ids is projected as of its registration snapshot: a re-added name reads NULL (PL-62)",
+       context do
+    runtime = start_compactor(context, [])
+    catalog = context.catalog
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
+    wide = Schema.new!([{"id", :int64}, {"ts_int", :int64}])
+    register_fixture(runtime, catalog, 1, wide, [%{"id" => 1, "ts_int" => 100}])
+    register_fixture(runtime, catalog, 2, wide, [%{"id" => 2, "ts_int" => 200}])
+
+    :ok = Catalog.alter_table(catalog, @table, {:drop_column, "ts_int"})
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :string)})
+    assert lake_pairs(context.storage) == [[1, nil], [2, nil]]
+
+    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert lake_pairs(context.storage) == [[1, nil], [2, nil]]
+  end
+
+  test "inputs written with ids are projected by id across a drop and a re-add (PL-62)",
+       context do
+    runtime = start_compactor(context, [])
+    catalog = context.catalog
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
+    {:ok, before} = Catalog.table_schema(catalog, @table)
+
+    register_written(
+      runtime,
+      catalog,
+      1,
+      before,
+      [%{"id" => 1, "ts_int" => 100}],
+      context.tmp_dir
+    )
+
+    :ok = Catalog.alter_table(catalog, @table, {:drop_column, "ts_int"})
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :string)})
+    {:ok, after_readd} = Catalog.table_schema(catalog, @table)
+
+    register_written(
+      runtime,
+      catalog,
+      2,
+      after_readd,
+      [%{"id" => 2, "ts_int" => "x"}],
+      context.tmp_dir
+    )
+
+    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert lake_pairs(context.storage) == [[1, nil], [2, "x"]]
   end
 
   test "readers pinned before the swap still see the inputs", context do

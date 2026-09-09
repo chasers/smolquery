@@ -31,8 +31,7 @@ defmodule Smolquery.Test.MapCatalog do
           retention: %{},
           clustering: %{},
           partitions: %{},
-          connections: %{},
-          dropped: %{}
+          connections: %{}
         }
       end)
 
@@ -204,7 +203,6 @@ defmodule Smolquery.Test.MapCatalog do
 
   defp alter(state, table_ref, {:add_column, %Schema.Field{} = field}) do
     with {:ok, schema} <- fetch_table(state, table_ref),
-         :ok <- not_tombstoned(state, table_ref, field.name),
          {:ok, schema} <- Schema.add_field(schema, %{field | id: next_id(schema)}) do
       {:ok, %{state | tables: Map.put(state.tables, table_ref, schema)}}
     else
@@ -215,14 +213,7 @@ defmodule Smolquery.Test.MapCatalog do
   defp alter(state, table_ref, {:drop_column, column}) do
     with {:ok, schema} <- fetch_table(state, table_ref),
          {:ok, schema} <- Schema.drop_field(schema, column) do
-      dropped = state.dropped |> Map.get(table_ref, MapSet.new()) |> MapSet.put(column)
-
-      {:ok,
-       %{
-         state
-         | tables: Map.put(state.tables, table_ref, schema),
-           dropped: Map.put(state.dropped, table_ref, dropped)
-       }}
+      {:ok, %{state | tables: Map.put(state.tables, table_ref, schema)}}
     else
       {:error, reason} -> {{:error, reason}, state}
     end
@@ -233,12 +224,6 @@ defmodule Smolquery.Test.MapCatalog do
       {:ok, schema} -> {:ok, schema}
       :error -> {:error, {:unknown_table, table_ref}}
     end
-  end
-
-  defp not_tombstoned(state, table_ref, name) do
-    if MapSet.member?(Map.get(state.dropped, table_ref, MapSet.new()), name),
-      do: {:error, {:column_tombstoned, name}},
-      else: :ok
   end
 
   defp apply_partitions(state, options, table_ref) do

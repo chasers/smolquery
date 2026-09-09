@@ -656,24 +656,6 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       Schema.names(schema)
     end
 
-    defp tombstone_table do
-      [[catalog, schema]] =
-        Engine.query!(
-          @engine,
-          "SELECT table_catalog, table_schema FROM information_schema.tables " <>
-            "WHERE table_name = 'smolquery_dropped_columns'"
-        ).rows
-
-      ~s|"#{catalog}"."#{schema}".smolquery_dropped_columns|
-    end
-
-    defp tombstones do
-      Engine.query!(
-        @engine,
-        "SELECT dataset, table_name, column_name FROM #{tombstone_table()} ORDER BY 3"
-      ).rows
-    end
-
     test "adds a column last, and a file written before it reads NULL", context do
       catalog = context.catalog
       segment = write_segment(context.segments_dir, 1, 3)
@@ -689,8 +671,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert row_count() == 3
     end
 
-    test "drops a column: gone now, still there at the earlier snapshot, and tombstoned",
-         context do
+    test "drops a column: gone now, still there at the earlier snapshot", context do
       catalog = context.catalog
       segment = write_segment(context.segments_dir, 1, 2)
       {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
@@ -709,29 +690,27 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       assert {:error, _unknown_column} =
                Engine.query(@engine, ~s|SELECT name FROM lake."analytics"."events"|, [])
-
-      assert tombstones() == [["analytics", "events", "name"]]
     end
 
-    test "a dropped name cannot come back, even with a different type", %{catalog: catalog} do
+    test "a dropped name comes back as a new column with a new id, whatever its type (PL-62)",
+         context do
+      catalog = context.catalog
+      segment = write_segment(context.segments_dir, 1, 2)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+      {:ok, dropped_at} = Catalog.current_snapshot(catalog)
+
       :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
 
       assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :int64)}) ==
-               {:error, {:column_tombstoned, "name"}}
-
-      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("label", :string)}) ==
                :ok
 
-      assert column_names() == ["id", "ts", "amount", "label"]
-    end
+      assert column_names() == ["id", "ts", "amount", "name"]
+      {:ok, read} = Catalog.table_schema(catalog, @table)
+      assert %Field{name: "name", type: :int64, id: 5, since: since} = List.last(read.fields)
+      assert since > dropped_at
 
-    test "an operator clears a tombstone by deleting its row", %{catalog: catalog} do
-      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
-
-      Engine.query!(@engine, "DELETE FROM #{tombstone_table()} WHERE column_name = 'name'")
-
-      assert Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :string)}) ==
-               :ok
+      result = Engine.query!(@engine, ~s|SELECT name FROM lake."analytics"."events"|)
+      assert result.rows == [[nil], [nil]]
     end
 
     test "refuses what the shared checks refuse, and nothing changes", %{catalog: catalog} do
@@ -757,14 +736,6 @@ defmodule Smolquery.Catalog.DuckLakeTest do
                {:error, {:partition_ref, {"analytics", "events__p1"}}}
 
       assert column_names() == ["id", "ts", "name", "amount"]
-      assert tombstones() == []
-    end
-
-    test "the tombstone lands before the drop, so no dropped column is ever without one",
-         %{catalog: catalog} do
-      assert Catalog.alter_table(catalog, @table, {:drop_column, "name"}) == :ok
-      assert column_names() == ["id", "ts", "amount"]
-      assert tombstones() == [["analytics", "events", "name"]]
     end
   end
 

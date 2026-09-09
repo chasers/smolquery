@@ -651,6 +651,35 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
+  `projection/2` for a file that carries no column ids and was registered at
+  `snapshot` (PL-62).
+
+  Such a file can only hold columns that existed when it was registered. A
+  declared column that began after `snapshot` (`Field.since`) is therefore a
+  typed `NULL` whatever the file names its columns — a column of that name in
+  the file is a dropped column that had the name before, and reading it as the
+  new one is exactly the leak ids exist to close. A column with no `since`, from
+  a catalog that assigns none, is matched by name as `projection/2` would.
+  """
+  @spec projection_as_of(t(), [String.t()], non_neg_integer()) ::
+          {:ok, String.t()} | {:error, term()}
+  def projection_as_of(%__MODULE__{fields: fields}, columns, snapshot)
+      when is_integer(snapshot) do
+    available = MapSet.new(columns)
+
+    with {:ok, expressions} <- map_fields(fields, &projected_as_of(&1, available, snapshot)) do
+      {:ok, Enum.join(expressions, ", ")}
+    end
+  end
+
+  defp projected_as_of(%Field{since: since} = field, _available, snapshot)
+       when is_integer(since) and since > snapshot,
+       do: projected_column(field, MapSet.new())
+
+  defp projected_as_of(%Field{} = field, available, _snapshot),
+    do: projected_column(field, available)
+
+  @doc """
   The `SELECT` list that projects a relation whose columns were written under
   `field_ids` — the file's column names to the ids they carried — onto this
   schema, matching by id (PL-62).

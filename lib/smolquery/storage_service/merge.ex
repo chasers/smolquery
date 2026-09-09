@@ -278,13 +278,77 @@ defmodule Smolquery.StorageService.Merge do
     runtime = narrow_per_call(runtime, Keyword.get(opts, :inputs_per_call))
 
     with {:ok, key} <- valid_key(key),
-         {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)) do
-      merge(
-        runtime,
-        table_ref,
-        key,
-        with_urls(%{sources: Enum.map(urls, &%{"url" => &1}), row_count: row_count})
-      )
+         {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)),
+         {:ok, sources} <- sealed_sources(runtime, table_ref, urls) do
+      merge(runtime, table_ref, key, with_urls(%{sources: sources, row_count: row_count}))
+    end
+  end
+
+  defp sealed_sources(runtime, table_ref, urls) do
+    with {:ok, field_ids} <- file_field_ids(runtime, urls),
+         {:ok, snapshots} <- registration_snapshots(runtime, table_ref, urls, field_ids) do
+      {:ok,
+       Enum.map(
+         urls,
+         &%{
+           "url" => &1,
+           "field_ids" => Map.get(field_ids, &1),
+           "snapshot" => Map.get(snapshots, &1)
+         }
+       )}
+    end
+  end
+
+  defp file_field_ids(runtime, urls) do
+    urls
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
+    |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
+      case query(runtime, schema_sql(chunk), chunk, runtime.merge_describe_timeout_ms) do
+        {:ok, result} -> {:cont, {:ok, Map.merge(acc, ids_by_file(result.rows))}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp schema_sql(urls),
+    do:
+      "SELECT file_name, name, num_children, field_id FROM parquet_schema([#{placeholders(urls)}])"
+
+  defp ids_by_file(rows) do
+    rows
+    |> Enum.group_by(&hd/1, &tl/1)
+    |> Map.new(fn {file, [[_root, count, _id] | columns]} ->
+      {file, top_level(columns, count || 0, [])}
+    end)
+  end
+
+  defp top_level(_rows, 0, columns) do
+    if Enum.all?(columns, fn {_name, id} -> is_integer(id) end),
+      do: Map.new(columns),
+      else: nil
+  end
+
+  defp top_level([[name, children, id] | rest], remaining, columns),
+    do: rest |> skip_subtree(children || 0) |> top_level(remaining - 1, [{name, id} | columns])
+
+  defp skip_subtree(rows, 0), do: rows
+
+  defp skip_subtree([[_name, children, _id] | rest], remaining),
+    do: rest |> skip_subtree(children || 0) |> skip_subtree(remaining - 1)
+
+  defp registration_snapshots(runtime, table_ref, urls, field_ids) do
+    if Enum.any?(urls, &is_nil(Map.get(field_ids, &1))) do
+      with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
+           {:ok, files} <-
+             Catalog.segment_files(
+               runtime.catalog,
+               Smolquery.Partitions.parent(table_ref),
+               snapshot
+             ) do
+        {:ok, Map.new(files, &{&1.path, &1.snapshot})}
+      end
+    else
+      {:ok, %{}}
     end
   end
 
@@ -455,10 +519,12 @@ defmodule Smolquery.StorageService.Merge do
 
   defp scan_select(runtime, schema, sources) do
     sources
-    |> Enum.group_by(&Map.get(&1, "field_ids"), & &1["url"])
-    |> Enum.sort_by(fn {field_ids, _urls} -> field_ids && Enum.sort(field_ids) end)
-    |> Enum.reduce_while({:ok, [], [], 0}, fn {field_ids, urls}, {:ok, selects, groups, offset} ->
-      case group_projection(runtime, schema, field_ids, urls) do
+    |> Enum.group_by(&group_key/1, & &1["url"])
+    |> Enum.sort_by(fn {{field_ids, snapshot}, _urls} ->
+      {field_ids && Enum.sort(field_ids), snapshot}
+    end)
+    |> Enum.reduce_while({:ok, [], [], 0}, fn {key, urls}, {:ok, selects, groups, offset} ->
+      case group_projection(runtime, schema, key, urls) do
         {:ok, projection} ->
           select = "SELECT #{projection} FROM #{scan(urls, offset)}"
 
@@ -478,11 +544,22 @@ defmodule Smolquery.StorageService.Merge do
     end
   end
 
-  defp group_projection(runtime, schema, nil, urls) do
-    with {:ok, columns} <- input_columns(runtime, urls), do: Schema.projection(schema, columns)
+  defp group_key(source) do
+    case Map.get(source, "field_ids") do
+      nil -> {nil, Map.get(source, "snapshot")}
+      field_ids -> {field_ids, nil}
+    end
   end
 
-  defp group_projection(_runtime, schema, field_ids, _urls),
+  defp group_projection(runtime, schema, {nil, snapshot}, urls) do
+    with {:ok, columns} <- input_columns(runtime, urls) do
+      if is_integer(snapshot),
+        do: Schema.projection_as_of(schema, columns, snapshot),
+        else: Schema.projection(schema, columns)
+    end
+  end
+
+  defp group_projection(_runtime, schema, {field_ids, _snapshot}, _urls),
     do: Schema.projection_by_id(schema, field_ids)
 
   defp input_columns(runtime, urls) do
