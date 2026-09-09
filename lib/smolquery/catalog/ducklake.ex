@@ -128,7 +128,7 @@ defmodule Smolquery.Catalog.DuckLake do
   @enforce_keys [:engine, :catalog]
   defstruct [:engine, :catalog]
 
-  @type t :: %__MODULE__{engine: atom(), catalog: String.t()}
+  @type t :: %__MODULE__{engine: Engine.handle(), catalog: String.t()}
 
   @type option ::
           {:name, atom()}
@@ -668,6 +668,13 @@ defmodule Smolquery.Catalog.DuckLake do
       {:ok, :committed}
     end
   end
+
+  @impl Catalog
+  def on_connection(%__MODULE__{engine: {name, _slot}} = config, slot),
+    do: %{config | engine: {name, slot}}
+
+  def on_connection(%__MODULE__{engine: name} = config, slot),
+    do: %{config | engine: {name, slot}}
 
   @impl Catalog
   def schema_version(%__MODULE__{} = config) do

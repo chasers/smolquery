@@ -56,6 +56,29 @@ defmodule Smolquery.BufferService.RuntimeTest do
                32
     end
 
+    test "catalog connections default to 4, reach the catalog engine, and are validated (T-439)",
+         %{
+           tmp_dir: dir
+         } do
+      runtime =
+        Runtime.new(
+          name: unique_name(),
+          dir: dir,
+          catalog: [metadata: "sqlite:#{dir}/c.sqlite", data_path: dir]
+        )
+
+      assert runtime.catalog_connections == 4
+      assert runtime.catalog_opts[:connections] == 4
+
+      runtime = Runtime.new(name: unique_name(), dir: dir, catalog: :none, catalog_connections: 2)
+      assert runtime.catalog_connections == 2
+      assert runtime.catalog_opts == nil
+
+      assert_raise ArgumentError, ~r/catalog_connections/, fn ->
+        Runtime.new(name: unique_name(), dir: dir, catalog: :none, catalog_connections: 0)
+      end
+    end
+
     test "claim valve factor defaults to 16 and takes an override", %{tmp_dir: dir} do
       assert Runtime.new(name: unique_name(), dir: dir).claim_valve_factor == 16
 

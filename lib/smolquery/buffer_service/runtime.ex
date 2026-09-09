@@ -246,6 +246,7 @@ defmodule Smolquery.BufferService.Runtime do
     :spool_dir,
     :catalog,
     :catalog_opts,
+    catalog_connections: 4,
     flush_interval_ms: 1_000,
     flush_idle_interval_ms: 5,
     commit_siblings: 5,
@@ -287,6 +288,7 @@ defmodule Smolquery.BufferService.Runtime do
           spool_dir: Path.t(),
           catalog: Catalog.t() | nil,
           catalog_opts: keyword() | nil,
+          catalog_connections: pos_integer(),
           flush_interval_ms: pos_integer(),
           flush_idle_interval_ms: non_neg_integer(),
           commit_siblings: non_neg_integer(),
@@ -320,6 +322,7 @@ defmodule Smolquery.BufferService.Runtime do
         }
 
   @limits [
+    :catalog_connections,
     :flush_interval_ms,
     :flush_idle_interval_ms,
     :commit_siblings,
@@ -434,7 +437,9 @@ defmodule Smolquery.BufferService.Runtime do
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
-    {catalog, catalog_opts} = resolve_catalog(Keyword.get(config, :catalog), name)
+    connections = Keyword.get(config, :catalog_connections, 4)
+    validate_catalog_connections!(connections)
+    {catalog, catalog_opts} = resolve_catalog(Keyword.get(config, :catalog), name, connections)
 
     runtime =
       struct!(
@@ -465,15 +470,27 @@ defmodule Smolquery.BufferService.Runtime do
     runtime
   end
 
-  defp resolve_catalog(:none, _name), do: {nil, nil}
+  defp resolve_catalog(:none, _name, _connections), do: {nil, nil}
 
-  defp resolve_catalog(nil, name) do
+  defp resolve_catalog(nil, name, connections) do
     if Keyword.has_key?(Application.get_env(:smolquery, Catalog.DuckLake, []), :metadata),
-      do: resolve_catalog([], name),
+      do: resolve_catalog([], name, connections),
       else: {nil, nil}
   end
 
-  defp resolve_catalog(catalog, name), do: Catalog.DuckLake.resolve(catalog, catalog_engine(name))
+  defp resolve_catalog(catalog, name, connections) do
+    case Catalog.DuckLake.resolve(catalog, catalog_engine(name)) do
+      {catalog, nil} -> {catalog, nil}
+      {catalog, opts} -> {catalog, Keyword.put(opts, :connections, connections)}
+    end
+  end
+
+  defp validate_catalog_connections!(count) when is_integer(count) and count > 0, do: :ok
+
+  defp validate_catalog_connections!(other) do
+    raise ArgumentError,
+          "config :smolquery, Smolquery.BufferService, catalog_connections: must be a positive integer, got: #{inspect(other)}"
+  end
 
   @doc """
   The engine instance the buffer's schema checks resolve the catalog through.

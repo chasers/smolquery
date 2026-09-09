@@ -113,7 +113,9 @@ TABLE` on either edge) and carry `MATERIALIZED` columns ([api.md](api.md#ddl),
   node has. It resolves the same configuration every other role does; a node
   whose configuration names no metadata database runs without the check and
   logs nothing, so a bare test peer still boots. One more DuckDB instance per
-  buffer node, with the catalog attached.
+  buffer node, with the catalog attached, carrying `catalog_connections`
+  (default 4) connections so a node's tables do not queue their flushes
+  behind one another's check.
 - **Every ingest node hears a column change at once.** A change broadcasts
   cluster-wide over `Smolquery.PubSub` and drops the table from every ingest
   schema cache; `schema_cache_ttl_ms` is only the backstop for a node the

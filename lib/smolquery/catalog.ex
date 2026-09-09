@@ -157,6 +157,7 @@ defmodule Smolquery.Catalog do
               {:ok, snapshot()} | {:error, term()}
   @callback current_snapshot(config :: term()) :: {:ok, snapshot()} | {:error, term()}
   @callback schema_version(config :: term()) :: {:ok, non_neg_integer()} | {:error, term()}
+  @callback on_connection(config :: term(), slot :: pos_integer()) :: term()
   @callback known_segments(config :: term()) :: {:ok, [String.t()]} | {:error, term()}
   @callback put_retention(config :: term(), table_ref(), retention() | nil) ::
               :ok | {:error, term()}
@@ -184,6 +185,7 @@ defmodule Smolquery.Catalog do
   @optional_callbacks put_table_options: 3,
                       alter_table: 3,
                       schema_version: 1,
+                      on_connection: 2,
                       put_connection: 2,
                       connection: 2,
                       list_connections: 1,
@@ -370,6 +372,22 @@ defmodule Smolquery.Catalog do
     if function_exported?(catalog.impl, :schema_version, 1),
       do: catalog.impl.schema_version(catalog.config),
       else: current_snapshot(catalog)
+  end
+
+  @doc """
+  The same catalog, addressed through connection `slot` of its engine.
+
+  A `Smolquery.Engine` can carry several connections to one instance
+  (`connections:`), each serialising its own callers; a caller that must not
+  wait on its neighbours' statements — every table buffer on a node
+  confirming its column ids at a flush — takes a slot of its own. An
+  implementation without connections to choose from answers itself.
+  """
+  @spec on_connection(t(), pos_integer()) :: t()
+  def on_connection(%__MODULE__{} = catalog, slot) when is_integer(slot) and slot > 0 do
+    if function_exported?(catalog.impl, :on_connection, 2),
+      do: %{catalog | config: catalog.impl.on_connection(catalog.config, slot)},
+      else: catalog
   end
 
   @doc """

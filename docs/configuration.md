@@ -239,6 +239,13 @@ runs the buffer without one, trusting the ids a writer sends; a configuration
 that names no metadata database at all runs the same way. Application config
 only: `config :smolquery, Smolquery.BufferService, catalog: :none`.
 
+`:catalog_connections` (`4`) is how many connections that catalog engine
+carries. Every table's flush confirms its column ids through it and each
+connection serialises its callers, so one connection would queue every
+table on the node behind every other's check; a table takes the slot its
+ref hashes to. The connections share one DuckDB instance and one attached
+lake, so the cost is a connection, not an engine. Application config only.
+
 `:dir` is the buffer's root. Micro-segments go to a `Store.Local` beneath
 `segments/`. Manifest logs go to `manifests/`. They are separate because they
 answer to different rules: segments can move to another store, while the log
