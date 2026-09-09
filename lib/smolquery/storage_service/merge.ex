@@ -205,6 +205,7 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.Engine
   alias Smolquery.Identifier
   alias Smolquery.Schema
+  alias Smolquery.Segments.FieldIds
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.HotTier
@@ -303,38 +304,12 @@ defmodule Smolquery.StorageService.Merge do
     urls
     |> Enum.chunk_every(runtime.merge_inputs_per_call)
     |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
-      case query(runtime, schema_sql(chunk), chunk, runtime.merge_describe_timeout_ms) do
-        {:ok, result} -> {:cont, {:ok, Map.merge(acc, ids_by_file(result.rows))}}
+      case query(runtime, FieldIds.sql(length(chunk)), chunk, runtime.merge_describe_timeout_ms) do
+        {:ok, result} -> {:cont, {:ok, Map.merge(acc, FieldIds.ids_by_file(result.rows))}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
-
-  defp schema_sql(urls),
-    do:
-      "SELECT file_name, name, num_children, field_id FROM parquet_schema([#{placeholders(urls)}])"
-
-  defp ids_by_file(rows) do
-    rows
-    |> Enum.group_by(&hd/1, &tl/1)
-    |> Map.new(fn {file, [[_root, count, _id] | columns]} ->
-      {file, top_level(columns, count || 0, [])}
-    end)
-  end
-
-  defp top_level(_rows, 0, columns) do
-    if Enum.all?(columns, fn {_name, id} -> is_integer(id) end),
-      do: Map.new(columns),
-      else: nil
-  end
-
-  defp top_level([[name, children, id] | rest], remaining, columns),
-    do: rest |> skip_subtree(children || 0) |> top_level(remaining - 1, [{name, id} | columns])
-
-  defp skip_subtree(rows, 0), do: rows
-
-  defp skip_subtree([[_name, children, _id] | rest], remaining),
-    do: rest |> skip_subtree(children || 0) |> skip_subtree(remaining - 1)
 
   defp registration_snapshots(runtime, table_ref, urls, field_ids) do
     if Enum.any?(urls, &is_nil(Map.get(field_ids, &1))) do
