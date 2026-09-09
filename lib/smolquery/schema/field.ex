@@ -44,14 +44,16 @@ defmodule Smolquery.Schema.Field do
     * `:since` — the catalog snapshot the column began at, likewise
     * `:materialized` — the expression the column is computed from, as text
       a client wrote or as a `Smolquery.Schema.Materialized` the catalog
-      validated
+      validated; a materialized column is nullable, so `nullable: false`
+      beside it is refused as `{:column_must_be_nullable, name}`
 
   """
   @spec new(term(), term(), keyword()) :: {:ok, t()} | {:error, term()}
   def new(name, type, opts \\ []) do
     with {:ok, name} <- Identifier.validate(name),
          {:ok, type} <- Schema.validate_type(type),
-         {:ok, materialized} <- materialized(Keyword.get(opts, :materialized)) do
+         {:ok, materialized} <- materialized(Keyword.get(opts, :materialized)),
+         :ok <- nullable_if_materialized(name, materialized, Keyword.get(opts, :nullable, true)) do
       {:ok,
        %__MODULE__{
          name: name,
@@ -63,6 +65,12 @@ defmodule Smolquery.Schema.Field do
        }}
     end
   end
+
+  defp nullable_if_materialized(_name, nil, _nullable), do: :ok
+  defp nullable_if_materialized(_name, _definition, true), do: :ok
+
+  defp nullable_if_materialized(name, _definition, false),
+    do: {:error, {:column_must_be_nullable, name}}
 
   defp materialized(nil), do: {:ok, nil}
   defp materialized(%Materialized{} = definition), do: {:ok, definition}

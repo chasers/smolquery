@@ -65,7 +65,10 @@ defmodule Smolquery.Schema.Materialized do
         }
 
   @allowed_classes ~w(FUNCTION OPERATOR CAST COMPARISON CONJUNCTION CASE BETWEEN CONSTANT COLUMN_REF)
-  @denied_functions ~w(current_setting)
+  @denied_functions ~w(current_setting getvariable current_localtime current_localtimestamp
+    to_timestamp timezone make_timestamptz version current_database current_schema
+    current_schemas current_query current_user current_role session_user user)
+  @zoned_types ["TIMESTAMP WITH TIME ZONE", "TIME WITH TIME ZONE"]
   @probe_extensions [:json]
 
   @doc """
@@ -130,8 +133,22 @@ defmodule Smolquery.Schema.Materialized do
   defp one_expression(%{"error" => true} = ast),
     do: refuse({:unparseable, Map.get(ast, "error_message", "syntax error")})
 
-  defp one_expression(%{"statements" => [%{"node" => %{"select_list" => [node]}}]}),
-    do: {:ok, node}
+  defp one_expression(%{
+         "statements" => [
+           %{
+             "node" => %{
+               "select_list" => [%{"alias" => ""} = node],
+               "from_table" => %{"type" => "EMPTY"},
+               "where_clause" => nil,
+               "modifiers" => [],
+               "group_expressions" => [],
+               "having" => nil,
+               "qualify" => nil
+             }
+           }
+         ]
+       }),
+       do: {:ok, node}
 
   defp one_expression(%{"statements" => [_one]}), do: refuse(:one_expression)
   defp one_expression(_ast), do: refuse(:one_expression)
@@ -140,7 +157,8 @@ defmodule Smolquery.Schema.Materialized do
     nodes = Ast.collect(node, &[&1])
 
     with :ok <- allowed(nodes),
-         :ok <- named_functions(nodes) do
+         :ok <- named_functions(nodes),
+         :ok <- unzoned(nodes) do
       sources(nodes, schema, regular)
     end
   end
@@ -163,6 +181,17 @@ defmodule Smolquery.Schema.Materialized do
     |> case do
       nil -> :ok
       function -> refuse({:unsupported_function, function})
+    end
+  end
+
+  defp unzoned(nodes) do
+    nodes
+    |> Enum.filter(&(&1["class"] == "CAST"))
+    |> Enum.map(&get_in(&1, ["cast_type", "id"]))
+    |> Enum.find(&(&1 in @zoned_types))
+    |> case do
+      nil -> :ok
+      type -> refuse({:zoned_type, type})
     end
   end
 
@@ -215,19 +244,25 @@ defmodule Smolquery.Schema.Materialized do
     placeholders = Enum.map_join(1..length(functions), ", ", &"$#{&1}")
 
     sql =
-      "SELECT function_name, list(DISTINCT coalesce(stability, 'UNKNOWN')) " <>
+      "SELECT function_name, list(DISTINCT function_type), " <>
+        "list(DISTINCT coalesce(stability, 'UNKNOWN')) " <>
         "FROM duckdb_functions() WHERE function_name IN (#{placeholders}) GROUP BY ALL"
 
     with {:ok, %{rows: rows}} <- Engine.query(engine, sql, functions) do
-      stabilities = Map.new(rows, fn [name, list] -> {name, list} end)
+      known = Map.new(rows, fn [name, types, stabilities] -> {name, {types, stabilities}} end)
 
-      Enum.reduce_while(functions, :ok, &stable(&1, Map.get(stabilities, &1), &2))
+      Enum.reduce_while(functions, :ok, &stable(&1, Map.get(known, &1), &2))
     end
   end
 
-  defp stable(_function, ["CONSISTENT"], :ok), do: {:cont, :ok}
+  defp stable(_function, {["scalar"], ["CONSISTENT"]}, :ok), do: {:cont, :ok}
   defp stable(function, nil, :ok), do: {:halt, refuse({:unknown_function, function})}
-  defp stable(function, _other, :ok), do: {:halt, refuse({:inconsistent_function, function})}
+
+  defp stable(function, {types, _stabilities}, :ok) do
+    if types == ["scalar"],
+      do: {:halt, refuse({:inconsistent_function, function})},
+      else: {:halt, refuse({:not_scalar, function, types})}
+  end
 
   defp bound(engine, canonical, type, regular) do
     {:ok, target} = Schema.duckdb_type(type)
@@ -245,13 +280,23 @@ defmodule Smolquery.Schema.Materialized do
             end)
       end
 
+    probe =
+      "SELECT typeof((#{canonical})), CAST((#{canonical}) AS #{target}) " <>
+        "FROM (#{row} UNION ALL #{row})"
+
     with {:ok, _locked} <- Engine.query(engine, "SET enable_external_access = false"),
-         {:ok, _probe} <-
-           Engine.query(engine, "SELECT CAST((#{canonical}) AS #{target}) FROM (#{row})") do
+         {:ok, %{rows: [[typed, _value] | _rest]}} <- Engine.query(engine, probe),
+         :ok <- unzoned_result(typed) do
       :ok
     else
+      {:error, {:invalid_materialized, _detail} = refusal} -> {:error, refusal}
       {:error, error} -> refuse({:does_not_bind, Exception.message(error)})
+      other -> refuse({:does_not_bind, inspect(other)})
     end
+  end
+
+  defp unzoned_result(typed) do
+    if String.contains?(typed, "WITH TIME ZONE"), do: refuse({:zoned_type, typed}), else: :ok
   end
 
   defp function_names(nodes) do
@@ -275,6 +320,14 @@ defmodule Smolquery.Schema.Materialized do
 
   def message({:unsupported_function, function}),
     do: "materialized expression may not call #{function}()"
+
+  def message({:not_scalar, function, types}),
+    do:
+      "materialized expression may only call scalar functions; #{function}() is #{Enum.join(types, "/")}"
+
+  def message({:zoned_type, type}),
+    do:
+      "materialized expression may not produce or cast to #{type}: the value would depend on the engine's time zone"
 
   def message({:unknown_function, function}),
     do: "materialized expression calls a function DuckDB does not have: #{function}()"

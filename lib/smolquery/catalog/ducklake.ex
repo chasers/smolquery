@@ -332,8 +332,17 @@ defmodule Smolquery.Catalog.DuckLake do
     with {:ok, name} <- table_name(config, table),
          {:ok, columns} <- Schema.column_definitions(schema),
          {:ok, definitions} <- validated_materialized(schema),
+         {:ok, existed} <- exists?(config, table),
          {:ok, _result} <- query(config, "CREATE TABLE IF NOT EXISTS #{name} (#{columns})") do
-      record_materialized(config, table, definitions)
+      if existed, do: :ok, else: record_materialized(config, table, definitions)
+    end
+  end
+
+  defp exists?(config, table) do
+    case table_schema(config, table) do
+      {:ok, _schema} -> {:ok, true}
+      {:error, {:unknown_table, _ref}} -> {:ok, false}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -372,9 +381,15 @@ defmodule Smolquery.Catalog.DuckLake do
     {:ok, %Field{id: id}} = Schema.field(schema, name)
 
     sources =
-      Enum.map(definition.sources, fn
-        source when is_integer(source) -> source
-        source when is_binary(source) -> elem(Schema.field(schema, source), 1).id
+      Enum.flat_map(definition.sources, fn
+        source when is_integer(source) ->
+          [source]
+
+        source when is_binary(source) ->
+          case Schema.field(schema, source) do
+            {:ok, %Field{id: source_id}} -> [source_id]
+            :error -> []
+          end
       end)
 
     {id, %{definition | sources: sources}}

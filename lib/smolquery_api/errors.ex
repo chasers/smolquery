@@ -242,6 +242,10 @@ defmodule SmolqueryApi.Errors do
     send_error(conn, 400, "INVALID_ARGUMENT", Ddl.message(reason))
   end
 
+  def from_reason(conn, {:invalid_materialized, {:engine_failed, detail}}) do
+    send_error(conn, 503, "UNAVAILABLE", Materialized.message({:engine_failed, detail}))
+  end
+
   def from_reason(conn, {:invalid_materialized, detail}) do
     send_error(conn, 400, "INVALID_ARGUMENT", Materialized.message(detail))
   end
