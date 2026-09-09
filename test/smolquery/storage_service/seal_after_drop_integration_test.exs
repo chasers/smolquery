@@ -12,6 +12,12 @@ defmodule Smolquery.StorageService.SealAfterDropIntegrationTest do
 
   The seal valve is age: the batch is written, the column dropped well inside
   `seal_max_age_ms`, and the maintenance tick then seals it.
+
+  The first statement is a query, not the `ALTER`: at boot the query
+  service's warm engines attach the same SQLite catalog, and a column change
+  that races that storm can lose the file lock more times than a commit
+  retries. One answered query means an engine is attached and the node has
+  settled, which is the state an operator's `ALTER` meets in practice.
   """
 
   use ExUnit.Case, async: false
@@ -51,6 +57,8 @@ defmodule Smolquery.StorageService.SealAfterDropIntegrationTest do
 
   test "an unsealed micro-segment carrying a dropped column still seals, without it",
        %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
     :ok = Catalog.alter_table(node.catalog, @table, {:add_column, Field.new!("label", :string)})
     {:ok, widened} = Catalog.table_schema(node.catalog, @table)
 
