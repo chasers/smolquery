@@ -796,10 +796,12 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp transact(config, statements) do
-    case Engine.transaction(config.engine, statements) do
-      :ok -> :ok
-      {:error, error} -> {:error, classify(error)}
-    end
+    with_commit_retries(fn ->
+      case Engine.transaction(config.engine, statements) do
+        :ok -> {:ok, :committed}
+        {:error, _error} = failure -> failure
+      end
+    end)
   end
 
   defp not_tombstoned(config, dataset, table, column) do
