@@ -20,6 +20,21 @@ parts work together.
 - **schema** — a table's columns and types (`Smolquery.Schema`). It also
   carries the clustering key and the partition count, so one cached read
   reaches every write point.
+- **column id** — the identity of a column, DuckLake's `column_id`, carried
+  on every `Smolquery.Schema.Field` as `id` and stamped into every Parquet
+  file as its field ids (PL-62). **Field ids** are that stamp: the
+  Parquet field-id metadata `COPY ... (FIELD_IDS {...})` writes and
+  `parquet_schema()` reads back, all of a file's columns or none. A name can be dropped and given to a new
+  column; an id never is. Every reader projects a file's columns by id, so a
+  re-used name never reads the old column's data.
+- **materialized column** — a column computed from the row by a SQL
+  expression over the table's regular columns (`Smolquery.Schema.Materialized`,
+  PL-61). The buffer computes it as rows land, every seal and compaction
+  stores it, and a read renders it as its expression wherever a file predates
+  it. It takes no insert value. The expression passes three gates once, at
+  definition, and is immutable after.
+  The expression lives beside the column in the `smolquery_materialized`
+  side table, keyed by the column's id.
 - **clustering key** — the column names writes sort by. smolquery's analog
   of ClickHouse's `ORDER BY`. The sorted Parquet's row-group stats are the
   sparse index.
@@ -51,8 +66,17 @@ parts work together.
   client sent. DuckDB parses the rows once, at flush. Always on: the writer
   that needed parsed rows is gone (PL-57).
 - **schema cache** — a per-node ETS cache of table schemas, bounded by
-  `schema_cache_ttl_ms`. CRUD invalidates it on the acting node; the TTL
-  bounds staleness everywhere else.
+  `schema_cache_ttl_ms`. CRUD invalidates it on the acting node, a column
+  change broadcasts cluster-wide and invalidates it everywhere it lands, and
+  the TTL bounds staleness for a node the broadcast does not reach.
+- **stale schema** — a batch whose schema names a column under an id the
+  catalog no longer gives that name (a name dropped and added again). The
+  owning buffer refuses it (`{:stale_schema, ref, names}`, T-439); the ingest
+  edge retries once with the catalog's schema, then answers 409.
+- **DDL job** — an `ALTER TABLE` run as a query job (`Smolquery.Ddl`, PL-61
+  L3): same submit, await and history as a query, no engine, the outcome on
+  `job.ddl`, and never cancelled — the catalog commit is not the job's to
+  stop.
 - **insertId** — the client's idempotency key. A retry hashes to the
   partition that holds the first attempt, so it dedups there.
 - **write ref** — the partition ref one batch writes to. Sticky by

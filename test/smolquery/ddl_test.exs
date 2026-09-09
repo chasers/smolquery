@@ -138,6 +138,11 @@ defmodule Smolquery.DdlTest do
                Ddl.parse("-- a note\n\n/* and\nanother */ ALTER TABLE ds.t DROP COLUMN c")
 
       assert Ddl.parse("-- ALTER TABLE ds.t DROP COLUMN c") == :not_ddl
+
+      assert {:ok, %AlterTable{change: {:drop_column, "c"}}} =
+               Ddl.parse("/* a /* nested */ note */ ALTER TABLE ds.t DROP COLUMN c")
+
+      assert Ddl.parse("/* never closed ALTER TABLE ds.t DROP COLUMN c") == :not_ddl
     end
 
     test "a statement that is not valid UTF-8 is refused, never scanned" do

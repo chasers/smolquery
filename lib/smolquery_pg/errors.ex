@@ -16,7 +16,8 @@ defmodule SmolqueryPg.Errors do
   take the codes Postgres gives the same refusals: `42703` for an unknown
   column, `42701` for a duplicate, `42704` for an unknown type, `42602` for
   a bad identifier, `42601` for a statement the parser does not accept,
-  `55000` for a column that cannot be added or dropped as asked, and
+  `42P17` for a `MATERIALIZED` expression the gates refuse, `55000` for a
+  column that cannot be added or dropped as asked, and
   `0A000` for a clause it recognises and refuses or what this release does
   not do. The message is
   `Smolquery.Ddl.message/1`, the wording the HTTP envelope shares.

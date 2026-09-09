@@ -90,11 +90,14 @@ defmodule Smolquery.QueryService.ViewsTest do
     lacking = %{"url" => "b", "field_ids" => %{"id" => 1, "ts_int" => 2}}
     sealed_before = %{"url" => "c", "snapshot" => 5}
     sealed_after = %{"url" => "d", "snapshot" => 9}
+    raced = %{"url" => "f", "snapshot" => 9, "column_ids" => [1, 2]}
+    recorded = %{"url" => "g", "snapshot" => 3, "column_ids" => [1, 2, 3]}
     legacy = %{"url" => "e"}
 
-    assert Views.recomputed(schema, [carrying, sealed_after]) == []
+    assert Views.recomputed(schema, [carrying, sealed_after, recorded]) == []
     assert Views.recomputed(schema, [carrying, lacking]) == ["ts"]
     assert Views.recomputed(schema, [sealed_before]) == ["ts"]
+    assert Views.recomputed(schema, [raced]) == ["ts"]
     assert Views.recomputed(schema, [legacy]) == ["ts"]
 
     assert [_schema, plain] = Views.table_view({"analytics", "events"}, schema, "SELECT 1")

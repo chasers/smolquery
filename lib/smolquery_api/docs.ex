@@ -151,7 +151,7 @@ defmodule SmolqueryApi.Docs do
         "auth" => "bearer",
         "summary" =>
           "Drop a column. Refused for the last column, a clustering column, a column " <>
-            "another is materialized from, or the " <>
+            "another is materialized from, a partition ref, or the " <>
             "retention column — clear those first. Files are not rewritten; the " <>
             "column stays visible to a read pinned at an earlier snapshot. Answers " <>
             "the table body."
@@ -176,7 +176,9 @@ defmodule SmolqueryApi.Docs do
           "Streaming insert. Body is application/x-ndjson only, one JSON " <>
             "object per line. 200 means every accepted row is durable and " <>
             "queryable; rejected rows come back per index in insertErrors. " <>
-            "429 with retry-after means the write path is behind.",
+            "429 with retry-after means the write path is behind; 409 ABORTED means the " <>
+            "table's columns changed under this node's cache and the retry did too — retry " <>
+            "the request; 503 that the buffer could not reach the catalog to check.",
         "query_params" => %{
           "insertId" =>
             "optional idempotency key; a retry with the same id and rows " <>
@@ -253,7 +255,8 @@ defmodule SmolqueryApi.Docs do
               "its ddl outcome; no rows)",
           "maxResults" => "page size, default 1000",
           "timeoutMs" => "cancel-and-504 deadline",
-          "explain" => "\"plan\" or \"analyze\" answers the plan text instead of rows",
+          "explain" =>
+            "\"plan\" or \"analyze\" answers the plan text instead of rows; refused (400) for ALTER TABLE",
           "trace" => "boolean; returns phase spans on the job"
         }
       },

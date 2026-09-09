@@ -218,7 +218,8 @@ defmodule Smolquery.Schema do
 
   @doc """
   Whether two schemas declare the same columns — names, types, nullability,
-  in order — ignoring the identity the catalog assigns.
+  and a materialized expression as written, in order — ignoring the identity
+  the catalog assigns.
 
   This is the comparison a client can make. A schema read back from the
   catalog carries each column's `id` and `since`; a schema a client sent never

@@ -92,6 +92,41 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Column changes, column ids, and materialized columns (0.19.0)
+
+Tables can now add and drop columns (`POST`/`DELETE .../columns`, or `ALTER
+TABLE` on either edge) and carry `MATERIALIZED` columns ([api.md](api.md#ddl),
+[api.md](api.md#materialized-columns)). Three things change for an operator.
+
+- **Every file is read by column id** (PL-62). A file this release writes
+  stamps its column ids; a file written before it carries none and is read by
+  name — in the sealed tier as of the snapshot it was registered at, which is
+  exact, and in the hot tier plainly, until it seals. The one rule that
+  leaves: after deploying, **wait one seal cycle before re-adding a name you
+  dropped earlier**, so no unstamped micro-segment still carries the old
+  column. Compaction rewrites the sealed tier with ids over time; nothing has
+  to be run by hand.
+- **Buffer nodes attach the metadata database** (T-439). The buffer confirms
+  a batch's column ids against the catalog before writing them — one
+  `schema_version` read per micro-segment — so a buffer-only node now needs the
+  same reach to `SMOLQUERY_CATALOG` / `CATALOG_DATABASE_URL` that a storage
+  node has. It resolves the same configuration every other role does; a node
+  whose configuration names no metadata database runs without the check and
+  logs nothing, so a bare test peer still boots. One more DuckDB instance per
+  buffer node, with the catalog attached.
+- **Every ingest node hears a column change at once.** A change broadcasts
+  cluster-wide over `Smolquery.PubSub` and drops the table from every ingest
+  schema cache; `schema_cache_ttl_ms` is only the backstop for a node the
+  broadcast does not reach. The buffer's id check is what makes even that
+  case safe: a stale write is refused and retried, never stored under the
+  wrong column.
+
+There is no privilege split between reading and changing a table: the API
+key, or the wire password, that can `SELECT` can `ALTER TABLE`. Rolling
+order does not matter for this release; a new query node's `ALTER` is
+readable by an old node the moment the catalog commits it, and an old node
+that never heard of ids reads every file by name, as it always did.
+
 ### The Polars flush writer is gone (PL-57)
 
 `SMOLQUERY_FLUSH_WRITER` is no longer a setting. DuckDB writes every flush,

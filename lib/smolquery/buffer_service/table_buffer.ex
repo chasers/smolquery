@@ -485,10 +485,8 @@ defmodule Smolquery.BufferService.TableBuffer do
         {:reply, {:duplicate, ack}, state}
 
       :error ->
-        with :ok <- write_gate(state),
-             {:ok, state} <- verified(state, schema) do
-          write_or_join(state, schema, rows, batch_id, bytes, from)
-        else
+        case write_gate(state) do
+          :ok -> write_or_join(state, schema, rows, batch_id, bytes, from)
           {:error, _reason} = refusal -> {:reply, refusal, state}
         end
     end
@@ -1105,15 +1103,18 @@ defmodule Smolquery.BufferService.TableBuffer do
   # projects by id (PL-62), so a schema read before a DROP and ADD of the same
   # name would store the row under the old column — NULL under the new one,
   # projected away at the seal — behind a 200 (T-439). The check is exact and
-  # cheap: every batch costs one `current_snapshot` read, the smallest read
-  # the catalog has, and the table's schema is read again only when that
-  # snapshot has moved since the ids were last confirmed or the batch carries
-  # other ids — a schema change or a seal registration, never a steady stream
-  # of writes. A memo of the ids alone would be one more cache to go stale,
-  # which is the hole this closes. A stale writer after a re-add is refused
-  # with the names that moved, so the ingest node drops its cache and retries.
-  # A buffer without a catalog trusts the writer; a batch without ids has
-  # nothing to check.
+  # cheap: every micro-segment costs one `schema_version` read, the smallest
+  # read the catalog has and one that moves only when a table's columns
+  # change, and the table's schema is read again only when that version has
+  # moved since the ids were last confirmed or the group carries other ids —
+  # a schema change, never a seal or a steady stream of writes. A memo of the ids alone
+  # would be one more cache to go stale, which is the hole this closes. A
+  # stale writer after a re-add is refused with the names that moved, so the
+  # ingest node drops its cache and retries. A buffer without a catalog trusts
+  # the writer; a batch without ids has nothing to check. A catalog that
+  # cannot answer — its engine restarting, or not yet up — refuses the batch
+  # as unavailable, so the ingest edge answers a retryable 503 rather than
+  # the table's buffer dying on the call.
   defp verified(%__MODULE__{runtime: %{catalog: nil}} = state, _schema), do: {:ok, state}
 
   defp verified(state, schema) do
@@ -1124,24 +1125,32 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp verified_at_snapshot(state, schema, ids) do
-    case Catalog.current_snapshot(state.runtime.catalog) do
-      {:ok, snapshot} when {ids, snapshot} == state.verified -> {:ok, state}
-      {:ok, snapshot} -> verified_against_catalog(state, schema, ids, snapshot)
+    case catalog_answer(fn -> Catalog.schema_version(state.runtime.catalog) end) do
+      {:ok, version} when {ids, version} == state.verified -> {:ok, state}
+      {:ok, version} -> verified_against_catalog(state, schema, ids, version)
       {:error, reason} -> {:error, {:catalog_unavailable, reason}}
     end
   end
 
-  defp verified_against_catalog(state, schema, ids, snapshot) do
-    case Catalog.table_schema(state.runtime.catalog, Partitions.parent(state.table_ref)) do
+  defp verified_against_catalog(state, schema, ids, version) do
+    parent = Partitions.parent(state.table_ref)
+
+    case catalog_answer(fn -> Catalog.table_schema(state.runtime.catalog, parent) end) do
       {:ok, current} ->
         case Schema.stale_ids(schema, current) do
-          [] -> {:ok, %{state | verified: {ids, snapshot}}}
+          [] -> {:ok, %{state | verified: {ids, version}}}
           stale -> {:error, {:stale_schema, state.table_ref, stale}}
         end
 
       {:error, reason} ->
         {:error, {:catalog_unavailable, reason}}
     end
+  end
+
+  defp catalog_answer(read) do
+    read.()
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp write_gate(state) do
@@ -1318,7 +1327,36 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp handoff(%__MODULE__{chunks: []} = state, _reason), do: state
 
+  # One schema per group — a differing schema already forced a flush — so the
+  # column-id check (T-439) runs once per micro-segment, here, and covers
+  # every batch in it: a stale group is refused whole, to callers who all
+  # sent the same stale schema, and nothing is spooled or committed for it.
   defp handoff(state, reason) do
+    case verified(state, state.schema) do
+      {:ok, state} -> commit_handoff(state, reason)
+      {:error, refusal} -> refuse_handoff(state, refusal)
+    end
+  end
+
+  defp refuse_handoff(state, refusal) do
+    Enum.each(state.pending, fn
+      {from, :flush} -> GenServer.reply(from, :ok)
+      {from, _kind} -> GenServer.reply(from, {:error, refusal})
+    end)
+
+    %{
+      state
+      | chunks: [],
+        pending: [],
+        batch_ids: [],
+        row_count: 0,
+        byte_size: 0,
+        opened_at: nil,
+        timer: cancel(state.timer)
+    }
+  end
+
+  defp commit_handoff(state, reason) do
     :telemetry.execute(
       [:smolquery, :buffer, :flush_trigger],
       %{rows: state.row_count, bytes: state.byte_size},
