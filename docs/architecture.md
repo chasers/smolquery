@@ -259,7 +259,14 @@ and drops the table the moment the broadcast lands, so a column added on
 one node — or by a DDL job on a query node, which has no ingest cache of its
 own to invalidate — is insertable on every node without waiting out
 `schema_cache_ttl_ms`; the TTL remains the backstop for a node the broadcast
-does not reach. Each `ALTER` is one DuckLake commit, atomic on its own and
+does not reach. The one change a stale cache could turn into silent loss —
+a name dropped and added again, so a write under the old id reads `NULL`
+under the new column — is closed at the buffer (T-439): the table's owner
+confirms a batch's ids against the catalog before writing them, one
+`current_snapshot` read per batch and the schema again only when the
+snapshot moved, and refuses a stale batch so the ingest edge retries with
+the schema the catalog holds now. A buffer configured without a catalog
+trusts its writers. Each `ALTER` is one DuckLake commit, atomic on its own and
 unrelated to any client transaction: the Postgres wire refuses one inside a
 `BEGIN` block rather than pretend a `ROLLBACK` could undo it.
 

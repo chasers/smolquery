@@ -196,6 +196,28 @@ defmodule Smolquery.SchemaTest do
       assert Schema.computed_select(Schema.new!([{"id", :int64}])) == ~s|"id"|
     end
 
+    test "stale_ids/2 names the columns a writer holds under an id the catalog moved (T-439)" do
+      written =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1),
+          Field.new!("x", :string, id: 5),
+          Field.new!("gone", :string, id: 6),
+          Field.new!("unidentified", :string)
+        ])
+
+      current =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1),
+          Field.new!("x", :int64, id: 9),
+          Field.new!("late", :string, id: 10),
+          Field.new!("unidentified", :string, id: 11)
+        ])
+
+      assert Schema.stale_ids(written, current) == ["x"]
+      assert Schema.stale_ids(current, current) == []
+      assert Schema.stale_ids(Schema.new!([{"id", :int64}]), current) == []
+    end
+
     test "same_columns?/2 compares what a client declared, never the ids" do
       declared = Schema.new!([{"id", :int64, nullable: false}, {"ts", :timestamp}])
 

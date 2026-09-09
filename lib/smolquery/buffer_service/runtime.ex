@@ -49,6 +49,14 @@ defmodule Smolquery.BufferService.Runtime do
 
       store: {Smolquery.Segments.Store.Local, dir: "/mnt/fast/buffer"}
 
+  `:catalog` is where a table buffer confirms a batch's column ids before it
+  writes them (T-439): a `Smolquery.Catalog` handle, DuckLake options, or
+  nothing — in which case the application's `Smolquery.Catalog.DuckLake`
+  configuration is resolved, as every other service resolves it, and the
+  buffer starts a catalog engine of its own. `:none` runs the buffer without
+  one, trusting the ids a writer sends; the test configuration does, so a
+  buffer under test does not attach a lake it never reads.
+
   `:write_pool_size` is how many DuckDB instances the flush spreads
   its encodes over — see `engine_for/2` for why it hashes on the segment id,
   and `engines/1` for the pool itself. It must be a positive integer no larger
@@ -222,6 +230,7 @@ defmodule Smolquery.BufferService.Runtime do
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.Replicator
   alias Smolquery.BufferService.Ring
+  alias Smolquery.Catalog
   alias Smolquery.Engine
   alias Smolquery.Segments.Store
 
@@ -233,6 +242,8 @@ defmodule Smolquery.BufferService.Runtime do
     :ring,
     :replicator,
     :spool_dir,
+    :catalog,
+    :catalog_opts,
     flush_interval_ms: 1_000,
     flush_idle_interval_ms: 5,
     commit_siblings: 5,
@@ -272,6 +283,8 @@ defmodule Smolquery.BufferService.Runtime do
           ring: Ring.t(),
           replicator: Replicator.t(),
           spool_dir: Path.t(),
+          catalog: Catalog.t() | nil,
+          catalog_opts: keyword() | nil,
           flush_interval_ms: pos_integer(),
           flush_idle_interval_ms: non_neg_integer(),
           commit_siblings: non_neg_integer(),
@@ -419,12 +432,15 @@ defmodule Smolquery.BufferService.Runtime do
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
+    {catalog, catalog_opts} = resolve_catalog(Keyword.get(config, :catalog), name)
 
     runtime =
       struct!(
         %__MODULE__{
           name: name,
           store: store,
+          catalog: catalog,
+          catalog_opts: catalog_opts,
           spool_dir: Keyword.get(config, :spool_dir, Path.join(dir, "spool")),
           manifest:
             HotManifest.new(
@@ -446,6 +462,15 @@ defmodule Smolquery.BufferService.Runtime do
 
     runtime
   end
+
+  defp resolve_catalog(:none, _name), do: {nil, nil}
+  defp resolve_catalog(catalog, name), do: Catalog.DuckLake.resolve(catalog, catalog_engine(name))
+
+  @doc """
+  The engine instance the buffer's schema checks resolve the catalog through.
+  """
+  @spec catalog_engine(atom()) :: atom()
+  def catalog_engine(name), do: Module.concat(name, "Catalog")
 
   @doc """
   The `spawn_opt` that a table's long-lived processes start under (T-330).

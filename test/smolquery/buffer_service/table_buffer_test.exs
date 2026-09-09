@@ -779,4 +779,53 @@ defmodule Smolquery.BufferService.TableBufferTest do
       assert {:ok, []} = Store.list(runtime.store, "analytics/events")
     end
   end
+
+  describe "column ids against the catalog (T-439)" do
+    alias Smolquery.Catalog
+    alias Smolquery.Schema.Field
+    alias Smolquery.Test.MapCatalog
+
+    setup context do
+      catalog = MapCatalog.new()
+      :ok = Catalog.create_dataset(catalog, "analytics")
+      :ok = Catalog.create_table(catalog, @table, schema())
+      {:ok, identified} = Catalog.table_schema(catalog, @table)
+
+      Map.merge(start_buffer_service(context, catalog: catalog), %{
+        catalog: catalog,
+        identified: identified
+      })
+    end
+
+    test "a batch whose ids match the catalog lands; one holding a re-used name under its old id is refused",
+         %{name: name, catalog: catalog, identified: before, runtime: runtime} do
+      assert {:ok, _ack} = Client.write_batch(name, @table, %{schema: before, rows: rows(1..1)})
+
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "ts"})
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts", :int64)})
+      {:ok, fresh} = Catalog.table_schema(catalog, @table)
+
+      assert Client.write_batch(name, @table, %{schema: before, rows: rows(2..2)}) ==
+               {:error, {:stale_schema, @table, ["ts"]}}
+
+      assert {:ok, ack} =
+               Client.write_batch(name, @table, %{schema: fresh, rows: [%{"id" => 2, "ts" => 7}]})
+
+      entry = Enum.find(HotManifest.entries(runtime.manifest, @table), &(&1.id == ack.segment_id))
+      assert entry.field_ids["ts"] == 3
+    end
+
+    test "a batch without ids, and a buffer without a catalog, are not checked", context do
+      assert {:ok, _ack} = Client.write_batch(context.name, @table, batch(1..1))
+
+      %{name: trusting} =
+        start_buffer_service(context, catalog: :none, dir: Path.join(context.tmp_dir, "trusting"))
+
+      assert {:ok, _ack} =
+               Client.write_batch(trusting, @table, %{
+                 schema: context.identified,
+                 rows: rows(1..1)
+               })
+    end
+  end
 end

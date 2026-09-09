@@ -68,6 +68,7 @@ defmodule Smolquery.BufferService.Supervisor do
   alias Smolquery.BufferService.Ring
   alias Smolquery.BufferService.RingEpoch
   alias Smolquery.BufferService.Runtime
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster.PgGroup
 
   # The write pool's own intensity, and it is deliberately far above a
@@ -127,7 +128,7 @@ defmodule Smolquery.BufferService.Supervisor do
           ),
           write_pool(runtime),
           expected_nodes(runtime)
-        ]
+        ] ++ DuckLake.children(runtime.catalog_opts, Runtime.catalog_engine(runtime.name))
 
     Supervisor.init(Enum.reject(children, &is_nil/1), strategy: :rest_for_one)
   end

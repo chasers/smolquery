@@ -45,19 +45,47 @@ defmodule Smolquery.IngestService.Client do
   @spec insert(atom(), Store.table_ref(), [term()], keyword()) ::
           {:ok, result()} | {:error, term()}
   def insert(name, table_ref, rows, opts \\ []) when is_list(rows) do
-    with {:ok, runtime} <- runtime(name),
-         {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      case Validator.validate(schema, rows) do
-        {[], errors} ->
-          measure(0, errors)
+    with {:ok, runtime} <- runtime(name) do
+      batch_id = Keyword.get(opts, :batch_id)
 
-          {:ok, %{inserted: 0, errors: errors}}
-
-        {valid, errors} ->
-          write(runtime, table_ref, schema, valid, errors, Keyword.get(opts, :batch_id))
-      end
+      with_fresh_schema(
+        runtime,
+        table_ref,
+        &validated_write(runtime, table_ref, &1, rows, batch_id)
+      )
     end
   end
+
+  defp validated_write(runtime, table_ref, schema, rows, batch_id) do
+    case Validator.validate(schema, rows) do
+      {[], errors} ->
+        measure(0, errors)
+
+        {:ok, %{inserted: 0, errors: errors}}
+
+      {valid, errors} ->
+        write(runtime, table_ref, schema, valid, errors, batch_id)
+    end
+  end
+
+  # The buffer refuses a batch whose column ids the catalog no longer gives
+  # those names (T-439): this node's cached schema predates a DROP and ADD of
+  # a name. The cache is dropped and the write is made once more against the
+  # schema the catalog holds now — the rows are validated again, because the
+  # re-added column may have another type. A second refusal is the caller's.
+  defp with_fresh_schema(runtime, table_ref, write) do
+    with {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
+      schema |> write.() |> retried_fresh(runtime, table_ref, write)
+    end
+  end
+
+  defp retried_fresh({:error, {:stale_schema, _ref, _names}}, runtime, table_ref, write) do
+    :ok = SchemaCache.invalidate(runtime, table_ref)
+
+    with {:ok, fresh} <- SchemaCache.fetch(runtime, table_ref), do: write.(fresh)
+  end
+
+  defp retried_fresh(result, _runtime, _table_ref, _write), do: result
 
   @doc """
   Writes the NDJSON `body` to the table — `insert/4`'s contract, entered from
@@ -72,9 +100,8 @@ defmodule Smolquery.IngestService.Client do
   @spec insert_ndjson(atom(), Store.table_ref(), binary(), keyword()) ::
           {:ok, result()} | {:error, term()}
   def insert_ndjson(name, table_ref, body, opts \\ []) when is_binary(body) do
-    with {:ok, runtime} <- runtime(name),
-         {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      forward_ndjson(runtime, table_ref, schema, body, opts)
+    with {:ok, runtime} <- runtime(name) do
+      with_fresh_schema(runtime, table_ref, &forward_ndjson(runtime, table_ref, &1, body, opts))
     end
   end
 

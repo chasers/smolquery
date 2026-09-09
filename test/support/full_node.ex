@@ -34,7 +34,9 @@ defmodule Smolquery.Test.FullNode do
   Starts buffer + storage + query wired together. `buffer_opts` sets the
   valves and cadences the scenario needs; everything else is the production
   shape. A `:schema` in `buffer_opts` replaces `schema/0` for the table the
-  node creates.
+  node creates; `catalog: :lake` gives the buffer the node's own catalog, so
+  it confirms a batch's column ids as a production buffer does (T-439) —
+  off by default, since that attaches the lake once more per node.
   """
   def start(context, buffer_opts) do
     {schema, buffer_opts} = Keyword.pop(buffer_opts, :schema, schema())
@@ -43,12 +45,18 @@ defmodule Smolquery.Test.FullNode do
     storage = :"node_storage_#{unique}"
     query = :"node_query_#{unique}"
 
+    metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
+    data_path = Path.join(context.tmp_dir, "ducklake")
+
+    buffer_opts =
+      case Keyword.get(buffer_opts, :catalog) do
+        :lake -> Keyword.put(buffer_opts, :catalog, metadata: metadata, data_path: data_path)
+        _other -> buffer_opts
+      end
+
     start_buffer(context, buffer, storage, buffer_opts)
 
     hot_port = bound_hot_port(buffer)
-
-    metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
-    data_path = Path.join(context.tmp_dir, "ducklake")
 
     start_supervised!(
       {StorageService.Supervisor,
