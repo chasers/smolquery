@@ -224,6 +224,19 @@ What that ack means:
   segment with no log record was never acked, so the buffer deletes it. To
   adopt such a segment would double-count a client's retry. The buffer drops a
   record whose segment is gone.
+- **The log is compacted, so recovery stays proportional to the tail (T-319).**
+  Every mutation appends a line and nothing removes one, so a log grows with
+  the node's lifetime write count rather than with what it currently holds.
+  That costs nothing on the commit path — an append through a held descriptor
+  is O(1) whatever the file's length — and everything on restart, which
+  replays the whole file before the hot server listens. A sandbox buffer node
+  held 814 MB across 106 logs, 105 of them describing nothing, and took ~30 s
+  to become Ready against ~3 s for a storage node. The owning `TableBuffer`
+  now rewrites a table's log to its live tail on the maintenance tick, once
+  the log passes `manifest_compact_min_bytes` and has grown to
+  `manifest_compact_ratio` times what the last rewrite left behind. The
+  trigger is measured in appended bytes rather than timed: a timer compacts
+  idle tables for nothing and starves busy ones.
 - **Backpressure is immediate. It bounds latency, not just memory.** A batch
   over `max_buffered_rows` or `max_buffered_bytes` gets
   `{:error, :buffer_full}`. A batch whose Little's-law wait estimate exceeds
@@ -1082,6 +1095,15 @@ droppable `retire_grace_ms` after a sealer retires it. Even when sealing keeps
 up, the grace window holds a floor of roughly `flush_rate x retire_grace_ms / 1000`
 entries — the flush rate times the grace window in seconds, and nothing bounds the index: `max_buffered_rows` and
 `max_buffered_bytes` bound the accumulator, not this.
+
+`smolquery_hot_manifest_compaction_bytes_reclaimed_total` is the same question
+asked of the *log* rather than the index (T-319): it is the dead history that
+would otherwise sit on the buffer's volume and be replayed on every restart. A
+flat series alongside a live commit rate means compaction has stopped running,
+which a node only notices at its next boot. Its companion
+`smolquery_hot_manifest_compactions_total` prices the trigger — a rate that
+tracks the commit rate means `manifest_compact_ratio` is too low to damp
+anything, and the rewrite is running far more often than it repays.
 
 They also carry a `method` label, narrowed to `get`, `head`, `post` or `other`.
 A `HEAD` counts zero bytes, because `httpfs` sends one before every segment read

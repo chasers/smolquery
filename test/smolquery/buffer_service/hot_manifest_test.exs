@@ -828,6 +828,129 @@ defmodule Smolquery.BufferService.HotManifestTest do
       {:ok, path} = HotManifest.log_path(manifest, @table)
       assert File.ls!(Path.dirname(path)) == ["manifest.log"]
     end
+
+    test "resets the tracked size and the baseline to what it wrote", context do
+      manifest = context.manifest
+      dropped = add(manifest, @table, rows(1))
+      kept = add(manifest, @table, rows(1))
+      :ok = HotManifest.drop(manifest, @table, [dropped.id])
+
+      assert HotManifest.compact(manifest, @table) == :ok
+
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+      assert %{bytes: bytes, baseline: baseline} = HotManifest.log_size(manifest, @table)
+      assert bytes == File.stat!(path).size
+      assert baseline == bytes
+      assert [^kept] = HotManifest.entries(manifest, @table)
+    end
+
+    test "a failed compaction leaves the size alone", context do
+      manifest = context.manifest
+      add(manifest, @table, rows(1))
+      before = HotManifest.log_size(manifest, @table)
+
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+      File.chmod!(Path.dirname(path), 0o500)
+      on_exit(fn -> File.chmod(Path.dirname(path), 0o700) end)
+
+      assert {:error, {:compaction_failed, _reason}} = HotManifest.compact(manifest, @table)
+      assert HotManifest.log_size(manifest, @table) == before
+    end
+  end
+
+  describe "log_size/2" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "is zero for a table with no log", %{manifest: manifest} do
+      assert HotManifest.log_size(manifest, @table) == %{bytes: 0, baseline: 0}
+    end
+
+    test "tracks the file as appends accumulate", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+
+      assert %{bytes: after_add, baseline: 0} = HotManifest.log_size(manifest, @table)
+      assert after_add == File.stat!(path).size
+
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 3)
+
+      assert %{bytes: after_retire} = HotManifest.log_size(manifest, @table)
+      assert after_retire == File.stat!(path).size
+      assert after_retire > after_add
+    end
+
+    test "counts appends made through a held log", %{manifest: manifest} do
+      {:ok, log} = HotManifest.open_log(manifest, @table)
+
+      segment = write(manifest, @table, rows(1))
+      {:ok, _entry} = HotManifest.add(manifest, @table, segment, log)
+
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+      assert %{bytes: bytes} = HotManifest.log_size(manifest, @table)
+      assert bytes == File.stat!(path).size
+
+      assert HotManifest.close_log(log) == :ok
+    end
+
+    test "is re-derived from the file by recovery, with a baseline of zero", context do
+      manifest = context.manifest
+      add(manifest, @table, rows(1))
+      {:ok, path} = HotManifest.log_path(manifest, @table)
+
+      restarted = %{start_manifest(context, context.local) | log_dir: manifest.log_dir}
+      assert HotManifest.log_size(restarted, @table) == %{bytes: 0, baseline: 0}
+
+      {:ok, _report} = HotManifest.recover(restarted, @table)
+
+      assert HotManifest.log_size(restarted, @table) == %{
+               bytes: File.stat!(path).size,
+               baseline: 0
+             }
+    end
+  end
+
+  describe "compaction_due?/4" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "is false below the floor", %{manifest: manifest} do
+      add(manifest, @table, rows(1))
+
+      %{bytes: bytes} = HotManifest.log_size(manifest, @table)
+
+      refute HotManifest.compaction_due?(manifest, @table, bytes + 1, 1)
+      assert HotManifest.compaction_due?(manifest, @table, bytes, 1)
+    end
+
+    test "is false for a table this node holds no log for", %{manifest: manifest} do
+      refute HotManifest.compaction_due?(manifest, @table, 0, 1)
+    end
+
+    test "needs the ratio again once a compaction sets a baseline", %{manifest: manifest} do
+      for _ <- 1..4, do: add(manifest, @table, rows(1))
+      :ok = HotManifest.compact(manifest, @table)
+
+      %{baseline: baseline} = HotManifest.log_size(manifest, @table)
+      assert baseline > 0
+
+      refute HotManifest.compaction_due?(manifest, @table, 0, 2)
+
+      for _ <- 1..5, do: add(manifest, @table, rows(1))
+
+      assert HotManifest.compaction_due?(manifest, @table, 0, 2)
+    end
+
+    test "a log whose entries all left compacts on the floor alone", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      :ok = HotManifest.drop(manifest, @table, [entry.id])
+      :ok = HotManifest.compact(manifest, @table)
+
+      assert %{bytes: 0, baseline: 0} = HotManifest.log_size(manifest, @table)
+
+      next = add(manifest, @table, rows(1))
+      :ok = HotManifest.drop(manifest, @table, [next.id])
+
+      assert HotManifest.compaction_due?(manifest, @table, 1, 100)
+    end
   end
 
   describe "against a store that is not a filesystem" do

@@ -77,6 +77,11 @@ defmodule Smolquery.Telemetry do
                                           named for entries *served*
                                           (`..._entries_total{route}`) and entries *read*
                                           (`..._read_entries_total{op}`)
+      [:smolquery, :hot_manifest, :compaction] %{duration_us, bytes_before, bytes_after,
+                                          records}, meta %{table_ref: ref}
+                                          — one manifest log rewritten to hold only what
+                                          it still describes; `bytes_before - bytes_after`
+                                          is the dead history reclaimed (T-319)
       [:smolquery, :hot_manifest, :read]  %{duration_us, entries},
                                           meta %{op: :entries | :pending | :claimable |
                                           :live_claim | :retired_before}
@@ -191,6 +196,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
     [:smolquery, :hot_manifest, :change],
+    [:smolquery, :hot_manifest, :compaction],
     [:smolquery, :hot_manifest, :read],
     [:smolquery, :hot_server, :request],
     [:smolquery, :retention, :sweep],
@@ -244,6 +250,18 @@ defmodule Smolquery.Telemetry do
         "size, and nothing else reports it. `retired` below `added` means sealing is " <>
         "not keeping up, which is the one condition under which nothing is ever reaped " <>
         "(T-320).",
+    "smolquery_hot_manifest_compactions_total" =>
+      "Manifest logs rewritten to hold only what they still describe (T-319). Its rate " <>
+        "is how often the trigger fires; a rate that tracks the commit rate means " <>
+        "`manifest_compact_ratio` is too low to be damping anything.",
+    "smolquery_hot_manifest_compaction_microseconds_total" =>
+      "Time spent rewriting manifest logs; divide by compactions for the mean. The " <>
+        "rewrite is proportional to the live set, not to the log, so a rising mean " <>
+        "means backlogs are deepening rather than that logs are.",
+    "smolquery_hot_manifest_compaction_bytes_reclaimed_total" =>
+      "Dead log history reclaimed by compaction. This is the disk, and the boot-time " <>
+        "replay, that would otherwise accumulate for the lifetime of the node — a flat " <>
+        "series alongside a live commit rate means compaction has stopped running.",
     "smolquery_hot_manifest_reads_total" =>
       "Scanning reads of a node's manifest index, by op (T-318).",
     "smolquery_hot_manifest_read_microseconds_total" =>
@@ -522,6 +540,20 @@ defmodule Smolquery.Telemetry do
     bump(
       {"smolquery_hot_manifest_index_entries_total", [change: Map.get(meta, :change, :unknown)]},
       Map.get(measurements, :entries, 0)
+    )
+  end
+
+  def handle_event([:smolquery, :hot_manifest, :compaction], measurements, _meta, nil) do
+    bump({"smolquery_hot_manifest_compactions_total", []}, 1)
+
+    bump(
+      {"smolquery_hot_manifest_compaction_microseconds_total", []},
+      Map.get(measurements, :duration_us, 0)
+    )
+
+    bump(
+      {"smolquery_hot_manifest_compaction_bytes_reclaimed_total", []},
+      max(Map.get(measurements, :bytes_before, 0) - Map.get(measurements, :bytes_after, 0), 0)
     )
   end
 

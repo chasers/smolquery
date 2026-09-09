@@ -650,7 +650,34 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp run_maintenance(state) do
     state
     |> reap()
+    |> compact_log()
     |> signal_when_ready()
+  end
+
+  defp compact_log(state) do
+    due? =
+      HotManifest.compaction_due?(
+        state.runtime.manifest,
+        state.table_ref,
+        state.runtime.manifest_compact_min_bytes,
+        state.runtime.manifest_compact_ratio
+      )
+
+    if due?, do: run_compaction(state), else: state
+  end
+
+  defp run_compaction(state) do
+    case Committer.compact(state.committer) do
+      :ok ->
+        state
+
+      {:error, reason} ->
+        Logger.warning(
+          "manifest log compaction for #{inspect(state.table_ref)} failed: #{inspect(reason)}"
+        )
+
+        state
+    end
   end
 
   defp reap(state) do

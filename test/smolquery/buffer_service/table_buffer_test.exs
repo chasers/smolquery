@@ -366,6 +366,89 @@ defmodule Smolquery.BufferService.TableBufferTest do
     end
   end
 
+  describe "manifest log compaction (T-319)" do
+    # The floor is what decides here; the ratio is 1 so every tick that clears
+    # the floor is due. A production trigger damps with the ratio instead.
+    defp compacting(min_bytes) do
+      [
+        manifest_compact_min_bytes: min_bytes,
+        manifest_compact_ratio: 1,
+        maintenance_interval_ms: 25
+      ]
+    end
+
+    defp log_bytes(runtime, table_ref),
+      do: HotManifest.log_size(runtime.manifest, table_ref).bytes
+
+    test "rewrites a log that has outgrown its live set", context do
+      %{name: name, runtime: runtime} = start_buffer_service(context, compacting(100_000_000))
+      table = {"analytics", "compacted_#{:erlang.unique_integer([:positive])}"}
+
+      for i <- 1..8, do: {:ok, _ack} = Client.write_batch(name, table, batch(i..i))
+
+      grown = log_bytes(runtime, table)
+      assert grown > 0
+
+      entries = HotManifest.entries(runtime.manifest, table)
+      assert :ok = Committer.compact(Runtime.committer_via(runtime, table))
+
+      assert log_bytes(runtime, table) <= grown
+      assert HotManifest.entries(runtime.manifest, table) == entries
+    end
+
+    test "the maintenance tick compacts once the log passes the floor", context do
+      %{name: name, runtime: runtime} = start_buffer_service(context, compacting(1))
+      table = {"analytics", "ticked_#{:erlang.unique_integer([:positive])}"}
+
+      {:ok, _ack} = Client.write_batch(name, table, batch(1..1))
+
+      assert Eventually.until(fn ->
+               HotManifest.log_size(runtime.manifest, table).baseline > 0
+             end)
+
+      {:ok, path} = HotManifest.log_path(runtime.manifest, table)
+      assert log_bytes(runtime, table) == File.stat!(path).size
+    end
+
+    test "a compacted log still commits, and survives recovery", context do
+      %{name: name, runtime: runtime} = start_buffer_service(context, compacting(1))
+      table = {"analytics", "reopened_#{:erlang.unique_integer([:positive])}"}
+
+      {:ok, _first} = Client.write_batch(name, table, batch(1..1))
+
+      assert Eventually.until(fn ->
+               HotManifest.log_size(runtime.manifest, table).baseline > 0
+             end)
+
+      assert {:ok, _second} = Client.write_batch(name, table, batch(2..2))
+
+      assert Eventually.until(fn ->
+               match?([_first, _second], HotManifest.entries(runtime.manifest, table))
+             end)
+
+      live = HotManifest.entries(runtime.manifest, table)
+      {:ok, path} = HotManifest.log_path(runtime.manifest, table)
+      assert log_bytes(runtime, table) == File.stat!(path).size
+
+      assert {:ok, report} = HotManifest.recover(runtime.manifest, table)
+      assert report.entries == 2
+      assert HotManifest.entries(runtime.manifest, table) == live
+    end
+
+    test "leaves a log below the floor alone", context do
+      %{name: name, runtime: runtime} = start_buffer_service(context, compacting(100_000_000))
+      table = {"analytics", "untouched_#{:erlang.unique_integer([:positive])}"}
+
+      {:ok, _ack} = Client.write_batch(name, table, batch(1..1))
+
+      assert Eventually.until(fn -> log_bytes(runtime, table) > 0 end)
+
+      Process.sleep(100)
+
+      assert HotManifest.log_size(runtime.manifest, table).baseline == 0
+    end
+  end
+
   describe "schema changes" do
     test "start a new segment rather than failing", %{name: name, runtime: runtime} do
       wide = Schema.new!([{"id", :int64}, {"ts", :timestamp}, {"extra", :string}])
