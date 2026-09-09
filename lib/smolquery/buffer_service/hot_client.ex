@@ -25,7 +25,10 @@ defmodule Smolquery.BufferService.HotClient do
 
   `"url"` is what a reader opens; `"claim_keys"` is what says which claim it
   belongs to; `"stats"` carries the flush-time min-max bounds a planner prunes
-  on.
+  on; `"field_ids"` is the column id each of the file's columns was written
+  under, by its name in the file, and what every reader projects the file by
+  (PL-62) — absent for a file written before ids existed, which is read by
+  name.
   """
   @type entry :: %{optional(String.t()) => term()}
 

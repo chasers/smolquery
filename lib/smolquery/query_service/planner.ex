@@ -269,7 +269,7 @@ defmodule Smolquery.QueryService.Planner do
            Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
       pruned =
         Trace.span(:prune, fn ->
-          pruned(members, Pruner.conjuncts(statement, refs, params))
+          pruned(members, tables, Pruner.conjuncts(statement, refs, params))
         end)
 
       hot = bounded(runtime, connection, statement, refs, tables, pruned, params)
@@ -338,9 +338,11 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp pruned(members, conjuncts) do
+  defp pruned(members, tables, conjuncts) do
     Map.new(members, fn {ref, entries} ->
-      {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || []))}
+      ids = Smolquery.Schema.field_ids(tables[ref].schema)
+
+      {ref, Enum.filter(entries, &Pruner.keep?(&1, conjuncts[ref] || [], ids))}
     end)
   end
 
@@ -737,9 +739,9 @@ defmodule Smolquery.QueryService.Planner do
     sealed = "SELECT * FROM #{lake}.#{ds}.#{t} AT (VERSION => #{snapshot})"
 
     union =
-      case Enum.map(entries, & &1["url"]) do
+      case entries do
         [] -> sealed
-        urls -> sealed <> " UNION ALL BY NAME SELECT * FROM " <> Views.read_parquet(urls)
+        entries -> sealed <> " UNION ALL BY NAME " <> Views.sources_select(schema, entries)
       end
 
     Views.table_view(ref, schema, union)

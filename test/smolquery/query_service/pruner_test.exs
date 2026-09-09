@@ -163,5 +163,29 @@ defmodule Smolquery.QueryService.PrunerTest do
       refute Pruner.keep?(entry(stats), [{"name", :eq, "zeta"}])
       assert Pruner.keep?(entry(stats), [{"name", :eq, "beta"}])
     end
+
+    test "resolves a column through ids, so a dropped column's bounds never prune its successor (PL-62)" do
+      bounds = %{"min" => 1, "max" => 10, "null_count" => 0}
+      old = %{"stats" => %{"ts_int" => bounds}, "field_ids" => %{"id" => 1, "ts_int" => 2}}
+      catalog = %{"id" => 1, "ts_int" => 3}
+
+      assert Pruner.keep?(old, [{"ts_int", :gt, 100}], catalog)
+      refute Pruner.keep?(old, [{"ts_int", :gt, 100}], %{"id" => 1, "ts_int" => 2})
+    end
+
+    test "finds a column's bounds under whatever the file named it" do
+      bounds = %{"min" => 1, "max" => 10, "null_count" => 0}
+      renamed = %{"stats" => %{"old" => bounds}, "field_ids" => %{"old" => 3}}
+
+      refute Pruner.keep?(renamed, [{"ts_int", :gt, 100}], %{"ts_int" => 3})
+    end
+
+    test "without ids on either side, the name is the key, as before" do
+      bounds = %{"min" => 1, "max" => 10, "null_count" => 0}
+      legacy = %{"stats" => %{"ts_int" => bounds}}
+
+      refute Pruner.keep?(legacy, [{"ts_int", :gt, 100}], %{"ts_int" => 3})
+      refute Pruner.keep?(legacy, [{"ts_int", :gt, 100}], nil)
+    end
   end
 end

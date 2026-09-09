@@ -370,8 +370,7 @@ defmodule Smolquery.QueryService.TopN do
          %{connection: connection, probe: probe, spec: spec, schema: schema} = state,
          candidates
        ) do
-    urls = Enum.map(candidates, & &1["url"])
-    from = padding(schema) <> " UNION ALL BY NAME " <> Views.parquet_select(urls)
+    from = padding(schema) <> " UNION ALL BY NAME " <> Views.sources_select(schema, candidates)
 
     with :ok <- define(connection, Views.table_view(spec.ref, schema, from)),
          {:ok, %Result{rows: [[count, bound]]}} <-

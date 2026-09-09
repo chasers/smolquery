@@ -35,6 +35,42 @@ defmodule Smolquery.QueryService.Views do
   def parquet_select(sources), do: "SELECT * FROM " <> read_parquet(sources)
 
   @doc """
+  The read over hot micro-segments (and any other Parquet sources) projected
+  onto `schema` **by column id**, as one `UNION ALL BY NAME` (PL-62).
+
+  Each source is a manifest entry as `Smolquery.BufferService.HotClient`
+  answers it — at least a `"url"`, and `"field_ids"` when the file was written
+  with ids. `read_parquet(..., union_by_name)` unions by *name*, so two files
+  that use one name for two different ids cannot share a scan: sources are
+  grouped by their `"field_ids"`, each group is projected through
+  `Smolquery.Schema.projection_by_id/2` — the input column with the right id,
+  whatever it is named, or a typed `NULL` — and the groups are unioned by
+  name after projection, when every group already speaks the catalog's names.
+  In steady state every file agrees and there is one group, so the SQL is one
+  scan, as before.
+
+  Sources without `"field_ids"` — files written before ids existed, and sealed
+  files a shard reads directly — form one group read by name, exactly the
+  read every file had before. Groups are rendered in a fixed order so the
+  same sources always give the same SQL.
+  """
+  @spec sources_select(Schema.t(), [map()]) :: String.t()
+  def sources_select(%Schema{} = schema, sources) do
+    sources
+    |> Enum.group_by(&Map.get(&1, "field_ids"), & &1["url"])
+    |> Enum.sort_by(fn {field_ids, _urls} -> field_ids && Enum.sort(field_ids) end)
+    |> Enum.map_join(" UNION ALL BY NAME ", fn
+      {nil, urls} ->
+        parquet_select(urls)
+
+      {field_ids, urls} ->
+        {:ok, projection} = Schema.projection_by_id(schema, field_ids)
+
+        "SELECT #{projection} FROM #{read_parquet(urls)}"
+    end)
+  end
+
+  @doc """
   The statements defining `dataset.table` as `schema`'s columns projected
   over `from_sql`.
 

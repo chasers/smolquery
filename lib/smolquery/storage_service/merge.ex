@@ -279,7 +279,12 @@ defmodule Smolquery.StorageService.Merge do
 
     with {:ok, key} <- valid_key(key),
          {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)) do
-      merge(runtime, table_ref, key, %{urls: urls, row_count: row_count})
+      merge(
+        runtime,
+        table_ref,
+        key,
+        with_urls(%{sources: Enum.map(urls, &%{"url" => &1}), row_count: row_count})
+      )
     end
   end
 
@@ -305,16 +310,15 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp merge_direct(runtime, key, schema, inputs) do
-    with {:ok, projection} <- projection(runtime, schema, inputs.urls),
-         {:ok, put} <-
-           Store.put(runtime.store, key, &copy(runtime, schema, projection, inputs.urls, &1)) do
+    with {:ok, select, urls} <- scan_select(runtime, schema, inputs.sources),
+         {:ok, put} <- Store.put(runtime.store, key, &copy(runtime, schema, select, urls, &1)) do
       {:ok, segment(key, put, inputs.row_count)}
     end
   end
 
   defp merge_chunked(runtime, key, schema, inputs) do
     table = staging_table(key)
-    chunks = Enum.chunk_every(inputs.urls, runtime.merge_inputs_per_call)
+    chunks = Enum.chunk_every(inputs.sources, runtime.merge_inputs_per_call)
 
     try do
       with :ok <- stage_chunks(runtime, schema, table, chunks),
@@ -338,16 +342,12 @@ defmodule Smolquery.StorageService.Merge do
     end)
   end
 
-  defp stage_chunk(runtime, schema, table, urls, index) do
-    with {:ok, projection} <- projection(runtime, schema, urls) do
+  defp stage_chunk(runtime, schema, table, sources, index) do
+    with {:ok, select, urls} <- scan_select(runtime, schema, sources) do
       sql =
         case index do
-          0 ->
-            "CREATE OR REPLACE TEMPORARY TABLE #{table} AS " <>
-              "SELECT #{projection} FROM #{scan(urls)}"
-
-          _ ->
-            "INSERT INTO #{table} SELECT #{projection} FROM #{scan(urls)}"
+          0 -> "CREATE OR REPLACE TEMPORARY TABLE #{table} AS #{select}"
+          _ -> "INSERT INTO #{table} #{select}"
         end
 
       with {:ok, _result} <- query(runtime, sql, urls, runtime.merge_staging_timeout_ms),
@@ -427,31 +427,63 @@ defmodule Smolquery.StorageService.Merge do
 
     entries
     |> Enum.filter(&MapSet.member?(claimed, &1["id"]))
-    |> Enum.reduce_while({:ok, %{urls: [], row_count: 0}}, fn entry, {:ok, acc} ->
+    |> Enum.reduce_while({:ok, %{sources: [], row_count: 0}}, fn entry, {:ok, acc} ->
       case input(entry) do
-        {:ok, url, row_count} ->
-          {:cont, {:ok, %{acc | urls: [url | acc.urls], row_count: acc.row_count + row_count}}}
+        {:ok, source, row_count} ->
+          {:cont,
+           {:ok, %{acc | sources: [source | acc.sources], row_count: acc.row_count + row_count}}}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, %{urls: []}} -> {:error, :no_inputs}
-      {:ok, inputs} -> {:ok, %{inputs | urls: Enum.reverse(inputs.urls)}}
+      {:ok, %{sources: []}} -> {:error, :no_inputs}
+      {:ok, inputs} -> {:ok, with_urls(%{inputs | sources: Enum.reverse(inputs.sources)})}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp input(%{"url" => url, "row_count" => row_count})
+  defp input(%{"url" => url, "row_count" => row_count} = entry)
        when is_binary(url) and is_integer(row_count) and row_count >= 0,
-       do: {:ok, url, row_count}
+       do: {:ok, %{"url" => url, "field_ids" => Map.get(entry, "field_ids")}, row_count}
 
   defp input(entry), do: {:error, {:invalid_manifest_entry, entry}}
 
-  defp projection(runtime, schema, urls) do
+  defp with_urls(%{sources: sources} = inputs),
+    do: Map.put(inputs, :urls, Enum.map(sources, & &1["url"]))
+
+  defp scan_select(runtime, schema, sources) do
+    sources
+    |> Enum.group_by(&Map.get(&1, "field_ids"), & &1["url"])
+    |> Enum.sort_by(fn {field_ids, _urls} -> field_ids && Enum.sort(field_ids) end)
+    |> Enum.reduce_while({:ok, [], [], 0}, fn {field_ids, urls}, {:ok, selects, groups, offset} ->
+      case group_projection(runtime, schema, field_ids, urls) do
+        {:ok, projection} ->
+          select = "SELECT #{projection} FROM #{scan(urls, offset)}"
+
+          {:cont, {:ok, [select | selects], [urls | groups], offset + length(urls)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, selects, groups, _offset} ->
+        {:ok, selects |> Enum.reverse() |> Enum.join(" UNION ALL BY NAME "),
+         groups |> Enum.reverse() |> List.flatten()}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp group_projection(runtime, schema, nil, urls) do
     with {:ok, columns} <- input_columns(runtime, urls), do: Schema.projection(schema, columns)
   end
+
+  defp group_projection(_runtime, schema, field_ids, _urls),
+    do: Schema.projection_by_id(schema, field_ids)
 
   defp input_columns(runtime, urls) do
     sql = "DESCRIBE SELECT * FROM #{scan(urls)}"
@@ -461,9 +493,9 @@ defmodule Smolquery.StorageService.Merge do
     end
   end
 
-  defp copy(runtime, schema, projection, urls, staged) do
+  defp copy(runtime, schema, select, urls, staged) do
     sql = """
-    COPY (SELECT #{projection} FROM #{scan(urls)}#{order_by(schema)})
+    COPY (SELECT * FROM (#{select})#{order_by(schema)})
     TO $#{length(urls) + 1} (#{parquet_options(runtime, schema)})
     """
 
@@ -495,9 +527,11 @@ defmodule Smolquery.StorageService.Merge do
     end
   end
 
-  defp scan(urls), do: "read_parquet([#{placeholders(urls)}], union_by_name := true)"
+  defp scan(urls, offset \\ 0),
+    do: "read_parquet([#{placeholders(urls, offset)}], union_by_name := true)"
 
-  defp placeholders(urls), do: Enum.map_join(1..length(urls), ", ", &"$#{&1}")
+  defp placeholders(urls, offset \\ 0),
+    do: Enum.map_join((offset + 1)..(offset + length(urls)), ", ", &"$#{&1}")
 
   defp query(runtime, sql, params, timeout \\ 30_000) do
     case Engine.try_query(Runtime.merge_engine(runtime), sql, params, timeout) do

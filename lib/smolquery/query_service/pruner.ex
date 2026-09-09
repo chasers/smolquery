@@ -71,15 +71,44 @@ defmodule Smolquery.QueryService.Pruner do
 
   @doc """
   Whether `entry`'s stats leave any chance a row matches every conjunct.
+
+  A conjunct names a column by its catalog name today; an entry's stats are
+  keyed by the name the column had in the file when it was written. `ids` —
+  the catalog's `Smolquery.Schema.field_ids/1` — and the entry's own
+  `"field_ids"` bridge the two (PL-62): the conjunct's column resolves to its
+  id, and the id to whatever the file called it. A column whose id the file
+  never carried has no stats there, so the entry is kept — nothing proves a
+  match impossible, and a column of the same *name* under another id is a
+  different column whose bounds must not prune this one. Without `ids`, or
+  for an entry written before ids existed, the name is the key, as before.
   """
-  @spec keep?(HotClient.entry(), [conjunct()]) :: boolean()
-  def keep?(_entry, []), do: true
+  @spec keep?(HotClient.entry(), [conjunct()], %{String.t() => pos_integer()} | nil) ::
+          boolean()
+  def keep?(entry, conjuncts, ids \\ nil)
 
-  def keep?(entry, conjuncts) do
+  def keep?(_entry, [], _ids), do: true
+
+  def keep?(entry, conjuncts, ids) do
     stats = entry |> Map.get("stats", %{}) |> Entry.decode_stats()
+    resolve = column_resolver(ids, Map.get(entry, "field_ids"))
 
-    not Enum.any?(conjuncts, &excludes?(stats, &1))
+    not Enum.any?(conjuncts, fn {column, op, value} ->
+      excludes?(stats, {resolve.(column), op, value})
+    end)
   end
+
+  defp column_resolver(ids, file_ids) when is_map(ids) and is_map(file_ids) do
+    names_by_id = Map.new(file_ids, fn {name, id} -> {id, name} end)
+
+    fn column ->
+      case Map.fetch(ids, column) do
+        {:ok, id} -> Map.get(names_by_id, id, :absent)
+        :error -> column
+      end
+    end
+  end
+
+  defp column_resolver(_ids, _file_ids), do: & &1
 
   defp aliases(from, refs) do
     known = MapSet.new(refs)

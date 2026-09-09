@@ -32,12 +32,22 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
     :added_at,
     :sealed_at,
     :retired_at,
+    :field_ids,
     stats: %{},
     claim_keys: [],
     batch_ids: []
   ]
 
   @type column_stats :: Segment.column_stats()
+
+  @typedoc """
+  What every reader of this segment projects it by (PL-62): the column id
+  each of the file's columns was written under, by its name in the file.
+  Recorded at write, so it is the schema *then*, whatever the catalog says
+  now — which is the point. `nil` for a segment written before ids existed;
+  such a segment is read by name, as it always was.
+  """
+  @type field_ids :: Segment.field_ids()
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -47,6 +57,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
           added_at: integer(),
           sealed_at: non_neg_integer() | nil,
           retired_at: integer() | nil,
+          field_ids: field_ids(),
           stats: %{optional(String.t()) => column_stats()},
           claim_keys: [String.t()],
           batch_ids: [String.t()]
@@ -68,6 +79,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
       row_count: segment.row_count,
       byte_size: segment.byte_size,
       added_at: added_at,
+      field_ids: segment.field_ids,
       stats: segment.stats,
       batch_ids: batch_ids
     }
@@ -135,7 +147,8 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
       "sealed_at" => entry.sealed_at,
       "retired_at" => entry.retired_at,
       "claim_keys" => entry.claim_keys,
-      "batch_ids" => entry.batch_ids
+      "batch_ids" => entry.batch_ids,
+      "field_ids" => entry.field_ids
     }
 
     if Keyword.get(opts, :stats, true) do
@@ -162,6 +175,7 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
        retired_at: Map.get(record, "retired_at"),
        claim_keys: Map.get(record, "claim_keys") || [],
        batch_ids: Map.get(record, "batch_ids") || [],
+       field_ids: Map.get(record, "field_ids"),
        stats: record |> Map.get("stats", %{}) |> decode_stats()
      }}
   end
