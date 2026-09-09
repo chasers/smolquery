@@ -128,6 +128,31 @@ defmodule SmolqueryApi.Docs do
         }
       },
       %{
+        "method" => "POST",
+        "path" => "/v1/datasets/:dataset/tables/:table/columns",
+        "auth" => "bearer",
+        "summary" =>
+          "Add a column, appended last and always nullable. Nothing is rewritten: " <>
+            "a segment written before the add reads the column as NULL. A name the " <>
+            "table has answers 409, and so does a name it once had — a dropped " <>
+            "column's name cannot be reused. Answers the table body.",
+        "request" => %{
+          "name" => "string",
+          "type" => "schema type",
+          "nullable" => "true, the default; false answers 422"
+        }
+      },
+      %{
+        "method" => "DELETE",
+        "path" => "/v1/datasets/:dataset/tables/:table/columns/:column",
+        "auth" => "bearer",
+        "summary" =>
+          "Drop a column. Refused for the last column, a clustering column, or the " <>
+            "retention column — clear those first. Files are not rewritten; the " <>
+            "column stays visible to a read pinned at an earlier snapshot, and its " <>
+            "name cannot be reused. Answers the table body."
+      },
+      %{
         "method" => "DELETE",
         "path" => "/v1/datasets/:dataset/tables/:table/segments",
         "auth" => "bearer",

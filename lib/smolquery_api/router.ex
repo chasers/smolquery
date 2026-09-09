@@ -26,6 +26,8 @@ defmodule SmolqueryApi.Router do
       POST /v1/datasets/:ds/tables                 create a table
       GET  /v1/datasets/:ds/tables/:table          a table's schema + retention
       PATCH /v1/datasets/:ds/tables/:table         set/clear retention policy
+      POST /v1/datasets/:ds/tables/:table/columns  add a column
+      DELETE /v1/datasets/:ds/tables/:table/columns/:column  drop a column
       DELETE /v1/datasets/:ds/tables/:table/segments  drop segments by path
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
       GET  /v1/connections                         list federated Postgres connections
@@ -73,6 +75,8 @@ defmodule SmolqueryApi.Router do
     patch "/v1/datasets/:dataset/tables/:table", TableController, :update
     delete "/v1/datasets/:dataset/tables/:table/segments", SegmentController, :delete
     post "/v1/datasets/:dataset/tables/:table/insert", InsertController, :create
+    post "/v1/datasets/:dataset/tables/:table/columns", ColumnController, :create
+    delete "/v1/datasets/:dataset/tables/:table/columns/:column", ColumnController, :delete
     get "/v1/connections", ConnectionController, :index
     post "/v1/connections", ConnectionController, :create
     post "/v1/connections/:name/test", ConnectionController, :test

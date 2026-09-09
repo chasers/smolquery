@@ -42,28 +42,33 @@ defmodule SmolqueryApi.TableSchema do
   @spec from_json(term()) :: {:ok, Schema.t()} | {:error, term()}
   def from_json(fields) when is_list(fields) do
     fields
-    |> Enum.reduce_while({:ok, []}, fn field, {:ok, specs} ->
-      case field_spec(field) do
-        {:ok, spec} -> {:cont, {:ok, [spec | specs]}}
+    |> Enum.reduce_while({:ok, []}, fn field, {:ok, parsed} ->
+      case field_from_json(field) do
+        {:ok, field} -> {:cont, {:ok, [field | parsed]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, specs} -> Schema.new(Enum.reverse(specs))
+      {:ok, parsed} -> Schema.new(Enum.reverse(parsed))
       {:error, reason} -> {:error, reason}
     end
   end
 
   def from_json(other), do: {:error, {:invalid_schema, other}}
 
-  defp field_spec(%{"name" => name, "type" => type} = field) do
+  @doc """
+  Parses one JSON-decoded field object — what `POST .../columns` carries,
+  and what each element of a schema list is.
+  """
+  @spec field_from_json(term()) :: {:ok, Field.t()} | {:error, term()}
+  def field_from_json(%{"name" => name, "type" => type} = field) do
     with {:ok, type} <- Schema.type_from_api(type),
          {:ok, nullable} <- nullable(field) do
-      {:ok, {name, type, [nullable: nullable]}}
+      Field.new(name, type, nullable: nullable)
     end
   end
 
-  defp field_spec(other), do: {:error, {:invalid_field, other}}
+  def field_from_json(other), do: {:error, {:invalid_field, other}}
 
   defp nullable(field) do
     case Map.get(field, "nullable", true) do

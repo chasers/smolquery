@@ -115,7 +115,13 @@ defmodule SmolqueryApi.TableController do
     end
   end
 
-  defp table_body(table, schema, policy) do
+  @doc """
+  The body every table route answers with: id, schema, retention, clustering,
+  partitions. Shared with `SmolqueryApi.ColumnController`, whose routes
+  answer the whole table too, so a client sees one shape.
+  """
+  @spec table_body(String.t(), Schema.t(), Catalog.retention() | nil) :: map()
+  def table_body(table, schema, policy) do
     %{
       "id" => table,
       "schema" => TableSchema.to_json(schema),
@@ -253,7 +259,13 @@ defmodule SmolqueryApi.TableController do
 
   defp id(_body), do: {:error, {:missing_field, "id"}}
 
-  defp invalidate_schema_cache(conn, table_ref) do
+  @doc """
+  Drops this node's cached schema for `table_ref`, so the next insert here
+  reads the catalog. Every route that changes a table calls it; other nodes
+  converge within `schema_cache_ttl_ms`.
+  """
+  @spec invalidate_schema_cache(Plug.Conn.t(), Catalog.table_ref()) :: :ok
+  def invalidate_schema_cache(conn, table_ref) do
     {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
 
     IngestService.Client.invalidate(runtime.ingest_name, table_ref)
