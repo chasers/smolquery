@@ -262,4 +262,72 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert Writer.ndjson_problem(@engine, fine, schema()) == :ok
     end
   end
+
+  describe "materialized columns (PL-61 L4)" do
+    defp computed_schema do
+      Schema.new!([
+        {"id", :int64},
+        {"ts_int", :int64},
+        {"ts", :timestamp,
+         materialized: %Smolquery.Schema.Materialized{
+           expression: "epoch_ms(ts_int)",
+           canonical: "epoch_ms(ts_int)",
+           sources: [2]
+         }},
+        {"n", :int64,
+         materialized: %Smolquery.Schema.Materialized{
+           expression: "CAST(id AS INTEGER) / 0",
+           canonical: "CAST(CAST(id AS INTEGER) AS BIGINT) // 0",
+           sources: [1]
+         }}
+      ])
+    end
+
+    test "the file carries the computed value, in schema order, with stats", %{tmp_dir: dir} do
+      path =
+        spool(dir, "computed.ndjson", [%{"id" => 1, "ts_int" => 1_700_000_000_000}, %{"id" => 2}])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, computed_schema(), store: store(dir), engine: @engine)
+
+      {:ok, result} =
+        Engine.query(@engine, "SELECT id, ts_int, ts, n FROM read_parquet($1) ORDER BY id", [
+          segment.path
+        ])
+
+      assert result.columns == ["id", "ts_int", "ts", "n"]
+
+      assert [[1, 1_700_000_000_000, ~N[2023-11-14 22:13:20.000000], nil], [2, nil, nil, nil]] =
+               result.rows
+
+      assert segment.stats["ts"].min == ~N[2023-11-14 22:13:20.000000]
+      assert segment.stats["ts"].null_count == 1
+    end
+
+    test "a value the expression cannot take stores NULL, and the batch still lands", %{
+      tmp_dir: dir
+    } do
+      path = spool(dir, "bad.ndjson", [%{"id" => 1, "ts_int" => 9_999_999_999_999_999}])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, computed_schema(), store: store(dir), engine: @engine)
+
+      assert segment.row_count == 1
+      assert segment.stats["ts"].null_count == 1
+    end
+
+    test "a body naming the materialized column is readable: the value is ignored, not read",
+         %{tmp_dir: dir} do
+      path =
+        spool(dir, "named.ndjson", [%{"id" => 1, "ts_int" => 0, "ts" => "2030-01-01T00:00:00"}])
+
+      assert Writer.readable_ndjson?(@engine, path, computed_schema())
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, computed_schema(), store: store(dir), engine: @engine)
+
+      {:ok, result} = Engine.query(@engine, "SELECT ts FROM read_parquet($1)", [segment.path])
+      assert result.rows == [[~N[1970-01-01 00:00:00.000000]]]
+    end
+  end
 end

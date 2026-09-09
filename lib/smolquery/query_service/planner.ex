@@ -223,6 +223,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster
+  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
   alias Smolquery.Federation
   alias Smolquery.Identifier
@@ -467,10 +468,10 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp classified(statement) do
-    ctes = collect(statement, &cte_names/1)
+    ctes = Ast.collect(statement, &cte_names/1)
 
     statement
-    |> collect(&base_table/1)
+    |> Ast.collect(&base_table/1)
     |> Enum.uniq()
     |> Enum.reduce_while({:ok, [], []}, fn node, {:ok, refs, federated} ->
       case classify(node, ctes) do
@@ -490,19 +491,6 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp collect(node, fun), do: node |> collect(fun, []) |> Enum.reverse()
-
-  defp collect(node, fun, acc) when is_map(node) do
-    acc = node |> fun.() |> Enum.reduce(acc, &[&1 | &2])
-
-    Enum.reduce(node, acc, fn {_key, value}, inner -> collect(value, fun, inner) end)
-  end
-
-  defp collect(node, fun, acc) when is_list(node),
-    do: Enum.reduce(node, acc, &collect(&1, fun, &2))
-
-  defp collect(_leaf, _fun, acc), do: acc
-
   defp cte_names(%{"cte_map" => %{"map" => entries}}) when is_list(entries),
     do: for(%{"key" => name} <- entries, do: name)
 
@@ -515,7 +503,7 @@ defmodule Smolquery.QueryService.Planner do
 
   defp gate_table_functions(statement, true) do
     statement
-    |> collect(&table_function_name/1)
+    |> Ast.collect(&table_function_name/1)
     |> Enum.find(&(&1 not in @allowed_table_functions))
     |> case do
       nil -> :ok

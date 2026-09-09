@@ -24,8 +24,9 @@ defmodule Smolquery.DdlTest do
       assert {:ok,
               %AlterTable{
                 table: {"analytics", "events"},
-                change: {:add_column, %Field{name: "country", type: :string, nullable: true}},
-                materialized: nil,
+                change:
+                  {:add_column,
+                   %Field{name: "country", type: :string, nullable: true, materialized: nil}},
                 if_exists: false
               }} = Ddl.parse("ALTER TABLE analytics.events ADD COLUMN country STRING")
     end
@@ -76,7 +77,16 @@ defmodule Smolquery.DdlTest do
     end
 
     test "MATERIALIZED keeps the expression as raw text" do
-      assert {:ok, %AlterTable{materialized: "epoch_ms(ts_int) + INTERVAL '1 hour'"}} =
+      assert {:ok,
+              %AlterTable{
+                change:
+                  {:add_column,
+                   %Field{
+                     name: "ts",
+                     type: :timestamp,
+                     materialized: %{expression: "epoch_ms(ts_int) + INTERVAL '1 hour'"}
+                   }}
+              }} =
                Ddl.parse(
                  "ALTER TABLE ds.t ADD COLUMN ts TIMESTAMP MATERIALIZED epoch_ms(ts_int) + INTERVAL '1 hour';"
                )
@@ -229,12 +239,18 @@ defmodule Smolquery.DdlTest do
                run(catalog, "ALTER TABLE ds.t ADD COLUMN IF NOT EXISTS ts STRING")
 
       assert {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
-      assert {:ok, %Field{name: "ts", type: :string, id: 2}} = Schema.field(schema, "ts")
+      assert {:ok, %Field{name: "ts", type: :string, id: 3}} = Schema.field(schema, "ts")
     end
 
-    test "MATERIALIZED is parsed but not yet executable", %{catalog: catalog} do
-      assert run(catalog, "ALTER TABLE ds.t ADD COLUMN x TIMESTAMP MATERIALIZED epoch_ms(id)") ==
-               {:error, :materialized_unsupported}
+    test "MATERIALIZED adds a computed column, its expression on the field (PL-61 L4)",
+         %{catalog: catalog} do
+      assert {:ok, %{operation: :add_column, column: "x", performed: true}} =
+               run(catalog, "ALTER TABLE ds.t ADD COLUMN x TIMESTAMP MATERIALIZED epoch_ms(id)")
+
+      {:ok, schema} = Catalog.table_schema(catalog, {"ds", "t"})
+
+      assert {:ok, %Field{type: :timestamp, materialized: %{expression: "epoch_ms(id)"}}} =
+               Schema.field(schema, "x")
     end
   end
 
@@ -245,7 +261,8 @@ defmodule Smolquery.DdlTest do
       assert Ddl.error?({:unsupported_ddl, "NOT NULL"})
       assert Ddl.error?(:last_column)
       assert Ddl.error?(:multiple_statements)
-      assert Ddl.error?(:materialized_unsupported)
+      assert Ddl.error?({:invalid_materialized, :one_expression})
+      assert Ddl.error?({:materialized_source, "id", "x"})
       refute Ddl.error?({:invalid_query, "syntax error"})
       refute Ddl.error?(:timeout)
     end

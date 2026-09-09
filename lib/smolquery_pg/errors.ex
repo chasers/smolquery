@@ -96,10 +96,14 @@ defmodule SmolqueryPg.Errors do
 
   def from_reason(:last_column), do: {"55000", Ddl.message(:last_column)}
 
+  def from_reason({:materialized_source, _name, _dependent} = reason),
+    do: {"55000", Ddl.message(reason)}
+
+  def from_reason({:invalid_materialized, _detail} = reason), do: {"42P17", Ddl.message(reason)}
+
   def from_reason(reason)
       when reason in [
              :alter_table_unsupported,
-             :materialized_unsupported,
              :ddl_not_explainable,
              :ddl_takes_no_params
            ],

@@ -11,6 +11,9 @@ defmodule SmolqueryApi.Errors do
 
   import Plug.Conn
 
+  alias Smolquery.Ddl
+  alias Smolquery.Schema.Materialized
+
   @doc """
   Sends the envelope and returns the conn.
   """
@@ -228,19 +231,28 @@ defmodule SmolqueryApi.Errors do
 
   def from_reason(conn, {tag, _detail} = reason)
       when tag in [:invalid_ddl, :unsupported_ddl, :unqualified_table] do
-    send_error(conn, 400, "INVALID_QUERY", Smolquery.Ddl.message(reason))
+    send_error(conn, 400, "INVALID_QUERY", Ddl.message(reason))
   end
 
   def from_reason(conn, :multiple_statements) do
-    send_error(conn, 400, "INVALID_QUERY", Smolquery.Ddl.message(:multiple_statements))
+    send_error(conn, 400, "INVALID_QUERY", Ddl.message(:multiple_statements))
   end
 
   def from_reason(conn, reason) when reason in [:ddl_not_explainable, :ddl_takes_no_params] do
-    send_error(conn, 400, "INVALID_ARGUMENT", Smolquery.Ddl.message(reason))
+    send_error(conn, 400, "INVALID_ARGUMENT", Ddl.message(reason))
   end
 
-  def from_reason(conn, :materialized_unsupported) do
-    send_error(conn, 501, "UNIMPLEMENTED", Smolquery.Ddl.message(:materialized_unsupported))
+  def from_reason(conn, {:invalid_materialized, detail}) do
+    send_error(conn, 400, "INVALID_ARGUMENT", Materialized.message(detail))
+  end
+
+  def from_reason(conn, {:materialized_source, name, dependent}) do
+    send_error(
+      conn,
+      422,
+      "FAILED_PRECONDITION",
+      "column #{name} is read by the materialized column #{dependent}; drop that one first"
+    )
   end
 
   def from_reason(conn, :commit_conflict) do
