@@ -28,9 +28,18 @@ The pipeline runs in this order:
    `vX.Y.Z`. The run also creates the GitHub release.
 
 A release run that fails after the merge does not need a new version bump.
-Dispatch the Release workflow with the bump commit as `sha`. The run reuses
-the image it already published. The run then finishes the tag and the
-release.
+Dispatch the Release workflow with the bump commit as `sha` — the **full**
+40-character SHA; `actions/checkout` reads a short one as a branch name and
+the run fails at checkout. The run reuses the image it already published.
+The run then finishes the tag and the release.
+
+The push-triggered run detects a bump by diffing `mix.exs` at the pushed
+head against its parent, so the bump commit must *be* the head of the push.
+A stack merged with `gh stack merge --rebase` lands its commits in order:
+put the version bump in the stack's **top** PR, or the run sees no
+version-line change and the release must be dispatched by hand at the
+bump commit — which then tags that commit, not the head (0.19.0 was
+released this way, one commit below `main`'s head).
 
 Pin deployments to the image digest, not to a tag. The digest is the
 durable reference.
