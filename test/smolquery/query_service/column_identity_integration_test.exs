@@ -61,6 +61,8 @@ defmodule Smolquery.QueryService.ColumnIdentityIntegrationTest do
 
   test "a micro-segment written under a dropped column reads NULL in its re-added namesake",
        %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
     :ok = Catalog.alter_table(node.catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
     {:ok, before} = Catalog.table_schema(node.catalog, @table)
 
