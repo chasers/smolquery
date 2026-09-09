@@ -106,4 +106,29 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
     {:ok, unchanged} = Catalog.table_schema(node.catalog, @table)
     assert Schema.names(unchanged) == ["id", "ts_int", "ts"]
   end
+
+  test "a row written before the column carries the value after its seal: the sealer recomputes (PL-61 L5)",
+       %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
+    {:ok, plain} = Catalog.table_schema(node.catalog, @table)
+    {:ok, _one} = write(node, plain, [%{"id" => 1, "ts_int" => 1_700_000_000_000}])
+
+    assert {:ok, %{state: :done}, nil} =
+             QueryService.Client.query(
+               node.query,
+               "ALTER TABLE analytics.events ADD COLUMN ts TIMESTAMP MATERIALIZED epoch_ms(ts_int)"
+             )
+
+    assert rows(node, "SELECT id, ts FROM analytics.events") == [%{"id" => 1, "ts" => nil}]
+
+    {:ok, widened} = Catalog.table_schema(node.catalog, @table)
+    {:ok, _two} = write(node, widened, [%{"id" => 2, "ts_int" => 1_700_000_060_000}])
+    assert Eventually.until(fn -> FullNode.sealed_count(node) >= 1 end, 200, 25)
+
+    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == [
+             %{"id" => 1, "ts" => ~N[2023-11-14 22:13:20.000000]},
+             %{"id" => 2, "ts" => ~N[2023-11-14 22:14:20.000000]}
+           ]
+  end
 end

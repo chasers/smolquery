@@ -204,6 +204,43 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert lake_pairs(context.storage) == [[1, nil], [2, "x"]]
   end
 
+  test "a materialized column added after the inputs sealed is computed by the compaction (PL-61 L5)",
+       context do
+    runtime = start_compactor(context, [])
+    catalog = context.catalog
+    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
+    {:ok, plain} = Catalog.table_schema(catalog, @table)
+
+    register_written(
+      runtime,
+      catalog,
+      1,
+      plain,
+      [%{"id" => 1, "ts_int" => 1_700_000_000_000}],
+      context.tmp_dir
+    )
+
+    register_written(runtime, catalog, 2, plain, [%{"id" => 2, "ts_int" => nil}], context.tmp_dir)
+
+    :ok =
+      Catalog.alter_table(
+        catalog,
+        @table,
+        {:add_column, Field.new!("ts", :timestamp, materialized: "epoch_ms(ts_int)")}
+      )
+
+    assert lake_stamps(context.storage) == [[1, nil], [2, nil]]
+
+    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert lake_stamps(context.storage) == [[1, ~N[2023-11-14 22:13:20.000000]], [2, nil]]
+  end
+
+  defp lake_stamps(storage) do
+    Runtime.catalog_engine(storage)
+    |> Engine.query!(~s|SELECT id, ts FROM lake."analytics"."events" ORDER BY id|)
+    |> Map.fetch!(:rows)
+  end
+
   test "readers pinned before the swap still see the inputs", context do
     runtime = start_compactor(context, [])
     a = seal(runtime, context.catalog, 1, 1..10)

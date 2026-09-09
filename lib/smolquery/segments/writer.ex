@@ -32,10 +32,11 @@ defmodule Smolquery.Segments.Writer do
   ## Materialized columns
 
   A column computed from the row (`Smolquery.Schema.Materialized`, PL-61 L4)
-  is not read from the body: the `COPY`'s select list evaluates its
-  canonical expression over the body's regular columns, wrapped in `TRY`, so
-  the file carries the value and a row whose values the expression cannot
-  take stores `NULL` rather than failing the batch. The stats are read off
+  is not read from the body: the `COPY`'s select list
+  (`Smolquery.Schema.computed_select/1`) evaluates its expression over the
+  body's regular columns, wrapped in `TRY`, so the file carries the value
+  and a row whose values the expression cannot take stores `NULL` rather
+  than failing the batch. The stats are read off
   the written file, so a materialized column is bounded like any other.
   `readable_ndjson?/3` reads the regular columns only, as the `COPY` does.
 
@@ -205,7 +206,7 @@ defmodule Smolquery.Segments.Writer do
 
     sql = """
     COPY (
-      SELECT #{select_list(schema)} FROM read_json([#{placeholders(count)}],
+      SELECT #{Schema.computed_select(schema)} FROM read_json([#{placeholders(count)}],
         format = 'newline_delimited',
         columns = {#{columns_spec(schema)}})#{order_clause(schema)}
     )
@@ -287,21 +288,6 @@ defmodule Smolquery.Segments.Writer do
       {:ok, type} = Schema.duckdb_type(field.type)
 
       "'#{field.name}': '#{type}'"
-    end)
-  end
-
-  defp select_list(%Schema{fields: fields}) do
-    Enum.map_join(fields, ", ", fn %Field{} = field ->
-      name = Identifier.quote_name!(field.name)
-
-      case field.materialized do
-        nil ->
-          name
-
-        %{canonical: canonical} when is_binary(canonical) ->
-          {:ok, type} = Schema.duckdb_type(field.type)
-          "TRY(CAST((#{canonical}) AS #{type})) AS #{name}"
-      end
     end)
   end
 
