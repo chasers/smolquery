@@ -32,7 +32,8 @@ defmodule Smolquery.Test.MapCatalog do
           clustering: %{},
           partitions: %{},
           connections: %{},
-          next_ids: %{}
+          next_ids: %{},
+          snapshot: 0
         }
       end)
 
@@ -95,7 +96,8 @@ defmodule Smolquery.Test.MapCatalog do
         %{
           state
           | tables: Map.put(state.tables, table_ref, identified),
-            next_ids: Map.put(state.next_ids, table_ref, length(identified.fields) + 1)
+            next_ids: Map.put(state.next_ids, table_ref, length(identified.fields) + 1),
+            snapshot: state.snapshot + 1
         }
       end
     end)
@@ -240,7 +242,8 @@ defmodule Smolquery.Test.MapCatalog do
        %{
          state
          | tables: Map.put(state.tables, table_ref, schema),
-           next_ids: Map.put(state.next_ids, table_ref, id + 1)
+           next_ids: Map.put(state.next_ids, table_ref, id + 1),
+           snapshot: state.snapshot + 1
        }}
     else
       {:error, reason} -> {{:error, reason}, state}
@@ -250,7 +253,8 @@ defmodule Smolquery.Test.MapCatalog do
   defp alter(state, table_ref, {:drop_column, column}) do
     with {:ok, schema} <- fetch_table(state, table_ref),
          {:ok, schema} <- Schema.drop_field(schema, column) do
-      {:ok, %{state | tables: Map.put(state.tables, table_ref, schema)}}
+      {:ok,
+       %{state | tables: Map.put(state.tables, table_ref, schema), snapshot: state.snapshot + 1}}
     else
       {:error, reason} -> {{:error, reason}, state}
     end
@@ -286,7 +290,7 @@ defmodule Smolquery.Test.MapCatalog do
   def expire_snapshots(_agent, _older_than_ms), do: {:ok, 0}
 
   @impl Catalog
-  def current_snapshot(_agent), do: {:error, :not_supported}
+  def current_snapshot(agent), do: {:ok, Agent.get(agent, & &1.snapshot)}
 
   @impl Catalog
   def known_segments(_agent), do: {:error, :not_supported}

@@ -257,6 +257,26 @@ defmodule Smolquery.Schema do
   def materialized?(%Field{}), do: true
 
   @doc """
+  The columns a writer's schema names under an id the catalog no longer gives
+  that name — a schema read before a `DROP` and `ADD` of the same name
+  (PL-62, T-439). A file stamped with such an id would be read as the old
+  column: `NULL` under the new one, projected away at the seal. A name only
+  one side has, or one either side has no id for, is not stale: an added or
+  dropped column converges as documented; only a re-used name loses data.
+  """
+  @spec stale_ids(t(), t()) :: [String.t()]
+  def stale_ids(%__MODULE__{fields: written}, %__MODULE__{fields: current}) do
+    ids = Map.new(current, &{&1.name, &1.id})
+
+    for %Field{name: name, id: id} <- written,
+        is_integer(id),
+        current_id = Map.get(ids, name),
+        is_integer(current_id),
+        current_id != id,
+        do: name
+  end
+
+  @doc """
   Every column's id by name, or `nil` when any column has none.
 
   All or nothing, because a file is stamped with ids for every column or for

@@ -292,6 +292,26 @@ defmodule SmolqueryApi.InsertControllerTest do
   end
 
   describe "a buffer node still on the Polars writer (rollout window, PL-57)" do
+    test "stale column ids after the one retry are a 409 that says to retry; an unreachable catalog a 503" do
+      stale =
+        SmolqueryApi.InsertController.insert_error(
+          conn(:post, "/"),
+          {:stale_schema, {"analytics", "events"}, ["ts"]}
+        )
+
+      assert stale.status == 409
+      assert JSON.decode!(stale.resp_body)["error"]["message"] =~ "(ts); retry"
+
+      unavailable =
+        SmolqueryApi.InsertController.insert_error(
+          conn(:post, "/"),
+          {:catalog_unavailable, :boom}
+        )
+
+      assert unavailable.status == 503
+      assert Plug.Conn.get_resp_header(unavailable, "retry-after") == ["1"]
+    end
+
     test "is a 503 that names the rollout order, not an internal error" do
       response = SmolqueryApi.InsertController.insert_error(conn(:post, "/"), :ndjson_unsupported)
 

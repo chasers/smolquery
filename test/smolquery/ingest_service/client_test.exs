@@ -6,6 +6,7 @@ defmodule Smolquery.IngestService.ClientTest do
   alias Smolquery.IngestService
   alias Smolquery.IngestService.Runtime
   alias Smolquery.Schema
+  alias Smolquery.Schema.Field
   alias Smolquery.Test.MapCatalog
 
   @moduletag :tmp_dir
@@ -30,7 +31,7 @@ defmodule Smolquery.IngestService.ClientTest do
 
     on_exit(fn -> BufferService.Runtime.delete(buffer) end)
 
-    catalog = MapCatalog.new()
+    catalog = Keyword.get_lazy(opts, :catalog, &MapCatalog.new/0)
     :ok = Catalog.create_dataset(catalog, "analytics")
     :ok = Catalog.create_table(catalog, @table, schema())
 
@@ -196,6 +197,47 @@ defmodule Smolquery.IngestService.ClientTest do
 
       {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
       assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+  end
+
+  describe "a schema cache that missed a DROP and ADD of the same name (T-439)" do
+    test "the buffer refuses the stale ids, the cache is dropped, and the write lands under the new column",
+         context do
+      catalog = MapCatalog.new()
+      :ok = Catalog.create_dataset(catalog, "analytics")
+      :ok = Catalog.create_table(catalog, @table, schema())
+
+      %{name: name, buffer: buffer} =
+        start_stack(context,
+          buffer: [catalog: catalog, write_pool_size: 1],
+          ingest: [catalog: catalog, schema_cache_ttl_ms: 600_000],
+          catalog: catalog
+        )
+
+      assert {:ok, %{inserted: 1}} =
+               IngestService.Client.insert(name, @table, [
+                 %{"id" => 1, "ts" => "2026-08-01T10:00:00"}
+               ])
+
+      :ok = MapCatalog.alter_table(catalog.config, @table, {:drop_column, "ts"})
+
+      :ok =
+        MapCatalog.alter_table(catalog.config, @table, {:add_column, Field.new!("ts", :string)})
+
+      assert {:ok, %{inserted: 1, errors: []}} =
+               IngestService.Client.insert(name, @table, [
+                 %{"id" => 2, "ts" => "2026-08-01T10:00:00"}
+               ])
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.map(entries, & &1.field_ids["ts"]) |> Enum.sort() == [2, 3]
+
+      assert {:ok, %{inserted: 0, errors: [%{errors: [%{message: message}]}]}} =
+               IngestService.Client.insert(name, @table, [
+                 %{"id" => 3, "ts" => 7}
+               ])
+
+      assert message =~ "cannot accept"
     end
   end
 

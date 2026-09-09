@@ -185,6 +185,8 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.BufferService.Runtime
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.BufferService.TableBuffer.Committer
+  alias Smolquery.Catalog
+  alias Smolquery.Partitions
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
@@ -211,7 +213,8 @@ defmodule Smolquery.BufferService.TableBuffer do
     in_flight: 0,
     in_flight_inserts: 0,
     in_flight_ids: MapSet.new(),
-    release_failures: 0
+    release_failures: 0,
+    verified: nil
   ]
 
   # `segment_id` is `nil` for a commit that produced no rows: the flush deletes
@@ -482,8 +485,10 @@ defmodule Smolquery.BufferService.TableBuffer do
         {:reply, {:duplicate, ack}, state}
 
       :error ->
-        case write_gate(state) do
-          :ok -> write_or_join(state, schema, rows, batch_id, bytes, from)
+        with :ok <- write_gate(state),
+             {:ok, state} <- verified(state, schema) do
+          write_or_join(state, schema, rows, batch_id, bytes, from)
+        else
           {:error, _reason} = refusal -> {:reply, refusal, state}
         end
     end
@@ -1095,6 +1100,49 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp committed_ack(state, batch_id),
     do: HotManifest.batch_ack(state.runtime.manifest, state.table_ref, batch_id)
+
+  # A batch is written under the ids its schema carries, and every reader
+  # projects by id (PL-62), so a schema read before a DROP and ADD of the same
+  # name would store the row under the old column — NULL under the new one,
+  # projected away at the seal — behind a 200 (T-439). The check is exact and
+  # cheap: every batch costs one `current_snapshot` read, the smallest read
+  # the catalog has, and the table's schema is read again only when that
+  # snapshot has moved since the ids were last confirmed or the batch carries
+  # other ids — a schema change or a seal registration, never a steady stream
+  # of writes. A memo of the ids alone would be one more cache to go stale,
+  # which is the hole this closes. A stale writer after a re-add is refused
+  # with the names that moved, so the ingest node drops its cache and retries.
+  # A buffer without a catalog trusts the writer; a batch without ids has
+  # nothing to check.
+  defp verified(%__MODULE__{runtime: %{catalog: nil}} = state, _schema), do: {:ok, state}
+
+  defp verified(state, schema) do
+    case Schema.field_ids(schema) do
+      nil -> {:ok, state}
+      ids -> verified_at_snapshot(state, schema, ids)
+    end
+  end
+
+  defp verified_at_snapshot(state, schema, ids) do
+    case Catalog.current_snapshot(state.runtime.catalog) do
+      {:ok, snapshot} when {ids, snapshot} == state.verified -> {:ok, state}
+      {:ok, snapshot} -> verified_against_catalog(state, schema, ids, snapshot)
+      {:error, reason} -> {:error, {:catalog_unavailable, reason}}
+    end
+  end
+
+  defp verified_against_catalog(state, schema, ids, snapshot) do
+    case Catalog.table_schema(state.runtime.catalog, Partitions.parent(state.table_ref)) do
+      {:ok, current} ->
+        case Schema.stale_ids(schema, current) do
+          [] -> {:ok, %{state | verified: {ids, snapshot}}}
+          stale -> {:error, {:stale_schema, state.table_ref, stale}}
+        end
+
+      {:error, reason} ->
+        {:error, {:catalog_unavailable, reason}}
+    end
+  end
 
   defp write_gate(state) do
     if Drain.draining?(state.runtime.name) do

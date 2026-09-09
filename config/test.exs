@@ -27,6 +27,7 @@ config :smolquery, SmolqueryWeb.Endpoint,
 # `commit_siblings: 0` holds the adaptive wait off, so `flush_interval_ms`
 # keeps meaning what a test says; adaptive tests opt back in explicitly.
 config :smolquery, Smolquery.BufferService,
+  catalog: :none,
   hot_server_port: 0,
   seal_consumer: {Smolquery.BufferService.SealLog, []},
   write_pool_size: 1,

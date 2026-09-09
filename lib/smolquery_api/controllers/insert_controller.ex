@@ -128,6 +128,25 @@ defmodule SmolqueryApi.InsertController do
     )
   end
 
+  def insert_error(conn, {:stale_schema, _ref, names}) do
+    Errors.send_error(
+      conn,
+      409,
+      "ABORTED",
+      "the table's columns changed while inserting (#{Enum.join(names, ", ")}); retry the request"
+    )
+  end
+
+  def insert_error(conn, {:catalog_unavailable, _reason}) do
+    conn
+    |> put_resp_header("retry-after", "1")
+    |> Errors.send_error(
+      503,
+      "UNAVAILABLE",
+      "the catalog could not confirm the table's columns; retry"
+    )
+  end
+
   def insert_error(conn, reason)
       when reason in [:buffer_service_unavailable, :ingest_service_unavailable] do
     Errors.send_error(conn, 503, "UNAVAILABLE", "the write path is not available here")
