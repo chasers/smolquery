@@ -107,7 +107,7 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
     assert Schema.names(unchanged) == ["id", "ts_int", "ts"]
   end
 
-  test "a row written before the column carries the value after its seal: the sealer recomputes (PL-61 L5)",
+  test "a row written before the column reads as the expression at once, and carries the value after its seal (PL-61 L5)",
        %{node: node} do
     assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
 
@@ -120,7 +120,9 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
                "ALTER TABLE analytics.events ADD COLUMN ts TIMESTAMP MATERIALIZED epoch_ms(ts_int)"
              )
 
-    assert rows(node, "SELECT id, ts FROM analytics.events") == [%{"id" => 1, "ts" => nil}]
+    assert rows(node, "SELECT id, ts FROM analytics.events") == [
+             %{"id" => 1, "ts" => ~N[2023-11-14 22:13:20.000000]}
+           ]
 
     {:ok, widened} = Catalog.table_schema(node.catalog, @table)
     {:ok, _two} = write(node, widened, [%{"id" => 2, "ts_int" => 1_700_000_060_000}])

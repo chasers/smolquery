@@ -70,6 +70,43 @@ defmodule Smolquery.QueryService.ViewsTest do
            ]
   end
 
+  test "a materialized column reads as coalesce(stored, expression) only where a source may lack it (PL-61)" do
+    schema =
+      Schema.new!([
+        Field.new!("id", :int64, id: 1, since: 2),
+        Field.new!("ts_int", :int64, id: 2, since: 2),
+        Field.new!("ts", :timestamp,
+          id: 3,
+          since: 9,
+          materialized: %Smolquery.Schema.Materialized{
+            expression: "epoch_ms(ts_int)",
+            canonical: "epoch_ms(ts_int)",
+            sources: [2]
+          }
+        )
+      ])
+
+    carrying = %{"url" => "a", "field_ids" => %{"id" => 1, "ts_int" => 2, "ts" => 3}}
+    lacking = %{"url" => "b", "field_ids" => %{"id" => 1, "ts_int" => 2}}
+    sealed_before = %{"url" => "c", "snapshot" => 5}
+    sealed_after = %{"url" => "d", "snapshot" => 9}
+    legacy = %{"url" => "e"}
+
+    assert Views.recomputed(schema, [carrying, sealed_after]) == []
+    assert Views.recomputed(schema, [carrying, lacking]) == ["ts"]
+    assert Views.recomputed(schema, [sealed_before]) == ["ts"]
+    assert Views.recomputed(schema, [legacy]) == ["ts"]
+
+    assert [_schema, plain] = Views.table_view({"analytics", "events"}, schema, "SELECT 1")
+    assert plain =~ ~s|SELECT "id", "ts_int", "ts" FROM|
+
+    assert [_schema, computed] =
+             Views.table_view({"analytics", "events"}, schema, "SELECT 1", ["ts"])
+
+    assert computed =~
+             ~s|SELECT "id", "ts_int", coalesce("ts", TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP))) AS "ts" FROM|
+  end
+
   test "casts a variant column from its stored JSON to the VARIANT a query sees" do
     schema = Schema.new!([{"id", :int64}, {"doc", :variant}])
 
