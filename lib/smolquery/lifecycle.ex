@@ -15,9 +15,20 @@ defmodule Smolquery.Lifecycle do
   `{"bench", "otel_logs_v5__p1"}` broadcasts on its parent's topic, because
   a page shows a table, and its partitions are the mechanism, not the
   subject. The delivered message is `{:lifecycle, event}` with the event's
-  `kind` (`:commit` | `:seal` | `:compaction`), the concrete `table_ref`
-  (partition ref included), the emitting `node`, a `result`, the raw
-  telemetry `measurements`, and an `at` timestamp in unix milliseconds.
+  `kind` (`:commit` | `:seal` | `:compaction` | `:schema_change`), the
+  concrete `table_ref` (partition ref included), the emitting `node`, a
+  `result`, the raw telemetry `measurements`, and an `at` timestamp in unix
+  milliseconds.
+
+  A `:schema_change` — a column added or dropped
+  (`Smolquery.Catalog.alter_table/3`) — broadcasts on the table's topic and
+  once more on `schema_topic/0`, which carries every table's schema changes
+  for a subscriber that must hear all of them without knowing the tables:
+  the ingest schema cache on every node drops the table it names, so a
+  column added over the API on one node, or by `ALTER TABLE` on the query
+  path, is insertable everywhere as soon as the broadcast lands, rather than
+  after `schema_cache_ttl_ms`. The metadata carries the `change` and the
+  `column`.
 
   Only events whose metadata carries a `table_ref` broadcast — the metrics
   side keeps labels to closed sets, so `table_ref` rides in metadata purely
@@ -51,11 +62,14 @@ defmodule Smolquery.Lifecycle do
   @events [
     [:smolquery, :buffer, :commit],
     [:smolquery, :seal, :attempt],
-    [:smolquery, :compact, :swap]
+    [:smolquery, :compact, :swap],
+    [:smolquery, :catalog, :schema_change]
   ]
 
+  @schema_topic "lifecycle:schema"
+
   @type event :: %{
-          kind: :commit | :seal | :compaction,
+          kind: :commit | :seal | :compaction | :schema_change,
           table_ref: Store.table_ref(),
           node: node(),
           result: atom(),
@@ -83,6 +97,12 @@ defmodule Smolquery.Lifecycle do
   end
 
   @doc """
+  Subscribes the caller to every table's schema changes.
+  """
+  @spec subscribe_schema() :: :ok | {:error, term()}
+  def subscribe_schema, do: Phoenix.PubSub.subscribe(Smolquery.PubSub, @schema_topic)
+
+  @doc """
   The PubSub topic a table's lifecycle events broadcast on.
   """
   @spec topic(Store.table_ref()) :: String.t()
@@ -91,6 +111,12 @@ defmodule Smolquery.Lifecycle do
 
     "lifecycle:#{dataset}.#{table}"
   end
+
+  @doc """
+  The PubSub topic every schema change broadcasts on, whatever its table.
+  """
+  @spec schema_topic() :: String.t()
+  def schema_topic, do: @schema_topic
 
   @impl GenServer
   def init(_opts) do
@@ -119,16 +145,7 @@ defmodule Smolquery.Lifecycle do
       at: System.system_time(:millisecond)
     }
 
-    delivered =
-      try do
-        Phoenix.PubSub.broadcast(Smolquery.PubSub, topic(table_ref), {:lifecycle, event})
-      rescue
-        ArgumentError -> {:error, :pubsub_unavailable}
-      catch
-        :exit, reason -> {:error, {:exit, reason}}
-      end
-
-    with :ok <- delivered do
+    with :ok <- Enum.reduce_while(topics(event), :ok, fn topic, :ok -> deliver(topic, event) end) do
       :telemetry.execute([:smolquery, :lifecycle, :broadcast], %{count: 1}, %{kind: event.kind})
     end
 
@@ -137,7 +154,24 @@ defmodule Smolquery.Lifecycle do
 
   def handle_event(_event, _measurements, _meta, nil), do: :ok
 
+  defp topics(%{kind: :schema_change, table_ref: table_ref}),
+    do: [topic(table_ref), @schema_topic]
+
+  defp topics(%{table_ref: table_ref}), do: [topic(table_ref)]
+
+  defp deliver(topic, event) do
+    case Phoenix.PubSub.broadcast(Smolquery.PubSub, topic, {:lifecycle, event}) do
+      :ok -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  rescue
+    ArgumentError -> {:halt, {:error, :pubsub_unavailable}}
+  catch
+    :exit, reason -> {:halt, {:error, {:exit, reason}}}
+  end
+
   defp kind(:buffer), do: :commit
   defp kind(:seal), do: :seal
   defp kind(:compact), do: :compaction
+  defp kind(:catalog), do: :schema_change
 end

@@ -22,6 +22,22 @@ defmodule SmolqueryPg.ErrorsTest do
     assert message =~ "9000 ms"
   end
 
+  test "maps the DDL reasons to the codes Postgres gives the same refusals (PL-61 L3)" do
+    assert {"42703", "column x does not exist"} = Errors.from_reason({:unknown_column, "x"})
+    assert {"42701", "column x already exists"} = Errors.from_reason({:duplicate_columns, ["x"]})
+    assert {"42704", _message} = Errors.from_reason({:unsupported_type, "GEOGRAPHY"})
+    assert {"42602", _message} = Errors.from_reason({:invalid_identifier, "bad name"})
+
+    assert {"0A000", "DEFAULT is not supported in ALTER TABLE"} =
+             Errors.from_reason({:unsupported_ddl, "DEFAULT"})
+
+    assert {"42601", _message} = Errors.from_reason({:unqualified_table, "events"})
+    assert {"55000", _message} = Errors.from_reason({:clustering_column, "ts"})
+    assert {"55000", _message} = Errors.from_reason(:last_column)
+    assert {"0A000", _message} = Errors.from_reason(:materialized_unsupported)
+    assert {"0A000", _message} = Errors.from_reason(:ddl_takes_no_params)
+  end
+
   test "a DuckDB error keeps its message and takes the code its class implies" do
     assert {"42601", "Parser Error: x"} = Errors.from_reason("Parser Error: x")
     assert {"42P01", _message} = Errors.from_reason("Catalog Error: y")

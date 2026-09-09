@@ -11,7 +11,16 @@ defmodule SmolqueryPg.Errors do
 
   DuckDB's own errors arrive as text prefixed with their class (`Parser
   Error`, `Binder Error`, `Catalog Error`). The prefix selects the code.
+
+  An `ALTER TABLE` (PL-61 L3) fails with `Smolquery.Ddl`'s reasons, which
+  take the codes Postgres gives the same refusals: `42703` for an unknown
+  column, `42701` for a duplicate, `42601` for a statement the parser does
+  not accept, `0A000` for a clause it recognises and refuses, `55000` for a column that cannot be added or dropped as asked,
+  and `0A000` for what this release does not do. The message is
+  `Smolquery.Ddl.message/1`, the wording the HTTP envelope shares.
   """
+
+  alias Smolquery.Ddl
 
   @type wire_error :: {code :: String.t(), message :: String.t()}
 
@@ -63,6 +72,36 @@ defmodule SmolqueryPg.Errors do
       {"72000",
        "a hot segment the transaction pinned for #{dataset}.#{table} has been retired; " <>
          "the transaction block is too old, start a new one"}
+
+  def from_reason({:unknown_column, _name} = reason), do: {"42703", Ddl.message(reason)}
+  def from_reason({:duplicate_columns, _names} = reason), do: {"42701", Ddl.message(reason)}
+  def from_reason({:unsupported_type, _type} = reason), do: {"42704", Ddl.message(reason)}
+  def from_reason({:invalid_identifier, _name} = reason), do: {"42602", Ddl.message(reason)}
+
+  def from_reason({:unsupported_ddl, _clause} = reason), do: {"0A000", Ddl.message(reason)}
+
+  def from_reason({tag, _detail} = reason) when tag in [:invalid_ddl, :unqualified_table],
+    do: {"42601", Ddl.message(reason)}
+
+  def from_reason({tag, _detail} = reason)
+      when tag in [
+             :column_must_be_nullable,
+             :clustering_column,
+             :retention_column,
+             :partition_ref
+           ],
+      do: {"55000", Ddl.message(reason)}
+
+  def from_reason(:last_column), do: {"55000", Ddl.message(:last_column)}
+
+  def from_reason(reason)
+      when reason in [
+             :alter_table_unsupported,
+             :materialized_unsupported,
+             :ddl_not_explainable,
+             :ddl_takes_no_params
+           ],
+      do: {"0A000", Ddl.message(reason)}
 
   def from_reason(:timeout), do: {"57014", "canceling statement due to statement timeout"}
   def from_reason(:cancelled), do: {"57014", "canceling statement due to user request"}

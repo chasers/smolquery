@@ -494,6 +494,11 @@ defmodule Smolquery.Catalog do
   an add reads the column as `NULL`; a file written before a drop keeps the
   bytes, which stay visible to a read pinned at an earlier snapshot.
 
+  A change that lands emits `[:smolquery, :catalog, :schema_change]` with
+  the table, the change, and the column in its metadata — the seam
+  `Smolquery.Lifecycle` rebroadcasts cluster-wide, and through which every
+  node's ingest schema cache hears of a column it did not change itself.
+
   An implementation without the callback answers
   `{:error, :alter_table_unsupported}`.
   """
@@ -502,12 +507,25 @@ defmodule Smolquery.Catalog do
     with :ok <- table_not_partition(table),
          {:ok, schema} <- table_schema(catalog, table),
          {:ok, policy} <- retention(catalog, table),
-         :ok <- admissible(schema, policy, change) do
-      if function_exported?(catalog.impl, :alter_table, 3),
-        do: catalog.impl.alter_table(catalog.config, table, change),
-        else: {:error, :alter_table_unsupported}
+         :ok <- admissible(schema, policy, change),
+         :ok <- altered(catalog, table, change) do
+      :telemetry.execute([:smolquery, :catalog, :schema_change], %{count: 1}, %{
+        table_ref: table,
+        change: elem(change, 0),
+        column: column_name(change),
+        result: :ok
+      })
     end
   end
+
+  defp altered(catalog, table, change) do
+    if function_exported?(catalog.impl, :alter_table, 3),
+      do: catalog.impl.alter_table(catalog.config, table, change),
+      else: {:error, :alter_table_unsupported}
+  end
+
+  defp column_name({:add_column, %Field{name: name}}), do: name
+  defp column_name({:drop_column, name}), do: name
 
   defp table_not_partition({_dataset, table} = ref) do
     if Partitions.reserved?(table), do: {:error, {:partition_ref, ref}}, else: :ok

@@ -3,6 +3,7 @@ defmodule Smolquery.IngestService.SchemaCacheTest do
 
   alias Smolquery.IngestService.Runtime
   alias Smolquery.IngestService.SchemaCache
+  alias Smolquery.Test.Eventually
   alias Smolquery.Test.StubCatalog
 
   @table {"analytics", "events"}
@@ -40,6 +41,42 @@ defmodule Smolquery.IngestService.SchemaCacheTest do
 
     assert_received {:called, :table_schema, [@table]}
     assert_received {:called, :table_schema, [@table]}
+  end
+
+  test "a schema change broadcast drops the entry, another table's does not (PL-61 L3)" do
+    runtime = start_cache()
+
+    {:ok, _schema} = SchemaCache.fetch(runtime, @table)
+    assert_received {:called, :table_schema, [@table]}
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :schema_change],
+      %{count: 1},
+      %{result: :ok, table_ref: {"analytics", "other"}, change: :add_column, column: "x"}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :schema_change],
+      %{count: 1},
+      %{result: :ok, table_ref: @table, change: :add_column, column: "label"}
+    )
+
+    assert Eventually.until(
+             fn ->
+               {:ok, _schema} = SchemaCache.fetch(runtime, @table)
+               received_read_through?()
+             end,
+             100,
+             10
+           )
+  end
+
+  defp received_read_through? do
+    receive do
+      {:called, :table_schema, [@table]} -> true
+    after
+      0 -> false
+    end
   end
 
   test "invalidation drops the entry" do

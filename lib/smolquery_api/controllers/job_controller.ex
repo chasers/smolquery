@@ -5,7 +5,9 @@ defmodule SmolqueryApi.JobController do
   A job's HTTP shape mirrors `Smolquery.QueryService.Job` — id, state, sql,
   timestamps, stats, the pinned snapshot — plus `resultsAvailable`, which is
   what separates a finished job whose frame is still held from one the
-  registry has let go. When the registry misses, `GET /v1/jobs/:id` falls back
+  registry has let go, and `statementType`: `SELECT` for a query, `ALTER_TABLE`
+  for DDL (PL-61 L3), whose outcome rides on `ddl` and which has no rows to
+  page — the results route answers 409, as it does for an explain job. When the registry misses, `GET /v1/jobs/:id` falls back
   to `QueryService.History` (PL-8 D8): status and stats survive the result
   TTL; results do not.
 
@@ -18,6 +20,7 @@ defmodule SmolqueryApi.JobController do
   use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
+  alias Smolquery.Ddl
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.History
@@ -80,6 +83,14 @@ defmodule SmolqueryApi.JobController do
             "an explain job has no result rows; read explain from GET /v1/jobs/:id"
           )
 
+        {:ok, %Job{state: :done, ddl: %{}}, _frame} ->
+          Errors.send_error(
+            conn,
+            409,
+            "FAILED_PRECONDITION",
+            "a DDL job has no result rows; read ddl from GET /v1/jobs/:id"
+          )
+
         {:ok, %Job{state: state}, _frame} when state in [:pending, :running] ->
           Json.send_json(conn, 200, %{"complete" => false, "rows" => []})
 
@@ -123,8 +134,30 @@ defmodule SmolqueryApi.JobController do
       "explain" => job.explain,
       "trace" => trace_json(job.trace),
       "scatter" => scatter_json(job.scatter),
+      "statementType" => statement_type(job),
+      "ddl" => ddl_json(job.ddl),
       "error" => error_json(job.error),
       "resultsAvailable" => results_available
+    }
+  end
+
+  defp statement_type(%Job{sql: sql}) do
+    if Ddl.parse(sql) == :not_ddl, do: "SELECT", else: "ALTER_TABLE"
+  end
+
+  defp ddl_json(nil), do: nil
+
+  defp ddl_json(%{
+         operation: operation,
+         table: {dataset, table},
+         column: column,
+         performed: performed
+       }) do
+    %{
+      "operation" => operation |> Atom.to_string() |> String.upcase(),
+      "targetTable" => "#{dataset}.#{table}",
+      "column" => column,
+      "performed" => performed
     }
   end
 
@@ -349,7 +382,10 @@ defmodule SmolqueryApi.JobController do
   defp error_json({:result_too_large, max}), do: result_too_large_message(max)
 
   defp error_json(error) when is_binary(error), do: error
-  defp error_json(error), do: inspect(error)
+
+  defp error_json(error) do
+    if Ddl.error?(error), do: Ddl.message(error), else: inspect(error)
+  end
 
   defp row_json(row), do: Map.new(row, fn {name, value} -> {name, value_json(value)} end)
 

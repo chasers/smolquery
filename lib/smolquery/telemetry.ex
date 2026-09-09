@@ -96,8 +96,14 @@ defmodule Smolquery.Telemetry do
                                           request method; this module narrows it to a
                                           closed set, the way it narrows the status
 
+      [:smolquery, :catalog, :schema_change] %{count},
+                                          meta %{table_ref: ref, change: :add_column | :drop_column,
+                                          column: name, result: :ok}
+                                          — a column added or dropped (PL-61); not a metric
+                                          here, carried for the lifecycle bridge
       [:smolquery, :lifecycle, :broadcast] %{count},
-                                          meta %{kind: :commit | :seal | :compaction}
+                                          meta %{kind: :commit | :seal | :compaction |
+                                          :schema_change}
 
   The per-table events carry `table_ref` in metadata for
   `Smolquery.Lifecycle`'s PubSub bridge; it is never a label here, so

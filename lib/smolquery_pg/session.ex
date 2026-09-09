@@ -19,6 +19,7 @@ defmodule SmolqueryPg.Session do
   | class | answer |
   |---|---|
   | `SELECT`, `WITH`, `VALUES`, `(` | `Smolquery.QueryService.Client`; the frame as rows |
+  | `ALTER TABLE` | the same client, as a DDL job (PL-61 L3); the `ALTER TABLE` command tag |
   | `SET`, `RESET`, `SHOW` | remembered in the session; `SHOW` reads it back |
   | `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT` | the transaction status only |
   | empty | `EmptyQueryResponse` |
@@ -567,6 +568,7 @@ defmodule SmolqueryPg.Session do
   defp dispatch(:query, session, statement, params), do: query(session, statement, params)
   defp dispatch(:explain, session, statement, params), do: explain(session, statement, params)
   defp dispatch(:declare, session, statement, params), do: declare(session, statement, params)
+  defp dispatch(:ddl, session, statement, []), do: ddl(session, statement)
   defp dispatch(class, session, statement, []), do: dispatch(class, session, statement)
 
   defp dispatch(_class, session, _statement, _params) do
@@ -623,6 +625,7 @@ defmodule SmolqueryPg.Session do
   defp class("deallocate"), do: :deallocate
   defp class("discard"), do: :discard
   defp class("explain"), do: :explain
+  defp class("alter"), do: :ddl
   defp class("abort"), do: :rollback
   defp class(keyword), do: {:unsupported, String.upcase(keyword)}
 
@@ -745,6 +748,41 @@ defmodule SmolqueryPg.Session do
 
     outcome_map(columns, rows, "SELECT #{length(rows)}", [])
   end
+
+  defp ddl(%__MODULE__{txn: :idle} = session, sql) do
+    case run_job(session, sql, timeout_ms: timeout_ms(session)) do
+      {:ok, %Job{ddl: outcome}, nil, session} ->
+        {:ok, command("ALTER TABLE", skipped(outcome)), session}
+
+      {:error, reason, session} ->
+        fail(session, reason)
+    end
+  end
+
+  defp ddl(session, _sql) do
+    {:error,
+     {"25001",
+      "ALTER TABLE cannot run inside a transaction block; it commits on its own, end the block first"},
+     failed(session)}
+  end
+
+  defp skipped(%{performed: true}), do: []
+
+  defp skipped(%{operation: :add_column, column: column, table: {dataset, table}}),
+    do: [
+      Protocol.notice_response(
+        "42701",
+        ~s|column "#{column}" of relation "#{dataset}.#{table}" already exists, skipping|
+      )
+    ]
+
+  defp skipped(%{operation: :drop_column, column: column, table: {dataset, table}}),
+    do: [
+      Protocol.notice_response(
+        "42703",
+        ~s|column "#{column}" of relation "#{dataset}.#{table}" does not exist, skipping|
+      )
+    ]
 
   defp fail(session, reason), do: {:error, Errors.from_reason(reason), failed(session)}
 

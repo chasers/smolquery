@@ -276,6 +276,41 @@ defmodule SmolqueryPg.FullNodeTest do
     assert %{results: [%{tag: "COMMIT"}]} = PgClient.query(socket, "COMMIT")
   end
 
+  test "ALTER TABLE through the wire, and the next SELECT reads the column (PL-61 L3)", %{
+    node: node,
+    port: port
+  } do
+    {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+    assert %{results: [%{rows: [["0"]]}]} =
+             PgClient.query(socket, "SELECT count(*) AS n FROM analytics.events")
+
+    assert %{errors: [], results: [%{tag: "ALTER TABLE"}]} =
+             PgClient.query(socket, "ALTER TABLE analytics.events ADD COLUMN label TEXT")
+
+    {:ok, widened} = Smolquery.Catalog.table_schema(node.catalog, FullNode.table())
+
+    {:ok, _ack} =
+      BufferService.Client.write_batch(node.buffer, FullNode.table(), %{
+        schema: widened,
+        rows: [%{"id" => 1, "label" => "one"}]
+      })
+
+    assert %{
+             errors: [],
+             results: [
+               %{columns: [%{name: "id"}, %{name: "label", oid: 25}], rows: [["1", "one"]]}
+             ]
+           } =
+             PgClient.query(socket, "SELECT id, label FROM analytics.events")
+
+    assert %{errors: [], results: [%{tag: "ALTER TABLE"}]} =
+             PgClient.query(socket, "ALTER TABLE analytics.events DROP COLUMN IF EXISTS label")
+
+    assert %{errors: [], results: [%{columns: [%{name: "id"}], rows: [["1"]]}]} =
+             PgClient.query(socket, "SELECT * FROM analytics.events")
+  end
+
   defp write(node, range) do
     batch = %{schema: FullNode.schema(), rows: Enum.map(range, &%{"id" => &1})}
     BufferService.Client.write_batch(node.buffer, FullNode.table(), batch)

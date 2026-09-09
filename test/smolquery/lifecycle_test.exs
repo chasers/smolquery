@@ -66,6 +66,31 @@ defmodule Smolquery.LifecycleTest do
     assert_receive {:lifecycle, %{kind: :compaction, result: :error}}
   end
 
+  test "a schema change broadcasts on the table's topic and on the schema topic (PL-61 L3)" do
+    :ok = Lifecycle.subscribe(@table)
+    :ok = Lifecycle.subscribe_schema()
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :schema_change],
+      %{count: 1},
+      %{result: :ok, table_ref: @table, change: :add_column, column: "label"}
+    )
+
+    assert_receive {:lifecycle, %{kind: :schema_change, table_ref: @table} = first}
+    assert_receive {:lifecycle, %{kind: :schema_change, table_ref: @table} = second}
+    assert first == second
+    refute_receive {:lifecycle, _event}, 50
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: 1, bytes: 1},
+      %{result: :ok, table_ref: @table}
+    )
+
+    assert_receive {:lifecycle, %{kind: :commit}}
+    refute_receive {:lifecycle, _event}, 50
+  end
+
   test "an event without a table_ref broadcasts nothing" do
     :ok = Lifecycle.subscribe(@table)
 

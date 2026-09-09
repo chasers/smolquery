@@ -25,6 +25,12 @@ defmodule Smolquery.QueryService.Job do
   `hot_ids:`. It is in-memory only, like `statistics`, `trace`, and
   `scatter`: history does not persist it, and nothing in the metadata
   database records it.
+
+  `ddl` says the job was an `ALTER TABLE` (`Smolquery.Ddl`), and what it did:
+  the operation, the table, the column, and whether anything changed. A DDL
+  job finishes `:done` with no `row_count`, no `snapshot`, and no result
+  frame — the catalog call was the whole job. History keeps its `sql` and
+  state, not the outcome, like `explain`.
   """
 
   alias Smolquery.Catalog
@@ -46,6 +52,7 @@ defmodule Smolquery.QueryService.Job do
     :explain,
     :trace,
     :scatter,
+    :ddl,
     :error,
     json_columns: [],
     hot_members: %{}
@@ -66,6 +73,7 @@ defmodule Smolquery.QueryService.Job do
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
           scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
+          ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),
           json_columns: [String.t()],
           hot_members: %{Catalog.table_ref() => [String.t()]}
@@ -127,6 +135,16 @@ defmodule Smolquery.QueryService.Job do
   @spec described(t(), Catalog.snapshot(), non_neg_integer(), Statistics.t() | nil) :: t()
   def described(%__MODULE__{} = job, snapshot, duration_ms, statistics),
     do: finish(job, snapshot, duration_ms, statistics, [])
+
+  @doc """
+  The job, finished as an `ALTER TABLE` with what it did.
+
+  There is no snapshot to pin and nothing to count: the outcome is the
+  result (`Smolquery.Ddl.execute/2`).
+  """
+  @spec altered(t(), Smolquery.Ddl.outcome(), non_neg_integer()) :: t()
+  def altered(%__MODULE__{} = job, outcome, duration_ms),
+    do: finish(job, nil, duration_ms, nil, ddl: outcome)
 
   defp finish(%__MODULE__{} = job, snapshot, duration_ms, statistics, fields) do
     struct!(

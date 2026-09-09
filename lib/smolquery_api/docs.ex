@@ -243,7 +243,10 @@ defmodule SmolqueryApi.Docs do
           "Synchronous query: the finished job plus its first page of rows. " <>
             "504 when the query outlives timeoutMs.",
         "request" => %{
-          "query" => "SQL, single SELECT",
+          "query" =>
+            "SQL: one SELECT, or one ALTER TABLE dataset.table ADD COLUMN [IF NOT EXISTS] name TYPE " <>
+              "| DROP COLUMN [IF EXISTS] name (answers the job with statementType ALTER_TABLE and " <>
+              "its ddl outcome; no rows)",
           "maxResults" => "page size, default 1000",
           "timeoutMs" => "cancel-and-504 deadline",
           "explain" => "\"plan\" or \"analyze\" answers the plan text instead of rows",
