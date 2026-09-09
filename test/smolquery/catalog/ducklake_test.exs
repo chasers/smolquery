@@ -34,7 +34,8 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       {DuckLake,
        name: @engine,
        metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
-       data_path: Path.join(context.tmp_dir, "data")}
+       data_path: Path.join(context.tmp_dir, "data"),
+       connections: 2}
     )
 
     catalog = DuckLake.new(engine: @engine)
@@ -479,6 +480,17 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       assert Enum.find(files, &(&1.path == full.path)).column_ids == [1, 2, 3, 4]
       assert Enum.find(files, &(&1.path == narrow.path)).column_ids == [1, 2, 3]
+    end
+
+    test "on_connection/2 addresses a slot of the engine, and every slot answers the same lake",
+         %{
+           catalog: catalog
+         } do
+      second = Catalog.on_connection(catalog, 2)
+      assert second.config.engine == {@engine, 2}
+      assert Catalog.on_connection(second, 1).config.engine == {@engine, 1}
+      assert Catalog.list_tables(second, "analytics") == {:ok, ["events"]}
+      assert Catalog.schema_version(second) == Catalog.schema_version(catalog)
     end
 
     test "schema_version moves on a column change and not on a registration (T-439)", %{

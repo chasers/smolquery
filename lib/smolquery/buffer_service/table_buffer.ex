@@ -1125,7 +1125,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   defp verified_at_snapshot(state, schema, ids) do
-    case catalog_answer(fn -> Catalog.schema_version(state.runtime.catalog) end) do
+    case catalog_answer(fn -> Catalog.schema_version(table_catalog(state)) end) do
       {:ok, version} when {ids, version} == state.verified -> {:ok, state}
       {:ok, version} -> verified_against_catalog(state, schema, ids, version)
       {:error, reason} -> {:error, {:catalog_unavailable, reason}}
@@ -1135,7 +1135,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp verified_against_catalog(state, schema, ids, version) do
     parent = Partitions.parent(state.table_ref)
 
-    case catalog_answer(fn -> Catalog.table_schema(state.runtime.catalog, parent) end) do
+    case catalog_answer(fn -> Catalog.table_schema(table_catalog(state), parent) end) do
       {:ok, current} ->
         case Schema.stale_ids(schema, current) do
           [] -> {:ok, %{state | verified: {ids, version}}}
@@ -1145,6 +1145,14 @@ defmodule Smolquery.BufferService.TableBuffer do
       {:error, reason} ->
         {:error, {:catalog_unavailable, reason}}
     end
+  end
+
+  # Each table takes the catalog connection its ref hashes to, so a node's
+  # tables do not queue their flushes behind one another's checks.
+  defp table_catalog(%__MODULE__{runtime: runtime, table_ref: table_ref}) do
+    slot = :erlang.phash2(table_ref, runtime.catalog_connections) + 1
+
+    Catalog.on_connection(runtime.catalog, slot)
   end
 
   defp catalog_answer(read) do
