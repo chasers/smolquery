@@ -327,21 +327,22 @@ defmodule Smolquery.StorageService.MergeTest do
     assert columns_in(runtime, segment, "*") == [["one", 1]]
   end
 
-  test "refuses an input column the catalog does not declare", %{
-    buffer: buffer,
-    runtime: runtime
-  } do
-    undeclared = %{
+  test "projects away a column the catalog does not declare — after a drop, that is the point (T-430)",
+       %{buffer: buffer, runtime: runtime} do
+    wider = %{
       schema: Schema.new!([{"id", :int64}, {"name", :string}]),
       rows: [%{"id" => 1, "name" => "one"}]
     }
 
-    {:ok, ack} = Client.write_batch(buffer, @table, undeclared)
+    {:ok, ack} = Client.write_batch(buffer, @table, wider)
 
-    assert merge(runtime, @table, claim([ack.segment_id])) ==
-             {:error, {:undeclared_columns, ["name"]}}
+    assert {:ok, segment} = merge(runtime, @table, claim([ack.segment_id]))
+    assert rows_in(runtime, segment) == [1]
 
-    assert {:ok, []} = Store.list(runtime.store, "analytics/events")
+    assert {:error, _no_such_column} =
+             Engine.query(Runtime.engine(runtime.name), "SELECT name FROM read_parquet($1)", [
+               Store.location(runtime.store, segment.key)
+             ])
   end
 
   test "reports a table the catalog does not hold", %{buffer: buffer, runtime: runtime} do
@@ -532,22 +533,26 @@ defmodule Smolquery.StorageService.MergeTest do
       assert columns_in(runtime, segment, "id, name") == [[1, nil], [2, "two"]]
     end
 
-    test "an undeclared column in a later chunk is refused", %{buffer: buffer, runtime: runtime} do
+    test "an undeclared column in a later chunk is projected away, like on the direct path",
+         %{buffer: buffer, runtime: runtime} do
       runtime = %{runtime | merge_inputs_per_call: 1}
       declared = %{schema: Schema.new!([{"id", :int64}]), rows: [%{"id" => 1}]}
 
-      undeclared = %{
+      wider = %{
         schema: Schema.new!([{"id", :int64}, {"name", :string}]),
         rows: [%{"id" => 2, "name" => "two"}]
       }
 
       {:ok, first} = Client.write_batch(buffer, @table, declared)
-      {:ok, second} = Client.write_batch(buffer, @table, undeclared)
+      {:ok, second} = Client.write_batch(buffer, @table, wider)
 
-      assert merge(runtime, @table, claim([first.segment_id, second.segment_id])) ==
-               {:error, {:undeclared_columns, ["name"]}}
+      assert {:ok, segment} = merge(runtime, @table, claim([first.segment_id, second.segment_id]))
+      assert rows_in(runtime, segment) == [1, 2]
 
-      assert {:ok, []} = Store.list(runtime.store, "analytics/events")
+      assert {:error, _no_such_column} =
+               Engine.query(Runtime.engine(runtime.name), "SELECT name FROM read_parquet($1)", [
+                 Store.location(runtime.store, segment.key)
+               ])
     end
 
     test "compaction over the cap chunks the same way", %{buffer: buffer, runtime: runtime} do
