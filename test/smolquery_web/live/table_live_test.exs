@@ -179,6 +179,25 @@ defmodule SmolqueryWeb.TableLiveTest do
       assert render_async(lv) =~ "query service is not running"
     end
 
+    test "marks a materialized column and shows its expression (PL-61)", %{conn: conn} do
+      runtime = start_web!()
+      seed(runtime)
+
+      :ok =
+        Catalog.alter_table(
+          runtime.catalog,
+          {"analytics", "events"},
+          {:add_column, Schema.Field.new!("day", :date, materialized: "CAST(ts AS DATE)")}
+        )
+
+      {:ok, _lv, html} = live(conn, ~p"/tables/analytics/events")
+
+      assert html =~ "<th>materialized</th>"
+      assert html =~ "CAST(ts AS DATE)"
+      assert html =~ ~r/day.{0,200}materialized/s
+      refute html =~ ~r/>name<.{0,120}badge.{0,40}materialized/s
+    end
+
     test "renders the clustering key", %{conn: conn} do
       runtime = start_web!()
       seed(runtime)

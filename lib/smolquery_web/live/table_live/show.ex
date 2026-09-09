@@ -1,6 +1,7 @@
 defmodule SmolqueryWeb.TableLive.Show do
   @moduledoc """
-  One table — its schema, its clustering key, its retention policy, its
+  One table — its schema (a materialized column marked, with the expression
+  it is computed from, PL-61), its clustering key, its retention policy, its
   lifecycle, and a peek at its rows.
 
   The clustering card edits the key the same way the API's table PATCH
@@ -505,13 +506,28 @@ defmodule SmolqueryWeb.TableLive.Show do
                 <th>field</th>
                 <th>type</th>
                 <th>nullable</th>
+                <th>materialized</th>
               </tr>
             </thead>
             <tbody>
               <tr :for={field <- @schema.fields}>
-                <td class="font-mono">{field.name}</td>
+                <td class="font-mono">
+                  {field.name}
+                  <span :if={Schema.materialized?(field)} class="badge badge-outline badge-sm ml-2">
+                    materialized
+                  </span>
+                </td>
                 <td class="font-mono">{api_type!(field.type)}</td>
                 <td class="font-mono">{field.nullable}</td>
+                <td class="font-mono text-sm">
+                  <code
+                    :if={Schema.materialized?(field)}
+                    title="computed from the row as it lands; the value is always this expression"
+                  >
+                    {field.materialized.expression}
+                  </code>
+                  <span :if={not Schema.materialized?(field)} class="opacity-40">—</span>
+                </td>
               </tr>
             </tbody>
           </table>
