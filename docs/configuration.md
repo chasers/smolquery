@@ -141,6 +141,13 @@ The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`. They
 still mount per-node development certificates. Operators can thus opt into
 mutual TLS: change both values to `true` before you apply the overlay.
 
+### Diagnostics
+
+| variable | effect (default) |
+|---|---|
+| `SMOLQUERY_MEMORY_TRACE` | `true` starts `Smolquery.MemoryTrace` (T-451): every `SMOLQUERY_MEMORY_TRACE_INTERVAL_MS` it reads what the cgroup charges the container (`memory.current`, its anon/file/slab split, the `max` and `oom_kill` event counters), the process's resident set and the BEAM's own split, and appends a line to `<SMOLQUERY_DATA_DIR>/memory-trace.log` on every new peak since start, on every sample above 80% of the cgroup limit, and once a minute as a heartbeat. The file is on the data volume, so it survives the OOM kill it is waiting for; it rotates once at 16 MiB. A peak above the threshold also logs a warning naming the three largest BEAM processes, at most every 10 s. The same readings are gauges on `GET /metrics` (`smolquery_memory_cgroup_bytes{kind}`, `smolquery_memory_cgroup_events{kind}`, `smolquery_memory_rss_bytes`, `smolquery_memory_beam_bytes{kind}`). Off by default (`false`) |
+| `SMOLQUERY_MEMORY_TRACE_INTERVAL_MS` | The tracer's sampling interval (`200`). A sample is three small file reads and one `:erlang.memory/0` |
+
 Releases, artifacts, and upgrade procedures live in
 [deployment.md](deployment.md).
 

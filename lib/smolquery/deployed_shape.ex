@@ -32,6 +32,8 @@ defmodule Smolquery.DeployedShape do
   alias Smolquery.StorageService.Runtime, as: StorageRuntime
   alias Smolquery.Telemetry
 
+  @encode_transient_factor 3
+
   @doc """
   Logs a service's resolved shape and registers it for `GET /metrics`.
 
@@ -50,6 +52,15 @@ defmodule Smolquery.DeployedShape do
     # day reading it out of failure messages.
     budget = BufferRuntime.write_engine_budget(runtime)
 
+    # The encode's transient memory is another product nothing writes down
+    # (T-451): DuckDB's read_json-to-Parquet of one commit peaks at about
+    # three times the NDJSON body, outside its own buffer manager and the
+    # BEAM's accounting, and `encode_concurrency` of them run at once. The
+    # sandbox ran 94 MB commits four at a time inside a 4 Gi pod and could
+    # not see why it OOMKilled; this line would have said ~1.1 GiB per burst.
+    encode_transient =
+      @encode_transient_factor * runtime.flush_max_bytes * runtime.encode_concurrency
+
     labels = [
       compression: runtime.compression,
       flush_max_bytes: runtime.flush_max_bytes,
@@ -57,6 +68,7 @@ defmodule Smolquery.DeployedShape do
       flush_idle_interval_ms: runtime.flush_idle_interval_ms,
       commit_siblings: runtime.commit_siblings,
       encode_concurrency: runtime.encode_concurrency,
+      encode_transient_bytes: encode_transient,
       write_pool_size: runtime.write_pool_size,
       write_engine_threads: budget[:threads],
       write_engine_memory_limit: budget[:memory_limit] || engine_memory_limit(),
@@ -77,6 +89,8 @@ defmodule Smolquery.DeployedShape do
         "Intended for production; if this is a dev or benchmark deployment, " <>
         "check GEN_RPC_TLS."
     )
+
+    warn_memory(encode_transient, Smolquery.CgroupMemory.limit_bytes())
 
     :ok
   end
@@ -122,6 +136,21 @@ defmodule Smolquery.DeployedShape do
 
     :ok
   end
+
+  # A burst of concurrent encodes past a quarter of the container is the shape
+  # that OOMKills a pod nothing at rest predicts (T-451): the memory is
+  # DuckDB's transient, held by its allocator after the encode, so a node
+  # that survives the first burst carries it into the next.
+  defp warn_memory(encode_transient, {:ok, limit}) when encode_transient * 4 > limit do
+    Logger.warning(
+      "memory: a burst of concurrent encodes peaks near #{div(encode_transient, 1_048_576)} " <>
+        "MiB (~#{@encode_transient_factor}x flush_max_bytes x encode_concurrency), over a " <>
+        "quarter of the container's #{div(limit, 1_048_576)} MiB. Lower flush_max_bytes or " <>
+        "encode_concurrency, or raise the container's limit (T-451)."
+    )
+  end
+
+  defp warn_memory(_encode_transient, _limit), do: :ok
 
   @doc """
   Whether Erlang distribution and gen_rpc are running over TLS.

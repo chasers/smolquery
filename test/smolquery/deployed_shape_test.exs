@@ -91,6 +91,7 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "flush_idle_interval_ms=5"
       assert log =~ "commit_siblings=0"
       assert log =~ "transport_tls=false"
+      assert log =~ ~r/encode_transient_bytes=\d+/
     end
 
     # The two values an operator cannot read off their own configuration: the

@@ -101,6 +101,26 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### A memory tracer that survives the kill, and the encode budget on the shape line (T-451)
+
+The buffer pods' OOM kills were not root-caused in place: nothing at rest
+predicted them and the tracer catching the climb was a shell script a kill
+also ends. `SMOLQUERY_MEMORY_TRACE=true` starts `Smolquery.MemoryTrace` on any
+role ([configuration.md](configuration.md#diagnostics)): it samples the
+cgroup's charge, its anon/file/slab split, the `max` and `oom_kill` counters,
+the resident set and the BEAM's split every 200 ms, appends new peaks, samples
+above 80% of the limit and a heartbeat to `<SMOLQUERY_DATA_DIR>/memory-trace.log`,
+and publishes the readings as gauges on `/metrics`. Read the file's last lines
+after a kill. Off by default.
+
+Separately, `bench/results/buffer.md` sized one candidate: one commit's
+DuckDB encode peaks near three times its NDJSON body, outside DuckDB's and the
+BEAM's own accounting, and `encode_concurrency` of them run at once — 94 MB
+commits four at a time are ~1.1 GiB per burst, retained by the allocator
+afterwards. The buffer shape line now prints `encode_transient_bytes` and warns
+when it exceeds a quarter of the container's limit; lower `flush_max_bytes` or
+`encode_concurrency`, or raise the limit, until it does not.
+
 ### Claim retries back off, and a diverged follower claim heals (T-450)
 
 A follower holding every id of an owner's claim under a claim the owner never
