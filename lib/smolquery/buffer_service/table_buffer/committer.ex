@@ -585,7 +585,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     reply_to_pending(commit.pending, result, rejected)
 
-    send(state.buffer, {:commit_done, commit.batch_ids, inserts(commit.pending)})
+    send(
+      state.buffer,
+      {:commit_done, commit.batch_ids, inserts(commit.pending),
+       if(match?({:ok, _ack}, result), do: :ok, else: :error)}
+    )
 
     state
   end

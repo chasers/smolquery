@@ -61,6 +61,10 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :buffer, :release_failure] %{consecutive}, meta %{table_ref: ref}
                                           — an oversized-claim release that could not
                                           replicate (T-294, T-297)
+      [:smolquery, :buffer, :claim_failure] %{consecutive}, meta %{table_ref: ref}
+                                          — a claim the replicas refused, counted
+                                          consecutively; backs off between attempts and
+                                          alerts like a release at the stuck threshold (T-450)
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
                                           meta %{result: :ok | :error, table_ref: ref}
       [:smolquery, :compact, :quarantine] %{count}, meta %{table_ref: ref, paths: [String.t()]}
@@ -199,6 +203,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :seal, :segment],
     [:smolquery, :seal, :stuck],
     [:smolquery, :buffer, :release_failure],
+    [:smolquery, :buffer, :claim_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
     [:smolquery, :hot_manifest, :change],
@@ -242,6 +247,8 @@ defmodule Smolquery.Telemetry do
       "Seal attempts that failed at or past the stuck threshold; a nonzero rate means a claim may never seal (T-293).",
     "smolquery_seal_release_failures_total" =>
       "Oversized-claim releases that could not replicate; a nonzero rate means sealing on a table is stalled (T-297).",
+    "smolquery_seal_claim_failures_total" =>
+      "Claims the replicas refused; a nonzero rate means the owner is backing off and the table's hot tier is not sealing (T-450).",
     "smolquery_compactions_total" => "Compaction swaps, by result.",
     "smolquery_compaction_microseconds_total" =>
       "Time compaction attempts ran, by result; divide by compactions for the mean (T-244).",
@@ -519,6 +526,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :buffer, :release_failure], _measurements, _meta, nil) do
     bump({"smolquery_seal_release_failures_total", []}, 1)
+  end
+
+  def handle_event([:smolquery, :buffer, :claim_failure], _measurements, _meta, nil) do
+    bump({"smolquery_seal_claim_failures_total", []}, 1)
   end
 
   def handle_event([:smolquery, :compact, :swap], measurements, meta, nil) do

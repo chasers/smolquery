@@ -197,14 +197,8 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end
   end
 
-  defp ship_mutation(targets, mutation, args, epoch) do
-    Enum.reduce_while(targets, :ok, fn target, :ok ->
-      case apply_mutation(target, mutation, args, epoch) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
+  defp ship_mutation(targets, mutation, args, epoch),
+    do: each(targets, &apply_mutation(&1, mutation, args, epoch))
 
   # A heal re-applies the mutation, and that re-apply may uncover a second
   # divergence the first answer could not name — re-shipped entries a
@@ -230,7 +224,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
 
       {:error, {:replication_failed, _node, {:claim_mismatch, %{} = mismatch}}}
       when mutation.op == :release and rounds > 0 ->
-        release_diverged_then_retry(target, mutation, args, epoch, mismatch)
+        release_diverged_then_retry(target, mutation, args, epoch, mismatch, rounds - 1)
 
       outcome ->
         outcome
@@ -244,24 +238,38 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   # than the ids the owner asked for; its `:claim_mismatch` names the whole
   # live set, which is released instead unless it holds ids the owner has
   # already sealed (the same asymmetry T-297 draws).
-  defp release_conflicting_then_retry(
+  defp release_conflicting_then_retry(target, mutation, args, epoch, claimed, rounds) do
+    target
+    |> release_on_follower(mutation, epoch, claimed)
+    |> then_retry(target, mutation, args, epoch, rounds, "claim", "T-450")
+  end
+
+  # Both heals end the same way: the follower's claims that stood in the way
+  # are released, and the owner's mutation is re-applied through
+  # `apply_mutation/5`, so a second divergence the release uncovers gets its
+  # own round rather than falling through unhealed.
+  defp then_retry(
+         {:ok, released},
          {_transport, node, _instance} = target,
          mutation,
          args,
          epoch,
-         claimed,
-         rounds
+         rounds,
+         what,
+         task
        ) do
-    with {:ok, released} <- release_on_follower(target, mutation, epoch, claimed),
-         :ok <- apply_mutation(target, mutation, args, epoch, rounds) do
+    with :ok <- apply_mutation(target, mutation, args, epoch, rounds) do
       Logger.warning(
-        "healed a diverged claim on #{inspect(mutation.table_ref)}: released #{node}'s own " <>
-          "live claim (#{inspect(released)}) before applying the owner's (T-450)"
+        "healed a diverged #{what} on #{inspect(mutation.table_ref)}: released #{node}'s own " <>
+          "live claim (#{inspect(released)}) before the owner's (#{task})"
       )
 
       :ok
     end
   end
+
+  defp then_retry({:error, reason}, _target, _mutation, _args, _epoch, _rounds, _what, _task),
+    do: {:error, reason}
 
   # The requested ids may be exactly one follower claim, in which case the
   # release lands; otherwise the mismatch names the follower's claims, and the
@@ -272,18 +280,24 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
         {:ok, ids}
 
       {:error, {:replication_failed, _node, {:claim_mismatch, mismatch}}} ->
-        wanted = MapSet.new(ids)
-
-        overlapping =
-          mismatch
-          |> live_claims()
-          |> Enum.filter(fn claim -> Enum.any?(claim, &MapSet.member?(wanted, &1)) end)
-
-        release_live_claims(target, mutation, epoch, overlapping)
+        release_live_claims(target, mutation, epoch, overlapping(mismatch, ids))
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Of the follower's live claims, the ones holding any of `ids` — never a
+  # claim beside them: with several live claims an owner's correct mirror of
+  # its other claim would be released too, and its later retire would meet a
+  # follower that knows no claim (the double commit this module's fences
+  # exist to prevent).
+  defp overlapping(mismatch, ids) do
+    wanted = MapSet.new(ids)
+
+    mismatch
+    |> live_claims()
+    |> Enum.filter(fn claim -> Enum.any?(claim, &MapSet.member?(wanted, &1)) end)
   end
 
   defp ship_release(target, mutation, epoch, ids) do
@@ -293,20 +307,24 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   end
 
   defp release_diverged_then_retry(
-         {_transport, node, _instance} = target,
+         target,
          mutation,
          args,
          epoch,
-         mismatch
+         mismatch,
+         rounds
        ) do
-    with {:ok, released} <- release_live_claims(target, mutation, epoch, live_claims(mismatch)),
-         :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
-      Logger.warning(
-        "healed a diverged release on #{inspect(mutation.table_ref)}: released " <>
-          "#{node}'s own live claim (#{inspect(released)}) before the owner's (T-297)"
-      )
+    case overlapping(mismatch, mutation.args.ids) do
+      # The follower holds none of the released ids under a claim — its live
+      # claims are over other entries — so the owner's release has nothing
+      # to do there; a mismatch that names only unrelated claims is done.
+      [] ->
+        :ok
 
-      :ok
+      claims ->
+        target
+        |> release_live_claims(mutation, epoch, claims)
+        |> then_retry(target, mutation, args, epoch, rounds, "release", "T-297")
     end
   end
 
@@ -330,17 +348,20 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   end
 
   defp release_each(target, mutation, epoch, claims) do
-    claims
-    |> Enum.reduce_while({:ok, []}, fn claim, {:ok, released} ->
-      case ship_release(target, mutation, epoch, claim) do
-        :ok -> {:cont, {:ok, [claim | released]}}
+    with :ok <- each(claims, &ship_release(target, mutation, epoch, &1)) do
+      {:ok, List.flatten(claims)}
+    end
+  end
+
+  # `fun` over each item until one answers an error — the shape every
+  # sequential shipment here has.
+  defp each(items, fun) do
+    Enum.reduce_while(items, :ok, fn item, :ok ->
+      case fun.(item) do
+        :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
-    |> case do
-      {:ok, released} -> {:ok, released |> Enum.reverse() |> List.flatten()}
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   defp sealed_on_owner?(mutation, id) do
@@ -390,14 +411,8 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     {:error, {:replication_failed, node, {:heal_in_progress, remaining}}}
   end
 
-  defp reship(target, mutation, epoch, ids) do
-    Enum.reduce_while(ids, :ok, fn id, :ok ->
-      case reship_entry(target, mutation, epoch, id) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
+  defp reship(target, mutation, epoch, ids),
+    do: each(ids, &reship_entry(target, mutation, epoch, &1))
 
   defp reship_entry({_transport, node, _instance} = target, mutation, epoch, id) do
     with {:ok, entry} <- owner_entry(node, mutation, id),

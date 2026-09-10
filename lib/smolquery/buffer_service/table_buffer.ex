@@ -194,7 +194,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @release_stuck_after 5
   @claim_backoff_base_ms 250
-  @claim_backoff_doubling_cap 20
+  @claim_stuck_after 5
 
   defstruct [
     :runtime,
@@ -216,8 +216,7 @@ defmodule Smolquery.BufferService.TableBuffer do
     in_flight_inserts: 0,
     in_flight_ids: MapSet.new(),
     release_failures: 0,
-    claim_failures: 0,
-    claim_retry_at: nil,
+    claim_backoff: nil,
     verified: nil
   ]
 
@@ -573,8 +572,8 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   def handle_info({:flush, _stale}, state), do: {:noreply, state}
 
-  def handle_info({:commit_done, batch_ids, inserts}, state) do
-    {:noreply, state |> settle(batch_ids, inserts) |> run_maintenance()}
+  def handle_info({:commit_done, batch_ids, inserts, result}, state) do
+    {:noreply, state |> settle(batch_ids, inserts, result) |> run_maintenance()}
   end
 
   def handle_info(:maintain, state) do
@@ -614,7 +613,11 @@ defmodule Smolquery.BufferService.TableBuffer do
       state.timer == nil
   end
 
-  defp settle(state, batch_ids, inserts) do
+  # A commit that landed reached every replica a claim would, so a claim
+  # backoff grown while a follower was away is over (see `claim_failed/2`).
+  defp settle(state, batch_ids, inserts, result) do
+    state = if result == :ok, do: claim_settled(state), else: state
+
     %{
       state
       | in_flight: state.in_flight - 1,
@@ -648,7 +651,8 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   defp drain_commit_done(state) do
     receive do
-      {:commit_done, batch_ids, inserts} -> drain_commit_done(settle(state, batch_ids, inserts))
+      {:commit_done, batch_ids, inserts, result} ->
+        drain_commit_done(settle(state, batch_ids, inserts, result))
     after
       0 -> state
     end
@@ -1016,7 +1020,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     case result do
       {:ok, claim} ->
-        {:ok, signal(%{state | claim_failures: 0, claim_retry_at: nil}, claim)}
+        {:ok, signal(claim_settled(state), claim)}
 
       {:error, {:replication_failed, node, {:heal_in_progress, remaining}}} ->
         {:error, heal_in_progress(state, node, remaining)}
@@ -1036,7 +1040,7 @@ defmodule Smolquery.BufferService.TableBuffer do
         "to re-ship to #{node}; retrying on the next tick"
     end)
 
-    %{state | claim_failures: 0, claim_retry_at: nil}
+    claim_settled(state)
   end
 
   # A claim that fails is retried on the next maintenance tick — and every
@@ -1045,29 +1049,61 @@ defmodule Smolquery.BufferService.TableBuffer do
   # lasted (T-450: a diverged follower claim, for over ten minutes). Each
   # consecutive failure doubles the wait before the next attempt, from
   # `@claim_backoff_base_ms` up to `seal_retry_ms`, so a shape nobody
-  # anticipated costs one log line per interval, not per flush. A success
-  # resets it. The drain's force-claim does not consult it: a handoff's
-  # point-in-time seal must try.
+  # anticipated costs one log line per interval, not per flush. The count
+  # feeds `[:smolquery, :buffer, :claim_failure]` and the log escalates to
+  # error at `@claim_stuck_after`, as a release that cannot replicate does
+  # (T-293): a claim failing identically forever is a stalled seal pipeline.
+  #
+  # A successful claim settles it, and so does a successful commit: a commit
+  # reaches the same replicas a claim does, so a follower that was down for
+  # a rolling restart is known to be back the moment a flush lands, without
+  # waiting out a backoff that grew while it was gone. The drain's
+  # force-claim does not consult the wait: a handoff's point-in-time seal
+  # must try.
+  #
   # The deadline is monotonic time, not `now/0`'s wall clock: it is the one
   # comparison here that gates whether the table does any work at all, and a
   # clock stepped backwards must not extend the wait by the size of the step.
   defp claim_failed(state, reason) do
-    consecutive = state.claim_failures + 1
-    doublings = min(consecutive - 1, @claim_backoff_doubling_cap)
+    consecutive = (state.claim_backoff[:consecutive] || 0) + 1
 
     wait =
-      min(@claim_backoff_base_ms * Integer.pow(2, doublings), state.runtime.seal_retry_ms)
+      Smolquery.Backoff.exponential(
+        consecutive,
+        @claim_backoff_base_ms,
+        state.runtime.seal_retry_ms
+      )
 
-    Logger.warning(
-      "claiming #{inspect(state.table_ref)} failed (#{consecutive} consecutive, next attempt " <>
-        "in #{wait} ms): #{inspect(reason)}"
+    :telemetry.execute(
+      [:smolquery, :buffer, :claim_failure],
+      %{consecutive: consecutive},
+      %{table_ref: state.table_ref}
     )
 
-    %{state | claim_failures: consecutive, claim_retry_at: monotonic_ms() + wait}
+    log_claim_failure(state.table_ref, reason, consecutive, wait)
+
+    %{state | claim_backoff: %{consecutive: consecutive, retry_at: monotonic_ms() + wait}}
   end
 
-  defp claim_backing_off?(%__MODULE__{claim_retry_at: nil}), do: false
-  defp claim_backing_off?(state), do: monotonic_ms() < state.claim_retry_at
+  defp log_claim_failure(table_ref, reason, consecutive, wait)
+       when consecutive >= @claim_stuck_after do
+    Logger.error(
+      "claiming #{inspect(table_ref)} failed (#{consecutive} consecutive, next attempt in " <>
+        "#{wait} ms): #{inspect(reason)} — sealing on this table is stalled (T-450)"
+    )
+  end
+
+  defp log_claim_failure(table_ref, reason, consecutive, wait) do
+    Logger.warning(
+      "claiming #{inspect(table_ref)} failed (#{consecutive} consecutive, next attempt " <>
+        "in #{wait} ms): #{inspect(reason)}"
+    )
+  end
+
+  defp claim_settled(state), do: %{state | claim_backoff: nil}
+
+  defp claim_backing_off?(%__MODULE__{claim_backoff: nil}), do: false
+  defp claim_backing_off?(state), do: monotonic_ms() < state.claim_backoff.retry_at
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
