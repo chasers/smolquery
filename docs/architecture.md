@@ -815,8 +815,10 @@ previous sweep's still-undersized output.
   every sweep, an OOM at the row cap's floor for instance, used to re-run
   every `compact_interval_ms`. The table now waits `compact_backoff_base_ms`,
   doubling per consecutive failure up to `compact_backoff_max_ms`, before
-  the sweep looks at it again. A success clears the wait. The log escalates
-  to an error at five consecutive failures, and
+  the sweep looks at it again. A success clears the wait. A merge OOM while
+  the row cap is still above its floor, and a corruption-shaped failure, are
+  left to the row-cap calibration and the quarantine, which need the next
+  sweep. The log escalates to an error at five consecutive failures, and
   `smolquery_compaction_backoffs_total` counts every deferral. Quarantine
   is the stop for a corrupt input; this is the pace for everything else.
 

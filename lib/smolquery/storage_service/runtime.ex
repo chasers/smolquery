@@ -81,7 +81,9 @@ defmodule Smolquery.StorageService.Runtime do
   passed since the last one; a success clears the cooldown. The base
   defaults to two sweep intervals, so the first failure costs one skipped
   sweep, and the ceiling to four hours. A base of `0` disables the
-  cooldown. The undersized run is still there when the cooldown ends, so
+  cooldown. A merge OOM while the table's row cap is above its floor,
+  and a corruption-shaped failure, do not back off: the row-cap calibration
+  and the quarantine each need the next sweep. The undersized run is still there when the cooldown ends, so
   the cost is delay on a table already failing, never lost work.
 
   The catalog engine carries two connections: the first
