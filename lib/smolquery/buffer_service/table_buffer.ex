@@ -193,6 +193,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   alias Smolquery.Segments.Writer
 
   @release_stuck_after 5
+  @claim_backoff_base_ms 250
 
   defstruct [
     :runtime,
@@ -214,6 +215,8 @@ defmodule Smolquery.BufferService.TableBuffer do
     in_flight_inserts: 0,
     in_flight_ids: MapSet.new(),
     release_failures: 0,
+    claim_failures: 0,
+    claim_retry_at: nil,
     verified: nil
   ]
 
@@ -942,6 +945,9 @@ defmodule Smolquery.BufferService.TableBuffer do
       not sealable?(state, unsealed) ->
         state
 
+      claim_backing_off?(state) ->
+        state
+
       true ->
         case try_claim_and_signal(state, unsealed) do
           {:ok, state} -> claim_up_to_max(state, live + 1)
@@ -1009,14 +1015,38 @@ defmodule Smolquery.BufferService.TableBuffer do
 
     case result do
       {:ok, claim} ->
-        {:ok, signal(state, claim)}
+        {:ok, signal(%{state | claim_failures: 0, claim_retry_at: nil}, claim)}
 
       {:error, reason} ->
-        Logger.warning("claiming #{inspect(state.table_ref)} failed: #{inspect(reason)}")
-
-        {:error, state}
+        {:error, claim_failed(state, reason)}
     end
   end
+
+  # A claim that fails is retried on the next maintenance tick — and every
+  # flush runs one, so under ingest a failure the replicas keep answering
+  # identically came back three to six times a second for as long as it
+  # lasted (T-450: a diverged follower claim, for over ten minutes). Each
+  # consecutive failure doubles the wait before the next attempt, from
+  # `@claim_backoff_base_ms` up to `seal_retry_ms`, so a shape nobody
+  # anticipated costs one log line per interval, not per flush. A success
+  # resets it. The drain's force-claim does not consult it: a handoff's
+  # point-in-time seal must try.
+  defp claim_failed(state, reason) do
+    consecutive = state.claim_failures + 1
+
+    wait =
+      min(@claim_backoff_base_ms * Integer.pow(2, consecutive - 1), state.runtime.seal_retry_ms)
+
+    Logger.warning(
+      "claiming #{inspect(state.table_ref)} failed (#{consecutive} consecutive, next attempt " <>
+        "in #{wait} ms): #{inspect(reason)}"
+    )
+
+    %{state | claim_failures: consecutive, claim_retry_at: now() + wait}
+  end
+
+  defp claim_backing_off?(%__MODULE__{claim_retry_at: nil}), do: false
+  defp claim_backing_off?(state), do: now() < state.claim_retry_at
 
   defp claim_byte_valve(state),
     do: max(state.runtime.seal_max_bytes * state.runtime.claim_valve_factor, 1)

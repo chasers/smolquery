@@ -80,6 +80,17 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   sealed ids — the same asymmetry the claim heal draws (T-291 owns the
   reconcile).
 
+  A follower that answers a claim with every requested id in `claimed` —
+  held under a claim the owner never froze, `missing` and `sealed` both
+  empty — heals by the release path too (T-450): the owner releases the
+  follower's claim (the requested ids, or the whole live set the follower's
+  `:claim_mismatch` names when its claim is wider) and applies its own. The
+  sandbox showed the shape this closes: a diverged follower claim over 57
+  ids that the owner re-requested three to six times a second for over ten
+  minutes, because the `missing`-only heal did not match and nothing else
+  did. The one refusal is the same as T-297's — a follower claim holding
+  ids the owner already sealed fails loudly, naming them.
+
   Two divergences sit outside the heal's reach, deliberately documented
   rather than silently covered. A follower recreated *empty* never answers
   `:partial_claim` at all — `Smolquery.BufferService.Endpoint` acks a
@@ -197,6 +208,12 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
       when mutation.op == :claim ->
         heal_then_retry(target, mutation, args, epoch, missing)
 
+      {:error,
+       {:replication_failed, _node,
+        {:partial_claim, %{missing: [], sealed: [], claimed: [_ | _] = claimed}}}}
+      when mutation.op == :claim ->
+        release_conflicting_then_retry(target, mutation, args, epoch, claimed)
+
       {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}}
       when mutation.op == :release ->
         release_diverged_then_retry(target, mutation, args, epoch, live_ids)
@@ -204,6 +221,60 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
       outcome ->
         outcome
     end
+  end
+
+  # The follower holds every requested id, but under a claim the owner never
+  # froze (T-450). Release the follower's claim — its entries go back to
+  # pending, and nothing seals from pending without a claim only the owner
+  # can freeze — then apply the owner's. The follower's claim may be wider
+  # than the ids the owner asked for; its `:claim_mismatch` names the whole
+  # live set, which is released instead unless it holds ids the owner has
+  # already sealed (the same asymmetry T-297 draws).
+  defp release_conflicting_then_retry(
+         {_transport, node, _instance} = target,
+         mutation,
+         args,
+         epoch,
+         claimed
+       ) do
+    with {:ok, released} <- release_on_follower(target, mutation, epoch, claimed),
+         :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
+      Logger.warning(
+        "healed a diverged claim on #{inspect(mutation.table_ref)}: released #{node}'s own " <>
+          "live claim (#{inspect(released)}) before applying the owner's (T-450)"
+      )
+
+      :ok
+    end
+  end
+
+  defp release_on_follower(target, mutation, epoch, ids) do
+    case ship_release(target, mutation, epoch, ids) do
+      :ok ->
+        {:ok, ids}
+
+      {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}} ->
+        release_whole_live_claim(target, mutation, epoch, live_ids)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp release_whole_live_claim({_transport, node, _instance} = target, mutation, epoch, live_ids) do
+    case Enum.filter(live_ids, &sealed_on_owner?(mutation, &1)) do
+      [] ->
+        with :ok <- ship_release(target, mutation, epoch, live_ids), do: {:ok, live_ids}
+
+      sealed ->
+        {:error, {:replication_failed, node, {:diverged_claim_sealed_on_owner, sealed}}}
+    end
+  end
+
+  defp ship_release(target, mutation, epoch, ids) do
+    released = [mutation.table_ref, :release, %{ids: ids}, epoch]
+
+    ship([target], mutation.name, :apply_replica_mutation, released)
   end
 
   defp release_diverged_then_retry(
