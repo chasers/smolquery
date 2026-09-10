@@ -395,6 +395,22 @@ if ms = System.get_env("SMOLQUERY_COMPACT_BACKOFF_MAX_MS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_BACKOFF_MAX_MS", ms)
 end
 
+# T-457: the ingest valve. A buffer node refuses commits once its unsealed
+# manifest entries, or their bytes, reach a ceiling, before the batch reaches
+# the buffer. Entries unset derive from the cgroup memory limit so a node can
+# always adopt what it holds after a restart; bytes unset are not gated.
+if entries = System.get_env("SMOLQUERY_BACKLOG_MAX_ENTRIES") do
+  config :smolquery, Smolquery.BufferService,
+    backlog_max_entries:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_BACKLOG_MAX_ENTRIES", entries)
+end
+
+if bytes = System.get_env("SMOLQUERY_BACKLOG_MAX_BYTES") do
+  config :smolquery, Smolquery.BufferService,
+    backlog_max_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_BACKLOG_MAX_BYTES", bytes)
+end
+
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
   config :smolquery, Smolquery.BufferService,
     max_buffered_bytes:

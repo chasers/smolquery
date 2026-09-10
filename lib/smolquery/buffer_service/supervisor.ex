@@ -93,7 +93,7 @@ defmodule Smolquery.BufferService.Supervisor do
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
-    runtime = Runtime.new(opts)
+    runtime = opts |> Runtime.new() |> Runtime.with_backlog_ceiling()
     Smolquery.DeployedShape.announce(runtime)
 
     Supervisor.start_link(__MODULE__, runtime, name: Runtime.supervisor(runtime.name))

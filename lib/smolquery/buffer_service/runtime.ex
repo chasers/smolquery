@@ -66,6 +66,15 @@ defmodule Smolquery.BufferService.Runtime do
   than let a node come up looking configured. Each member is a whole
   `Smolquery.Engine` subtree carrying that module's own `:memory_limit`, so the
   declared DuckDB memory budget is `write_pool_size ×` it —
+  `:backlog_max_entries` and `:backlog_max_bytes` (both default `nil`) are
+  the ingest valve (T-457): a commit is refused with
+  `{:error, {:backlog_full, refusal}}` once the node's unsealed manifest
+  entries, or their bytes, reach a ceiling — before the batch reaches the
+  buffer, and never on the seal path, which keeps draining. Entries left
+  `nil` derive from the container's memory limit (`backlog_max_entries/2`),
+  because the boot peak of adopting the backlog is what a deep hot tier
+  turns into an OOM kill; bytes left `nil` are not gated.
+
   `:write_engine_memory_limit` (default `nil`) narrows the pool's members
   without touching the query engine's.
 
@@ -276,7 +285,9 @@ defmodule Smolquery.BufferService.Runtime do
     row_validator: nil,
     fullsweep_after: 0,
     hot_server_ip: {127, 0, 0, 1},
-    hot_server_port: 4001
+    hot_server_port: 4001,
+    backlog_max_entries: nil,
+    backlog_max_bytes: nil
   ]
 
   @type t :: %__MODULE__{
@@ -318,7 +329,9 @@ defmodule Smolquery.BufferService.Runtime do
           row_validator: {module(), atom()} | nil,
           fullsweep_after: non_neg_integer(),
           hot_server_ip: :inet.ip_address(),
-          hot_server_port: :inet.port_number()
+          hot_server_port: :inet.port_number(),
+          backlog_max_entries: pos_integer() | nil,
+          backlog_max_bytes: pos_integer() | nil
         }
 
   @limits [
@@ -352,10 +365,20 @@ defmodule Smolquery.BufferService.Runtime do
     :row_validator,
     :fullsweep_after,
     :hot_server_ip,
-    :hot_server_port
+    :hot_server_port,
+    :backlog_max_entries,
+    :backlog_max_bytes
   ]
 
   @codecs [:lz4raw, :zstd, :snappy, :gzip, :uncompressed]
+
+  # What one unsealed manifest entry costs a buffer node to adopt at boot,
+  # roughly: the sandbox's buffer-2 needed a 7,666 MiB peak to adopt 331,000
+  # entries (T-451), and the task that filed the valve put the slope at about
+  # 15 KB per entry. The ceiling keeps that peak inside half the container.
+  @boot_bytes_per_entry 15_360
+  @backlog_entries_floor 4_096
+  @backlog_entries_fallback 200_000
 
   # A sanity ceiling, not a tuned one. Each pool member is a whole
   # `Smolquery.Engine` subtree — an `Adbc.Database`, a connection, and that
@@ -434,6 +457,8 @@ defmodule Smolquery.BufferService.Runtime do
     validate_fullsweep_after!(Keyword.get(config, :fullsweep_after, 0))
     validate_claim_valve_factor!(Keyword.get(config, :claim_valve_factor, 16))
     validate_max_live_claims!(Keyword.get(config, :max_live_claims, 1))
+    validate_backlog_ceiling!(:backlog_max_entries, Keyword.get(config, :backlog_max_entries))
+    validate_backlog_ceiling!(:backlog_max_bytes, Keyword.get(config, :backlog_max_bytes))
     name = Keyword.get(config, :name, Smolquery.BufferService)
     dir = Keyword.get(config, :dir, @default_dir)
     store = build_store(config, dir)
@@ -484,6 +509,65 @@ defmodule Smolquery.BufferService.Runtime do
       {catalog, opts} -> {catalog, Keyword.put(opts, :connections, connections)}
     end
   end
+
+  defp validate_backlog_ceiling!(_key, nil), do: :ok
+  defp validate_backlog_ceiling!(_key, count) when is_integer(count) and count > 0, do: :ok
+
+  defp validate_backlog_ceiling!(key, other) do
+    raise ArgumentError,
+          "config :smolquery, Smolquery.BufferService, #{key}: must be a positive integer " <>
+            "or nil, got: #{inspect(other)}"
+  end
+
+  @doc """
+  What one unsealed manifest entry costs the node to adopt at boot, in
+  bytes, as the backlog ceiling assumes it (T-457).
+  """
+  @spec boot_bytes_per_entry() :: pos_integer()
+  def boot_bytes_per_entry, do: @boot_bytes_per_entry
+
+  @doc """
+  The most unsealed manifest entries this node may hold before it refuses
+  commits (T-457).
+
+  An explicit `backlog_max_entries` wins. Left `nil`, the ceiling derives
+  from the container's cgroup memory limit: adopting the backlog after a
+  restart peaks at about `boot_bytes_per_entry/0` per entry, and a node
+  must be able to adopt what it holds — a pod that cannot boot cannot run
+  the heal that would drain it — so the ceiling is the limit over twice
+  that, leaving the other half for the BEAM, the encodes and everything
+  else the sampler charges the container with, and never below
+  #{@backlog_entries_floor}. Without a cgroup limit it is
+  #{@backlog_entries_fallback}, which is a 6 Gi container's derivation
+  near enough, since bare metal states no ceiling of its own.
+
+  The limit was raised three times in one day on the sandbox — 4 Gi, 6 Gi,
+  8 Gi — and the backlog outgrew each one, because the boot peak follows the
+  backlog. A ceiling on the backlog is what makes the container limit a
+  fixed, checkable number instead of a moving target.
+  """
+  @spec backlog_max_entries(t(), {:ok, pos_integer()} | :none) :: pos_integer()
+  def backlog_max_entries(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
+
+  def backlog_max_entries(%__MODULE__{backlog_max_entries: entries}, _cgroup)
+      when is_integer(entries),
+      do: entries
+
+  def backlog_max_entries(%__MODULE__{}, {:ok, bytes}),
+    do: max(div(bytes, 2 * @boot_bytes_per_entry), @backlog_entries_floor)
+
+  def backlog_max_entries(%__MODULE__{}, :none), do: @backlog_entries_fallback
+
+  @doc """
+  The runtime with its entry ceiling resolved (`backlog_max_entries/2`),
+  once, at boot: `Smolquery.BufferService.Supervisor` starts with this, so
+  the valve on every commit reads a struct field and never the cgroup. A
+  runtime nobody resolved keeps `nil` and admits everything, which is what
+  a bare `new/1` in a test gets.
+  """
+  @spec with_backlog_ceiling(t()) :: t()
+  def with_backlog_ceiling(%__MODULE__{} = runtime),
+    do: %{runtime | backlog_max_entries: backlog_max_entries(runtime)}
 
   defp validate_catalog_connections!(count) when is_integer(count) and count > 0, do: :ok
 

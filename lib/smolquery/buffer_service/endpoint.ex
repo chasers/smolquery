@@ -17,6 +17,7 @@ defmodule Smolquery.BufferService.Endpoint do
   a caller try the next owner rather than crash.
   """
 
+  alias Smolquery.BufferService.Backlog
   alias Smolquery.BufferService.Drain
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotManifest.Entry
@@ -302,7 +303,29 @@ defmodule Smolquery.BufferService.Endpoint do
       retry(runtime, table_ref, schema, payload, byte_size, batch_id, retries)
   end
 
+  # Two valves, both before the batch reaches the buffer's mailbox: the
+  # backlog valve (T-457) refuses a node whose unsealed hot tier is already
+  # too deep to survive, and Little's-law admission (PL-9) refuses a batch
+  # the buffer could not ack inside its budget.
   defp admit_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id) do
+    count = payload_count(payload)
+
+    case Backlog.admit(runtime, table_ref) do
+      :ok ->
+        admit_load_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id)
+
+      {:error, reason} ->
+        :telemetry.execute(
+          [:smolquery, :buffer, :admission],
+          %{rows: count},
+          %{outcome: :backlog}
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp admit_load_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id) do
     load = load(runtime, table_ref)
     count = payload_count(payload)
 

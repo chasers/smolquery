@@ -155,8 +155,12 @@ defmodule Smolquery.BufferService.HotManifest do
   Even when sealing keeps up there is a resident floor of roughly
   `flush_rate x retire_grace_ms / 1000` entries — the flush rate times the
   grace window in seconds, because the grace window holds them.
-  Nothing bounds the index; `max_buffered_rows` and `max_buffered_bytes` bound
-  the accumulator, not this.
+  `max_buffered_rows` and `max_buffered_bytes` bound the accumulator, not
+  this. What bounds the index is the ingest valve (T-457): `depth/2` keeps
+  the unsealed entries and bytes per table and per node as O(1) counters,
+  and `Smolquery.BufferService.Backlog` refuses a commit once the node's
+  count reaches `backlog_max_entries`, which is derived from the container's
+  memory limit so a node can always adopt what it holds after a restart.
 
   ## How the *log* shrinks, which is a different question (T-319)
 
@@ -306,6 +310,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.new(tombstones(name), @index_options ++ [:set, :named_table])
     :ets.new(owed(name), @index_options ++ [:set, :named_table])
     :ets.new(sizes(name), @index_options ++ [:set, :named_table])
+    :ets.new(depths(name), @index_options ++ [:set, :named_table])
 
     {:ok, name}
   end
@@ -395,9 +400,34 @@ defmodule Smolquery.BufferService.HotManifest do
       index_retired(manifest, table_ref, entry)
       index_batches(manifest, table_ref, entry)
       refresh_claim_for(manifest, table_ref, entry, held)
+      track_depth(manifest, table_ref, weight(entry), weight(held))
       count(:added, if(held == :error, do: 1, else: 0))
 
       {:ok, entry}
+    end
+  end
+
+  @doc """
+  How much of the table's hot tier — or, with `:node`, of every table's on
+  this node — is still unsealed: the entries and their bytes (T-457).
+
+  Two O(1) counter reads, kept the way `log_size/2` is: every `put_entry/4`,
+  `retire/6` and drop moves them by what it changed, and `recover/2`
+  re-derives a table's row from the index it just rebuilt. The `:node` row
+  is the sum over tables, so the ingest valve
+  (`Smolquery.BufferService.Backlog`) costs a commit one lookup, not a scan
+  of an index that reached 331,000 entries the day this was measured.
+  Retired entries waiting out `retire_grace_ms` are not in it: the reaper
+  drains those on its own, and refusing commits cannot hurry it.
+  """
+  @spec depth(t(), Store.table_ref() | :node) :: %{
+          entries: non_neg_integer(),
+          bytes: non_neg_integer()
+        }
+  def depth(%__MODULE__{table: table}, key) do
+    case :ets.lookup(depths(table), key) do
+      [{_key, entries, bytes}] -> %{entries: entries, bytes: bytes}
+      [] -> %{entries: 0, bytes: 0}
     end
   end
 
@@ -1233,9 +1263,56 @@ defmodule Smolquery.BufferService.HotManifest do
         index_retired(manifest, table_ref, sealed)
       end)
 
+      track_depth(manifest, table_ref, {0, 0}, Enum.reduce(pending, {0, 0}, &add_weight/2))
       refresh_claim(manifest, table_ref)
       count(:retired, length(pending))
     end
+  end
+
+  # The unsealed depth an entry contributes: one entry and its bytes until it
+  # seals, nothing after. `held` is `entry/3`'s answer, so an absent entry
+  # weighs nothing too.
+  defp weight(%Entry{sealed_at: nil, byte_size: bytes}), do: {1, bytes}
+  defp weight(%Entry{}), do: {0, 0}
+  defp weight({:ok, %Entry{} = entry}), do: weight(entry)
+  defp weight(:error), do: {0, 0}
+
+  defp add_weight(%Entry{} = entry, {entries, bytes}) do
+    {more_entries, more_bytes} = weight(entry)
+
+    {entries + more_entries, bytes + more_bytes}
+  end
+
+  # Moves a table's unsealed depth, and the node's with it, from `before` to
+  # `after`. Both rows are `{key, entries, bytes}` in the depths table, each
+  # update one atomic `update_counter`, and the node's new reading is what
+  # `GET /metrics` shows (T-457).
+  defp track_depth(manifest, table_ref, after_weight, before_weight)
+
+  defp track_depth(_manifest, _table_ref, same, same), do: :ok
+
+  defp track_depth(%__MODULE__{table: table}, table_ref, {entries, bytes}, {had, had_bytes}) do
+    ops = [{2, entries - had}, {3, bytes - had_bytes}]
+    :ets.update_counter(depths(table), table_ref, ops, {table_ref, 0, 0})
+    [node_entries, node_bytes] = :ets.update_counter(depths(table), :node, ops, {:node, 0, 0})
+
+    Telemetry.put_gauge("smolquery_buffer_unsealed_entries", [], node_entries)
+    Telemetry.put_gauge("smolquery_buffer_unsealed_bytes", [], node_bytes)
+  end
+
+  # Recovery rebuilt the table's index outright, so its depth is re-derived
+  # from what is there rather than patched: one pass over the pending
+  # entries, projecting each to its byte size inside ETS.
+  defp reseed_depth(%__MODULE__{table: table} = manifest, table_ref) do
+    spec = [
+      {{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}],
+       [{:map_get, :byte_size, :"$1"}]}
+    ]
+
+    sizes = :ets.select(table, spec)
+    %{entries: entries, bytes: bytes} = depth(manifest, table_ref)
+
+    track_depth(manifest, table_ref, {length(sizes), Enum.sum(sizes)}, {entries, bytes})
   end
 
   defp delete_and_forget(manifest, table_ref, ids, log) do
@@ -1335,6 +1412,8 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp sizes(table) when is_atom(table), do: Module.concat(table, Sizes)
 
+  defp depths(table) when is_atom(table), do: Module.concat(table, Depths)
+
   defp id_spec(table_ref), do: [{{{table_ref, :"$1"}, :_}, [], [:"$1"]}]
 
   defp index_retired(%__MODULE__{table: table}, table_ref, %Entry{retired_at: at, id: id})
@@ -1422,6 +1501,7 @@ defmodule Smolquery.BufferService.HotManifest do
     :ets.delete(manifest.table, {table_ref, entry.id})
     unindex_retired(manifest, table_ref, {:ok, entry})
     forget_batches(manifest, table_ref, entry)
+    track_depth(manifest, table_ref, {0, 0}, weight(entry))
   end
 
   defp forget_batches(%__MODULE__{table: table}, table_ref, %Entry{} = entry),
@@ -1445,6 +1525,7 @@ defmodule Smolquery.BufferService.HotManifest do
     Enum.each(entries, &index_batches(manifest, table_ref, &1))
     Enum.each(entries, &index_retired(manifest, table_ref, &1))
     refresh_claim(manifest, table_ref)
+    reseed_depth(manifest, table_ref)
 
     %{
       recovered: Enum.count(entries, &(not MapSet.member?(present, &1.id))),

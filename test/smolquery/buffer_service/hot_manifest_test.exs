@@ -182,6 +182,75 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "depth/2 (T-457)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    test "counts the unsealed entries and their bytes, per table and for the node",
+         %{manifest: manifest} do
+      assert HotManifest.depth(manifest, @table) == %{entries: 0, bytes: 0}
+      assert HotManifest.depth(manifest, :node) == %{entries: 0, bytes: 0}
+
+      first = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(2))
+      other = add(manifest, @other, rows(3))
+
+      assert HotManifest.depth(manifest, @table) ==
+               %{entries: 2, bytes: first.byte_size + second.byte_size}
+
+      assert HotManifest.depth(manifest, @other) == %{entries: 1, bytes: other.byte_size}
+
+      assert HotManifest.depth(manifest, :node) ==
+               %{entries: 3, bytes: first.byte_size + second.byte_size + other.byte_size}
+    end
+
+    test "a retired entry leaves the depth, and a dropped one too", %{manifest: manifest} do
+      first = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(2))
+
+      :ok = HotManifest.retire(manifest, @table, [first.id], 7)
+      assert HotManifest.depth(manifest, @table) == %{entries: 1, bytes: second.byte_size}
+      assert HotManifest.depth(manifest, :node) == %{entries: 1, bytes: second.byte_size}
+
+      :ok = HotManifest.retire(manifest, @table, [first.id], 7)
+      assert HotManifest.depth(manifest, @table) == %{entries: 1, bytes: second.byte_size}
+
+      :ok = HotManifest.drop(manifest, @table, [second.id, first.id])
+      assert HotManifest.depth(manifest, @table) == %{entries: 0, bytes: 0}
+      assert HotManifest.depth(manifest, :node) == %{entries: 0, bytes: 0}
+    end
+
+    test "re-putting an entry moves the depth by what changed, never twice",
+         %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+
+      {:ok, _same} = HotManifest.put_entry(manifest, @table, entry)
+      assert HotManifest.depth(manifest, @table) == %{entries: 1, bytes: entry.byte_size}
+
+      {:ok, _sealed} = HotManifest.put_entry(manifest, @table, Entry.seal(entry, 3, 4))
+      assert HotManifest.depth(manifest, @table) == %{entries: 0, bytes: 0}
+
+      {:ok, _unsealed} = HotManifest.put_entry(manifest, @table, entry)
+      assert HotManifest.depth(manifest, @table) == %{entries: 1, bytes: entry.byte_size}
+    end
+
+    test "recovery re-derives a table's depth from the index it rebuilt", context do
+      manifest = start_manifest(context, context.local)
+      first = add(manifest, @table, rows(1))
+      second = add(manifest, @table, rows(2))
+      :ok = HotManifest.retire(manifest, @table, [first.id], 7)
+
+      fresh = start_manifest(context, context.local)
+      assert HotManifest.depth(fresh, @table) == %{entries: 0, bytes: 0}
+
+      assert {:ok, %{entries: 2}} = HotManifest.recover(fresh, @table)
+      assert HotManifest.depth(fresh, @table) == %{entries: 1, bytes: second.byte_size}
+      assert HotManifest.depth(fresh, :node) == %{entries: 1, bytes: second.byte_size}
+
+      assert {:ok, _again} = HotManifest.recover(fresh, @table)
+      assert HotManifest.depth(fresh, :node) == %{entries: 1, bytes: second.byte_size}
+    end
+  end
+
   describe "pending/3 and empty?/2 (T-317)" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

@@ -147,6 +147,26 @@ defmodule SmolqueryApi.InsertControllerTest do
     assert String.to_integer(retry_after) >= 1
   end
 
+  test "a buffer node whose unsealed backlog is at its ceiling is a 429 naming the depth (T-457)",
+       %{name: name, buffer: buffer} do
+    assert post_rows(name, [%{"id" => 1}]).status == 200
+
+    {:ok, runtime} = BufferService.Runtime.fetch(buffer)
+    BufferService.Runtime.put(%{runtime | backlog_max_entries: 1})
+
+    response = post_rows(name, [%{"id" => 2}])
+
+    assert response.status == 429
+
+    assert %{"error" => %{"status" => "RESOURCE_EXHAUSTED", "message" => message}} =
+             JSON.decode!(response.resp_body)
+
+    assert message =~ "hot tier backlog too deep"
+    assert message =~ "analytics.events"
+    assert message =~ "ceiling of 1"
+    assert Plug.Conn.get_resp_header(response, "retry-after") == ["5"]
+  end
+
   test "a draining buffer is a 503 with retry-after, not a 500", %{name: name, buffer: buffer} do
     assert :ok = BufferService.Drain.handoff(buffer)
 

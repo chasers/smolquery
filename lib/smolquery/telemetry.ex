@@ -48,7 +48,10 @@ defmodule Smolquery.Telemetry do
                                           table_ref: ref}
                                           — why a group-commit window closed; the one
                                           fact that says which knob is in control (T-333)
-      [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused}
+      [:smolquery, :buffer, :admission]   %{rows}, meta %{outcome: :refused | :backlog}
+                                          — a batch refused before the buffer's mailbox:
+                                          by Little's-law admission (PL-9), or because the
+                                          node's unsealed backlog is at its ceiling (T-457)
       [:smolquery, :buffer, :dedup]       %{rows}
       [:smolquery, :seal, :attempt]       %{duration_us, segments},
                                           meta %{result: :ok | :error | :crashed, table_ref: ref}
@@ -241,6 +244,9 @@ defmodule Smolquery.Telemetry do
       "Time spent answering HTTP requests; divide by requests for the mean.",
     "smolquery_buffer_admission_refused_rows_total" =>
       "Rows refused by Little's-law admission (PL-9).",
+    "smolquery_buffer_backlog_refused_rows_total" =>
+      "Rows refused because the node's unsealed hot tier is at its ceiling; a sustained " <>
+        "rate means sealing is not draining this node (T-457).",
     "smolquery_buffer_dedup_rows_total" =>
       "Rows answered from the batch-id dedup index instead of rewritten (T-41).",
     "smolquery_seal_attempts_total" => "Seal attempts, by result.",
@@ -377,8 +383,11 @@ defmodule Smolquery.Telemetry do
 
   # The second exception to counters-only: memory readings are levels, not
   # events, and a counter cannot say "1.3 GiB". Written by
-  # `Smolquery.MemoryMetrics` on its sampling interval (T-451); nothing else
-  # should call `put_gauge/3`. Cardinality is the closed `kind` set below.
+  # `Smolquery.MemoryMetrics` on its sampling interval (T-451), and by
+  # `Smolquery.BufferService.HotManifest` on every change to the node's
+  # unsealed depth (T-457), with the ceiling that depth is refused at written
+  # once by `Smolquery.DeployedShape`. Cardinality is the closed `kind` set
+  # below.
   # `smolquery_memory_cgroup_events_total` is the kernel's own cumulative
   # counter, set rather than incremented, and rendered as the counter it is.
   @gauges %{
@@ -390,7 +399,13 @@ defmodule Smolquery.Telemetry do
     "smolquery_memory_rss_bytes" => "This OS process's resident set.",
     "smolquery_memory_rss_peak_bytes" => "The highest resident set sampled in the last 60 s.",
     "smolquery_memory_beam_bytes" =>
-      "The BEAM's own accounting, by kind (total, processes, binary, ets)."
+      "The BEAM's own accounting, by kind (total, processes, binary, ets).",
+    "smolquery_buffer_unsealed_entries" =>
+      "Unsealed micro-segments this buffer node holds across every table; what a restart must adopt (T-457).",
+    "smolquery_buffer_unsealed_bytes" =>
+      "Bytes of unsealed micro-segments this buffer node holds across every table (T-457).",
+    "smolquery_buffer_unsealed_entries_limit" =>
+      "The unsealed entry count at which this buffer node refuses commits (T-457)."
   }
 
   @kernel_counters %{
@@ -542,6 +557,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :buffer, :flush_trigger], _measurements, meta, nil) do
     bump({"smolquery_buffer_flush_trigger_total", [reason: flush_reason(meta)]}, 1)
+  end
+
+  def handle_event([:smolquery, :buffer, :admission], measurements, %{outcome: :backlog}, nil) do
+    bump({"smolquery_buffer_backlog_refused_rows_total", []}, Map.get(measurements, :rows, 0))
   end
 
   def handle_event([:smolquery, :buffer, :admission], measurements, _meta, nil) do

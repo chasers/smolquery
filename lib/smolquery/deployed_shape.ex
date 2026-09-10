@@ -77,11 +77,14 @@ defmodule Smolquery.DeployedShape do
       claim_valve_factor: runtime.claim_valve_factor,
       claim_max_bytes: runtime.seal_max_bytes * runtime.claim_valve_factor,
       claim_max_files: runtime.seal_max_files * runtime.claim_valve_factor,
+      backlog_max_entries: runtime.backlog_max_entries,
+      backlog_max_bytes: runtime.backlog_max_bytes,
       transport_tls: transport_tls?()
     ]
 
     Logger.info("buffer shape: #{describe(labels)}")
     Telemetry.put_info("smolquery_buffer_shape_info", labels)
+    publish_backlog_ceiling(runtime.backlog_max_entries)
 
     warn_slow(
       transport_tls?(),
@@ -136,6 +139,15 @@ defmodule Smolquery.DeployedShape do
 
     :ok
   end
+
+  # The ceiling the ingest valve refuses at (T-457), as a gauge beside the
+  # unsealed depth the manifest publishes, so one panel shows both. Written
+  # once at boot, like the shape it belongs to; a derived ceiling is exactly
+  # the number an operator cannot read off their configuration.
+  defp publish_backlog_ceiling(nil), do: :ok
+
+  defp publish_backlog_ceiling(entries),
+    do: Telemetry.put_gauge("smolquery_buffer_unsealed_entries_limit", [], entries)
 
   # A burst of concurrent encodes past a quarter of the container is the shape
   # that OOMKills a pod nothing at rest predicts (T-451): the memory is

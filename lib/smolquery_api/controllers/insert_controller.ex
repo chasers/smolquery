@@ -5,16 +5,20 @@ defmodule SmolqueryApi.InsertController do
   A 200 means the buffer service has every accepted row durable and queryable,
   and the body says which rows were not accepted (`insertErrors`, per-index) —
   partial failure is a successful response, BigQuery-style. Whole-request
-  failures map to the envelope: an unknown table is a 404, a full buffer is a
+  failures map to the envelope: an unknown table is a 404, a full buffer or a
+  node whose unsealed backlog is at its ceiling (T-457) is a
   429 with `retry-after`, a service that is not running here is a 503.
   """
 
   use SmolqueryApi, :controller
 
+  alias Smolquery.BufferService.Backlog
   alias Smolquery.IngestService
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Json
   alias SmolqueryApi.Runtime
+
+  @backlog_retry_after_s 5
 
   @doc """
   Inserts the body's rows into a table.
@@ -118,6 +122,12 @@ defmodule SmolqueryApi.InsertController do
   @spec insert_error(Plug.Conn.t(), term()) :: Plug.Conn.t()
   def insert_error(conn, :buffer_full) do
     Errors.send_resource_exhausted(conn, 1, "buffer full, retry later")
+  end
+
+  # A backlog refusal is the same retryable 429, with a longer retry-after:
+  # the backlog drains at the seal's pace, not the accumulator's (T-457).
+  def insert_error(conn, {:backlog_full, refusal}) do
+    Errors.send_resource_exhausted(conn, @backlog_retry_after_s, Backlog.message(refusal))
   end
 
   def insert_error(conn, {:overloaded, predicted_ms}) do

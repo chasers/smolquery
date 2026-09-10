@@ -63,6 +63,9 @@ defmodule Smolquery.BufferService.Client do
   Errors a caller must expect:
 
     * `{:error, :buffer_full}` — shed load; the ingest edge turns this into a 429
+    * `{:error, {:backlog_full, refusal}}` — the node's unsealed hot tier is at
+      its ceiling (`Smolquery.BufferService.Backlog`, T-457); the refusal
+      names the table and the depth, and the ingest edge turns it into a 429
     * `{:error, :buffer_service_unavailable}` — the owner does not run the
       `:buffer` role
     * `{:error, :draining}` — the owner is mid-drain (Milestone 8 L4); the

@@ -101,6 +101,27 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### A buffer node refuses commits once its unsealed backlog is too deep to survive (T-457)
+
+A buffer node accepted commits at whatever rate a client sent them, however
+far behind its sealing was. One stalled seal path grew a node's hot manifest to
+331,000 unsealed entries, and the boot peak of adopting a backlog scales with
+it at roughly 15 KB per entry: buffer-2 needed 7,666 MiB to adopt on boot, could
+not inside 4 Gi, and crash-looped instead of running the heal that would have
+drained it. The limit was raised to 6 Gi and then 8 Gi in one day and the
+backlog outgrew each. Every node now keeps its unsealed entries and bytes as
+O(1) counters and refuses a commit with a retryable 429 (`retry-after: 5`,
+naming the table and the depth) once the count reaches
+`SMOLQUERY_BACKLOG_MAX_ENTRIES` — derived from the container's cgroup memory
+limit so a node can always adopt what it holds, `200000` without one — or the
+bytes reach `SMOLQUERY_BACKLOG_MAX_BYTES` when set. The valve is on ingest
+only: sealing keeps draining a node that refuses, and replicated shipments are
+never refused. `smolquery_buffer_unsealed_entries`, `_bytes` and
+`_entries_limit` are on `GET /metrics`; alert on the ratio well before one.
+The ceiling is on the `buffer shape:` boot line. Clients that retry on 429
+need no change; ones that treat 429 as fatal now lose a batch a full node
+would previously have taken and later died holding.
+
 ### Compaction takes its own catalog connection, and backs off when it fails (T-458)
 
 A storage node's catalog engine now carries two connections: one for seal
