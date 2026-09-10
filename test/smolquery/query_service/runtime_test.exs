@@ -24,6 +24,16 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert Runtime.new().name == Smolquery.QueryService
     end
 
+    test "refuses a hot_manifest_page that is not a positive integer at boot (T-449)" do
+      for page <- [0, -1, "1024", nil] do
+        assert_raise ArgumentError, ~r/unsupported hot_manifest_page/, fn ->
+          Runtime.new(name: __MODULE__.BadPage, hot_manifest_page: page)
+        end
+      end
+
+      assert Runtime.new(name: __MODULE__.Page, hot_manifest_page: 16).hot_manifest_page == 16
+    end
+
     test "wires a DuckLake catalog to this instance's own engine" do
       runtime = Runtime.new(name: __MODULE__.Lake)
 
