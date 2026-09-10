@@ -128,4 +128,39 @@ defmodule Smolquery.BufferService.HotClientTest do
                {:error, {:invalid_identifier, "../etc"}}
     end
   end
+
+  describe "newest/4 (T-449)" do
+    test "reads one newest-first page, and says where the next one starts", context do
+      buffer = start_buffer(context)
+      base_url = HotServer.base_url(buffer)
+      acks = for n <- 1..3, do: elem(Client.write_batch(buffer, @table, batch(n..n)), 1)
+      [oldest, middle, newest] = acks |> Enum.map(& &1.segment_id) |> Enum.sort()
+
+      assert {:ok, [first, second], next} = HotClient.newest(base_url, @table, 2, stats: false)
+      assert {first["id"], second["id"], next} == {newest, middle, middle}
+      refute Map.has_key?(first, "stats")
+
+      assert {:ok, [last], nil} = HotClient.newest(base_url, @table, 2, before: next)
+      assert last["id"] == oldest
+      assert Map.has_key?(last, "stats")
+    end
+
+    test "an untouched table is an empty page with no next", context do
+      buffer = start_buffer(context)
+
+      assert HotClient.newest(HotServer.base_url(buffer), @table, 5) == {:ok, [], nil}
+    end
+
+    test "reports an unreachable buffer node rather than raising" do
+      assert {:error, {:manifest_unreachable, _reason}} =
+               HotClient.newest("http://127.0.0.1:1", @table, 5)
+    end
+
+    test "refuses a table name that is not an identifier", context do
+      buffer = start_buffer(context)
+
+      assert HotClient.newest(HotServer.base_url(buffer), {"analytics", "../etc"}, 5) ==
+               {:error, {:invalid_identifier, "../etc"}}
+    end
+  end
 end

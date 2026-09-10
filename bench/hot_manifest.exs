@@ -126,7 +126,7 @@ defmodule Bench.HotManifest do
     )
 
     IO.puts(
-      "  depth    entry us   entries us   claimable us   live_claim us   reap us   empty? us"
+      "  depth    entry us   entries us   newest 50 us   claimable us   live_claim us   reap us   empty? us"
     )
 
     for depth <- depths do
@@ -142,6 +142,7 @@ defmodule Bench.HotManifest do
       IO.puts(
         "  #{pad(depth, 5)}    #{pad(reps(fn -> HotManifest.entry(manifest, @table, mid) end, 51), 8)}   " <>
           "#{pad(reps(fn -> HotManifest.entries(manifest, @table) end, 11), 10)}   " <>
+          "#{pad(reps(fn -> HotManifest.newest(manifest, @table, 50, stats: false) end, 51), 12)}   " <>
           "#{pad(reps(fn -> HotManifest.claimable(manifest, @table, 1_024) end, 21), 12)}   " <>
           "#{pad(reps(fn -> HotManifest.live_claim(manifest, @table) end, 51), 13)}   " <>
           "#{pad(reps(fn -> HotManifest.retired_before(manifest, @table, 2_000_000) end, 51), 7)}   " <>
@@ -233,6 +234,7 @@ defmodule Bench.HotManifest do
         claim = Enum.take(ids, @claim_size)
 
         report_read(backlog, "GET whole", fn -> whole(stack) end, backlog)
+        report_read(backlog, "GET newest 50", fn -> newest(stack, 50) end, min(backlog, 50))
         report_read(backlog, "POST claim", fn -> scoped(stack, claim) end, length(claim))
       after
         stop_stack(stack)
@@ -458,6 +460,12 @@ defmodule Bench.HotManifest do
 
   defp scoped(stack, ids) do
     {:ok, entries} = HotClient.manifest(stack.base_url, @table, ids: ids, stats: false)
+
+    JSON.encode!(entries)
+  end
+
+  defp newest(stack, limit) do
+    {:ok, entries, _next} = HotClient.newest(stack.base_url, @table, limit, stats: false)
 
     JSON.encode!(entries)
   end

@@ -133,6 +133,19 @@ defmodule Smolquery.QueryService.Planner do
   turned planning that preview from 5.3 s and a 1.1 GiB BEAM peak into a
   fraction of either. That peak is what OOMKilled the sandbox's query pods.
 
+  Trimming the file list was not enough on its own. To know which entries
+  were newest the planner still fetched the whole manifest, and the day this
+  was reopened one buffer node held 285,000 entries for the table: the fetch
+  and its decoding killed the pod before a file was read. So the preview's
+  table is fetched newest-first, a page at a time
+  (`Smolquery.BufferService.HotClient.newest/4`), until the entries the
+  membership rule keeps hold the rows the sealed tier does not — one page of
+  a few entries, usually, and none at all when the sealed tier covers the
+  LIMIT by itself. A page is what the plan read, not the tier, so
+  `hot_members` leaves that table out: a wire transaction that opened with
+  the preview pins the table at its next touch, rather than pinning a later
+  `count(*)` to three files.
+
   ## Both tiers project onto the catalog's schema
 
   Micro-segments written before a column was added lack it; `UNION ALL BY
@@ -285,9 +298,11 @@ defmodule Smolquery.QueryService.Planner do
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          conjuncts = Pruner.conjuncts(statement, refs, params),
          top_n = TopN.spec(statement, refs),
+         any_n = AnyN.spec(statement, refs),
+         page = newest_page(any_n, runtime, tables, pin),
          {:ok, manifests} <-
            Trace.span(:manifests, fn ->
-             manifests(runtime, refs, tables, &reads_stats?(&1, conjuncts, top_n))
+             manifests(runtime, refs, tables, &reads_stats?(&1, conjuncts, top_n), page)
            end),
          {:ok, members} <-
            Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
@@ -296,14 +311,21 @@ defmodule Smolquery.QueryService.Planner do
       hot =
         runtime
         |> bounded(connection, statement, tables, pruned, params, top_n)
-        |> trimmed(tables, AnyN.spec(statement, refs))
+        |> trimmed(tables, any_n)
 
       query = %{sql: sql, canonical: canonical, params: params}
 
       {:ok,
-       Trace.span(:build, fn -> build(query, snapshot, refs, tables, members, hot, attaches) end)}
+       Trace.span(:build, fn ->
+         build(query, snapshot, refs, tables, members, hot, attaches, page)
+       end)}
     end
   end
+
+  # A page is what the plan read of the preview's table, not the tier: a later
+  # query pinned to it would read short, so the table is not pinnable.
+  defp pinnable(members, nil), do: members
+  defp pinnable(members, %{ref: ref}), do: Map.delete(members, ref)
 
   defp pinned_snapshot(runtime, nil), do: Catalog.current_snapshot(runtime.catalog)
   defp pinned_snapshot(_runtime, snapshot), do: {:ok, snapshot}
@@ -388,14 +410,33 @@ defmodule Smolquery.QueryService.Planner do
   # read lazy; the trim still spares the manifest fetch and the URL list).
   defp trimmed(hot, _tables, nil), do: hot
 
-  defp trimmed(hot, tables, %{ref: ref, limit: limit}) do
-    sealed_rows =
-      case tables[ref].stats do
-        %{rows: rows} -> rows
-        _unavailable -> :unavailable
-      end
+  defp trimmed(hot, tables, %{ref: ref, limit: limit}),
+    do: Map.update!(hot, ref, &AnyN.trim(&1, sealed_rows(tables[ref]), limit))
 
-    Map.update!(hot, ref, &AnyN.trim(&1, sealed_rows, limit))
+  defp sealed_rows(%{stats: %{rows: rows}}), do: rows
+  defp sealed_rows(_unavailable), do: :unavailable
+
+  # The preview's table is fetched newest-first, a page at a time, until the
+  # entries its membership rule keeps hold the rows the sealed tier does not
+  # (T-449): the whole manifest was 285,000 entries per buffer node the day
+  # this was reopened, fetched to keep three. A pinned read (`hot_ids:`)
+  # names its entries already, and reads them whole.
+  defp newest_page(nil, _runtime, _tables, _pin), do: nil
+
+  defp newest_page(%{ref: ref, limit: limit}, runtime, tables, pin) do
+    %{sealed: sealed} = table = tables[ref]
+    hot_before_ms = Keyword.get(pin, :hot_before_ms)
+
+    if Map.has_key?(Keyword.get(pin, :hot_ids, %{}), ref) do
+      nil
+    else
+      %{
+        ref: ref,
+        rows: AnyN.need(sealed_rows(table), limit),
+        entries: runtime.hot_manifest_page,
+        keep: &(include?(&1, sealed) and stamped_before?(&1, hot_before_ms))
+      }
+    end
   end
 
   defp bounded(runtime, connection, statement, tables, hot, params, spec) do
@@ -635,15 +676,15 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp manifests(_runtime, [], _tables, _reads_stats?), do: {:ok, %{}}
+  defp manifests(_runtime, [], _tables, _reads_stats?, _page), do: {:ok, %{}}
 
   # A partitioned table's hot tier lives under several buffer refs
   # (Smolquery.Partitions), so each table expands into its partition refs for
   # the fetch and every page gathers under the parent — the rest of the plan
   # keeps seeing one hot tier per table. `reads_stats?.(ref)` says whether
   # the plan can use the entries' flush-time stats; a fetch that cannot
-  # leaves them out.
-  defp manifests(runtime, refs, tables, reads_stats?) do
+  # leaves them out. `page` names the one table read newest-first by page.
+  defp manifests(runtime, refs, tables, reads_stats?, page) do
     urls = manifest_urls(runtime)
 
     pairs =
@@ -661,10 +702,7 @@ defmodule Smolquery.QueryService.Planner do
         fn {parent, partition, url} ->
           {parent,
            Trace.span(:manifest_fetch, %{url: url}, fn ->
-             HotClient.manifest(url, partition,
-               timeout_ms: runtime.buffer_timeout_ms,
-               stats: reads_stats?.(parent)
-             )
+             fetch(runtime, parent, partition, url, reads_stats?, page)
            end)}
         end,
         ordered: true,
@@ -740,7 +778,49 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
-  defp build(query, snapshot, refs, tables, members, hot, attaches) do
+  defp fetch(runtime, parent, partition, url, reads_stats?, page) do
+    case page do
+      %{ref: ^parent} ->
+        newest(url, partition, page, runtime.buffer_timeout_ms, nil, 0, [])
+
+      _whole ->
+        HotClient.manifest(url, partition,
+          timeout_ms: runtime.buffer_timeout_ms,
+          stats: reads_stats?.(parent)
+        )
+    end
+  end
+
+  # One source's share of the page: as many entries as rows are still
+  # uncovered (a micro-segment holds at least one row, so that many entries
+  # cover them unless the membership rule rejects some), capped by
+  # `hot_manifest_page`, again while the kept rows fall short and the source
+  # has more. A sealed tier that covers the LIMIT alone asks for nothing.
+  defp newest(_url, _partition, %{rows: rows}, _timeout_ms, _before, covered, pages)
+       when covered >= rows,
+       do: {:ok, gathered(pages)}
+
+  defp newest(url, partition, page, timeout_ms, before, covered, pages) do
+    limit = min(page.rows - covered, page.entries)
+    opts = [timeout_ms: timeout_ms, stats: false, before: before]
+
+    case HotClient.newest(url, partition, limit, opts) do
+      {:ok, entries, nil} ->
+        {:ok, gathered([entries | pages])}
+
+      {:ok, entries, next} ->
+        kept = entries |> Enum.filter(page.keep) |> Enum.sum_by(&(&1["row_count"] || 0))
+
+        newest(url, partition, page, timeout_ms, next, covered + kept, [entries | pages])
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp gathered(pages), do: pages |> Enum.reverse() |> Enum.concat()
+
+  defp build(query, snapshot, refs, tables, members, hot, attaches, page) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
 
     %Plan{
@@ -753,9 +833,9 @@ defmodule Smolquery.QueryService.Planner do
       params: query.params,
       hot: hot,
       hot_members:
-        Map.new(members, fn {ref, entries} ->
-          {ref, Enum.map(entries, &:binary.copy(&1["id"]))}
-        end),
+        members
+        |> pinnable(page)
+        |> Map.new(fn {ref, entries} -> {ref, Enum.map(entries, &:binary.copy(&1["id"]))} end),
       schemas: Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end),
       statistics: statistics(members, hot, tables)
     }

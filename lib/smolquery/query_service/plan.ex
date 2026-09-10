@@ -15,7 +15,10 @@ defmodule Smolquery.QueryService.Plan do
   the exact hot tier this plan read, keyed by table. A caller that wants a
   later plan to read the same hot tier passes it back as `hot_ids:`
   (PL-58 layer 8, T-418); it is the pruner's input, not its output, so a
-  later query with a different `WHERE` still prunes from the whole set.
+  later query with a different `WHERE` still prunes from the whole set. A
+  table the plan read by page — the preview's, whose unordered `LIMIT`
+  fetched only the newest entries (T-449) — is absent: a page is not the
+  tier, and a later query pinned to it would read short.
   `statistics` is those
   decisions counted (`Smolquery.QueryService.Statistics`) — what the plan
   reads, per tier, reported out with the finished job; `nil` when the

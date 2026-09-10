@@ -140,4 +140,16 @@ defmodule Smolquery.QueryService.AnyNTest do
       assert ids(AnyN.trim(entries, 0, 5)) == ["02", "01"]
     end
   end
+
+  describe "need/2" do
+    test "the rows of the limit the sealed tier leaves to the hot tier" do
+      assert AnyN.need(0, 25) == 25
+      assert AnyN.need(20, 25) == 5
+      assert AnyN.need(30, 25) == 0
+    end
+
+    test "unknown sealed statistics leave every row to the hot tier" do
+      assert AnyN.need(:unavailable, 25) == 25
+    end
+  end
 end

@@ -128,6 +128,15 @@ defmodule Smolquery.QueryService.Runtime do
   short with no error. `300_000` by default; it must sit below the buffer's
   `retire_grace_ms` (`600_000`) by more than the cluster's clock skew.
 
+  `hot_manifest_page` (T-449) caps how many entries one newest-first page of
+  a table's hot manifest asks a buffer node for. The preview's unordered
+  `LIMIT n` is answered from the newest micro-segments, and the planner
+  fetches them a page at a time — as many entries as rows it still needs, or
+  this many, whichever is fewer — until the entries it keeps hold the rows
+  the sealed tier does not. `1_024` by default: about 400 KB of stats-free
+  entries per page per buffer node, against a whole manifest that ran to
+  285,000 entries the day this was measured.
+
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
   a job's own `distributed:` option overrides it either way. `min_files` is
@@ -183,6 +192,7 @@ defmodule Smolquery.QueryService.Runtime do
     warm_probe: "SELECT 1",
     top_n_probe_rows: 1_000_000,
     hot_pin_max_age_ms: 300_000,
+    hot_manifest_page: 1_024,
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -217,6 +227,7 @@ defmodule Smolquery.QueryService.Runtime do
           warm_probe: String.t(),
           top_n_probe_rows: non_neg_integer(),
           hot_pin_max_age_ms: pos_integer(),
+          hot_manifest_page: pos_integer(),
           store: Store.t() | nil,
           distributed: %{
             enabled: boolean(),
@@ -244,7 +255,8 @@ defmodule Smolquery.QueryService.Runtime do
     :warm_engines,
     :warm_engine_max_age_ms,
     :top_n_probe_rows,
-    :hot_pin_max_age_ms
+    :hot_pin_max_age_ms,
+    :hot_manifest_page
   ]
 
   @doc """

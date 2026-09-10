@@ -79,10 +79,18 @@ defmodule Smolquery.QueryService.AnyN do
   @spec trim([HotClient.entry()], non_neg_integer() | :unavailable, pos_integer()) ::
           [HotClient.entry()]
   def trim(entries, sealed_rows, limit) do
-    covered = if is_integer(sealed_rows), do: sealed_rows, else: 0
-
     entries
     |> Enum.sort_by(& &1["id"], :desc)
-    |> SingleTable.take_rows(max(limit - covered, 0))
+    |> SingleTable.take_rows(need(sealed_rows, limit))
   end
+
+  @doc """
+  The rows of `limit` the hot tier must hold, once the sealed tier's
+  `sealed_rows` are counted: what the planner's newest-first manifest read
+  stops at, and what `trim/3` covers. Unknown sealed statistics leave all of
+  them to the hot tier.
+  """
+  @spec need(non_neg_integer() | :unavailable, pos_integer()) :: non_neg_integer()
+  def need(sealed_rows, limit) when is_integer(sealed_rows), do: max(limit - sealed_rows, 0)
+  def need(:unavailable, limit), do: limit
 end
