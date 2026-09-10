@@ -94,6 +94,7 @@ defmodule Smolquery.QueryService.TopN do
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Pruner
+  alias Smolquery.QueryService.SingleTable
   alias Smolquery.QueryService.Views
   alias Smolquery.Schema
 
@@ -141,14 +142,14 @@ defmodule Smolquery.QueryService.TopN do
   """
   @spec spec(map(), [Catalog.table_ref()]) :: t() | nil
   def spec(%{"node" => %{"type" => "SELECT_NODE"} = node} = statement, refs) do
-    with {:ok, source} <- source(node["from_table"], refs),
-         true <- simple?(node),
-         true <- single_reference?(statement),
+    with {:ok, source} <- SingleTable.source(node["from_table"], refs),
+         true <- SingleTable.simple?(node),
+         true <- SingleTable.single_reference?(statement, @excluded_classes),
          {:ok, modifiers} <- modifiers(node["modifiers"]),
          true <- parameter_free?(node["select_list"], modifiers.order["orders"]),
          {:ok, column, direction} <- order(modifiers.order, source),
          true <- stored_column?(node["select_list"], column),
-         {:ok, limit} <- limit(modifiers.limit) do
+         {:ok, limit} <- SingleTable.limit(modifiers.limit) do
       %{ref: source.ref, column: column, direction: direction, limit: limit}
     else
       _ineligible -> nil
@@ -347,7 +348,7 @@ defmodule Smolquery.QueryService.TopN do
 
   defp function_names(statement) do
     statement
-    |> walk([], fn node, acc ->
+    |> SingleTable.walk([], fn node, acc ->
       case node do
         %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name | acc]
         _other -> acc
@@ -413,56 +414,6 @@ defmodule Smolquery.QueryService.TopN do
   defp edge_of(:desc), do: "min"
   defp edge_of(:asc), do: "max"
 
-  defp source(
-         %{
-           "type" => "BASE_TABLE",
-           "schema_name" => dataset,
-           "table_name" => table,
-           "alias" => alias,
-           "catalog_name" => "",
-           "at_clause" => nil,
-           "sample" => nil,
-           "column_name_alias" => []
-         },
-         refs
-       )
-       when dataset != "" do
-    ref = {dataset, table}
-    name = if alias == "", do: table, else: alias
-
-    if ref in refs, do: {:ok, %{ref: ref, name: name}}, else: :error
-  end
-
-  defp source(_from, _refs), do: :error
-
-  defp simple?(node) do
-    node["group_expressions"] == [] and Map.get(node, "group_sets", []) == [] and
-      is_nil(node["having"]) and is_nil(node["qualify"]) and is_nil(node["sample"]) and
-      node["aggregate_handling"] == "STANDARD_HANDLING" and
-      get_in(node, ["cte_map", "map"]) in [nil, []]
-  end
-
-  defp single_reference?(statement) do
-    %{tables: tables, excluded: excluded} =
-      walk(statement, %{tables: 0, excluded: false}, fn node, acc ->
-        %{
-          tables: acc.tables + if(node["type"] == "BASE_TABLE", do: 1, else: 0),
-          excluded: acc.excluded or node["class"] in @excluded_classes
-        }
-      end)
-
-    tables == 1 and not excluded
-  end
-
-  defp walk(node, acc, fun) when is_map(node) do
-    Enum.reduce(node, fun.(node, acc), fn {_key, value}, inner -> walk(value, inner, fun) end)
-  end
-
-  defp walk(node, acc, fun) when is_list(node),
-    do: Enum.reduce(node, acc, &walk(&1, &2, fun))
-
-  defp walk(_leaf, acc, _fun), do: acc
-
   defp modifiers(modifiers) when is_list(modifiers) do
     case Enum.sort_by(modifiers, & &1["type"]) do
       [%{"type" => "LIMIT_MODIFIER"} = limit, %{"type" => "ORDER_MODIFIER"} = order] ->
@@ -509,23 +460,6 @@ defmodule Smolquery.QueryService.TopN do
         Map.get(item, "rename_list", []) == []
     end)
   end
-
-  defp limit(%{"limit" => limit, "offset" => offset}) do
-    with {:ok, n} when n >= 1 <- integer(limit),
-         {:ok, skip} when skip >= 0 <- integer(offset) do
-      {:ok, n + skip}
-    else
-      _not_constant -> :error
-    end
-  end
-
-  defp integer(nil), do: {:ok, 0}
-
-  defp integer(%{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => value}})
-       when is_integer(value),
-       do: {:ok, value}
-
-  defp integer(_expression), do: :error
 
   defp constant(value) do
     %{

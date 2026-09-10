@@ -15,11 +15,12 @@ defmodule Smolquery.QueryService.AnyN do
 
   ## What qualifies
 
-  One SELECT over exactly one table reference, with a constant LIMIT (and
-  OFFSET, whose rows are read before they are skipped) as its only modifier:
-  no ORDER BY (that is `Smolquery.QueryService.TopN`'s case), no WHERE (a
-  predicate decides how many rows survive, and the file count that covers it
-  is unknowable from row counts), no DISTINCT, GROUP BY, HAVING, QUALIFY, or
+  One SELECT over exactly one table reference
+  (`Smolquery.QueryService.SingleTable`), with a constant LIMIT (and OFFSET,
+  whose rows are read before they are skipped) as its only modifier: no ORDER
+  BY (that is `Smolquery.QueryService.TopN`'s case), no WHERE (a predicate
+  decides how many rows survive, and the file count that covers it is
+  unknowable from row counts), no DISTINCT, GROUP BY, HAVING, QUALIFY, or
   SAMPLE, no CTE, and no subquery, window, or function anywhere in the
   statement — `SELECT count(*) FROM t LIMIT 1` counts every row, and the
   only way to be sure no select item aggregates is to accept none that calls
@@ -40,6 +41,7 @@ defmodule Smolquery.QueryService.AnyN do
 
   alias Smolquery.BufferService.HotClient
   alias Smolquery.Catalog
+  alias Smolquery.QueryService.SingleTable
 
   @typedoc "The table the LIMIT belongs to, and n: the LIMIT plus any OFFSET."
   @type t :: %{ref: Catalog.table_ref(), limit: pos_integer()}
@@ -54,11 +56,12 @@ defmodule Smolquery.QueryService.AnyN do
   """
   @spec spec(map(), [Catalog.table_ref()]) :: t() | nil
   def spec(%{"node" => %{"type" => "SELECT_NODE"} = node} = statement, refs) do
-    with {:ok, ref} <- source(node["from_table"], refs),
+    with {:ok, %{ref: ref}} <- SingleTable.source(node["from_table"], refs),
          true <- is_nil(node["where_clause"]),
-         true <- simple?(node),
-         true <- single_reference?(statement),
-         {:ok, limit} <- limit(node["modifiers"]) do
+         true <- SingleTable.simple?(node),
+         true <- SingleTable.single_reference?(statement, @excluded_classes),
+         [%{"type" => "LIMIT_MODIFIER"} = modifier] <- node["modifiers"],
+         {:ok, limit} <- SingleTable.limit(modifier) do
       %{ref: ref, limit: limit}
     else
       _ineligible -> nil
@@ -91,70 +94,4 @@ defmodule Smolquery.QueryService.AnyN do
 
     take_rows(rest, max(needed - rows, 0), [entry | taken])
   end
-
-  defp source(
-         %{
-           "type" => "BASE_TABLE",
-           "schema_name" => dataset,
-           "table_name" => table,
-           "catalog_name" => "",
-           "at_clause" => nil,
-           "sample" => nil
-         },
-         refs
-       )
-       when dataset != "" do
-    ref = {dataset, table}
-
-    if ref in refs, do: {:ok, ref}, else: :error
-  end
-
-  defp source(_from, _refs), do: :error
-
-  defp simple?(node) do
-    node["group_expressions"] == [] and Map.get(node, "group_sets", []) == [] and
-      is_nil(node["having"]) and is_nil(node["qualify"]) and is_nil(node["sample"]) and
-      node["aggregate_handling"] == "STANDARD_HANDLING" and
-      get_in(node, ["cte_map", "map"]) in [nil, []]
-  end
-
-  defp single_reference?(statement) do
-    %{tables: tables, excluded: excluded} =
-      walk(statement, %{tables: 0, excluded: false}, fn node, acc ->
-        %{
-          tables: acc.tables + if(node["type"] == "BASE_TABLE", do: 1, else: 0),
-          excluded: acc.excluded or node["class"] in @excluded_classes
-        }
-      end)
-
-    tables == 1 and not excluded
-  end
-
-  defp walk(node, acc, fun) when is_map(node) do
-    Enum.reduce(node, fun.(node, acc), fn {_key, value}, inner -> walk(value, inner, fun) end)
-  end
-
-  defp walk(node, acc, fun) when is_list(node),
-    do: Enum.reduce(node, acc, &walk(&1, &2, fun))
-
-  defp walk(_leaf, acc, _fun), do: acc
-
-  defp limit([%{"type" => "LIMIT_MODIFIER", "limit" => limit, "offset" => offset}]) do
-    with {:ok, n} when n >= 1 <- integer(limit),
-         {:ok, skip} when skip >= 0 <- integer(offset) do
-      {:ok, n + skip}
-    else
-      _not_constant -> :error
-    end
-  end
-
-  defp limit(_modifiers), do: :error
-
-  defp integer(nil), do: {:ok, 0}
-
-  defp integer(%{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => value}})
-       when is_integer(value),
-       do: {:ok, value}
-
-  defp integer(_expression), do: :error
 end
