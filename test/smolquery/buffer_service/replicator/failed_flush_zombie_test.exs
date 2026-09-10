@@ -192,6 +192,9 @@ defmodule Smolquery.BufferService.Replicator.FailedFlushZombieTest do
     owner =
       start_instance(
         context,
+        # The owner's tick is what re-ships the owed drop; 50 ms left the
+        # zombie assertions below racing it on a loaded CI runner.
+        maintenance_interval_ms: 300,
         replicator:
           {SegmentShipping,
            replication_factor: 2,
