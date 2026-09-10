@@ -85,15 +85,8 @@ defmodule Smolquery.MemoryMetrics do
 
   @impl GenServer
   def init(config) do
-    root = Keyword.get(config, :cgroup_root, "/sys/fs/cgroup")
-
-    case CgroupMemory.limit_bytes(root) do
-      {:ok, limit} -> Telemetry.put_gauge("smolquery_memory_cgroup_limit_bytes", [], limit)
-      :none -> :ok
-    end
-
     state = %{
-      root: root,
+      root: Keyword.get(config, :cgroup_root, "/sys/fs/cgroup"),
       interval_ms: Keyword.get(config, :interval_ms, @default_interval_ms),
       window_ms: Keyword.get(config, :window_ms, @window_ms),
       recent: []
@@ -113,8 +106,19 @@ defmodule Smolquery.MemoryMetrics do
     ]
 
     publish(sample, recent)
+    publish_limit(state.root)
 
     %{state | recent: recent}
+  end
+
+  # Republished every tick like every other series: the metrics table is
+  # recreated empty when `Smolquery.Telemetry` restarts, and a limit written
+  # once at start would be gone for the rest of the node's life.
+  defp publish_limit(root) do
+    case CgroupMemory.limit_bytes(root) do
+      {:ok, limit} -> Telemetry.put_gauge("smolquery_memory_cgroup_limit_bytes", [], limit)
+      :none -> :ok
+    end
   end
 
   defp publish(sample, recent) do
