@@ -109,13 +109,21 @@ defmodule Smolquery.BufferService.HotServer do
       end
     catch
       kind, reason ->
-        measure(%{conn | status: 500}, started_at)
+        measure(%{conn | status: exception_status(kind, reason)}, started_at)
 
         :erlang.raise(kind, reason, __STACKTRACE__)
     else
       answered -> measure(answered, started_at)
     end
   end
+
+  # The status the wire will carry: Bandit answers a raised `Plug.Exception`
+  # with its own status (a malformed query string is a 400), and the metrics
+  # must say the same thing, not 500 for every exception.
+  defp exception_status(:error, %{__exception__: true} = exception),
+    do: Plug.Exception.status(exception)
+
+  defp exception_status(_kind, _reason), do: 500
 
   defp route(conn, name) do
     case {conn.method, conn.path_info} do
@@ -193,7 +201,10 @@ defmodule Smolquery.BufferService.HotServer do
   defp manifest(conn, name, table_ref, ids, opts) do
     case runtime(name) do
       {:ok, runtime} ->
-        entries = HotManifest.entries(runtime.manifest, table_ref, ids)
+        entries =
+          HotManifest.entries(runtime.manifest, table_ref, ids,
+            stats: Keyword.get(opts, :stats, true)
+          )
 
         body =
           entries
@@ -210,16 +221,10 @@ defmodule Smolquery.BufferService.HotServer do
     end
   end
 
-  # `?stats=false` is the one parameter this route reads (T-449). It is read
-  # off the raw query string rather than through `fetch_query_params/1`,
-  # which raises on a malformed percent-encoding — and a raise here would
-  # record the request as a 500 in the metrics while Bandit answers 400. A
-  # query string this cannot read means the default: stats included.
-  defp wants_stats?(%Plug.Conn{query_string: query}) do
-    query
-    |> String.split("&")
-    |> Enum.all?(&(&1 != "stats=false"))
-  end
+  # `?stats=false` is the one parameter this route reads (T-449). A query
+  # string that does not decode (invalid UTF-8) raises the 400 `call/2`
+  # records as such.
+  defp wants_stats?(conn), do: fetch_query_params(conn).query_params["stats"] != "false"
 
   defp scoped_manifest(conn, name, table_ref) do
     case read_scope(conn) do

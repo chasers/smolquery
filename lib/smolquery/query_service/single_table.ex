@@ -15,6 +15,7 @@ defmodule Smolquery.QueryService.SingleTable do
   """
 
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Ast
 
   @typedoc "The one base table a statement reads, and the name its columns resolve under."
   @type source :: %{ref: Catalog.table_ref(), name: String.t()}
@@ -67,15 +68,15 @@ defmodule Smolquery.QueryService.SingleTable do
   """
   @spec single_reference?(map(), [String.t()]) :: boolean()
   def single_reference?(statement, excluded) do
-    %{tables: tables, excluded: found} =
-      walk(statement, %{tables: 0, excluded: false}, fn node, acc ->
-        %{
-          tables: acc.tables + if(node["type"] == "BASE_TABLE", do: 1, else: 0),
-          excluded: acc.excluded or node["class"] in excluded
-        }
+    tags =
+      Ast.collect(statement, fn node ->
+        List.flatten([
+          if(node["type"] == "BASE_TABLE", do: [:table], else: []),
+          if(node["class"] in excluded, do: [:excluded], else: [])
+        ])
       end)
 
-    tables == 1 and not found
+    Enum.count(tags, &(&1 == :table)) == 1 and :excluded not in tags
   end
 
   @doc """
@@ -121,18 +122,4 @@ defmodule Smolquery.QueryService.SingleTable do
        do: {:ok, value}
 
   defp integer(_expression), do: :error
-
-  @doc """
-  Folds `fun` over every map node of a serialized AST, depth first — the
-  walk both bounds read expression classes and function names with.
-  """
-  @spec walk(term(), acc, (map(), acc -> acc)) :: acc when acc: term()
-  def walk(node, acc, fun) when is_map(node) do
-    Enum.reduce(node, fun.(node, acc), fn {_key, value}, inner -> walk(value, inner, fun) end)
-  end
-
-  def walk(node, acc, fun) when is_list(node),
-    do: Enum.reduce(node, acc, &walk(&1, &2, fun))
-
-  def walk(_leaf, acc, _fun), do: acc
 end

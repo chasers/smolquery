@@ -435,15 +435,21 @@ defmodule Smolquery.BufferService.HotManifest do
   An id the table no longer holds is absent from the result rather than an
   error. The caller's set is a claim, and an entry can retire between the claim
   and the read — the same answer a full read gives.
+  `stats: false` on a full read projects the entries *in* ETS, so the stats
+  block — most of an entry's bytes (T-318: 73× the rest) — is never copied
+  out for a caller that will not read it, such as a manifest GET with
+  `?stats=false` (T-449). Those entries come back with `stats: %{}`.
   """
-  @spec entries(t(), Store.table_ref(), [String.t()] | :all) :: [Entry.t()]
-  def entries(manifest, table_ref, ids \\ :all)
+  @spec entries(t(), Store.table_ref(), [String.t()] | :all, stats: boolean()) :: [Entry.t()]
+  def entries(manifest, table_ref, ids \\ :all, opts \\ [])
 
-  def entries(%__MODULE__{table: table}, table_ref, :all) do
-    measured(:entries, fn -> :ets.select(table, entry_spec(table_ref)) end)
+  def entries(%__MODULE__{table: table}, table_ref, :all, opts) do
+    spec = entry_spec(table_ref, Keyword.get(opts, :stats, true))
+
+    measured(:entries, fn -> :ets.select(table, spec) end)
   end
 
-  def entries(%__MODULE__{} = manifest, table_ref, ids) when is_list(ids) do
+  def entries(%__MODULE__{} = manifest, table_ref, ids, _opts) when is_list(ids) do
     ids
     |> Enum.uniq()
     |> Enum.flat_map(&lookup(manifest, table_ref, &1))
@@ -1230,7 +1236,21 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp entry_spec(table_ref), do: [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}]
+  defp entry_spec(table_ref, true), do: [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}]
+
+  # The same entries with an empty stats block, built by the match spec so the
+  # stats never leave ETS: every other field of the struct is read off the
+  # stored entry, and the struct tag with them.
+  defp entry_spec(table_ref, false) do
+    without_stats =
+      Entry.__info__(:struct)
+      |> Enum.map(& &1.field)
+      |> List.delete(:stats)
+      |> Map.new(&{&1, {:map_get, &1, :"$1"}})
+      |> Map.merge(%{__struct__: Entry, stats: %{}})
+
+    [{{{table_ref, :_}, :"$1"}, [], [without_stats]}]
+  end
 
   defp pending_spec(table_ref) do
     [{{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}], [:"$1"]}]
@@ -1368,7 +1388,7 @@ defmodule Smolquery.BufferService.HotManifest do
 
     removed =
       table
-      |> :ets.select(entry_spec(table_ref))
+      |> :ets.select(entry_spec(table_ref, true))
       |> Enum.reject(&MapSet.member?(keep, &1.id))
 
     Enum.each(removed, &:ets.delete(table, {table_ref, &1.id}))

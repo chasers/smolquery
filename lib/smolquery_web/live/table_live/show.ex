@@ -428,10 +428,14 @@ defmodule SmolqueryWeb.TableLive.Show do
   defp preview_error(:query_service_unavailable),
     do: "The query service is not running on this node — no preview."
 
+  # A timeout names no cause: the job's deadline fires the same way for a
+  # hot tier too deep to read, a buffer node that accepts and never answers,
+  # or a slow sealed-tier read that touched no hot file at all.
   defp preview_error(:timeout),
     do:
-      "The preview timed out after #{div(@preview_timeout_ms, 1000)} s — the table's hot tier " <>
-        "is too large to read in time. The schema and lifecycle above are unaffected."
+      "The preview did not answer within #{div(@preview_timeout_ms, 1000)} s — a deep hot " <>
+        "tier, a slow buffer node, or a slow sealed read. The schema and lifecycle above " <>
+        "are unaffected."
 
   # The planner names the partition it could not reach; the runner, when a
   # buffer node dies between the manifest and DuckDB's read, only has the

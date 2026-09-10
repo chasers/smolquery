@@ -65,6 +65,7 @@ defmodule Smolquery.BufferService.HotManifestTest do
       assert entry.added_at > 0
 
       assert HotManifest.entries(manifest, @table) == [entry]
+      assert HotManifest.entries(manifest, @table, :all, stats: false) == [%{entry | stats: %{}}]
     end
 
     test "carries the segment's stats, so the planner can prune", %{manifest: manifest} do
