@@ -107,13 +107,30 @@ defmodule Smolquery.BufferService.Endpoint do
   defp payload_count(rows) when is_list(rows), do: length(rows)
   defp payload_count({:ndjson, _body, count}), do: count
 
+  # The backlog valve (T-457) runs here, beside the drain check and before
+  # `deliver/7` resolves — and, for a table this node has not seen, starts
+  # and recovers — the table's buffer: a node too full to take a commit
+  # should not pay a buffer start and a manifest recovery to refuse it.
   defp admit(runtime, table_ref, schema, payload, byte_size, batch_id) do
-    with :ok <- RingEpoch.check_write(runtime.name, table_ref) do
-      if Drain.draining?(runtime.name) do
-        {:error, :draining}
-      else
-        deliver(runtime, table_ref, schema, payload, byte_size, batch_id, @retries)
-      end
+    with :ok <- RingEpoch.check_write(runtime.name, table_ref),
+         :ok <- not_draining(runtime),
+         :ok <- backlog(runtime, table_ref, payload) do
+      deliver(runtime, table_ref, schema, payload, byte_size, batch_id, @retries)
+    end
+  end
+
+  defp not_draining(runtime),
+    do: if(Drain.draining?(runtime.name), do: {:error, :draining}, else: :ok)
+
+  defp backlog(runtime, table_ref, payload) do
+    with {:error, reason} <- Backlog.admit(runtime, table_ref) do
+      :telemetry.execute(
+        [:smolquery, :buffer, :admission],
+        %{rows: payload_count(payload)},
+        %{outcome: :backlog}
+      )
+
+      {:error, reason}
     end
   end
 
@@ -303,29 +320,7 @@ defmodule Smolquery.BufferService.Endpoint do
       retry(runtime, table_ref, schema, payload, byte_size, batch_id, retries)
   end
 
-  # Two valves, both before the batch reaches the buffer's mailbox: the
-  # backlog valve (T-457) refuses a node whose unsealed hot tier is already
-  # too deep to survive, and Little's-law admission (PL-9) refuses a batch
-  # the buffer could not ack inside its budget.
   defp admit_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id) do
-    count = payload_count(payload)
-
-    case Backlog.admit(runtime, table_ref) do
-      :ok ->
-        admit_load_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id)
-
-      {:error, reason} ->
-        :telemetry.execute(
-          [:smolquery, :buffer, :admission],
-          %{rows: count},
-          %{outcome: :backlog}
-        )
-
-        {:error, reason}
-    end
-  end
-
-  defp admit_load_and_write(runtime, table_ref, buffer, schema, payload, byte_size, batch_id) do
     load = load(runtime, table_ref)
     count = payload_count(payload)
 

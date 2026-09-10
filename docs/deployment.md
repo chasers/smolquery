@@ -116,7 +116,10 @@ naming the table and the depth) once the count reaches
 limit so a node can always adopt what it holds, `200000` without one — or the
 bytes reach `SMOLQUERY_BACKLOG_MAX_BYTES` when set. The valve is on ingest
 only: sealing keeps draining a node that refuses, and replicated shipments are
-never refused. `smolquery_buffer_unsealed_entries`, `_bytes` and
+never refused, though a shipped copy counts toward the follower's depth (it is
+memory at its next boot), so a node can pass its ceiling by what its owners
+ship it; size the ceiling to the replication factor if the copies are the
+larger share. `smolquery_buffer_unsealed_entries`, `_bytes` and
 `_entries_limit` are on `GET /metrics`; alert on the ratio well before one.
 The ceiling is on the `buffer shape:` boot line. Clients that retry on 429
 need no change; ones that treat 429 as fatal now lose a batch a full node
