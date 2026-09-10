@@ -9,8 +9,28 @@ defmodule Smolquery.BufferService.HotServer do
   against it:
 
       GET  /v1/datasets/:dataset/tables/:table/manifest
+      GET  /v1/datasets/:dataset/tables/:table/manifest?newest=N&before=ID
       POST /v1/datasets/:dataset/tables/:table/manifest
       GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet
+
+  ## The newest-first page
+
+  `?newest=N` answers with the node's N newest entries for the table, newest
+  first, and `&before=ID` with the N newest older than that id (T-449). A
+  full page names the id to continue from in the `x-smolquery-manifest-next`
+  response header; a page without that header ends the manifest. The read
+  costs the node what it answers with (`HotManifest.newest/4` walks the index
+  from its newest key and stops), where the whole `GET` costs it the backlog.
+
+  The query planner's preview is the reader: an unordered `LIMIT n` is
+  answered by the newest micro-segments holding n rows, and it used to fetch
+  the whole manifest to find them — 285,000 entries on one node the day this
+  was measured, per buffer node, per preview, on a 3 Gi query pod.
+
+  `?stats=false` combines with either read. A `newest` that is not a positive
+  integer, or a `before` that is not a segment id, is a `400`: answering the
+  whole manifest instead would hand the caller exactly the cost it asked not
+  to pay.
 
   ## The scoped manifest read, and why it is a POST
 
@@ -93,6 +113,7 @@ defmodule Smolquery.BufferService.HotServer do
   alias Smolquery.Segments.Store
 
   @rewrite_on Plug.RewriteOn.init([:x_forwarded_proto, :x_forwarded_host, :x_forwarded_port])
+  @next_header Smolquery.BufferService.HotClient.next_header()
 
   @impl Plug
   def init(name), do: name
@@ -132,7 +153,7 @@ defmodule Smolquery.BufferService.HotServer do
         conn
         |> put_private(:hot_server_route, :manifest)
         |> put_private(:hot_server_table, {dataset, table})
-        |> manifest(name, {dataset, table}, :all, stats: wants_stats?(conn))
+        |> whole_manifest(name, {dataset, table})
 
       {"POST", ["v1", "datasets", dataset, "tables", table, "manifest"]} ->
         conn
@@ -201,10 +222,8 @@ defmodule Smolquery.BufferService.HotServer do
   defp manifest(conn, name, table_ref, ids, opts) do
     case runtime(name) do
       {:ok, runtime} ->
-        entries =
-          HotManifest.entries(runtime.manifest, table_ref, ids,
-            stats: Keyword.get(opts, :stats, true)
-          )
+        entries = read(runtime.manifest, table_ref, ids, opts)
+        count = length(entries)
 
         body =
           entries
@@ -212,7 +231,8 @@ defmodule Smolquery.BufferService.HotServer do
           |> JSON.encode!()
 
         conn
-        |> put_private(:hot_server_entries, length(entries))
+        |> put_private(:hot_server_entries, count)
+        |> next_page(entries, count, Keyword.get(opts, :newest))
         |> put_resp_content_type("application/json")
         |> respond(200, body)
 
@@ -221,10 +241,58 @@ defmodule Smolquery.BufferService.HotServer do
     end
   end
 
-  # `?stats=false` is the one parameter this route reads (T-449). A query
-  # string that does not decode (invalid UTF-8) raises the 400 `call/2`
-  # records as such.
-  defp wants_stats?(conn), do: fetch_query_params(conn).query_params["stats"] != "false"
+  defp read(manifest, table_ref, :all, opts) do
+    case Keyword.get(opts, :newest) do
+      nil ->
+        HotManifest.entries(manifest, table_ref, :all, stats: Keyword.get(opts, :stats, true))
+
+      limit ->
+        HotManifest.newest(manifest, table_ref, limit,
+          before: Keyword.get(opts, :before),
+          stats: Keyword.get(opts, :stats, true)
+        )
+    end
+  end
+
+  defp read(manifest, table_ref, ids, opts),
+    do: HotManifest.entries(manifest, table_ref, ids, stats: Keyword.get(opts, :stats, true))
+
+  defp next_page(conn, entries, count, count) when count > 0,
+    do: put_resp_header(conn, @next_header, List.last(entries).id)
+
+  defp next_page(conn, _entries, _count, _newest), do: conn
+
+  # `?stats=false`, `?newest=N`, and `?before=ID` are the parameters this
+  # route reads (T-449). A query string that does not decode (invalid UTF-8)
+  # raises the 400 `call/2` records as such.
+  defp whole_manifest(conn, name, table_ref) do
+    case page_opts(fetch_query_params(conn).query_params) do
+      {:ok, opts} -> manifest(conn, name, table_ref, :all, opts)
+      {:error, message} -> respond(conn, 400, message)
+    end
+  end
+
+  defp page_opts(params) do
+    with {:ok, newest} <- newest(params["newest"]),
+         {:ok, before} <- before(params["before"], newest) do
+      {:ok, stats: params["stats"] != "false", newest: newest, before: before}
+    end
+  end
+
+  defp newest(nil), do: {:ok, nil}
+
+  defp newest(value) do
+    case Integer.parse(value) do
+      {limit, ""} when limit > 0 -> {:ok, limit}
+      _not_a_count -> {:error, "newest must be a positive integer"}
+    end
+  end
+
+  defp before(nil, _newest), do: {:ok, nil}
+  defp before(_id, nil), do: {:error, "before needs newest"}
+
+  defp before(id, _newest),
+    do: if(Id.valid?(id), do: {:ok, id}, else: {:error, "before must be a segment id"})
 
   defp scoped_manifest(conn, name, table_ref) do
     case read_scope(conn) do

@@ -32,7 +32,19 @@ defmodule Smolquery.BufferService.HotClient do
   """
   @type entry :: %{optional(String.t()) => term()}
 
-  @type option :: {:timeout_ms, timeout()} | {:ids, [String.t()]} | {:stats, boolean()}
+  @type option ::
+          {:timeout_ms, timeout()}
+          | {:ids, [String.t()]}
+          | {:stats, boolean()}
+          | {:before, String.t() | nil}
+
+  @next_header "x-smolquery-manifest-next"
+
+  @doc """
+  The response header a full newest-first page names its continuation in.
+  """
+  @spec next_header() :: String.t()
+  def next_header, do: @next_header
 
   @doc """
   Every micro-segment the buffer node at `base_url` holds for `table_ref`.
@@ -58,11 +70,44 @@ defmodule Smolquery.BufferService.HotClient do
   """
   @spec manifest(String.t(), Store.table_ref(), [option()]) ::
           {:ok, [entry()]} | {:error, term()}
-  def manifest(base_url, {dataset, table} = table_ref, opts \\ []) do
+  def manifest(base_url, table_ref, opts \\ []) do
+    with {:ok, entries, _next} <- request(base_url, table_ref, query(opts), scope(opts), opts) do
+      {:ok, entries}
+    end
+  end
+
+  @doc """
+  One page of a newest-first read: up to `limit` of the node's entries for
+  `table_ref`, newest first, and only those older than `before:` when the
+  option is given (T-449).
+
+  `next` is the id to pass as `before:` for the page after this one, or
+  `nil` when this page ends the manifest — the server names it in the
+  `x-smolquery-manifest-next` header of a full page. A reader that wants the
+  newest entries holding n rows asks for n entries (a micro-segment holds at
+  least one row), keeps what its membership rule accepts, and reads on only
+  while that falls short.
+
+  A node from before this parameter answers the whole manifest, oldest
+  first, with no `next`: complete, at the whole read's cost, which is what
+  this read replaces. `:stats` and `:timeout_ms` are `manifest/3`'s.
+  """
+  @spec newest(String.t(), Store.table_ref(), pos_integer(), [option()]) ::
+          {:ok, [entry()], String.t() | nil} | {:error, term()}
+  def newest(base_url, table_ref, limit, opts \\ []) when is_integer(limit) and limit > 0 do
+    params =
+      [newest: limit] ++
+        List.wrap(if before = Keyword.get(opts, :before), do: {:before, before}) ++
+        List.wrap(if Keyword.get(opts, :stats, true) == false, do: {:stats, false})
+
+    request(base_url, table_ref, "?" <> URI.encode_query(params), nil, opts)
+  end
+
+  defp request(base_url, {dataset, table} = table_ref, query, scope, opts) do
     with {:ok, _prefix} <- Store.prefix(table_ref) do
       base_url
-      |> url("/v1/datasets/#{dataset}/tables/#{table}/manifest" <> query(opts))
-      |> fetch(scope(opts), Keyword.get(opts, :timeout_ms, @default_timeout_ms))
+      |> url("/v1/datasets/#{dataset}/tables/#{table}/manifest" <> query)
+      |> fetch(scope, Keyword.get(opts, :timeout_ms, @default_timeout_ms))
     end
   end
 
@@ -89,10 +134,17 @@ defmodule Smolquery.BufferService.HotClient do
       if scope, do: [method: :post, json: scope] ++ common, else: [method: :get] ++ common
 
     case Req.request(request) do
-      {:ok, %Req.Response{status: 200, body: entries}} when is_list(entries) -> {:ok, entries}
-      {:ok, %Req.Response{status: 200, body: body}} -> {:error, {:manifest_malformed, body}}
-      {:ok, %Req.Response{status: status}} -> {:error, {:manifest_status, status}}
-      {:error, reason} -> {:error, {:manifest_unreachable, reason}}
+      {:ok, %Req.Response{status: 200, body: entries} = response} when is_list(entries) ->
+        {:ok, entries, response |> Req.Response.get_header(@next_header) |> List.first()}
+
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:error, {:manifest_malformed, body}}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:manifest_status, status}}
+
+      {:error, reason} ->
+        {:error, {:manifest_unreachable, reason}}
     end
   end
 end

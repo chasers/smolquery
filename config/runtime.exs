@@ -465,6 +465,15 @@ if age = System.get_env("SMOLQUERY_HOT_PIN_MAX_AGE_MS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_HOT_PIN_MAX_AGE_MS", age)
 end
 
+# `SMOLQUERY_HOT_MANIFEST_PAGE` (T-449) caps how many entries one newest-first
+# page of a table's hot manifest asks a buffer node for; the preview's
+# unordered LIMIT reads pages until its rows are covered.
+if entries = System.get_env("SMOLQUERY_HOT_MANIFEST_PAGE") do
+  config :smolquery, Smolquery.QueryService,
+    hot_manifest_page:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_HOT_MANIFEST_PAGE", entries)
+end
+
 # Distributed queries (PL-49) are on by default: a decomposable aggregate
 # query scatters its file list across several DuckDB instances — the query
 # service's group members when clustering is on,

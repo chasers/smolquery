@@ -500,6 +500,7 @@ listener, one per instance. It serves three routes behind the internal secret
 
 ```
 GET  /v1/datasets/:dataset/tables/:table/manifest                 # JSON entries
+GET  /v1/datasets/:dataset/tables/:table/manifest?newest=N        # the N newest, newest first
 POST /v1/datasets/:dataset/tables/:table/manifest                 # named entries only
 GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment bytes
 ```
@@ -520,6 +521,15 @@ GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment byte
   `{"ids": [...], "stats": false}`, and pays for its claim rather than for the
   backlog it is draining (T-316). It is a `POST` because 1,024 ULIDs are about
   28 KB of request line. Nothing about the node's state changes either way.
+- **The preview reads the newest entries by page.** An unordered `LIMIT n`
+  is answered by the newest micro-segments holding n rows, and the planner
+  used to fetch the whole manifest to find them — 285,000 entries per buffer
+  node the day that OOMKilled a query pod (T-449). `GET …?newest=N` answers
+  the N newest, newest first, walking the index from its last key and
+  stopping; a full page names the id to continue from in
+  `x-smolquery-manifest-next`, and `&before=ID` continues from it. The
+  planner asks for as many entries as rows it still needs, and reads on only
+  while the entries it keeps fall short.
 - **A segment id is validated and resolved through the manifest**, never by a
   join of request input into a path. `Smolquery.Segments.Id.valid?/1` rejects
   anything that is not a well-formed ULID before it gets near the filesystem.

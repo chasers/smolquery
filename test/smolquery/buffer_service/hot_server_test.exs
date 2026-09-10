@@ -5,11 +5,13 @@ defmodule Smolquery.BufferService.HotServerTest do
 
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
+  alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
   alias Smolquery.BufferService.Runtime
   alias Smolquery.Engine
   alias Smolquery.Schema
+  alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.MemoryStore
@@ -132,6 +134,75 @@ defmodule Smolquery.BufferService.HotServerTest do
       response = get(:"not_a_buffer_#{:erlang.unique_integer([:positive])}", @manifest_path)
 
       assert response.status == 503
+    end
+  end
+
+  describe "newest-first page (T-449)" do
+    defp three_segments(name) do
+      acks = for n <- 1..3, do: elem(Client.write_batch(name, @table, batch(n..n)), 1)
+
+      acks |> Enum.map(& &1.segment_id) |> Enum.sort()
+    end
+
+    defp next_page(response), do: Plug.Conn.get_resp_header(response, HotClient.next_header())
+
+    test "answers the newest entries first, naming where the next page starts", context do
+      name = start_buffer_service(context)
+      [oldest, middle, newest] = three_segments(name)
+
+      response = get(name, @manifest_path <> "?newest=2&stats=false")
+
+      assert response.status == 200
+      assert [%{"id" => ^newest} = entry, %{"id" => ^middle}] = JSON.decode!(response.resp_body)
+      refute Map.has_key?(entry, "stats")
+      assert entry["url"] =~ segment_path(newest)
+      assert next_page(response) == [middle]
+
+      response = get(name, @manifest_path <> "?newest=2&before=#{middle}")
+
+      assert [%{"id" => ^oldest} = entry] = JSON.decode!(response.resp_body)
+      assert Map.has_key?(entry, "stats")
+      assert next_page(response) == []
+    end
+
+    test "a page that ends exactly at the table names a next page, and that page is empty",
+         context do
+      name = start_buffer_service(context)
+      [oldest, _middle, _newest] = three_segments(name)
+
+      response = get(name, @manifest_path <> "?newest=3")
+
+      assert [_, _, _] = JSON.decode!(response.resp_body)
+      assert next_page(response) == [oldest]
+
+      response = get(name, @manifest_path <> "?newest=3&before=#{oldest}")
+
+      assert JSON.decode!(response.resp_body) == []
+      assert next_page(response) == []
+    end
+
+    test "the whole read names no next page", context do
+      name = start_buffer_service(context)
+      three_segments(name)
+
+      response = get(name, @manifest_path)
+
+      assert [_, _, _] = JSON.decode!(response.resp_body)
+      assert next_page(response) == []
+    end
+
+    test "refuses a newest that is not a count, and a before that is not a segment id",
+         context do
+      name = start_buffer_service(context)
+
+      for query <- [
+            "?newest=0",
+            "?newest=ten",
+            "?newest=2&before=nope",
+            "?before=#{Id.generate()}"
+          ] do
+        assert get(name, @manifest_path <> query).status == 400, query
+      end
     end
   end
 
@@ -471,6 +542,18 @@ defmodule Smolquery.BufferService.HotServerTest do
       assert measurements.entries == 2
       assert measurements.response_bytes == byte_size(response.resp_body)
       assert measurements.duration_us >= 0
+    end
+
+    test "prices a newest-first page by the entries it answered with (T-449)", context do
+      name = start_buffer_service(context)
+      {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, _second} = Client.write_batch(name, @table, batch(2..2))
+
+      response = get(name, @manifest_path <> "?newest=1")
+
+      assert_receive {:hot_server_request, measurements, %{route: :manifest, status: 200}}
+      assert measurements.entries == 1
+      assert measurements.response_bytes == byte_size(response.resp_body)
     end
 
     test "prices a scoped read against the whole one it replaces", context do

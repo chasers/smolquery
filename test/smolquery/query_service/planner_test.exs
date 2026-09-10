@@ -980,10 +980,88 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
       refute Enum.any?(plan.hot[@table], &Map.has_key?(&1, "stats"))
-      assert Enum.count(plan.hot_members[@table]) == 10
       [_schema, view] = plan.statements
       assert view =~ "id-10.parquet"
       refute view =~ "id-07.parquet"
+    end
+
+    test "fetches the newest entries a page at a time, never the whole manifest" do
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime(preview_entries()), @conn, sql)
+
+      assert plan.statistics.hot.files_total == 5
+      assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
+    end
+
+    test "a table read by page is not pinnable: hot_members leaves it out" do
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime(preview_entries()), @conn, sql)
+
+      assert plan.hot_members == %{}
+    end
+
+    test "reads on while the kept entries fall short, asking only for the rows still uncovered" do
+      runtime = runtime(preview_entries(), runtime: [hot_manifest_page: 2])
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert plan.statistics.hot.files_total == 3
+      assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
+    end
+
+    test "an entry the membership rule excludes does not count toward the page's rows" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+
+      entries =
+        Enum.map(preview_entries(), fn
+          %{"id" => "id-10"} = entry ->
+            Map.put(entry, "claim_keys", ["analytics/events/01SEALED.parquet"])
+
+          entry ->
+            entry
+        end)
+
+      runtime =
+        runtime(entries,
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}],
+          runtime: [hot_manifest_page: 2]
+        )
+
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == ["id-09", "id-08", "id-07"]
+    end
+
+    test "a sealed tier that covers the LIMIT reads no manifest at all" do
+      runtime =
+        runtime(preview_entries(),
+          answers: [stats: %{{@table, @snapshot} => %{files: 1, rows: 5, bytes: 100}}],
+          runtime: [buffer_base_url: "http://127.0.0.1:1"]
+        )
+
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert plan.hot[@table] == []
+      assert plan.statistics.hot.files_total == 0
+    end
+
+    test "a pinned preview reads its pinned entries whole (T-418)" do
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} =
+               Planner.plan(runtime(preview_entries()), @conn, sql,
+                 hot_ids: %{@table => ["id-01", "id-02"]}
+               )
+
+      assert ids(plan.hot[@table]) == ["id-02", "id-01"]
+      assert plan.hot_members == %{@table => ["id-01", "id-02"]}
     end
 
     test "the OFFSET rows are read before they are skipped, so they count" do
@@ -1035,13 +1113,13 @@ defmodule Smolquery.QueryService.PlannerTest do
       end
     end
 
-    test "statistics report the trimmed read against the whole hot tier" do
+    test "statistics report the trimmed read against the page it was trimmed from" do
       sql = "SELECT * FROM analytics.events LIMIT 5"
 
       assert {:ok, %Plan{statistics: %Statistics{hot: hot}}} =
                Planner.plan(runtime(preview_entries()), @conn, sql)
 
-      assert hot.files_total == 10
+      assert hot.files_total == 5
       assert hot.files_scanned == 3
       assert hot.rows_scanned == 6
     end

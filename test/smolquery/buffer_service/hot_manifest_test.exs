@@ -141,6 +141,47 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "newest/4 (T-449)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    defp three(manifest),
+      do: Enum.sort_by(for(n <- 1..3, do: add(manifest, @table, rows(n))), & &1.id)
+
+    test "reads the newest entries first, and stops at the limit", %{manifest: manifest} do
+      [_oldest, middle, newest] = three(manifest)
+
+      assert HotManifest.newest(manifest, @table, 2) == [newest, middle]
+    end
+
+    test "before: continues with the entries older than the previous page's last id",
+         %{manifest: manifest} do
+      [oldest, middle, _newest] = three(manifest)
+
+      assert HotManifest.newest(manifest, @table, 2, before: middle.id) == [oldest]
+      assert HotManifest.newest(manifest, @table, 2, before: oldest.id) == []
+    end
+
+    test "a limit past the table reads all of it, newest first", %{manifest: manifest} do
+      [oldest, middle, newest] = three(manifest)
+
+      assert HotManifest.newest(manifest, @table, 10) == [newest, middle, oldest]
+    end
+
+    test "stays inside the table", %{manifest: manifest} do
+      _other = add(manifest, @other, rows(1))
+      entry = add(manifest, @table, rows(1))
+
+      assert HotManifest.newest(manifest, @table, 5) == [entry]
+      assert HotManifest.newest(manifest, {"analytics", "absent"}, 5) == []
+    end
+
+    test "stats: false projects the stats away in ETS", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(2))
+
+      assert HotManifest.newest(manifest, @table, 1, stats: false) == [%{entry | stats: %{}}]
+    end
+  end
+
   describe "pending/3 and empty?/2 (T-317)" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 

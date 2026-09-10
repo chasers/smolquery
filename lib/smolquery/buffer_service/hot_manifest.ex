@@ -92,11 +92,12 @@ defmodule Smolquery.BufferService.HotManifest do
 
   ## What a scanning read costs, and how to see it
 
-  Three reads walk a table's index rather than resolving one key: `entries/2`
-  serving the whole manifest over HTTP, `pending/3` deciding what to claim, and
-  `retired_before/3` on every reap. Each emits
-  `[:smolquery, :hot_manifest, :read]` with its duration and the entries it
-  answered with, labelled by `op`, and so does the O(1) `live_claim/2` (T-318).
+  Four reads walk a table's index rather than resolving one key: `entries/2`
+  serving the whole manifest over HTTP, `newest/4` serving one newest-first
+  page of it, `pending/3` deciding what to claim, and `retired_before/3` on
+  every reap. Each emits `[:smolquery, :hot_manifest, :read]` with its
+  duration and the entries it answered with, labelled by `op`, and so does
+  the O(1) `live_claim/2` (T-318).
 
   That is the seam because it is caller-agnostic. The same index backs the
   sealer, the query planner and the buffer's own write path, and "which read is
@@ -454,6 +455,34 @@ defmodule Smolquery.BufferService.HotManifest do
     |> Enum.uniq()
     |> Enum.flat_map(&lookup(manifest, table_ref, &1))
     |> Enum.sort_by(& &1.id)
+  end
+
+  @doc """
+  Up to `limit` of the table's entries, newest first: one page of a
+  newest-first read of the manifest (T-449).
+
+  `entries/4` costs the node its whole unsealed backlog on every call, and a
+  reader that wants the newest few entries — the query planner covering an
+  unordered `LIMIT n` from the newest micro-segments — paid that to keep a
+  handful. This read costs what it returns instead: `:ets.select_reverse/3`
+  walks the `:ordered_set` from the table's last key, which is its newest id,
+  and stops at `limit`.
+
+  `before:` continues a read from the previous page's last id, with only the
+  entries older than it. The entries newer than it are still traversed — the
+  guard skips them in C without copying them out — so reading k pages costs
+  the k-th page k times over. The preview reads one or two.
+
+  `stats: false` projects the stats away in the match spec, as `entries/4`
+  does.
+  """
+  @spec newest(t(), Store.table_ref(), pos_integer(), before: String.t() | nil, stats: boolean()) ::
+          [Entry.t()]
+  def newest(%__MODULE__{table: table}, table_ref, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    spec = newest_spec(table_ref, Keyword.get(opts, :before), Keyword.get(opts, :stats, true))
+
+    measured(:newest, fn -> select_limited(table, spec, limit, :newest) end)
   end
 
   @doc """
@@ -1245,40 +1274,49 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp entry_spec(table_ref, true), do: [{{{table_ref, :_}, :"$1"}, [], [:"$1"]}]
+  defp entry_spec(table_ref, stats), do: [{{{table_ref, :_}, :"$1"}, [], [entry_body(stats)]}]
 
-  # The same entries with an empty stats block, built by the match spec so the
+  defp newest_spec(table_ref, nil, stats), do: entry_spec(table_ref, stats)
+
+  defp newest_spec(table_ref, before, stats),
+    do: [{{{table_ref, :"$2"}, :"$1"}, [{:<, :"$2", before}], [entry_body(stats)]}]
+
+  defp entry_body(true), do: :"$1"
+
+  # The same entry with an empty stats block, built by the match spec so the
   # stats never leave ETS: every other field of the struct is read off the
   # stored entry, and the struct tag with them.
-  defp entry_spec(table_ref, false) do
-    without_stats =
-      Entry.__info__(:struct)
-      |> Enum.map(& &1.field)
-      |> List.delete(:stats)
-      |> Map.new(&{&1, {:map_get, &1, :"$1"}})
-      |> Map.merge(%{__struct__: Entry, stats: %{}})
-
-    [{{{table_ref, :_}, :"$1"}, [], [without_stats]}]
+  defp entry_body(false) do
+    Entry.__info__(:struct)
+    |> Enum.map(& &1.field)
+    |> List.delete(:stats)
+    |> Map.new(&{&1, {:map_get, &1, :"$1"}})
+    |> Map.merge(%{__struct__: Entry, stats: %{}})
   end
 
   defp pending_spec(table_ref) do
     [{{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}], [:"$1"]}]
   end
 
-  defp select_limited(table, spec, limit),
-    do: table |> :ets.select(spec, limit) |> collect(limit, 0, [])
+  defp select_limited(table, spec, limit, order \\ :oldest)
 
-  defp collect(:"$end_of_table", _limit, _taken, chunks),
+  defp select_limited(table, spec, limit, :oldest),
+    do: table |> :ets.select(spec, limit) |> collect(limit, 0, [], &:ets.select/1)
+
+  defp select_limited(table, spec, limit, :newest),
+    do: table |> :ets.select_reverse(spec, limit) |> collect(limit, 0, [], &:ets.select_reverse/1)
+
+  defp collect(:"$end_of_table", _limit, _taken, chunks, _next),
     do: chunks |> Enum.reverse() |> Enum.concat()
 
-  defp collect({entries, continuation}, limit, taken, chunks) do
+  defp collect({entries, continuation}, limit, taken, chunks, next) do
     taken = taken + length(entries)
     chunks = [entries | chunks]
 
     if taken >= limit do
       chunks |> Enum.reverse() |> Enum.concat() |> Enum.take(limit)
     else
-      collect(:ets.select(continuation), limit, taken, chunks)
+      collect(next.(continuation), limit, taken, chunks, next)
     end
   end
 
