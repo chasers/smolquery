@@ -31,6 +31,7 @@ defmodule Smolquery.Application do
       [
         Smolquery.Telemetry,
         Smolquery.MetricsServer,
+        Smolquery.MemoryTrace,
         {Phoenix.PubSub, name: Smolquery.PubSub},
         Smolquery.Lifecycle,
         Smolquery.Cluster.RingCache

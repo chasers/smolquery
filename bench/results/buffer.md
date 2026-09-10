@@ -446,3 +446,62 @@ Against `main` in the same fixture: 521.1 / 345.0 / 135.0 at depths 0 / 1,024 /
   (T-317) took depth 4,096 from 135.0 to 225.9. Making `live_claim/2` a keyed
   read, walking the retired prefix instead of scanning, and dropping the
   redundant sort in `entries/2` (T-318) took it from 225.9 to ~540.
+
+## Follow-up: what one encode costs in memory, and what stays behind (T-451, 2026-09-10)
+
+The sandbox's buffer pods OOMKilled at 4 Gi and again at 6 Gi while reading
+1–2 GiB whenever anyone looked, with `flush_max_bytes=94000000` and
+`encode_concurrency=4`. Measured locally through `Smolquery.Segments.Writer`
+— the buffer's real encode, one DuckDB `COPY` over a spooled NDJSON body — on
+four write engines at `memory_limit = 512MB`, 8 DuckDB threads each, a
+40-column log-like schema (~1 KB per row), RSS sampled every 20 ms:
+
+```
+encode                    wall ms   RSS peak   RSS settled after 300 ms
+  1 x  8 MiB body            58       +29 MiB     +30 MiB
+  1 x 32 MiB body           162       +72 MiB     +61 MiB
+  4 x 32 MiB concurrent     186      +409 MiB    +376 MiB
+  1 x 94 MiB body           480      +262 MiB    +128 MiB
+  4 x 94 MiB concurrent     498      +820 MiB    +730 MiB
+```
+
+Six back-to-back bursts of `4 x 94 MiB`, from a 250 MiB process:
+
+```
+cycle   RSS peak   RSS settled   DuckDB's own pools   BEAM total
+  1      1530        1459              1 MiB            73 MiB
+  2      1921        1749              2 MiB            73 MiB
+  3      1933        1712              3 MiB            75 MiB
+  4      1803        1548              5 MiB            75 MiB
+  5      1700        1207              6 MiB            75 MiB
+  6      1745        1564              7 MiB            75 MiB
+```
+
+Three things this says.
+
+- **One encode peaks at about three times its body.** 94 MB of NDJSON is
+  ~260 MiB while `read_json` parses and the Parquet writer encodes. Four at
+  once is ~1.1 GiB on the first burst, and the sandbox ran exactly that shape.
+- **The memory is neither DuckDB's nor the BEAM's by their own accounting.**
+  `duckdb_memory()` reports single-digit MiB at rest, the BEAM 75 MiB, yet the
+  process settles 1.2–1.8 GiB above where it started. The transient lives in
+  DuckDB's allocator and is retained after the encode; a later burst reuses
+  it and peaks higher. `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072
+  MALLOC_TOP_PAD_=0` changed nothing (peaks 1503–1987, settled 1176–1861),
+  so it is not glibc arena count — consistent with DuckDB's bundled allocator
+  keeping its pages. This is the "steady anon growth" and the
+  "violent transient spikes" of T-451 in one mechanism: bursts, and what
+  each burst leaves behind.
+- **It is not visible at rest, and no knob names it.** `DeployedShape` now
+  prints `encode_transient_bytes` (3 × flush_max_bytes × encode_concurrency)
+  on the buffer shape line and warns when it exceeds a quarter of the cgroup
+  limit; `Smolquery.MemoryTrace` records the bursts as they happen.
+
+On the sandbox's numbers: a 1.3–2 GiB base plus a ~1.1 GiB burst plus what
+earlier bursts left behind is a 4 Gi pod's ceiling, and a 6 Gi pod's given
+time — which is what the cgroup's `max` counters recorded. Sizing:
+`4 x 32 MiB` peaked at +409 MiB, so `flush_max_bytes=32000000` at the same
+concurrency, or `encode_concurrency=2` at 94 MB, halves the burst; the
+trace file will say which the next kill needs. Whether DuckDB can be told to
+return the pages (its allocator's decay, or `SET allocator_flush_threshold`)
+is the next experiment; this one only sized the problem.
