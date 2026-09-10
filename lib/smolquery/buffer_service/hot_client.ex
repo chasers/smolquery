@@ -47,7 +47,10 @@ defmodule Smolquery.BufferService.HotClient do
       that already knows what it wants should say so (T-316). An id the node no
       longer holds is absent from the answer, exactly as it is from a full read.
     * `:stats` — `false` leaves out the flush-time bounds. They are most of an
-      entry's bytes and only a pruning caller reads them. Ignored without `:ids`.
+      entry's bytes and only a pruning caller reads them. A whole-manifest
+      read without them goes out as `GET …/manifest?stats=false` (T-449); a
+      node from before that parameter ignores it and answers with the stats,
+      which costs bytes and nothing else.
     * `:timeout_ms` — how long to wait for the response.
 
   A scoped read goes out as a `POST`, because 1,024 ULIDs do not fit in a URL.
@@ -58,7 +61,7 @@ defmodule Smolquery.BufferService.HotClient do
   def manifest(base_url, {dataset, table} = table_ref, opts \\ []) do
     with {:ok, _prefix} <- Store.prefix(table_ref) do
       base_url
-      |> url("/v1/datasets/#{dataset}/tables/#{table}/manifest")
+      |> url("/v1/datasets/#{dataset}/tables/#{table}/manifest" <> query(opts))
       |> fetch(scope(opts), Keyword.get(opts, :timeout_ms, @default_timeout_ms))
     end
   end
@@ -68,6 +71,12 @@ defmodule Smolquery.BufferService.HotClient do
       nil -> nil
       ids -> %{"ids" => ids, "stats" => Keyword.get(opts, :stats, true)}
     end
+  end
+
+  defp query(opts) do
+    if is_nil(Keyword.get(opts, :ids)) and Keyword.get(opts, :stats, true) == false,
+      do: "?stats=false",
+      else: ""
   end
 
   defp url(base, path), do: String.trim_trailing(base, "/") <> path

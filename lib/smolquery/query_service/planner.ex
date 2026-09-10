@@ -115,6 +115,24 @@ defmodule Smolquery.QueryService.Planner do
   defines the table for real. A query that does not qualify, a WHERE that
   names a volatile function, and a probe that fails all keep every entry.
 
+  ## The preview reads the fewest files that hold its rows (T-449)
+
+  `SELECT * FROM t LIMIT 50` — the table page's preview, the editor's sample
+  query — has no ORDER BY and no WHERE, so any 50 rows answer it.
+  `Smolquery.QueryService.AnyN` names that shape, and the planner then hands
+  DuckDB only the sources it needs: the sealed tier covers what its row count
+  at the snapshot says, the newest micro-segments the rest. Without it the
+  hot read listed every micro-segment, and because that read unions files by
+  name DuckDB opened every one before its first row — the LIMIT could not
+  stop it. A table with 8,000 hot files took 7.7 s to preview.
+
+  The same query cannot use an entry's flush-time stats — only the pruner and
+  the Top-N probe read them — and they are most of an entry's bytes (T-328:
+  ~7.6 KB with, ~0.4 KB without). So the manifest is fetched with
+  `stats: false` for every table whose entries neither will read, which
+  turned planning that preview from 5.3 s and a 1.1 GiB BEAM peak into a
+  fraction of either. That peak is what OOMKilled the sandbox's query pods.
+
   ## Both tiers project onto the catalog's schema
 
   Micro-segments written before a column was added lack it; `UNION ALL BY
@@ -228,6 +246,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Federation
   alias Smolquery.Identifier
   alias Smolquery.Partitions
+  alias Smolquery.QueryService.AnyN
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
@@ -264,16 +283,20 @@ defmodule Smolquery.QueryService.Planner do
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
+         conjuncts = Pruner.conjuncts(statement, refs, params),
+         top_n = TopN.spec(statement, refs),
          {:ok, manifests} <-
-           Trace.span(:manifests, fn -> manifests(runtime, refs, tables) end),
+           Trace.span(:manifests, fn ->
+             manifests(runtime, refs, tables, &reads_stats?(&1, conjuncts, top_n))
+           end),
          {:ok, members} <-
            Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
-      pruned =
-        Trace.span(:prune, fn ->
-          pruned(members, tables, Pruner.conjuncts(statement, refs, params))
-        end)
+      pruned = Trace.span(:prune, fn -> pruned(members, tables, conjuncts) end)
 
-      hot = bounded(runtime, connection, statement, refs, tables, pruned, params)
+      hot =
+        runtime
+        |> bounded(connection, statement, tables, pruned, params, top_n)
+        |> trimmed(tables, AnyN.spec(statement, refs))
 
       query = %{sql: sql, canonical: canonical, params: params}
 
@@ -347,8 +370,35 @@ defmodule Smolquery.QueryService.Planner do
     end)
   end
 
-  defp bounded(runtime, connection, statement, refs, tables, hot, params) do
-    case TopN.spec(statement, refs) do
+  # Only two readers of a manifest entry's flush-time stats exist — the WHERE
+  # pruner and the Top-N probe — and they are most of an entry's bytes (T-328
+  # measured ~7.6 KB with them against ~0.4 KB without). A query neither can
+  # use — the preview's `SELECT * FROM t LIMIT 50`, any unfiltered scan — is
+  # fetched without them, so a deep seal backlog costs the planner kilobytes
+  # per file, not a gigabyte of decoded JSON per query (T-449).
+  defp reads_stats?(ref, conjuncts, top_n) do
+    Map.has_key?(conjuncts, ref) or match?(%{ref: ^ref}, top_n)
+  end
+
+  # An unordered, unfiltered `LIMIT n` is answered by any n rows, so the plan
+  # hands DuckDB the fewest sources that hold them (T-449): the sealed tier
+  # covers what its row count at the snapshot says it holds, the newest
+  # micro-segments the rest. `union_by_name` makes DuckDB open every listed
+  # file before the first row, so the LIMIT alone could never stop early.
+  defp trimmed(hot, _tables, nil), do: hot
+
+  defp trimmed(hot, tables, %{ref: ref, limit: limit}) do
+    sealed_rows =
+      case tables[ref].stats do
+        %{rows: rows} -> rows
+        _unavailable -> :unavailable
+      end
+
+    Map.update!(hot, ref, &AnyN.trim(&1, sealed_rows, limit))
+  end
+
+  defp bounded(runtime, connection, statement, tables, hot, params, spec) do
+    case spec do
       nil ->
         hot
 
@@ -584,13 +634,15 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp manifests(_runtime, [], _tables), do: {:ok, %{}}
+  defp manifests(_runtime, [], _tables, _reads_stats?), do: {:ok, %{}}
 
   # A partitioned table's hot tier lives under several buffer refs
   # (Smolquery.Partitions), so each table expands into its partition refs for
   # the fetch and every page gathers under the parent — the rest of the plan
-  # keeps seeing one hot tier per table.
-  defp manifests(runtime, refs, tables) do
+  # keeps seeing one hot tier per table. `reads_stats?.(ref)` says whether
+  # the plan can use the entries' flush-time stats; a fetch that cannot
+  # leaves them out.
+  defp manifests(runtime, refs, tables, reads_stats?) do
     urls = manifest_urls(runtime)
 
     pairs =
@@ -608,7 +660,10 @@ defmodule Smolquery.QueryService.Planner do
         fn {parent, partition, url} ->
           {parent,
            Trace.span(:manifest_fetch, %{url: url}, fn ->
-             HotClient.manifest(url, partition, timeout_ms: runtime.buffer_timeout_ms)
+             HotClient.manifest(url, partition,
+               timeout_ms: runtime.buffer_timeout_ms,
+               stats: reads_stats?.(parent)
+             )
            end)}
         end,
         ordered: true,

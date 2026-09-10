@@ -174,6 +174,20 @@ defmodule Smolquery.BufferService.HotServerTest do
       assert entry["url"] =~ segment_path(ack.segment_id)
     end
 
+    test "a whole-manifest GET leaves the stats out when asked (T-449)", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..3))
+
+      [entry] = get(name, @manifest_path <> "?stats=false").resp_body |> JSON.decode!()
+
+      refute Map.has_key?(entry, "stats")
+      assert entry["id"] == ack.segment_id
+      assert entry["row_count"] == 3
+
+      [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
+      assert entry["stats"]["id"]["max"] == 3
+    end
+
     test "an id the node no longer holds is absent, not an error", context do
       name = start_buffer_service(context)
       {:ok, ack} = Client.write_batch(name, @table, batch(1..1))

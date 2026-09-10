@@ -83,6 +83,18 @@ defmodule Smolquery.BufferService.HotClientTest do
       assert String.starts_with?(entry["url"], HotServer.base_url(buffer))
     end
 
+    test "drops the stats from a whole-manifest read too (T-449)", context do
+      buffer = start_buffer(context)
+      {:ok, ack} = Client.write_batch(buffer, @table, batch(1..3))
+      {:ok, _more} = Client.write_batch(buffer, @table, batch(4..4))
+
+      assert {:ok, entries} = HotClient.manifest(HotServer.base_url(buffer), @table, stats: false)
+
+      assert Enum.count(entries) == 2
+      refute Enum.any?(entries, &Map.has_key?(&1, "stats"))
+      assert Enum.any?(entries, &(&1["id"] == ack.segment_id))
+    end
+
     test "an id the node no longer holds is absent from a scoped read", context do
       buffer = start_buffer(context)
 

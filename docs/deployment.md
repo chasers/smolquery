@@ -101,6 +101,18 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The query planner reads the hot manifest without stats when it cannot prune (T-449)
+
+A plan with no WHERE conjunct and no Top-N bound on a table now fetches that
+table's manifest as `GET …/manifest?stats=false`, and an unordered, unfiltered
+`LIMIT n` reads only the newest micro-segments that hold n rows. Both are
+query-side; the one protocol change is the query parameter. A buffer node from
+before this release ignores it and answers with the stats, so a mixed-version
+rollout costs bytes and nothing else — upgrade buffer nodes to get the saving.
+The table page's preview of a table with a deep seal backlog went from
+seconds per thousand hot files and a gigabyte of BEAM memory per query to
+milliseconds; it was what OOMKilled the sandbox's query pods.
+
 ### Column changes, column ids, and materialized columns (0.19.0)
 
 Tables can now add and drop columns (`POST`/`DELETE .../columns`, or `ALTER

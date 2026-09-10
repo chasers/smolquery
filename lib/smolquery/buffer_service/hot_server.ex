@@ -121,10 +121,12 @@ defmodule Smolquery.BufferService.HotServer do
     case {conn.method, conn.path_info} do
       {method, ["v1", "datasets", dataset, "tables", table, "manifest"]}
       when method in ["GET", "HEAD"] ->
+        conn = fetch_query_params(conn)
+
         conn
         |> put_private(:hot_server_route, :manifest)
         |> put_private(:hot_server_table, {dataset, table})
-        |> manifest(name, {dataset, table}, :all, stats: true)
+        |> manifest(name, {dataset, table}, :all, stats: conn.query_params["stats"] != "false")
 
       {"POST", ["v1", "datasets", dataset, "tables", table, "manifest"]} ->
         conn
