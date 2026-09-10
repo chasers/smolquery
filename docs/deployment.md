@@ -101,6 +101,22 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### A retire is O(claim), and replies before its maintenance (T-459)
+
+A partition holding 140,000 unsealed entries could not drain: the storage node's
+seal succeeded, and the `:retire` call that stamps the entries timed out, 161
+times in two hours, so the same claim was re-sealed forever. Inside that call,
+retiring one member of a claim looked its siblings up by scanning every entry
+of the table with its stats — about a gigabyte copied out of ETS per retire at
+that depth — then re-derived every live claim with another scan, and then ran
+the maintenance the retire made due (the grace reaper's drop with its own
+replication round, a log compaction that rewrites the whole manifest, the next
+claim) before replying, all against a 5 s budget the endpoint never widened.
+The siblings now come from the live-claim cache and leave it by name, the
+maintenance runs after the reply, and the call waits `control_timeout_ms`
+(15 s), the budget the sealer's transport already waited. Buffer-side only; no
+protocol change.
+
 ### A buffer node refuses commits once its unsealed backlog is too deep to survive (T-457)
 
 A buffer node accepted commits at whatever rate a client sent them, however

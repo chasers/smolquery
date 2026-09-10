@@ -261,10 +261,14 @@ defmodule Smolquery.BufferService.Endpoint do
   """
   @spec retire(atom(), Store.table_ref(), [String.t()], non_neg_integer(), [String.t()] | nil) ::
           :ok | {:error, term()}
+  # The call waits the control budget the caller's transport waits, not
+  # `TableBuffer.retire/5`'s 5 s default: a retire that lands at 6 s used to
+  # exit here and reach the sealer as a `{:badrpc, {:EXIT, {:timeout, ...}}}`
+  # while the buffer went on to commit it (T-459).
   def retire(name, table_ref, ids, snapshot, keys \\ nil) do
     with {:ok, runtime} <- runtime(name),
          {:ok, buffer} <- buffer(runtime, table_ref) do
-      TableBuffer.retire(buffer, ids, snapshot, keys)
+      TableBuffer.retire(buffer, ids, snapshot, keys, runtime.control_timeout_ms)
     end
   catch
     :exit, {:noproc, _call} -> {:error, :buffer_unavailable}

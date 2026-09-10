@@ -509,6 +509,13 @@ defmodule Smolquery.BufferService.TableBuffer do
     {:noreply, run_maintenance(state)}
   end
 
+  # The retire is acknowledged once it is durable here and on the replicas;
+  # the maintenance it makes due — the grace reaper's drop and its own
+  # replication round, a log compaction that rewrites the whole manifest,
+  # the next claim — runs after the reply, so none of it counts against the
+  # sealer's call timeout. On a partition holding 140,000 entries that
+  # maintenance, inside the timeout, is what made every retire time out and
+  # the backlog block its own drain (T-459).
   def handle_call({:retire, ids, snapshot, keys}, _from, state) do
     result =
       Committer.with_log(state.committer, fn log ->
@@ -519,7 +526,7 @@ defmodule Smolquery.BufferService.TableBuffer do
       end)
 
     case result do
-      :ok -> {:reply, :ok, run_maintenance(state)}
+      :ok -> {:reply, :ok, state, {:continue, :maintain}}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -591,6 +598,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl GenServer
+  def handle_continue(:maintain, state), do: {:noreply, run_maintenance(state)}
 
   @impl GenServer
   def terminate(:normal, state), do: shutdown_commit(state)
