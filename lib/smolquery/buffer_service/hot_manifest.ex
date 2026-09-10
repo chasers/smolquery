@@ -635,7 +635,16 @@ defmodule Smolquery.BufferService.HotManifest do
 
     case Enum.find(live, &(Enum.sort(&1.ids) == sorted)) do
       nil ->
-        {:error, {:claim_mismatch, %{live_ids: live |> Enum.flat_map(& &1.ids) |> Enum.sort()}}}
+        # `live_claims` names each live claim's ids on its own: a release is
+        # matched against exactly one claim, so an owner healing a follower
+        # that holds several must release them one by one, not their union
+        # (T-450 review). `live_ids`, the union, stays for the T-297 readers.
+        {:error,
+         {:claim_mismatch,
+          %{
+            live_ids: live |> Enum.flat_map(& &1.ids) |> Enum.sort(),
+            live_claims: Enum.map(live, &Enum.sort(&1.ids))
+          }}}
 
       claim ->
         record = %{"op" => "release", "ids" => claim.ids}

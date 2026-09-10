@@ -228,9 +228,9 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
       when mutation.op == :claim and rounds > 0 ->
         release_conflicting_then_retry(target, mutation, args, epoch, claimed, rounds - 1)
 
-      {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}}
+      {:error, {:replication_failed, _node, {:claim_mismatch, %{} = mismatch}}}
       when mutation.op == :release and rounds > 0 ->
-        release_diverged_then_retry(target, mutation, args, epoch, live_ids)
+        release_diverged_then_retry(target, mutation, args, epoch, mismatch)
 
       outcome ->
         outcome
@@ -263,26 +263,26 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end
   end
 
+  # The requested ids may be exactly one follower claim, in which case the
+  # release lands; otherwise the mismatch names the follower's claims, and the
+  # ones holding any of the requested ids are released one by one.
   defp release_on_follower(target, mutation, epoch, ids) do
     case ship_release(target, mutation, epoch, ids) do
       :ok ->
         {:ok, ids}
 
-      {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}} ->
-        release_whole_live_claim(target, mutation, epoch, live_ids)
+      {:error, {:replication_failed, _node, {:claim_mismatch, mismatch}}} ->
+        wanted = MapSet.new(ids)
+
+        overlapping =
+          mismatch
+          |> live_claims()
+          |> Enum.filter(fn claim -> Enum.any?(claim, &MapSet.member?(wanted, &1)) end)
+
+        release_live_claims(target, mutation, epoch, overlapping)
 
       {:error, reason} ->
         {:error, reason}
-    end
-  end
-
-  defp release_whole_live_claim({_transport, node, _instance} = target, mutation, epoch, live_ids) do
-    case Enum.filter(live_ids, &sealed_on_owner?(mutation, &1)) do
-      [] ->
-        with :ok <- ship_release(target, mutation, epoch, live_ids), do: {:ok, live_ids}
-
-      sealed ->
-        {:error, {:replication_failed, node, {:diverged_claim_sealed_on_owner, sealed}}}
     end
   end
 
@@ -297,25 +297,45 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
          mutation,
          args,
          epoch,
-         live_ids
+         mismatch
        ) do
-    case Enum.filter(live_ids, &sealed_on_owner?(mutation, &1)) do
-      [] ->
-        released = [mutation.table_ref, :release, %{ids: live_ids}, epoch]
+    with {:ok, released} <- release_live_claims(target, mutation, epoch, live_claims(mismatch)),
+         :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
+      Logger.warning(
+        "healed a diverged release on #{inspect(mutation.table_ref)}: released " <>
+          "#{node}'s own live claim (#{inspect(released)}) before the owner's (T-297)"
+      )
 
-        with :ok <- ship([target], mutation.name, :apply_replica_mutation, released),
-             :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
-          Logger.warning(
-            "healed a diverged release on #{inspect(mutation.table_ref)}: released " <>
-              "#{node}'s own live claim (#{inspect(live_ids)}) before the owner's (T-297)"
-          )
-
-          :ok
-        end
-
-      sealed ->
-        {:error, {:replication_failed, node, {:diverged_claim_sealed_on_owner, sealed}}}
+      :ok
     end
+  end
+
+  # A `:claim_mismatch` names the follower's live claims one by one
+  # (`live_claims`), because a release is matched against exactly one claim
+  # and a follower can hold several — releasing their union would match none
+  # and never converge. A follower from before that key names only the union
+  # (`live_ids`), which is the one-claim case.
+  defp live_claims(%{live_claims: [_ | _] = claims}), do: claims
+  defp live_claims(%{live_ids: live_ids}), do: [live_ids]
+
+  # Releases each of `claims` on the follower, unless one of them holds an id
+  # the owner already sealed — releasing that to pending would set up a
+  # double-commit after a ring change, so the whole heal refuses, naming them
+  # (the asymmetry T-297 draws).
+  defp release_live_claims({_transport, node, _instance} = target, mutation, epoch, claims) do
+    case claims |> List.flatten() |> Enum.filter(&sealed_on_owner?(mutation, &1)) do
+      [] -> release_each(target, mutation, epoch, claims)
+      sealed -> {:error, {:replication_failed, node, {:diverged_claim_sealed_on_owner, sealed}}}
+    end
+  end
+
+  defp release_each(target, mutation, epoch, claims) do
+    Enum.reduce_while(claims, {:ok, []}, fn claim, {:ok, released} ->
+      case ship_release(target, mutation, epoch, claim) do
+        :ok -> {:cont, {:ok, released ++ claim}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp sealed_on_owner?(mutation, id) do
