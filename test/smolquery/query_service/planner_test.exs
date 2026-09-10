@@ -958,4 +958,92 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert log =~ "top-n probe failed, reading every hot entry"
     end
   end
+
+  describe "an unordered LIMIT reads the fewest hot files that hold its rows (T-449)" do
+    defp preview_entries(rows \\ 2) do
+      for k <- 1..10 do
+        entry("id-#{String.pad_leading("#{k}", 2, "0")}", %{
+          "row_count" => rows,
+          "stats" => %{"id" => %{"min" => 1, "max" => 9, "null_count" => 0}}
+        })
+      end
+    end
+
+    defp sealed_rows(rows),
+      do: [answers: [stats: %{{@table, @snapshot} => %{files: 1, rows: rows, bytes: 100}}]]
+
+    test "takes the newest entries until their rows cover the LIMIT, and fetches no stats" do
+      entries = preview_entries()
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime(entries), @conn, sql)
+
+      assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
+      refute Enum.any?(plan.hot[@table], &Map.has_key?(&1, "stats"))
+      assert Enum.count(plan.hot_members[@table]) == 10
+      [_schema, view] = plan.statements
+      assert view =~ "id-10.parquet"
+      refute view =~ "id-07.parquet"
+    end
+
+    test "the OFFSET rows are read before they are skipped, so they count" do
+      sql = "SELECT id FROM analytics.events LIMIT 3 OFFSET 2"
+
+      assert {:ok, plan} = Planner.plan(runtime(preview_entries()), @conn, sql)
+
+      assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
+    end
+
+    test "a sealed tier that already holds the rows needs no hot file" do
+      runtime = runtime(preview_entries(), sealed_rows(5))
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert plan.hot[@table] == []
+      [_schema, view] = plan.statements
+      refute view =~ "read_parquet"
+      assert view =~ "AT (VERSION => #{@snapshot})"
+    end
+
+    test "a sealed tier short of the rows is topped up from the newest entries" do
+      runtime = runtime(preview_entries(), sealed_rows(3))
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == ["id-10"]
+    end
+
+    test "a WHERE keeps every entry and fetches the stats the pruner reads" do
+      sql = "SELECT * FROM analytics.events WHERE id > 1 LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(runtime(preview_entries()), @conn, sql)
+
+      assert Enum.count(plan.hot[@table]) == 10
+      assert Enum.all?(plan.hot[@table], &Map.has_key?(&1, "stats"))
+    end
+
+    test "an aggregate or a DISTINCT keeps every entry: they read every row" do
+      for sql <- [
+            "SELECT count(*) FROM analytics.events LIMIT 5",
+            "SELECT DISTINCT name FROM analytics.events LIMIT 5",
+            "SELECT * FROM analytics.events"
+          ] do
+        assert {:ok, plan} = Planner.plan(runtime(preview_entries()), @conn, sql)
+        assert Enum.count(plan.hot[@table]) == 10, sql
+      end
+    end
+
+    test "statistics report the trimmed read against the whole hot tier" do
+      sql = "SELECT * FROM analytics.events LIMIT 5"
+
+      assert {:ok, %Plan{statistics: %Statistics{hot: hot}}} =
+               Planner.plan(runtime(preview_entries()), @conn, sql)
+
+      assert hot.files_total == 10
+      assert hot.files_scanned == 3
+      assert hot.rows_scanned == 6
+    end
+  end
 end

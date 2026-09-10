@@ -68,3 +68,40 @@ honest about work done rather than just time taken.
 - **Full scans should skip the planner.** At `selectivity: all`, planning is pure
   overhead (cached path ~2 ms slower than native). Cheap enough not to special-case
   yet, but the shape to remember when the union planner lands (T-27).
+
+## Follow-up: the preview over a deep hot tier (T-449, 2026-09-10)
+
+The sandbox's query pods OOMKilled in a loop, about fifteen seconds after a
+browser opened the table page of `supabase_staging.system_logs`, whose buffer
+nodes held a wedged seal backlog of thousands of micro-segments. The page's
+preview is `SELECT * FROM t LIMIT 50`. Two costs scaled with the hot file
+count: the planner fetched every entry with its 63-column stats block (T-328:
+~7.6 KB per entry against ~0.4 KB without) and decoded the lot in the BEAM,
+and the hot read unioned every file by name, so DuckDB opened all of them
+before the LIMIT could stop it.
+
+Measured locally through `Smolquery.QueryService.Client` against a real
+DuckLake (sqlite) and a canned manifest server holding 8,000 micro-segments of
+20 rows × 10 columns each, every entry padded to 63 columns of stats (49 MB of
+manifest JSON, served pre-encoded so the server costs the VM nothing). Peaks
+sampled every 20 ms; Linux aarch64, Elixir 1.20 / OTP 29, DuckDB via ADBC.
+
+```
+SELECT * FROM analytics.events LIMIT 50       wall ms   BEAM peak   RSS peak   hot files read
+  before  plan only                             2,518    +792 MiB     +98 MiB   8,000 listed
+  before  full query                            6,375    +674 MiB    +662 MiB   8,000
+  after   plan only                               314     +17 MiB     +14 MiB   3 listed
+  after   full query                              166      +8 MiB      +0 MiB   3
+```
+
+Two changes, both in the planner: a plan whose statement has no WHERE
+conjunct and no Top-N bound for a table fetches that table's manifest as
+`GET …?stats=false` (`Smolquery.BufferService.HotClient`, honoured by
+`HotServer`'s GET route); and an unordered, unfiltered constant `LIMIT n`
+(`Smolquery.QueryService.AnyN`) hands DuckDB only the newest micro-segments
+whose row counts cover what the sealed tier's row count at the snapshot does
+not. At 3,000 files the same preview took 3.7 s before; at 500, 0.9 s.
+
+What this does not cover: a `WHERE` still fetches every entry with stats and
+hands DuckDB every surviving file, which is T-328's remaining scope — scoping
+the planner's fetch by ids or by the pruner's needs.

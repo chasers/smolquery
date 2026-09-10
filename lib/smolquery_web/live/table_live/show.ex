@@ -52,6 +52,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   alias SmolqueryWeb.Waterfall
 
   @preview_rows 50
+  @preview_timeout_ms 15_000
   @lifecycle_debounce_ms 300
   @event_feed_limit 8
 
@@ -304,7 +305,7 @@ defmodule SmolqueryWeb.TableLive.Show do
   end
 
   defp fetch_preview(runtime, sql) do
-    case QueryService.Client.query(runtime.query_name, sql, timeout_ms: 15_000) do
+    case QueryService.Client.query(runtime.query_name, sql, timeout_ms: @preview_timeout_ms) do
       {:ok, %QueryService.Job{state: :done} = job, frame} ->
         {columns, rows} =
           DataTable.frame_page(frame, 0, @preview_rows, json_columns: job.json_columns)
@@ -426,6 +427,16 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp preview_error(:query_service_unavailable),
     do: "The query service is not running on this node — no preview."
+
+  defp preview_error(:timeout),
+    do:
+      "The preview timed out after #{div(@preview_timeout_ms, 1000)} s — the table's hot tier " <>
+        "is too large to read in time. The schema and lifecycle above are unaffected."
+
+  defp preview_error({:hot_tier_unavailable, {dataset, partition}, _reason}),
+    do:
+      "The hot tier for #{dataset}.#{partition} is unreachable — no preview until its " <>
+        "buffer node answers."
 
   defp preview_error(reason), do: "Preview failed: #{inspect(reason)}"
 

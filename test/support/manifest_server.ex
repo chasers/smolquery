@@ -17,9 +17,17 @@ defmodule Smolquery.Test.ManifestServer do
 
   @impl Plug
   def call(conn, agent) do
+    conn = fetch_query_params(conn)
+    entries = Agent.get(agent, & &1)
+
+    entries =
+      if conn.query_params["stats"] == "false",
+        do: Enum.map(entries, &Map.delete(&1, "stats")),
+        else: entries
+
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, agent |> Agent.get(& &1) |> JSON.encode!())
+    |> send_resp(200, JSON.encode!(entries))
   end
 
   @doc """

@@ -507,8 +507,9 @@ GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment byte
   tier. Such an entry never round-trips through this route at all.
 - **The `GET` costs the serving node its whole unsealed backlog.** It scans
   the table's entries out of ETS, sorts them, builds a record each, and encodes
-  the lot as one JSON document. The query planner wants exactly that, because it
-  prunes on each entry's flush-time bounds. The sealer does not: it holds a
+  the lot as one JSON document. The query planner wants exactly that when it
+  prunes on each entry's flush-time bounds; a plan with nothing to prune on
+  asks `GET …?stats=false` and gets the entries without them (T-449). The sealer does not: it holds a
   claim of at most 1,024 ids. So the sealer `POST`s the ids it wants, with
   `{"ids": [...], "stats": false}`, and pays for its claim rather than for the
   backlog it is draining (T-316). It is a `POST` because 1,024 ULIDs are about
@@ -1017,6 +1018,22 @@ Properties worth knowing:
   probed, and a probe that finds fewer than n rows, or fails, keeps every
   entry. The probe runs before lockdown, with extension autoload off. `SMOLQUERY_TOP_N_PROBE_ROWS` sizes the second probe round
   and `0` turns the bound off.
+- **An unordered, unfiltered `LIMIT n` reads the fewest hot files that hold
+  n rows** (T-449). `SELECT * FROM t LIMIT 50` — the table page's preview, the
+  editor's sample query — is answered by any n rows, so the planner covers n
+  with the sealed tier's row count at the snapshot and then the newest
+  micro-segments, and hands DuckDB only those. The hot read unions files by
+  name, which makes DuckDB open every listed file before its first row, so
+  the LIMIT alone never stopped early: a preview over 8,000 hot files scanned
+  all 8,000. A WHERE, an ORDER BY, an aggregate, or any function call in the
+  select list disqualifies; the plan then reads every file as before.
+- **A plan that cannot use flush-time stats does not fetch them** (T-449).
+  Only the WHERE pruner and the Top-N probe read an entry's stats, and they
+  are most of its bytes (~7.6 KB with, ~0.4 KB without, T-328). An
+  unfiltered, unordered query fetches the manifest as `GET …?stats=false`;
+  planning the preview of a table with 8,000 hot files took 5.3 s and peaked
+  1.1 GiB above baseline in the BEAM with the stats, which is what OOMKilled
+  the sandbox's query pods at a 3 Gi limit.
 - **An unreachable buffer owner fails the query.** Sealed-only rows behind a
   green status would be a wrong answer.
 - **A `catalog.schema.table` reference federates** (T-324). A catalog name
