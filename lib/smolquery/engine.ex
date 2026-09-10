@@ -318,21 +318,20 @@ defmodule Smolquery.Engine do
     end
   end
 
-  # `allocator_background_threads` (T-452): without jemalloc's background
-  # thread DuckDB keeps the pages an encode or a merge freed, and neither
+  # `allocator_background_threads` (T-452) is deliberately not a per-engine
+  # setting here: it is one jemalloc flag for the whole OS process, which
+  # libduckdb re-applies from each instance's own configuration on open and
+  # forces off on every instance close. `Smolquery.DuckDB.start_link/1`
+  # therefore opens every instance with the node's configured value, and
+  # `Smolquery.Allocator` re-asserts it on a schedule. `config.exs` sets it
+  # on; `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS` overrides it. Without it
+  # DuckDB keeps the pages an encode or a merge freed, and neither
   # `duckdb_memory()` nor the BEAM ever sees them — a buffer node settled
-  # 1.1–1.5 GiB above its start after a burst of encodes. With it the pages
-  # return within a second, at the same wall time. It is one flag for the
-  # whole OS process, not one per DuckDB instance: the `SET` reaches a static
-  # in libduckdb, so the last engine to start decides for every engine in
-  # the BEAM. That is why it lives in the application config (`config.exs`
-  # sets it on; `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS` overrides it) and
-  # has no per-engine option — every engine applies the node's one value. A
-  # build without jemalloc (the macOS universal binary) accepts and ignores
-  # it.
+  # 1.1–1.5 GiB above its start after a burst of encodes. A build without
+  # jemalloc (the macOS universal binary) accepts and ignores it.
   defp settings(config) do
     config
-    |> Keyword.take([:memory_limit, :threads, :allocator_background_threads])
+    |> Keyword.take([:memory_limit, :threads])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 end

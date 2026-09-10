@@ -85,7 +85,7 @@ version's driver exists.
 |---|---|
 | `SMOLQUERY_MEMORY_LIMIT` | The per-engine DuckDB memory limit (`2GB`). The storage merge engine resolves its own limit instead — see `SMOLQUERY_STORAGE_MEMORY_LIMIT` |
 | `SMOLQUERY_ENGINE_THREADS` | The DuckDB threads for one standalone engine (default: the deployment host's scheduler count). The write pool also divides this number |
-| `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS` | Whether DuckDB's allocator runs jemalloc's background thread (`true`, T-452). Without it DuckDB keeps the pages an encode or a merge freed — a buffer node settled 1.1–1.5 GiB above its start after a burst of encodes that `duckdb_memory()` never saw — and the container's anon memory climbs until the kill. The flag is one per OS process, not per DuckDB instance: every engine applies the node's value, and the last one to start decides for all. One background thread; `false` turns it off. A build without jemalloc (the macOS universal binary) ignores it |
+| `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS` | Whether DuckDB's allocator runs jemalloc's background thread (`true`, T-452). Without it DuckDB keeps the pages an encode or a merge freed — a buffer node settled 1.1–1.5 GiB above its start after a burst of encodes that `duckdb_memory()` never saw — and the container's anon memory climbs until the kill. The flag is one per OS process, not per DuckDB instance, and libduckdb re-applies each instance's own value on open and forces it off on every instance close — so every instance opens with the node's value (`Smolquery.DuckDB`) and `Smolquery.Allocator` re-asserts it every second from an instance of its own. One background thread; `false` turns both off. A build without jemalloc (the macOS universal binary) ignores it |
 | `SMOLQUERY_MAX_RESULT_ROWS` | The ceiling on rows that `Engine.query/3` converts to Elixir terms (`100000`, or `infinity`) |
 | `SMOLQUERY_EXTENSION_DIRECTORY` | Where DuckDB finds and installs its extensions (PL-50). The image sets it to `/app/duckdb-extensions`, which ships `httpfs`, `json`, `ducklake`, `aws`, and `postgres` pre-installed. Unset, DuckDB uses `$HOME/.duckdb/extensions` — under `/data` in the image, an `emptyDir` that a pod roll wipes, so the first query after a roll used to download the `aws` extension (429 ms on prod) |
 | `SMOLQUERY_SPILL_DIR` | The root for per-instance DuckDB spill directories (`.tmp`, relative to the working directory). Use node-local storage. It is intentionally separate from `SMOLQUERY_DATA_DIR` |
@@ -160,6 +160,9 @@ config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   extensions: [:httpfs, :json],
   allocator_background_threads: true
+
+config :smolquery, Smolquery.Allocator,
+  interval_ms: 1_000
 
 config :smolquery, :data_dir, "priv/data"
 
