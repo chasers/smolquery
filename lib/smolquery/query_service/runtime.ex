@@ -131,9 +131,9 @@ defmodule Smolquery.QueryService.Runtime do
   `hot_manifest_page` (T-449) caps how many entries one newest-first page of
   a table's hot manifest asks a buffer node for. The preview's unordered
   `LIMIT n` is answered from the newest micro-segments, and the planner
-  fetches them a page at a time — as many entries as rows it still needs, or
-  this many, whichever is fewer — until the entries it keeps hold the rows
-  the sealed tier does not. `1_024` by default: about 400 KB of stats-free
+  fetches them a page at a time — as many entries as rows it needs, or this
+  many, whichever is fewer, then whole pages — until the entries it keeps
+  hold the rows the sealed tier does not. `1_024` by default: about 400 KB of stats-free
   entries per page per buffer node, against a whole manifest that ran to
   285,000 entries the day this was measured.
 
@@ -287,6 +287,19 @@ defmodule Smolquery.QueryService.Runtime do
       distributed: distributed(Keyword.get(config, :distributed, []))
     }
     |> struct!(Keyword.take(config, @limits))
+    |> validate_hot_manifest_page()
+  end
+
+  # A page of zero entries would trip `HotClient.newest/4`'s guard inside
+  # every preview's fetch task, and the plan would report the buffer node
+  # unreachable; the boot is where a bad number belongs (T-449).
+  defp validate_hot_manifest_page(%__MODULE__{hot_manifest_page: page} = runtime)
+       when is_integer(page) and page > 0,
+       do: runtime
+
+  defp validate_hot_manifest_page(%__MODULE__{hot_manifest_page: page}) do
+    raise ArgumentError,
+          "unsupported hot_manifest_page: #{inspect(page)} (expected a positive integer)"
   end
 
   defp warm_probe(nil), do: "SELECT 1"

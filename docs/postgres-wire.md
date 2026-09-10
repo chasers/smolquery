@@ -204,7 +204,11 @@ be the same read. `EXPLAIN` inside a block pins and reads the pin like a
 query, since `postgres_fdw` estimates before it scans. Only a table's
 first touch keys on micro-segment ULID timestamps, where cross-node
 clock skew is the precision; from then on the block reads that table by
-id.
+id. The one exception is a first touch that was an unordered, unfiltered
+`LIMIT` (the table page's preview): it reads the newest micro-segments by
+page rather than the whole hot tier, names no ids, and leaves the table on
+the timestamp bound until a later statement in the block reads it whole
+(T-449).
 
 ## Security
 

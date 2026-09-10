@@ -28,7 +28,10 @@ defmodule SmolqueryPg.Session do
   A transaction block pins its read (PL-58 layers 7 and 8): the block's
   first query captures a hot-tier time bound at submit and the snapshot
   the job ran at, and each table's first touch in the block captures the
-  exact micro-segment ids that job read (`job.hot_members`). Every later
+  exact micro-segment ids that job read (`job.hot_members`) — unless that
+  touch was a preview reading the hot tier by page (T-449), which names no
+  ids, so the table stays on the time bound until a statement reads it
+  whole. Every later
   query in the block passes all three through
   `Smolquery.QueryService.Client` — the id set as `hot_ids:` for a table
   already touched, the time bound for one not yet touched — so two

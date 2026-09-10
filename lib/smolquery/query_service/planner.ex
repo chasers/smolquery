@@ -79,7 +79,10 @@ defmodule Smolquery.QueryService.Planner do
 
   The bound leans on ULID timestamps, so cross-node clock skew is its
   precision — but only once per table, at first touch; after that the id
-  set is exact.
+  set is exact. One exception: a table the preview read by page (T-449,
+  below) supplies no id set, since a page is not the tier, so the block
+  reads it at the bound's precision until a later statement touches it
+  whole.
 
   A pin has a lifetime, `Runtime.hot_pin_max_age_ms`: a micro-segment is
   reaped from the hot tier `retire_grace_ms` after its seal, and a read
@@ -356,13 +359,16 @@ defmodule Smolquery.QueryService.Planner do
         pinned_members(ref, manifest, sealed, ids)
 
       :error ->
-        {:ok,
-         Enum.filter(
-           manifest,
-           &(include?(&1, sealed) and stamped_before?(&1, hot_before_ms))
-         )}
+        {:ok, Enum.filter(manifest, &member?(&1, sealed, hot_before_ms))}
     end
   end
+
+  # The one membership rule for an unpinned table: not claimed by a seal
+  # the snapshot already holds, and stamped before the pin's bound. The
+  # newest-first pager keeps entries by this same rule (`newest_page/4`),
+  # and its stop condition is only right while the two are one function.
+  defp member?(entry, sealed, hot_before_ms),
+    do: include?(entry, sealed) and stamped_before?(entry, hot_before_ms)
 
   defp pinned_members(ref, manifest, sealed, ids) do
     pinned = MapSet.new(ids)
@@ -434,7 +440,7 @@ defmodule Smolquery.QueryService.Planner do
         ref: ref,
         rows: AnyN.need(sealed_rows(table), limit),
         entries: runtime.hot_manifest_page,
-        keep: &(include?(&1, sealed) and stamped_before?(&1, hot_before_ms))
+        keep: &member?(&1, sealed, hot_before_ms)
       }
     end
   end
@@ -687,22 +693,25 @@ defmodule Smolquery.QueryService.Planner do
   defp manifests(runtime, refs, tables, reads_stats?, page) do
     urls = manifest_urls(runtime)
 
+    # The page rides on the paged table's own pairs, not in the task
+    # function: it closes over the sealed tier's basename set, and a closure
+    # the stream sends to every task is copied into every task's heap.
     pairs =
       Enum.flat_map(refs, fn ref ->
         count = Partitions.count(tables[ref].schema.partitions, runtime.write_partitions)
 
         for partition <- Partitions.refs(ref, count), url <- urls do
-          {ref, partition, url}
+          {ref, partition, url, page_for(page, ref)}
         end
       end)
 
     {gathered, failures} =
       pairs
       |> Task.async_stream(
-        fn {parent, partition, url} ->
+        fn {parent, partition, url, ref_page} ->
           {parent,
            Trace.span(:manifest_fetch, %{url: url}, fn ->
-             fetch(runtime, parent, partition, url, reads_stats?, page)
+             fetch(runtime, parent, partition, url, reads_stats?, ref_page)
            end)}
         end,
         ordered: true,
@@ -714,10 +723,10 @@ defmodule Smolquery.QueryService.Planner do
         {{:ok, {parent, {:ok, entries}}}, _pair}, {acc, failed} ->
           {Map.update!(acc, parent, &[entries | &1]), failed}
 
-        {{:ok, {_parent, {:error, reason}}}, {_parent2, partition, url}}, {acc, failed} ->
+        {{:ok, {_parent, {:error, reason}}}, {_parent2, partition, url, _page}}, {acc, failed} ->
           {acc, Map.put_new(failed, url, {partition, reason})}
 
-        {{:exit, reason}, {_parent, partition, url}}, {acc, failed} ->
+        {{:exit, reason}, {_parent, partition, url, _page}}, {acc, failed} ->
           {acc, Map.put_new(failed, url, {partition, reason})}
       end)
 
@@ -778,6 +787,9 @@ defmodule Smolquery.QueryService.Planner do
   defp fetch_deadline(%Runtime{buffer_timeout_ms: :infinity}), do: :infinity
   defp fetch_deadline(%Runtime{buffer_timeout_ms: ms}), do: ms + 5_000
 
+  defp page_for(%{ref: ref} = page, ref), do: page
+  defp page_for(_other_or_none, _ref), do: nil
+
   defp fetch(runtime, parent, partition, url, reads_stats?, page) do
     case page do
       %{ref: ^parent} ->
@@ -791,17 +803,22 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  # One source's share of the page: as many entries as rows are still
-  # uncovered (a micro-segment holds at least one row, so that many entries
-  # cover them unless the membership rule rejects some), capped by
-  # `hot_manifest_page`, again while the kept rows fall short and the source
-  # has more. A sealed tier that covers the LIMIT alone asks for nothing.
+  # One source's share of the page. The first request asks for as many
+  # entries as rows are uncovered (a micro-segment holds at least one row,
+  # so that many entries cover them unless the membership rule rejects
+  # some), capped by `hot_manifest_page`; a sealed tier that covers the
+  # LIMIT alone asks for nothing. Every request after the first asks for
+  # the whole cap: the first page fell short because the rule rejected
+  # entries — a run of them claimed by seals the snapshot already holds, or
+  # flushed after a block's pin — and a run of thousands must cost a few
+  # round trips, not one per row still needed, each re-walking the newer
+  # keys server-side.
   defp newest(_url, _partition, %{rows: rows}, _timeout_ms, _before, covered, pages)
        when covered >= rows,
        do: {:ok, gathered(pages)}
 
   defp newest(url, partition, page, timeout_ms, before, covered, pages) do
-    limit = min(page.rows - covered, page.entries)
+    limit = if is_nil(before), do: min(page.rows - covered, page.entries), else: page.entries
     opts = [timeout_ms: timeout_ms, stats: false, before: before]
 
     case HotClient.newest(url, partition, limit, opts) do

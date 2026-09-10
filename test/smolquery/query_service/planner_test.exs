@@ -1002,13 +1002,15 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert plan.hot_members == %{}
     end
 
-    test "reads on while the kept entries fall short, asking only for the rows still uncovered" do
+    test "reads on while the kept entries fall short, a whole page at a time after the first" do
       runtime = runtime(preview_entries(), runtime: [hot_manifest_page: 2])
       sql = "SELECT * FROM analytics.events LIMIT 5"
 
       assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
 
-      assert plan.statistics.hot.files_total == 3
+      # The first page asked for the 5 rows as 2 entries (the cap), which held 4;
+      # the second asked for the cap outright, not the 1 row still uncovered.
+      assert plan.statistics.hot.files_total == 4
       assert ids(plan.hot[@table]) == ["id-10", "id-09", "id-08"]
     end
 
@@ -1035,6 +1037,28 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
 
       assert ids(plan.hot[@table]) == ["id-09", "id-08", "id-07"]
+    end
+
+    test "a run of excluded entries longer than the page still finds the kept ones" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+
+      entries =
+        Enum.map(preview_entries(), fn
+          %{"id" => id} = entry when id in ["id-01", "id-02", "id-03"] -> entry
+          entry -> Map.put(entry, "claim_keys", ["analytics/events/01SEALED.parquet"])
+        end)
+
+      runtime =
+        runtime(entries,
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}],
+          runtime: [hot_manifest_page: 1]
+        )
+
+      sql = "SELECT * FROM analytics.events LIMIT 3"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert ids(plan.hot[@table]) == ["id-03", "id-02"]
     end
 
     test "a sealed tier that covers the LIMIT reads no manifest at all" do

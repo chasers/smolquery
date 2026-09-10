@@ -528,8 +528,8 @@ GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment byte
   the N newest, newest first, walking the index from its last key and
   stopping; a full page names the id to continue from in
   `x-smolquery-manifest-next`, and `&before=ID` continues from it. The
-  planner asks for as many entries as rows it still needs, and reads on only
-  while the entries it keeps fall short.
+  planner asks for as many entries as rows it needs, then whole pages, and
+  reads on only while the entries it keeps fall short.
 - **A segment id is validated and resolved through the manifest**, never by a
   join of request input into a path. `Smolquery.Segments.Id.valid?/1` rejects
   anything that is not a well-formed ULID before it gets near the filesystem.
