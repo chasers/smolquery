@@ -495,7 +495,7 @@ Three things this says.
 - **It is not visible at rest, and no knob names it.** `DeployedShape` now
   prints `encode_transient_bytes` (3 × flush_max_bytes × encode_concurrency)
   on the buffer shape line and warns when it exceeds a quarter of the cgroup
-  limit; `Smolquery.MemoryTrace` records the bursts as they happen.
+  limit; `Smolquery.MemoryMetrics` publishes the charge and its 60 s peak on `/metrics`, so a scrape sees the bursts.
 
 On the sandbox's numbers: a 1.3–2 GiB base plus a ~1.1 GiB burst plus what
 earlier bursts left behind is a 4 Gi pod's ceiling, and a 6 Gi pod's given

@@ -101,17 +101,18 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
-### A memory tracer that survives the kill, and the encode budget on the shape line (T-451)
+### Memory on /metrics, and the encode budget on the shape line (T-451)
 
 The buffer pods' OOM kills were not root-caused in place: nothing at rest
-predicted them and the tracer catching the climb was a shell script a kill
-also ends. `SMOLQUERY_MEMORY_TRACE=true` starts `Smolquery.MemoryTrace` on any
-role ([configuration.md](configuration.md#diagnostics)): it samples the
-cgroup's charge, its anon/file/slab split, the `max` and `oom_kill` counters,
-the resident set and the BEAM's split every 200 ms, appends new peaks, samples
-above 80% of the limit and a heartbeat to `<SMOLQUERY_DATA_DIR>/memory-trace.log`,
-and publishes the readings as gauges on `/metrics`. Read the file's last lines
-after a kill. Off by default.
+predicted them, and the number that kills a pod — what the cgroup charges the
+container — was readable only by hand inside it. Every node now publishes
+`smolquery_memory_cgroup_bytes{kind}`, `smolquery_memory_cgroup_peak_bytes`
+(the highest charge of the last 60 s, so a 15 s scrape still sees a spike),
+`smolquery_memory_cgroup_limit_bytes`, the kernel's cumulative
+`smolquery_memory_cgroup_events_total{kind="max|oom_kill"}`, the resident set
+and the BEAM's split on `GET /metrics` (`Smolquery.MemoryMetrics`, sampling
+every 250 ms). Point the scraper at the metrics listener of every buffer pod;
+alert on `rate(smolquery_memory_cgroup_events_total{kind="max"}[5m]) > 0`.
 
 Separately, `bench/results/buffer.md` sized one candidate: one commit's
 DuckDB encode peaks near three times its NDJSON body, outside DuckDB's and the
