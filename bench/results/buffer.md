@@ -505,3 +505,42 @@ concurrency, or `encode_concurrency=2` at 94 MB, halves the burst; the
 trace file will say which the next kill needs. Whether DuckDB can be told to
 return the pages (its allocator's decay, or `SET allocator_flush_threshold`)
 is the next experiment; this one only sized the problem.
+
+## Follow-up: DuckDB returns the encode's pages with `allocator_background_threads` (T-452, 2026-09-10)
+
+T-451 left the defect named but not fixed: after a burst of encodes the
+process kept 1.2–1.8 GiB that neither `duckdb_memory()` nor the BEAM
+accounted for. Same harness (four 512 MB write engines, six back-to-back
+bursts of `4 x 94 MiB`, RSS sampled every 20 ms, 1.5 s settle), one DuckDB
+allocator setting at a time, applied with `SET` on each engine after start:
+
+```
+setting                                          peak max   settled after 6 bursts   settled range
+  baseline (2 threads)                            1981 MiB    +1093 MiB                1321–1784
+  allocator_flush_threshold = 16MB                1785 MiB     +926 MiB                 753–1148
+  allocator_bulk_deallocation_flush_threshold=16MB 1371 MiB    +987 MiB                1106–1347
+  allocator_background_threads = true             1502 MiB      +88 MiB                 274–368
+  flush 16MB + background threads                 1501 MiB     +153 MiB                 251–429
+
+  baseline (8 threads)                            1972 MiB    +1110 MiB                1125–1541
+  allocator_background_threads = true (8 threads) 1510 MiB      +47 MiB                 231–301
+```
+
+`duckdb_memory()` read 0–7 MiB *during* the encodes as well as after them:
+the transient never enters DuckDB's buffer manager, so no `memory_limit`
+bounds it. Wall time per burst was unchanged (≈510–550 ms either way).
+
+What this says: the retention is jemalloc's dirty-page decay, which only runs
+when something calls into the allocator and idle engines do not. DuckDB's
+`allocator_background_threads` gives jemalloc its background thread, and the
+pages return within the settle. The two flush thresholds help a little and
+are not the mechanism. The peak itself — the burst's true transient, ~3× the
+NDJSON body per concurrent encode — is unchanged and remains the operator's
+budget (`encode_transient_bytes` on the buffer shape line).
+
+Shipped as the default for every `Smolquery.Engine`
+(`allocator_background_threads: true`, `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS=false`
+to opt out). The sandbox's steady 1.0–1.3 GiB/hour anon climb is this
+retention accumulating across tables and bursts; the tracer-era prediction to
+check is that `smolquery_memory_cgroup_bytes{kind="anon"}` on the buffer pods
+returns to its floor between bursts after the upgrade.

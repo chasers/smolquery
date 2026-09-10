@@ -101,6 +101,17 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### DuckDB returns the encode's pages: allocator_background_threads on by default (T-452)
+
+Every `Smolquery.Engine` now starts DuckDB with `allocator_background_threads = true`.
+Measured in `bench/results/buffer.md`: after six bursts of four concurrent 94 MB
+encodes a buffer process settled 1.1–1.5 GiB above its start without it and
+~50–90 MiB above with it, at the same wall time — the pages jemalloc kept were
+the buffer pods' steady anon climb (T-451). The burst's own peak is unchanged,
+so `encode_transient_bytes` on the shape line still sizes the container. One
+extra OS thread per DuckDB instance. `SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS=false`
+turns it back off.
+
 ### Memory on /metrics, and the encode budget on the shape line (T-451)
 
 The buffer pods' OOM kills were not root-caused in place: nothing at rest

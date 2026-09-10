@@ -126,6 +126,16 @@ if limit = System.get_env("SMOLQUERY_MEMORY_LIMIT") do
   config :smolquery, Smolquery.Engine, memory_limit: limit
 end
 
+# DuckDB's allocator returns the pages an encode or a merge freed only when
+# jemalloc's background thread runs (T-452): without it a buffer node kept
+# 1.1–1.5 GiB after a burst of encodes that duckdb_memory() never saw. On by
+# default; this is the way off.
+if background = System.get_env("SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS") do
+  config :smolquery, Smolquery.Engine,
+    allocator_background_threads:
+      Smolquery.RuntimeConfig.boolean!("SMOLQUERY_ALLOCATOR_BACKGROUND_THREADS", background)
+end
+
 # The storage merge engine's own limit (T-250). Unset, it derives from the
 # container's cgroup memory limit, and only without one of those does it
 # inherit SMOLQUERY_MEMORY_LIMIT — one size for every engine on every role,
