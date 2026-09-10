@@ -590,9 +590,11 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
     end
 
+    # The base is well past what the drop and the seal between the failure and
+    # the next sweep take on a slow CI runner; 200 ms was not.
     test "a success clears the cooldown", context do
       runtime =
-        start_compactor(context, compact_backoff_base_ms: 200, compact_backoff_max_ms: 200)
+        start_compactor(context, compact_backoff_base_ms: 1_500, compact_backoff_max_ms: 1_500)
 
       {_good, bad} = corrupt(runtime, context.catalog)
 
@@ -603,7 +605,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       assert {:ok, %{compacted: [], cooling: [@table]}} = Compactor.sweep(context.storage)
 
-      Process.sleep(250)
+      Process.sleep(1_600)
 
       assert {:ok, %{compacted: [%{replaced: 2}], cooling: []}} =
                Compactor.sweep(context.storage)
