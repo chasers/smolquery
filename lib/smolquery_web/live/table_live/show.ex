@@ -433,10 +433,16 @@ defmodule SmolqueryWeb.TableLive.Show do
       "The preview timed out after #{div(@preview_timeout_ms, 1000)} s — the table's hot tier " <>
         "is too large to read in time. The schema and lifecycle above are unaffected."
 
+  # The planner names the partition it could not reach; the runner, when a
+  # buffer node dies between the manifest and DuckDB's read, only has the
+  # engine's error. Both are the same page state.
   defp preview_error({:hot_tier_unavailable, {dataset, partition}, _reason}),
     do:
       "The hot tier for #{dataset}.#{partition} is unreachable — no preview until its " <>
         "buffer node answers."
+
+  defp preview_error({:hot_tier_unavailable, _reason}),
+    do: "The table's hot tier is unreachable — no preview until its buffer node answers."
 
   defp preview_error(reason), do: "Preview failed: #{inspect(reason)}"
 
