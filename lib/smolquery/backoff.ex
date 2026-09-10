@@ -4,10 +4,12 @@ defmodule Smolquery.Backoff do
   failure up to a ceiling.
 
   The sealer waits this way between attempts on a table that keeps failing
-  (T-293), and the buffer waits this way between claims a replica keeps
-  refusing (T-450). Both used to spell the arithmetic out; the doubling is
-  capped so the exponent cannot grow without bound, and the ceiling is the
-  caller's — `seal_backoff_max_ms` on one side, `seal_retry_ms` on the other.
+  (T-293), the buffer waits this way between claims a replica keeps
+  refusing (T-450), and the compactor waits this way before re-planning a
+  table whose merge keeps failing (T-458). The first two used to spell the
+  arithmetic out; the doubling is capped so the exponent cannot grow without
+  bound, and the ceiling is the caller's — `seal_backoff_max_ms`,
+  `seal_retry_ms`, and `compact_backoff_max_ms` respectively.
   """
 
   @doubling_cap 30

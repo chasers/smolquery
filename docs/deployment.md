@@ -101,6 +101,28 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Compaction takes its own catalog connection, and backs off when it fails (T-458)
+
+A storage node's catalog engine now carries two connections: one for seal
+commits, retention and GC, and one the compactor alone commits through. The
+compaction swap holds a connection for as long as DuckLake takes to read the
+merged file's footer, and on the sandbox that was minutes per attempt, on
+repeat: `SELECT 1` on the shared connection waited 34.77 s while every seal's
+catalog call timed out at 30 s, so a compacting node could not seal and the
+buffer backlog it existed to drain grew instead. Separately, a table whose
+compaction fails now waits `SMOLQUERY_COMPACT_BACKOFF_BASE_MS` (default ten
+minutes, two sweeps) before the sweep looks at it again, doubling per
+consecutive failure up to `SMOLQUERY_COMPACT_BACKOFF_MAX_MS` (four hours);
+`smolquery_compaction_backoffs_total` counts the deferrals and the log
+escalates to an error at five in a row. Both are storage-side; no protocol
+changes. One more DuckDB connection per storage pod.
+
+The merges that failed were OOMs under a configured
+`SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` of 512 MiB in a 6 Gi container whose
+derived quarter is 1536 MiB. That override predates T-452, when storage pods
+held 3.7–4.2 GiB; they now hold about 1 GiB, so unset it and let the quarter
+derive. The boot log prints the derived value beside a configured one.
+
 ### The hot read is lazy for files with column ids (T-453)
 
 The planner's view reads each group of same-id micro-segments with a plain
