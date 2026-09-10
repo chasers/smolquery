@@ -233,6 +233,18 @@ defmodule Smolquery.QueryService.DecomposerTest do
                refused("SELECT DISTINCT name FROM analytics.events")
     end
 
+    test "a bare count(*) is answered from metadata, not a scan (T-448)" do
+      assert :metadata_only = refused("SELECT count(*) FROM analytics.events")
+      assert :metadata_only = refused("SELECT count(*) AS n, count(*) AS m FROM analytics.events")
+      assert :metadata_only = refused("SELECT count(*) FROM analytics.events GROUP BY ALL")
+    end
+
+    test "a count that scans still decomposes", %{tmp_dir: tmp_dir} do
+      round_trip("SELECT count(name) AS n FROM analytics.events", tmp_dir)
+      round_trip("SELECT count(*) AS n FROM analytics.events WHERE id > 10", tmp_dir)
+      round_trip("SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket", tmp_dir)
+    end
+
     test "a DISTINCT aggregate" do
       assert {:distinct_aggregate, "count"} =
                refused("SELECT count(DISTINCT name) FROM analytics.events")

@@ -37,6 +37,17 @@ defmodule Smolquery.QueryService.Decomposer do
   kin — refuse as well: each worker would bind them on its own clock or
   seed, and the shards would disagree with the single-engine answer.
 
+  ## A bare `count(*)` has no scan to shard
+
+  `SELECT count(*) FROM t` — no WHERE, no group keys, nothing but
+  `count(*)` in the select list — refuses as `:metadata_only` (T-448).
+  DuckDB answers it from each parquet footer's row count without reading a
+  row group, so there is nothing to parallelize, and the scatter would
+  still pay an engine per worker, a partial per shard, the transfer and
+  the merge; prod measured it slower distributed than not. `count(col)`
+  scans for nulls and stays eligible, and so does any count under a WHERE
+  or a GROUP BY.
+
   ## `GROUP BY ALL`
 
   DuckDB serializes `GROUP BY ALL` as `aggregate_handling: FORCE_AGGREGATES`
@@ -113,6 +124,7 @@ defmodule Smolquery.QueryService.Decomposer do
          :ok <- gate_volatile(node),
          {:ok, keys} <- group_keys(node, table_columns),
          {:ok, items} <- classified_items(node, keys),
+         :ok <- gate_scan(node, keys, items),
          :ok <- gate_outputs(items, outputs),
          {:ok, tail} <- tail(node, outputs),
          {:ok, partial_sql} <- partial(connection, node, keys, items, params) do
@@ -357,6 +369,19 @@ defmodule Smolquery.QueryService.Decomposer do
       {:ok, items}
     end
   end
+
+  # Nothing but `count(*)`, with no keys and no WHERE, is answered from
+  # parquet footers and hot-manifest row counts rather than a scan; sharding
+  # it only adds the fixed costs (T-448).
+  defp gate_scan(%{"where_clause" => nil}, [], items) do
+    if Enum.all?(items, &match?({:aggregate, "count_star", _item}, &1)) do
+      {:error, :metadata_only}
+    else
+      :ok
+    end
+  end
+
+  defp gate_scan(_node, _keys, _items), do: :ok
 
   defp gate_outputs(items, outputs) do
     if length(items) == length(outputs) do

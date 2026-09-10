@@ -179,7 +179,7 @@ Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `
 
 ## Distributed execution (PL-49)
 
-`"distributed": true | false` overrides the deployment's `SMOLQUERY_DISTRIBUTED_QUERY` default (on) for this job only. `POST /v1/queries` and `POST /v1/jobs` both take it. A distributed answer carries a **`scatter`** object on the job — `{"shards": 3, "partialBytes": 41210}` — and `"scatter": null` means the ordinary single-engine scan answered, including every fallback. A query that does not decompose, or any distributed failure, falls back silently and answers the same rows. History does not persist `scatter`. A non-boolean `distributed` value is a 400.
+`"distributed": true | false` overrides the deployment's `SMOLQUERY_DISTRIBUTED_QUERY` default (on) for this job only. `POST /v1/queries` and `POST /v1/jobs` both take it. A distributed answer carries a **`scatter`** object on the job — `{"shards": 3, "partialBytes": 41210}` — and `"scatter": null` means the ordinary single-engine scan answered, including every fallback. A query that does not decompose, or any distributed failure, falls back silently and answers the same rows. A bare `SELECT count(*) FROM t` never scatters: the engine answers it from file metadata without a scan, and distribution only added the fixed costs (T-448). History does not persist `scatter`. A non-boolean `distributed` value is a 400.
 
 ## Query statistics
 
