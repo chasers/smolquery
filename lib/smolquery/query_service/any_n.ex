@@ -83,15 +83,6 @@ defmodule Smolquery.QueryService.AnyN do
 
     entries
     |> Enum.sort_by(& &1["id"], :desc)
-    |> take_rows(max(limit - covered, 0), [])
-  end
-
-  defp take_rows(_entries, 0, taken), do: Enum.reverse(taken)
-  defp take_rows([], _needed, taken), do: Enum.reverse(taken)
-
-  defp take_rows([entry | rest], needed, taken) do
-    rows = if is_integer(entry["row_count"]), do: entry["row_count"], else: 0
-
-    take_rows(rest, max(needed - rows, 0), [entry | taken])
+    |> SingleTable.take_rows(max(limit - covered, 0))
   end
 end

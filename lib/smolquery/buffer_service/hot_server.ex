@@ -121,12 +121,10 @@ defmodule Smolquery.BufferService.HotServer do
     case {conn.method, conn.path_info} do
       {method, ["v1", "datasets", dataset, "tables", table, "manifest"]}
       when method in ["GET", "HEAD"] ->
-        conn = fetch_query_params(conn)
-
         conn
         |> put_private(:hot_server_route, :manifest)
         |> put_private(:hot_server_table, {dataset, table})
-        |> manifest(name, {dataset, table}, :all, stats: conn.query_params["stats"] != "false")
+        |> manifest(name, {dataset, table}, :all, stats: wants_stats?(conn))
 
       {"POST", ["v1", "datasets", dataset, "tables", table, "manifest"]} ->
         conn
@@ -210,6 +208,17 @@ defmodule Smolquery.BufferService.HotServer do
       {:error, :unavailable} ->
         respond(conn, 503, "buffer service unavailable")
     end
+  end
+
+  # `?stats=false` is the one parameter this route reads (T-449). It is read
+  # off the raw query string rather than through `fetch_query_params/1`,
+  # which raises on a malformed percent-encoding — and a raise here would
+  # record the request as a 500 in the metrics while Bandit answers 400. A
+  # query string this cannot read means the default: stats included.
+  defp wants_stats?(%Plug.Conn{query_string: query}) do
+    query
+    |> String.split("&")
+    |> Enum.all?(&(&1 != "stats=false"))
   end
 
   defp scoped_manifest(conn, name, table_ref) do

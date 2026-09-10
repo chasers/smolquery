@@ -95,6 +95,25 @@ defmodule Smolquery.QueryService.SingleTable do
 
   def limit(_modifier), do: :error
 
+  @doc """
+  The leading `entries` whose row counts cover `rows`, in the order given —
+  none for `rows` of zero, all of them when even all fall short. An entry
+  without a row count is taken and counts for nothing.
+  """
+  @spec take_rows([map()], non_neg_integer()) :: [map()]
+  def take_rows(entries, rows) do
+    entries
+    |> Enum.reduce_while({[], 0}, fn entry, {taken, covered} ->
+      if covered >= rows do
+        {:halt, {taken, covered}}
+      else
+        {:cont, {[entry | taken], covered + (entry["row_count"] || 0)}}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
   defp integer(nil), do: {:ok, 0}
 
   defp integer(%{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => value}})

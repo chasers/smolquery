@@ -192,7 +192,7 @@ defmodule Smolquery.QueryService.TopN do
   The choice only affects how tight the bound is, never whether it is sound.
   """
   @spec candidates([HotClient.entry()], t(), pos_integer()) :: [HotClient.entry()]
-  def candidates(entries, spec, rows), do: entries |> ranked(spec) |> take_rows(rows)
+  def candidates(entries, spec, rows), do: entries |> ranked(spec) |> SingleTable.take_rows(rows)
 
   defp ranked(entries, %{column: column, direction: direction}) do
     entries
@@ -302,7 +302,7 @@ defmodule Smolquery.QueryService.TopN do
   defp rounds(_probe, entries, _ranked, [], outcome), do: {entries, outcome}
 
   defp rounds(probe, entries, ranked, [rows | budgets], outcome) do
-    candidates = take_rows(ranked, rows)
+    candidates = SingleTable.take_rows(ranked, rows)
     count = length(candidates)
 
     if count == 0 or count == outcome.candidates or count == length(ranked) do
@@ -498,19 +498,6 @@ defmodule Smolquery.QueryService.TopN do
       a > b -> :gt
       true -> :eq
     end
-  end
-
-  defp take_rows(entries, rows) do
-    entries
-    |> Enum.reduce_while({[], 0}, fn entry, {taken, covered} ->
-      if covered >= rows do
-        {:halt, {taken, covered}}
-      else
-        {:cont, {[entry | taken], covered + entry["row_count"]}}
-      end
-    end)
-    |> elem(0)
-    |> Enum.reverse()
   end
 
   defp past(:desc), do: :ge
