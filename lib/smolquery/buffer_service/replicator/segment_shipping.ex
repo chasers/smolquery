@@ -89,7 +89,12 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   ids that the owner re-requested three to six times a second for over ten
   minutes, because the `missing`-only heal did not match and nothing else
   did. The one refusal is the same as T-297's — a follower claim holding
-  ids the owner already sealed fails loudly, naming them.
+  ids the owner already sealed fails loudly, naming them. A heal's re-apply
+  may uncover a second divergence the first answer could not name — the
+  re-shipped entries frozen under the follower's own claim, say — so an
+  attempt runs up to two heal rounds before handing the answer back as it
+  stands, and a mixed divergence converges in one attempt rather than one
+  per tick.
 
   Two divergences sit outside the heal's reach, deliberately documented
   rather than silently covered. A follower recreated *empty* never answers
@@ -201,21 +206,30 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end)
   end
 
-  defp apply_mutation(target, mutation, args, epoch) do
+  # A heal re-applies the mutation, and that re-apply may uncover a second
+  # divergence the first answer could not name — re-shipped entries a
+  # follower has meanwhile frozen under its own claim, say. `rounds` is how
+  # many more heals this attempt may run before it hands the answer back as
+  # it stands: two shapes deep is what a mixed divergence needs, and a bound
+  # keeps a follower that answers something new every time from spinning
+  # the owner's group-commit path.
+  @heal_rounds 2
+
+  defp apply_mutation(target, mutation, args, epoch, rounds \\ @heal_rounds) do
     case ship([target], mutation.name, :apply_replica_mutation, args) do
       {:error,
        {:replication_failed, _node, {:partial_claim, %{missing: [_ | _] = missing, sealed: []}}}}
-      when mutation.op == :claim ->
-        heal_then_retry(target, mutation, args, epoch, missing)
+      when mutation.op == :claim and rounds > 0 ->
+        heal_then_retry(target, mutation, args, epoch, missing, rounds - 1)
 
       {:error,
        {:replication_failed, _node,
         {:partial_claim, %{missing: [], sealed: [], claimed: [_ | _] = claimed}}}}
-      when mutation.op == :claim ->
-        release_conflicting_then_retry(target, mutation, args, epoch, claimed)
+      when mutation.op == :claim and rounds > 0 ->
+        release_conflicting_then_retry(target, mutation, args, epoch, claimed, rounds - 1)
 
       {:error, {:replication_failed, _node, {:claim_mismatch, %{live_ids: live_ids}}}}
-      when mutation.op == :release ->
+      when mutation.op == :release and rounds > 0 ->
         release_diverged_then_retry(target, mutation, args, epoch, live_ids)
 
       outcome ->
@@ -235,10 +249,11 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
          mutation,
          args,
          epoch,
-         claimed
+         claimed,
+         rounds
        ) do
     with {:ok, released} <- release_on_follower(target, mutation, epoch, claimed),
-         :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
+         :ok <- apply_mutation(target, mutation, args, epoch, rounds) do
       Logger.warning(
         "healed a diverged claim on #{inspect(mutation.table_ref)}: released #{node}'s own " <>
           "live claim (#{inspect(released)}) before applying the owner's (T-450)"
@@ -310,19 +325,26 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
     end
   end
 
-  defp heal_then_retry({_transport, node, _instance} = target, mutation, args, epoch, missing) do
+  defp heal_then_retry(
+         {_transport, node, _instance} = target,
+         mutation,
+         args,
+         epoch,
+         missing,
+         rounds
+       ) do
     {batch, rest} = Enum.split(missing, @heal_batch_limit)
 
     with :ok <- reship(target, mutation, epoch, batch) do
       case rest do
-        [] -> retry_claim(target, mutation, args, batch)
+        [] -> retry_claim(target, mutation, args, epoch, batch, rounds)
         _more -> heal_in_progress(node, mutation, batch, rest)
       end
     end
   end
 
-  defp retry_claim({_transport, node, _instance} = target, mutation, args, healed) do
-    with :ok <- ship([target], mutation.name, :apply_replica_mutation, args) do
+  defp retry_claim({_transport, node, _instance} = target, mutation, args, epoch, healed, rounds) do
+    with :ok <- apply_mutation(target, mutation, args, epoch, rounds) do
       Logger.warning(
         "healed a partial claim on #{inspect(mutation.table_ref)}: re-shipped " <>
           "#{length(healed)} missing entries to #{node} (#{inspect(healed)})"

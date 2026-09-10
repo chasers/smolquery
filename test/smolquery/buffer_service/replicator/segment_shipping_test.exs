@@ -40,8 +40,16 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     name
   end
 
+  # A standalone follower instance owns every table in its own one-node ring,
+  # so it would claim the entries it holds on its own maintenance tick — the
+  # valves an owner is started with are the follower's too, or a test that
+  # outlives one tick races the follower's claim (seen on CI, T-450).
   defp start_pair(context, owner_opts \\ []) do
-    follower = start_instance(context)
+    follower =
+      start_instance(
+        context,
+        Keyword.take(owner_opts, [:seal_max_files, :seal_max_bytes, :seal_max_age_ms])
+      )
 
     owner =
       start_instance(
@@ -698,6 +706,32 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       assert [%{ids: live_ids, keys: keys}] = live_claims(owner)
       assert live_ids == Enum.sort(ids)
       refute keys == ["diverged-key"]
+      assert live_claims(follower) == live_claims(owner)
+    end
+
+    test "a heal that uncovers the follower's own claim over the re-shipped entries converges in one attempt",
+         context do
+      {owner, follower, ids} = diverged_pair(context)
+      [kept | dropped] = ids
+      :ok = Endpoint.apply_replica_mutation(follower, @table, :drop, %{ids: dropped}, nil)
+      stage_diverged(follower, [kept])
+
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 1_000_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+      assert log =~ "healed a diverged claim"
+      assert log =~ "healed a partial claim"
+      assert log =~ "re-shipped 4 missing entries"
+      refute log =~ "claiming #{inspect(@table)} failed"
+
+      assert [%{ids: live_ids}] = live_claims(owner)
+      assert live_ids == Enum.sort(ids)
       assert live_claims(follower) == live_claims(owner)
     end
 
