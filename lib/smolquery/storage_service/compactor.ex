@@ -229,10 +229,37 @@ defmodule Smolquery.StorageService.Compactor do
   def start_link(%Runtime{} = runtime) do
     runtime = %{
       Runtime.with_compact_max_rows(runtime)
-      | catalog: Runtime.compaction_catalog(runtime)
+      | catalog: compaction_catalog(runtime)
     }
 
     GenServer.start_link(__MODULE__, runtime, name: Runtime.compactor(runtime.name))
+  end
+
+  # A catalog handed to the storage service outright was started by its
+  # caller, on an engine that may carry one connection; a lake the service
+  # runs itself always carries the compaction connection. Without it the
+  # compactor shares the seal side's, as it did before T-458, and says so —
+  # a compaction that crashed on every sweep would be worse than one that
+  # queues seals.
+  defp compaction_catalog(runtime) do
+    catalog = Runtime.compaction_catalog(runtime)
+
+    case Map.get(catalog.config, :engine) do
+      {engine, slot} when is_atom(engine) and is_integer(slot) ->
+        if Process.whereis(Engine.connection_name(engine, slot)) do
+          catalog
+        else
+          Logger.warning(
+            "the catalog engine #{inspect(engine)} carries no connection #{slot} for " <>
+              "compaction; compaction shares the seal side's connection (T-458)"
+          )
+
+          runtime.catalog
+        end
+
+      _not_a_pooled_engine ->
+        catalog
+    end
   end
 
   @doc """
@@ -270,7 +297,7 @@ defmodule Smolquery.StorageService.Compactor do
           @quarantine_after
         )
 
-      cooldowns = adjusted_cooldowns(state.cooldowns, due, outcomes, runtime)
+      cooldowns = adjusted_cooldowns(state.cooldowns, due, outcomes, runtime, state.row_caps)
 
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
@@ -298,13 +325,25 @@ defmodule Smolquery.StorageService.Compactor do
   way every time — an OOM the row cap cannot fix, a store put that keeps
   failing — used to re-run it every `compact_interval_ms` for as long as it
   failed: minutes of merge and a held catalog connection per attempt, with
-  no path out but the operator. Every table in `swept` that failed backs
-  off; every other swept table's cooldown is cleared, so one success — or
-  nothing left to do — starts the next failure's count from one. Tables
-  the sweep left out because they were cooling are not in `swept` and keep
-  their entry. The wait is `Smolquery.Backoff.exponential/3` over the
-  runtime's `compact_backoff_base_ms` and `compact_backoff_max_ms`; a base
-  of `0` puts `retry_at` in the past and never leaves a table out.
+  no path out but the operator. Every table in `swept` whose failure has no
+  recovery of its own backs off; every other swept table's cooldown is
+  cleared, so one success — or nothing left to do — starts the next
+  failure's count from one. Tables the sweep left out because they were
+  cooling are not in `swept` and keep their entry. The wait is
+  `Smolquery.Backoff.exponential/3` over the runtime's
+  `compact_backoff_base_ms` and `compact_backoff_max_ms`; a base of `0`
+  puts `retry_at` in the past and never leaves a table out.
+
+  Two failures already have a recovery that depends on the very next sweep
+  retrying, and neither backs off: a merge OOM while the table's row cap is
+  still above the floor, which `adjusted_row_caps/3` halves the cap on and
+  must see again to calibrate (T-262), and a corruption-shaped failure,
+  which `adjusted_quarantine/4` counts toward the quarantine that stops it
+  (T-310). What backs off is the rest: an OOM at the floor, where halving
+  has nothing left to give; an engine call exit, which ran the merge for
+  its whole budget; a store put, a catalog conflict, an invariant check.
+  `row_caps` is the state before the sweep, so the cap the OOM ran under
+  is the one judged.
 
   At `#{@stuck_after}` consecutive failures the log escalates to an error,
   the way the sealer's does at its stuck threshold: the difference between
@@ -318,10 +357,15 @@ defmodule Smolquery.StorageService.Compactor do
           [Catalog.table_ref()],
           [term()],
           Runtime.t(),
+          %{Catalog.table_ref() => map()},
           integer()
         ) :: %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}}
-  def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, now_ms \\ now_ms()) do
-    failed = MapSet.new(for {:failed, %{table: table_ref}} <- outcomes, do: table_ref)
+  def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, row_caps, now_ms \\ now_ms()) do
+    failed =
+      for {:failed, %{table: table_ref, reason: reason}} <- outcomes,
+          backs_off?(reason, table_capped(runtime, row_caps, table_ref).compact_max_rows),
+          into: MapSet.new(),
+          do: table_ref
 
     Enum.reduce(swept, cooldowns, fn table_ref, acc ->
       if MapSet.member?(failed, table_ref),
@@ -524,6 +568,16 @@ defmodule Smolquery.StorageService.Compactor do
         )
 
         Map.put(caps, table, %{entry | cap: entry.cap * 2, streak: 0, probe: true})
+    end
+  end
+
+  # See `adjusted_cooldowns/6`: a failure with a recovery of its own that
+  # needs the next sweep is left to it.
+  defp backs_off?(reason, cap) do
+    cond do
+      counts_toward_quarantine?(reason) -> false
+      merge_oom?(reason) -> cap <= @row_cap_floor
+      true -> true
     end
   end
 

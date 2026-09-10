@@ -565,20 +565,53 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   describe "a failing table backs off (T-458)" do
-    defp corrupt(runtime, catalog) do
-      good = seal(runtime, catalog, 1, 1..10)
-      bad = seal(runtime, catalog, 2, 11..20)
-      File.write!(bad.path, "not a parquet file")
+    # A store whose puts fail `failures` times, then work. The merge's final
+    # COPY lands through it, so each failure is a `{:put_failed, ...}` —
+    # the shape with no recovery of its own, which is what backs off.
+    defmodule FlakyPut do
+      @behaviour Store
 
-      {good, bad}
+      def new(inner, failures) do
+        {:ok, counter} = Agent.start_link(fn -> failures end)
+
+        %Store{impl: __MODULE__, config: {inner, counter}}
+      end
+
+      @impl Store
+      def put({inner, counter}, key, encoder) do
+        if Agent.get_and_update(counter, &{&1 > 0, max(&1 - 1, 0)}),
+          do: {:error, {:put_failed, key, :enospc}},
+          else: Store.put(inner, key, encoder)
+      end
+
+      @impl Store
+      def location({inner, _counter}, key), do: Store.location(inner, key)
+
+      @impl Store
+      def list({inner, _counter}, prefix), do: Store.list(inner, prefix)
+
+      @impl Store
+      def delete({inner, _counter}, key), do: Store.delete(inner, key)
+
+      @impl Store
+      def shared?({inner, _counter}), do: Store.shared?(inner)
+
+      @impl Store
+      def sweep_staging({inner, _counter}, age_ms), do: Store.sweep_staging(inner, age_ms)
+    end
+
+    defp flaky_compactor(context, failures, opts) do
+      inner = Store.Local.new(dir: Path.join(context.tmp_dir, "sealed"))
+      runtime = start_compactor(context, [store: FlakyPut.new(inner, failures)] ++ opts)
+      seal(%{runtime | store: inner}, context.catalog, 1, 1..10)
+      seal(%{runtime | store: inner}, context.catalog, 2, 11..20)
+
+      runtime
     end
 
     test "a table whose compaction failed is left out of the sweep until the wait passes",
          context do
-      runtime =
-        start_compactor(context, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
-
-      corrupt(runtime, context.catalog)
+      flaky_compactor(context, 3, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
 
       assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
 
@@ -590,18 +623,15 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
     end
 
-    # The base is well past what the drop and the seal between the failure and
-    # the next sweep take on a slow CI runner; 200 ms was not.
+    # The base is well past what a sweep takes on a slow CI runner.
     test "a success clears the cooldown", context do
-      runtime =
-        start_compactor(context, compact_backoff_base_ms: 1_500, compact_backoff_max_ms: 1_500)
+      flaky_compactor(context, 1,
+        compact_backoff_base_ms: 1_500,
+        compact_backoff_max_ms: 1_500
+      )
 
-      {_good, bad} = corrupt(runtime, context.catalog)
-
-      assert {:ok, %{failed: [_failure]}} = Compactor.sweep(context.storage)
-
-      {:ok, _snapshot} = Catalog.drop_segments(context.catalog, @table, [bad.path])
-      seal(runtime, context.catalog, 3, 21..30)
+      assert {:ok, %{failed: [%{reason: {:put_failed, _key, :enospc}}]}} =
+               Compactor.sweep(context.storage)
 
       assert {:ok, %{compacted: [], cooling: [@table]}} = Compactor.sweep(context.storage)
 
@@ -614,23 +644,71 @@ defmodule Smolquery.StorageService.CompactorTest do
     end
 
     test "a base of zero never leaves a table out", context do
-      runtime = start_compactor(context, compact_backoff_base_ms: 0)
-      corrupt(runtime, context.catalog)
+      flaky_compactor(context, 3, compact_backoff_base_ms: 0)
 
       for _sweep <- 1..3 do
         assert {:ok, %{failed: [_failure], cooling: []}} = Compactor.sweep(context.storage)
       end
     end
+
+    test "a corruption-shaped failure is the quarantine's to stop, and never backs off",
+         context do
+      runtime =
+        start_compactor(context, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
+
+      _good = seal(runtime, context.catalog, 1, 1..10)
+      bad = seal(runtime, context.catalog, 2, 11..20)
+      File.write!(bad.path, "not a parquet file")
+
+      for _sweep <- 1..2 do
+        assert {:ok, %{failed: [%{reason: {:sizing_failed, %Adbc.Error{}}}], cooling: []}} =
+                 Compactor.sweep(context.storage)
+      end
+    end
   end
 
-  describe "adjusted_cooldowns/5 (T-458)" do
+  describe "the compaction connection is optional for a catalog handed in (T-458)" do
+    test "a catalog on a one-connection engine is shared with the seal side, and compaction runs",
+         context do
+      storage = :"compactor_single_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {DuckLake,
+         name: Runtime.catalog_engine(storage),
+         metadata: "sqlite:#{Path.join(context.tmp_dir, "single.sqlite")}",
+         data_path: Path.join(context.tmp_dir, "single_lake")},
+        id: Runtime.catalog_engine(storage)
+      )
+
+      for engine <- [Runtime.engine(storage), Runtime.compact_engine(storage)] do
+        start_supervised!({Engine, name: engine}, id: engine)
+      end
+
+      catalog = DuckLake.new(engine: Runtime.catalog_engine(storage))
+      :ok = Catalog.create_dataset(catalog, "analytics")
+      :ok = Catalog.create_table(catalog, @table, schema())
+      single = %{context | storage: storage, catalog: catalog}
+
+      {runtime, log} = with_log(fn -> start_compactor(single, []) end)
+
+      assert log =~ "carries no connection 2 for compaction"
+      seal(runtime, catalog, 1, 1..10)
+      seal(runtime, catalog, 2, 11..20)
+
+      assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(storage)
+    end
+  end
+
+  describe "adjusted_cooldowns/6 (T-458)" do
     @other {"analytics", "other"}
 
     defp backoff_runtime(base, max) do
-      Runtime.new(
-        name: __MODULE__.Backoff,
-        compact_backoff_base_ms: base,
-        compact_backoff_max_ms: max
+      Runtime.with_compact_max_rows(
+        Runtime.new(
+          name: __MODULE__.Backoff,
+          compact_backoff_base_ms: base,
+          compact_backoff_max_ms: max
+        )
       )
     end
 
@@ -641,12 +719,12 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       cooldowns =
         Enum.reduce(1..3, %{}, fn _n, acc ->
-          Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, 1_000)
+          Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, %{}, 1_000)
         end)
 
       assert cooldowns == %{@table => %{consecutive: 3, retry_at: 1_250}}
 
-      assert Compactor.adjusted_cooldowns(%{}, [@table], [failed(@table)], runtime, 1_000) ==
+      assert Compactor.adjusted_cooldowns(%{}, [@table], [failed(@table)], runtime, %{}, 1_000) ==
                %{@table => %{consecutive: 1, retry_at: 1_100}}
     end
 
@@ -658,11 +736,46 @@ defmodule Smolquery.StorageService.CompactorTest do
         @other => %{consecutive: 1, retry_at: 9}
       }
 
-      assert Compactor.adjusted_cooldowns(before, [@table], [{:ok, %{table: @table}}], runtime, 0) ==
+      ok = [{:ok, %{table: @table}}]
+
+      assert Compactor.adjusted_cooldowns(before, [@table], ok, runtime, %{}, 0) ==
                %{@other => %{consecutive: 1, retry_at: 9}}
 
-      assert Compactor.adjusted_cooldowns(before, [@table], [:skip], runtime, 0) ==
+      assert Compactor.adjusted_cooldowns(before, [@table], [:skip], runtime, %{}, 0) ==
                %{@other => %{consecutive: 1, retry_at: 9}}
+    end
+
+    test "a failure with a recovery of its own is left to it, and clears the cooldown" do
+      runtime = backoff_runtime(100, 250)
+      cooling = %{@table => %{consecutive: 2, retry_at: 5}}
+
+      oom =
+        {:failed,
+         %{
+           table: @table,
+           reason:
+             {:put_failed, "k", {:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}},
+           paths: ["a"]
+         }}
+
+      corrupt =
+        {:failed,
+         %{
+           table: @table,
+           reason: {:sizing_failed, %Adbc.Error{message: "Invalid Input Error: No magic bytes"}},
+           paths: ["a"]
+         }}
+
+      # The cap is above the floor, so the OOM halves it and must be seen again.
+      assert Compactor.adjusted_cooldowns(cooling, [@table], [oom], runtime, %{}, 0) == %{}
+      # A corrupt input is counted toward quarantine, which is the stop for it.
+      assert Compactor.adjusted_cooldowns(cooling, [@table], [corrupt], runtime, %{}, 0) == %{}
+
+      # At the floor there is nothing left to halve, so the OOM backs off.
+      at_floor = %{@table => %{cap: 65_536}}
+
+      assert Compactor.adjusted_cooldowns(%{}, [@table], [oom], runtime, at_floor, 0) ==
+               %{@table => %{consecutive: 1, retry_at: 100}}
     end
 
     test "every deferral is an event, and the log escalates at five consecutive failures" do
@@ -672,7 +785,7 @@ defmodule Smolquery.StorageService.CompactorTest do
       log =
         capture_log(fn ->
           Enum.reduce(1..5, %{}, fn _n, acc ->
-            Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, 0)
+            Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, %{}, 0)
           end)
         end)
 
