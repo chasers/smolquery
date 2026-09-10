@@ -90,6 +90,7 @@ defmodule Smolquery.QueryService.TopN do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
@@ -348,11 +349,9 @@ defmodule Smolquery.QueryService.TopN do
 
   defp function_names(statement) do
     statement
-    |> SingleTable.walk([], fn node, acc ->
-      case node do
-        %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name | acc]
-        _other -> acc
-      end
+    |> Ast.collect(fn
+      %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name]
+      _other -> []
     end)
     |> Enum.map(&String.downcase/1)
     |> Enum.uniq()

@@ -174,7 +174,7 @@ defmodule Smolquery.BufferService.HotServerTest do
       assert entry["url"] =~ segment_path(ack.segment_id)
     end
 
-    test "a malformed query string on the manifest GET is ignored, not a 500", context do
+    test "a stats value that is not false keeps the stats", context do
       name = start_buffer_service(context)
       {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
 
