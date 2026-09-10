@@ -1300,19 +1300,14 @@ defmodule Smolquery.BufferService.HotManifest do
     Telemetry.put_gauge("smolquery_buffer_unsealed_bytes", [], node_bytes)
   end
 
-  # Recovery rebuilt the table's index outright, so its depth is re-derived
-  # from what is there rather than patched: one pass over the pending
-  # entries, projecting each to its byte size inside ETS.
-  defp reseed_depth(%__MODULE__{table: table} = manifest, table_ref) do
-    spec = [
-      {{{table_ref, :_}, :"$1"}, [{:==, {:map_get, :sealed_at, :"$1"}, nil}],
-       [{:map_get, :byte_size, :"$1"}]}
-    ]
-
-    sizes = :ets.select(table, spec)
+  # Recovery rebuilt the table's index outright from `live`, so its depth is
+  # re-derived from that list rather than patched — one pass, no scan of the
+  # index just rebuilt — against whatever the row read before, which is not
+  # zero on a re-recover.
+  defp reseed_depth(manifest, table_ref, live) do
     %{entries: entries, bytes: bytes} = depth(manifest, table_ref)
 
-    track_depth(manifest, table_ref, {length(sizes), Enum.sum(sizes)}, {entries, bytes})
+    track_depth(manifest, table_ref, Enum.reduce(live, {0, 0}, &add_weight/2), {entries, bytes})
   end
 
   defp delete_and_forget(manifest, table_ref, ids, log) do
@@ -1525,7 +1520,7 @@ defmodule Smolquery.BufferService.HotManifest do
     Enum.each(entries, &index_batches(manifest, table_ref, &1))
     Enum.each(entries, &index_retired(manifest, table_ref, &1))
     refresh_claim(manifest, table_ref)
-    reseed_depth(manifest, table_ref)
+    reseed_depth(manifest, table_ref, entries)
 
     %{
       recovered: Enum.count(entries, &(not MapSet.member?(present, &1.id))),

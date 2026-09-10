@@ -28,6 +28,16 @@ defmodule Smolquery.BufferService.Backlog do
   the seal path reads this valve: sealing keeps draining a node that
   refuses, which is the point, and a replicated shipment from a table's
   owner is never refused, so replicas cannot diverge.
+
+  A shipment does count toward the follower's depth, though: the copy is
+  real memory at the follower's next boot, which is what the ceiling
+  guards. So a node's unsealed entries can pass its ceiling by what its
+  owners ship it — up to one ceiling per owner whose seal path has
+  stalled — and a follower at its ceiling on copies alone refuses its own
+  tables' writes while those copies drain. Both are the honest reading of
+  the node's memory. The derivation keeps half the container for that
+  and everything else; a deployment whose replication factor makes the
+  copies the larger share sets `backlog_max_entries` lower to match.
   """
 
   alias Smolquery.BufferService.HotManifest
