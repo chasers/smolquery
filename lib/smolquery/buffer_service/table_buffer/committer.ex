@@ -17,6 +17,10 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   it is running. Routing those appends here is also an ordering guarantee:
   a claim queued behind the commit that created its entries cannot ship to a
   follower before the entries themselves have replicated.
+  A retire is the one mutation whose replication round runs *before* it
+  takes the log: its ids belong to a claim that already shipped, so the
+  round has nothing to order against a commit, and running it here would
+  stall the table's group commit for a follower's answer (T-459).
 
   ## Encodes run concurrently; everything durable stays serial (T-169)
 

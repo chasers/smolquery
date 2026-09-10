@@ -113,9 +113,11 @@ the maintenance the retire made due (the grace reaper's drop with its own
 replication round, a log compaction that rewrites the whole manifest, the next
 claim) before replying, all against a 5 s budget the endpoint never widened.
 The siblings now come from the live-claim cache and leave it by name, the
-maintenance runs after the reply, and the call waits `control_timeout_ms`
-(15 s), the budget the sealer's transport already waited. Buffer-side only; no
-protocol change.
+maintenance runs on a message behind the calls already waiting, the retire's
+replication round runs before it takes the log so the group commit never waits
+on it, and the call waits `control_timeout_ms` (15 s), the budget the sealer's
+transport already waited, answering a named error rather than an exit past it.
+Buffer-side only; no protocol change.
 
 ### A buffer node refuses commits once its unsealed backlog is too deep to survive (T-457)
 

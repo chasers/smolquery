@@ -212,13 +212,18 @@ defmodule Smolquery.BufferService.HotManifest do
   unsealed backlog — and a deeper backlog is exactly when a buffer can least
   afford it (T-318). The answer now lives in a second ETS table, read by key.
 
-  The cache is **re-derived, never patched**. Every mutation that can change
-  which entries are claimed — `freeze/5`, `release_live/5`, `seal_all/5`,
-  `delete_and_forget/4`, and recovery's `replace/3` — recomputes it from the
-  entries table in full. So the stored value is always the same value a scan
-  would produce, and the only thing that changed is *when* the scan runs: once
-  per claim, release, retire or drop, rather than once per commit. There is no
-  incremental-update rule to get wrong.
+  The cache follows two rules. A mutation that changes what a claim *is* —
+  `freeze/5`, `release_live/5`, and recovery's `replace/3` — re-derives it
+  from the entries table in full, so the stored value is the value a scan
+  would produce. A mutation that only takes members *out* of a claim —
+  `seal_all/5` on a retire, `delete_and_forget/4` on a drop — removes those
+  ids from the claim's row by name and drops the row once empty
+  (`unclaim/3`, T-459); the two agree because a claim's row holds exactly
+  its unsealed members. The retire path also reads the cache: retiring one
+  member of a claim retires the claim, and the other members come from the
+  claim's row, one lookup per claim and one per id, never from a scan of the
+  table's entries — on a partition holding 140,000 entries that scan copied
+  every entry's stats out of ETS per retire, and the retire timed out.
 
   ## Usage
 
@@ -786,9 +791,10 @@ defmodule Smolquery.BufferService.HotManifest do
   Every live claim of the table, oldest first by claim key.
 
   The read is the claims cache, not a scan: one row per live claim, keyed
-  `{table_ref, first_key}`, rebuilt in full on every claim-bearing mutation
-  — the same cache-a-derivation rule `live_claim/2` has always followed, so
-  the cost is bounded by the live-claim count, never the manifest.
+  `{table_ref, first_key}`, rebuilt in full when a claim is frozen, released
+  or recovered and shrunk by name when a member is retired or dropped
+  (T-459), so the cost is bounded by the live-claim count, never the
+  manifest.
   """
   @spec live_claims(t(), Store.table_ref()) :: [claim()]
   def live_claims(%__MODULE__{table: table}, table_ref) do
@@ -1154,30 +1160,18 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  # Retiring one member of a claim retires the whole claim, and the claim's
-  # other members come from the live-claim cache, keyed by the claim's head
-  # key — one lookup per claim named, one per id — never from a scan of the
-  # table's entries: on a 140,000-entry partition that scan copied every
-  # entry's stats out of ETS on every retire, and the retire timed out, so
-  # the backlog blocked its own drain (T-459).
   defp with_claim(%__MODULE__{table: table} = manifest, table_ref, pending) do
-    claimed = pending |> Enum.flat_map(& &1.claim_keys) |> MapSet.new()
+    have = MapSet.new(pending, & &1.id)
 
-    if MapSet.size(claimed) == 0 do
+    siblings =
       pending
-    else
-      siblings =
-        pending
-        |> Enum.map(& &1.claim_keys)
-        |> Enum.reject(&(&1 == []))
-        |> Enum.uniq()
-        |> Enum.flat_map(&claimed_ids(table, table_ref, &1))
-        |> Enum.uniq()
-        |> Enum.flat_map(&lookup(manifest, table_ref, &1))
-        |> Enum.filter(&sibling?(&1, claimed))
+      |> Enum.map(& &1.claim_keys)
+      |> Enum.reject(&(&1 == []))
+      |> Enum.uniq()
+      |> Enum.flat_map(&claimed_ids(table, table_ref, &1))
+      |> Enum.reject(&MapSet.member?(have, &1))
 
-      Enum.uniq_by(pending ++ siblings, & &1.id)
-    end
+    pending ++ unsealed(manifest, table_ref, siblings)
   end
 
   defp claimed_ids(table, table_ref, keys) do
@@ -1187,14 +1181,6 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp sibling?(%Entry{} = entry, claimed) do
-    not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
-  end
-
-  # Entries that just left a claim — sealed or dropped — leave the live-claim
-  # cache by name, and a claim with no member left leaves whole; no
-  # re-derivation over the table (T-459). `refresh_claim/2` stays for the
-  # mutations that change what a claim *is* (a freeze, a release, recovery).
   defp unclaim(%__MODULE__{table: table}, table_ref, entries) do
     entries
     |> Enum.filter(&(&1.claim_keys != []))
