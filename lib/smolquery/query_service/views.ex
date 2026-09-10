@@ -20,19 +20,31 @@ defmodule Smolquery.QueryService.Views do
   alias Smolquery.Schema
 
   @doc """
-  A `read_parquet` over `sources` (paths or URLs), union-by-name.
+  A `read_parquet` over `sources` (paths or URLs).
+
+  Without `union_by_name` (the default), DuckDB binds the schema from the
+  first file and opens the rest only as the scan reaches them, so a `LIMIT`
+  stops after a handful of files. That is right for files known to share one
+  schema: an id group of micro-segments, or a scattered query's partials.
+  `union_by_name: true` makes DuckDB read every footer up front to unify
+  the columns by name — the price of files that may differ, and the reason a
+  read over thousands of them could not stop early (T-453).
   """
-  @spec read_parquet([String.t()]) :: String.t()
-  def read_parquet(sources) do
-    "read_parquet([" <>
-      Enum.map_join(sources, ", ", &Identifier.sql_string/1) <> "], union_by_name := true)"
+  @spec read_parquet([String.t()], union_by_name: boolean()) :: String.t()
+  def read_parquet(sources, opts \\ []) do
+    list = "[" <> Enum.map_join(sources, ", ", &Identifier.sql_string/1) <> "]"
+
+    if Keyword.get(opts, :union_by_name, false),
+      do: "read_parquet(#{list}, union_by_name := true)",
+      else: "read_parquet(#{list})"
   end
 
   @doc """
-  A full `SELECT * FROM read_parquet(...)` over `sources`.
+  A full `SELECT * FROM read_parquet(...)` over `sources` that may differ,
+  unioned by name.
   """
   @spec parquet_select([String.t()]) :: String.t()
-  def parquet_select(sources), do: "SELECT * FROM " <> read_parquet(sources)
+  def parquet_select(sources), do: "SELECT * FROM " <> read_parquet(sources, union_by_name: true)
 
   @doc """
   The read over hot micro-segments (and any other Parquet sources) projected
@@ -47,7 +59,13 @@ defmodule Smolquery.QueryService.Views do
   whatever it is named, or a typed `NULL` — and the groups are unioned by
   name after projection, when every group already speaks the catalog's names.
   In steady state every file agrees and there is one group, so the SQL is one
-  scan, as before.
+  scan, as before — and since T-453 a lazy one: an id group's `read_parquet`
+  does not union by name, because every file in it was written with the same
+  columns in the same order and types, so DuckDB binds the schema from the
+  first file and opens the rest as the scan reaches them. A `LIMIT` over
+  thousands of hot files stops after a handful instead of after every
+  footer. Only the groups of files without ids still union by name, since
+  those may differ (T-455 removes them).
 
   A sealed file a shard reads directly carries no ids in its manifest, so
   the worker asks the file (`Smolquery.Segments.FieldIds`) and hands the
@@ -89,13 +107,17 @@ defmodule Smolquery.QueryService.Views do
 
   defp group_select(_schema, :by_name, sources), do: parquet_select(urls(sources))
 
+  # Legacy files without ids may differ from one another: unioned by name.
   defp group_select(schema, {:as_of, snapshot}, sources) do
     columns = sources |> Enum.flat_map(& &1["columns"]) |> Enum.uniq()
     {:ok, projection} = Schema.projection_as_of(schema, columns, snapshot)
 
-    "SELECT #{projection} FROM #{read_parquet(urls(sources))}"
+    "SELECT #{projection} FROM #{read_parquet(urls(sources), union_by_name: true)}"
   end
 
+  # Files stamped with the same ids were written with the same columns, in
+  # the same order and types — the writer stamps all of a schema or none —
+  # so the group reads lazily, and a LIMIT stops early (T-453).
   defp group_select(schema, {:ids, field_ids}, sources) do
     {:ok, projection} = Schema.projection_by_id(schema, field_ids)
 

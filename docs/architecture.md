@@ -216,11 +216,17 @@ probe, a distributed shard, and the sealer projecting a claim — renders
 through one primitive: `Smolquery.Schema.projection_by_id/2` sources each
 catalog column from the input column carrying its *id*, whatever that column
 is named, and a typed `NULL` where no input carries it, including when the
-input has a column of the same name under another id. `read_parquet` unions
-files by name, so `Smolquery.QueryService.Views.sources_select/2` groups
-files by their `field_ids` and unions the groups only after each is projected
-onto the catalog's names; in steady state every file agrees and it is one
-scan, as before. The pruner resolves a query's column to its id and the id to
+input has a column of the same name under another id.
+`Smolquery.QueryService.Views.sources_select/2` groups files by their
+`field_ids`, projects each group onto the catalog's names, and unions the
+groups by name. Every file in one group was written with the same columns in
+the same order and types, so the group's `read_parquet` does *not* union by
+name (T-453): DuckDB binds the schema from the first file and opens the rest
+as the scan reaches them, and a `LIMIT` stops after a handful of files
+instead of after every footer — a `WHERE … LIMIT 10` over 8,000 hot files
+went from 4.3 s to milliseconds. In steady state every file agrees and it is
+one scan. Only a group of files without ids still unions by name, since
+those may differ (T-455 removes it). The pruner resolves a query's column to its id and the id to
 the file's name for it, so a bound from a dropped column never prunes its
 successor. A file without ids is read by name, as it always was.
 
@@ -980,7 +986,8 @@ view shadows the attached lake:
 CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "id", "ts" FROM (
   SELECT * FROM "lake"."analytics"."events" AT (VERSION => 42)   -- sealed, pinned
   UNION ALL BY NAME
-  SELECT * FROM read_parquet(['http://…/01A.parquet'], union_by_name := true)
+  SELECT CAST("id" AS BIGINT) AS "id", CAST("ts" AS TIMESTAMP) AS "ts"        -- hot, by column id
+  FROM read_parquet(['http://…/01A.parquet', 'http://…/01B.parquet'])       -- lazy: no union_by_name (T-453)
 )
 ```
 
