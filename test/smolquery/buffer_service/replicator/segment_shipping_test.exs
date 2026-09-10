@@ -600,4 +600,183 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert {:error, {:stale_epoch, 1}} =
              Endpoint.accept_replica(follower, @table, entry, nil, 0)
   end
+
+  describe "a diverged follower claim over the owner's ids (T-450)" do
+    defp replicate_to(follower) do
+      [
+        replicator:
+          {SegmentShipping,
+           replication_factor: 2,
+           targets: fn _name, _ref -> {:ok, [{Transport.Local, node(), follower}]} end}
+      ]
+    end
+
+    # Writes under valves nothing crosses, so the owner claims nothing on its
+    # own; the test then stages the follower's diverged claim and restarts the
+    # owner under the valves the case needs, the way the T-297 tests do.
+    defp diverged_pair(context) do
+      owner_name = :"t450_owner_#{:erlang.unique_integer([:positive])}"
+      follower = start_instance(context)
+
+      owner =
+        start_instance(
+          context,
+          [
+            name: owner_name,
+            seal_max_files: 1_000_000,
+            seal_max_bytes: 1_000_000_000,
+            seal_max_age_ms: 600_000
+          ] ++ replicate_to(follower)
+        )
+
+      ids =
+        for n <- 1..5 do
+          {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-t450-#{n}"))
+          ack.segment_id
+        end
+
+      {owner, follower, ids}
+    end
+
+    defp restart_owner(context, owner, follower, opts) do
+      {:ok, %{name: owner_name}} = Runtime.fetch(owner)
+      :ok = stop_supervised(owner)
+
+      owner =
+        start_instance(
+          context,
+          [name: owner_name, seal_max_bytes: 1_000_000_000, seal_max_age_ms: 600_000] ++
+            opts ++ replicate_to(follower)
+        )
+
+      assert Eventually.until(fn ->
+               match?([{_buffer, _load}], Registry.lookup(Runtime.registry(owner), @table))
+             end)
+
+      [{buffer, _load}] = Registry.lookup(Runtime.registry(owner), @table)
+
+      {owner, buffer}
+    end
+
+    defp stage_diverged(follower, ids),
+      do:
+        :ok =
+          Endpoint.apply_replica_mutation(
+            follower,
+            @table,
+            :claim,
+            %{ids: ids, keys: ["diverged-key"]},
+            nil
+          )
+
+    defp live_claims(name) do
+      {:ok, runtime} = Runtime.fetch(name)
+
+      runtime.manifest
+      |> HotManifest.live_claims(@table)
+      |> Enum.map(&%{ids: Enum.sort(&1.ids), keys: &1.keys})
+      |> Enum.sort()
+    end
+
+    test "heals by releasing the follower's claim, then applying the owner's", context do
+      {owner, follower, ids} = diverged_pair(context)
+      stage_diverged(follower, ids)
+
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 1_000_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+      assert log =~ "healed a diverged claim"
+      assert log =~ "(T-450)"
+      refute log =~ "claiming #{inspect(@table)} failed"
+
+      assert [%{ids: live_ids, keys: keys}] = live_claims(owner)
+      assert live_ids == Enum.sort(ids)
+      refute keys == ["diverged-key"]
+      assert live_claims(follower) == live_claims(owner)
+    end
+
+    test "a follower claim wider than the owner's is released whole", context do
+      {owner, follower, ids} = diverged_pair(context)
+      stage_diverged(follower, ids)
+
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 2,
+          claim_valve_factor: 1,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+      assert log =~ "healed a diverged claim"
+      assert log =~ inspect(Enum.sort(ids))
+      refute log =~ "claiming #{inspect(@table)} failed"
+
+      assert Enum.count(live_claims(owner)) > 1
+      assert live_claims(follower) == live_claims(owner)
+    end
+
+    test "a follower claim holding an id the owner sealed refuses the heal, naming it",
+         context do
+      {owner, follower, ids} = diverged_pair(context)
+      {:ok, owner_runtime} = Runtime.fetch(owner)
+      [retired | rest] = ids
+      :ok = HotManifest.retire(owner_runtime.manifest, @table, [retired], 42)
+      stage_diverged(follower, ids)
+
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 1_000_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+      assert log =~ ":diverged_claim_sealed_on_owner"
+      assert log =~ retired
+      refute log =~ "healed a diverged claim"
+
+      assert live_claims(owner) == []
+      assert [%{ids: follower_ids}] = live_claims(follower)
+      assert follower_ids == Enum.sort([retired | rest])
+    end
+
+    test "a claim that keeps failing backs off instead of retrying on every tick", context do
+      {owner, follower, ids} = diverged_pair(context)
+      {:ok, owner_runtime} = Runtime.fetch(owner)
+      [retired | _rest] = ids
+      :ok = HotManifest.retire(owner_runtime.manifest, @table, [retired], 42)
+      stage_diverged(follower, ids)
+
+      {_owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 1,
+          seal_retry_ms: 60_000,
+          maintenance_interval_ms: 600_000
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for _tick <- 1..20, do: :ok = GenServer.call(buffer, :maintain)
+        end)
+
+      failures =
+        log |> String.split("claiming #{inspect(@table)} failed") |> Enum.count() |> Kernel.-(1)
+
+      assert failures == 1
+      assert log =~ "1 consecutive, next attempt in 250 ms"
+
+      state = :sys.get_state(buffer)
+      assert state.claim_failures == 1
+      assert is_integer(state.claim_retry_at)
+    end
+  end
 end

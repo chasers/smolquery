@@ -101,6 +101,19 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Claim retries back off, and a diverged follower claim heals (T-450)
+
+A follower holding every id of an owner's claim under a claim the owner never
+froze used to refuse that claim identically on every attempt, and the owner
+re-attempted on every flush — three to six times a second on the sandbox, for
+over ten minutes, with no path out. The owner now releases the follower's
+claim and applies its own, the same way a diverged *release* has healed since
+T-297; a follower claim holding ids the owner already sealed still fails
+loudly, naming them. Independently, a failed claim now waits before the next
+attempt — 250 ms, doubling per consecutive failure up to `seal_retry_ms`
+(default 30 s) — so a refusal nobody anticipated costs one warning per
+interval, not one per flush. Both are owner-side; no protocol changes.
+
 ### The query planner reads the hot manifest without stats when it cannot prune (T-449)
 
 A plan with no WHERE conjunct and no Top-N bound on a table now fetches that
