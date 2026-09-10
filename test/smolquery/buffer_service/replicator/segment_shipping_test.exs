@@ -236,7 +236,9 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert first_attempt =~ "in progress"
     assert first_attempt =~ "re-shipped 64 missing entries"
     assert first_attempt =~ "1 remain"
-    assert first_attempt =~ ":heal_in_progress"
+    refute first_attempt =~ "consecutive"
+    assert :sys.get_state(buffer).claim_failures == 0
+    assert :sys.get_state(buffer).claim_retry_at == nil
 
     {:ok, owner_runtime} = Runtime.fetch(owner)
     assert HotManifest.live_claim(owner_runtime.manifest, @table) == :error
@@ -666,16 +668,10 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       {owner, buffer}
     end
 
-    defp stage_diverged(follower, ids),
+    defp stage_diverged(follower, ids, keys \\ ["diverged-key"]),
       do:
         :ok =
-          Endpoint.apply_replica_mutation(
-            follower,
-            @table,
-            :claim,
-            %{ids: ids, keys: ["diverged-key"]},
-            nil
-          )
+          Endpoint.apply_replica_mutation(follower, @table, :claim, %{ids: ids, keys: keys}, nil)
 
     defp live_claims(name) do
       {:ok, runtime} = Runtime.fetch(name)
@@ -728,6 +724,30 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       assert log =~ "healed a diverged claim"
       assert log =~ "healed a partial claim"
       assert log =~ "re-shipped 4 missing entries"
+      refute log =~ "claiming #{inspect(@table)} failed"
+
+      assert [%{ids: live_ids}] = live_claims(owner)
+      assert live_ids == Enum.sort(ids)
+      assert live_claims(follower) == live_claims(owner)
+    end
+
+    test "a follower holding two claims over the owner's ids has each released, not their union",
+         context do
+      {owner, follower, ids} = diverged_pair(context)
+      {first_two, rest} = Enum.split(ids, 2)
+      stage_diverged(follower, first_two, ["diverged-key-1"])
+      stage_diverged(follower, rest, ["diverged-key-2"])
+
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 1_000_000,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :force_seal) end)
+
+      assert log =~ "healed a diverged claim"
       refute log =~ "claiming #{inspect(@table)} failed"
 
       assert [%{ids: live_ids}] = live_claims(owner)

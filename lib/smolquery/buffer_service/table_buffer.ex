@@ -194,6 +194,7 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   @release_stuck_after 5
   @claim_backoff_base_ms 250
+  @claim_backoff_doubling_cap 20
 
   defstruct [
     :runtime,
@@ -1017,9 +1018,25 @@ defmodule Smolquery.BufferService.TableBuffer do
       {:ok, claim} ->
         {:ok, signal(%{state | claim_failures: 0, claim_retry_at: nil}, claim)}
 
+      {:error, {:replication_failed, node, {:heal_in_progress, remaining}}} ->
+        {:error, heal_in_progress(state, node, remaining)}
+
       {:error, reason} ->
         {:error, claim_failed(state, reason)}
     end
+  end
+
+  # A partial-claim heal re-ships at most one batch per attempt and asks for
+  # the next tick (T-289); that is progress, not a failure — under the
+  # backoff a 3,000-entry divergence would take twenty minutes of doubling
+  # waits to converge. The counter resets, the next tick tries again.
+  defp heal_in_progress(state, node, remaining) do
+    Logger.info(fn ->
+      "claim heal on #{inspect(state.table_ref)} in progress: #{remaining} entries remain " <>
+        "to re-ship to #{node}; retrying on the next tick"
+    end)
+
+    %{state | claim_failures: 0, claim_retry_at: nil}
   end
 
   # A claim that fails is retried on the next maintenance tick — and every
@@ -1031,22 +1048,28 @@ defmodule Smolquery.BufferService.TableBuffer do
   # anticipated costs one log line per interval, not per flush. A success
   # resets it. The drain's force-claim does not consult it: a handoff's
   # point-in-time seal must try.
+  # The deadline is monotonic time, not `now/0`'s wall clock: it is the one
+  # comparison here that gates whether the table does any work at all, and a
+  # clock stepped backwards must not extend the wait by the size of the step.
   defp claim_failed(state, reason) do
     consecutive = state.claim_failures + 1
+    doublings = min(consecutive - 1, @claim_backoff_doubling_cap)
 
     wait =
-      min(@claim_backoff_base_ms * Integer.pow(2, consecutive - 1), state.runtime.seal_retry_ms)
+      min(@claim_backoff_base_ms * Integer.pow(2, doublings), state.runtime.seal_retry_ms)
 
     Logger.warning(
       "claiming #{inspect(state.table_ref)} failed (#{consecutive} consecutive, next attempt " <>
         "in #{wait} ms): #{inspect(reason)}"
     )
 
-    %{state | claim_failures: consecutive, claim_retry_at: now() + wait}
+    %{state | claim_failures: consecutive, claim_retry_at: monotonic_ms() + wait}
   end
 
   defp claim_backing_off?(%__MODULE__{claim_retry_at: nil}), do: false
-  defp claim_backing_off?(state), do: now() < state.claim_retry_at
+  defp claim_backing_off?(state), do: monotonic_ms() < state.claim_retry_at
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp claim_byte_valve(state),
     do: max(state.runtime.seal_max_bytes * state.runtime.claim_valve_factor, 1)
