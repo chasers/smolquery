@@ -450,6 +450,26 @@ defmodule Smolquery.BufferService.SealingTest do
       assert File.exists?(Store.location(runtime.store, entry.key))
     end
 
+    test "a retire that outlasts the control budget is a named error, not an exit (T-459)",
+         context do
+      %{name: name} = start_buffer_service(context, control_timeout_ms: 100)
+
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+      pid = buffer(name)
+      :ok = :sys.suspend(pid)
+
+      try do
+        assert Client.retire(name, @table, [ack.segment_id], 5) ==
+                 {:error, {:retire_timed_out, 100}}
+      after
+        :ok = :sys.resume(pid)
+      end
+
+      assert Eventually.until(fn ->
+               match?({:ok, [%{sealed_at: 5}]}, Client.hot_manifest(name, @table))
+             end)
+    end
+
     test "is idempotent for a sealer retrying after a crash", context do
       %{name: name} = start_buffer_service(context, [])
 

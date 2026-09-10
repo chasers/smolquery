@@ -377,6 +377,14 @@ defmodule Smolquery.BufferService.TableBuffer do
 
   `keys` fences the retire against a released claim — see
   `Smolquery.BufferService.HotManifest.retire/6`. `nil` skips the fence.
+
+  The call is answered once the retire is durable here and on the replicas.
+  The maintenance it makes due — the grace reaper's drop and that drop's
+  replication round, a log compaction, the next claim — runs on a message
+  the buffer sends itself, behind every call already waiting, so it counts
+  against no caller's timeout (T-459). The replication round runs before
+  the retire takes the log: its ids belong to a claim that already shipped,
+  so the table's group commit never waits on a follower's answer to it.
   """
   @spec retire(GenServer.server(), [String.t()], non_neg_integer(), [String.t()] | nil, timeout()) ::
           :ok | {:error, term()}
@@ -509,25 +517,21 @@ defmodule Smolquery.BufferService.TableBuffer do
     {:noreply, run_maintenance(state)}
   end
 
-  # The retire is acknowledged once it is durable here and on the replicas;
-  # the maintenance it makes due — the grace reaper's drop and its own
-  # replication round, a log compaction that rewrites the whole manifest,
-  # the next claim — runs after the reply, so none of it counts against the
-  # sealer's call timeout. On a partition holding 140,000 entries that
-  # maintenance, inside the timeout, is what made every retire time out and
-  # the backlog block its own drain (T-459).
   def handle_call({:retire, ids, snapshot, keys}, _from, state) do
     result =
-      Committer.with_log(state.committer, fn log ->
-        with :ok <-
-               append_replicas(state, :retire, %{ids: ids, snapshot: snapshot, keys: keys}) do
+      with :ok <- append_replicas(state, :retire, %{ids: ids, snapshot: snapshot, keys: keys}) do
+        Committer.with_log(state.committer, fn log ->
           HotManifest.retire(state.runtime.manifest, state.table_ref, ids, snapshot, keys, log)
-        end
-      end)
+        end)
+      end
 
     case result do
-      :ok -> {:reply, :ok, state, {:continue, :maintain}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      :ok ->
+        send(self(), :maintain_now)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -597,10 +601,9 @@ defmodule Smolquery.BufferService.TableBuffer do
     {:stop, reason, state}
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_info(:maintain_now, state), do: {:noreply, run_maintenance(state)}
 
-  @impl GenServer
-  def handle_continue(:maintain, state), do: {:noreply, run_maintenance(state)}
+  def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(:normal, state), do: shutdown_commit(state)

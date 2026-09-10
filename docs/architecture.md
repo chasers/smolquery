@@ -634,10 +634,12 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   crashed sealer retries from.
   The retire is acknowledged once it is durable on the owner and its
   replicas; the maintenance it makes due — the grace reaper's drop and its
-  replication round, a log compaction, the next claim — runs after the
-  reply, outside the sealer's call budget (T-459). That call waits the
-  control budget (`control_timeout_ms`), the same the sealer's transport
-  waits.
+  replication round, a log compaction, the next claim — runs on a message
+  the buffer sends itself, behind every call already waiting, so it counts
+  against no caller's budget (T-459). The call waits `control_timeout_ms`,
+  the budget the sealer's transport waits, and one that outlasts it is a
+  named error rather than an exit; the buffer may still commit it once it
+  gets to it, which the retry finds as `:ok`.
 - **Boot adopts what is already on disk.** A buffer is what runs the seal
   check. A node that restarts with an unsealed tail for a table nobody writes
   to again would strand that tail. `Smolquery.BufferService.Adopter` starts a
