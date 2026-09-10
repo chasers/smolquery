@@ -103,9 +103,11 @@ One note per release, newest first.
 
 ### DuckDB returns the encode's pages: allocator_background_threads on by default (T-452)
 
-Every `Smolquery.Engine` now starts DuckDB with `allocator_background_threads = true`
-— one flag for the whole OS process, so the node's configured value is what
-every engine applies.
+Every DuckDB instance now opens with `allocator_background_threads = true`, and
+`Smolquery.Allocator` re-asserts it every second: the flag is one per OS
+process, and libduckdb forces it off whenever any instance closes — a query
+pod closes a job engine per query — so a `SET` at boot alone would be undone
+within seconds.
 Measured in `bench/results/buffer.md`: after six bursts of four concurrent 94 MB
 encodes a buffer process settled 1.1–1.5 GiB above its start without it and
 ~50–90 MiB above with it, at the same wall time — the pages jemalloc kept were
