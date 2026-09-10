@@ -181,7 +181,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
   test "a distributed answer lands on the job as scatter", %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, _frame} =
-             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events")
+             Client.query(distributed, "SELECT count(*) AS n, sum(id) AS s FROM analytics.events")
 
     assert %{shards: 3, partial_bytes: bytes} = job.scatter
     assert bytes > 0
@@ -191,7 +191,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     control: control
   } do
     assert {:ok, %{state: :done} = job, _frame} =
-             Client.query(control, "SELECT count(*) AS n FROM analytics.events",
+             Client.query(control, "SELECT count(*) AS n, sum(id) AS s FROM analytics.events",
                distributed: true
              )
 
@@ -203,10 +203,24 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     distributed: distributed
   } do
     assert {:ok, %{state: :done} = job, _frame} =
-             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events",
+             Client.query(distributed, "SELECT count(*) AS n, sum(id) AS s FROM analytics.events",
                distributed: false
              )
 
+    assert job.scatter == nil
+    refute_received {:scatter, _measurements, _meta}
+  end
+
+  test "a bare count(*) never scatters: the footers answer it (T-448)", %{
+    control: control,
+    distributed: distributed
+  } do
+    both(control, distributed, "SELECT count(*) AS n FROM analytics.events")
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events")
+
+    assert DataFrame.to_columns(frame) == %{"n" => [15]}
     assert job.scatter == nil
     refute_received {:scatter, _measurements, _meta}
   end

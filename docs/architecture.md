@@ -1096,7 +1096,10 @@ wider than one instance (`Smolquery.QueryService.Scatter`):
    query and a *final* query, by surgery on DuckDB's own AST (abstract
    syntax tree). A query it cannot split exactly refuses, and the job runs
    the single-engine path above. Refusal is the common case and costs
-   nothing.
+   nothing. So does a query with no scan to shard: a bare
+   `SELECT count(*) FROM t` is answered from parquet footers and
+   hot-manifest row counts, and scattering it only adds the fixed costs
+   (T-448 measured it 2.7× slower distributed).
 2. The job's file list — the sealed segments at the pinned snapshot, plus
    the pruned hot-tier URLs — is sharded round-robin across the workers.
 3. Each worker (`Smolquery.QueryService.PartialWorker`) starts its own

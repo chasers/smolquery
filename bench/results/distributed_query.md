@@ -103,3 +103,37 @@ results are exact, and the constraint is partial-result size on
 high-cardinality group-bys. Whether to build it is a separate decision — the
 fixed per-shard costs mean it only pays for scans that already run for
 hundreds of milliseconds on one node.
+
+## Follow-up: a bare `count(*)` must not scatter (T-448, 2026-09-10)
+
+Prod reported a plain `SELECT count(*) FROM t` slower distributed than not.
+DuckDB answers that shape from each parquet footer's row count without
+reading a row group, so there is no scan to shard; the scatter still pays an
+engine per worker, a partial per shard, the transfer and the merge — exactly
+the fixed costs `min_files` exists to avoid, but file count is the wrong
+proxy for a query with no scan.
+
+Measured through the public surface (`scatter_integration_test` fixture:
+6 sealed files + 1 hot entry, `min_files: 4`, 3 local workers, one node,
+warm engines, 10 reps after 2 warm-ups; Linux aarch64, Elixir 1.20 / OTP 29,
+DuckDB via ADBC):
+
+```
+SELECT count(*) AS n FROM analytics.events        min ms   median ms   scattered
+  before  distributed: true                        268.1     286.3      yes
+  before  distributed: false                        96.2     106.6      no
+  after   distributed: true  (refuses :metadata_only)  106.5  118.3     no
+  after   distributed: false                        98.1     104.5      no
+```
+
+Scattering the bare count cost 2.7× the single-engine answer on the smallest
+fixture that clears `min_files`; on a real cluster the partial transfer only
+widens the gap. With the gate, the distributed service answers within noise
+of the single-engine path — the ~10 ms residual is the decomposer's
+serialize/`DESCRIBE` round trips before it refuses, which the rest of the
+gate pays too.
+
+The gate is narrow: `count(col)` scans for nulls, and a count under a WHERE
+or a GROUP BY scans, so those still decompose. `min`/`max` without a WHERE
+were left alone — parquet statistics are per row group, not footer-level,
+so DuckDB may still open every file; measure before extending the rule.
