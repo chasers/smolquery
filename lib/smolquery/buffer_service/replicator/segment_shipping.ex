@@ -330,12 +330,17 @@ defmodule Smolquery.BufferService.Replicator.SegmentShipping do
   end
 
   defp release_each(target, mutation, epoch, claims) do
-    Enum.reduce_while(claims, {:ok, []}, fn claim, {:ok, released} ->
+    claims
+    |> Enum.reduce_while({:ok, []}, fn claim, {:ok, released} ->
       case ship_release(target, mutation, epoch, claim) do
-        :ok -> {:cont, {:ok, released ++ claim}}
+        :ok -> {:cont, {:ok, [claim | released]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+    |> case do
+      {:ok, released} -> {:ok, released |> Enum.reverse() |> List.flatten()}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp sealed_on_owner?(mutation, id) do
