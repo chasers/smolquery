@@ -305,6 +305,38 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
              |> Enum.all?(&(&1.sealed_at == 11))
     end
 
+    test "finds the claim's other members in the claim cache, never by scanning the entries (T-459)",
+         %{manifest: manifest} do
+      first = add(manifest, @table)
+      second = add(manifest, @table)
+      unclaimed = add(manifest, @table)
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [first.id, second.id], @keys)
+      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :hot_manifest, :read]])
+
+      assert HotManifest.retire(manifest, @table, [first.id], 11, @keys) == :ok
+
+      refute_received {[:smolquery, :hot_manifest, :read], ^ref, _measurements, %{op: :entries}}
+      assert {:ok, %Entry{sealed_at: 11}} = HotManifest.entry(manifest, @table, second.id)
+      assert {:ok, %Entry{sealed_at: nil}} = HotManifest.entry(manifest, @table, unclaimed.id)
+      assert HotManifest.live_claim(manifest, @table) == :error
+    end
+
+    test "a dropped member leaves the live claim, and the last one takes the claim with it (T-459)",
+         %{manifest: manifest} do
+      first = add(manifest, @table)
+      second = add(manifest, @table)
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [first.id, second.id], @keys)
+
+      :ok = HotManifest.drop(manifest, @table, [first.id])
+
+      assert {:ok, %{ids: [second_id], keys: @keys}} = HotManifest.live_claim(manifest, @table)
+      assert second_id == second.id
+
+      :ok = HotManifest.drop(manifest, @table, [second.id])
+
+      assert HotManifest.live_claim(manifest, @table) == :error
+    end
+
     test "leaves an unclaimed entry alone", %{manifest: manifest} do
       claimed = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [claimed.id], @keys)

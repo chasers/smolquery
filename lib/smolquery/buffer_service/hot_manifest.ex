@@ -1154,23 +1154,65 @@ defmodule Smolquery.BufferService.HotManifest do
     end
   end
 
-  defp with_claim(manifest, table_ref, pending) do
+  # Retiring one member of a claim retires the whole claim, and the claim's
+  # other members come from the live-claim cache, keyed by the claim's head
+  # key — one lookup per claim named, one per id — never from a scan of the
+  # table's entries: on a 140,000-entry partition that scan copied every
+  # entry's stats out of ETS on every retire, and the retire timed out, so
+  # the backlog blocked its own drain (T-459).
+  defp with_claim(%__MODULE__{table: table} = manifest, table_ref, pending) do
     claimed = pending |> Enum.flat_map(& &1.claim_keys) |> MapSet.new()
 
     if MapSet.size(claimed) == 0 do
       pending
     else
       siblings =
-        manifest
-        |> entries(table_ref)
+        pending
+        |> Enum.map(& &1.claim_keys)
+        |> Enum.reject(&(&1 == []))
+        |> Enum.uniq()
+        |> Enum.flat_map(&claimed_ids(table, table_ref, &1))
+        |> Enum.uniq()
+        |> Enum.flat_map(&lookup(manifest, table_ref, &1))
         |> Enum.filter(&sibling?(&1, claimed))
 
       Enum.uniq_by(pending ++ siblings, & &1.id)
     end
   end
 
+  defp claimed_ids(table, table_ref, keys) do
+    case :ets.lookup(claims(table), {table_ref, hd(keys)}) do
+      [{_key, %{ids: ids}}] -> ids
+      [] -> []
+    end
+  end
+
   defp sibling?(%Entry{} = entry, claimed) do
     not Entry.sealed?(entry) and Enum.any?(entry.claim_keys, &MapSet.member?(claimed, &1))
+  end
+
+  # Entries that just left a claim — sealed or dropped — leave the live-claim
+  # cache by name, and a claim with no member left leaves whole; no
+  # re-derivation over the table (T-459). `refresh_claim/2` stays for the
+  # mutations that change what a claim *is* (a freeze, a release, recovery).
+  defp unclaim(%__MODULE__{table: table}, table_ref, entries) do
+    entries
+    |> Enum.filter(&(&1.claim_keys != []))
+    |> Enum.group_by(&hd(&1.claim_keys), & &1.id)
+    |> Enum.each(fn {key, ids} -> unclaim_ids(table, {table_ref, key}, MapSet.new(ids)) end)
+  end
+
+  defp unclaim_ids(table, cache_key, gone) do
+    case :ets.lookup(claims(table), cache_key) do
+      [{^cache_key, %{ids: held} = claim}] ->
+        case Enum.reject(held, &MapSet.member?(gone, &1)) do
+          [] -> :ets.delete(claims(table), cache_key)
+          left -> :ets.insert(claims(table), {cache_key, %{claim | ids: left}})
+        end
+
+      [] ->
+        :ok
+    end
   end
 
   defp freezable(_manifest, _table_ref, [], _keys), do: {:error, :nothing_to_claim}
@@ -1264,7 +1306,7 @@ defmodule Smolquery.BufferService.HotManifest do
       end)
 
       track_depth(manifest, table_ref, {0, 0}, Enum.reduce(pending, {0, 0}, &add_weight/2))
-      refresh_claim(manifest, table_ref)
+      unclaim(manifest, table_ref, pending)
       count(:retired, length(pending))
     end
   end
@@ -1322,7 +1364,7 @@ defmodule Smolquery.BufferService.HotManifest do
              :ok <- append(manifest, table_ref, record, log) do
           Enum.each(entries, &forget(manifest, table_ref, &1))
 
-          refresh_claim(manifest, table_ref)
+          unclaim(manifest, table_ref, Enum.reject(entries, &Entry.sealed?/1))
           count(:reaped, length(entries))
         end
     end

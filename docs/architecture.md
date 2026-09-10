@@ -615,6 +615,11 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   claimed but unsealed. The next re-signal would then rebuild that claim's
   segment from a subset. That would overwrite a committed segment with fewer
   rows.
+  The other members come from the live-claim cache, one lookup per claim
+  and one per id, never from a scan of the table's entries (T-459): on a
+  partition holding 140,000 entries that scan copied every entry's stats
+  out of ETS per retire, the retire timed out, and the backlog blocked its
+  own drain.
 - **The signal is level-triggered, not an event.** It repeats every
   `seal_retry_ms` until the claim is retired. A sealer that dies mid-handoff
   therefore costs one retry interval. It does not park that table's tail
@@ -627,6 +632,12 @@ config :smolquery, Smolquery.BufferService, seal_consumer: {MyApp.Sealer, []}
   can hold open. A retire of an already-sealed id is `:ok`. A retire of an id
   the sweep already deleted is also `:ok`. Those are all the directions a
   crashed sealer retries from.
+  The retire is acknowledged once it is durable on the owner and its
+  replicas; the maintenance it makes due — the grace reaper's drop and its
+  replication round, a log compaction, the next claim — runs after the
+  reply, outside the sealer's call budget (T-459). That call waits the
+  control budget (`control_timeout_ms`), the same the sealer's transport
+  waits.
 - **Boot adopts what is already on disk.** A buffer is what runs the seal
   check. A node that restarts with an unsealed tail for a table nobody writes
   to again would strand that tail. `Smolquery.BufferService.Adopter` starts a
