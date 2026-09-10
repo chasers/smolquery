@@ -435,6 +435,16 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_compaction_quarantined_segments_total") == before_quarantined + 2
   end
 
+  test "counts rows the backlog valve refused apart from admission's (T-457)" do
+    before_backlog = value("smolquery_buffer_backlog_refused_rows_total")
+    before_admission = value("smolquery_buffer_admission_refused_rows_total")
+
+    :telemetry.execute([:smolquery, :buffer, :admission], %{rows: 7}, %{outcome: :backlog})
+
+    assert value("smolquery_buffer_backlog_refused_rows_total") == before_backlog + 7
+    assert value("smolquery_buffer_admission_refused_rows_total") == before_admission
+  end
+
   test "counts every compaction deferral (T-458)" do
     before_backoffs = value("smolquery_compaction_backoffs_total")
 

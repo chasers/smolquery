@@ -496,6 +496,34 @@ defmodule Smolquery.BufferService.TableBufferTest do
 
       assert Client.write_batch(name, @table, batch(1..2)) == {:error, :buffer_full}
     end
+
+    test "refuses a commit once the node's unsealed backlog is at its ceiling (T-457)",
+         context do
+      %{name: name} = start_buffer_service(context, backlog_max_entries: 2)
+      {:ok, runtime} = Runtime.fetch(name)
+      assert runtime.backlog_max_entries == 2
+
+      assert {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+      assert {:ok, second} = Client.write_batch(name, @table, batch(2..2))
+
+      assert {:error, {:backlog_full, refusal}} = Client.write_batch(name, @table, batch(3..3))
+      assert %{table_ref: @table, entries: 2, table_entries: 2, limit: :entries} = refusal
+      assert refusal.max_entries == 2
+      assert refusal.bytes == HotManifest.depth(runtime.manifest, :node).bytes
+
+      # The valve is on ingest only: sealing still drains the node.
+      :ok = HotManifest.retire(runtime.manifest, @table, [second.segment_id], 1)
+      assert {:ok, _third} = Client.write_batch(name, @table, batch(3..3))
+    end
+
+    test "the byte ceiling refuses too, naming the bytes", context do
+      %{name: name} = start_buffer_service(context, backlog_max_bytes: 1)
+
+      assert {:ok, _first} = Client.write_batch(name, @table, batch(1..1))
+
+      assert {:error, {:backlog_full, %{limit: :bytes}}} =
+               Client.write_batch(name, @table, batch(2..2))
+    end
   end
 
   describe "a flush that fails" do

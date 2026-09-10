@@ -97,6 +97,8 @@ version's driver exists.
 | `SMOLQUERY_FLUSH_IDLE_INTERVAL_MS` | The group-commit window below `SMOLQUERY_COMMIT_SIBLINGS` (`5`). The value is a few ms rather than zero, so the simultaneous first inserts of a burst still share one commit |
 | `SMOLQUERY_FLUSH_MAX_BYTES` | The other flush trigger (`2000000`): accumulated wire bytes that force a group commit before the interval elapses. Whichever trigger fires first ends the commit. A batch size and arrival rate that reach this cap sooner than `SMOLQUERY_FLUSH_INTERVAL_MS` make the interval decorative. Raise the cap to let the cadence govern, at the cost of resident bytes per table |
 | `SMOLQUERY_MAX_BUFFERED_BYTES` | The admission ceiling on one table's accumulator (`64000000`). Past it, the buffer refuses a write with `buffer_full`. Keep the value above `SMOLQUERY_FLUSH_MAX_BYTES` with a clear margin; the accumulator overshoots the flush trigger by up to one batch. A pair that is not strictly greater logs a warning at the buffer boot. The row-side pair (`flush_max_rows`/`max_buffered_rows`) gets the same check |
+| `SMOLQUERY_BACKLOG_MAX_ENTRIES` | The unsealed micro-segments a buffer node holds before it refuses commits (T-457). The refusal is a 429 with `retry-after: 5` naming the table and the depth, before the batch reaches the buffer; sealing keeps draining, and replicated shipments are never refused. Unset, the ceiling is the container's cgroup memory limit over twice the boot cost of an entry (about 15 KB), floored at `4096`, so a node can always adopt what it holds after a restart. Without a cgroup limit it is `200000`. The boot log's `buffer shape:` line shows the resolved value, and `smolquery_buffer_unsealed_entries_limit` publishes it |
+| `SMOLQUERY_BACKLOG_MAX_BYTES` | The same valve on the unsealed micro-segments' bytes (unset: not gated). Entries drive the boot peak, so entries are the ceiling that derives; bytes are for a node whose hot-tier disk is the tighter bound |
 | `SMOLQUERY_BUFFER_FULLSWEEP_AFTER` | The `fullsweep_after` spawn option of every `TableBuffer` and its committer (`0`, T-330). Both processes take a whole payload onto their heap per group commit. The garbage lands on the old heap, and only a fullsweep collects an old heap, so OTP's default of 65,535 keeps every payload the process ever handled resident. A loaded buffer pod measured 1,892 MB of process heaps against a live set of 0.0 MB, and the tier was OOM-killed holding that garbage. `0` makes every collection a fullsweep. Its cost is proportional to the live set, which is what makes `0` affordable here. Raise it only to trade resident bytes for collection work; a value near OTP's default restores the leak |
 | `SMOLQUERY_SEAL_MAX_BYTES` | The byte trigger that makes a table's unsealed tail sealable (`67108864`). It also sizes the claim's byte valve, through `SMOLQUERY_CLAIM_VALVE_FACTOR` |
 | `SMOLQUERY_SEAL_MAX_FILES` | The micro-segment-count trigger (`64`). It likewise sizes the claim's count valve |
@@ -191,6 +193,8 @@ config :smolquery, Smolquery.BufferService,
   maintenance_interval_ms: 5_000,
   manifest_compact_min_bytes: 1_048_576,
   manifest_compact_ratio: 4,
+  backlog_max_entries: nil,
+  backlog_max_bytes: nil,
   seal_consumer: {Smolquery.StorageService.Client, []},
   hot_server_ip: {127, 0, 0, 1},
   hot_server_port: 4001,

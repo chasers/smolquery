@@ -379,6 +379,19 @@ What that ack means:
   unbounded 6 s p50 becomes p99 ≤ the budget ([benchmarks](benchmarks.md)).
   The ingest edge turns both errors into a 429. The prediction becomes the
   `retry-after` value.
+- **The unsealed backlog is bounded too** (T-457). Those two bounds cover
+  what is arriving. Nothing bounded what had arrived and not yet sealed, and
+  one stalled seal path grew a node's hot manifest to 331,000 entries. The
+  boot peak of adopting a backlog scales with it, so every container limit
+  was temporary. `HotManifest.depth/2` keeps the unsealed entries and bytes
+  per table and per node as O(1) counters. A commit is refused with
+  `{:error, {:backlog_full, refusal}}` once the node's count reaches
+  `backlog_max_entries`, derived from the container's memory limit so a
+  node can always adopt what it holds, or its bytes reach
+  `backlog_max_bytes` when that is set. The refusal names the table and
+  the depth, and the ingest edge turns it into a 429 with `retry-after: 5`.
+  The valve closes on ingest only. Sealing keeps draining a node that
+  refuses, and a replicated shipment from a table's owner is never refused.
 - **One table, one node.** `Smolquery.BufferService.Ring` maps a table to its
   owning buffer node by consistent hashing. A call for a table this node does
   not own is forwarded to the owner, not refused. In a cluster, the ring
@@ -1272,6 +1285,12 @@ fail criterion for any sustained-rate measurement.
 
 `smolquery_hot_manifest_index_entries_total{change}` is the one series that says
 whether a node's hot manifest index is in steady state or growing (T-320).
+`smolquery_buffer_unsealed_entries` and `smolquery_buffer_unsealed_bytes` are
+the depth itself, as gauges the manifest republishes on every change, beside
+`smolquery_buffer_unsealed_entries_limit`, the count the node refuses commits
+at (T-457). Alert on the ratio well before it reaches one;
+`smolquery_buffer_backlog_refused_rows_total` counts the rows refused once it
+has.
 
 Memory is the one family of gauges beside the `_info` shapes (T-451).
 `Smolquery.MemoryMetrics` samples every 250 ms what the cgroup charges the

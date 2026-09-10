@@ -79,6 +79,24 @@ defmodule Smolquery.BufferService.RuntimeTest do
       end
     end
 
+    test "the backlog ceilings default to nil, and refuse anything but a positive integer",
+         %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+
+      assert runtime.backlog_max_entries == nil
+      assert runtime.backlog_max_bytes == nil
+
+      for {key, value} <- [
+            backlog_max_entries: 0,
+            backlog_max_bytes: -1,
+            backlog_max_entries: "1"
+          ] do
+        assert_raise ArgumentError, ~r/#{key}/, fn ->
+          Runtime.new([{:name, unique_name()}, {:dir, dir}, {key, value}])
+        end
+      end
+    end
+
     test "claim valve factor defaults to 16 and takes an override", %{tmp_dir: dir} do
       assert Runtime.new(name: unique_name(), dir: dir).claim_valve_factor == 16
 
@@ -202,6 +220,34 @@ defmodule Smolquery.BufferService.RuntimeTest do
         )
 
       assert Runtime.write_engine_budget(limited)[:memory_limit] == "512MB"
+    end
+  end
+
+  describe "backlog_max_entries/2 and with_backlog_ceiling/1 (T-457)" do
+    test "an explicit ceiling wins over the cgroup", %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir, backlog_max_entries: 12_345)
+
+      assert Runtime.backlog_max_entries(runtime, {:ok, 6_442_450_944}) == 12_345
+    end
+
+    test "derives the ceiling from the container limit over twice the boot cost of an entry",
+         %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+      per_entry = Runtime.boot_bytes_per_entry()
+
+      assert Runtime.backlog_max_entries(runtime, {:ok, 6_442_450_944}) ==
+               div(6_442_450_944, 2 * per_entry)
+
+      assert Runtime.backlog_max_entries(runtime, {:ok, 1}) == 4_096
+      assert Runtime.backlog_max_entries(runtime, :none) == 200_000
+    end
+
+    test "with_backlog_ceiling/1 resolves the field once, and a bare runtime admits everything",
+         %{tmp_dir: dir} do
+      runtime = Runtime.new(name: unique_name(), dir: dir)
+
+      assert runtime.backlog_max_entries == nil
+      assert is_integer(Runtime.with_backlog_ceiling(runtime).backlog_max_entries)
     end
   end
 
