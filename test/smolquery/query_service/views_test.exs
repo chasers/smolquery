@@ -6,7 +6,7 @@ defmodule Smolquery.QueryService.ViewsTest do
   alias Smolquery.Schema.Field
 
   describe "sources_select/2 (PL-62)" do
-    test "projects each field-id group by id, reads unidentified sources by name, and unions by name" do
+    test "projects each field-id group by id and reads it lazily; unidentified sources read by name, unioned" do
       schema =
         Schema.new!([Field.new!("id", :int64, id: 1), Field.new!("ts_int", :string, id: 3)])
 
@@ -20,10 +20,10 @@ defmodule Smolquery.QueryService.ViewsTest do
                ~s|SELECT * FROM read_parquet(['/sealed/legacy.parquet'], union_by_name := true)| <>
                  " UNION ALL BY NAME " <>
                  ~s|SELECT CAST("id" AS BIGINT) AS "id", CAST(NULL AS VARCHAR) AS "ts_int" | <>
-                 ~s|FROM read_parquet(['http://a/1.parquet'], union_by_name := true)| <>
+                 ~s|FROM read_parquet(['http://a/1.parquet'])| <>
                  " UNION ALL BY NAME " <>
                  ~s|SELECT CAST("id" AS BIGINT) AS "id", CAST("ts_int" AS VARCHAR) AS "ts_int" | <>
-                 ~s|FROM read_parquet(['http://a/2.parquet'], union_by_name := true)|
+                 ~s|FROM read_parquet(['http://a/2.parquet'])|
     end
 
     test "a sealed file without ids is projected as of its registration snapshot; later columns read NULL" do
@@ -43,7 +43,7 @@ defmodule Smolquery.QueryService.ViewsTest do
                  ~s|FROM read_parquet(['/sealed/old.parquet'], union_by_name := true)| <>
                  " UNION ALL BY NAME " <>
                  ~s|SELECT CAST("id" AS BIGINT) AS "id", CAST("label" AS VARCHAR) AS "label" | <>
-                 ~s|FROM read_parquet(['/sealed/new.parquet'], union_by_name := true)|
+                 ~s|FROM read_parquet(['/sealed/new.parquet'])|
     end
 
     test "files that agree share one scan" do
@@ -57,7 +57,7 @@ defmodule Smolquery.QueryService.ViewsTest do
 
       assert Views.sources_select(schema, sources) ==
                ~s|SELECT CAST("id" AS BIGINT) AS "id" | <>
-                 ~s|FROM read_parquet(['http://a/1.parquet', 'http://a/2.parquet'], union_by_name := true)|
+                 ~s|FROM read_parquet(['http://a/1.parquet', 'http://a/2.parquet'])|
     end
   end
 

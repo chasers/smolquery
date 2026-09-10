@@ -383,8 +383,9 @@ defmodule Smolquery.QueryService.Planner do
   # An unordered, unfiltered `LIMIT n` is answered by any n rows, so the plan
   # hands DuckDB the fewest sources that hold them (T-449): the sealed tier
   # covers what its row count at the snapshot says it holds, the newest
-  # micro-segments the rest. `union_by_name` makes DuckDB open every listed
-  # file before the first row, so the LIMIT alone could never stop early.
+  # micro-segments the rest. A read that unions files by name makes DuckDB
+  # open every listed file before the first row (T-453 made the id-grouped
+  # read lazy; the trim still spares the manifest fetch and the URL list).
   defp trimmed(hot, _tables, nil), do: hot
 
   defp trimmed(hot, tables, %{ref: ref, limit: limit}) do

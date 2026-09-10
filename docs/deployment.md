@@ -101,6 +101,18 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The hot read is lazy for files with column ids (T-453)
+
+The planner's view reads each group of same-id micro-segments with a plain
+`read_parquet([...])`, no `union_by_name`: DuckDB binds the schema from the
+first file and opens the rest as the scan reaches them, so a `LIMIT` over a deep
+hot tier stops after a handful of files for every statement shape, and a full
+scan no longer pays every footer up front (`bench/results/planner.md`: a
+`WHERE … LIMIT 10` over 8,000 hot files 3.8 s → 0.4 s, a `count(*)` 51 s → 7 s).
+Files written before column ids (PL-62) still read by name, eagerly; T-455
+removes that path, after which a pre-id hot file fails the query with a clear
+error rather than being read.
+
 ### DuckDB returns the encode's pages: allocator_background_threads on by default (T-452)
 
 Every DuckDB instance now opens with `allocator_background_threads = true`, and

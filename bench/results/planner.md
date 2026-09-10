@@ -105,3 +105,36 @@ not. At 3,000 files the same preview took 3.7 s before; at 500, 0.9 s.
 What this does not cover: a `WHERE` still fetches every entry with stats and
 hands DuckDB every surviving file, which is T-328's remaining scope — scoping
 the planner's fetch by ids or by the pruner's needs.
+
+## Follow-up: the id-grouped hot read is lazy (T-453, 2026-09-10)
+
+T-449 trimmed the file list for the bare unordered `LIMIT` because the hot
+read's `union_by_name := true` made DuckDB open every listed footer before its
+first row. Every other statement shape — a WHERE, a function in the select
+list, an ORDER BY the Top-N probe cannot bound — still listed and opened every
+file. Since PL-62 the planner groups hot sources by the column ids their files
+were written under, and every file in one group has the same columns in the
+same order and types, so the group's `read_parquet` needs no `union_by_name`:
+DuckDB binds the schema from the first file and opens the rest as the scan
+reaches them.
+
+Same harness as T-449 (8,000 micro-segments of 20 rows × 10 columns, ids
+stamped, served over HTTP; a real DuckLake for the sealed tier; through
+`QueryService.Client`, single engine):
+
+```
+statement over 8,000 hot files            eager (union_by_name)   lazy (T-453)
+  SELECT * … LIMIT 50  (any-N trim, 3 files)        200 ms            194 ms
+  SELECT * … WHERE c1 LIKE 'v1-%' LIMIT 10        3,779 ms            409 ms
+  SELECT id, lower(c1) … LIMIT 10                 3,649 ms            394 ms
+  SELECT count(*) …                              50,579 ms          7,203 ms
+  SELECT count(c1) …                             40,056 ms          6,616 ms
+```
+
+The `LIMIT` shapes the any-N bound could not cover drop ~9×, and the full
+scans drop ~7×: the eager read paid 8,000 serial footer round trips before a
+single parallel scan could start, while the lazy read overlaps them with the
+scan. The ~400 ms floor on the `LIMIT` shapes is the planner's own work —
+the stats-free manifest fetch and an 8,000-URL statement — which T-328 owns.
+The legacy groups (files without ids) still union by name and stay eager;
+T-455 removes them.
