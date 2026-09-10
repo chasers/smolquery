@@ -71,7 +71,9 @@ defmodule Smolquery.MemoryMetricsTest do
          %{tmp_dir: dir} do
       cgroup = fake_cgroup(dir, 500, max_events: 7)
 
-      start_supervised!({MemoryMetrics, name: :t451_gauges, cgroup_root: cgroup, interval_ms: 10})
+      start_supervised!(
+        {MemoryMetrics, enabled: true, name: :t451_gauges, cgroup_root: cgroup, interval_ms: 10}
+      )
 
       assert Eventually.until(fn ->
                Telemetry.render() =~
@@ -98,7 +100,8 @@ defmodule Smolquery.MemoryMetricsTest do
       cgroup = fake_cgroup(dir, 500)
 
       start_supervised!(
-        {MemoryMetrics, name: :t451_peak, cgroup_root: cgroup, interval_ms: 10, window_ms: 300}
+        {MemoryMetrics,
+         enabled: true, name: :t451_peak, cgroup_root: cgroup, interval_ms: 10, window_ms: 300}
       )
 
       File.write!(Path.join(cgroup, "memory.current"), "#{900 * @mib}\n")
@@ -125,7 +128,10 @@ defmodule Smolquery.MemoryMetricsTest do
     test "without a cgroup filesystem the resident set is what it publishes", %{tmp_dir: dir} do
       start_supervised!(
         {MemoryMetrics,
-         name: :t451_no_cgroup, cgroup_root: Path.join(dir, "nowhere"), interval_ms: 10}
+         enabled: true,
+         name: :t451_no_cgroup,
+         cgroup_root: Path.join(dir, "nowhere"),
+         interval_ms: 10}
       )
 
       assert Eventually.until(fn -> Telemetry.render() =~ "smolquery_memory_rss_peak_bytes " end)

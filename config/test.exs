@@ -8,6 +8,10 @@ config :smolquery, roles: []
 
 config :smolquery, Smolquery.MetricsServer, port: 0
 
+# The tests that exercise the memory sampler start their own instances over a
+# fake cgroup; the node's own would race them on the same unlabelled series.
+config :smolquery, Smolquery.MemoryMetrics, enabled: false
+
 config :smolquery, SmolqueryApi.Endpoint, http: [ip: {127, 0, 0, 1}, port: 0], server: false
 
 config :smolquery, SmolqueryPg, ip: {127, 0, 0, 1}, port: 0
