@@ -122,6 +122,32 @@ defmodule Smolquery.StorageService.Compactor do
   stays a candidate and merges with future arrivals. It never re-merges
   alone; `compact_min_inputs` gates that.
 
+  ## A failing table backs off instead of re-running every sweep
+
+  "The sweep is the retry" is the right shape for a crash, and the wrong
+  one for a merge that fails the same way every time. A group that OOMs
+  under a row cap already at its floor, or whose put keeps failing, re-ran
+  every `compact_interval_ms` for as long as it failed, and each attempt
+  was minutes of merge that held a catalog connection: on the sandbox the
+  seals queued behind it timed out, so a compacting node could not seal and
+  the buffer backlog it was meant to drain grew instead (T-458). Now a
+  failed table waits `compact_backoff_base_ms`, doubling per consecutive
+  failure up to `compact_backoff_max_ms`, before the sweep looks at it
+  again — `adjusted_cooldowns/5` — and a success clears the wait. The
+  quarantine (below) is the stop for a *corrupt* input; this is the pace
+  for everything else.
+
+  ## Compaction commits through its own catalog connection
+
+  The catalog engine carries a connection reserved for compaction
+  (`Runtime.compaction_catalog/1`, T-458). The swap's transaction holds its
+  connection for as long as `ducklake_add_data_files` takes to read the
+  merged file's footer, and `Merge.compact/5` reads the schema and the
+  snapshot's file list through the same handle; on the one connection every
+  seal commit shared, `SELECT 1` waited 34.77 s behind a compacting node
+  against the seal's 30 s call timeout. Sealing's catalog calls stay on the
+  first connection, where nothing of compaction's queues ahead of them.
+
   ## Compaction runs on its own engine, and recycles it after a call exit
 
   Sizing and merging go through `Runtime.compact_engine/1`, never the seal
@@ -174,12 +200,19 @@ defmodule Smolquery.StorageService.Compactor do
   alias Smolquery.StorageService.Runtime
 
   @enforce_keys [:runtime]
-  defstruct [:runtime, row_caps: %{}, quarantine: %{}, quarantined_groups: MapSet.new()]
+  defstruct [
+    :runtime,
+    row_caps: %{},
+    quarantine: %{},
+    quarantined_groups: MapSet.new(),
+    cooldowns: %{}
+  ]
 
   @group_max_staging_chunks 64
   @stage_chunk_target_bytes 67_108_864
   @engine_recycle_wait_ms 5_000
   @quarantine_after 5
+  @stuck_after 5
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -187,10 +220,18 @@ defmodule Smolquery.StorageService.Compactor do
 
   @doc """
   Starts the compactor for a runtime.
+
+  The compactor reads and commits through the catalog engine's compaction
+  connection (`Runtime.compaction_catalog/1`), taken here once, so a swap
+  holding it for minutes queues no seal commit behind it (T-458).
   """
   @spec start_link(Runtime.t()) :: GenServer.on_start()
   def start_link(%Runtime{} = runtime) do
-    runtime = Runtime.with_compact_max_rows(runtime)
+    runtime = %{
+      Runtime.with_compact_max_rows(runtime)
+      | catalog: Runtime.compaction_catalog(runtime)
+    }
+
     GenServer.start_link(__MODULE__, runtime, name: Runtime.compactor(runtime.name))
   end
 
@@ -198,9 +239,11 @@ defmodule Smolquery.StorageService.Compactor do
   Sweeps now, without waiting for the interval.
 
   Reports what was compacted and what failed, per table, plus the groups this
-  node currently quarantines — the observable form of the policy above, and
-  what tests assert on. A wedged table shows up as a non-empty `quarantined`
-  even on a sweep where nothing else happens.
+  node currently quarantines and the tables it left out of this sweep
+  because their last compaction failed (`cooling`, T-458) — the observable
+  form of the policy above, and what tests assert on. A wedged table shows
+  up as a non-empty `quarantined` even on a sweep where nothing else
+  happens.
   """
   @spec sweep(atom(), timeout()) :: {:ok, map()} | {:error, term()}
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
@@ -209,9 +252,11 @@ defmodule Smolquery.StorageService.Compactor do
     runtime = state.runtime
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
+      {cooling, due} = Enum.split_with(tables, &cooling_down?(state.cooldowns, &1))
+
       outcomes =
         Enum.map(
-          tables,
+          due,
           &compact_table(runtime, state.row_caps, state.quarantined_groups, &1)
         )
 
@@ -225,10 +270,13 @@ defmodule Smolquery.StorageService.Compactor do
           @quarantine_after
         )
 
+      cooldowns = adjusted_cooldowns(state.cooldowns, due, outcomes, runtime)
+
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
         failed: for({:failed, failure} <- outcomes, do: failure),
-        quarantined: quarantined_groups |> MapSet.to_list() |> Enum.sort()
+        quarantined: quarantined_groups |> MapSet.to_list() |> Enum.sort(),
+        cooling: Enum.sort(cooling)
       }
 
       {:ok, report,
@@ -236,10 +284,101 @@ defmodule Smolquery.StorageService.Compactor do
          state
          | row_caps: row_caps,
            quarantine: quarantine,
-           quarantined_groups: quarantined_groups
+           quarantined_groups: quarantined_groups,
+           cooldowns: cooldowns
        }}
     end
   end
+
+  @doc """
+  The per-table cooldowns after a sweep — a failing table's compaction backs
+  off instead of re-running every sweep (T-458).
+
+  The sweep is the compactor's retry, and a table whose merge fails the same
+  way every time — an OOM the row cap cannot fix, a store put that keeps
+  failing — used to re-run it every `compact_interval_ms` for as long as it
+  failed: minutes of merge and a held catalog connection per attempt, with
+  no path out but the operator. Every table in `swept` that failed backs
+  off; every other swept table's cooldown is cleared, so one success — or
+  nothing left to do — starts the next failure's count from one. Tables
+  the sweep left out because they were cooling are not in `swept` and keep
+  their entry. The wait is `Smolquery.Backoff.exponential/3` over the
+  runtime's `compact_backoff_base_ms` and `compact_backoff_max_ms`; a base
+  of `0` puts `retry_at` in the past and never leaves a table out.
+
+  At `#{@stuck_after}` consecutive failures the log escalates to an error,
+  the way the sealer's does at its stuck threshold: the difference between
+  "retrying" and "stalled" is what an operator needs, not a stop.
+  `retry_at` is monotonic time, so a clock step cannot shorten or extend a
+  cooldown. The cooldowns live in the compactor's state: a restart forgets
+  them, and the first failure after it starts the count again.
+  """
+  @spec adjusted_cooldowns(
+          %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}},
+          [Catalog.table_ref()],
+          [term()],
+          Runtime.t(),
+          integer()
+        ) :: %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}}
+  def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, now_ms \\ now_ms()) do
+    failed = MapSet.new(for {:failed, %{table: table_ref}} <- outcomes, do: table_ref)
+
+    Enum.reduce(swept, cooldowns, fn table_ref, acc ->
+      if MapSet.member?(failed, table_ref),
+        do: back_off(acc, table_ref, runtime, now_ms),
+        else: Map.delete(acc, table_ref)
+    end)
+  end
+
+  defp back_off(cooldowns, table_ref, runtime, now_ms) do
+    consecutive =
+      case cooldowns do
+        %{^table_ref => %{consecutive: consecutive}} -> consecutive + 1
+        _first -> 1
+      end
+
+    wait =
+      Smolquery.Backoff.exponential(
+        consecutive,
+        runtime.compact_backoff_base_ms,
+        runtime.compact_backoff_max_ms
+      )
+
+    :telemetry.execute(
+      [:smolquery, :compact, :backoff],
+      %{consecutive: consecutive, wait_ms: wait},
+      %{table_ref: table_ref}
+    )
+
+    log_backoff(table_ref, consecutive, wait)
+
+    Map.put(cooldowns, table_ref, %{consecutive: consecutive, retry_at: now_ms + wait})
+  end
+
+  defp log_backoff(_table_ref, _consecutive, 0), do: :ok
+
+  defp log_backoff(table_ref, consecutive, wait) when consecutive >= @stuck_after do
+    Logger.error(
+      "compaction of #{inspect(table_ref)} has failed #{consecutive} times in a row; " <>
+        "next attempt in #{wait} ms — compaction on this table is stalled (T-458)"
+    )
+  end
+
+  defp log_backoff(table_ref, consecutive, wait) do
+    Logger.warning(
+      "compaction of #{inspect(table_ref)} backs off #{wait} ms " <>
+        "(#{consecutive} consecutive failure(s))"
+    )
+  end
+
+  defp cooling_down?(cooldowns, table_ref) do
+    case cooldowns do
+      %{^table_ref => %{retry_at: retry_at}} -> now_ms() < retry_at
+      _not_cooling -> false
+    end
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   @row_cap_floor 65_536
   @relax_patience_start 2

@@ -46,14 +46,14 @@ defmodule Smolquery.StorageService.RuntimeTest do
 
       assert %Catalog{impl: Catalog.DuckLake, config: %{engine: engine}} = runtime.catalog
       assert engine == Runtime.catalog_engine(__MODULE__.Lake)
-      assert runtime.catalog_opts == []
+      assert runtime.catalog_opts == [connections: Runtime.catalog_connections()]
     end
 
     test "passes catalog options through for the supervisor to start" do
       opts = [metadata: "sqlite:/tmp/c.sqlite", data_path: "/tmp/lake"]
       runtime = Runtime.new(name: __MODULE__.LakeOpts, catalog: opts)
 
-      assert runtime.catalog_opts == opts
+      assert runtime.catalog_opts == [connections: Runtime.catalog_connections()] ++ opts
     end
 
     test "takes a catalog handle outright, and then starts none" do
@@ -179,6 +179,36 @@ defmodule Smolquery.StorageService.RuntimeTest do
       runtime = Runtime.new(name: __MODULE__.InheritedLimit)
 
       assert Runtime.engine_memory_limit(runtime, :none) == nil
+    end
+  end
+
+  describe "compaction_catalog/1 (T-458)" do
+    test "a lake this service runs starts with the compaction connection beside the first" do
+      runtime = Runtime.new(name: __MODULE__.CompactionCatalog)
+      engine = Runtime.catalog_engine(runtime.name)
+
+      assert runtime.catalog_opts[:connections] == Runtime.catalog_connections()
+      assert runtime.catalog.config.engine == engine
+      assert Runtime.compaction_catalog(runtime).config.engine == {engine, 2}
+    end
+
+    test "the compaction backoff defaults to two sweeps, doubling up to four hours" do
+      runtime = Runtime.new(name: __MODULE__.CompactBackoff)
+
+      assert runtime.compact_backoff_base_ms == 2 * runtime.compact_interval_ms
+      assert runtime.compact_backoff_max_ms == 14_400_000
+    end
+
+    test "refuses a compaction backoff without a non-negative base and a positive ceiling" do
+      for opts <- [
+            [compact_backoff_base_ms: -1],
+            [compact_backoff_base_ms: "600000"],
+            [compact_backoff_max_ms: 0]
+          ] do
+        assert_raise ArgumentError, ~r/unsupported compact backoff/, fn ->
+          Runtime.new([name: __MODULE__.BadCompactBackoff] ++ opts)
+        end
+      end
     end
   end
 

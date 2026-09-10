@@ -72,6 +72,10 @@ defmodule Smolquery.Telemetry do
                                           5 times (a Compactor module constant, not a
                                           runtime setting) and stopped being planned on
                                           this node; alert on rate > 0 (T-310)
+      [:smolquery, :compact, :backoff]    %{consecutive, wait_ms}, meta %{table_ref: ref}
+                                          — a table whose compaction failed and is left
+                                          out of the sweep for wait_ms, doubling per
+                                          consecutive failure (T-458)
       [:smolquery, :hot_manifest, :change] %{entries},
                                           meta %{change: :added | :retired | :reaped |
                                           :recovered}
@@ -206,6 +210,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :buffer, :claim_failure],
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
+    [:smolquery, :compact, :backoff],
     [:smolquery, :hot_manifest, :change],
     [:smolquery, :hot_manifest, :compaction],
     [:smolquery, :hot_manifest, :read],
@@ -257,6 +262,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_quarantined_segments_total" =>
       "Sealed segments quarantined after repeated compaction failures; a nonzero rate " <>
         "means a table needs an operator to drop or replace a segment (T-310).",
+    "smolquery_compaction_backoffs_total" =>
+      "Compactions of a table deferred after a failed one; a sustained rate means a " <>
+        "table's merge keeps failing and the sweep is waiting longer between attempts (T-458).",
     "smolquery_hot_manifest_index_entries_total" =>
       "Entries entering and leaving a node's manifest index, by change. " <>
         "`added + recovered - reaped` is the resident entry count — the index's real " <>
@@ -594,6 +602,10 @@ defmodule Smolquery.Telemetry do
       {"smolquery_compaction_quarantined_segments_total", []},
       length(Map.get(meta, :paths, []))
     )
+  end
+
+  def handle_event([:smolquery, :compact, :backoff], _measurements, _meta, nil) do
+    bump({"smolquery_compaction_backoffs_total", []}, 1)
   end
 
   def handle_event([:smolquery, :hot_manifest, :change], measurements, meta, nil) do

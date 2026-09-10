@@ -379,6 +379,22 @@ if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do
   config :smolquery, Smolquery.StorageService, compact_engine_memory_limit: limit
 end
 
+# T-458: a table whose compaction keeps failing is left out of the sweep for
+# `min(base * 2^(n-1), max)` after n consecutive failures, so a merge that
+# OOMs every time does not re-run every interval. The base may be 0 (no
+# cooldown); the ceiling must be positive, as with the seal backoff.
+if ms = System.get_env("SMOLQUERY_COMPACT_BACKOFF_BASE_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_backoff_base_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_BACKOFF_BASE_MS", ms)
+end
+
+if ms = System.get_env("SMOLQUERY_COMPACT_BACKOFF_MAX_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_backoff_max_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_BACKOFF_MAX_MS", ms)
+end
+
 if bytes = System.get_env("SMOLQUERY_MAX_BUFFERED_BYTES") do
   config :smolquery, Smolquery.BufferService,
     max_buffered_bytes:

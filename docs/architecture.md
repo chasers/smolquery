@@ -804,6 +804,21 @@ previous sweep's still-undersized output.
   from the sorted input ids. That is the same identity rule sealing uses. A
   compaction that crashed before its swap re-plans the same group into the
   same key on the next sweep.
+- **The swap commits through its own catalog connection** (T-458). The
+  catalog engine carries two connections. Seals, retention and GC use the
+  first; the compactor takes the second at start. The swap's transaction
+  holds a connection while DuckLake reads the merged file's footer, and on
+  one shared connection `SELECT 1` waited 34.77 s behind a compacting node
+  while every seal's catalog call timed out at 30 s. Sealing never queues
+  behind compaction now.
+- **A failing table backs off** (T-458). A merge that fails the same way
+  every sweep, an OOM at the row cap's floor for instance, used to re-run
+  every `compact_interval_ms`. The table now waits `compact_backoff_base_ms`,
+  doubling per consecutive failure up to `compact_backoff_max_ms`, before
+  the sweep looks at it again. A success clears the wait. The log escalates
+  to an error at five consecutive failures, and
+  `smolquery_compaction_backoffs_total` counts every deferral. Quarantine
+  is the stop for a corrupt input; this is the pace for everything else.
 
 ### Clustering key
 

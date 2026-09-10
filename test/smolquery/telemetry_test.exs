@@ -435,6 +435,18 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_compaction_quarantined_segments_total") == before_quarantined + 2
   end
 
+  test "counts every compaction deferral (T-458)" do
+    before_backoffs = value("smolquery_compaction_backoffs_total")
+
+    :telemetry.execute(
+      [:smolquery, :compact, :backoff],
+      %{consecutive: 1, wait_ms: 600_000},
+      %{table_ref: {"analytics", "events"}}
+    )
+
+    assert value("smolquery_compaction_backoffs_total") == before_backoffs + 1
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

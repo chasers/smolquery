@@ -70,6 +70,28 @@ defmodule Smolquery.StorageService.Runtime do
   `seal_retry_ms`'s default, so the first failure adds nothing. A base of
   `0` disables the cooldown.
 
+  `compact_backoff_base_ms` and `compact_backoff_max_ms` pace a table whose
+  compaction keeps failing the same way (T-458). The compactor's retry is
+  its next sweep, so a merge that OOMs on every attempt re-ran every
+  `compact_interval_ms` for as long as it kept failing — on the sandbox,
+  minutes-long merges held the catalog connection more or less
+  permanently, and the seals queued behind them timed out. After `n`
+  consecutive failures the table is left out of the sweep until
+  `min(compact_backoff_base_ms * 2^(n-1), compact_backoff_max_ms)` has
+  passed since the last one; a success clears the cooldown. The base
+  defaults to two sweep intervals, so the first failure costs one skipped
+  sweep, and the ceiling to four hours. A base of `0` disables the
+  cooldown. The undersized run is still there when the cooldown ends, so
+  the cost is delay on a table already failing, never lost work.
+
+  The catalog engine carries two connections: the first
+  for seal commits, retention, GC and every other caller, the last for
+  compaction alone (`compaction_catalog/1`). An `Adbc.Connection` serializes
+  its callers, and a compaction swap holds one for as long as
+  `ducklake_add_data_files` takes to read the merged file's footer — on one
+  connection, `SELECT 1` waited 34.77 s behind a compacting node against the
+  seal's 30 s call timeout, so a compacting node could not seal (T-458).
+
   `ring` is the static node list `Smolquery.StorageService.Routing` falls back
   to — the storage-side ownership ring's node set once clustering is off, or
   before any node has joined `Smolquery.Cluster.PgGroup`'s `:pg` group for
@@ -258,6 +280,8 @@ defmodule Smolquery.StorageService.Runtime do
     compact_max_rows: nil,
     compact_bucket_ms: 3_600_000,
     compact_engine_memory_limit: nil,
+    compact_backoff_base_ms: 600_000,
+    compact_backoff_max_ms: 14_400_000,
     merge_engine: nil,
     merge_inputs_per_call: 12,
     merge_copy_timeout_ms: 300_000,
@@ -295,6 +319,8 @@ defmodule Smolquery.StorageService.Runtime do
           compact_max_rows: pos_integer() | nil,
           compact_bucket_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
+          compact_backoff_base_ms: non_neg_integer(),
+          compact_backoff_max_ms: pos_integer(),
           merge_engine: Smolquery.Engine.handle() | nil,
           merge_inputs_per_call: pos_integer(),
           merge_copy_timeout_ms: pos_integer(),
@@ -327,6 +353,8 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_max_rows,
     :compact_bucket_ms,
     :compact_engine_memory_limit,
+    :compact_backoff_base_ms,
+    :compact_backoff_max_ms,
     :merge_inputs_per_call,
     :merge_copy_timeout_ms,
     :merge_staging_timeout_ms,
@@ -335,6 +363,8 @@ defmodule Smolquery.StorageService.Runtime do
     :snapshot_keep_ms,
     :handoff
   ]
+
+  @catalog_connections 2
 
   @codecs [:zstd, :snappy, :gzip, :uncompressed]
 
@@ -355,8 +385,7 @@ defmodule Smolquery.StorageService.Runtime do
     config = Keyword.merge(Application.get_env(:smolquery, Smolquery.StorageService, []), opts)
     name = Keyword.get(config, :name, Smolquery.StorageService)
 
-    {catalog, catalog_opts} =
-      Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
+    {catalog, catalog_opts} = resolve_catalog(Keyword.get(config, :catalog), name)
 
     %__MODULE__{
       name: name,
@@ -373,11 +402,42 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compact_bucket_ms()
     |> validate_compact_inputs()
     |> validate_compact_max_rows()
+    |> validate_compact_backoff()
     |> validate_merge_inputs_per_call()
     |> validate_merge_timeouts()
   end
 
+  # A lake this service runs itself starts with the compaction connection
+  # beside the first one; a catalog handed in outright is the caller's, and
+  # its engine must carry `catalog_connections/0` connections for the
+  # compactor to commit through (T-458).
+  defp resolve_catalog(catalog, name) do
+    case Catalog.DuckLake.resolve(catalog, catalog_engine(name)) do
+      {catalog, nil} -> {catalog, nil}
+      {catalog, opts} -> {catalog, Keyword.put(opts, :connections, @catalog_connections)}
+    end
+  end
+
   use Smolquery.Runtime
+
+  @doc """
+  How many connections the catalog engine carries: one for every caller on
+  the seal side, and one more that compaction alone commits through (T-458).
+  """
+  @spec catalog_connections() :: pos_integer()
+  def catalog_connections, do: @catalog_connections
+
+  @doc """
+  The catalog handle compaction reads and commits through: the last of the
+  catalog engine's `catalog_connections/0` connections, so a swap's
+  minutes-long hold — `ducklake_add_data_files` reads the merged file's
+  footer inside the transaction — queues no seal commit behind it (T-458).
+  The compactor takes it once at start; every other caller keeps the
+  runtime's `catalog`, which is the first connection.
+  """
+  @spec compaction_catalog(t()) :: Catalog.t()
+  def compaction_catalog(%__MODULE__{catalog: catalog}),
+    do: Catalog.on_connection(catalog, @catalog_connections)
 
   @doc """
   The DuckDB memory limit the merge engine starts with.
@@ -601,6 +661,19 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported compact_engine_memory_limit: #{inspect(limit)} " <>
             "(expected a DuckDB size string like \"1GiB\", or nil)"
+  end
+
+  defp validate_compact_backoff(
+         %__MODULE__{compact_backoff_base_ms: base, compact_backoff_max_ms: max} = runtime
+       )
+       when is_integer(base) and base >= 0 and is_integer(max) and max > 0,
+       do: runtime
+
+  defp validate_compact_backoff(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported compact backoff: base #{inspect(runtime.compact_backoff_base_ms)}, " <>
+            "max #{inspect(runtime.compact_backoff_max_ms)} " <>
+            "(expected a non-negative base and a positive ceiling, in milliseconds)"
   end
 
   defp validate_merge_inputs_per_call(%__MODULE__{merge_inputs_per_call: per_call} = runtime)

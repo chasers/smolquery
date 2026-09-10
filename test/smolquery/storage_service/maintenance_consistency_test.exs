@@ -74,7 +74,10 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
 
     start_supervised!(
       {DuckLake,
-       name: StorageRuntime.catalog_engine(storage), metadata: metadata, data_path: data_path},
+       name: StorageRuntime.catalog_engine(storage),
+       metadata: metadata,
+       data_path: data_path,
+       connections: StorageRuntime.catalog_connections()},
       id: StorageRuntime.catalog_engine(storage)
     )
 

@@ -21,6 +21,16 @@ defmodule Smolquery.StorageService.Supervisor do
   each just-uploaded segment back when a commit registers it (DuckLake's
   add-data-files collects the file's footer stats).
 
+  The catalog engine carries two connections
+  (`Smolquery.StorageService.Runtime.catalog_connections/0`, T-458): the
+  first for seal commits and every other caller, the second for compaction
+  alone. Separate engines kept a compaction `COPY` off the catalog, but the
+  swap's own catalog transaction still held the one connection for as long
+  as DuckLake took to read the merged file's footer, and on the sandbox
+  `SELECT 1` waited 34.77 s behind a compacting node while every seal's
+  catalog call timed out at 30 s. The compactor takes the second connection
+  once, at start (`Smolquery.StorageService.Runtime.compaction_catalog/1`).
+
   The merge engine carries one connection per seal slot
   (`max_concurrent_seals`, T-299). An `Adbc.Connection` serializes its
   callers, so on a single connection two "concurrent" seals only
@@ -126,7 +136,8 @@ defmodule Smolquery.StorageService.Supervisor do
         "storage merge engine",
         Runtime.engine_memory_limit(runtime),
         runtime.engine_memory_limit,
-        "half the cgroup memory limit"
+        "half the cgroup memory limit",
+        Runtime.engine_memory_limit(%{runtime | engine_memory_limit: nil})
       )
 
     [
@@ -141,7 +152,8 @@ defmodule Smolquery.StorageService.Supervisor do
         "storage compaction engine",
         Runtime.compact_engine_memory_limit(runtime),
         runtime.compact_engine_memory_limit,
-        "a quarter of the cgroup memory limit"
+        "a quarter of the cgroup memory limit",
+        Runtime.compact_engine_memory_limit(%{runtime | compact_engine_memory_limit: nil})
       )
 
     [{:name, Runtime.compact_engine(runtime.name)} | shared_engine_opts(runtime)] ++
@@ -155,10 +167,21 @@ defmodule Smolquery.StorageService.Supervisor do
     ]
   end
 
-  defp memory_limit(_label, nil, _configured, _derivation), do: []
+  # A configured limit is logged beside what the derivation would have
+  # given, because the two drift apart silently: the sandbox ran compaction
+  # at a configured 512 MiB in a 6 Gi container whose derived quarter was
+  # 1536 MiB, and every merge of one table OOMed while five gigabytes sat
+  # idle (T-458).
+  defp memory_limit(_label, nil, _configured, _derivation, _derived), do: []
 
-  defp memory_limit(label, limit, configured, derivation) do
-    source = if configured, do: "configured", else: derivation
+  defp memory_limit(label, limit, configured, derivation, derived) do
+    source =
+      cond do
+        is_nil(configured) -> derivation
+        is_nil(derived) -> "configured"
+        true -> "configured; #{derivation} would be #{derived}"
+      end
+
     Logger.info("#{label} memory_limit=#{limit} (#{source})")
 
     [memory_limit: limit]

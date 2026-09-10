@@ -72,6 +72,25 @@ defmodule Smolquery.StorageService.SupervisorTest do
   end
 
   @tag :tmp_dir
+  test "the catalog engine carries a connection reserved for compaction (T-458)", %{name: name} do
+    catalog_engine = Runtime.catalog_engine(name)
+    compaction = Runtime.catalog_connections()
+
+    assert is_pid(Process.whereis(Engine.connection_name(catalog_engine, compaction)))
+    assert {:ok, runtime} = Runtime.fetch(name)
+    assert Runtime.compaction_catalog(runtime).config.engine == {catalog_engine, compaction}
+
+    seal_side = Process.whereis(Engine.connection_name(catalog_engine))
+    :ok = :sys.suspend(seal_side)
+
+    try do
+      assert {:ok, _result} = Engine.query({catalog_engine, compaction}, "SELECT 1")
+    after
+      :ok = :sys.resume(seal_side)
+    end
+  end
+
+  @tag :tmp_dir
   test "a seal signal reaches the handoff through the whole subtree", %{name: name} do
     Sealer.seal_ready(name, @events, %{ids: ["a"], keys: ["k"]})
 
