@@ -581,4 +581,29 @@ defmodule Smolquery.EngineTest do
         pid
     end
   end
+
+  describe "the allocator's background thread (T-452)" do
+    test "is on by default, so DuckDB returns the pages an encode freed" do
+      start_supervised!({Engine, name: __MODULE__.Background}, id: :background_default)
+
+      assert Engine.query!(
+               __MODULE__.Background,
+               "SELECT current_setting('allocator_background_threads')"
+             )
+             |> Result.one!() == true
+    end
+
+    test "can be turned off per engine" do
+      start_supervised!(
+        {Engine, name: __MODULE__.NoBackground, allocator_background_threads: false},
+        id: :background_off
+      )
+
+      assert Engine.query!(
+               __MODULE__.NoBackground,
+               "SELECT current_setting('allocator_background_threads')"
+             )
+             |> Result.one!() == false
+    end
+  end
 end

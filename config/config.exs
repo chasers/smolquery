@@ -47,7 +47,8 @@ config :smolquery, Smolquery.QueryService.WorkerTransport, channels: 4
 config :smolquery, Smolquery.Engine,
   memory_limit: "2GB",
   extensions: [:httpfs, :json],
-  max_result_rows: 100_000
+  max_result_rows: 100_000,
+  allocator_background_threads: true
 
 config :smolquery, :data_dir, "priv/data"
 

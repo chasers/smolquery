@@ -393,6 +393,7 @@ defmodule Smolquery.Engine.Connection do
   end
 
   defp quote_setting(value) when is_integer(value), do: Integer.to_string(value)
+  defp quote_setting(value) when is_boolean(value), do: Atom.to_string(value)
   defp quote_setting(value), do: value |> to_string() |> Identifier.sql_string()
 
   # Caller settings run later and may override these defaults. The mkdir is

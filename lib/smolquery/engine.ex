@@ -78,6 +78,7 @@ defmodule Smolquery.Engine do
           | {:statements, [String.t()]}
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}
+          | {:allocator_background_threads, boolean()}
           | {:max_result_rows, pos_integer() | :infinity}
           | {:temp_directory, Path.t()}
           | {:max_temp_directory_size, String.t()}
@@ -318,9 +319,15 @@ defmodule Smolquery.Engine do
     end
   end
 
+  # `allocator_background_threads` defaults on (T-452): without jemalloc's
+  # background thread DuckDB keeps the pages an encode or a merge freed, and
+  # neither `duckdb_memory()` nor the BEAM ever sees them — a buffer node
+  # settled 1.1–1.5 GiB above its start after a burst of encodes. With it the
+  # pages return within a second, at the same wall time.
   defp settings(config) do
     config
-    |> Keyword.take([:memory_limit, :threads])
+    |> Keyword.put_new(:allocator_background_threads, true)
+    |> Keyword.take([:memory_limit, :threads, :allocator_background_threads])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 end
