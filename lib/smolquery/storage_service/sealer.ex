@@ -76,7 +76,6 @@ defmodule Smolquery.StorageService.Sealer do
   defstruct [:runtime, attempts: %{}, reconciles: %{}, failures: %{}, retry_at: %{}]
 
   @stuck_after 5
-  @backoff_doubling_cap 30
 
   @doc """
   Starts the sealer for a runtime.
@@ -277,11 +276,13 @@ defmodule Smolquery.StorageService.Sealer do
 
   @doc false
   @spec backoff_ms(pos_integer(), Runtime.t()) :: non_neg_integer()
-  def backoff_ms(consecutive, runtime) do
-    doublings = min(consecutive - 1, @backoff_doubling_cap)
-
-    min(runtime.seal_backoff_base_ms * Integer.pow(2, doublings), runtime.seal_backoff_max_ms)
-  end
+  def backoff_ms(consecutive, runtime),
+    do:
+      Smolquery.Backoff.exponential(
+        consecutive,
+        runtime.seal_backoff_base_ms,
+        runtime.seal_backoff_max_ms
+      )
 
   defp cooling_down?(state, table_ref) do
     case Map.fetch(state.retry_at, table_ref) do

@@ -237,8 +237,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert first_attempt =~ "re-shipped 64 missing entries"
     assert first_attempt =~ "1 remain"
     refute first_attempt =~ "consecutive"
-    assert :sys.get_state(buffer).claim_failures == 0
-    assert :sys.get_state(buffer).claim_retry_at == nil
+    assert :sys.get_state(buffer).claim_backoff == nil
 
     {:ok, owner_runtime} = Runtime.fetch(owner)
     assert HotManifest.live_claim(owner_runtime.manifest, @table) == :error
@@ -755,6 +754,69 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       assert live_claims(follower) == live_claims(owner)
     end
 
+    test "a release heal releases only the follower claims holding the released ids", context do
+      owner_name = :"t450_release_#{:erlang.unique_integer([:positive])}"
+      follower = start_instance(context, seal_max_files: 1_000_000, seal_max_age_ms: 600_000)
+
+      owner =
+        start_instance(
+          context,
+          [
+            name: owner_name,
+            seal_max_files: 1_000_000,
+            seal_max_bytes: 1_000_000_000,
+            seal_max_age_ms: 600_000
+          ] ++
+            replicate_to(follower)
+        )
+
+      ids =
+        for n <- 1..18 do
+          {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-t450r-#{n}"))
+          ack.segment_id
+        end
+
+      {:ok, owner_runtime} = Runtime.fetch(owner)
+      {:ok, prefix} = Store.prefix(@table)
+      {:ok, old_key} = Store.key(prefix, "01KYWPEEGAM8FQVQS5S2QF26SV")
+      {:ok, _oversized} = HotManifest.claim(owner_runtime.manifest, @table, ids, [old_key])
+
+      # Two more entries the oversized claim does not cover, frozen on the
+      # follower under a claim of its own: the release must not touch it.
+      later =
+        for n <- 19..20 do
+          {:ok, ack} = Client.write_batch(owner, @table, batch([%{"id" => n}], "b-t450r-#{n}"))
+          ack.segment_id
+        end
+
+      stage_diverged(follower, Enum.take(ids, 2), ["diverged-key"])
+      stage_diverged(follower, later, ["later-key"])
+
+      # Valves of 16: the 18-id claim is oversized, so a maintenance pass
+      # releases it and re-claims the oldest 16 — never reaching `later`.
+      {owner, buffer} =
+        restart_owner(context, owner, follower,
+          seal_max_files: 16,
+          claim_valve_factor: 1,
+          seal_retry_ms: 1,
+          maintenance_interval_ms: 600_000
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> :ok = GenServer.call(buffer, :maintain) end)
+
+      [healed] = log |> String.split("\n") |> Enum.filter(&(&1 =~ "healed a diverged release"))
+      assert healed =~ inspect(ids |> Enum.take(2) |> Enum.sort())
+      refute healed =~ hd(later)
+
+      assert Enum.any?(
+               live_claims(follower),
+               &(&1.keys == ["later-key"] and &1.ids == Enum.sort(later))
+             )
+
+      assert [%{ids: live_ids}] = live_claims(owner)
+      assert live_ids == ids |> Enum.take(16) |> Enum.sort()
+    end
+
     test "a follower claim wider than the owner's is released whole", context do
       {owner, follower, ids} = diverged_pair(context)
       stage_diverged(follower, ids)
@@ -810,7 +872,7 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       :ok = HotManifest.retire(owner_runtime.manifest, @table, [retired], 42)
       stage_diverged(follower, ids)
 
-      {_owner, buffer} =
+      {owner, buffer} =
         restart_owner(context, owner, follower,
           seal_max_files: 1,
           seal_retry_ms: 60_000,
@@ -829,8 +891,22 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
       assert log =~ "1 consecutive, next attempt in 250 ms"
 
       state = :sys.get_state(buffer)
-      assert state.claim_failures == 1
-      assert is_integer(state.claim_retry_at)
+      assert %{consecutive: 1, retry_at: retry_at} = state.claim_backoff
+      assert is_integer(retry_at)
+
+      # Past the wait, the next tick tries again and the count grows.
+      Process.sleep(300)
+      :ok = GenServer.call(buffer, :maintain)
+      assert %{consecutive: 2} = :sys.get_state(buffer).claim_backoff
+
+      # A commit that lands reaches the same replicas, so it ends the backoff;
+      # the maintenance pass right after it tries once more and fails afresh —
+      # a count of 1, not 3.
+      {:ok, _ack} = Client.write_batch(owner, @table, batch([%{"id" => 99}], "b-t450-reset"))
+
+      assert Eventually.until(fn ->
+               match?(%{consecutive: 1}, :sys.get_state(buffer).claim_backoff)
+             end)
     end
   end
 end
