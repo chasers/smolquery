@@ -145,8 +145,7 @@ mutual TLS: change both values to `true` before you apply the overlay.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_MEMORY_TRACE` | `true` starts `Smolquery.MemoryTrace` (T-451): every `SMOLQUERY_MEMORY_TRACE_INTERVAL_MS` it reads what the cgroup charges the container (`memory.current`, its anon/file/slab split, the `max` and `oom_kill` event counters), the process's resident set and the BEAM's own split, and appends a line to `<SMOLQUERY_DATA_DIR>/memory-trace.log` on every new peak since start, on every sample above 80% of the cgroup limit, and once a minute as a heartbeat. The file is on the data volume, so it survives the OOM kill it is waiting for; it rotates once at 16 MiB. A peak above the threshold also logs a warning naming the three largest BEAM processes, at most every 10 s. The same readings are gauges on `GET /metrics` (`smolquery_memory_cgroup_bytes{kind}`, `smolquery_memory_cgroup_events{kind}`, `smolquery_memory_rss_bytes`, `smolquery_memory_beam_bytes{kind}`). Off by default (`false`) |
-| `SMOLQUERY_MEMORY_TRACE_INTERVAL_MS` | The tracer's sampling interval (`200`). A sample is three small file reads and one `:erlang.memory/0` |
+Memory needs no variable: `Smolquery.MemoryMetrics` runs on every node and publishes the cgroup's charge and its anon/file/slab split, the 60-second peak of that charge, the cgroup limit, the kernel's cumulative `max` and `oom_kill` counters, the resident set and the BEAM's split as `smolquery_memory_*` series on `GET /metrics` (T-451) — see [architecture.md](architecture.md). Sampling is every 250 ms (`config :smolquery, Smolquery.MemoryMetrics, interval_ms: 250`; `enabled: false` turns it off). Scrape it; the peak series is what catches a spike shorter than the scrape interval.
 
 Releases, artifacts, and upgrade procedures live in
 [deployment.md](deployment.md).

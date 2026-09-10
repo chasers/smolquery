@@ -369,20 +369,29 @@ defmodule Smolquery.Telemetry do
 
   # The second exception to counters-only: memory readings are levels, not
   # events, and a counter cannot say "1.3 GiB". Written by
-  # `Smolquery.MemoryTrace` on its sampling interval (T-451); nothing else
+  # `Smolquery.MemoryMetrics` on its sampling interval (T-451); nothing else
   # should call `put_gauge/3`. Cardinality is the closed `kind` set below.
+  # `smolquery_memory_cgroup_events_total` is the kernel's own cumulative
+  # counter, set rather than incremented, and rendered as the counter it is.
   @gauges %{
     "smolquery_memory_cgroup_bytes" =>
       "What the cgroup charges this container, by kind (current, anon, file, slab).",
-    "smolquery_memory_cgroup_events" =>
-      "The cgroup's cumulative ceiling hits (max) and kernel OOM kills (oom_kill).",
+    "smolquery_memory_cgroup_peak_bytes" =>
+      "The highest cgroup charge sampled in the last 60 s; what a scrape interval misses.",
+    "smolquery_memory_cgroup_limit_bytes" => "The cgroup memory limit the container runs under.",
     "smolquery_memory_rss_bytes" => "This OS process's resident set.",
+    "smolquery_memory_rss_peak_bytes" => "The highest resident set sampled in the last 60 s.",
     "smolquery_memory_beam_bytes" =>
       "The BEAM's own accounting, by kind (total, processes, binary, ets)."
   }
 
+  @kernel_counters %{
+    "smolquery_memory_cgroup_events_total" =>
+      "The cgroup's cumulative ceiling hits (max) and kernel OOM kills (oom_kill), as the kernel counts them."
+  }
+
   @doc """
-  Sets a memory gauge to `value` — a level, replacing the last reading.
+  Sets a memory series to `value` — a level, replacing the last reading.
 
   Like `put_info/2`, a metrics write must never take down its caller: a
   missing table is `:ok`.
@@ -461,7 +470,9 @@ defmodule Smolquery.Telemetry do
     grouped
     |> Enum.sort()
     |> Enum.map_join(fn {name, rows} ->
-      help = Map.get(@help, name) || Map.get(@info, name) || Map.get(@gauges, name) || name
+      help =
+        Map.get(@help, name) || Map.get(@info, name) || Map.get(@gauges, name) ||
+          Map.get(@kernel_counters, name) || name
 
       type =
         if Map.has_key?(@info, name) or Map.has_key?(@gauges, name), do: "gauge", else: "counter"

@@ -101,21 +101,6 @@ if metrics_ip = System.get_env("SMOLQUERY_METRICS_IP") do
     ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_METRICS_IP", metrics_ip)
 end
 
-# The memory tracer (T-451): off unless asked for. It samples the cgroup's
-# charge every interval, appends new peaks, samples above 80% of the limit and
-# a heartbeat to `<data_dir>/memory-trace.log`, and publishes the readings as
-# gauges on /metrics. The file is on the data volume so it outlives an OOM kill.
-if trace = System.get_env("SMOLQUERY_MEMORY_TRACE") do
-  config :smolquery, Smolquery.MemoryTrace,
-    enabled: Smolquery.RuntimeConfig.boolean!("SMOLQUERY_MEMORY_TRACE", trace)
-end
-
-if interval = System.get_env("SMOLQUERY_MEMORY_TRACE_INTERVAL_MS") do
-  config :smolquery, Smolquery.MemoryTrace,
-    interval_ms:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_MEMORY_TRACE_INTERVAL_MS", interval)
-end
-
 if username = System.get_env("SMOLQUERY_WEB_USERNAME") do
   config :smolquery, SmolqueryWeb, username: username
 end

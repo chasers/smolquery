@@ -1238,6 +1238,19 @@ fail criterion for any sustained-rate measurement.
 
 `smolquery_hot_manifest_index_entries_total{change}` is the one series that says
 whether a node's hot manifest index is in steady state or growing (T-320).
+
+Memory is the one family of gauges beside the `_info` shapes (T-451).
+`Smolquery.MemoryMetrics` samples every 250 ms what the cgroup charges the
+container (`smolquery_memory_cgroup_bytes{kind="current|anon|file|slab"}`), the
+highest charge of the last 60 s (`smolquery_memory_cgroup_peak_bytes` — a scrape
+interval is longer than the spike that kills a pod), the limit
+(`smolquery_memory_cgroup_limit_bytes`), the kernel's cumulative ceiling hits
+and kills (`smolquery_memory_cgroup_events_total{kind="max|oom_kill"}`), the
+resident set (`smolquery_memory_rss_bytes`, `_peak_bytes`) and the BEAM's own
+split (`smolquery_memory_beam_bytes{kind="total|processes|binary|ets"}`). The
+difference between the cgroup's charge and the BEAM's total is DuckDB and its
+allocator, which neither accounts for; that gap is where the buffer pods' OOM
+kills lived.
 `added + recovered - reaped` is the resident entry count, which nothing else
 reports. `retired` falling behind `added` means sealing is not keeping up — the
 one condition under which nothing is ever reaped, because an entry is only
