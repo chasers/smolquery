@@ -320,7 +320,8 @@ per-database, so a database of its own settles it; override with
 ```sh
 docker run -d --rm -p 9000:9000 \
   -e MINIO_ROOT_USER=smolquery -e MINIO_ROOT_PASSWORD=smolquery-secret \
-  minio/minio server /data
+  -e MINIO_DEFAULT_BUCKETS=smolquery-store-s3-test \
+  bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
 ```
 
 `:cluster`-tagged tests go further: they need the whole fleet on real distinct
