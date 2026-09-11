@@ -20,6 +20,7 @@ defmodule Smolquery.StorageService.RetentionTest do
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Retention
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.Test.ExitingCatalog
   alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
@@ -59,7 +60,8 @@ defmodule Smolquery.StorageService.RetentionTest do
           catalog: context.catalog,
           engine_extensions: [],
           retention_interval_ms: 3_600_000
-        ] ++ opts
+        ]
+        |> Keyword.merge(opts)
       )
 
     start_supervised!({Retention, runtime}, id: {:retention, context.storage})
@@ -155,6 +157,23 @@ defmodule Smolquery.StorageService.RetentionTest do
 
     assert Retention.sweep(context.storage) == {:error, %CallExited{reason: :noproc}}
     assert Process.alive?(retention)
+  end
+
+  test "a sweep stops at the first catalog call that exits and defers the tables behind it (T-464)",
+       context do
+    other = {"analytics", "clicks"}
+    :ok = Catalog.create_table(context.catalog, other, schema())
+
+    wedged =
+      ExitingCatalog.new(context.catalog, retention: fn [table] -> table == other end)
+
+    runtime = start_retention(context, catalog: wedged)
+    seal(runtime, context.catalog, 1, [days_ago(10)])
+
+    assert {:ok, report} = Retention.sweep(context.storage)
+    assert [%{table: ^other, reason: %CallExited{reason: :timeout}}] = report.failed
+    assert report.deferred == [@table]
+    assert report.dropped == []
   end
 
   test "a sweep with nothing expired drops nothing and reports it", context do

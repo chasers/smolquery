@@ -423,7 +423,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     database = Process.whereis(Engine.database_name(compact_engine))
 
     assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
-    assert %{table: @table, reason: {:swap_failed, %CallExited{reason: :timeout}}} = failure
+    assert %{table: @table, reason: %CallExited{reason: :timeout}} = failure
     assert Process.alive?(compactor)
     assert Process.whereis(Engine.database_name(compact_engine)) == database
 
@@ -446,7 +446,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     assert {:ok, report} = Compactor.sweep(context.storage)
 
-    assert [%{table: first, reason: {:swap_failed, %CallExited{reason: :timeout}}}] =
+    assert [%{table: first, reason: %CallExited{reason: :timeout}}] =
              report.failed
 
     assert [second] = report.deferred
