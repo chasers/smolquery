@@ -28,6 +28,15 @@ defmodule Smolquery.Cluster.Topology do
   which is the reason the page shows it. A node that is not alive, or that
   runs a release too old to answer, carries `nil`.
 
+  Rows are gathered concurrently, one task per node, because each alive
+  remote node costs four RPCs in sequence and a node that is in the
+  membership but not yet answering — mid-roll, or partitioned before the
+  net tick notices — makes every one of them wait its full timeout. Done in
+  series that is longer than the page's refresh interval, and the page
+  froze exactly while an operator watched a roll. A node whose row does not
+  come back inside one node's worth of timeouts is shown alive with what
+  the membership alone knows, and nothing per-node, until the next refresh.
+
   Degrades to a single row for `node()` — alive, no ring/storage membership
   claimed unless this node's own roles say so, nil epoch, not draining —
   wherever clustering is disabled, the same way every other reader in this
@@ -46,6 +55,7 @@ defmodule Smolquery.Cluster.Topology do
   alias Smolquery.StorageService
 
   @rpc_timeout_ms 2_000
+  @row_timeout_ms 4 * @rpc_timeout_ms + 500
 
   @type row :: %{
           node: node(),
@@ -73,11 +83,37 @@ defmodule Smolquery.Cluster.Topology do
     storage_members = PgGroup.nodes(StorageService, StorageService, static_fallback(:storage))
     expected_buffer = expected_buffer_nodes(alive, buffer_members)
 
-    alive
-    |> Enum.concat(expected_buffer)
-    |> Enum.uniq()
-    |> Enum.sort()
-    |> Enum.map(&row(&1, alive, buffer_members, storage_members, expected_buffer))
+    nodes = alive |> Enum.concat(expected_buffer) |> Enum.uniq() |> Enum.sort()
+
+    nodes
+    |> Task.async_stream(&row(&1, alive, buffer_members, storage_members, expected_buffer),
+      ordered: true,
+      timeout: @row_timeout_ms,
+      on_timeout: :kill_task
+    )
+    |> Enum.zip(nodes)
+    |> Enum.map(fn
+      {{:ok, row}, _node} ->
+        row
+
+      {{:exit, _reason}, node} ->
+        unanswered_row(node, buffer_members, storage_members, expected_buffer)
+    end)
+  end
+
+  defp unanswered_row(node, buffer_members, storage_members, expected_buffer) do
+    %{
+      node: node,
+      pod: Pods.pod_of_node(node),
+      alive: true,
+      roles: [],
+      build: nil,
+      buffer_member: node in buffer_members,
+      storage_member: node in storage_members,
+      expected_buffer: node in expected_buffer,
+      buffer_epoch: nil,
+      draining: false
+    }
   end
 
   defp row(node, alive, buffer_members, storage_members, expected_buffer) do

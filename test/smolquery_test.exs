@@ -1,5 +1,5 @@
 defmodule SmolqueryTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   doctest Smolquery
 
@@ -16,5 +16,8 @@ defmodule SmolqueryTest do
 
     assert Smolquery.git_sha() == "0123456789abcdef0123456789abcdef01234567"
     assert Smolquery.build().sha == "0123456789abcdef0123456789abcdef01234567"
+
+    Application.put_env(:smolquery, :git_sha, "")
+    assert Smolquery.git_sha() == nil
   end
 end

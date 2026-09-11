@@ -158,8 +158,9 @@ if size = System.get_env("SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE") do
   config :smolquery, :max_temp_directory_size, size
 end
 
-if sha = System.get_env("SMOLQUERY_GIT_SHA") do
-  config :smolquery, :git_sha, sha
+case System.get_env("SMOLQUERY_GIT_SHA") do
+  sha when sha not in [nil, ""] -> config :smolquery, :git_sha, sha
+  _unset_or_empty -> :ok
 end
 
 if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do

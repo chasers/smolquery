@@ -36,7 +36,7 @@ defmodule SmolqueryWeb.ClusterLiveTest do
       assert html =~ ~s|title="0123456789abcdef0123456789abcdef01234567">0123456</span>|
     end
 
-    test "a node whose build is unknown shows its version alone, or a dash when it is down",
+    test "a node whose build names no commit shows its version alone",
          %{conn: conn} do
       Application.delete_env(:smolquery, :git_sha)
       start_web!()

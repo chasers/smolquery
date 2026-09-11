@@ -32,10 +32,17 @@ defmodule Smolquery do
   two deploys apart. The image build bakes the commit in as
   `SMOLQUERY_GIT_SHA` (`Dockerfile`, `.github/workflows/release.yml`), and
   `config/runtime.exs` reads it into `:git_sha`. A dev checkout has no such
-  setting and answers `nil`.
+  setting and answers `nil`, and so does an image built without the
+  argument: Docker defines the variable empty then, and empty is not a
+  commit.
   """
   @spec git_sha() :: String.t() | nil
-  def git_sha, do: Application.get_env(:smolquery, :git_sha)
+  def git_sha do
+    case Application.get_env(:smolquery, :git_sha) do
+      sha when is_binary(sha) and sha != "" -> sha
+      _unset_or_empty -> nil
+    end
+  end
 
   @doc """
   What this node is running: its version and the commit it was built from
