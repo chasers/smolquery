@@ -48,6 +48,16 @@ defmodule Smolquery.BufferService.SupervisorTest do
     assert is_pid(Process.whereis(Runtime.buffers(name)))
   end
 
+  test "the write pool keeps no file cache: every staged file is read once (T-461)", context do
+    name = start_buffer_service(context)
+    {:ok, runtime} = Runtime.fetch(name)
+
+    for engine <- Runtime.engines(runtime) do
+      assert Engine.query!(engine, "SELECT current_setting('enable_external_file_cache')")
+             |> Result.one!() == false
+    end
+  end
+
   test "publishes a runtime the client can find", context do
     name = start_buffer_service(context)
 

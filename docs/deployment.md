@@ -101,6 +101,25 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Long-lived engines keep no file cache (T-461)
+
+DuckDB's external file cache, on by default since 1.3, keeps a per-path entry
+for every file an instance has ever read, and memory pressure evicts only an
+entry's buffers, never the entry. Every encode ends by reading the unique
+staged file it just wrote; every merge reads each hot file once; every swap
+reads a new file's footer once; every segment is eventually compacted or
+retired. On a long-lived engine the cache therefore only grows: its buffers
+filled the write engines to their memory limit (the `duckdb_memory()` "fill"
+on a buffer pod) and its entries grew outside every accounting — 2.5 GiB in
+fourteen hours of flat backlog on the sandbox's buffer pods, after T-452 had
+already returned jemalloc's pages. Every `Smolquery.Engine` — the buffer
+write pool, the storage merge, compaction and catalog engines, and the query
+planner's catalog engine — now starts with `enable_external_file_cache =
+false`; a query's job engine dies with its query and keeps DuckDB's default.
+Nothing to configure. On an upgraded pod, RSS tracks its tracked state; on
+one still running the old release, `SELECT count(*) FROM
+duckdb_external_file_cache()` on any write engine counts the dead entries.
+
 ### A retire is O(claim), and replies before its maintenance (T-459)
 
 A partition holding 140,000 unsealed entries could not drain: the storage node's
