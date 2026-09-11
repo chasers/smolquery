@@ -235,10 +235,14 @@ defmodule Smolquery.Engine do
 
   See `Smolquery.Engine.Connection.transaction/3` for why the transaction runs
   inside the connection process and why statements carry no parameters.
+
+  `timeout` bounds the call the way `query/4`'s does, and the same caveat
+  applies: a transaction whose call times out is still running, and commits
+  or rolls back on its own time.
   """
-  @spec transaction(handle(), [String.t()]) :: :ok | {:error, Exception.t()}
-  def transaction(handle, statements) do
-    Connection.transaction(connection(handle), statements)
+  @spec transaction(handle(), [String.t()], timeout()) :: :ok | {:error, Exception.t()}
+  def transaction(handle, statements, timeout \\ 30_000) do
+    Connection.transaction(connection(handle), statements, timeout)
   end
 
   @doc """

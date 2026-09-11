@@ -125,10 +125,16 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Schema.Materialized
   alias Smolquery.Segments.Store
 
-  @enforce_keys [:engine, :catalog]
-  defstruct [:engine, :catalog]
+  @default_swap_timeout_ms 120_000
 
-  @type t :: %__MODULE__{engine: Engine.handle(), catalog: String.t()}
+  @enforce_keys [:engine, :catalog]
+  defstruct [:engine, :catalog, swap_timeout_ms: @default_swap_timeout_ms]
+
+  @type t :: %__MODULE__{
+          engine: Engine.handle(),
+          catalog: String.t(),
+          swap_timeout_ms: timeout()
+        }
 
   @type option ::
           {:name, atom()}
@@ -217,13 +223,20 @@ defmodule Smolquery.Catalog.DuckLake do
 
     * `:engine` — the engine name given to `start_link/1`
     * `:catalog` — the attached catalog name, if not the default
+    * `:swap_timeout_ms` — how long `replace_segments/4` waits for its
+      transaction, two minutes by default. The swap's
+      `ducklake_add_data_files` reads the merged file's footer through the
+      store, and over S3 that alone outlasted the engine's 30 s call default
+      on every attempt of one table (T-460); nothing but compaction commits
+      through this path, so the wait costs no seal anything.
 
   """
   @spec new(keyword()) :: Catalog.t()
   def new(opts) do
     config = %__MODULE__{
       engine: Keyword.get(opts, :engine, __MODULE__),
-      catalog: Keyword.get(opts, :catalog, @default_catalog)
+      catalog: Keyword.get(opts, :catalog, @default_catalog),
+      swap_timeout_ms: Keyword.get(opts, :swap_timeout_ms, @default_swap_timeout_ms)
     }
 
     %Catalog{impl: __MODULE__, config: config}
@@ -256,7 +269,7 @@ defmodule Smolquery.Catalog.DuckLake do
   def resolve(opts, engine) do
     opts = List.wrap(opts)
 
-    {new([engine: engine] ++ Keyword.take(opts, [:catalog])), opts}
+    {new([engine: engine] ++ Keyword.take(opts, [:catalog, :swap_timeout_ms])), opts}
   end
 
   @doc """
@@ -661,10 +674,11 @@ defmodule Smolquery.Catalog.DuckLake do
   defp swap(config, ref, add, drop) do
     with {:ok, name} <- table_name(config, ref),
          :ok <-
-           Engine.transaction(config.engine, [
-             delete_statement(name, drop),
-             add_statement(config, ref, add)
-           ]) do
+           Engine.transaction(
+             config.engine,
+             [delete_statement(name, drop), add_statement(config, ref, add)],
+             config.swap_timeout_ms
+           ) do
       {:ok, :committed}
     end
   end

@@ -166,6 +166,30 @@ defmodule Smolquery.StorageService.Compactor do
   queues behind it anymore, and a killed merge is free to retry: the output
   key is derived, so next sweep's attempt converges on the same key.
 
+  The rebuilt instance must not share the burning one's spill directory:
+  `Smolquery.Engine.Connection` names each instance's leaf after the
+  database process, because under one shared leaf the rebuilt engine's
+  first spilling merge overwrote and deleted the abandoned sort's temp
+  files, and reading them back segfaulted the VM on every storage node
+  within hours (T-460).
+
+  ## A catalog call that exits is a failure, not a crash
+
+  Every engine call in sizing and merging goes through
+  `Smolquery.Engine.try_query/4`, but the catalog's calls — the listing, the
+  merge's schema and snapshot reads, and the swap's transaction — are plain
+  `GenServer.call`s, and each can exit: the swap's `ducklake_add_data_files`
+  outlasted its call timeout on every attempt of one table, and the exit took
+  the whole compactor down with it. A crash forgets the backoff, the row caps
+  and the quarantine, so the same group was re-planned and re-merged next
+  sweep and timed out again, forty-five times in ten hours, while each
+  abandoned transaction kept running on the catalog connection (T-460). Here
+  an exit is caught where it happens: the swap's becomes `{:swap_failed,
+  %CallExited{}}`, any other catalog call's `{:catalog_call_exited,
+  %CallExited{}}`, and a listing that exits fails the sweep. All three back
+  the table off like any other failure and none recycles the compaction
+  engine, whose statement did not exit.
+
   ## The output key is derived, so a retry converges instead of duplicating
 
   The merged segment's id comes from the sorted input ids
@@ -278,7 +302,7 @@ defmodule Smolquery.StorageService.Compactor do
   defp run(state) do
     runtime = state.runtime
 
-    with {:ok, tables} <- Catalog.tables(runtime.catalog) do
+    with {:ok, tables} <- catalog_call(:listing_failed, fn -> Catalog.tables(runtime.catalog) end) do
       {cooling, due} = Enum.split_with(tables, &cooling_down?(state.cooldowns, &1))
 
       outcomes =
@@ -712,6 +736,16 @@ defmodule Smolquery.StorageService.Compactor do
 
   defp compact_table(runtime, quarantined_groups, table_ref) do
     started_at = System.monotonic_time(:microsecond)
+
+    case catalog_call(:catalog_call_exited, fn ->
+           compact_listed(runtime, quarantined_groups, table_ref, started_at)
+         end) do
+      {:error, reason} -> failed(runtime, table_ref, reason, started_at)
+      outcome -> outcome
+    end
+  end
+
+  defp compact_listed(runtime, quarantined_groups, table_ref, started_at) do
     routing = Routing.resolve(runtime.name)
 
     with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
@@ -733,6 +767,12 @@ defmodule Smolquery.StorageService.Compactor do
       {:error, reason, failed_paths} ->
         failed(runtime, table_ref, reason, started_at, paths: failed_paths)
     end
+  end
+
+  defp catalog_call(step, call) do
+    call.()
+  catch
+    :exit, reason -> {:error, {step, CallExited.new(reason)}}
   end
 
   # A registered segment under a tombstoned key is a released claim's orphan
@@ -928,9 +968,7 @@ defmodule Smolquery.StorageService.Compactor do
              row_count: row_count,
              inputs_per_call: staging_per_call(runtime, group)
            ),
-         {:ok, snapshot} <-
-           Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
-         :ok <- verify_retired(runtime, table_ref, paths) do
+         {:ok, snapshot} <- swapped(runtime, table_ref, segment, paths) do
       Logger.info(fn ->
         "compacted #{length(paths)} segment(s) of #{inspect(table_ref)} " <>
           "into #{key} at snapshot #{snapshot}"
@@ -968,6 +1006,16 @@ defmodule Smolquery.StorageService.Compactor do
         {:cont, {:ok, [id | ids]}}
       else
         {:halt, {:error, {:not_a_segment_path, path}}}
+      end
+    end)
+  end
+
+  defp swapped(runtime, table_ref, segment, paths) do
+    catalog_call(:swap_failed, fn ->
+      with {:ok, snapshot} <-
+             Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
+           :ok <- verify_retired(runtime, table_ref, paths) do
+        {:ok, snapshot}
       end
     end)
   end

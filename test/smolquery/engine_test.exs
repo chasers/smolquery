@@ -367,15 +367,26 @@ defmodule Smolquery.EngineTest do
       assert temp_directory(name_a) != temp_directory(name_b)
     end
 
-    test "the directory is named for the instance, so a restart reuses its own" do
+    test "the directory is named for the instance: a connection restart keeps it, a database rebuild gets its own (T-460)" do
       directory = temp_directory(@engine)
 
       assert Path.basename(directory) =~ "EngineTest.Instance"
 
-      stop_supervised!(Engine)
-      start_supervised!({Engine, name: @engine})
+      conn = Process.whereis(Engine.connection_name(@engine))
+      kill_and_await(conn)
+      await_registered(Engine.connection_name(@engine), conn)
 
       assert temp_directory(@engine) == directory
+
+      database = Process.whereis(Engine.database_name(@engine))
+      conn = Process.whereis(Engine.connection_name(@engine))
+      kill_and_await(database)
+      await_registered(Engine.database_name(@engine), database)
+      await_registered(Engine.connection_name(@engine), conn)
+
+      rebuilt = temp_directory(@engine)
+      assert rebuilt != directory
+      assert Path.dirname(rebuilt) == Path.dirname(directory)
     end
 
     test "an explicit directory wins over the derived one" do

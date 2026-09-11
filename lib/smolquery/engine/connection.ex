@@ -34,6 +34,19 @@ defmodule Smolquery.Engine.Connection do
   so live instances sharing a directory can corrupt each other's spilled sorts.
   `:temp_directory` overrides the default.
 
+  The default leaf names the *instance*, not the engine: a registered
+  connection's leaf carries its name, the OS pid, and the pid of the
+  `Adbc.Database` it connects to. A connection-only restart reuses the
+  surviving database's leaf, and a rebuilt database gets a fresh one, because
+  the instance a rebuild replaces is still alive — a killed database process
+  releases nothing native while its connection is mid-statement, so the
+  abandoned statement runs to completion on the old instance. Under one
+  shared leaf the new instance opened the old one's spill files by name,
+  overwrote them and deleted them when its query finished, and the old
+  instance's sort read them back and took the VM down with SIGSEGV
+  (T-460). Each instance removes its own leaf when it closes. The OS pid
+  keeps two VMs sharing one spill root apart.
+
   Isolation lives here because `Smolquery.QueryService.Runner` creates
   connections directly rather than through `Smolquery.Engine`.
   """
@@ -400,7 +413,10 @@ defmodule Smolquery.Engine.Connection do
   # best-effort on purpose: a bad spill root should fail the first spill, at
   # query time, not every boot of an engine that may never spill.
   defp spill_settings(opts) do
-    directory = Keyword.get_lazy(opts, :temp_directory, &default_temp_directory/0)
+    directory =
+      Keyword.get_lazy(opts, :temp_directory, fn ->
+        default_temp_directory(Keyword.fetch!(opts, :database))
+      end)
 
     File.mkdir_p(Path.dirname(directory))
 
@@ -418,23 +434,30 @@ defmodule Smolquery.Engine.Connection do
     end
   end
 
-  defp default_temp_directory do
-    Path.join(Application.get_env(:smolquery, :spill_dir, @default_spill_root), instance_token())
+  defp default_temp_directory(database) do
+    Path.join(
+      Application.get_env(:smolquery, :spill_dir, @default_spill_root),
+      instance_token(database)
+    )
   end
 
-  # Named engines reuse their leaf after a supervised restart. The OS pid
-  # keeps two VMs sharing one spill root out of each other's directories;
-  # DuckDB temp-file names are not instance-specific.
-  defp instance_token do
+  defp instance_token(database) do
     case Process.info(self(), :registered_name) do
-      {:registered_name, name} when is_atom(name) -> registered_instance_token(name)
+      {:registered_name, name} when is_atom(name) -> registered_instance_token(name, database)
       _unregistered -> "connection-#{System.unique_integer([:positive])}-os#{System.pid()}"
     end
   end
 
-  defp registered_instance_token(name) do
+  defp registered_instance_token(name, database) do
     encoded = name |> Atom.to_string() |> URI.encode(&URI.char_unreserved?/1)
 
-    "#{encoded}-os#{System.pid()}"
+    "#{encoded}-os#{System.pid()}-db#{database_token(database)}"
+  end
+
+  defp database_token(database) do
+    case GenServer.whereis(database) do
+      pid when is_pid(pid) -> pid |> :erlang.pid_to_list() |> to_string() |> String.trim("<>")
+      _unstarted -> Integer.to_string(System.unique_integer([:positive]))
+    end
   end
 end
