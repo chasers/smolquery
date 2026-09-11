@@ -312,10 +312,13 @@ defmodule Smolquery.BufferService.HotManifest.ClaimTest do
       unclaimed = add(manifest, @table)
       {:ok, _claim} = HotManifest.claim(manifest, @table, [first.id, second.id], @keys)
       ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :hot_manifest, :read]])
+      table = manifest.table
 
       assert HotManifest.retire(manifest, @table, [first.id], 11, @keys) == :ok
 
-      refute_received {[:smolquery, :hot_manifest, :read], ^ref, _measurements, %{op: :entries}}
+      refute_received {[:smolquery, :hot_manifest, :read], ^ref, _measurements,
+                       %{op: :entries, manifest: ^table}}
+
       assert {:ok, %Entry{sealed_at: 11}} = HotManifest.entry(manifest, @table, second.id)
       assert {:ok, %Entry{sealed_at: nil}} = HotManifest.entry(manifest, @table, unclaimed.id)
       assert HotManifest.live_claim(manifest, @table) == :error

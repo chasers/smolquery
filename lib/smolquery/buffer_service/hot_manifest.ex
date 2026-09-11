@@ -482,7 +482,7 @@ defmodule Smolquery.BufferService.HotManifest do
   def entries(%__MODULE__{table: table}, table_ref, :all, opts) do
     spec = entry_spec(table_ref, Keyword.get(opts, :stats, true))
 
-    measured(:entries, fn -> :ets.select(table, spec) end)
+    measured(:entries, table, fn -> :ets.select(table, spec) end)
   end
 
   def entries(%__MODULE__{} = manifest, table_ref, ids, _opts) when is_list(ids) do
@@ -517,7 +517,7 @@ defmodule Smolquery.BufferService.HotManifest do
       when is_integer(limit) and limit > 0 do
     spec = newest_spec(table_ref, Keyword.get(opts, :before), Keyword.get(opts, :stats, true))
 
-    measured(:newest, fn -> select_limited(table, spec, limit, :newest) end)
+    measured(:newest, table, fn -> select_limited(table, spec, limit, :newest) end)
   end
 
   @doc """
@@ -545,11 +545,12 @@ defmodule Smolquery.BufferService.HotManifest do
   def pending(manifest, table_ref, limit \\ :infinity)
 
   def pending(%__MODULE__{table: table}, table_ref, :infinity),
-    do: measured(:pending, fn -> :ets.select(table, pending_spec(table_ref)) end)
+    do: measured(:pending, table, fn -> :ets.select(table, pending_spec(table_ref)) end)
 
   def pending(%__MODULE__{table: table}, table_ref, limit)
       when is_integer(limit) and limit > 0,
-      do: measured(:pending, fn -> select_limited(table, pending_spec(table_ref), limit) end)
+      do:
+        measured(:pending, table, fn -> select_limited(table, pending_spec(table_ref), limit) end)
 
   @doc """
   Up to `limit` unsealed entries as the claim path sees them: id, size, and age.
@@ -576,7 +577,7 @@ defmodule Smolquery.BufferService.HotManifest do
        ]}
     ]
 
-    measured(:claimable, fn ->
+    measured(:claimable, table, fn ->
       table
       |> select_limited(spec, limit)
       |> Enum.map(fn {id, byte_size, added_at} ->
@@ -957,7 +958,7 @@ defmodule Smolquery.BufferService.HotManifest do
   """
   @spec retired_before(t(), Store.table_ref(), integer()) :: [Entry.t()]
   def retired_before(%__MODULE__{} = manifest, table_ref, cutoff) do
-    measured(:retired_before, fn ->
+    measured(:retired_before, manifest.table, fn ->
       manifest
       |> reapable(table_ref, {table_ref, 0, ""}, cutoff, [])
       |> Enum.flat_map(&lookup(manifest, table_ref, &1))
@@ -1495,10 +1496,10 @@ defmodule Smolquery.BufferService.HotManifest do
     |> Enum.map(fn {keys, ids} -> %{ids: ids, keys: keys} end)
   end
 
-  defp measured(op, fun) do
+  defp measured(op, table, fun) do
     Telemetry.span(
       [:smolquery, :hot_manifest, :read],
-      &{%{entries: read_entries(&1)}, %{op: op}},
+      &{%{entries: read_entries(&1)}, %{op: op, manifest: table}},
       fun
     )
   end
