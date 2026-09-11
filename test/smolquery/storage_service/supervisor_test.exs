@@ -52,6 +52,18 @@ defmodule Smolquery.StorageService.SupervisorTest do
   end
 
   @tag :tmp_dir
+  test "the merge, compaction and catalog engines keep no file cache (T-461)", %{name: name} do
+    for engine <- [
+          Runtime.engine(name),
+          Runtime.compact_engine(name),
+          Runtime.catalog_engine(name)
+        ] do
+      assert Engine.query!(engine, "SELECT current_setting('enable_external_file_cache')")
+             |> Result.one!() == false
+    end
+  end
+
+  @tag :tmp_dir
   test "an explicit engine_memory_limit reaches the merge engine (T-250)", context do
     name = :"storage_sup_mem_#{:erlang.unique_integer([:positive])}"
 

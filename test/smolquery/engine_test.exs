@@ -347,6 +347,20 @@ defmodule Smolquery.EngineTest do
       assert Engine.query!(__MODULE__.Override, "SELECT current_setting('threads')")
              |> Result.one!() == 1
     end
+
+    test "a named engine keeps no file cache unless external_file_cache: true asks (T-461)" do
+      start_supervised!({Engine, name: __MODULE__.Cached, external_file_cache: true},
+        id: :cached
+      )
+
+      assert file_cache?(@engine) == false
+      assert file_cache?(__MODULE__.Cached) == true
+    end
+  end
+
+  defp file_cache?(engine) do
+    Engine.query!(engine, "SELECT current_setting('enable_external_file_cache')")
+    |> Result.one!()
   end
 
   describe "spill isolation (T-201)" do

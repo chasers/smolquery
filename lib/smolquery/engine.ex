@@ -40,6 +40,23 @@ defmodule Smolquery.Engine do
   Extension names and settings are interpolated into SQL (DuckDB takes no
   parameters in `INSTALL`/`LOAD`/`SET`). Never pass user-supplied values.
 
+  ## A named engine keeps no file cache
+
+  DuckDB's external file cache (`enable_external_file_cache`, on in DuckDB by
+  default) keeps a per-path entry for every file an instance has ever read,
+  and memory pressure evicts only an entry's buffers, never the entry. The
+  buffers show in `duckdb_memory()` as `EXTERNAL_FILE_CACHE` and fill to the
+  memory limit; the entries are ordinary C++ allocation that neither
+  `duckdb_memory()` nor the BEAM reports. Every encode ends by reading the
+  unique staged file it just wrote, every merge reads each hot file once,
+  every swap reads a new file's footer once, and every segment is eventually
+  compacted or retired, so on a long-lived instance the entries only ever
+  grow: tens of kilobytes per file, forever — the buffer pods climbed
+  2.5 GiB in fourteen hours of flat backlog (T-461). Every engine started
+  here is long-lived, so the cache is off unless `external_file_cache: true`
+  asks for it. A query's job engine is not started here and keeps DuckDB's
+  default: it dies with its query, and its cache with it.
+
   ## Two result contracts, chosen by size
 
   `query/3` returns a `Smolquery.Engine.Result`: ordered columns and rows of
@@ -81,6 +98,7 @@ defmodule Smolquery.Engine do
           | {:max_result_rows, pos_integer() | :infinity}
           | {:temp_directory, Path.t()}
           | {:max_temp_directory_size, String.t()}
+          | {:external_file_cache, boolean()}
 
   @doc """
   Resolves the DuckDB thread count for an engine configuration.
@@ -138,6 +156,9 @@ defmodule Smolquery.Engine do
       configuration for this instance.
     * `:temp_directory`, `:max_temp_directory_size` — override the spill
       directory and its per-instance limit.
+    * `:external_file_cache` — whether DuckDB caches the files this engine
+      reads (`enable_external_file_cache`). Off unless set; see the
+      moduledoc for why a long-lived engine must not keep one.
 
   """
   @spec start_link([option()]) :: Supervisor.on_start()
@@ -337,5 +358,10 @@ defmodule Smolquery.Engine do
     config
     |> Keyword.take([:memory_limit, :threads])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Kernel.++(file_cache_setting(config))
+  end
+
+  defp file_cache_setting(config) do
+    [enable_external_file_cache: Keyword.get(config, :external_file_cache, false)]
   end
 end
