@@ -16,6 +16,7 @@ defmodule Smolquery.Cluster.TopologyTest do
       refute row.expected_buffer
       assert row.buffer_epoch == nil
       refute row.draining
+      assert row.build == Smolquery.build()
     end
 
     test "the pod is derived from the node name" do
