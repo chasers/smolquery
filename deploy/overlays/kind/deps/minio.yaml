@@ -26,14 +26,25 @@ spec:
         app: minio
     spec:
       containers:
+        # bitnamilegacy, not minio/minio: Docker Hub stopped serving minio/minio
+        # and minio/mc to anonymous pulls on 2026-09-11 (401 on every digest and
+        # tag), and bitnamilegacy is the frozen free mirror ci.yml's integration
+        # job already pins (T-466). This image runs `server` off environment
+        # variables and creates MINIO_DEFAULT_BUCKETS itself, which is what
+        # Store.S3 needs (segment PUTs do not create their bucket), so the mc
+        # job that used to do that is gone with the mc image. MINIO_DATA_DIR keeps
+        # the objects at /data, where the cluster tests look for them.
         - name: minio
-          image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-          args: ["server", "/data"]
+          image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
           env:
             - name: MINIO_ROOT_USER
               value: smolquery
             - name: MINIO_ROOT_PASSWORD
               value: smolquery-secret
+            - name: MINIO_DEFAULT_BUCKETS
+              value: smolquery-sealed
+            - name: MINIO_DATA_DIR
+              value: /data
           ports:
             - containerPort: 9000
           volumeMounts:
@@ -42,26 +53,3 @@ spec:
       volumes:
         - name: data
           emptyDir: {}
----
-# Store.S3 expects its bucket to exist (segment PUTs do not create it); this
-# closes the "bucket creation at boot is a manifest concern" item deferred
-# from L3.
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: minio-create-bucket
-  namespace: smolquery
-spec:
-  backoffLimit: 10
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: mc
-          image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-          command:
-            - /bin/sh
-            - -c
-            - |
-              until mc alias set local http://minio:9000 smolquery smolquery-secret; do sleep 2; done
-              mc mb --ignore-existing local/smolquery-sealed
