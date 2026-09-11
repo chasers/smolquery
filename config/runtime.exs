@@ -158,6 +158,10 @@ if size = System.get_env("SMOLQUERY_MAX_TEMP_DIRECTORY_SIZE") do
   config :smolquery, :max_temp_directory_size, size
 end
 
+if sha = System.get_env("SMOLQUERY_GIT_SHA") do
+  config :smolquery, :git_sha, sha
+end
+
 if max_rows = System.get_env("SMOLQUERY_MAX_RESULT_ROWS") do
   ceiling =
     Smolquery.RuntimeConfig.positive_integer_or_infinity!("SMOLQUERY_MAX_RESULT_ROWS", max_rows)

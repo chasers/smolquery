@@ -43,7 +43,7 @@ echo "==> generating dev TLS certs"
 ./scripts/gen-dev-certs.sh "deploy/overlays/${OVERLAY}/tls" "${CERT_SPECS[@]}"
 
 echo "==> building image"
-docker build -t smolquery:dev .
+docker build --build-arg "GIT_SHA=$(git rev-parse HEAD)" -t smolquery:dev .
 
 echo "==> loading image into kind"
 kind load docker-image smolquery:dev --name "$CLUSTER"

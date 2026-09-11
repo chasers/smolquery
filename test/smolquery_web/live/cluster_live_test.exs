@@ -24,6 +24,29 @@ defmodule SmolqueryWeb.ClusterLiveTest do
       assert html =~ ~s|class="block max-w-56 truncate" title="#{node()}">#{node()}</span>|
     end
 
+    test "shows each node's version and the commit it was built from (T-465)", %{conn: conn} do
+      Application.put_env(:smolquery, :git_sha, "0123456789abcdef0123456789abcdef01234567")
+      on_exit(fn -> Application.delete_env(:smolquery, :git_sha) end)
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/cluster")
+
+      assert html =~ "<th>Build</th>"
+      assert html =~ Smolquery.version()
+      assert html =~ ~s|title="0123456789abcdef0123456789abcdef01234567">0123456</span>|
+    end
+
+    test "a node whose build is unknown shows its version alone, or a dash when it is down",
+         %{conn: conn} do
+      Application.delete_env(:smolquery, :git_sha)
+      start_web!()
+
+      {:ok, _lv, html} = live(conn, ~p"/cluster")
+
+      assert html =~ Smolquery.version()
+      refute html =~ ~s|opacity-70" title=|
+    end
+
     test "lists every role this node runs in one Roles column", %{conn: conn} do
       start_web!()
 

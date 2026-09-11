@@ -37,9 +37,11 @@ WORKDIR /app
 COPY --from=build /app/_build/prod/rel/smolquery ./
 COPY --from=build /app/duckdb-extensions ./duckdb-extensions
 
+ARG GIT_SHA=""
 ENV HOME=/data \
     SMOLQUERY_DATA_DIR=/data \
-    SMOLQUERY_EXTENSION_DIRECTORY=/app/duckdb-extensions
+    SMOLQUERY_EXTENSION_DIRECTORY=/app/duckdb-extensions \
+    SMOLQUERY_GIT_SHA=$GIT_SHA
 
 VOLUME /data
 EXPOSE 4000 4002 5432

@@ -9,6 +9,11 @@ defmodule SmolqueryWeb.ClusterLive.Index do
   leaving); the ring/epoch/drain fields it doesn't cover are refreshed on a
   timer instead, since nothing here broadcasts those.
 
+  The Build column is each node's own `Smolquery.build/0`: version and git
+  commit, read over RPC like its roles (T-465). Every push to `main` ships an
+  image tagged by commit and most do not bump the version, so a half-rolled
+  deploy shows as rows whose commits differ while their versions agree.
+
   Three distinct actions per node, not one:
 
     * **Kill** — `Smolquery.Cluster.Pods.kill!/1`, an ungraceful pod
@@ -201,6 +206,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
               <th>Pod</th>
               <th>Alive</th>
               <th>Roles</th>
+              <th>Build</th>
               <th>Expected</th>
               <th>Epoch</th>
               <th>Draining</th>
@@ -215,6 +221,7 @@ defmodule SmolqueryWeb.ClusterLive.Index do
               <td class="font-mono whitespace-nowrap">{row.pod}</td>
               <td>{status_badge(row.alive, "up", "down")}</td>
               <td class="whitespace-nowrap">{roles_badges(row.roles)}</td>
+              <td class="font-mono whitespace-nowrap">{build_cell(row.build)}</td>
               <td>{mismatch_badge(row.expected_buffer, row.buffer_member)}</td>
               <td class="font-mono">{row.buffer_epoch || "—"}</td>
               <td>{boolean_badge(row.draining or draining?(@draining, row.node))}</td>
@@ -256,6 +263,18 @@ defmodule SmolqueryWeb.ClusterLive.Index do
         </table>
       </div>
     </Layouts.app>
+    """
+  end
+
+  defp build_cell(nil), do: "—"
+
+  defp build_cell(%{version: version, sha: nil}), do: version
+
+  defp build_cell(%{version: version, sha: sha}) do
+    assigns = %{version: version, sha: sha, short: String.slice(sha, 0, 7)}
+
+    ~H"""
+    {@version} <span class="opacity-70" title={@sha}>{@short}</span>
     """
   end
 
