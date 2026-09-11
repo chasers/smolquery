@@ -240,6 +240,21 @@ defmodule Smolquery.Engine do
   end
 
   @doc """
+  Same as `transaction/3`, but an exit from the call comes back as an error —
+  `try_query/4`'s contract for a transaction (T-464).
+
+  A transaction whose call exits is still running on the connection, and
+  commits or rolls back on its own time; the caller learns only that it did
+  not hear the answer.
+  """
+  @spec try_transaction(handle(), [String.t()], timeout()) :: :ok | {:error, Exception.t()}
+  def try_transaction(handle, statements, timeout \\ 30_000) do
+    transaction(handle, statements, timeout)
+  catch
+    :exit, reason -> {:error, CallExited.new(reason)}
+  end
+
+  @doc """
   Same as `query/3` but raises on error.
   """
   @spec query!(atom(), String.t(), [term()]) :: Result.t()

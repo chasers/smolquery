@@ -98,6 +98,19 @@ defmodule Smolquery.Catalog.DuckLake do
   way: a relative path returned as-is would match no store location, and GC would
   again see every committed segment as unreferenced.
 
+  ## A call that exits is an error here, never a crash upstream
+
+  Every statement this module runs goes through `Smolquery.Engine.try_query/4`
+  or `Smolquery.Engine.try_transaction/3`, so a call that times out on a busy
+  connection, or finds the connection gone, comes back as
+  `{:error, %Smolquery.Engine.CallExited{}}` like any other failure (T-464).
+  Every `Smolquery.Catalog` callback already promises `{:error, term()}`, and
+  the callers that matter are sweeps: the compactor, retention and GC each
+  visit every table in one long-lived process, and an exit from one table's
+  read used to take the whole sweep down and, for GC, its grace-period
+  bookkeeping with it. The abandoned statement keeps running on the
+  connection either way; what changes is that the caller keeps its state.
+
   `ducklake_merge_adjacent_files/2` must never be called on a smolquery table:
   over externally-registered files it crashes DuckDB fatally (ducklake
   `67480b1d`, format 0.4), and a fatal error invalidates the whole database.
@@ -426,7 +439,7 @@ defmodule Smolquery.Catalog.DuckLake do
         "INSERT INTO #{materialized_table(config.catalog)} VALUES (#{Enum.join(values, ", ")})"
       end)
 
-    Engine.transaction(config.engine, statements)
+    Engine.try_transaction(config.engine, statements)
   end
 
   @impl Catalog
@@ -676,7 +689,7 @@ defmodule Smolquery.Catalog.DuckLake do
   defp swap(config, ref, add, drop) do
     with {:ok, name} <- table_name(config, ref),
          :ok <-
-           Engine.transaction(
+           Engine.try_transaction(
              config.engine,
              [delete_statement(name, drop), add_statement(config, ref, add)],
              config.swap_timeout_ms
@@ -815,7 +828,7 @@ defmodule Smolquery.Catalog.DuckLake do
          :ok <- maybe_ensure_retention_table(config, options) do
       case option_statements(config, dataset, table, options) do
         [] -> :ok
-        statements -> Engine.transaction(config.engine, statements)
+        statements -> Engine.try_transaction(config.engine, statements)
       end
     end
   end
@@ -970,7 +983,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp transact(config, statements) do
     with_commit_retries(fn ->
-      case Engine.transaction(config.engine, statements) do
+      case Engine.try_transaction(config.engine, statements) do
         :ok -> {:ok, :committed}
         {:error, _error} = failure -> failure
       end
@@ -1123,7 +1136,7 @@ defmodule Smolquery.Catalog.DuckLake do
     now = System.system_time(:millisecond)
     created_at = connection.created_at || now
 
-    Engine.transaction(config.engine, [
+    Engine.try_transaction(config.engine, [
       delete_connection_sql(config, connection.name),
       "INSERT INTO #{connections_table(config.catalog)} " <>
         "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at) " <>
@@ -1353,7 +1366,7 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp query(config, sql, params \\ [], timeout \\ 30_000),
-    do: Engine.query(config.engine, sql, params, timeout)
+    do: Engine.try_query(config.engine, sql, params, timeout)
 
   defp engine_extensions do
     :smolquery

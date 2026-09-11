@@ -183,13 +183,16 @@ defmodule Smolquery.StorageService.Compactor do
   the whole compactor down with it. A crash forgets the backoff, the row caps
   and the quarantine, so the same group was re-planned and re-merged next
   sweep and timed out again, forty-five times in ten hours, while each
-  abandoned transaction kept running on the catalog connection (T-460). Here
-  an exit is caught where it happens: the swap's transaction becomes
-  `{:swap_failed, %CallExited{}}`, any other exit during a table's
-  compaction — a catalog read, or a store put whose HTTP pool died —
-  `{:call_exited, %CallExited{}}`, and a listing that exits fails the sweep.
-  All three back the table off like any other failure and none recycles the
-  compaction engine, whose statement did not exit.
+  abandoned transaction kept running on the catalog connection (T-460). The
+  catalog now answers such an exit as `{:error, %CallExited{}}` itself
+  (`Smolquery.Catalog.DuckLake`, T-464), so a listing that exits fails the
+  sweep with that error, a read that exits fails its table with it, and the
+  swap's transaction is tagged `{:swap_failed, %CallExited{}}` so the log
+  says which phase. One catch remains here, for an exit the catalog never
+  sees: a store put whose HTTP pool died mid-upload becomes
+  `{:call_exited, %CallExited{}}`. Every one of these backs the table off
+  like any other failure and none recycles the compaction engine, whose
+  statement did not exit.
 
   The sweep also stops at the first such exit. The call that exited is still
   running on the catalog's compaction connection, which serializes its
@@ -311,7 +314,7 @@ defmodule Smolquery.StorageService.Compactor do
   defp run(state) do
     runtime = state.runtime
 
-    with {:ok, tables} <- catalog_call(:listing_failed, fn -> Catalog.tables(runtime.catalog) end) do
+    with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       {cooling, due} = Enum.split_with(tables, &cooling_down?(state.cooldowns, &1))
       {outcomes, deferred} = sweep_due(runtime, state, due)
       swept = due -- deferred
@@ -758,6 +761,8 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
+  defp call_exited?({:failed, %{reason: %CallExited{}}}), do: true
+
   defp call_exited?({:failed, %{reason: {step, %CallExited{}}}})
        when step in [:swap_failed, :call_exited],
        do: true
@@ -767,7 +772,7 @@ defmodule Smolquery.StorageService.Compactor do
   defp compact_table(runtime, quarantined_groups, table_ref) do
     started_at = System.monotonic_time(:microsecond)
 
-    case catalog_call(:call_exited, fn ->
+    case exit_safe(:call_exited, fn ->
            compact_listed(runtime, quarantined_groups, table_ref, started_at)
          end) do
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
@@ -799,7 +804,7 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp catalog_call(step, call) do
+  defp exit_safe(step, call) do
     call.()
   catch
     :exit, reason -> {:error, {step, CallExited.new(reason)}}
@@ -1041,12 +1046,16 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp swapped(runtime, table_ref, segment, paths) do
-    with {:ok, snapshot} <-
-           catalog_call(:swap_failed, fn ->
-             Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths)
-           end),
+    with {:ok, snapshot} <- replaced(runtime, table_ref, segment, paths),
          :ok <- verify_retired(runtime, table_ref, paths) do
       {:ok, snapshot}
+    end
+  end
+
+  defp replaced(runtime, table_ref, segment, paths) do
+    case Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths) do
+      {:error, %CallExited{} = exited} -> {:error, {:swap_failed, exited}}
+      other -> other
     end
   end
 

@@ -13,6 +13,7 @@ defmodule Smolquery.StorageService.RetentionTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
@@ -143,6 +144,17 @@ defmodule Smolquery.StorageService.RetentionTest do
     refute aged.path in known
     assert kept.path in known
     assert File.exists?(aged.path)
+  end
+
+  test "a catalog call that exits fails the sweep instead of crashing the sweeper (T-464)",
+       context do
+    runtime = start_retention(context, [])
+    seal(runtime, context.catalog, 1, [~N[2026-01-01 00:00:00]])
+    retention = Process.whereis(Runtime.retention(context.storage))
+    Process.unregister(Engine.connection_name(Runtime.catalog_engine(context.storage)))
+
+    assert Retention.sweep(context.storage) == {:error, %CallExited{reason: :noproc}}
+    assert Process.alive?(retention)
   end
 
   test "a sweep with nothing expired drops nothing and reports it", context do
