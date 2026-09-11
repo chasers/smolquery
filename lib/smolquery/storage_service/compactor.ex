@@ -20,7 +20,7 @@ defmodule Smolquery.StorageService.Compactor do
   The sealer is told when a table wants sealing because only the buffer knows.
   Undersized sealed segments are entirely the catalog's knowledge, so nothing
   signals a compactor — it sweeps on an interval and finds work by reading
-  `segments/3`. A failed or crashed compaction needs no bookkeeping for the
+  `segment_files/3`. A failed or crashed compaction needs no bookkeeping for the
   same reason: the undersized run is still there next sweep, and the sweep is
   the retry.
 
@@ -118,9 +118,10 @@ defmodule Smolquery.StorageService.Compactor do
   every owned segment's footer was read on every sweep, and once the
   engines stopped caching file reads (T-461) a table with nothing to
   compact cost two store requests per file per sweep, forever. A size the
-  catalog does not know (recorded as `0`) keeps the file a candidate, so
-  the footer decides. Footers are still read for the candidates: sizing is
-  where a corrupt file first fails, and the quarantine keys on that.
+  catalog does not know is recorded as `0`, which is under any threshold,
+  so the footer decides for that file. Footers are still read for the
+  candidates: sizing is where a corrupt file first fails, and the
+  quarantine keys on that.
 
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
@@ -790,11 +791,11 @@ defmodule Smolquery.StorageService.Compactor do
   defp compact_listed(runtime, quarantined_groups, table_ref, started_at) do
     routing = Routing.resolve(runtime.name)
 
-    with {:ok, files} <- listed_files(runtime, table_ref),
+    with {:ok, files} <- Catalog.segment_files(runtime.catalog, table_ref, :current),
          paths = Enum.map(files, & &1.path),
          [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
          [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths),
-         {:ok, group} <- plan(runtime, plannable, catalog_sizes(files)),
+         {:ok, group} <- plan(runtime, listed_among(files, plannable)),
          :ok <- refuse_tombstoned(runtime, table_ref, group) do
       swap(runtime, table_ref, group, started_at)
     else
@@ -872,16 +873,15 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp listed_files(runtime, table_ref) do
-    with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog) do
-      Catalog.segment_files(runtime.catalog, table_ref, snapshot)
-    end
+  defp listed_among(files, paths) do
+    plannable = MapSet.new(paths)
+
+    Enum.filter(files, &MapSet.member?(plannable, &1.path))
   end
 
-  defp catalog_sizes(files), do: Map.new(files, &{&1.path, &1.bytes})
-
-  defp plan(runtime, owned, sizes) do
-    candidates = Enum.filter(owned, &candidate?(Map.get(sizes, &1, 0), runtime))
+  defp plan(runtime, files) do
+    candidates =
+      for %{path: path, bytes: bytes} <- files, bytes < runtime.compact_below_bytes, do: path
 
     if length(candidates) < runtime.compact_min_inputs do
       :skip
@@ -889,9 +889,6 @@ defmodule Smolquery.StorageService.Compactor do
       plan_undersized(runtime, candidates)
     end
   end
-
-  defp candidate?(0, _runtime), do: true
-  defp candidate?(bytes, runtime), do: bytes < runtime.compact_below_bytes
 
   defp plan_undersized(runtime, owned) do
     with {:ok, undersized} <- undersized(runtime, owned) do
