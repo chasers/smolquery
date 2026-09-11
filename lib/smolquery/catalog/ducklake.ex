@@ -143,6 +143,7 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:catalog, String.t()}
           | {:automatic_migration, boolean()}
           | {:store, Store.t()}
+          | {:swap_timeout_ms, timeout()}
 
   @default_catalog "lake"
   @commit_attempts 5
@@ -669,7 +670,8 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp swap(config, ref, add, []), do: query(config, add_statement(config, ref, add))
+  defp swap(config, ref, add, []),
+    do: query(config, add_statement(config, ref, add), [], config.swap_timeout_ms)
 
   defp swap(config, ref, add, drop) do
     with {:ok, name} <- table_name(config, ref),
@@ -1350,7 +1352,8 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp query(config, sql, params \\ []), do: Engine.query(config.engine, sql, params)
+  defp query(config, sql, params \\ [], timeout \\ 30_000),
+    do: Engine.query(config.engine, sql, params, timeout)
 
   defp engine_extensions do
     :smolquery
