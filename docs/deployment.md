@@ -101,6 +101,10 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The cluster page shows each node's version and commit (T-465)
+
+Every push to `main` ships an image tagged by commit, and most do not bump the version, so the cluster page's node table now has a Build column: the node's own version and the git commit it was built from, read from each node over RPC. The image bakes the commit in as `SMOLQUERY_GIT_SHA` from the `GIT_SHA` build argument, which `release.yml` and `scripts/kind-up.sh` pass; a node built without it shows its version alone, and one running a release older than this shows a dash until it is rolled.
+
 ### Compaction screens candidates by the catalog's file sizes, and a catalog call that exits is an error (T-463, T-464)
 
 The compactor used to read every owned segment's Parquet footer on every sweep to find the undersized ones. With the engines no longer caching file reads (T-461) that was two store requests per file per sweep on tables with nothing to compact. It now lists a table through `Catalog.segment_files/3` and skips any file DuckLake already sizes at or above `compact_below_bytes`; footers are read only for the candidates, which is still where a corrupt file first fails. A sweep over a table with nothing undersized issues no per-file store reads.

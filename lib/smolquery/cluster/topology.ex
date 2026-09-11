@@ -22,6 +22,12 @@ defmodule Smolquery.Cluster.Topology do
   the membership fields drive the drain button and the expected-node check.
   A node that is not alive has no roles to report, so it carries `[]`.
 
+  `build` is what the node runs, too — its own `Smolquery.build/0`, version
+  and git commit, over the same RPC (T-465). A rolling deploy that did not
+  bump the version is only visible as a commit that differs between rows,
+  which is the reason the page shows it. A node that is not alive, or that
+  runs a release too old to answer, carries `nil`.
+
   Degrades to a single row for `node()` — alive, no ring/storage membership
   claimed unless this node's own roles say so, nil epoch, not draining —
   wherever clustering is disabled, the same way every other reader in this
@@ -46,6 +52,7 @@ defmodule Smolquery.Cluster.Topology do
           pod: String.t(),
           alive: boolean(),
           roles: [Roles.t()],
+          build: %{version: String.t(), sha: String.t() | nil} | nil,
           buffer_member: boolean(),
           storage_member: boolean(),
           expected_buffer: boolean(),
@@ -81,6 +88,7 @@ defmodule Smolquery.Cluster.Topology do
       pod: Pods.pod_of_node(node),
       alive: is_alive,
       roles: if(is_alive, do: rpc(node, Roles, :enabled, []) || [], else: []),
+      build: if(is_alive, do: build_of(rpc(node, Smolquery, :build, []))),
       buffer_member: node in buffer_members,
       storage_member: node in storage_members,
       expected_buffer: node in expected_buffer,
@@ -88,6 +96,11 @@ defmodule Smolquery.Cluster.Topology do
       draining: is_alive and rpc(node, Drain, :draining?, [BufferService]) == true
     }
   end
+
+  defp build_of(%{version: version, sha: sha}) when is_binary(version),
+    do: %{version: version, sha: sha}
+
+  defp build_of(_unanswered), do: nil
 
   defp alive_nodes do
     if Cluster.enabled?(), do: Membership.members(), else: [node()]
