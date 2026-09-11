@@ -434,6 +434,20 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
   end
 
+  test "a file the catalog sizes at or above the threshold is never opened, so a corrupt one costs nothing (T-463)",
+       context do
+    runtime = start_compactor(context, compact_below_bytes: 1)
+    good = seal(runtime, context.catalog, 1, 1..10)
+    bad = seal(runtime, context.catalog, 2, 11..20)
+    File.write!(bad.path, "not a parquet file")
+
+    assert Compactor.sweep(context.storage) ==
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+
+    assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+    assert Enum.sort(current) == Enum.sort([good.path, bad.path])
+  end
+
   test "a sweep stops at the first call exit and defers the tables behind it (T-460)", context do
     catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
     runtime = start_compactor(context, catalog: catalog)

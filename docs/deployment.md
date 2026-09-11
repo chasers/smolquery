@@ -101,6 +101,12 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Compaction screens candidates by the catalog's file sizes, and a catalog call that exits is an error (T-463, T-464)
+
+The compactor used to read every owned segment's Parquet footer on every sweep to find the undersized ones. With the engines no longer caching file reads (T-461) that was two store requests per file per sweep on tables with nothing to compact. It now lists a table through `Catalog.segment_files/3` and skips any file DuckLake already sizes at or above `compact_below_bytes`; footers are read only for the candidates, which is still where a corrupt file first fails. A sweep over a table with nothing undersized issues no per-file store reads.
+
+Separately, every DuckLake catalog call that times out or finds its connection gone now answers `{:error, %Smolquery.Engine.CallExited{}}` instead of exiting its caller, so a busy catalog connection fails one retention, GC or compaction sweep instead of crashing the sweeper and, for GC, its grace-period bookkeeping. Nothing to configure.
+
 ### Long-lived engines keep no file cache (T-461)
 
 DuckDB's external file cache, on by default since 1.3, keeps a per-path entry

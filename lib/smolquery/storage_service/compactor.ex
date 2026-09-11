@@ -110,6 +110,18 @@ defmodule Smolquery.StorageService.Compactor do
   bytes-per-row constant fits every workload — see `adjusted_row_caps/3`
   (T-262).
 
+  The catalog screens the candidates before any footer is opened (T-463).
+  `Catalog.segment_files/3` carries the whole-file size DuckLake recorded at
+  registration, and a file at or above `compact_below_bytes` by that measure
+  is never a candidate — its compressed-data sum is smaller still, so the
+  screen only ever tightens the threshold by a footer's width. Without it,
+  every owned segment's footer was read on every sweep, and once the
+  engines stopped caching file reads (T-461) a table with nothing to
+  compact cost two store requests per file per sweep, forever. A size the
+  catalog does not know (recorded as `0`) keeps the file a candidate, so
+  the footer decides. Footers are still read for the candidates: sizing is
+  where a corrupt file first fails, and the quarantine keys on that.
+
   The sizing query chunks the same way, oldest first, and reads each file's
   `num_rows` in the same call. Sizing stops once the undersized bytes found
   reach `compact_max_bytes`, the rows found reach `compact_max_rows`, or the
@@ -778,10 +790,11 @@ defmodule Smolquery.StorageService.Compactor do
   defp compact_listed(runtime, quarantined_groups, table_ref, started_at) do
     routing = Routing.resolve(runtime.name)
 
-    with {:ok, paths} <- Catalog.segments(runtime.catalog, table_ref, :current),
+    with {:ok, files} <- listed_files(runtime, table_ref),
+         paths = Enum.map(files, & &1.path),
          [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
          [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths),
-         {:ok, group} <- plan(runtime, plannable),
+         {:ok, group} <- plan(runtime, plannable, catalog_sizes(files)),
          :ok <- refuse_tombstoned(runtime, table_ref, group) do
       swap(runtime, table_ref, group, started_at)
     else
@@ -859,13 +872,26 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp plan(runtime, owned) do
-    if length(owned) < runtime.compact_min_inputs do
-      :skip
-    else
-      plan_undersized(runtime, owned)
+  defp listed_files(runtime, table_ref) do
+    with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog) do
+      Catalog.segment_files(runtime.catalog, table_ref, snapshot)
     end
   end
+
+  defp catalog_sizes(files), do: Map.new(files, &{&1.path, &1.bytes})
+
+  defp plan(runtime, owned, sizes) do
+    candidates = Enum.filter(owned, &candidate?(Map.get(sizes, &1, 0), runtime))
+
+    if length(candidates) < runtime.compact_min_inputs do
+      :skip
+    else
+      plan_undersized(runtime, candidates)
+    end
+  end
+
+  defp candidate?(0, _runtime), do: true
+  defp candidate?(bytes, runtime), do: bytes < runtime.compact_below_bytes
 
   defp plan_undersized(runtime, owned) do
     with {:ok, undersized} <- undersized(runtime, owned) do
