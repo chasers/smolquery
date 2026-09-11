@@ -94,6 +94,8 @@ defmodule Smolquery.Test.PathCatalog do
   end
 
   @impl Catalog
+  def segment_files(agent, table, :current), do: segment_files(agent, table, 1)
+
   def segment_files(agent, table, snapshot) do
     with {:ok, paths} <- segments(agent, table, snapshot) do
       {:ok, Enum.map(paths, &%{path: &1, rows: 0, bytes: 0, snapshot: snapshot})}

@@ -149,7 +149,7 @@ defmodule Smolquery.Catalog do
               {:ok, [String.t()]} | {:error, term()}
   @callback segment_stats(config :: term(), table_ref(), snapshot()) ::
               {:ok, segment_stats()} | {:error, term()}
-  @callback segment_files(config :: term(), table_ref(), snapshot()) ::
+  @callback segment_files(config :: term(), table_ref(), snapshot() | :current) ::
               {:ok, [segment_file()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
@@ -311,9 +311,12 @@ defmodule Smolquery.Catalog do
 
   The lifecycle UI's question (T-295): compaction is visible only in the size
   distribution — how many segments sit under `compact_below_bytes`, and how
-  they merge away over time — which no aggregate answers.
+  they merge away over time — which no aggregate answers. `:current` reads
+  the latest snapshot, resolved by the implementation in one place, so a
+  caller with no use for the snapshot number does not fetch it first
+  (T-463).
   """
-  @spec segment_files(t(), table_ref(), snapshot()) ::
+  @spec segment_files(t(), table_ref(), snapshot() | :current) ::
           {:ok, [segment_file()]} | {:error, term()}
   def segment_files(%__MODULE__{} = catalog, table, snapshot),
     do: catalog.impl.segment_files(catalog.config, table, snapshot)

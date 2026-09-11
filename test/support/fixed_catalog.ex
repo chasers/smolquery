@@ -47,6 +47,9 @@ defmodule Smolquery.Test.FixedCatalog do
     do: {:ok, Map.get(segments, {table, snapshot}, [])}
 
   @impl Catalog
+  def segment_files(%{snapshot: snapshot} = answers, table, :current),
+    do: segment_files(answers, table, snapshot)
+
   def segment_files(answers, table, snapshot) do
     with {:ok, paths} <- segments(answers, table, snapshot) do
       {:ok, Enum.map(paths, &%{path: &1, rows: 0, bytes: 0, snapshot: snapshot})}

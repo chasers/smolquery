@@ -326,12 +326,11 @@ defmodule Smolquery.StorageService.Merge do
 
   defp registration_snapshots(runtime, table_ref, urls, field_ids) do
     if Enum.any?(urls, &is_nil(Map.get(field_ids, &1))) do
-      with {:ok, snapshot} <- Catalog.current_snapshot(runtime.catalog),
-           {:ok, files} <-
+      with {:ok, files} <-
              Catalog.segment_files(
                runtime.catalog,
                Smolquery.Partitions.parent(table_ref),
-               snapshot
+               :current
              ) do
         {:ok, Map.new(files, &{&1.path, &1.snapshot})}
       end

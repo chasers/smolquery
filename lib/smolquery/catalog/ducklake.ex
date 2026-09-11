@@ -602,6 +602,11 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def segment_files(%__MODULE__{} = config, table, :current) do
+    with {:ok, snapshot} <- current_snapshot(config), do: segment_files(config, table, snapshot)
+  end
+
+  @impl Catalog
   def segment_files(%__MODULE__{} = config, {dataset, table}, snapshot)
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
