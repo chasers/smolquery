@@ -70,7 +70,8 @@ defmodule Smolquery.StorageService.CompactorTest do
           compact_max_bytes: 16_777_216,
           compact_interval_ms: 3_600_000,
           compact_backoff_base_ms: 0
-        ] ++ opts
+        ]
+        |> Keyword.merge(opts)
       )
 
     start_supervised!({Compactor, runtime}, id: {:compactor, context.storage})
@@ -408,6 +409,43 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert is_pid(Process.whereis(Engine.connection_name(compact_engine)))
 
     assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(context.storage)
+  end
+
+  test "a swap whose transaction times out fails the table without crashing or recycling (T-460)",
+       context do
+    catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
+    runtime = start_compactor(context, catalog: catalog)
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    compactor = Process.whereis(Runtime.compactor(context.storage))
+    compact_engine = Runtime.compact_engine(context.storage)
+    database = Process.whereis(Engine.database_name(compact_engine))
+
+    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert %{table: @table, reason: {:swap_failed, %CallExited{reason: :timeout}}} = failure
+    assert Process.alive?(compactor)
+    assert Process.whereis(Engine.database_name(compact_engine)) == database
+
+    assert {:ok, [_merged]} =
+             Catalog.segments(Runtime.compaction_catalog(runtime), @table, :current)
+
+    assert lake_rows(context.storage) == 20
+    assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+  end
+
+  test "a catalog listing that exits fails the sweep instead of crashing it (T-460)", context do
+    runtime = start_compactor(context, [])
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+
+    compactor = Process.whereis(Runtime.compactor(context.storage))
+    Process.unregister(Engine.connection_name(Runtime.catalog_engine(context.storage), 2))
+
+    assert Compactor.sweep(context.storage) ==
+             {:error, {:listing_failed, %CallExited{reason: :noproc}}}
+
+    assert Process.alive?(compactor)
   end
 
   test "quarantines a segment that fails compaction identically, then stops replanning it (T-310)",
