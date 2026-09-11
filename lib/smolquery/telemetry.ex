@@ -95,9 +95,11 @@ defmodule Smolquery.Telemetry do
                                           is the dead history reclaimed (T-319)
       [:smolquery, :hot_manifest, :read]  %{duration_us, entries},
                                           meta %{op: :entries | :pending | :claimable |
-                                          :live_claim | :retired_before}
+                                          :live_claim | :retired_before, manifest: table}
                                           — one scanning read of a node's manifest index,
-                                          whoever made it (T-318)
+                                          whoever made it (T-318); `manifest` is the
+                                          index table read, so a handler on a node with
+                                          several manifests can tell them apart (T-462)
       [:smolquery, :hot_server, :request] %{duration_us, response_bytes, entries},
                                           meta %{route: :manifest | :manifest_scoped |
                                           :segment | :unknown, method: String.t(),
