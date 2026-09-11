@@ -362,6 +362,6 @@ defmodule Smolquery.Engine do
   end
 
   defp file_cache_setting(config) do
-    [enable_external_file_cache: Keyword.get(config, :external_file_cache, false)]
+    [enable_external_file_cache: Keyword.get(config, :external_file_cache) == true]
   end
 end

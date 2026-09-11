@@ -356,6 +356,14 @@ defmodule Smolquery.EngineTest do
       assert file_cache?(@engine) == false
       assert file_cache?(__MODULE__.Cached) == true
     end
+
+    test "an explicit nil for external_file_cache reads as off, like the other nil settings" do
+      start_supervised!({Engine, name: __MODULE__.NilCache, external_file_cache: nil},
+        id: :nil_cache
+      )
+
+      assert file_cache?(__MODULE__.NilCache) == false
+    end
   end
 
   defp file_cache?(engine) do
