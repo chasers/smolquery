@@ -184,11 +184,19 @@ defmodule Smolquery.StorageService.Compactor do
   and the quarantine, so the same group was re-planned and re-merged next
   sweep and timed out again, forty-five times in ten hours, while each
   abandoned transaction kept running on the catalog connection (T-460). Here
-  an exit is caught where it happens: the swap's becomes `{:swap_failed,
-  %CallExited{}}`, any other catalog call's `{:catalog_call_exited,
-  %CallExited{}}`, and a listing that exits fails the sweep. All three back
-  the table off like any other failure and none recycles the compaction
-  engine, whose statement did not exit.
+  an exit is caught where it happens: the swap's transaction becomes
+  `{:swap_failed, %CallExited{}}`, any other exit during a table's
+  compaction — a catalog read, or a store put whose HTTP pool died —
+  `{:call_exited, %CallExited{}}`, and a listing that exits fails the sweep.
+  All three back the table off like any other failure and none recycles the
+  compaction engine, whose statement did not exit.
+
+  The sweep also stops at the first such exit. The call that exited is still
+  running on the catalog's compaction connection, which serializes its
+  callers, so every later table's first catalog read would queue behind it,
+  exit at its own timeout, and be backed off for a failure that is not its
+  own. The tables behind the exit are reported as `deferred` — untouched, no
+  cooldown counted — and the next sweep finds them where they are.
 
   ## The output key is derived, so a retry converges instead of duplicating
 
@@ -291,8 +299,9 @@ defmodule Smolquery.StorageService.Compactor do
 
   Reports what was compacted and what failed, per table, plus the groups this
   node currently quarantines and the tables it left out of this sweep
-  because their last compaction failed (`cooling`, T-458) — the observable
-  form of the policy above, and what tests assert on. A wedged table shows
+  because their last compaction failed (`cooling`, T-458), and the tables it
+  left untouched behind a call that exited (`deferred`, T-460) — the
+  observable form of the policy above, and what tests assert on. A wedged table shows
   up as a non-empty `quarantined` even on a sweep where nothing else
   happens.
   """
@@ -304,12 +313,8 @@ defmodule Smolquery.StorageService.Compactor do
 
     with {:ok, tables} <- catalog_call(:listing_failed, fn -> Catalog.tables(runtime.catalog) end) do
       {cooling, due} = Enum.split_with(tables, &cooling_down?(state.cooldowns, &1))
-
-      outcomes =
-        Enum.map(
-          due,
-          &compact_table(runtime, state.row_caps, state.quarantined_groups, &1)
-        )
+      {outcomes, deferred} = sweep_due(runtime, state, due)
+      swept = due -- deferred
 
       row_caps = adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
 
@@ -321,13 +326,14 @@ defmodule Smolquery.StorageService.Compactor do
           @quarantine_after
         )
 
-      cooldowns = adjusted_cooldowns(state.cooldowns, due, outcomes, runtime, state.row_caps)
+      cooldowns = adjusted_cooldowns(state.cooldowns, swept, outcomes, runtime, state.row_caps)
 
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
         failed: for({:failed, failure} <- outcomes, do: failure),
         quarantined: quarantined_groups |> MapSet.to_list() |> Enum.sort(),
-        cooling: Enum.sort(cooling)
+        cooling: Enum.sort(cooling),
+        deferred: Enum.sort(deferred)
       }
 
       {:ok, report,
@@ -734,10 +740,34 @@ defmodule Smolquery.StorageService.Compactor do
     %{runtime | compact_max_rows: cap}
   end
 
+  defp sweep_due(_runtime, _state, []), do: {[], []}
+
+  defp sweep_due(runtime, state, [table_ref | rest]) do
+    outcome = compact_table(runtime, state.row_caps, state.quarantined_groups, table_ref)
+
+    if call_exited?(outcome) do
+      Logger.warning(fn ->
+        "compaction sweep stopped after a call exited on #{inspect(table_ref)}: " <>
+          "#{length(rest)} table(s) deferred to the next sweep"
+      end)
+
+      {[outcome], rest}
+    else
+      {outcomes, deferred} = sweep_due(runtime, state, rest)
+      {[outcome | outcomes], deferred}
+    end
+  end
+
+  defp call_exited?({:failed, %{reason: {step, %CallExited{}}}})
+       when step in [:swap_failed, :call_exited],
+       do: true
+
+  defp call_exited?(_outcome), do: false
+
   defp compact_table(runtime, quarantined_groups, table_ref) do
     started_at = System.monotonic_time(:microsecond)
 
-    case catalog_call(:catalog_call_exited, fn ->
+    case catalog_call(:call_exited, fn ->
            compact_listed(runtime, quarantined_groups, table_ref, started_at)
          end) do
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
@@ -1011,13 +1041,13 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp swapped(runtime, table_ref, segment, paths) do
-    catalog_call(:swap_failed, fn ->
-      with {:ok, snapshot} <-
-             Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
-           :ok <- verify_retired(runtime, table_ref, paths) do
-        {:ok, snapshot}
-      end
-    end)
+    with {:ok, snapshot} <-
+           catalog_call(:swap_failed, fn ->
+             Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths)
+           end),
+         :ok <- verify_retired(runtime, table_ref, paths) do
+      {:ok, snapshot}
+    end
   end
 
   defp verify_retired(runtime, table_ref, dropped) do

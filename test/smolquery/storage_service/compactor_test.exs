@@ -81,8 +81,8 @@ defmodule Smolquery.StorageService.CompactorTest do
     runtime
   end
 
-  defp seal(runtime, catalog, index, range) do
-    {:ok, prefix} = Store.prefix(@table)
+  defp seal(runtime, catalog, index, range, table \\ @table) do
+    {:ok, prefix} = Store.prefix(table)
     rows = for i <- range, do: %{"id" => i}
 
     {:ok, segment} =
@@ -92,7 +92,7 @@ defmodule Smolquery.StorageService.CompactorTest do
         id: Id.generate(index * 1_000)
       )
 
-    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+    {:ok, _snapshot} = Catalog.register_segments(catalog, table, [segment])
 
     segment
   end
@@ -307,7 +307,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "leaves segments at or above the size floor alone", context do
@@ -316,7 +316,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
@@ -327,7 +327,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "groups oldest first and leaves what would pass the ceiling", context do
@@ -377,7 +377,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert lake_rows(context.storage) == 50
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "a sweep survives an engine that cannot answer its calls (T-251)", context do
@@ -434,6 +434,33 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
   end
 
+  test "a sweep stops at the first call exit and defers the tables behind it (T-460)", context do
+    catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
+    runtime = start_compactor(context, catalog: catalog)
+    other = {"analytics", "clicks"}
+    :ok = Catalog.create_table(context.catalog, other, schema())
+    seal(runtime, context.catalog, 1, 1..10)
+    seal(runtime, context.catalog, 2, 11..20)
+    seal(runtime, context.catalog, 3, 21..30, other)
+    seal(runtime, context.catalog, 4, 31..40, other)
+
+    assert {:ok, report} = Compactor.sweep(context.storage)
+
+    assert [%{table: first, reason: {:swap_failed, %CallExited{reason: :timeout}}}] =
+             report.failed
+
+    assert [second] = report.deferred
+    assert Enum.sort([first, second]) == Enum.sort([@table, other])
+    assert report.cooling == []
+
+    assert {:ok, [_merged]} =
+             Catalog.segments(Runtime.compaction_catalog(runtime), first, :current)
+
+    assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, second, :current)
+
+    assert {:ok, %{failed: [%{table: ^second}], deferred: []}} = Compactor.sweep(context.storage)
+  end
+
   test "a catalog listing that exits fails the sweep instead of crashing it (T-460)", context do
     runtime = start_compactor(context, [])
     seal(runtime, context.catalog, 1, 1..10)
@@ -466,7 +493,14 @@ defmodule Smolquery.StorageService.CompactorTest do
     end
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [[bad.path]], cooling: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [[bad.path]],
+                cooling: [],
+                deferred: []
+              }}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
     assert Enum.sort(current) == Enum.sort([good.path, bad.path])
@@ -509,7 +543,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     start_compactor(context, [])
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "a table this node's storage ring hands to another node is left alone", context do
@@ -518,7 +552,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Compactor.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: []}}
+             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
@@ -654,7 +688,8 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
 
       assert Compactor.sweep(context.storage) ==
-               {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [@table]}}
+               {:ok,
+                %{compacted: [], failed: [], quarantined: [], cooling: [@table], deferred: []}}
 
       Process.sleep(350)
 

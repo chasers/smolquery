@@ -387,6 +387,32 @@ defmodule Smolquery.EngineTest do
       rebuilt = temp_directory(@engine)
       assert rebuilt != directory
       assert Path.dirname(rebuilt) == Path.dirname(directory)
+      assert Path.basename(rebuilt) =~ ~r/-db\d+\.\d+\.\d+$/
+    end
+
+    test "every slot of a multi-connection engine shares the instance's leaf, so a slot survives a restart after a spill (T-460)" do
+      pool = __MODULE__.SpillPool
+
+      start_supervised!({Engine, name: pool, connections: 2, memory_limit: "64MB"},
+        id: :spill_pool
+      )
+
+      assert temp_directory({pool, 1}) == temp_directory({pool, 2})
+
+      assert {:ok, _} =
+               Engine.query(
+                 {pool, 1},
+                 "SELECT count(*) FROM (SELECT i, random() r FROM range(8000000) t(i) ORDER BY r)",
+                 [],
+                 120_000
+               )
+
+      conn = Process.whereis(Engine.connection_name(pool, 1))
+      kill_and_await(conn)
+      await_registered(Engine.connection_name(pool, 1), conn)
+
+      assert {:ok, %Result{rows: [[1]]}} = Engine.query({pool, 1}, "SELECT 1")
+      assert temp_directory({pool, 1}) == temp_directory({pool, 2})
     end
 
     test "an explicit directory wins over the derived one" do

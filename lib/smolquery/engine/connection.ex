@@ -34,9 +34,13 @@ defmodule Smolquery.Engine.Connection do
   so live instances sharing a directory can corrupt each other's spilled sorts.
   `:temp_directory` overrides the default.
 
-  The default leaf names the *instance*, not the engine: a registered
-  connection's leaf carries its name, the OS pid, and the pid of the
-  `Adbc.Database` it connects to. A connection-only restart reuses the
+  The default leaf names the *instance*, not the engine or the connection: a
+  registered connection's leaf carries the name of the `Adbc.Database` it
+  connects to, the OS pid, and that database's pid. Every slot of a
+  multi-connection engine derives the same leaf, which matters because
+  `temp_directory` is one setting per instance and DuckDB refuses to change
+  it once a spill has used it — a slot that derived its own leaf would fail
+  to restart after any spill. A connection-only restart reuses the
   surviving database's leaf, and a rebuilt database gets a fresh one, because
   the instance a rebuild replaces is still alive — a killed database process
   releases nothing native while its connection is mid-statement, so the
@@ -443,21 +447,24 @@ defmodule Smolquery.Engine.Connection do
 
   defp instance_token(database) do
     case Process.info(self(), :registered_name) do
-      {:registered_name, name} when is_atom(name) -> registered_instance_token(name, database)
+      {:registered_name, name} when is_atom(name) -> registered_instance_token(database)
       _unregistered -> "connection-#{System.unique_integer([:positive])}-os#{System.pid()}"
     end
   end
 
-  defp registered_instance_token(name, database) do
-    encoded = name |> Atom.to_string() |> URI.encode(&URI.char_unreserved?/1)
+  defp registered_instance_token(database) do
+    pid = GenServer.whereis(database)
+    label = if is_atom(database), do: Atom.to_string(database), else: "database"
+    encoded = URI.encode(label, &URI.char_unreserved?/1)
 
-    "#{encoded}-os#{System.pid()}-db#{database_token(database)}"
+    "#{encoded}-os#{System.pid()}-db#{pid_token(pid)}"
   end
 
-  defp database_token(database) do
-    case GenServer.whereis(database) do
-      pid when is_pid(pid) -> pid |> :erlang.pid_to_list() |> to_string() |> String.trim("<>")
-      _unstarted -> Integer.to_string(System.unique_integer([:positive]))
-    end
+  defp pid_token(pid) do
+    pid
+    |> :erlang.pid_to_list()
+    |> to_string()
+    |> String.trim_leading("<")
+    |> String.trim_trailing(">")
   end
 end
