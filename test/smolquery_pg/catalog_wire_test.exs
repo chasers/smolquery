@@ -10,6 +10,7 @@ defmodule SmolqueryPg.CatalogWireTest do
   alias Smolquery.Catalog
   alias Smolquery.QueryService
   alias Smolquery.Schema
+  alias Smolquery.Test.ExitingCatalog
   alias Smolquery.Test.FixedCatalog
   alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.PgClient
@@ -59,6 +60,35 @@ defmodule SmolqueryPg.CatalogWireTest do
     {:ok, socket, _params} = PgClient.connect(port, password: @password)
 
     %{socket: socket, catalog: catalog}
+  end
+
+  test "a catalog call that exits is an error to the client, not an empty catalog (T-464)",
+       context do
+    unique = :erlang.unique_integer([:positive])
+    pg = :"pg_catalog_wedged_#{unique}"
+    wedged = ExitingCatalog.new(context.catalog, [:list_datasets])
+
+    start_supervised!(
+      {SmolqueryPg.Supervisor,
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: :"pg_catalog_query_#{unique}",
+       port: 0,
+       catalog: wedged},
+      id: pg
+    )
+
+    on_exit(fn -> Runtime.delete(pg) end)
+    {:ok, {_ip, port}} = SmolqueryPg.Supervisor.bound(pg)
+    {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+    answer = PgClient.query(socket, "SELECT relname FROM pg_catalog.pg_class")
+
+    assert [%{"M" => message}] = answer.errors
+    assert message =~ "pg_catalog_unavailable"
+    assert message =~ "CallExited"
+    assert answer.results == []
   end
 
   test "two result columns of one name both answer: the re-select labels them (T-426)", %{

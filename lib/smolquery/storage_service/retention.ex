@@ -51,6 +51,7 @@ defmodule Smolquery.StorageService.Retention do
 
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
 
@@ -72,19 +73,23 @@ defmodule Smolquery.StorageService.Retention do
   @doc """
   Sweeps now, without waiting for the interval.
 
-  Reports what was dropped per table, how many snapshots expired, and what
-  failed.
+  Reports what was dropped per table, how many snapshots expired, what
+  failed, and the tables the sweep left untouched behind a catalog call that
+  exited (`deferred`, T-464): the call that exited is still running on the
+  catalog connection, so every later table would queue behind it and fail
+  for a reason not its own.
   """
   @spec sweep(atom(), timeout()) :: {:ok, map()} | {:error, term()}
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.retention(name), :sweep, timeout)
 
   defp run(state) do
     with {:ok, tables} <- Catalog.tables(state.runtime.catalog) do
-      outcomes = Enum.map(tables, &sweep_table(state.runtime, &1))
+      {outcomes, deferred} = sweep_tables(state.runtime, tables)
 
       report = %{
         dropped: for({:ok, drop} <- outcomes, do: drop),
         failed: for({:failed, failure} <- outcomes, do: failure),
+        deferred: deferred,
         expired_snapshots: expire(state.runtime)
       }
 
@@ -98,6 +103,24 @@ defmodule Smolquery.StorageService.Retention do
       )
 
       {:ok, report}
+    end
+  end
+
+  defp sweep_tables(_runtime, []), do: {[], []}
+
+  defp sweep_tables(runtime, [table_ref | rest]) do
+    case sweep_table(runtime, table_ref) do
+      {:failed, %{reason: %CallExited{}}} = outcome ->
+        Logger.warning(fn ->
+          "retention sweep stopped after a catalog call exited on #{inspect(table_ref)}: " <>
+            "#{length(rest)} table(s) deferred to the next sweep"
+        end)
+
+        {[outcome], rest}
+
+      outcome ->
+        {outcomes, deferred} = sweep_tables(runtime, rest)
+        {[outcome | outcomes], deferred}
     end
   end
 

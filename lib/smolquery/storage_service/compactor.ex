@@ -186,13 +186,12 @@ defmodule Smolquery.StorageService.Compactor do
   abandoned transaction kept running on the catalog connection (T-460). The
   catalog now answers such an exit as `{:error, %CallExited{}}` itself
   (`Smolquery.Catalog.DuckLake`, T-464), so a listing that exits fails the
-  sweep with that error, a read that exits fails its table with it, and the
-  swap's transaction is tagged `{:swap_failed, %CallExited{}}` so the log
-  says which phase. One catch remains here, for an exit the catalog never
-  sees: a store put whose HTTP pool died mid-upload becomes
-  `{:call_exited, %CallExited{}}`. Every one of these backs the table off
-  like any other failure and none recycles the compaction engine, whose
-  statement did not exit.
+  sweep with that error and a read or the swap that exits fails its table
+  with it. One catch remains here, for an exit the catalog never sees: a
+  store put whose HTTP pool died mid-upload becomes
+  `{:call_exited, %CallExited{}}`. Both back the table off like any other
+  failure and neither recycles the compaction engine, whose statement did
+  not exit.
 
   The sweep also stops at the first such exit. The call that exited is still
   running on the catalog's compaction connection, which serializes its
@@ -762,11 +761,7 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp call_exited?({:failed, %{reason: %CallExited{}}}), do: true
-
-  defp call_exited?({:failed, %{reason: {step, %CallExited{}}}})
-       when step in [:swap_failed, :call_exited],
-       do: true
-
+  defp call_exited?({:failed, %{reason: {:call_exited, %CallExited{}}}}), do: true
   defp call_exited?(_outcome), do: false
 
   defp compact_table(runtime, quarantined_groups, table_ref) do
@@ -1046,16 +1041,9 @@ defmodule Smolquery.StorageService.Compactor do
   end
 
   defp swapped(runtime, table_ref, segment, paths) do
-    with {:ok, snapshot} <- replaced(runtime, table_ref, segment, paths),
+    with {:ok, snapshot} <- Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths),
          :ok <- verify_retired(runtime, table_ref, paths) do
       {:ok, snapshot}
-    end
-  end
-
-  defp replaced(runtime, table_ref, segment, paths) do
-    case Catalog.replace_segments(runtime.catalog, table_ref, [segment], paths) do
-      {:error, %CallExited{} = exited} -> {:error, {:swap_failed, exited}}
-      other -> other
     end
   end
 

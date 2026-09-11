@@ -50,6 +50,13 @@ defmodule SmolqueryPg.PgCatalog do
   every call runs through this server, so a refresh never interleaves with
   a read.
 
+  A rebuild that cannot read the catalog — a call that timed out behind a
+  busy connection, or found it gone, answers `{:error, %CallExited{}}`
+  since T-464 — is not a rebuild: the query answers
+  `{:error, {:pg_catalog_unavailable, _}}`, the generated tables keep their
+  last shape, and the next query tries again. An empty `pg_class` would be
+  a wrong answer a client acts on, not a failure it can retry.
+
   All calls take the edge's instance name; the server and its engine derive
   from it (`SmolqueryPg.Runtime.pg_catalog/1`).
   """
@@ -59,6 +66,7 @@ defmodule SmolqueryPg.PgCatalog do
   alias Explorer.DataFrame
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Frame
   alias Smolquery.Identifier
   alias SmolqueryPg.PgCatalog.Rewrite
@@ -174,9 +182,8 @@ defmodule SmolqueryPg.PgCatalog do
   end
 
   def handle_call({:query, sql, settings, params}, _from, state) do
-    state = ensure_fresh(state)
-
-    with {:ok, _ast, canonical} <- serialize(state.engine, Rewrite.pre(sql, settings)),
+    with {:ok, state} <- ensure_fresh(state),
+         {:ok, _ast, canonical} <- serialize(state.engine, Rewrite.pre(sql, settings)),
          {:ok, frame} <- run(state.engine, Rewrite.post(canonical), params) do
       {:reply, {:ok, columns(frame), rows(frame)}, state}
     else
@@ -289,11 +296,12 @@ defmodule SmolqueryPg.PgCatalog do
     now = System.monotonic_time(:millisecond)
 
     if now - state.refreshed_at > @refresh_ttl_ms or state.refreshed_at == 0 do
-      refresh(state.engine, state.runtime.catalog)
-
-      %{state | refreshed_at: now}
+      case refresh(state.engine, state.runtime.catalog) do
+        :ok -> {:ok, %{state | refreshed_at: now}}
+        {:error, reason} -> {:error, {:pg_catalog_unavailable, reason}}
+      end
     else
-      state
+      {:ok, state}
     end
   end
 
@@ -593,7 +601,12 @@ defmodule SmolqueryPg.PgCatalog do
   defp refresh(_engine, nil), do: :ok
 
   defp refresh(engine, catalog) do
-    tables = listed_tables(catalog)
+    with {:ok, tables} <- listed_tables(catalog) do
+      rebuild(engine, tables)
+    end
+  end
+
+  defp rebuild(engine, tables) do
     datasets = tables |> Enum.map(fn {dataset, _table, _schema} -> dataset end) |> Enum.uniq()
 
     Engine.transaction(engine, [
@@ -674,16 +687,24 @@ defmodule SmolqueryPg.PgCatalog do
   end
 
   defp listed_tables(catalog) do
-    case Catalog.tables(catalog) do
-      {:ok, refs} -> Enum.flat_map(refs, &table_entry(catalog, &1))
-      {:error, _reason} -> []
+    with {:ok, refs} <- Catalog.tables(catalog) do
+      Enum.reduce_while(refs, {:ok, []}, &collect_entry(catalog, &1, &2))
+    end
+  end
+
+  defp collect_entry(catalog, ref, {:ok, entries}) do
+    case table_entry(catalog, ref) do
+      {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+      :skip -> {:cont, {:ok, entries}}
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 
   defp table_entry(catalog, {dataset, table} = ref) do
     case Catalog.table_schema(catalog, ref) do
-      {:ok, schema} -> [{dataset, table, schema}]
-      {:error, _reason} -> []
+      {:ok, schema} -> {:ok, {dataset, table, schema}}
+      {:error, %CallExited{} = exited} -> {:error, exited}
+      {:error, _dropped_meanwhile} -> :skip
     end
   end
 

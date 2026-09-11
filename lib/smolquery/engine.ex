@@ -234,9 +234,7 @@ defmodule Smolquery.Engine do
   @spec try_query(handle(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
   def try_query(handle, sql, params \\ [], timeout \\ 30_000) do
-    query(handle, sql, params, timeout)
-  catch
-    :exit, reason -> {:error, CallExited.new(reason)}
+    catching_exit(fn -> query(handle, sql, params, timeout) end)
   end
 
   @doc """
@@ -249,7 +247,11 @@ defmodule Smolquery.Engine do
   """
   @spec try_transaction(handle(), [String.t()], timeout()) :: :ok | {:error, Exception.t()}
   def try_transaction(handle, statements, timeout \\ 30_000) do
-    transaction(handle, statements, timeout)
+    catching_exit(fn -> transaction(handle, statements, timeout) end)
+  end
+
+  defp catching_exit(call) do
+    call.()
   catch
     :exit, reason -> {:error, CallExited.new(reason)}
   end
