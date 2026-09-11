@@ -544,6 +544,18 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "a call that exits (T-464)" do
+    test "comes back as {:error, %CallExited{}} from a read and from a commit" do
+      catalog = DuckLake.new(engine: @engine)
+      Process.unregister(Engine.connection_name(@engine))
+
+      assert Catalog.tables(catalog) == {:error, %Smolquery.Engine.CallExited{reason: :noproc}}
+
+      assert Catalog.drop_segments(catalog, @table, ["/nowhere.parquet"]) ==
+               {:error, %Smolquery.Engine.CallExited{reason: :noproc}}
+    end
+  end
+
   describe "replace_segments/4" do
     test "one snapshot both adds the replacement and retires the inputs", %{
       catalog: catalog,

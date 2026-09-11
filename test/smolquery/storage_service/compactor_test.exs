@@ -469,8 +469,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     compactor = Process.whereis(Runtime.compactor(context.storage))
     Process.unregister(Engine.connection_name(Runtime.catalog_engine(context.storage), 2))
 
-    assert Compactor.sweep(context.storage) ==
-             {:error, {:listing_failed, %CallExited{reason: :noproc}}}
+    assert Compactor.sweep(context.storage) == {:error, %CallExited{reason: :noproc}}
 
     assert Process.alive?(compactor)
   end

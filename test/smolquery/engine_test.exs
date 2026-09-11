@@ -189,6 +189,28 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "try_transaction/3" do
+    test "commits like transaction/3 and returns its errors" do
+      assert Engine.try_transaction(@engine, ["CREATE TABLE try_txn (n INTEGER)"]) == :ok
+
+      assert {:error, %Adbc.Error{}} =
+               Engine.try_transaction(@engine, ["SELECT * FROM no_such_table"])
+    end
+
+    test "returns CallExited instead of exiting when the connection is down or busy (T-464)" do
+      assert {:error, %CallExited{reason: :noproc}} =
+               Engine.try_transaction(__MODULE__.Missing, ["SELECT 1"])
+
+      busy = Process.whereis(Engine.connection_name(@engine))
+      :ok = :sys.suspend(busy)
+
+      assert {:error, %CallExited{reason: :timeout}} =
+               Engine.try_transaction(@engine, ["SELECT 1"], 50)
+
+      :ok = :sys.resume(busy)
+    end
+  end
+
   describe "transaction/2" do
     test "commits every statement together" do
       assert Engine.transaction(@engine, [
