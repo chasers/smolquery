@@ -71,6 +71,11 @@ defmodule Smolquery.QueryService.Runner do
   begins with `ALTER` but is not one of the two accepted shapes fails the
   job with the parser's reason; one asked to explain, describe, or bind
   parameters is refused before the catalog is touched.
+
+  An `EXPLAIN ANALYZE` job switches profiling on for its connection, with the
+  other per-connection statements and before the lockdown seals the
+  configuration: from DuckDB 2.0 the analyzed plan over the C API is only the
+  message that profiling is disabled unless `enable_profiling` is set.
   """
 
   use GenServer, restart: :temporary
@@ -333,7 +338,11 @@ defmodule Smolquery.QueryService.Runner do
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
-             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
+             run_statements(
+               connection,
+               plan,
+               plan.statements ++ profiling(explain) ++ lockdown(runtime, plan, job_id)
+             )
            end),
          {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
@@ -376,8 +385,7 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id, _timeout_ms) do
-    with {:ok, result} <-
-           Connection.query(connection, explain_sql(explain, plan.sql), plan.params, :infinity) do
+    with {:ok, result} <- explained(connection, explain, plan) do
       {:ok, {{:explain, explain_text(result)}, nil, []}}
     end
   end
@@ -433,8 +441,14 @@ defmodule Smolquery.QueryService.Runner do
   defp bounded(plan, max_rows),
     do: "SELECT * FROM (#{plan.canonical_sql}) LIMIT #{max_rows + 1}"
 
-  defp explain_sql(:plan, sql), do: "EXPLAIN " <> sql
-  defp explain_sql(:analyze, sql), do: "EXPLAIN ANALYZE " <> sql
+  defp explained(connection, :plan, plan),
+    do: Connection.query(connection, "EXPLAIN " <> plan.sql, plan.params, :infinity)
+
+  defp explained(connection, :analyze, plan),
+    do: Connection.query(connection, "EXPLAIN ANALYZE " <> plan.sql, plan.params, :infinity)
+
+  defp profiling(:analyze), do: ["SET enable_profiling = 'no_output'"]
+  defp profiling(_plan_describe_or_run), do: []
 
   defp explain_text(result) do
     Enum.map_join(result.rows, "\n", fn row ->

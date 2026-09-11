@@ -28,6 +28,7 @@ defmodule Smolquery.QueryService.Pruner do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Ast
 
   @type op :: :gt | :ge | :lt | :le | :eq
   @type conjunct :: {String.t(), op(), term()}
@@ -207,21 +208,23 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp column(_node, _aliases), do: :error
 
-  defp literal(%{"class" => "CONSTANT", "value" => %{"is_null" => false} = value}, _params),
-    do: constant(value)
+  defp literal(%{"class" => "CONSTANT"} = node, _params) do
+    case Ast.constant(node) do
+      {:ok, {type, value}} -> constant(type, value)
+      _null_or_unreadable -> :error
+    end
+  end
 
-  defp literal(
-         %{
-           "class" => "CAST",
-           "cast_type" => %{"id" => cast},
-           "child" => %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => text}}
-         },
-         _params
-       )
-       when cast in ["TIMESTAMP", "DATE"] and is_binary(text) do
-    case cast do
-      "TIMESTAMP" -> text |> String.replace(" ", "T") |> naive()
-      "DATE" -> date(text)
+  defp literal(%{"class" => "CAST", "child" => %{"class" => "CONSTANT"} = child} = node, _params) do
+    case {Ast.cast_type(node), Ast.constant(child)} do
+      {"TIMESTAMP", {:ok, {_type, text}}} when is_binary(text) ->
+        text |> String.replace(" ", "T") |> naive()
+
+      {"DATE", {:ok, {_type, text}}} when is_binary(text) ->
+        date(text)
+
+      _other_cast ->
+        :error
     end
   end
 
@@ -247,15 +250,13 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp bound(_opaque), do: :error
 
-  defp constant(%{"type" => %{"id" => id}, "value" => value})
-       when id in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"] and
+  defp constant(type, value)
+       when type in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"] and
               is_number(value),
        do: {:ok, value}
 
-  defp constant(%{"type" => %{"id" => "VARCHAR"}, "value" => value}) when is_binary(value),
-    do: {:ok, value}
-
-  defp constant(_value), do: :error
+  defp constant("VARCHAR", value) when is_binary(value), do: {:ok, value}
+  defp constant(_type, _value), do: :error
 
   defp naive(text) do
     case NaiveDateTime.from_iso8601(text) do

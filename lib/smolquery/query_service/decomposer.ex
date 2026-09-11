@@ -78,6 +78,7 @@ defmodule Smolquery.QueryService.Decomposer do
   and cast to the type reported there, positionally.
   """
 
+  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
 
   @mergeable ~w(count_star count sum min max)
@@ -337,7 +338,7 @@ defmodule Smolquery.QueryService.Decomposer do
       item["distinct"] -> {:error, {:distinct_aggregate, name}}
       item["filter"] != nil -> {:error, {:filtered_aggregate, name}}
       item["order_bys"]["orders"] != [] -> {:error, {:ordered_aggregate, name}}
-      nested_aggregate?(item["children"]) -> {:error, {:nested_aggregate, name}}
+      nested_aggregate?(Ast.arguments(item)) -> {:error, {:nested_aggregate, name}}
       true -> {:ok, {:aggregate, name, item}}
     end
   end
@@ -559,17 +560,12 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => nil}, _names), do: {:ok, ""}
+
   defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => limit}, _names) do
-    case limit do
-      %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => count}}
-      when is_integer(count) and count >= 0 ->
-        {:ok, "LIMIT #{count}"}
-
-      nil ->
-        {:ok, ""}
-
-      _expression ->
-        {:error, :unsupported_limit}
+    case Ast.constant(limit) do
+      {:ok, {_type, count}} when is_integer(count) and count >= 0 -> {:ok, "LIMIT #{count}"}
+      _not_a_count -> {:error, :unsupported_limit}
     end
   end
 

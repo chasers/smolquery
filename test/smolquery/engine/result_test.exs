@@ -33,6 +33,16 @@ defmodule Smolquery.Engine.ResultTest do
       assert result.num_rows == 2
     end
 
+    test "reads an untyped null column as nils, as many as its neighbours hold" do
+      untyped = %Adbc.Column{field: %Adbc.Field{name: "NULL", type: nil}, data: nil, size: nil}
+      result = Result.from_adbc(%Adbc.Result{data: [[hd(batch()), untyped]], num_rows: nil})
+
+      assert result.columns == ["id", "NULL"]
+      assert result.rows == [[1, nil], [2, nil]]
+
+      assert Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil}).rows == []
+    end
+
     test "handles a statement that returned no data" do
       result = Result.from_adbc(%Adbc.Result{data: nil, num_rows: 7})
 

@@ -12,11 +12,11 @@ defmodule Smolquery.DuckDBTest do
   end
 
   describe "ADBC configuration" do
-    test "pins the packaged driver to an official asset of the same version" do
+    test "pins the packaged driver to the mirrored preview asset of the same version" do
       assert [{:duckdb, [version: version, url: url]}] = Application.fetch_env!(:adbc, :drivers)
 
       assert version == DuckDB.version()
-      assert url =~ "duckdb/releases/download/v#{DuckDB.version()}/libduckdb-"
+      assert url =~ "smolquery/releases/download/duckdb-v#{DuckDB.version()}/libduckdb-"
     end
   end
 

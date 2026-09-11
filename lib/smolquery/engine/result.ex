@@ -30,6 +30,11 @@ defmodule Smolquery.Engine.Result do
 
   @doc """
   Builds a result from an `Adbc.Result`, flattening its record batches.
+
+  A column DuckDB exports as Arrow's null type — a bare `NULL` in a select
+  list, from 2.0 on — arrives with no type, data or length. It reads as nils,
+  as many as the batch's other columns hold; a batch of nothing but such
+  columns reads as empty.
   """
   @spec from_adbc(Adbc.Result.t()) :: t()
   def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}) do
@@ -113,8 +118,17 @@ defmodule Smolquery.Engine.Result do
   defp batch_to_rows([]), do: []
 
   defp batch_to_rows(batch) do
-    batch
-    |> Enum.map(&Adbc.Column.to_list/1)
+    columns = Enum.map(batch, &column_values/1)
+    length = Enum.find_value(columns, 0, &(is_list(&1) and length(&1)))
+
+    columns
+    |> Enum.map(fn
+      :untyped_nulls -> List.duplicate(nil, length)
+      values -> values
+    end)
     |> Enum.zip_with(& &1)
   end
+
+  defp column_values(%Adbc.Column{field: %{type: nil}, data: nil}), do: :untyped_nulls
+  defp column_values(column), do: Adbc.Column.to_list(column)
 end

@@ -1,20 +1,20 @@
 import Config
 
-duckdb_driver_version = "1.5.3"
+duckdb_driver_version = "2.0.0-alpha38195"
 duckdb_target = :erlang.system_info(:system_architecture) |> to_string()
 
 duckdb_driver_url =
   cond do
     String.contains?(duckdb_target, "-darwin") ->
-      "https://github.com/duckdb/duckdb/releases/download/v#{duckdb_driver_version}/libduckdb-osx-universal.zip"
+      "https://github.com/chasers/smolquery/releases/download/duckdb-v#{duckdb_driver_version}/libduckdb-osx-universal.zip"
 
     String.contains?(duckdb_target, "-linux-gnu") and
         String.starts_with?(duckdb_target, "aarch64-") ->
-      "https://github.com/duckdb/duckdb/releases/download/v#{duckdb_driver_version}/libduckdb-linux-arm64.zip"
+      "https://github.com/chasers/smolquery/releases/download/duckdb-v#{duckdb_driver_version}/libduckdb-linux-arm64.zip"
 
     String.contains?(duckdb_target, "-linux-gnu") and
         String.starts_with?(duckdb_target, "x86_64-") ->
-      "https://github.com/duckdb/duckdb/releases/download/v#{duckdb_driver_version}/libduckdb-linux-amd64.zip"
+      "https://github.com/chasers/smolquery/releases/download/duckdb-v#{duckdb_driver_version}/libduckdb-linux-amd64.zip"
 
     true ->
       nil

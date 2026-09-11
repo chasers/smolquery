@@ -74,10 +74,14 @@ received value, and the accepted shape.
 
 ### Engine and the write path
 
-The build packages DuckDB 1.5.3 through ADBC (Arrow Database Connectivity)
-0.12.1. Every database process uses that same driver version. The build target
-selects the compile-time asset. macOS uses the universal asset. Linux GNU uses
-the matching `aarch64` or `x86_64` asset.
+The build packages DuckDB 2.0.0-alpha38195, a preview of DuckDB 2.0, through
+ADBC (Arrow Database Connectivity) 0.12.1. Every database process uses that
+same driver version. DuckDB serves its preview libraries from a path that moves
+with every nightly and redirects to an expiring blob, so the pinned build is
+mirrored as the prerelease `duckdb-v2.0.0-alpha38195` on this repository and
+the driver downloads from there. The build target selects the compile-time
+asset. macOS uses the universal asset. Linux GNU uses the matching `aarch64` or
+`x86_64` asset.
 
 An unsupported target falls back to ADBC's own driver matrix, so Mix tasks
 still run there. On such a target, the engine refuses to start until the pinned
