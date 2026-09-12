@@ -101,6 +101,17 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The engine is a DuckDB 2.0 preview (T-467)
+
+The pinned driver is DuckDB `2.0.0-alpha38195`, a preview of the 2.0 release DuckDB has scheduled for 2026-10-21, taken from the `v2.0-cyanoptera` preview line. DuckDB serves those libraries from a path that moves with every nightly and redirects to an expiring blob, so the exact build is mirrored as the prerelease `duckdb-v2.0.0-alpha38195` on this repository and `config/config.exs` downloads the driver from there. Nothing to configure; the pin moves to the release when it ships.
+
+What changes for an operator:
+
+- **`EXPLAIN` output is DuckDB 2.0's.** Plans render as box-drawn trees with mixed-case operator names (`Projection`, `Dummy Scan`) instead of the upper-case blocks; anything that greps a plan needs the new names. `EXPLAIN ANALYZE` still reports its timings: the runner switches profiling on for that job's connection before the lockdown seals the configuration.
+- **A catalog this build creates is DuckLake format `1.1-dev1`.** Three versions are in play: the DuckDB engine (1.5.3 before, this preview now), the DuckLake extension built for each engine, and the catalog format stamped in the metadata database. The DuckLake extension built for DuckDB 1.5.3 understands format `1.0` only and refuses a `1.1-dev1` catalog (`DuckLake catalog version mismatch`), so a deployment whose catalog was first created by this release cannot roll the image back to 0.20.0. A catalog created under 1.5.3 stays at format `1.0`: this build attaches, reads and writes it without a migration, and a 1.5.3 node reads it back afterwards, so an existing deployment keeps its rollback. DuckDB 2.0's own storage format bump applies only to native DuckDB database files, which this deployment does not keep; the metadata lives in SQLite or Postgres.
+- **A locked-down engine now allows the options DuckLake sets on its metadata connection.** The DuckLake extension built for this preview runs three `SET`s on its metadata connection at every transaction (`pg_experimental_filter_pushdown`, `sqlite_disable_multithreaded_scans`, `current_transaction_invalidation_policy`), and a locked configuration refused them, so every query on a job engine or partial worker failed with `Current transaction is aborted`. Both lockdowns now set `allowed_configs` to exactly those three before `lock_configuration`; none of them reaches outside the engine, and the list locks with the rest. Nothing to configure.
+- **One writer test is excluded by tag.** `epoch_ms` of a value past the timestamp range raises an INTERNAL error in this build (an execution error from a function not marked fallible), which invalidates the whole database rather than yielding NULL under `TRY`. A materialized column whose expression can overflow that way takes the engine subtree down on that batch until the pin moves on; the build after it (`alpha41396`) already has the fix.
+
 ### The cluster page shows each node's version and commit (T-465)
 
 Every push to `main` ships an image tagged by commit, and most do not bump the version, so the cluster page's node table now has a Build column: the node's own version and the git commit it was built from, read from each node over RPC. The image bakes the commit in as `SMOLQUERY_GIT_SHA` from the `GIT_SHA` build argument, which `release.yml` and `scripts/kind-up.sh` pass; a node built without it shows its version alone, and one running a release older than this shows a dash until it is rolled.

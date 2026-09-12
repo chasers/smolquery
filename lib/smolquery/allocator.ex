@@ -9,7 +9,7 @@ defmodule Smolquery.Allocator do
   libduckdb owns it badly for a process with many instances: opening an
   instance applies *that instance's* configured value to the whole process,
   and closing any instance forces it off for the whole process (verified
-  against the pinned 1.5.3 through jemalloc's own `mallctl`). A query pod
+  against 1.5.3 through jemalloc's own `mallctl`). A query pod
   opens and closes a job engine per query, a buffer pod a probe engine per
   schema change, so a `SET` at boot would be undone within seconds.
 

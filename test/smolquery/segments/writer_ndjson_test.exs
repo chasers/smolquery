@@ -304,9 +304,9 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert segment.stats["ts"].null_count == 1
     end
 
-    test "a value the expression cannot take stores NULL, and the batch still lands", %{
-      tmp_dir: dir
-    } do
+    @tag :duckdb_preview_internal_error
+    test "a value the expression cannot take stores NULL, and the batch still lands (an INTERNAL error in DuckDB 2.0.0-alpha38195, gone by alpha41396)",
+         %{tmp_dir: dir} do
       path = spool(dir, "bad.ndjson", [%{"id" => 1, "ts_int" => 9_999_999_999_999_999}])
 
       {:ok, segment} =

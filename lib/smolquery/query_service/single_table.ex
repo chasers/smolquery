@@ -85,6 +85,8 @@ defmodule Smolquery.QueryService.SingleTable do
   (`LIMIT 10%`, `LIMIT 2 + 3` and `LIMIT $1` all refuse).
   """
   @spec limit(map()) :: {:ok, pos_integer()} | :error
+  def limit(%{"limit_type" => "PERCENTAGE"}), do: :error
+
   def limit(%{"limit" => limit, "offset" => offset}) do
     with {:ok, n} when n >= 1 <- integer(limit),
          {:ok, skip} when skip >= 0 <- integer(offset) do
@@ -117,9 +119,10 @@ defmodule Smolquery.QueryService.SingleTable do
 
   defp integer(nil), do: {:ok, 0}
 
-  defp integer(%{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => value}})
-       when is_integer(value),
-       do: {:ok, value}
-
-  defp integer(_expression), do: :error
+  defp integer(expression) do
+    case Ast.constant(expression) do
+      {:ok, {_type, value}} when is_integer(value) -> {:ok, value}
+      _not_an_integer -> :error
+    end
+  end
 end
