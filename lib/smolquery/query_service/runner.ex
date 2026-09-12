@@ -81,6 +81,7 @@ defmodule Smolquery.QueryService.Runner do
   use GenServer, restart: :temporary
 
   alias Explorer.DataFrame
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Ddl
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
@@ -498,6 +499,7 @@ defmodule Smolquery.QueryService.Runner do
       "SET allowed_directories = #{sql_list(directories)}",
       "SET allowed_paths = #{sql_list(urls)}",
       "SET enable_external_access = false",
+      DuckLake.allowed_configs_statement(),
       "SET lock_configuration = true"
     ]
   end

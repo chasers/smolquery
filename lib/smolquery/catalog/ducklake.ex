@@ -159,6 +159,7 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:swap_timeout_ms, timeout()}
 
   @default_catalog "lake"
+  @metadata_configs ~w(pg_experimental_filter_pushdown sqlite_disable_multithreaded_scans current_transaction_invalidation_policy)
   @commit_attempts 5
   @retryable_markers [
     "Transaction conflict",
@@ -328,6 +329,26 @@ defmodule Smolquery.Catalog.DuckLake do
     "ATTACH IF NOT EXISTS #{Identifier.sql_string("ducklake:" <> metadata)} " <>
       "AS #{Identifier.quote_name!(catalog)} " <>
       "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0#{migration})"
+  end
+
+  @doc """
+  The `SET allowed_configs` a locked-down engine needs before
+  `lock_configuration`, so that DuckLake can still read the lake.
+
+  On every transaction DuckLake sets three options on its metadata connection:
+  `pg_experimental_filter_pushdown` off for a Postgres catalog,
+  `sqlite_disable_multithreaded_scans` on for a SQLite one, and
+  `current_transaction_invalidation_policy` after it begins the transaction.
+  A locked configuration refuses each, and the refused SET after the begin
+  invalidates the transaction, so every metadata query then fails with
+  "Current transaction is aborted". Listing the three under `allowed_configs`
+  exempts them from the lock; none of them reaches outside the engine, and
+  the list itself locks with everything else.
+  """
+  @spec allowed_configs_statement() :: String.t()
+  def allowed_configs_statement do
+    "SET allowed_configs = [" <>
+      Enum.map_join(@metadata_configs, ", ", &Identifier.sql_string/1) <> "]"
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))
