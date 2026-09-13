@@ -101,6 +101,12 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### The web UI no longer falls back to long polling (T-468)
+
+The LiveView socket used to switch a tab to HTTP long polling whenever a WebSocket took more than 2.5 seconds to open, which is routine after a laptop wakes from sleep and Wi-Fi comes back. phoenix.js closes the still-connecting socket (the console shows "WebSocket is closed before the connection is established"), swaps the transport, and never tries the WebSocket again until a full page load. Long polling cannot survive a sleep: its server-side session dies after 15 seconds without a poll, so every later wake-up got a `410 Gone` and the "Something went wrong!" flash, with nothing in the server log because an idle shutdown is a normal exit. With three web pods and no session affinity, each poll also depended on a PubSub hop to the owning pod.
+
+The fallback is off: a tab stays on the WebSocket and phoenix.js keeps retrying it after a slow open. What an operator sees change: a proxy or network that blocks WebSockets outright now shows the reconnect flash instead of quietly degrading to long polling, so the load balancer in front of the web pods must pass WebSocket upgrades. The `/live/longpoll` route still exists on the server for a client that asks for it explicitly. A wake-up still shows the flash for the seconds the WebSocket takes to reconnect; that is a real reconnect, and its wording is a separate task.
+
 ### The cluster page shows each node's version and commit (T-465)
 
 Every push to `main` ships an image tagged by commit, and most do not bump the version, so the cluster page's node table now has a Build column: the node's own version and the git commit it was built from, read from each node over RPC. The image bakes the commit in as `SMOLQUERY_GIT_SHA` from the `GIT_SHA` build argument, which `release.yml` and `scripts/kind-up.sh` pass; a node built without it shows its version alone, and one running a release older than this shows a dash until it is rolled.
