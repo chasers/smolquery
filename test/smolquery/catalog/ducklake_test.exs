@@ -1099,6 +1099,11 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   end
 
   describe "query path" do
+    setup do
+      Engine.query!(@engine, "SET enable_profiling = 'no_output'")
+      :ok
+    end
+
     test "prunes segments by the stats DuckLake derived from the footers", %{
       catalog: catalog,
       segments_dir: dir
@@ -1241,6 +1246,14 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert :ok = Catalog.create_table(catalog, {"analytics", "varied"}, schema)
       assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "varied"})
       assert anonymous(read) == schema
+    end
+  end
+
+  describe "allowed_configs_statement/0" do
+    test "names the three options DuckLake sets on its metadata connection, as one SET" do
+      assert DuckLake.allowed_configs_statement() ==
+               "SET allowed_configs = ['pg_experimental_filter_pushdown', " <>
+                 "'sqlite_disable_multithreaded_scans', 'current_transaction_invalidation_policy']"
     end
   end
 end

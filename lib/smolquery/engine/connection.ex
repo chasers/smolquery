@@ -68,6 +68,8 @@ defmodule Smolquery.Engine.Connection do
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
 
+  @unsized_batch "a result of only untyped NULL columns carries no row count; cast one column"
+
   @type option ::
           {:database, GenServer.server()}
           | {:name, GenServer.name()}
@@ -307,6 +309,7 @@ defmodule Smolquery.Engine.Connection do
     case Result.from_adbc(result, max_rows) do
       {:ok, converted} -> {:ok, converted}
       {:error, :too_many_rows} -> {:error, %ResultTooLarge{max: max_rows}}
+      {:error, :unsized_batch} -> {:error, %ArgumentError{message: @unsized_batch}}
     end
   end
 

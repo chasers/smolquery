@@ -57,6 +57,6 @@ defmodule Smolquery.QueryService.ParamsTest do
     assert {:ok, %{state: :done, explain: plan}, nil} =
              Client.query(name, "SELECT $1 AS n", explain: :plan, params: [1])
 
-    assert plan =~ "PROJECTION"
+    assert plan =~ "Projection"
   end
 end

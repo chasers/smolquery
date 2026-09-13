@@ -203,7 +203,7 @@ defmodule SmolqueryApi.JobControllerTest do
                }
              } = body
 
-      assert explain =~ "PROJECTION"
+      assert explain =~ "Projection"
       refute Map.has_key?(body, "rows")
     end
 
@@ -237,7 +237,7 @@ defmodule SmolqueryApi.JobControllerTest do
              end)
 
       {200, job} = get_json(name, "/v1/jobs/#{id}")
-      assert job["explain"] =~ "PROJECTION"
+      assert job["explain"] =~ "Projection"
       assert job["resultsAvailable"] == false
 
       {409, body} = get_json(name, "/v1/jobs/#{id}/results")

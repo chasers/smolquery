@@ -284,6 +284,16 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :offset = refused("SELECT count(*) FROM analytics.events LIMIT 5 OFFSET 5")
     end
 
+    test "a percent LIMIT, which 2.0 folds into the LIMIT modifier" do
+      assert :percent_limit = refused("SELECT count(*) FROM analytics.events LIMIT 10%")
+    end
+
+    test "a DECIMAL LIMIT, whose serialized value is unscaled" do
+      sql = "SELECT name, count(*) FROM analytics.events GROUP BY name LIMIT 1.5"
+
+      assert :unsupported_limit = refused(sql, describe(sql))
+    end
+
     test "ORDER BY on an expression" do
       sql = "SELECT name, count(*) FROM analytics.events GROUP BY name ORDER BY sum(value)"
 

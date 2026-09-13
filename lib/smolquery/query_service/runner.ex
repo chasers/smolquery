@@ -71,6 +71,11 @@ defmodule Smolquery.QueryService.Runner do
   begins with `ALTER` but is not one of the two accepted shapes fails the
   job with the parser's reason; one asked to explain, describe, or bind
   parameters is refused before the catalog is touched.
+
+  An `EXPLAIN ANALYZE` job switches profiling on for its connection, with the
+  other per-connection statements and before the lockdown seals the
+  configuration: from DuckDB 2.0 the analyzed plan over the C API is only the
+  message that profiling is disabled unless `enable_profiling` is set.
   """
 
   use GenServer, restart: :temporary
@@ -83,6 +88,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.JobEngine
+  alias Smolquery.QueryService.Lockdown
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Scatter
@@ -333,7 +339,11 @@ defmodule Smolquery.QueryService.Runner do
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
-             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
+             run_statements(
+               connection,
+               plan,
+               plan.statements ++ profiling(explain) ++ lockdown(runtime, plan, job_id)
+             )
            end),
          {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
@@ -377,7 +387,7 @@ defmodule Smolquery.QueryService.Runner do
 
   defp outcome(_runtime, connection, plan, _max_rows, explain, _job_id, _timeout_ms) do
     with {:ok, result} <-
-           Connection.query(connection, explain_sql(explain, plan.sql), plan.params, :infinity) do
+           Connection.query(connection, explain_sql(explain) <> plan.sql, plan.params, :infinity) do
       {:ok, {{:explain, explain_text(result)}, nil, []}}
     end
   end
@@ -433,8 +443,11 @@ defmodule Smolquery.QueryService.Runner do
   defp bounded(plan, max_rows),
     do: "SELECT * FROM (#{plan.canonical_sql}) LIMIT #{max_rows + 1}"
 
-  defp explain_sql(:plan, sql), do: "EXPLAIN " <> sql
-  defp explain_sql(:analyze, sql), do: "EXPLAIN ANALYZE " <> sql
+  defp explain_sql(:plan), do: "EXPLAIN "
+  defp explain_sql(:analyze), do: "EXPLAIN ANALYZE "
+
+  defp profiling(:analyze), do: ["SET enable_profiling = 'no_output'"]
+  defp profiling(_plan_describe_or_run), do: []
 
   defp explain_text(result) do
     Enum.map_join(result.rows, "\n", fn row ->
@@ -480,22 +493,13 @@ defmodule Smolquery.QueryService.Runner do
       runtime.allowed_directories ++
         EngineSecrets.sealed_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
 
-    [
-      "SET allowed_directories = #{sql_list(directories)}",
-      "SET allowed_paths = #{sql_list(urls)}",
-      "SET enable_external_access = false",
-      "SET lock_configuration = true"
-    ]
+    Lockdown.statements(directories, urls)
   end
 
   defp partial_directories(%Runtime{distributed: %{enabled: true}}, job_id),
     do: [Scatter.dir(job_id)]
 
   defp partial_directories(_runtime, _job_id), do: []
-
-  defp sql_list(values) do
-    "[" <> Enum.map_join(values, ", ", &Smolquery.Identifier.sql_string/1) <> "]"
-  end
 
   defp run_statements(connection, plan, statements) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->

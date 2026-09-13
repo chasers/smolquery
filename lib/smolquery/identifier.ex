@@ -62,4 +62,13 @@ defmodule Smolquery.Identifier do
   def sql_string(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "''") <> "'"
   end
+
+  @doc """
+  A SQL list literal of single-quoted strings (`['a', 'b']`), for the file
+  lists and settings that take one.
+  """
+  @spec sql_list([String.t()]) :: String.t()
+  def sql_list(values) when is_list(values) do
+    "[" <> Enum.map_join(values, ", ", &sql_string/1) <> "]"
+  end
 end
