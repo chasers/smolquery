@@ -83,6 +83,15 @@ the driver downloads from there. The build target selects the compile-time
 asset. macOS uses the universal asset. Linux GNU uses the matching `aarch64` or
 `x86_64` asset.
 
+That mirror is the trust root for the engine binary until the pin returns to
+DuckDB's release page: adbc verifies nothing it downloads. The assets' SHA-256:
+
+| asset | sha256 |
+|---|---|
+| `libduckdb-linux-arm64.zip` | `32fc4e0dc2d705ef01f18f99e560a2c45d3e706bb8b09d10b0b93f6dd25d0589` |
+| `libduckdb-linux-amd64.zip` | `f014c97608d2dad349a36a2a3b2ab38ecca5a2b85b09c58a925824fd0b3539ee` |
+| `libduckdb-osx-universal.zip` | `81d266bb8e3265ff280aac282c99084e12c9a1ce4a63b830476ff7d41b8ecf7b` |
+
 An unsupported target falls back to ADBC's own driver matrix, so Mix tasks
 still run there. On such a target, the engine refuses to start until the pinned
 version's driver exists.

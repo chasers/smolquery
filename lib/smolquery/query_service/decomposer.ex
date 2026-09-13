@@ -221,10 +221,20 @@ defmodule Smolquery.QueryService.Decomposer do
   defp gate_modifiers(modifiers) do
     Enum.reduce_while(modifiers, :ok, fn modifier, :ok ->
       case modifier do
-        %{"type" => "ORDER_MODIFIER"} -> {:cont, :ok}
-        %{"type" => "LIMIT_MODIFIER", "offset" => nil} -> {:cont, :ok}
-        %{"type" => "LIMIT_MODIFIER"} -> {:halt, {:error, :offset}}
-        %{"type" => other} -> {:halt, {:error, {:unsupported_modifier, other}}}
+        %{"type" => "ORDER_MODIFIER"} ->
+          {:cont, :ok}
+
+        %{"type" => "LIMIT_MODIFIER", "limit_type" => "PERCENTAGE"} ->
+          {:halt, {:error, :percent_limit}}
+
+        %{"type" => "LIMIT_MODIFIER", "offset" => nil} ->
+          {:cont, :ok}
+
+        %{"type" => "LIMIT_MODIFIER"} ->
+          {:halt, {:error, :offset}}
+
+        %{"type" => other} ->
+          {:halt, {:error, {:unsupported_modifier, other}}}
       end
     end)
   end
@@ -563,8 +573,8 @@ defmodule Smolquery.QueryService.Decomposer do
   defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => nil}, _names), do: {:ok, ""}
 
   defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => limit}, _names) do
-    case Ast.constant(limit) do
-      {:ok, {_type, count}} when is_integer(count) and count >= 0 -> {:ok, "LIMIT #{count}"}
+    case Ast.integer(limit) do
+      {:ok, count} when count >= 0 -> {:ok, "LIMIT #{count}"}
       _not_a_count -> {:error, :unsupported_limit}
     end
   end

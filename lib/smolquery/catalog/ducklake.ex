@@ -347,8 +347,7 @@ defmodule Smolquery.Catalog.DuckLake do
   """
   @spec allowed_configs_statement() :: String.t()
   def allowed_configs_statement do
-    "SET allowed_configs = [" <>
-      Enum.map_join(@metadata_configs, ", ", &Identifier.sql_string/1) <> "]"
+    "SET allowed_configs = " <> Identifier.sql_list(@metadata_configs)
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))

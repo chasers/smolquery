@@ -192,8 +192,11 @@ defmodule Smolquery.Schema.Materialized do
 
   defp unzoned(nodes) do
     nodes
-    |> Enum.filter(&(&1["class"] == "CAST"))
-    |> Enum.map(&Ast.cast_type/1)
+    |> Enum.flat_map(fn
+      %{"class" => "CAST"} = cast -> [Ast.cast_type(cast)]
+      %{"class" => "TYPE"} = type -> [Ast.type_name(type)]
+      _node -> []
+    end)
     |> Enum.find(&(&1 in @zoned_types))
     |> case do
       nil -> :ok

@@ -33,18 +33,22 @@ defmodule Smolquery.Engine.Result do
 
   A column DuckDB exports as Arrow's null type — a bare `NULL` in a select
   list, from 2.0 on — arrives with no type, data or length. It reads as nils,
-  as many as the batch's other columns hold; a batch of nothing but such
-  columns reads as empty.
+  as many as the batch's other columns hold. A batch of nothing but such
+  columns has no row count anywhere (the driver leaves `num_rows` nil for a
+  select), and rather than read it as empty this raises; `from_adbc/2`
+  answers `{:error, :unsized_batch}`. Casting one column (`NULL::INTEGER`)
+  gives the batch a length.
   """
   @spec from_adbc(Adbc.Result.t()) :: t()
-  def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}) do
-    %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}
-  end
+  def from_adbc(%Adbc.Result{} = result) do
+    case from_adbc(result, :infinity) do
+      {:ok, converted} ->
+        converted
 
-  def from_adbc(%Adbc.Result{data: batches}) do
-    rows = Enum.flat_map(batches, &batch_to_rows/1)
-
-    %__MODULE__{columns: column_names(batches), rows: rows, num_rows: length(rows)}
+      {:error, :unsized_batch} ->
+        raise ArgumentError,
+              "a result of only untyped NULL columns carries no row count; cast one column"
+    end
   end
 
   @doc """
@@ -62,9 +66,7 @@ defmodule Smolquery.Engine.Result do
   `:infinity` converts whatever came back.
   """
   @spec from_adbc(Adbc.Result.t(), pos_integer() | :infinity) ::
-          {:ok, t()} | {:error, :too_many_rows}
-  def from_adbc(%Adbc.Result{} = result, :infinity), do: {:ok, from_adbc(result)}
-
+          {:ok, t()} | {:error, :too_many_rows | :unsized_batch}
   def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}, _max_rows) do
     {:ok, %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}}
   end
@@ -72,18 +74,23 @@ defmodule Smolquery.Engine.Result do
   def from_adbc(%Adbc.Result{data: batches}, max_rows) do
     batches
     |> Enum.reduce_while({0, []}, fn batch, {count, acc} ->
-      rows = batch_to_rows(batch)
-      total = count + length(rows)
+      case batch_to_rows(batch) do
+        :unsized ->
+          {:halt, :unsized_batch}
 
-      if total > max_rows do
-        {:halt, :too_many_rows}
-      else
-        {:cont, {total, [rows | acc]}}
+        rows when max_rows != :infinity and count + length(rows) > max_rows ->
+          {:halt, :too_many_rows}
+
+        rows ->
+          {:cont, {count + length(rows), [rows | acc]}}
       end
     end)
     |> case do
       :too_many_rows ->
         {:error, :too_many_rows}
+
+      :unsized_batch ->
+        {:error, :unsized_batch}
 
       {count, acc} ->
         rows = acc |> Enum.reverse() |> Enum.concat()
@@ -119,14 +126,19 @@ defmodule Smolquery.Engine.Result do
 
   defp batch_to_rows(batch) do
     columns = Enum.map(batch, &column_values/1)
-    length = Enum.find_value(columns, 0, &(is_list(&1) and length(&1)))
 
-    columns
-    |> Enum.map(fn
-      :untyped_nulls -> List.duplicate(nil, length)
-      values -> values
-    end)
-    |> Enum.zip_with(& &1)
+    case Enum.find(columns, &is_list/1) do
+      nil ->
+        :unsized
+
+      sized ->
+        columns
+        |> Enum.map(fn
+          :untyped_nulls -> List.duplicate(nil, length(sized))
+          values -> values
+        end)
+        |> Enum.zip_with(& &1)
+    end
   end
 
   defp column_values(%Adbc.Column{field: %{type: nil}, data: nil}), do: :untyped_nulls

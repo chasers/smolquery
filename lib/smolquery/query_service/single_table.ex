@@ -119,10 +119,5 @@ defmodule Smolquery.QueryService.SingleTable do
 
   defp integer(nil), do: {:ok, 0}
 
-  defp integer(expression) do
-    case Ast.constant(expression) do
-      {:ok, {_type, value}} when is_integer(value) -> {:ok, value}
-      _not_an_integer -> :error
-    end
-  end
+  defp integer(expression), do: Ast.integer(expression)
 end

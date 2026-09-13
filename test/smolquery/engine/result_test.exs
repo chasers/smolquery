@@ -40,7 +40,12 @@ defmodule Smolquery.Engine.ResultTest do
       assert result.columns == ["id", "NULL"]
       assert result.rows == [[1, nil], [2, nil]]
 
-      assert Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil}).rows == []
+      assert Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil}, :infinity) ==
+               {:error, :unsized_batch}
+
+      assert_raise ArgumentError, ~r/no row count/, fn ->
+        Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil})
+      end
     end
 
     test "handles a statement that returned no data" do

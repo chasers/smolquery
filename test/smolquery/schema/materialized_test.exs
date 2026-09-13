@@ -160,6 +160,15 @@ defmodule Smolquery.Schema.MaterializedTest do
       assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
                validate("CAST(epoch_ms(ts_int) AS TIMESTAMPTZ)::VARCHAR", :string)
 
+      assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
+               validate(
+                 "hour(CAST(struct_pack(a := epoch_ms(ts_int)) AS STRUCT(a TIMESTAMPTZ)).a)",
+                 :int64
+               )
+
+      assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
+               validate("hour(CAST([epoch_ms(ts_int)] AS TIMESTAMPTZ[])[1])", :int64)
+
       assert {:error, {:invalid_materialized, {:unsupported_function, "to_timestamp"}}} =
                validate("to_timestamp(ts_int)")
 
