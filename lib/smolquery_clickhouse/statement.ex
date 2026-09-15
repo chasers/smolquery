@@ -44,6 +44,30 @@ defmodule SmolqueryClickHouse.Statement do
     end
   end
 
+  @doc """
+  Whether `query` is an `INSERT`, by its first keyword.
+  """
+  @spec insert?(String.t()) :: boolean()
+  def insert?(query) when is_binary(query), do: match?({:ok, _rest}, keyword(query, "INSERT"))
+
+  @doc """
+  Splits a trailing `FORMAT name` off a statement (T-478).
+
+  Answers the statement without the clause, trimmed and without a final
+  `;`, and the format's name, or `nil` when the statement names none. Only
+  the end of the text is read: a `FORMAT` earlier in the statement, or one
+  inside a string literal that ends it, is not a clause.
+  """
+  @spec split_format(String.t()) :: {String.t(), String.t() | nil}
+  def split_format(query) when is_binary(query) do
+    statement = query |> String.trim() |> String.trim_trailing(";") |> String.trim_trailing()
+
+    case Regex.run(~r/\A(.*[^\s'])\s+FORMAT\s+([A-Za-z][A-Za-z0-9_]*)\z/is, statement) do
+      [_match, rest, format] -> {rest, format}
+      nil -> {statement, nil}
+    end
+  end
+
   defp keyword(text, word) do
     trimmed = String.trim_leading(text)
     size = byte_size(word)

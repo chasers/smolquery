@@ -99,11 +99,12 @@ without them refuses to boot.
   `pg_catalog` for drivers and `psql`'s backslash commands, SCRAM-SHA-256
   and TLS, and `REPEATABLE READ` blocks that pin their read — see
   [docs/postgres-wire.md](docs/postgres-wire.md).
-- **A ClickHouse HTTP insert listener.** A producer that writes `RowBinary` to
+- **A ClickHouse HTTP listener.** A producer that writes `RowBinary` to
   ClickHouse points at port 8123 (`18123` in dev) and sends the same
   `INSERT ... FORMAT RowBinary` request, with the API key as its password.
-  An insert is all or nothing, as in ClickHouse — see
-  [docs/clickhouse.md](docs/clickhouse.md).
+  An insert is all or nothing, as in ClickHouse. A ClickHouse client can run
+  smolquery SQL there too, answered in `TabSeparated`, the `JSON` formats or
+  `RowBinaryWithNamesAndTypes` — see [docs/clickhouse.md](docs/clickhouse.md).
 - **Attribute bags as columns.** `MAP(STRING, STRING)` (ClickHouse's
   `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
   scalars. Both have limits a caller must know — they are listed in

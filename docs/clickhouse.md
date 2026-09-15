@@ -1,15 +1,20 @@
-# ClickHouse HTTP insert
+# ClickHouse HTTP interface
 
-smolquery takes the insert a ClickHouse HTTP client sends, on its own
-listener, so a producer that writes `RowBinary` to ClickHouse can point at
-smolquery instead. The `:clickhouse` role starts the edge
-(`SmolqueryClickHouse`, T-477). The insert itself is T-476.
+smolquery takes the inserts and runs the queries a ClickHouse HTTP client
+sends, on its own listener, so a producer or a reader that speaks ClickHouse
+over HTTP can point at smolquery instead. The `:clickhouse` role starts the
+edge (`SmolqueryClickHouse`, T-477). The insert is T-476, and queries are
+T-478.
 
 ```sh
 curl -sS "http://127.0.0.1:8123/?query=INSERT%20INTO%20logs.events%20FORMAT%20RowBinaryWithNamesAndTypes" \
   -H "X-ClickHouse-User: default" \
   -H "X-ClickHouse-Key: $SMOLQUERY_API_KEY" \
   --data-binary @rows.bin
+
+curl -sS "http://127.0.0.1:8123/" \
+  -H "X-ClickHouse-Key: $SMOLQUERY_API_KEY" \
+  --data-binary "SELECT count(*) AS n FROM logs.events FORMAT JSON"
 ```
 
 ## The listener
@@ -20,13 +25,13 @@ curl -sS "http://127.0.0.1:8123/?query=INSERT%20INTO%20logs.events%20FORMAT%20Ro
 - **Password.** The API key (`SMOLQUERY_API_KEY`), or `SMOLQUERY_CLICKHOUSE_PASSWORD` when set. A node with the `:clickhouse` role and neither refuses to boot.
 - **How a client sends the password.** The ways ClickHouse takes it: the `X-ClickHouse-Key` header, HTTP basic auth, or the `password` parameter. A `Bearer` token works too. When a request carries more than one, the first in that order wins. The user name is accepted as given.
 - **Health checks.** `GET /` and `GET /ping` answer `Ok.` without a password, as ClickHouse does.
-- **Refused before the body.** A missing or wrong password is a 401 with code 516 `AUTHENTICATION_FAILED`, on every path. Next, the insert is counted against the in-flight limit before its body is read, as the API's insert is. Over the limit is a 429 with code 202 and `retry-after: 1`.
-- **Inserts only.** A query sent with `GET` is a 501 `NOT_IMPLEMENTED`. Any other path is a 404.
+- **Refused before the body.** A missing or wrong password is a 401 with code 516 `AUTHENTICATION_FAILED`, on every path. An insert is then counted against the in-flight limit before its body is read, as the API's insert is. Over the limit is a 429 with code 202 and `retry-after: 1`.
+- **Paths.** Everything happens on `/`. Any other path but `/ping` is a 404.
 - **Metrics.** Requests are counted in `smolquery_clickhouse_requests_total`, by status class.
 
 ## The insert
 
-`POST /?query=INSERT INTO db.table (columns) FORMAT RowBinary`. The body holds the rows.
+`POST /?query=INSERT INTO db.table (columns) FORMAT RowBinary`. The `INSERT` is in the `query` parameter, and the body holds the rows.
 
 - **Statement.** `INSERT INTO [TABLE] [db.]table [(column, ...)] [SETTINGS name = value, ...] FORMAT name`. Keywords are case-insensitive, and names may be backquoted or double-quoted. Nothing but whitespace and one `;` may follow the format name.
 - **Table.** The dataset is the statement's qualifier, else the `database` parameter, else the `X-ClickHouse-Database` header, else `default`.
@@ -35,4 +40,17 @@ curl -sS "http://127.0.0.1:8123/?query=INSERT%20INTO%20logs.events%20FORMAT%20Ro
 - **All or nothing.** When any row is refused, none is written, as in ClickHouse. A nonzero `input_format_allow_errors_num` or `input_format_allow_errors_ratio` writes the other rows instead, without enforcing the number.
 - **Settings.** `insert_deduplication_token` is the idempotency key, as `insertId` is on the API's NDJSON insert. Every other setting is accepted and ignored. A statement's `SETTINGS` clause wins over the URL.
 - **Limits.** The body and the NDJSON its rows decode to are each held to `SMOLQUERY_INSERT_MAX_NDJSON_BYTES`, the API's limit. Over it is a 413; send smaller blocks. The edge keeps its own in-flight counter, sized by `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` as the API's is. A node running both the `api` and `clickhouse` roles holds two counters, each with that limit.
-- **Answers.** A 200 has an empty body and an `X-ClickHouse-Summary` header. A failure answers ClickHouse's text form, `Code: N. DB::Exception: message. (NAME)`, with `X-ClickHouse-Exception-Code`: 62 `SYNTAX_ERROR`, 73 `UNKNOWN_FORMAT` on a 404, as ClickHouse answers it, 60 `UNKNOWN_TABLE`, 81 `UNKNOWN_DATABASE`, 33 `CANNOT_READ_ALL_DATA` for a body that ends mid-row, 117 `INCORRECT_DATA` for rows that cannot be written, 202 `TOO_MANY_SIMULTANEOUS_QUERIES` on a 429, 516 `AUTHENTICATION_FAILED` on a 401, and 1002 `UNKNOWN_EXCEPTION` on a 503. A retryable answer carries `retry-after`. A statement other than an insert is a 501 `NOT_IMPLEMENTED`.
+- **Answers.** A 200 has an empty body and an `X-ClickHouse-Summary` header. A failure answers ClickHouse's text form, `Code: N. DB::Exception: message. (NAME)`, with `X-ClickHouse-Exception-Code`: 62 `SYNTAX_ERROR`, 73 `UNKNOWN_FORMAT` on a 404, as ClickHouse answers it, 60 `UNKNOWN_TABLE`, 81 `UNKNOWN_DATABASE`, 33 `CANNOT_READ_ALL_DATA` for a body that ends mid-row, 117 `INCORRECT_DATA` for rows that cannot be written, 202 `TOO_MANY_SIMULTANEOUS_QUERIES` on a 429, 516 `AUTHENTICATION_FAILED` on a 401, and 1002 `UNKNOWN_EXCEPTION` on a 503. A retryable answer carries `retry-after`. An `INSERT` in the body alone, with no `query` parameter, is a 501 `NOT_IMPLEMENTED`.
+
+## Queries
+
+A query is any `POST /` whose `query` parameter is not an `INSERT`, or a `GET /?query=`. The node needs the `query` role too.
+
+- **Statement.** The `query` parameter, then the body, joined by a newline, as ClickHouse joins them. It is read up to 262,144 bytes, ClickHouse's `max_query_size`.
+- **Dialect.** The statement is smolquery's SQL, the same the API and the Postgres wire run, with the same planner, tiers and result cap. It is **not** translated from ClickHouse SQL: `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY` and other ClickHouse-only syntax fail as the engine reports them.
+- **Format.** A trailing `FORMAT name` in the statement, else the `X-ClickHouse-Format` header, else the `default_format` parameter, else `TabSeparated`. Taken: `TabSeparated` (`TSV`), `TabSeparatedWithNames`, `TabSeparatedWithNamesAndTypes`, `JSON`, `JSONCompact`, `JSONEachRow` and `RowBinaryWithNamesAndTypes`. Another is a 404 with code 73.
+- **Types.** Every column is `Nullable` except a map: `Int64`, `Float64`, `String`, `Bool`, `DateTime64(6)`, `Date32`, `Decimal(P, S)`, `Map(String, String)`. A `VARIANT` column is a `String` holding JSON. In JSON a 64-bit integer is a quoted string, as ClickHouse writes it by default.
+- **Connecting.** `version()` answers `24.8.1.1`, the ClickHouse release whose HTTP behavior the edge follows, and `timezone()` answers `UTC`. So the `select 1, version()` that `ch`, the Elixir client, runs on connect succeeds.
+- **Settings.** `max_execution_time`, in seconds, bounds the query. Every other setting is accepted and ignored. `{name:Type}` parameters are not substituted.
+- **GET is read-only.** As in ClickHouse, a `GET` whose statement is not a `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN` or `EXISTS` is code 164 `READONLY`.
+- **Answers.** A 200 carries `X-ClickHouse-Format`, `X-ClickHouse-Query-Id` (the job id), `X-ClickHouse-Timezone` and `X-ClickHouse-Summary`, whose `read_rows` and `read_bytes` are what the plan scanned. A statement with no result, such as an `ALTER TABLE`, answers an empty body without `X-ClickHouse-Format`. A failure is 62 `SYNTAX_ERROR`, 60 `UNKNOWN_TABLE`, 47 `UNKNOWN_IDENTIFIER`, 396 `TOO_MANY_ROWS_OR_BYTES` past the result cap, 159 `TIMEOUT_EXCEEDED`, 202 `TOO_MANY_SIMULTANEOUS_QUERIES` on a 429, or 1002 `UNKNOWN_EXCEPTION`, with a 503 and `retry-after` when the query service or a buffer node cannot be reached.

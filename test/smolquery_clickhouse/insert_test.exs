@@ -174,9 +174,7 @@ defmodule SmolqueryClickHouse.InsertTest do
     cases = [
       {%{"query" => "INSERT INTO logs.nope FORMAT RowBinary"}, 404, "60"},
       {%{"query" => "INSERT INTO logs.events FORMAT"}, 400, "62"},
-      {%{"query" => "INSERT INTO logs.events FORMAT Native"}, 404, "73"},
-      {%{"query" => "SELECT 1"}, 501, "48"},
-      {%{}, 400, "62"}
+      {%{"query" => "INSERT INTO logs.events FORMAT Native"}, 404, "73"}
     ]
 
     for {params, status, code} <- cases do

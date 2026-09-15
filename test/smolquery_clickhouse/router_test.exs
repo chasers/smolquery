@@ -54,11 +54,32 @@ defmodule SmolqueryClickHouse.RouterTest do
     assert response.status == 401
   end
 
-  test "a query sent with GET is NOT_IMPLEMENTED", %{name: name} do
-    response = conn(:get, "/?query=SELECT%201") |> authed() |> request(name)
+  test "a query reaches the query service, which is not running here", %{name: name} do
+    for conn <- [conn(:get, "/?query=SELECT%201"), conn(:post, "/", "SELECT 1")] do
+      response = conn |> authed() |> request(name)
+
+      assert response.status == 503
+      assert get_resp_header(response, "x-clickhouse-exception-code") == ["1002"]
+      assert get_resp_header(response, "retry-after") == ["5"]
+    end
+  end
+
+  test "an INSERT in the body alone is NOT_IMPLEMENTED", %{name: name} do
+    response =
+      conn(:post, "/", "INSERT INTO logs.events VALUES (1)") |> authed() |> request(name)
 
     assert response.status == 501
     assert get_resp_header(response, "x-clickhouse-exception-code") == ["48"]
+  end
+
+  test "a statement over max_query_size is refused before it runs", %{name: name} do
+    response =
+      conn(:post, "/", "SELECT '" <> String.duplicate("x", 262_145) <> "'")
+      |> authed()
+      |> request(name)
+
+    assert response.status == 400
+    assert get_resp_header(response, "x-clickhouse-exception-code") == ["62"]
   end
 
   test "an unknown path with the password is a 404", %{name: name} do

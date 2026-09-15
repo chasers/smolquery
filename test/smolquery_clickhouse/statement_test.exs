@@ -54,4 +54,27 @@ defmodule SmolqueryClickHouse.StatementTest do
                {:error, "a quoted name or value is never closed"}
     end
   end
+
+  describe "insert?/1" do
+    test "reads the first keyword, in any case" do
+      assert Statement.insert?("  insert into t FORMAT RowBinary")
+      refute Statement.insert?("SELECT 1")
+      refute Statement.insert?("INSERTED")
+      refute Statement.insert?("")
+    end
+  end
+
+  describe "split_format/1" do
+    test "splits a trailing FORMAT clause and a final semicolon" do
+      assert Statement.split_format("SELECT 1 FORMAT JSONEachRow ;\n") ==
+               {"SELECT 1", "JSONEachRow"}
+
+      assert Statement.split_format("select *\nfrom t\nformat TSV") == {"select *\nfrom t", "TSV"}
+    end
+
+    test "leaves a statement with no clause, or one only inside a string, whole" do
+      assert Statement.split_format(" SELECT 1; ") == {"SELECT 1", nil}
+      assert Statement.split_format("SELECT 'x FORMAT JSON'") == {"SELECT 'x FORMAT JSON'", nil}
+    end
+  end
 end
