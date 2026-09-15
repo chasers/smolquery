@@ -37,6 +37,7 @@ defmodule Smolquery.RowBinary do
   | `Float32`, `Float64` | `FLOAT64`; NaN and the infinities are written as DuckDB's strings for them |
   | `String`, `FixedString(N)` | `STRING`; must be UTF-8, and a `FixedString`'s trailing NULs are dropped |
   | `String` | `VARIANT`; must hold JSON text |
+  | `UUID` | `STRING`, as the 36-character lowercase text ClickHouse prints |
   | `Bool` | `BOOL` |
   | `DateTime`, `DateTime64(P)` | `TIMESTAMP`, at microseconds; the zone argument is ignored, the value is UTC |
   | `Date`, `Date32` | `DATE` |
@@ -44,7 +45,7 @@ defmodule Smolquery.RowBinary do
   | `Map(K, V)` with string keys and string or `Nullable` string values | `MAP(STRING, STRING)` |
   | `Nullable(T)`, `LowCardinality(T)` | as `T`; RowBinary writes `LowCardinality(T)` as `T` |
 
-  Anything else — `Array`, `Tuple`, `UUID`, `Enum8`, `Int128`, `Decimal256`,
+  Anything else — `Array`, `Tuple`, `Enum8`, `Int128`, `Decimal256`,
   `JSON`, `Dynamic` — is refused at the header, naming the column.
 
   ## Errors
@@ -83,6 +84,7 @@ defmodule Smolquery.RowBinary do
           | {:datetime64, 0..9}
           | :date
           | :date32
+          | :uuid
           | {:decimal, 1..38, non_neg_integer()}
           | {:map, wire(), wire()}
           | {:nullable, wire()}
@@ -116,7 +118,8 @@ defmodule Smolquery.RowBinary do
     "Bool" => :bool,
     "DateTime" => :datetime,
     "Date" => :date,
-    "Date32" => :date32
+    "Date32" => :date32,
+    "UUID" => :uuid
   }
 
   @doc """
@@ -256,6 +259,7 @@ defmodule Smolquery.RowBinary do
   defp storable?({:float, _bits}, :float64), do: true
   defp storable?(:string, type) when type in [:string, :variant], do: true
   defp storable?({:fixed_string, _size}, :string), do: true
+  defp storable?(:uuid, :string), do: true
   defp storable?(:bool, :bool), do: true
   defp storable?(:datetime, :timestamp), do: true
   defp storable?({:datetime64, _precision}, :timestamp), do: true
@@ -377,6 +381,9 @@ defmodule Smolquery.RowBinary do
   defp value({:decimal, precision, scale}, {:numeric, target, _scale}, body),
     do: decimal(decimal_bits(precision), scale, target, body)
 
+  defp value(:uuid, _type, <<high::little-unsigned-64, low::little-unsigned-64, rest::binary>>),
+    do: {:ok, uuid(<<high::64, low::64>>), rest}
+
   defp value({:map, key, entry}, _type, body) do
     with {:ok, count, rest} <- varint(body), do: entries(key, entry, count, rest, [], nil)
   end
@@ -384,6 +391,15 @@ defmodule Smolquery.RowBinary do
   defp value(_wire, _type, _body), do: truncated()
 
   defp truncated, do: {:malformed, "the body ends mid-value"}
+
+  defp uuid(
+         <<a::binary-size(4), b::binary-size(2), c::binary-size(2), d::binary-size(2),
+           e::binary-size(6)>>
+       ) do
+    [?", hex(a), ?-, hex(b), ?-, hex(c), ?-, hex(d), ?-, hex(e), ?"]
+  end
+
+  defp hex(bytes), do: Base.encode16(bytes, case: :lower)
 
   defp varint(body), do: varint(body, 0, 0)
 
