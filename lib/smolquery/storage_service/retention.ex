@@ -185,7 +185,7 @@ defmodule Smolquery.StorageService.Retention do
     end)
   end
 
-  @past_microseconds "CASE WHEN regexp_matches(stats_max_value, '\.\d{6}0*[1-9]') " <>
+  @past_microseconds ~S"CASE WHEN regexp_matches(stats_max_value, '\.\d{6}0*[1-9]') " <>
                        "THEN INTERVAL 1 MICROSECOND ELSE INTERVAL 0 MICROSECOND END"
 
   defp footer_stats_chunk(runtime, paths, column) do
