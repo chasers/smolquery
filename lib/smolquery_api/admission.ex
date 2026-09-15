@@ -66,7 +66,14 @@ defmodule SmolqueryApi.Admission do
   @spec admit_conn(Plug.Conn.t()) :: Plug.Conn.t()
   def admit_conn(
         %Plug.Conn{method: "POST", path_info: ["v1", "datasets", _, "tables", _, "insert"]} = conn
-      ) do
+      ),
+      do: admit_ingest(conn)
+
+  def admit_conn(%Plug.Conn{method: "POST", path_info: []} = conn), do: admit_ingest(conn)
+
+  def admit_conn(%Plug.Conn{} = conn), do: conn
+
+  defp admit_ingest(conn) do
     instance = conn.private.smolquery_api
 
     case Process.whereis(server(instance)) do
@@ -74,8 +81,6 @@ defmodule SmolqueryApi.Admission do
       server -> admit_conn(conn, server, reservation(conn, instance))
     end
   end
-
-  def admit_conn(%Plug.Conn{} = conn), do: conn
 
   defp admit_conn(conn, server, bytes) do
     case admit(server, bytes) do

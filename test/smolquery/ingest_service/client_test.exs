@@ -355,4 +355,79 @@ defmodule Smolquery.IngestService.ClientTest do
       assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
     end
   end
+
+  describe "insert_rowbinary/5 (T-476)" do
+    defp leb(n) when n < 128, do: <<n>>
+    defp leb(n), do: <<1::1, Bitwise.band(n, 127)::7, leb(Bitwise.bsr(n, 7))::binary>>
+    defp str(bytes), do: [leb(byte_size(bytes)), bytes]
+
+    defp typed(rows) do
+      IO.iodata_to_binary([
+        leb(2),
+        str("id"),
+        str("ts"),
+        str("Nullable(Int64)"),
+        str("DateTime64(6)"),
+        Enum.map(rows, fn {id, us} ->
+          [if(id, do: [0, <<id::little-signed-64>>], else: <<1>>), <<us::little-signed-64>>]
+        end)
+      ])
+    end
+
+    test "decodes on this node and writes the rows", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+      body = typed([{1, 1_789_380_000_000_000}, {2, 1_789_380_000_000_001}])
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+
+    test "a row the decoder refuses is reported at its index, and the rest land", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+      body = typed([{1, 0}, {nil, 0}, {3, 0}])
+
+      assert {:ok, %{inserted: 2, errors: [%{index: 1, errors: [%{message: message}]}]}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
+
+      assert message == "column id must not be null"
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+
+    test "skip_invalid_rows: false writes nothing when the decoder refuses a row", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+      body = typed([{1, 0}, {nil, 0}])
+
+      assert {:ok, %{inserted: 0, errors: [%{index: 1}]}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types,
+                 skip_invalid_rows: false
+               )
+
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, @table)
+    end
+
+    test "a body the decoder cannot read writes nothing", context do
+      %{name: name} = start_stack(context)
+      body = binary_part(typed([{1, 0}]), 0, 20)
+
+      assert {:error, {:invalid_rowbinary, _message}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
+    end
+
+    test "rows that decode past max_ndjson_bytes are refused before forwarding", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+      body = typed([{1, 0}, {2, 0}])
+
+      assert {:error, {:decoded_too_large, _bytes, 10}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types,
+                 max_ndjson_bytes: 10
+               )
+
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, @table)
+    end
+  end
 end

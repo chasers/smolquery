@@ -132,13 +132,23 @@ defmodule Smolquery.RowBinary do
   `{:ok, result}` carries the NDJSON of every row the schema takes, how many
   that is, and each refused row's index and reasons. An empty body is zero
   rows in every format.
-  """
-  @spec decode(Schema.t(), binary(), format()) ::
-          {:ok, result()} | {:error, {:invalid_rowbinary, String.t()}}
-  def decode(%Schema{}, <<>>, _format), do: {:ok, %{ndjson: [], row_count: 0, errors: []}}
 
-  def decode(%Schema{} = schema, body, format) when is_binary(body) do
-    case header(schema, body, format) do
+  ## Options
+
+    * `:columns` — for `:row_binary`, the names of the body's columns in order,
+      as an `INSERT` statement lists them; each is read as the type its schema
+      column implies, and a column left out is null. Without it, the schema's
+      regular columns in order. The header formats name their own columns and
+      ignore it.
+  """
+  @spec decode(Schema.t(), binary(), format(), keyword()) ::
+          {:ok, result()} | {:error, {:invalid_rowbinary, String.t()}}
+  def decode(schema, body, format, opts \\ [])
+
+  def decode(%Schema{}, <<>>, _format, _opts), do: {:ok, %{ndjson: [], row_count: 0, errors: []}}
+
+  def decode(%Schema{} = schema, body, format, opts) when is_binary(body) do
+    case header(schema, body, format, Keyword.get(opts, :columns)) do
       {:ok, [], <<_byte, _rest::binary>>} ->
         invalid("the header names no columns, but bytes follow it")
 
@@ -172,10 +182,14 @@ defmodule Smolquery.RowBinary do
 
   defp invalid(message), do: {:error, {:invalid_rowbinary, message}}
 
-  defp header(schema, body, :row_binary),
-    do: {:ok, columns(Enum.map(Schema.regular_fields(schema), &{&1, schema_wire(&1)})), body}
+  defp header(schema, body, :row_binary, nil),
+    do: {:ok, columns(implied(Schema.regular_fields(schema))), body}
 
-  defp header(schema, body, format) when format in [:with_names, :with_names_and_types] do
+  defp header(schema, body, :row_binary, names) when is_list(names) do
+    with {:ok, fields} <- named_fields(schema, names), do: {:ok, columns(implied(fields)), body}
+  end
+
+  defp header(schema, body, format, _names) when format in [:with_names, :with_names_and_types] do
     with {:ok, count, rest} <- varint(body),
          {:ok, names, rest} <- strings(count, rest, []),
          {:ok, fields} <- named_fields(schema, names),
@@ -184,8 +198,7 @@ defmodule Smolquery.RowBinary do
     end
   end
 
-  defp wires(:with_names, fields, _count, rest),
-    do: {:ok, Enum.map(fields, &{&1, schema_wire(&1)}), rest}
+  defp wires(:with_names, fields, _count, rest), do: {:ok, implied(fields), rest}
 
   defp wires(:with_names_and_types, fields, count, body) do
     with {:ok, types, rest} <- strings(count, body, []),
@@ -193,6 +206,8 @@ defmodule Smolquery.RowBinary do
       {:ok, pairs, rest}
     end
   end
+
+  defp implied(fields), do: Enum.map(fields, &{&1, schema_wire(&1)})
 
   defp strings(0, rest, acc), do: {:ok, Enum.reverse(acc), rest}
 

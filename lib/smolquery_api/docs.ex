@@ -171,6 +171,26 @@ defmodule SmolqueryApi.Docs do
       },
       %{
         "method" => "POST",
+        "path" => "/",
+        "auth" => "bearer",
+        "summary" =>
+          "ClickHouse HTTP insert (T-476). The query parameter holds INSERT INTO [db.]table " <>
+            "[(columns)] [SETTINGS ...] FORMAT RowBinary, RowBinaryWithNames or " <>
+            "RowBinaryWithNamesAndTypes, and the body holds the rows. The database is the " <>
+            "statement's qualifier, else the database parameter or X-ClickHouse-Database " <>
+            "header, else default. All or nothing unless input_format_allow_errors_num or " <>
+            "input_format_allow_errors_ratio is above zero. 200 with X-ClickHouse-Summary; a " <>
+            "failure answers ClickHouse's text form with X-ClickHouse-Exception-Code.",
+        "query_params" => %{
+          "query" =>
+            "INSERT ... FORMAT RowBinary | RowBinaryWithNames | RowBinaryWithNamesAndTypes",
+          "database" => "the database for an unqualified table",
+          "insert_deduplication_token" => "optional idempotency key, as insertId",
+          "input_format_allow_errors_num" => "above zero writes the rows that are not refused"
+        }
+      },
+      %{
+        "method" => "POST",
         "path" => "/v1/datasets/:dataset/tables/:table/insert",
         "auth" => "bearer",
         "summary" =>

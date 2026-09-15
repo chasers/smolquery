@@ -652,4 +652,26 @@ defmodule Smolquery.RowBinaryTest do
       assert lines(decoded) == [%{"ts" => "2026-09-14 10:00:00.123456789"}]
     end
   end
+
+  describe "decode/4 with the columns an INSERT statement lists (T-476)" do
+    test "a plain body's columns are the named ones, in the named order" do
+      schema = Schema.new!([{"id", :int64, nullable: false}, {"note", :string}, {"ok", :bool}])
+      body = IO.iodata_to_binary([0, str("hi"), <<7::little-signed-64>>])
+
+      assert {:ok, decoded} =
+               RowBinary.decode(schema, body, :row_binary, columns: ["note", "id"])
+
+      assert decoded.row_count == 1
+      assert lines(decoded) == [%{"note" => "hi", "id" => 7}]
+    end
+
+    test "the named columns are checked like a header's" do
+      schema = Schema.new!([{"id", :int64, nullable: false}])
+
+      assert RowBinary.decode(schema, <<1>>, :row_binary, columns: ["nope"]) ==
+               {:error,
+                {:invalid_rowbinary,
+                 ~s(unknown column: "nope"; column id must not be null, and the header does not name it)}}
+    end
+  end
 end

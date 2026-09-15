@@ -210,3 +210,15 @@ Failures answer one JSON envelope everywhere:
 A `503 UNAVAILABLE` from a query means a buffer node the reader expected could not answer. The result would have been silently short. See [fan-out](architecture.md#clustered-fan-out).
 
 A `503 UNAVAILABLE` from a `/v1/connections` route means this node holds no `SMOLQUERY_CREDENTIAL_KEY`, so it can neither seal a new password nor open a stored one. Set the key and restart the node. A `422 FAILED_PRECONDITION` on the same routes means the stored password does not open with the key this node holds — the key changed, and the connection must be registered again.
+
+## ClickHouse HTTP insert
+
+`POST /?query=INSERT INTO db.table (columns) FORMAT RowBinary` takes the insert a ClickHouse HTTP client sends (T-476), so a producer that writes RowBinary can point at smolquery with its bearer key. The body holds the rows.
+
+- **Statement.** `INSERT INTO [TABLE] [db.]table [(column, ...)] [SETTINGS name = value, ...] FORMAT name`. Keywords are case-insensitive, and names may be backquoted or double-quoted. Nothing but whitespace and one `;` may follow the format name.
+- **Table.** The dataset is the statement's qualifier, else the `database` parameter, else the `X-ClickHouse-Database` header, else `default`.
+- **Formats.** `RowBinary`, `RowBinaryWithNames` and `RowBinaryWithNamesAndTypes`. A plain `RowBinary` body carries no types, so each column is read as the type its smolquery column implies: `Int64`, `Float64`, `String`, `Bool`, `DateTime64(6)` or `DateTime64(9)`, `Date32`, `Decimal(P, S)`, `Map(String, String)`, wrapped in `Nullable` when the column is nullable. A producer with other ClickHouse types, such as `UUID` or `UInt8`, must send `RowBinaryWithNamesAndTypes`.
+- **All or nothing.** When any row is refused, none is written, as in ClickHouse. A nonzero `input_format_allow_errors_num` or `input_format_allow_errors_ratio` writes the other rows instead, without enforcing the number.
+- **Settings.** `insert_deduplication_token` is the idempotency key, as `insertId` is on the NDJSON route. Every other setting is accepted and ignored. A statement's `SETTINGS` clause wins over the URL.
+- **Limits.** The body and the NDJSON its rows decode to are each held to `SMOLQUERY_INSERT_MAX_NDJSON_BYTES`. Over it is a 413; send smaller blocks.
+- **Answers.** A 200 has an empty body and an `X-ClickHouse-Summary` header. A failure answers ClickHouse's text form, `Code: N. DB::Exception: message. (NAME)`, with `X-ClickHouse-Exception-Code`: 62 `SYNTAX_ERROR`, 73 `UNKNOWN_FORMAT` on a 404, as ClickHouse answers it, 60 `UNKNOWN_TABLE`, 81 `UNKNOWN_DATABASE`, 33 `CANNOT_READ_ALL_DATA` for a body that ends mid-row, 117 `INCORRECT_DATA` for rows that cannot be written, 202 `TOO_MANY_SIMULTANEOUS_QUERIES` on a 429, and 1002 `UNKNOWN_EXCEPTION` on a 503. A retryable answer carries `retry-after`. A statement other than an insert is a 501 `NOT_IMPLEMENTED`.

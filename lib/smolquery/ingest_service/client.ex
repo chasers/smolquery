@@ -18,6 +18,7 @@ defmodule Smolquery.IngestService.Client do
   alias Smolquery.IngestService.SchemaCache
   alias Smolquery.IngestService.Validator
   alias Smolquery.Partitions
+  alias Smolquery.RowBinary
   alias Smolquery.Segments.Store
 
   @type result :: %{inserted: non_neg_integer(), errors: [Validator.row_errors()]}
@@ -112,6 +113,79 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
+  @doc """
+  Writes a ClickHouse RowBinary `body` to the table: `insert_ndjson/4`'s
+  contract, entered from RowBinary (T-476).
+
+  The body is decoded on this node by `Smolquery.RowBinary.decode/4` into the
+  NDJSON the flush reads, and forwarded as that. `format` is the decoder's.
+  A body the decoder cannot read is `{:error, {:invalid_rowbinary, message}}`
+  and writes nothing. Rows the decoder refuses and rows the flush refuses are
+  both reported at their index in the RowBinary body.
+
+  ## Options
+
+    * `:columns` — the names a plain `RowBinary` body's columns carry, in
+      order, as an `INSERT` statement lists them
+    * `:max_ndjson_bytes` — refuses a body whose rows decode past it, with
+      `{:error, {:decoded_too_large, bytes, limit}}`, before anything is
+      forwarded
+    * `:batch_id` and `:skip_invalid_rows`, as `insert/4` takes them
+  """
+  @spec insert_rowbinary(atom(), Store.table_ref(), binary(), RowBinary.format(), keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def insert_rowbinary(name, table_ref, body, format, opts \\ []) when is_binary(body) do
+    with {:ok, runtime} <- runtime(name) do
+      with_fresh_schema(
+        runtime,
+        table_ref,
+        &forward_rowbinary(runtime, table_ref, &1, {body, format}, opts)
+      )
+    end
+  end
+
+  defp forward_rowbinary(runtime, table_ref, schema, {body, format}, opts) do
+    started = System.monotonic_time(:microsecond)
+    decoded = RowBinary.decode(schema, body, format, Keyword.take(opts, [:columns]))
+    decode_us = System.monotonic_time(:microsecond) - started
+    skip? = Keyword.get(opts, :skip_invalid_rows, true)
+
+    case decoded do
+      {:ok, %{row_count: 0, errors: errors}} ->
+        nothing_written(errors, decode_us)
+
+      {:ok, %{errors: [_ | _] = errors}} when not skip? ->
+        nothing_written(errors, decode_us)
+
+      {:ok, %{ndjson: ndjson, row_count: count, errors: errors}} ->
+        ndjson = IO.iodata_to_binary(ndjson)
+
+        with :ok <- within(byte_size(ndjson), Keyword.get(opts, :max_ndjson_bytes)) do
+          runtime
+          |> forward(table_ref, schema, {ndjson, count}, decode_us, opts)
+          |> merge_refused(errors, count)
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp nothing_written(errors, decode_us) do
+    measure(0, errors, decode_us)
+
+    {:ok, %{inserted: 0, errors: errors}}
+  end
+
+  defp within(_bytes, nil), do: :ok
+  defp within(bytes, limit) when bytes <= limit, do: :ok
+  defp within(bytes, limit), do: {:error, {:decoded_too_large, bytes, limit}}
+
+  defp merge_refused({:ok, result}, decode_errors, row_count),
+    do: {:ok, %{result | errors: remapped(decode_errors, result.errors, row_count)}}
+
+  defp merge_refused(error, _decode_errors, _row_count), do: error
+
   # The body goes to the owning buffer as the bytes the client sent. Nothing here
   # parses it, so this node spends no CPU per row and the frame never exists to be
   # serialized — T-182 measured those two as 32% and 1% of the ack.
@@ -126,6 +200,10 @@ defmodule Smolquery.IngestService.Client do
     row_count = count_rows(body)
     count_us = System.monotonic_time(:microsecond) - started
 
+    forward(runtime, table_ref, schema, {body, row_count}, count_us, opts)
+  end
+
+  defp forward(runtime, table_ref, schema, {body, row_count}, count_us, opts) do
     skip? = Keyword.get(opts, :skip_invalid_rows, true)
     batch_id = Keyword.get(opts, :batch_id)
     target = write_target(table_ref, schema, runtime, batch_id)
@@ -225,19 +303,27 @@ defmodule Smolquery.IngestService.Client do
   # indices are positions in `valid`, so they are mapped back onto the caller's
   # body before they join the validator's own errors.
   defp report(valid, errors, refused, inserted) do
-    rejected = MapSet.new(errors, & &1.index)
-
-    original =
-      0..(length(valid) + length(errors) - 1)//1
-      |> Enum.reject(&MapSet.member?(rejected, &1))
-      |> List.to_tuple()
-
-    mapped = Enum.map(refused, &%{&1 | index: elem(original, &1.index)})
-    all = Enum.sort_by(errors ++ mapped, & &1.index)
+    all = remapped(errors, refused, length(valid))
 
     measure(inserted, all)
 
     {:ok, %{inserted: inserted, errors: all}}
+  end
+
+  # `refused` are indices among the rows that were forwarded, which skip the
+  # rows `errors` already refused; they are mapped back onto the caller's body.
+  defp remapped(errors, refused, forwarded) do
+    rejected = MapSet.new(errors, & &1.index)
+
+    original =
+      0..(forwarded + length(errors) - 1)//1
+      |> Enum.reject(&MapSet.member?(rejected, &1))
+      |> List.to_tuple()
+
+    Enum.sort_by(
+      errors ++ Enum.map(refused, &%{&1 | index: elem(original, &1.index)}),
+      & &1.index
+    )
   end
 
   defp measure(accepted, errors, parse_us \\ 0, write_us \\ 0) do
