@@ -13,6 +13,8 @@ defmodule SmolqueryApi.Admission do
   ingest body is counted before the first byte is read and an unauthenticated
   request never reaches the counter. Only `POST .../insert` is counted —
   every other route carries small bodies the parsers already bound. The
+  ClickHouse edge (`SmolqueryClickHouse.Router`, T-477) counts its inserts
+  the same way through `admit_body/3`, on a server of its own. The
   reservation is the request's `content-length`, capped at the route's own
   body limit; a request that does not declare a length reserves that limit
   outright, so a chunked body cannot slip under the counter.
@@ -24,12 +26,12 @@ defmodule SmolqueryApi.Admission do
 
   The counter releases when the response is sent, and a monitor on the
   request process releases on crash, so an abandoned request cannot leak its
-  reservation. The server is one process per API instance; two calls per
+  reservation. The server is one process per edge instance; two calls per
   request is noise next to a multi-megabyte body.
 
   A request dispatched for an instance with no admission server passes
-  uncounted. In production the server starts under `SmolqueryApi.Supervisor`
-  ahead of the endpoint, so that window is a supervisor restart; in tests it
+  uncounted. In production the server starts under its edge's supervisor
+  ahead of the listener, so that window is a supervisor restart; in tests it
   is the default, and only admission's own tests start the server. The same
   contract covers a server that dies between the lookup and the call: the
   request passes uncounted rather than crash.
@@ -43,11 +45,20 @@ defmodule SmolqueryApi.Admission do
   alias SmolqueryApi.Runtime
 
   @doc """
-  Starts the admission server for an API runtime.
+  Starts an admission server.
+
+  Given an API runtime, the server is that instance's, with the limit
+  `SmolqueryApi.Runtime.insert_max_in_flight_bytes/2` derives. Given options,
+  `:name` is the instance and `:limit` the bytes it admits at once.
   """
-  @spec start_link(Runtime.t()) :: GenServer.on_start()
-  def start_link(%Runtime{} = runtime) do
-    GenServer.start_link(__MODULE__, runtime, name: server(runtime.name))
+  @spec start_link(Runtime.t() | keyword()) :: GenServer.on_start()
+  def start_link(%Runtime{} = runtime),
+    do: start_link(name: runtime.name, limit: Runtime.insert_max_in_flight_bytes(runtime))
+
+  def start_link(opts) when is_list(opts) do
+    GenServer.start_link(__MODULE__, Keyword.fetch!(opts, :limit),
+      name: server(Keyword.fetch!(opts, :name))
+    )
   end
 
   @doc """
@@ -66,37 +77,53 @@ defmodule SmolqueryApi.Admission do
   @spec admit_conn(Plug.Conn.t()) :: Plug.Conn.t()
   def admit_conn(
         %Plug.Conn{method: "POST", path_info: ["v1", "datasets", _, "tables", _, "insert"]} = conn
-      ),
-      do: admit_ingest(conn)
-
-  def admit_conn(%Plug.Conn{method: "POST", path_info: []} = conn), do: admit_ingest(conn)
-
-  def admit_conn(%Plug.Conn{} = conn), do: conn
-
-  defp admit_ingest(conn) do
+      ) do
     instance = conn.private.smolquery_api
 
-    case Process.whereis(server(instance)) do
-      nil -> conn
-      server -> admit_conn(conn, server, reservation(conn, instance))
-    end
-  end
-
-  defp admit_conn(conn, server, bytes) do
-    case admit(server, bytes) do
-      :no_server ->
+    case admit_body(conn, instance, ceiling(instance)) do
+      {:ok, conn} ->
         conn
-
-      {:ok, reservation} ->
-        Plug.Conn.register_before_send(conn, fn conn ->
-          release(server, reservation)
-          conn
-        end)
 
       {:error, :admission_full} ->
         conn
         |> Errors.send_resource_exhausted(1, "too many ingest bytes in flight, retry later")
         |> Plug.Conn.halt()
+    end
+  end
+
+  def admit_conn(%Plug.Conn{} = conn), do: conn
+
+  @doc """
+  Counts `conn`'s body against `instance`'s admission server.
+
+  The reservation is the declared `content-length`, capped at `ceiling`, or
+  `ceiling` when no length is declared. An admitted conn releases its
+  reservation when the response is sent; refusing is the caller's to answer,
+  in its own protocol's form.
+  """
+  @spec admit_body(Plug.Conn.t(), atom(), pos_integer()) ::
+          {:ok, Plug.Conn.t()} | {:error, :admission_full}
+  def admit_body(conn, instance, ceiling) do
+    case Process.whereis(server(instance)) do
+      nil -> {:ok, conn}
+      server -> reserve(conn, server, reservation(conn, ceiling))
+    end
+  end
+
+  defp reserve(conn, server, bytes) do
+    case admit(server, bytes) do
+      :no_server ->
+        {:ok, conn}
+
+      {:ok, reservation} ->
+        {:ok,
+         Plug.Conn.register_before_send(conn, fn conn ->
+           release(server, reservation)
+           conn
+         end)}
+
+      {:error, :admission_full} = full ->
+        full
     end
   end
 
@@ -118,9 +145,7 @@ defmodule SmolqueryApi.Admission do
   @spec in_flight(atom()) :: non_neg_integer()
   def in_flight(instance), do: GenServer.call(server(instance), :in_flight)
 
-  defp reservation(conn, instance) do
-    ceiling = ceiling(instance)
-
+  defp reservation(conn, ceiling) do
     case Plug.Conn.get_req_header(conn, "content-length") do
       [length | _] ->
         case Integer.parse(length) do
@@ -139,8 +164,7 @@ defmodule SmolqueryApi.Admission do
   end
 
   @impl GenServer
-  def init(%Runtime{} = runtime) do
-    limit = Runtime.insert_max_in_flight_bytes(runtime)
+  def init(limit) when is_integer(limit) and limit > 0 do
     Logger.info("ingest admission limit=#{limit} bytes in flight")
 
     {:ok, %{limit: limit, in_flight: 0, reservations: %{}}}

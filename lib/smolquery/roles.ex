@@ -4,7 +4,8 @@ defmodule Smolquery.Roles do
 
   A role maps one-to-one onto a top-level supervision subtree — the four
   services, plus `:api` for the HTTP front door, `:web` for the LiveView
-  UI, and `:pg` for the Postgres wire edge. A node starts only the
+  UI, `:pg` for the Postgres wire edge, and `:clickhouse` for the ClickHouse
+  HTTP insert edge. A node starts only the
   subtrees in its role set, so the same release deploys as a single-node dev
   instance (every role) or as a fleet of specialized nodes.
 
@@ -19,9 +20,9 @@ defmodule Smolquery.Roles do
   With the variable unset, a node runs every role.
   """
 
-  @type t :: :api | :ingest | :buffer | :storage | :query | :web | :pg
+  @type t :: :api | :ingest | :buffer | :storage | :query | :web | :pg | :clickhouse
 
-  @all [:api, :ingest, :buffer, :storage, :query, :web, :pg]
+  @all [:api, :ingest, :buffer, :storage, :query, :web, :pg, :clickhouse]
   @names Map.new(@all, &{Atom.to_string(&1), &1})
 
   @doc """

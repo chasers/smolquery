@@ -6,7 +6,8 @@
     buffer_service: "Smolquery.BufferService.*",
     storage_service: "Smolquery.StorageService.*",
     query_service: "Smolquery.QueryService.*",
-    pg: "SmolqueryPg.*"
+    pg: "SmolqueryPg.*",
+    clickhouse: "SmolqueryClickHouse.*"
   ],
   deps: [
     forbidden: [

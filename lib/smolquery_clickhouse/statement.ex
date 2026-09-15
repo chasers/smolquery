@@ -1,4 +1,4 @@
-defmodule SmolqueryApi.ClickHouseInsert do
+defmodule SmolqueryClickHouse.Statement do
   @moduledoc """
   The `INSERT` statement a ClickHouse HTTP client sends in its `query`
   parameter, parsed as far as an insert needs (T-476).

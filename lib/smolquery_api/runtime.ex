@@ -132,18 +132,28 @@ defmodule SmolqueryApi.Runtime do
   for encode buffers and the accumulators — floored at `max_ndjson_bytes` so a
   small container still ingests. Without a cgroup limit the fallback is
   #{@in_flight_fallback} bytes.
+
+  Takes any runtime carrying the two fields, so the ClickHouse edge
+  (`SmolqueryClickHouse.Runtime`) derives its limit the same way.
   """
-  @spec insert_max_in_flight_bytes(t(), {:ok, pos_integer()} | :none) :: pos_integer()
+  @spec insert_max_in_flight_bytes(
+          %{
+            :insert_max_in_flight_bytes => pos_integer() | nil,
+            :max_ndjson_bytes => pos_integer(),
+            optional(atom()) => term()
+          },
+          {:ok, pos_integer()} | :none
+        ) :: pos_integer()
   def insert_max_in_flight_bytes(runtime, cgroup \\ Smolquery.CgroupMemory.limit_bytes())
 
-  def insert_max_in_flight_bytes(%__MODULE__{insert_max_in_flight_bytes: bytes}, _cgroup)
+  def insert_max_in_flight_bytes(%{insert_max_in_flight_bytes: bytes}, _cgroup)
       when is_integer(bytes),
       do: bytes
 
-  def insert_max_in_flight_bytes(%__MODULE__{max_ndjson_bytes: ndjson}, {:ok, bytes}),
+  def insert_max_in_flight_bytes(%{max_ndjson_bytes: ndjson}, {:ok, bytes}),
     do: max(div(bytes, 4), ndjson)
 
-  def insert_max_in_flight_bytes(%__MODULE__{}, :none), do: @in_flight_fallback
+  def insert_max_in_flight_bytes(%{max_ndjson_bytes: _ndjson}, :none), do: @in_flight_fallback
 
   use Smolquery.Runtime
 

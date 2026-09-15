@@ -166,6 +166,36 @@ defmodule SmolqueryApi.AdmissionTest do
     assert Process.alive?(server)
   end
 
+  describe "admit_body/3" do
+    test "reserves the declared length and releases it when the response is sent", %{name: name} do
+      assert {:ok, conn} =
+               conn(:post, "/", "0123456789")
+               |> put_req_header("content-length", "10")
+               |> Admission.admit_body(name, 50)
+
+      assert Admission.in_flight(name) == 10
+
+      Plug.Conn.send_resp(conn, 200, "")
+
+      await(fn -> Admission.in_flight(name) == 0 end)
+    end
+
+    test "leaves a refusal to the caller", %{name: name} do
+      hold(name, 95)
+
+      assert conn(:post, "/", "") |> Admission.admit_body(name, 50) == {:error, :admission_full}
+    end
+
+    test "starts from a name and a limit" do
+      name = :"admission_opts_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({Admission, name: name, limit: 10}, id: {:admission, name})
+
+      hold(name, 5)
+
+      assert conn(:post, "/", "") |> Admission.admit_body(name, 6) == {:error, :admission_full}
+    end
+  end
+
   defp await(check, attempts \\ 50) do
     cond do
       check.() -> :ok

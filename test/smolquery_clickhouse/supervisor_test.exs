@@ -1,0 +1,51 @@
+defmodule SmolqueryClickHouse.SupervisorTest do
+  use ExUnit.Case, async: true
+
+  alias SmolqueryApi.Admission
+  alias SmolqueryClickHouse.Runtime
+
+  @password "supervisor-test-password"
+
+  defp start_edge(opts \\ []) do
+    name = :"ch_supervisor_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {SmolqueryClickHouse.Supervisor,
+       Keyword.merge([name: name, password: @password, port: 0], opts)}
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    {:ok, {_ip, port}} = SmolqueryClickHouse.Supervisor.bound(name)
+
+    {name, "http://127.0.0.1:#{port}"}
+  end
+
+  test "serves the edge over a real listener" do
+    {_name, base} = start_edge()
+
+    assert %{status: 200, body: "Ok.\n"} = Req.get!(base <> "/ping", retry: false)
+    assert Req.post!(base <> "/", params: [query: "SELECT 1"], retry: false).status == 401
+
+    response =
+      Req.get!(base <> "/",
+        params: [query: "SELECT 1"],
+        headers: [{"x-clickhouse-key", @password}],
+        retry: false
+      )
+
+    assert response.status == 501
+  end
+
+  test "starts the edge's own admission counter" do
+    {name, _base} = start_edge(insert_max_in_flight_bytes: 1_000)
+
+    assert Admission.in_flight(name) == 0
+  end
+
+  test "refuses to boot without a password" do
+    assert_raise ArgumentError, ~r/refuses to boot/, fn ->
+      SmolqueryClickHouse.Supervisor.start_link(name: :ch_no_password, password: "")
+    end
+  end
+end

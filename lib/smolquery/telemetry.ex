@@ -37,6 +37,7 @@ defmodule Smolquery.Telemetry do
   ## The event catalog
 
       [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status
+      [:smolquery, :clickhouse, :stop]    Plug.Telemetry — conn status
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
@@ -203,6 +204,7 @@ defmodule Smolquery.Telemetry do
 
   @events [
     [:smolquery, :api, :stop],
+    [:smolquery, :clickhouse, :stop],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :flush_trigger],
@@ -231,6 +233,8 @@ defmodule Smolquery.Telemetry do
 
   @help %{
     "smolquery_api_requests_total" => "HTTP requests answered, by status class.",
+    "smolquery_clickhouse_requests_total" =>
+      "ClickHouse HTTP edge requests answered, by status class.",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -523,6 +527,10 @@ defmodule Smolquery.Telemetry do
       {"smolquery_api_request_microseconds_total", []},
       System.convert_time_unit(Map.get(measurements, :duration, 0), :native, :microsecond)
     )
+  end
+
+  def handle_event([:smolquery, :clickhouse, :stop], _measurements, %{conn: conn}, nil) do
+    bump({"smolquery_clickhouse_requests_total", [class: status_class(conn.status)]}, 1)
   end
 
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do

@@ -6,6 +6,8 @@ config :smolquery, SmolqueryApi, api_key: "smolquery-dev"
 
 config :smolquery, SmolqueryPg, port: 15_432
 
+config :smolquery, SmolqueryClickHouse, port: 18_123
+
 config :smolquery, SmolqueryWeb,
   username: "smolquery",
   password: "smolquery"

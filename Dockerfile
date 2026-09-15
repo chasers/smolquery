@@ -44,7 +44,7 @@ ENV HOME=/data \
     SMOLQUERY_GIT_SHA=$GIT_SHA
 
 VOLUME /data
-EXPOSE 4000 4002 5432
+EXPOSE 4000 4002 5432 8123
 
 ENTRYPOINT ["/app/bin/smolquery"]
 CMD ["start"]
