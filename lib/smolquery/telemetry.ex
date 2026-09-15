@@ -402,6 +402,10 @@ defmodule Smolquery.Telemetry do
     "smolquery_memory_rss_peak_bytes" => "The highest resident set sampled in the last 60 s.",
     "smolquery_memory_beam_bytes" =>
       "The BEAM's own accounting, by kind (total, processes, binary, ets).",
+    "smolquery_memory_mapping_bytes" =>
+      "This OS process's resident set by mapping class (heap, anon_arena, anon_reserved, anon, file); anon_reserved is address space, not usage.",
+    "smolquery_memory_mapping_arenas" =>
+      "How many arena-shaped anonymous mappings this OS process holds; they go fully resident and stay.",
     "smolquery_buffer_unsealed_entries" =>
       "Unsealed micro-segments this buffer node holds across every table; what a restart must adopt (T-457).",
     "smolquery_buffer_unsealed_bytes" =>
