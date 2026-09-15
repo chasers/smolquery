@@ -48,6 +48,14 @@ defmodule SmolqueryApi.InsertController do
   batch*, so a retry must carry the same rows; BigQuery-style, best-effort
   scope: the window closes for as long as the batch's segment stays in the
   hot tier, which comfortably covers any retry loop.
+
+  `skipInvalidRows=false` makes the request all or nothing, after BigQuery's
+  `insertAll` option of the same name, whose default runs the other way. When
+  any row is refused, by the schema or by the flush, no row of the request is
+  written, and the answer is a 200 with `insertedRows: 0` and the refused rows
+  in `insertErrors`. An `insertId` sent with a refused request is not spent,
+  so corrected rows can retry under it. The default, `true`, writes the valid
+  rows (T-474).
   """
   @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def create(conn, %{"dataset" => dataset, "table" => table}) do
@@ -71,8 +79,10 @@ defmodule SmolqueryApi.InsertController do
     max_bytes = runtime.max_ndjson_bytes
 
     with {:ok, batch_id} <- insert_id(conn.query_params),
+         {:ok, skip?} <- skip_invalid_rows(conn.query_params),
          {:ok, body, conn} <- read_ndjson(conn, max_bytes),
-         {:ok, result} <- insert_ndjson(runtime, table_ref, body, batch_id) do
+         {:ok, result} <-
+           insert_ndjson(runtime, table_ref, body, batch_id: batch_id, skip_invalid_rows: skip?) do
       respond(conn, result)
     else
       {:error, :too_large} ->
@@ -112,9 +122,8 @@ defmodule SmolqueryApi.InsertController do
     end
   end
 
-  defp insert_ndjson(runtime, table_ref, body, batch_id) do
-    IngestService.Client.insert_ndjson(runtime.ingest_name, table_ref, body, batch_id: batch_id)
-  end
+  defp insert_ndjson(runtime, table_ref, body, opts),
+    do: IngestService.Client.insert_ndjson(runtime.ingest_name, table_ref, body, opts)
 
   @doc """
   Maps a whole-request write failure to the envelope; shared with batch loads.
@@ -180,6 +189,17 @@ defmodule SmolqueryApi.InsertController do
     )
   end
 
+  def insert_error(conn, :whole_request_unsupported) do
+    conn
+    |> put_resp_header("retry-after", "5")
+    |> Errors.send_error(
+      503,
+      "UNAVAILABLE",
+      "the owning buffer node runs a release that cannot refuse a whole request; " <>
+        "finish the rollout, buffer nodes first, or retry with skipInvalidRows=true (T-474)"
+    )
+  end
+
   def insert_error(conn, reason), do: Errors.from_reason(conn, reason)
 
   defp insert_id(%{"insertId" => id}) when is_binary(id) and id != "" and byte_size(id) <= 128,
@@ -187,6 +207,14 @@ defmodule SmolqueryApi.InsertController do
 
   defp insert_id(%{"insertId" => _invalid}), do: {:error, {:invalid_param, "insertId"}}
   defp insert_id(_body), do: {:ok, nil}
+
+  defp skip_invalid_rows(%{"skipInvalidRows" => "true"}), do: {:ok, true}
+  defp skip_invalid_rows(%{"skipInvalidRows" => "false"}), do: {:ok, false}
+
+  defp skip_invalid_rows(%{"skipInvalidRows" => _invalid}),
+    do: {:error, {:invalid_param, "skipInvalidRows"}}
+
+  defp skip_invalid_rows(_params), do: {:ok, true}
 
   @doc """
   The `insertErrors` JSON shape of validator rejections; shared with loads.

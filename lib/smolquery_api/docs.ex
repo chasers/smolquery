@@ -182,7 +182,11 @@ defmodule SmolqueryApi.Docs do
         "query_params" => %{
           "insertId" =>
             "optional idempotency key; a retry with the same id and rows " <>
-              "cannot double-count, except across a partition-count raise"
+              "cannot double-count, except across a partition-count raise",
+          "skipInvalidRows" =>
+            "true (default) writes the valid rows; false writes nothing when any row " <>
+              "is refused, answers 200 with insertedRows 0 and the refused rows, and " <>
+              "leaves the insertId unspent"
         }
       },
       %{

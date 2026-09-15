@@ -307,4 +307,52 @@ defmodule Smolquery.IngestService.ClientTest do
       assert Enum.sum_by(entries, & &1.row_count) == 2
     end
   end
+
+  describe "skip_invalid_rows: false (T-474)" do
+    test "a row the validator refuses writes none of the request", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+
+      assert {:ok, %{inserted: 0, errors: [%{index: 1}]}} =
+               IngestService.Client.insert(name, @table, [%{"id" => 1}, %{"id" => "x"}],
+                 skip_invalid_rows: false
+               )
+
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, @table)
+    end
+
+    test "a row the flush refuses writes none of the request", context do
+      %{name: name, buffer: buffer} = start_stack(context, buffer: [write_pool_size: 1])
+
+      rows = [%{"id" => 1}, %{"id" => 9_223_372_036_854_775_808}, %{"id" => 2}]
+
+      assert {:ok, %{inserted: 0, errors: [%{index: 1, errors: [%{message: message}]}]}} =
+               IngestService.Client.insert(name, @table, rows, skip_invalid_rows: false)
+
+      assert message =~ "the flush refused the row"
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, @table)
+    end
+
+    test "an NDJSON body with a refused line writes none of it", context do
+      %{name: name, buffer: buffer} = start_stack(context, buffer: [write_pool_size: 1])
+
+      body = ~s({"id":1}\n{"id":"junk"}\n{"id":3}\n)
+
+      assert {:ok, %{inserted: 0, errors: [%{index: 1}]}} =
+               IngestService.Client.insert_ndjson(name, @table, body, skip_invalid_rows: false)
+
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, @table)
+    end
+
+    test "a clean body still writes every row", context do
+      %{name: name, buffer: buffer} = start_stack(context)
+
+      assert {:ok, %{inserted: 2, errors: []}} =
+               IngestService.Client.insert_ndjson(name, @table, ~s({"id":1}\n{"id":2}\n),
+                 skip_invalid_rows: false
+               )
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+  end
 end

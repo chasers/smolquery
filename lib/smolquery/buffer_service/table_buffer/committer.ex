@@ -118,7 +118,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   """
   @type commit :: %{
           :schema => Smolquery.Schema.t(),
-          :chunks => [[Writer.row()] | {:ndjson, binary(), non_neg_integer()}],
+          :chunks => [
+            [Writer.row()]
+            | {:ndjson, binary(), non_neg_integer()}
+            | {:whole, [Writer.row()] | {:ndjson, binary(), non_neg_integer()}, String.t() | nil}
+          ],
           :pending => [{GenServer.from(), :new | :duplicate | :flush}],
           :batch_ids => [String.t()],
           :row_count => non_neg_integer(),
@@ -460,14 +464,25 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     File.rm(probe)
 
     with {:ok, kept, refused} <- bisected do
+      refusals = Enum.sort_by(errors ++ refused, & &1.index)
+      chunk = Enum.at(commit.chunks, index)
+
       {:ok,
        %{
          index: index,
-         errors: Enum.sort_by(errors ++ refused, & &1.index),
-         paths: respool(runtime, id, index, kept)
+         errors: refusal(chunk, refusals),
+         paths: respool(runtime, id, index, kept(chunk, refusals, kept))
        }}
     end
   end
+
+  defp kept({:whole, _payload, _batch_id}, [_refused | _rest], _kept), do: []
+  defp kept(_chunk, _refusals, kept), do: kept
+
+  defp refusal({:whole, _payload, batch_id}, [_refused | _rest] = refusals),
+    do: {:whole, batch_id, refusals}
+
+  defp refusal(_chunk, refusals), do: refusals
 
   # The validator is the fast pre-check; DuckDB is the authority. A row the
   # validator takes and DuckDB refuses — an INT64 past 2^63, a NUMERIC past its
@@ -551,6 +566,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       {:error, {:invalid_rows, Exception.message(error)}}
   end
 
+  defp chunk_bytes({:whole, payload, _batch_id}), do: chunk_bytes(payload)
   defp chunk_bytes({:ndjson, body, _count}), do: body
   defp chunk_bytes(rows) when is_list(rows), do: ndjson_iodata(rows)
 
@@ -558,7 +574,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     encoded_at = System.monotonic_time(:microsecond)
 
     {encoded, rejected} = split_rejected(encoded)
-    {result, added_at} = commit_durably(state, commit, encoded, encoded_at)
+
+    {result, added_at} =
+      commit_durably(
+        state,
+        %{commit | batch_ids: spent(commit.batch_ids, rejected)},
+        encoded,
+        encoded_at
+      )
 
     done_at = System.monotonic_time(:microsecond)
     duration_us = done_at - started
@@ -599,6 +622,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp inserts(pending), do: Enum.count(pending, fn {_from, kind} -> kind != :flush end)
+
+  defp spent(batch_ids, rejected) do
+    unspent = for {_index, {:whole, batch_id, _errors}} <- rejected, batch_id != nil, do: batch_id
+
+    batch_ids -- unspent
+  end
 
   # Split so the manifest append and the replication round can be timed apart:
   # they are the two serialized steps, and T-181 exists because the encode —
@@ -705,6 +734,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # one: partial failure is a result, not an error. Its valid rows are in the
   # segment that just committed, so the ack is real; `errors` names the rows the
   # schema refused, at their index in that caller's body.
+  defp rejected_reply({:ok, _ack}, {:whole, _batch_id, errors}), do: {:invalid, errors}
+  defp rejected_reply({:rejected, _rejected}, {:whole, _batch_id, errors}), do: {:invalid, errors}
   defp rejected_reply({:ok, ack}, errors), do: {:ok, ack, errors}
   defp rejected_reply({:rejected, _rejected}, errors), do: {:invalid, errors}
   defp rejected_reply(error, _errors), do: error

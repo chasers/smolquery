@@ -339,4 +339,32 @@ defmodule SmolqueryApi.InsertControllerTest do
       assert JSON.decode!(response.resp_body)["error"]["message"] =~ "buffer nodes first"
     end
   end
+
+  describe "skipInvalidRows (T-474)" do
+    test "false writes none of a body with a refused row", %{name: name, buffer: buffer} do
+      body = ndjson([%{"id" => 1}, %{"id" => "junk"}, %{"id" => 3}])
+      response = post_ndjson(name, body, @path <> "?skipInvalidRows=false")
+
+      assert response.status == 200
+
+      assert %{"insertedRows" => 0, "insertErrors" => [%{"index" => 1}]} =
+               JSON.decode!(response.resp_body)
+
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+    end
+
+    test "takes only true or false", %{name: name} do
+      response = post_ndjson(name, ndjson([%{"id" => 1}]), @path <> "?skipInvalidRows=maybe")
+
+      assert response.status == 400
+    end
+
+    test "a buffer node that cannot refuse a whole request answers 503 with retry-after" do
+      conn =
+        SmolqueryApi.InsertController.insert_error(conn(:post, @path), :whole_request_unsupported)
+
+      assert conn.status == 503
+      assert Plug.Conn.get_resp_header(conn, "retry-after") == ["5"]
+    end
+  end
 end

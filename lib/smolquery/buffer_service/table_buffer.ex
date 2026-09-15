@@ -335,6 +335,42 @@ defmodule Smolquery.BufferService.TableBuffer do
   end
 
   @doc """
+  Accumulates a batch its caller wants written whole or not at all, and
+  returns once it is durable or refused (T-474).
+
+  `payload` is a row list, as `write/5` takes it, or `{:ndjson, body,
+  row_count}`, as `write_ndjson/7` takes its parts. The difference is at the
+  flush. When the commit finds rows in this batch the schema refuses, none of
+  the batch's rows are written, its caller is answered `{:invalid, errors}`
+  naming the refused rows, and `batch_id` is not recorded, so a corrected
+  retry under the same id writes. The rest of the commit lands as it would
+  have. Otherwise identical to `write/5`, including the ack and the dedup
+  semantics.
+  """
+  @spec write_whole(
+          GenServer.server(),
+          Schema.t(),
+          [Writer.row()] | {:ndjson, binary(), non_neg_integer()},
+          non_neg_integer() | nil,
+          timeout(),
+          String.t() | nil
+        ) ::
+          {:ok, ack()}
+          | {:invalid, [row_errors()]}
+          | {:duplicate, ack()}
+          | {:error, term()}
+  def write_whole(buffer, %Schema{} = schema, payload, byte_size, timeout, batch_id \\ nil) do
+    GenServer.call(
+      buffer,
+      {:write, schema, {:whole, payload, batch_id}, batch_id, whole_bytes(payload, byte_size)},
+      timeout
+    )
+  end
+
+  defp whole_bytes(rows, _byte_size) when is_list(rows), do: :erlang.external_size(rows)
+  defp whole_bytes({:ndjson, _body, _count}, byte_size), do: byte_size
+
+  @doc """
   Records an entry another node's group commit shipped here (T-96).
 
   The follower half of `Smolquery.BufferService.Replicator.SegmentShipping`:
@@ -1434,6 +1470,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   # Counted by the sender, because counting lines again here would be a second
   # pass over bytes this node is deliberately not reading.
   defp chunk_count({:ndjson, _body, count}), do: count
+  defp chunk_count({:whole, payload, _batch_id}), do: chunk_count(payload)
 
   defp handoff(%__MODULE__{chunks: []} = state, _reason), do: state
 
