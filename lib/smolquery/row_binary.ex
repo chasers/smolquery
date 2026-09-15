@@ -92,12 +92,14 @@ defmodule Smolquery.RowBinary do
   @type result :: %{ndjson: iodata(), row_count: non_neg_integer(), errors: [row_errors()]}
 
   @int64_max 9_223_372_036_854_775_807
-  @epoch_gregorian_seconds 62_167_219_200
   @epoch_gregorian_days 719_528
   @min_micros -62_135_596_800_000_000
   @max_micros 253_402_300_799_999_999
   @min_days -719_162
   @max_days 2_932_896
+  @two_digits List.to_tuple(
+                for n <- 0..99, do: n |> Integer.to_string() |> String.pad_leading(2, "0")
+              )
 
   @nullary %{
     "Int8" => {:int, 8, :signed},
@@ -476,36 +478,43 @@ defmodule Smolquery.RowBinary do
 
   defp timestamp(us) do
     seconds = Integer.floor_div(us, 1_000_000)
-
-    {{year, month, day}, {hour, minute, second}} =
-      :calendar.gregorian_seconds_to_datetime(seconds + @epoch_gregorian_seconds)
+    days = Integer.floor_div(seconds, 86_400)
+    second_of_day = seconds - days * 86_400
+    fraction = us - seconds * 1_000_000
 
     [
       ?",
-      pad(year, 4),
-      ?-,
-      pad(month, 2),
-      ?-,
-      pad(day, 2),
+      calendar_date(days),
       ?\s,
-      pad(hour, 2),
+      two_digits(div(second_of_day, 3600)),
       ?:,
-      pad(minute, 2),
+      two_digits(rem(div(second_of_day, 60), 60)),
       ?:,
-      pad(second, 2),
+      two_digits(rem(second_of_day, 60)),
       ?.,
-      pad(Integer.mod(us, 1_000_000), 6),
+      two_digits(div(fraction, 10_000)),
+      two_digits(rem(div(fraction, 100), 100)),
+      two_digits(rem(fraction, 100)),
       ?"
     ]
   end
 
-  defp date(days) do
+  defp date(days), do: [?", calendar_date(days), ?"]
+
+  defp calendar_date(days) do
     {year, month, day} = :calendar.gregorian_days_to_date(days + @epoch_gregorian_days)
 
-    [?", pad(year, 4), ?-, pad(month, 2), ?-, pad(day, 2), ?"]
+    [
+      two_digits(div(year, 100)),
+      two_digits(rem(year, 100)),
+      ?-,
+      two_digits(month),
+      ?-,
+      two_digits(day)
+    ]
   end
 
-  defp pad(n, width), do: n |> Integer.to_string() |> String.pad_leading(width, "0")
+  defp two_digits(n), do: elem(@two_digits, n)
 
   defp decimal_bits(precision) when precision <= 9, do: 32
   defp decimal_bits(precision) when precision <= 18, do: 64
