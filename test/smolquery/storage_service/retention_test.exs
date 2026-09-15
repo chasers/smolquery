@@ -18,6 +18,7 @@ defmodule Smolquery.StorageService.RetentionTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
+  alias Smolquery.Segments.Writer
   alias Smolquery.StorageService.Retention
   alias Smolquery.StorageService.Runtime
   alias Smolquery.Test.ExitingCatalog
@@ -185,5 +186,50 @@ defmodule Smolquery.StorageService.RetentionTest do
     assert {:ok, report} = Retention.sweep(context.storage)
     assert report.dropped == []
     assert report.failed == []
+  end
+
+  test "a TIMESTAMP_NS policy column expires a segment by its footer maximum (T-475)",
+       context do
+    runtime = start_retention(context, [])
+    table = {"analytics", "ns_events"}
+    schema = Schema.new!([{"id", :int64}, {"ts", :timestamp_ns}])
+    :ok = Catalog.create_table(context.catalog, table, schema)
+
+    aged = seal_ns(runtime, context, table, schema, 1, [days_ago(10), days_ago(9)])
+    fresh = seal_ns(runtime, context, table, schema, 2, [days_ago(0)])
+
+    :ok = Catalog.put_retention(context.catalog, table, %{column: "ts", ttl_ms: @day_ms})
+
+    assert {:ok, report} = Retention.sweep(context.storage)
+    assert [%{table: ^table, dropped: [dropped]}] = report.dropped
+    assert dropped == aged.path
+    assert {:ok, [current]} = Catalog.segments(context.catalog, table, :current)
+    assert current == fresh.path
+  end
+
+  defp seal_ns(runtime, context, table, schema, index, timestamps) do
+    {:ok, prefix} = Store.prefix(table)
+    path = Path.join(context.tmp_dir, "ns-#{index}.ndjson")
+
+    File.write!(
+      path,
+      timestamps
+      |> Enum.with_index()
+      |> Enum.map_join(fn {ts, i} ->
+        JSON.encode!(%{"id" => i, "ts" => NaiveDateTime.to_string(ts) <> "789"}) <> "\n"
+      end)
+    )
+
+    {:ok, segment} =
+      Writer.write({:ndjson, [path]}, schema,
+        store: runtime.store,
+        prefix: prefix,
+        id: Id.generate(index * 1_000),
+        engine: Runtime.engine(context.storage)
+      )
+
+    {:ok, _snapshot} = Catalog.register_segments(context.catalog, table, [segment])
+
+    segment
   end
 end

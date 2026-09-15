@@ -773,6 +773,7 @@ defmodule SmolqueryPg.PgCatalog do
   defp attribute_type(:string), do: {25, -1}
   defp attribute_type(:bool), do: {16, -1}
   defp attribute_type(:timestamp), do: {1114, -1}
+  defp attribute_type(:timestamp_ns), do: {1114, -1}
   defp attribute_type(:date), do: {1082, -1}
   defp attribute_type(_map_or_variant), do: {3802, -1}
 
@@ -780,6 +781,7 @@ defmodule SmolqueryPg.PgCatalog do
   defp attribute_layout(:float64), do: {8, true, "d", "p"}
   defp attribute_layout(:bool), do: {1, true, "c", "p"}
   defp attribute_layout(:timestamp), do: {8, true, "d", "p"}
+  defp attribute_layout(:timestamp_ns), do: {8, true, "d", "p"}
   defp attribute_layout(:date), do: {4, true, "i", "p"}
   defp attribute_layout(_varlena), do: {-1, false, "i", "x"}
 

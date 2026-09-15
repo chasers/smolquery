@@ -343,4 +343,29 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert result.rows == [[~N[1970-01-01 00:00:00.000000]]]
     end
   end
+
+  test "a TIMESTAMP_NS column keeps every digit, and its bounds round outward to microseconds (T-475)",
+       %{tmp_dir: dir} do
+    schema = Schema.new!([{"id", :int64}, {"ts", :timestamp_ns}])
+
+    path =
+      spool(dir, "ns.ndjson", [
+        %{"id" => 1, "ts" => "1969-12-31 23:59:59.999999999"},
+        %{"id" => 2, "ts" => "2026-09-14 10:00:00.123456789"}
+      ])
+
+    {:ok, segment} = Writer.write({:ndjson, [path]}, schema, store: store(dir), engine: @engine)
+
+    assert segment.stats["ts"].min == ~N[1969-12-31 23:59:59.999999]
+    assert segment.stats["ts"].max == ~N[2026-09-14 10:00:00.123457]
+
+    {:ok, result} =
+      Engine.query(
+        @engine,
+        "SELECT CAST(ts AS VARCHAR) FROM read_parquet($1) ORDER BY id",
+        [segment.path]
+      )
+
+    assert result.rows == [["1969-12-31 23:59:59.999999999"], ["2026-09-14 10:00:00.123456789"]]
+  end
 end

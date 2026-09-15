@@ -197,7 +197,7 @@ defmodule SmolqueryApi.TableController do
   defp retention_from_json(%{"retention" => %{"column" => column, "ttlMs" => ttl_ms}}, schema)
        when is_binary(column) and is_integer(ttl_ms) and ttl_ms > 0 do
     case Schema.field(schema, column) do
-      {:ok, %{type: type}} when type in [:timestamp, :date] ->
+      {:ok, %{type: type}} when type in [:timestamp, :timestamp_ns, :date] ->
         {:ok, %{column: column, ttl_ms: ttl_ms}}
 
       {:ok, %{type: type}} ->

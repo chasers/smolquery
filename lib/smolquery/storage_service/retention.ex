@@ -12,6 +12,11 @@ defmodule Smolquery.StorageService.Retention do
   retention conservative by construction and `drop_segments/3` — already
   exactly-once — the whole mechanism.
 
+  A `TIMESTAMP_NS` column's footer maximum carries nine fractional digits,
+  and the cast to `TIMESTAMP` truncates them. A maximum with a nonzero digit
+  past the sixth is rounded up a microsecond, so no segment is dropped while
+  its newest row is still inside the horizon (T-475).
+
   Conservative extends to ignorance: a file whose stats for the policy column
   are missing, unparseable, or absent (a segment written before the column
   existed) is kept, never dropped. Retention that guesses is deletion.
@@ -180,9 +185,12 @@ defmodule Smolquery.StorageService.Retention do
     end)
   end
 
+  @past_microseconds "CASE WHEN regexp_matches(stats_max_value, '\.\d{6}0*[1-9]') " <>
+                       "THEN INTERVAL 1 MICROSECOND ELSE INTERVAL 0 MICROSECOND END"
+
   defp footer_stats_chunk(runtime, paths, column) do
     sql =
-      "SELECT file_name, max(TRY_CAST(stats_max_value AS TIMESTAMP)), " <>
+      "SELECT file_name, max(TRY_CAST(stats_max_value AS TIMESTAMP) + #{@past_microseconds}), " <>
         "bool_or(stats_max_value IS NULL OR TRY_CAST(stats_max_value AS TIMESTAMP) IS NULL) " <>
         "FROM parquet_metadata([#{placeholders(paths)}]) " <>
         "WHERE path_in_schema = $#{length(paths) + 1} GROUP BY file_name"

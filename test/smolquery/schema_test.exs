@@ -10,6 +10,7 @@ defmodule Smolquery.SchemaTest do
     :string,
     :bool,
     :timestamp,
+    :timestamp_ns,
     :date,
     {:numeric, 38, 2},
     {:map, :string, :string},
@@ -609,6 +610,42 @@ defmodule Smolquery.SchemaTest do
       refute Schema.clustering_type?(:variant)
 
       for type <- @explorer_types, do: assert(Schema.clustering_type?(type))
+    end
+  end
+
+  describe "timestamp_ns (T-475)" do
+    test "maps to TIMESTAMP_NS in every vocabulary" do
+      assert Schema.duckdb_type(:timestamp_ns) == {:ok, "TIMESTAMP_NS"}
+      assert Schema.api_type(:timestamp_ns) == {:ok, "TIMESTAMP_NS"}
+      assert Schema.type_from_api("timestamp_ns") == {:ok, :timestamp_ns}
+      assert Schema.logical_from_duckdb("TIMESTAMP_NS") == {:ok, :timestamp_ns}
+      assert Schema.explorer_dtype(:timestamp_ns) == {:ok, {:naive_datetime, :nanosecond}}
+    end
+
+    test "a value stays text with every fractional digit, normalized to UTC" do
+      assert Schema.value_from_json(:timestamp_ns, "2026-09-14T10:00:00.123456789Z") ==
+               {:ok, "2026-09-14 10:00:00.123456789"}
+
+      assert Schema.value_from_json(:timestamp_ns, "2026-09-14 10:00:00.123456789+02:00") ==
+               {:ok, "2026-09-14 08:00:00.123456789"}
+
+      assert Schema.value_from_json(:timestamp_ns, "2026-09-14 10:00:00") ==
+               {:ok, "2026-09-14 10:00:00"}
+
+      assert Schema.value_from_json(:timestamp_ns, ~N[2026-09-14 10:00:00.123456]) ==
+               {:ok, "2026-09-14 10:00:00.123456"}
+    end
+
+    test "refuses text that is not a timestamp" do
+      for text <- [
+            "2026-09-14",
+            "2026-13-01 00:00:00",
+            "2026-09-14 10:00:00.1234567890",
+            "yesterday"
+          ] do
+        assert {:error, {:invalid_value, :timestamp_ns, ^text}} =
+                 Schema.value_from_json(:timestamp_ns, text)
+      end
     end
   end
 end

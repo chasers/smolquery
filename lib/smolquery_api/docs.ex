@@ -41,6 +41,7 @@ defmodule SmolqueryApi.Docs do
         "STRING",
         "BOOL",
         "TIMESTAMP",
+        "TIMESTAMP_NS",
         "DATE",
         "NUMERIC(p,s)"
       ],

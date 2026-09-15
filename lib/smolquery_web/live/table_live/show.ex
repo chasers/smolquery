@@ -416,7 +416,7 @@ defmodule SmolqueryWeb.TableLive.Show do
 
   defp time_columns(schema) do
     for %Schema.Field{name: name, type: type} <- schema.fields,
-        type in [:timestamp, :date],
+        type in [:timestamp, :timestamp_ns, :date],
         do: name
   end
 

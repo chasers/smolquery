@@ -113,6 +113,7 @@ defmodule Smolquery.Ddl do
     "boolean" => "BOOL",
     "bool" => "BOOL",
     "timestamp" => "TIMESTAMP",
+    "timestamp_ns" => "TIMESTAMP_NS",
     "date" => "DATE",
     "variant" => "VARIANT",
     "json" => "VARIANT"

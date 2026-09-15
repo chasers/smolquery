@@ -40,6 +40,15 @@ defmodule Smolquery.Segments.Writer do
   the written file, so a materialized column is bounded like any other.
   `readable_ndjson?/3` reads the regular columns only, as the `COPY` does.
 
+  ## Nanosecond bounds
+
+  A `TIMESTAMP_NS` column's bounds are read as `epoch_ns` integers and rounded
+  outward to microseconds, the minimum down and the maximum up (T-475). The
+  manifest holds a `NaiveDateTime`, which has no nanoseconds, and ADBC's own
+  conversion truncates toward zero, which rounds a pre-1970 minimum up past
+  the data. A bound a microsecond wide of the data never prunes a segment that
+  holds a match.
+
   ## Usage
 
       schema = Smolquery.Schema.new!([{"id", :int64}, {"ts", :timestamp}])
@@ -85,7 +94,8 @@ defmodule Smolquery.Segments.Writer do
           | {:id, String.t()}
           | {:compression, atom() | {atom(), integer() | nil}}
 
-  @orderable [:int64, :float64, :timestamp, :date]
+  @orderable [:int64, :float64, :timestamp, :timestamp_ns, :date]
+  @epoch ~N[1970-01-01 00:00:00.000000]
 
   @doc """
   Writes the spooled NDJSON `paths` as one segment in `:store`, returning the
@@ -258,13 +268,7 @@ defmodule Smolquery.Segments.Writer do
   defp ndjson_stats(engine, path, %Schema{fields: fields}) do
     selects =
       Enum.map_join(fields, ", ", fn %Field{} = field ->
-        name = Identifier.quote_name!(field.name)
-
-        if ndjson_bounded?(field.type) do
-          "min(#{name}), max(#{name}), count(*) - count(#{name})"
-        else
-          "NULL, NULL, count(*) - count(#{name})"
-        end
+        stats_select(field.type, Identifier.quote_name!(field.name))
       end)
 
     case Engine.query(engine, "SELECT #{selects} FROM read_parquet($1)", [path]) do
@@ -278,7 +282,8 @@ defmodule Smolquery.Segments.Writer do
     fields
     |> Enum.zip(Enum.chunk_every(values, 3))
     |> Map.new(fn {%Field{} = field, [min, max, nulls]} ->
-      {field.name, column_stats(min, max, nulls)}
+      {field.name,
+       column_stats(bound(field.type, min, :floor), bound(field.type, max, :ceil), nulls)}
     end)
   end
 
@@ -286,6 +291,23 @@ defmodule Smolquery.Segments.Writer do
   # `Smolquery.BufferService.HotManifest.Entry` reads them by these names.
   defp column_stats(min, max, null_count),
     do: %{min: min, max: max, null_count: null_count}
+
+  defp stats_select(:timestamp_ns, name),
+    do: "epoch_ns(min(#{name})), epoch_ns(max(#{name})), count(*) - count(#{name})"
+
+  defp stats_select(type, name) do
+    if ndjson_bounded?(type),
+      do: "min(#{name}), max(#{name}), count(*) - count(#{name})",
+      else: "NULL, NULL, count(*) - count(#{name})"
+  end
+
+  defp bound(:timestamp_ns, ns, direction) when is_integer(ns),
+    do: NaiveDateTime.add(@epoch, micros(ns, direction), :microsecond)
+
+  defp bound(_type, value, _direction), do: value
+
+  defp micros(ns, :floor), do: Integer.floor_div(ns, 1_000)
+  defp micros(ns, :ceil), do: -Integer.floor_div(-ns, 1_000)
 
   defp ndjson_bounded?({:numeric, _precision, _scale}), do: true
   defp ndjson_bounded?(:string), do: true

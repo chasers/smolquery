@@ -118,6 +118,7 @@ defmodule SmolqueryPg.Types do
     "BLOB" => {17, -1, -1},
     "DATE" => {1082, 4, -1},
     "TIMESTAMP" => {1114, 8, -1},
+    "TIMESTAMP_NS" => {1114, 8, -1},
     "TIMESTAMP WITH TIME ZONE" => {1184, 8, -1},
     "TIMESTAMPTZ" => {1184, 8, -1},
     "JSON" => {25, -1, -1},

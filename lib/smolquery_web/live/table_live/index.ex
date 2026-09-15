@@ -24,6 +24,7 @@ defmodule SmolqueryWeb.TableLive.Index do
     "FLOAT64",
     "BOOL",
     "TIMESTAMP",
+    "TIMESTAMP_NS",
     "DATE",
     "NUMERIC(38,9)",
     "MAP(STRING, STRING)",
