@@ -317,4 +317,45 @@ defmodule Smolquery.BufferService.NdjsonPassthroughTest do
            |> Enum.map(& &1.row_count)
            |> Enum.sum() == 8
   end
+
+  test "a retry that joins a whole-request batch the flush refuses is refused with it, not answered as written",
+       context do
+    name = :"buffer_whole_dup_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {BufferService.Supervisor,
+       name: name,
+       dir: Path.join(context.tmp_dir, "whole_dup"),
+       flush_interval_ms: 60_000,
+       flush_max_rows: 6,
+       write_pool_size: 1},
+      id: name
+    )
+
+    on_exit(fn -> Runtime.delete(name) end)
+
+    bad = ~s({"id":1,"tenant":"a"}\n{"id":9223372036854775808,"tenant":"b"}\n)
+
+    whole = %{
+      schema: schema(),
+      byte_size: byte_size(bad),
+      batch_id: "whole-dup",
+      whole_request: %{ndjson: bad, row_count: 2}
+    }
+
+    warm = Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(3..5)) end)
+    Process.sleep(200)
+    first = Task.async(fn -> Client.write_batch(name, @table, whole) end)
+    Process.sleep(200)
+    retry = Task.async(fn -> Client.write_batch(name, @table, whole) end)
+    Process.sleep(200)
+    last = Task.async(fn -> Client.write_batch(name, @table, ndjson_batch(6..6)) end)
+
+    assert [{:ok, _warm}, {:invalid, [%{index: 1}]}, {:invalid, [%{index: 1}]}, {:ok, _last}] =
+             Task.await_many([warm, first, retry, last], 15_000)
+
+    {:ok, runtime} = Runtime.fetch(name)
+    assert [entry] = HotManifest.entries(runtime.manifest, @table)
+    assert entry.row_count == 4
+  end
 end

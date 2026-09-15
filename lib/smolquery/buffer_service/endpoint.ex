@@ -377,6 +377,13 @@ defmodule Smolquery.BufferService.Endpoint do
 
             {:ok, ack}
 
+          # It joined a whole-request batch the flush refused, so nothing was
+          # accumulated for it and nothing drained it (T-474).
+          {:duplicate_invalid, errors} ->
+            Load.leave(load, count)
+
+            {:invalid, errors}
+
           {:error, reason} ->
             Load.leave(load, count)
 

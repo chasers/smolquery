@@ -123,7 +123,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
             | {:ndjson, binary(), non_neg_integer()}
             | {:whole, [Writer.row()] | {:ndjson, binary(), non_neg_integer()}, String.t() | nil}
           ],
-          :pending => [{GenServer.from(), :new | :duplicate | :flush}],
+          :pending => [{GenServer.from(), :new | {:duplicate, String.t()} | :flush}],
           :batch_ids => [String.t()],
           :row_count => non_neg_integer(),
           :byte_size => non_neg_integer(),
@@ -723,7 +723,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
           index + 1
 
         _not_a_chunk ->
-          GenServer.reply(from, reply_for(kind, result))
+          GenServer.reply(from, joined_reply(kind, result, rejected))
           index
       end
     end)
@@ -740,6 +740,18 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp rejected_reply({:rejected, _rejected}, errors), do: {:invalid, errors}
   defp rejected_reply(error, _errors), do: error
 
+  defp joined_reply({:duplicate, batch_id} = kind, result, rejected) do
+    case Enum.find_value(rejected, fn {_index, refusal} -> whole_errors(refusal, batch_id) end) do
+      nil -> reply_for(kind, result)
+      errors -> {:duplicate_invalid, errors}
+    end
+  end
+
+  defp joined_reply(kind, result, _rejected), do: reply_for(kind, result)
+
+  defp whole_errors({:whole, batch_id, errors}, batch_id), do: errors
+  defp whole_errors(_refusal, _batch_id), do: nil
+
   defp split_rejected({:ok, segment, rejected}), do: {{:ok, segment}, rejected}
   defp split_rejected({:rejected, rejected}), do: {{:rejected, rejected}, rejected}
   defp split_rejected(encoded), do: {encoded, %{}}
@@ -752,8 +764,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     do: reply_for(kind, {:error, :ndjson_commit_failed})
 
   defp reply_for(:new, result), do: result
-  defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
-  defp reply_for(:duplicate, error), do: error
+  defp reply_for({:duplicate, _batch_id}, {:ok, ack}), do: {:duplicate, ack}
+  defp reply_for({:duplicate, _batch_id}, error), do: error
   defp reply_for(:flush, {:ok, _ack}), do: :ok
   defp reply_for(:flush, error), do: error
 

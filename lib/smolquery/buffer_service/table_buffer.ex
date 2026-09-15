@@ -272,7 +272,9 @@ defmodule Smolquery.BufferService.TableBuffer do
   the accumulator joins that commit's pending list instead of accumulating
   its rows twice. The `{:duplicate, ack}` shape exists for the endpoint's
   load accounting — rows that were never accepted must not wait to be
-  drained — and callers who do not care treat it as `{:ok, ack}`.
+  drained — and callers who do not care treat it as `{:ok, ack}`. A batch that
+  joined a whole-request batch the flush refused (T-474) wrote nothing either,
+  and is answered `{:duplicate_invalid, errors}` with that batch's refused rows.
 
   Mid-drain (Milestone 8 L4), a non-duplicate batch is refused with
   `{:error, :draining}` here as well as at the endpoint. The endpoint's gate
@@ -290,7 +292,10 @@ defmodule Smolquery.BufferService.TableBuffer do
   under, and this is the last gate before rows enter the accumulator.
   """
   @spec write(GenServer.server(), Schema.t(), [Writer.row()], timeout(), String.t() | nil) ::
-          {:ok, ack()} | {:duplicate, ack()} | {:error, term()}
+          {:ok, ack()}
+          | {:duplicate, ack()}
+          | {:duplicate_invalid, [row_errors()]}
+          | {:error, term()}
   def write(buffer, %Schema{} = schema, rows, timeout, batch_id \\ nil) when is_list(rows) do
     GenServer.call(buffer, {:write, schema, rows, batch_id, :erlang.external_size(rows)}, timeout)
   end
@@ -316,6 +321,7 @@ defmodule Smolquery.BufferService.TableBuffer do
           | {:ok, ack(), [row_errors()]}
           | {:invalid, [row_errors()]}
           | {:duplicate, ack()}
+          | {:duplicate_invalid, [row_errors()]}
           | {:error, term()}
   def write_ndjson(
         buffer,
@@ -358,6 +364,7 @@ defmodule Smolquery.BufferService.TableBuffer do
           {:ok, ack()}
           | {:invalid, [row_errors()]}
           | {:duplicate, ack()}
+          | {:duplicate_invalid, [row_errors()]}
           | {:error, term()}
   def write_whole(buffer, %Schema{} = schema, payload, byte_size, timeout, batch_id \\ nil) do
     GenServer.call(
@@ -1382,7 +1389,7 @@ defmodule Smolquery.BufferService.TableBuffer do
   defp write_or_join(state, schema, rows, batch_id, bytes, from) do
     cond do
       not is_nil(batch_id) and batch_id in state.batch_ids ->
-        {:noreply, %{state | pending: [{from, :duplicate} | state.pending]}}
+        {:noreply, %{state | pending: [{from, {:duplicate, batch_id}} | state.pending]}}
 
       not is_nil(batch_id) and MapSet.member?(state.in_flight_ids, batch_id) ->
         settle_in_flight_duplicate(state, schema, rows, batch_id, bytes, from)
