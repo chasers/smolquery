@@ -9,6 +9,8 @@ defmodule Smolquery.RowBinaryTest do
         --format RowBinary > plain.bin
       clickhouse local --session_timezone=UTC --queries-file canon.sql \\
         --format RowBinaryWithNames > names.bin
+      clickhouse local --queries-file uuid.sql \\
+        --format RowBinaryWithNamesAndTypes > uuid.bin
 
   """
 
@@ -140,6 +142,25 @@ defmodule Smolquery.RowBinaryTest do
                  "wide" => "-0.000001",
                  "attrs" => %{},
                  "payload" => 3
+               }
+             ]
+    end
+
+    test "UUID columns decode into the text ClickHouse prints for them" do
+      schema = Schema.new!([{"id", :string, nullable: false}, {"maybe", :string}])
+
+      assert {:ok, decoded} =
+               RowBinary.decode(schema, fixture("uuid.bin"), :with_names_and_types)
+
+      assert lines(decoded) == [
+               %{"id" => "61f0c404-5cb3-11e7-907b-a6006ad3dba0", "maybe" => nil},
+               %{
+                 "id" => "00000000-0000-0000-0000-000000000000",
+                 "maybe" => "ffffffff-ffff-ffff-ffff-ffffffffffff"
+               },
+               %{
+                 "id" => "00000000-0000-0000-0001-000000000005",
+                 "maybe" => "0123abcd-4567-89ef-fedc-ba9876543210"
                }
              ]
     end
@@ -406,6 +427,15 @@ defmodule Smolquery.RowBinaryTest do
                    "ClickHouse type Map(Nullable(String), String) cannot be written to it"}}
     end
 
+    test "a UUID can be written only to a STRING column" do
+      schema = Schema.new!([{"id", :int64}])
+
+      assert RowBinary.decode(schema, header(["id"], ["UUID"]), :with_names_and_types) ==
+               {:error,
+                {:invalid_rowbinary,
+                 "column id is INT64; ClickHouse type UUID cannot be written to it"}}
+    end
+
     test "a header that ends early, or names no columns but carries bytes, is refused" do
       assert RowBinary.decode(@canonical_schema, <<2, 2, "id">>, :with_names) ==
                {:error, {:invalid_rowbinary, "header: the body ends mid-value"}}
@@ -435,6 +465,7 @@ defmodule Smolquery.RowBinaryTest do
       assert RowBinary.parse_type("Decimal(18, 2)") == {:ok, {:decimal, 18, 2}}
       assert RowBinary.parse_type("Decimal128(4)") == {:ok, {:decimal, 38, 4}}
       assert RowBinary.parse_type("FixedString(16)") == {:ok, {:fixed_string, 16}}
+      assert RowBinary.parse_type("Nullable(UUID)") == {:ok, {:nullable, :uuid}}
 
       assert RowBinary.parse_type("Map(LowCardinality(String), Nullable(String))") ==
                {:ok, {:map, :string, {:nullable, :string}}}
@@ -443,7 +474,6 @@ defmodule Smolquery.RowBinaryTest do
     test "refuses types it cannot read and text that does not parse" do
       for text <- [
             "Array(String)",
-            "UUID",
             "Int128",
             "Decimal(76, 2)",
             "Decimal256(2)",
