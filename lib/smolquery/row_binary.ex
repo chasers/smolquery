@@ -431,7 +431,7 @@ defmodule Smolquery.RowBinary do
     do: {:ok, float_json(<<bits::64>>, bits >>> 63, bits &&& 0xFFFFFFFFFFFFF), rest}
 
   defp float(32, <<bits::little-unsigned-32, rest::binary>>),
-    do: {:ok, float_json(<<bits::32>>, bits >>> 31, bits &&& 0x3FFFFF), rest}
+    do: {:ok, float_json(<<bits::32>>, bits >>> 31, bits &&& 0x7FFFFF), rest}
 
   defp float(_bits, _body), do: truncated()
 

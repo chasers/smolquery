@@ -241,6 +241,22 @@ defmodule Smolquery.RowBinaryTest do
     end
   end
 
+  describe "Float32 specials" do
+    test "NaN and the infinities decode as DuckDB's strings for them, quiet NaN included" do
+      schema = Schema.new!([{"f", :float64}])
+
+      body =
+        header(["f"], ["Float32"]) <>
+          <<0x7FC00000::little-32, 0xFFC00000::little-32, 0x7F800000::little-32,
+            0xFF800000::little-32, 0x7F800001::little-32>>
+
+      assert {:ok, decoded} = RowBinary.decode(schema, body, :with_names_and_types)
+
+      assert Enum.map(lines(decoded), & &1["f"]) ==
+               ["NaN", "NaN", "Infinity", "-Infinity", "NaN"]
+    end
+  end
+
   describe "decode/3 round trip" do
     test "random rows encoded as RowBinary decode to the values that were encoded" do
       rows = for _row <- 1..500, do: random_row()
