@@ -353,6 +353,22 @@ defmodule SmolqueryApi.InsertControllerTest do
       assert {:ok, []} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
     end
 
+    test "false writes none of a body whose row lacks a required column", %{
+      name: name,
+      buffer: buffer
+    } do
+      body = ndjson([%{"id" => 1}, %{}, %{"id" => 3}])
+      response = post_ndjson(name, body, @path <> "?skipInvalidRows=false")
+
+      assert response.status == 200
+
+      assert %{"insertedRows" => 0, "insertErrors" => [%{"index" => 1, "errors" => [error]}]} =
+               JSON.decode!(response.resp_body)
+
+      assert error["message"] =~ "must not be null"
+      assert {:ok, []} = BufferService.Client.hot_manifest(buffer, {"analytics", "events"})
+    end
+
     test "takes only true or false", %{name: name} do
       response = post_ndjson(name, ndjson([%{"id" => 1}]), @path <> "?skipInvalidRows=maybe")
 

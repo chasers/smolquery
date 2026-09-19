@@ -344,9 +344,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp write_spooled(runtime, prefix, commit, id, engine, paths) do
-    case write_ndjson(runtime, prefix, commit, id, engine, paths) do
-      {:ok, segment} ->
-        {:ok, segment}
+    with :ok <- whole_bodies_complete(engine, commit, paths),
+         {:ok, segment} <- write_ndjson(runtime, prefix, commit, id, engine, paths) do
+      {:ok, segment}
+    else
+      :incomplete ->
+        salvage(runtime, prefix, commit, id, engine, paths)
 
       {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} ->
         salvage(runtime, prefix, commit, id, engine, paths)
@@ -357,6 +360,33 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   after
     Enum.each(paths, &File.rm/1)
   end
+
+  # A `COPY` writes a NULL into a column that must not hold one without
+  # complaint, so a whole-request body missing a required value would land
+  # whole. Its caller was promised all or nothing, by the schema as well as by
+  # the flush (T-474), so such a body is probed before the write and sent
+  # through the salvage, where the row validator names the rows. Only
+  # whole-request NDJSON bodies pay for the probe.
+  defp whole_bodies_complete(engine, commit, paths) do
+    commit.chunks
+    |> Enum.zip(paths)
+    |> Enum.reduce_while(:ok, fn
+      {{:whole, {:ndjson, _body, _count}, _batch_id}, path}, :ok ->
+        case Writer.ndjson_problem(engine, path, commit.schema, required: true) do
+          {:refused, _message} -> {:halt, :incomplete}
+          _ok_or_engine_failure -> {:cont, :ok}
+        end
+
+      _other_chunk, :ok ->
+        {:cont, :ok}
+    end)
+  end
+
+  defp chunk_problem({:whole, {:ndjson, _body, _count}, _batch_id}, engine, path, schema),
+    do: Writer.ndjson_problem(engine, path, schema, required: true)
+
+  defp chunk_problem(_chunk, engine, path, schema),
+    do: Writer.ndjson_problem(engine, path, schema)
 
   defp write_ndjson(runtime, prefix, commit, id, engine, paths) do
     Writer.write({:ndjson, paths}, commit.schema,
@@ -383,8 +413,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # request for one row is what this path is fixing.
   defp salvage(runtime, prefix, commit, id, engine, paths) do
     problems =
-      Enum.map(Enum.with_index(paths), fn {path, index} ->
-        {path, index, Writer.ndjson_problem(engine, path, commit.schema)}
+      commit.chunks
+      |> Enum.zip(paths)
+      |> Enum.with_index()
+      |> Enum.map(fn {{chunk, path}, index} ->
+        {path, index, chunk_problem(chunk, engine, path, commit.schema)}
       end)
 
     with :ok <- engine_alive(problems),
