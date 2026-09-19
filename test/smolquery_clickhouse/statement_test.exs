@@ -99,4 +99,75 @@ defmodule SmolqueryClickHouse.StatementTest do
       assert Statement.split_format("SELECT 1 -- FORMAT JSON") == {"SELECT 1 -- FORMAT JSON", nil}
     end
   end
+
+  describe "split_settings/1" do
+    test "a trailing clause is split off with its settings" do
+      assert Statement.split_settings(
+               "SELECT 1 SETTINGS max_execution_time = 15, short_circuit_function_evaluation = 'force_enable'"
+             ) ==
+               {"SELECT 1",
+                %{
+                  "max_execution_time" => "15",
+                  "short_circuit_function_evaluation" => "force_enable"
+                }}
+    end
+
+    test "a statement with no clause is left alone" do
+      assert Statement.split_settings("SELECT 1") == {"SELECT 1", %{}}
+    end
+
+    test "a clause that ends a subquery is dropped, and the trailing one still applies" do
+      sql =
+        "WITH s AS (SELECT 1 AS n SETTINGS optimize_read_in_order = 0) SELECT n FROM s SETTINGS max_execution_time = 2"
+
+      assert Statement.split_settings(sql) ==
+               {"WITH s AS (SELECT 1 AS n ) SELECT n FROM s", %{"max_execution_time" => "2"}}
+    end
+
+    test "a table, a column, a literal and a comment named settings are not clauses" do
+      for sql <- [
+            "SELECT name, value FROM system.settings",
+            "SELECT settings FROM t WHERE settings = 1",
+            "SELECT * FROM settings WHERE name = 'x'",
+            "SELECT 'SETTINGS a = 1'",
+            "SELECT 1 -- SETTINGS a = 1"
+          ] do
+        assert Statement.split_settings(sql) == {sql, %{}}
+      end
+    end
+  end
+
+  describe "standard_quoting/1" do
+    test "a backquoted identifier becomes a double-quoted one" do
+      assert Statement.standard_quoting(~S|SELECT `Events.Name`, `a``b`, `c"d` FROM `t`|) ==
+               ~S|SELECT "Events.Name", "a`b", "c""d" FROM "t"|
+    end
+
+    test "backslash escapes in a literal become the characters they stand for" do
+      assert Statement.standard_quoting(~S|SELECT 'it\'s', 'a\tb', 'c\\d', '\x41'|) ==
+               "SELECT 'it''s', 'a\tb', 'c\\d', 'A'"
+    end
+
+    test "an escape ClickHouse does not know keeps its backslash, as LIKE needs" do
+      assert Statement.standard_quoting(~S|SELECT x LIKE '%a\_b\%'|) ==
+               ~S|SELECT x LIKE '%a\_b\%'|
+    end
+
+    test "a doubled quote after an escaped one stays a quote" do
+      assert Statement.standard_quoting(~S|SELECT '\'' 'a'|) == "SELECT '''' 'a'"
+      assert Statement.standard_quoting(~S|SELECT '\'''a'|) == "SELECT '''''a'"
+    end
+
+    test "quoting without a backslash or a backtick is left byte for byte" do
+      sql = ~S|SELECT 'it''s', "a""b" -- `c` 'd\'|
+
+      assert Statement.standard_quoting(sql) == sql
+    end
+  end
+
+  describe "unescape/1" do
+    test "reads the escaped form a parameter's value arrives in" do
+      assert Statement.unescape(~S|a\tb\nc\\d\'e\0|) == "a\tb\nc\\d'e" <> <<0>>
+    end
+  end
 end

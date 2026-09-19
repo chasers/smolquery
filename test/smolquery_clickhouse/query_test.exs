@@ -165,4 +165,45 @@ defmodule SmolqueryClickHouse.QueryTest do
     assert response.status == 400
     assert exception_code(response) == ["36"]
   end
+
+  describe "a statement written for ClickHouse (T-481)" do
+    test "parameters, backticks, escapes, SETTINGS and FORMAT, as HyperDX sends them", %{
+      name: name
+    } do
+      sql =
+        "SELECT {n:Int32} AS `__hdx_n`, {s:String} AS s, 'it\\'s' AS q " <>
+          "SETTINGS short_circuit_function_evaluation = 'force_enable' \nFORMAT JSONCompact"
+
+      response =
+        conn(:post, "/?" <> URI.encode_query(%{"param_n" => "7", "param_s" => "a'b"}), sql)
+        |> request(name)
+
+      assert response.status == 200
+      assert %{"meta" => meta, "data" => [[7, "a'b", "it's"]]} = JSON.decode!(response.resp_body)
+      assert Enum.map(meta, & &1["name"]) == ["__hdx_n", "s", "q"]
+    end
+
+    test "the SETTINGS clause bounds the query, over the URL's setting", %{name: name} do
+      response =
+        conn(:post, "/?max_execution_time=abc", "SELECT 1 SETTINGS max_execution_time = 5")
+        |> request(name)
+
+      assert response.status == 200
+      assert response.resp_body == "1\n"
+    end
+
+    test "FORMAT before SETTINGS is read too", %{name: name} do
+      response = post(name, "SELECT 1 AS n FORMAT JSONEachRow SETTINGS max_threads = 1")
+
+      assert response.status == 200
+      assert response.resp_body == ~s|{"n":1}\n|
+    end
+
+    test "a placeholder with no value is code 456", %{name: name} do
+      response = post(name, "SELECT {missing:String}")
+
+      assert response.status == 400
+      assert exception_code(response) == ["456"]
+    end
+  end
 end

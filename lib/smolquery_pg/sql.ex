@@ -14,22 +14,33 @@ defmodule SmolqueryPg.Sql do
           {:code, String.t()}
           | {:string, String.t()}
           | {:quoted, String.t()}
+          | {:backquoted, String.t()}
           | {:comment, String.t()}
           | {:dollar, String.t()}
 
   @doc """
   `sql` as a list of tokens whose texts concatenate back to `sql`.
+
+  With `dialect: :clickhouse` a backquoted identifier is a `:backquoted`
+  token, and inside any quotes a backslash escapes the next character, as
+  ClickHouse reads both. Postgres gives neither that meaning, so without
+  the option a backtick is code and a backslash is a character.
   """
-  @spec tokens(String.t()) :: [token()]
-  def tokens(sql) when is_binary(sql), do: sql |> scan([], []) |> Enum.reverse()
+  @spec tokens(String.t(), dialect: :clickhouse) :: [token()]
+  def tokens(sql, opts \\ []) when is_binary(sql) do
+    mode = Keyword.get(opts, :dialect, :plain)
+
+    sql |> scan([], [], mode) |> Enum.reverse()
+  end
 
   @doc """
-  `sql` with every `:code` token replaced by `fun.(text)`.
+  `sql` with every `:code` token replaced by `fun.(text)`. `opts` are
+  `tokens/2`'s.
   """
-  @spec map_code(String.t(), (String.t() -> iodata())) :: String.t()
-  def map_code(sql, fun) do
+  @spec map_code(String.t(), (String.t() -> iodata()), dialect: :clickhouse) :: String.t()
+  def map_code(sql, fun, opts \\ []) do
     sql
-    |> tokens()
+    |> tokens(opts)
     |> Enum.map(fn
       {:code, text} -> fun.(text)
       {_kind, text} -> text
@@ -37,66 +48,73 @@ defmodule SmolqueryPg.Sql do
     |> IO.iodata_to_binary()
   end
 
-  defp scan(<<>>, current, tokens), do: flush(current, tokens)
+  defp scan(<<>>, current, tokens, _mode), do: flush(current, tokens)
 
-  defp scan(<<?', rest::binary>>, current, tokens),
-    do: quoted(rest, ?', [?'], :string, flush(current, tokens))
+  defp scan(<<?', rest::binary>>, current, tokens, mode),
+    do: quoted(rest, ?', [?'], :string, flush(current, tokens), mode)
 
-  defp scan(<<?", rest::binary>>, current, tokens),
-    do: quoted(rest, ?", [?"], :quoted, flush(current, tokens))
+  defp scan(<<?", rest::binary>>, current, tokens, mode),
+    do: quoted(rest, ?", [?"], :quoted, flush(current, tokens), mode)
 
-  defp scan(<<"--", rest::binary>>, current, tokens),
-    do: line_comment(rest, [?-, ?-], flush(current, tokens))
+  defp scan(<<?`, rest::binary>>, current, tokens, :clickhouse),
+    do: quoted(rest, ?`, [?`], :backquoted, flush(current, tokens), :clickhouse)
 
-  defp scan(<<"/*", rest::binary>>, current, tokens),
-    do: block_comment(rest, [?*, ?/], flush(current, tokens), 1)
+  defp scan(<<"--", rest::binary>>, current, tokens, mode),
+    do: line_comment(rest, [?-, ?-], flush(current, tokens), mode)
 
-  defp scan(<<?$, rest::binary>>, current, tokens) do
+  defp scan(<<"/*", rest::binary>>, current, tokens, mode),
+    do: block_comment(rest, [?*, ?/], flush(current, tokens), 1, mode)
+
+  defp scan(<<?$, rest::binary>>, current, tokens, mode) do
     case dollar_tag(rest) do
-      {:ok, tag, rest} -> dollar(rest, tag, [tag, ?$], flush(current, tokens))
-      :error -> scan(rest, [?$ | current], tokens)
+      {:ok, tag, rest} -> dollar(rest, tag, [tag, ?$], flush(current, tokens), mode)
+      :error -> scan(rest, [?$ | current], tokens, mode)
     end
   end
 
-  defp scan(<<char, rest::binary>>, current, tokens), do: scan(rest, [char | current], tokens)
+  defp scan(<<char, rest::binary>>, current, tokens, mode),
+    do: scan(rest, [char | current], tokens, mode)
 
   defp flush([], tokens), do: tokens
   defp flush(current, tokens), do: [{:code, text(current)} | tokens]
 
   defp emit(kind, current, tokens), do: [{kind, text(current)} | tokens]
 
-  defp quoted(<<>>, _quote, current, kind, tokens), do: emit(kind, current, tokens)
+  defp quoted(<<>>, _quote, current, kind, tokens, _mode), do: emit(kind, current, tokens)
 
-  defp quoted(<<quote, quote, rest::binary>>, quote, current, kind, tokens),
-    do: quoted(rest, quote, [quote, quote | current], kind, tokens)
+  defp quoted(<<?\\, char, rest::binary>>, quote, current, kind, tokens, :clickhouse),
+    do: quoted(rest, quote, [char, ?\\ | current], kind, tokens, :clickhouse)
 
-  defp quoted(<<quote, rest::binary>>, quote, current, kind, tokens),
-    do: scan(rest, [], emit(kind, [quote | current], tokens))
+  defp quoted(<<quote, quote, rest::binary>>, quote, current, kind, tokens, mode),
+    do: quoted(rest, quote, [quote, quote | current], kind, tokens, mode)
 
-  defp quoted(<<char, rest::binary>>, quote, current, kind, tokens),
-    do: quoted(rest, quote, [char | current], kind, tokens)
+  defp quoted(<<quote, rest::binary>>, quote, current, kind, tokens, mode),
+    do: scan(rest, [], emit(kind, [quote | current], tokens), mode)
 
-  defp line_comment(<<>>, current, tokens), do: emit(:comment, current, tokens)
+  defp quoted(<<char, rest::binary>>, quote, current, kind, tokens, mode),
+    do: quoted(rest, quote, [char | current], kind, tokens, mode)
 
-  defp line_comment(<<?\n, rest::binary>>, current, tokens),
-    do: scan(rest, [], emit(:comment, [?\n | current], tokens))
+  defp line_comment(<<>>, current, tokens, _mode), do: emit(:comment, current, tokens)
 
-  defp line_comment(<<char, rest::binary>>, current, tokens),
-    do: line_comment(rest, [char | current], tokens)
+  defp line_comment(<<?\n, rest::binary>>, current, tokens, mode),
+    do: scan(rest, [], emit(:comment, [?\n | current], tokens), mode)
 
-  defp block_comment(<<>>, current, tokens, _depth), do: emit(:comment, current, tokens)
+  defp line_comment(<<char, rest::binary>>, current, tokens, mode),
+    do: line_comment(rest, [char | current], tokens, mode)
 
-  defp block_comment(<<"*/", rest::binary>>, current, tokens, 1),
-    do: scan(rest, [], emit(:comment, [?/, ?* | current], tokens))
+  defp block_comment(<<>>, current, tokens, _depth, _mode), do: emit(:comment, current, tokens)
 
-  defp block_comment(<<"*/", rest::binary>>, current, tokens, depth),
-    do: block_comment(rest, [?/, ?* | current], tokens, depth - 1)
+  defp block_comment(<<"*/", rest::binary>>, current, tokens, 1, mode),
+    do: scan(rest, [], emit(:comment, [?/, ?* | current], tokens), mode)
 
-  defp block_comment(<<"/*", rest::binary>>, current, tokens, depth),
-    do: block_comment(rest, [?*, ?/ | current], tokens, depth + 1)
+  defp block_comment(<<"*/", rest::binary>>, current, tokens, depth, mode),
+    do: block_comment(rest, [?/, ?* | current], tokens, depth - 1, mode)
 
-  defp block_comment(<<char, rest::binary>>, current, tokens, depth),
-    do: block_comment(rest, [char | current], tokens, depth)
+  defp block_comment(<<"/*", rest::binary>>, current, tokens, depth, mode),
+    do: block_comment(rest, [?*, ?/ | current], tokens, depth + 1, mode)
+
+  defp block_comment(<<char, rest::binary>>, current, tokens, depth, mode),
+    do: block_comment(rest, [char | current], tokens, depth, mode)
 
   defp dollar_tag(rest) do
     case Regex.run(~r/^([A-Za-z_][A-Za-z0-9_]*)?\$/, rest) do
@@ -109,23 +127,23 @@ defmodule SmolqueryPg.Sql do
   defp after_match(rest, match),
     do: binary_part(rest, byte_size(match), byte_size(rest) - byte_size(match))
 
-  defp dollar(<<>>, _tag, current, tokens), do: emit(:dollar, current, tokens)
+  defp dollar(<<>>, _tag, current, tokens, _mode), do: emit(:dollar, current, tokens)
 
-  defp dollar(<<?$, rest::binary>> = all, tag, current, tokens) do
+  defp dollar(<<?$, rest::binary>> = all, tag, current, tokens, mode) do
     size = byte_size(tag)
 
     case rest do
       <<^tag::binary-size(^size), after_tag::binary>> ->
-        scan(after_tag, [], emit(:dollar, [tag, ?$ | current], tokens))
+        scan(after_tag, [], emit(:dollar, [tag, ?$ | current], tokens), mode)
 
       _other ->
         <<char, rest::binary>> = all
-        dollar(rest, tag, [char | current], tokens)
+        dollar(rest, tag, [char | current], tokens, mode)
     end
   end
 
-  defp dollar(<<char, rest::binary>>, tag, current, tokens),
-    do: dollar(rest, tag, [char | current], tokens)
+  defp dollar(<<char, rest::binary>>, tag, current, tokens, mode),
+    do: dollar(rest, tag, [char | current], tokens, mode)
 
   defp text(current), do: current |> Enum.reverse() |> IO.iodata_to_binary()
 

@@ -29,7 +29,9 @@ Plain analytical SQL is fine: `SELECT` with joins, `WHERE`, `GROUP BY`, `HAVING`
 `ORDER BY`, `LIMIT`/`OFFSET`, CTEs, window functions, subqueries, `UNION ALL`,
 `CASE`, casts, `ILIKE`; `dataset.table` qualification; map access (`attrs['host']`);
 `COLUMNS('regex')`; and the DuckDB function library. On the edge itself: a trailing
-`FORMAT` clause, `version()`, `timezone()`, and the `max_execution_time` setting.
+`FORMAT` clause, a `SETTINGS` clause, `{name:Type}` parameters, backquoted identifiers,
+backslash escapes in literals, `version()`, `timezone()`, and the `max_execution_time`
+setting.
 
 These ClickHouse spellings already resolve, with the same meaning: `argMax`,
 `argMin`, `countIf`, `median`, `quantile(x, 0.5)` (the two-argument form), `if`,
@@ -57,8 +59,8 @@ The Postgres edge solved the same problem for its clients with an emulated
 
 | ClickHouse | Status | Note |
 |---|---|---|
-| Trailing `SETTINGS` clause | **Parse error** | The edge strips a trailing `FORMAT` but not `SETTINGS`. Cheap to fix; Logflare's transformer emits it |
-| `{name:Type}` query parameters | **Not substituted** | Sent as `param_<name>` URL values. Any parameterized client query fails. Cheap to fix |
+| Trailing `SETTINGS` clause | Works (T-481) | Split off with `FORMAT`, in either order; `max_execution_time` is read, the rest ignored. One that ends a subquery is dropped |
+| `{name:Type}` query parameters | Works (T-481) | Filled from `param_<name>` as literals. Scalar types and `Identifier`; an `Array`, `Map` or `Tuple` parameter is code 36 |
 | `ARRAY JOIN` / `LEFT ARRAY JOIN` | **Parse error** | DuckDB's `UNNEST` is the equivalent shape |
 | `LIMIT n BY expr` | **Parse error** | Rewritable as a windowed row-number filter |
 | `PREWHERE` | **Parse error** | Could be accepted and folded into `WHERE` |
@@ -66,7 +68,8 @@ The Postgres edge solved the same problem for its clients with an emulated
 | `WITH FILL`, `INTERPOLATE` | **Parse error** | Gap-filling time series |
 | `GLOBAL IN` / `GLOBAL JOIN` | **Parse error** | Distributed-only in ClickHouse |
 | `FINAL` | **Silently accepted** | `FROM t FINAL` parses with `FINAL` read as the table's *alias*, so the query runs and any `t.column` reference then fails. After an explicit alias it is a parse error. There are no merge semantics here to skip, so accepting and dropping it is the right fix |
-| Backtick-quoted identifiers | **Error** | DuckDB does not take backticks; use double quotes |
+| Backtick-quoted identifiers | Works (T-481) | Rewritten to double quotes on the edge |
+| Backslash escapes in literals (`'it\'s'`) | Works (T-481) | Rewritten to the characters they stand for. `LIKE '%a\_b%'` keeps its backslash, but DuckDB's `LIKE` has no default escape character, so `\_` matches a backslash and any character, not a literal `_` — differs |
 | Parametric aggregates: `quantile(0.5)(x)`, `topK(1)(x)` | **Parse error** | The two-argument `quantile(x, 0.5)` works |
 | `any(x)` | **Parse error** | `ANY` is a keyword in DuckDB; `any_value(x)` is the equivalent |
 | `position(haystack, needle)` | **Parse error** | DuckDB takes `position(needle IN haystack)` |
@@ -127,8 +130,8 @@ These return an answer, just not always ClickHouse's.
 | Client | Works today | Blocked by |
 |---|---|---|
 | `curl`, hand-written SQL | Yes | Nothing, if the SQL is DuckDB-flavored |
-| `ch` (Elixir) | Connects and queries | Nothing for plain SQL; `{name:Type}` params fail |
-| Logflare reads | No | `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY`, `match`, `has`, `arrayExists`, `{name:Type}` params, trailing `SETTINGS`. Map access (`col['key']`) already works |
+| `ch` (Elixir) | Connects and queries | Nothing for plain SQL |
+| Logflare reads | No | `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY`, `match`, `has`, `arrayExists`. Map access (`col['key']`), `{name:Type}` params and a trailing `SETTINGS` already work |
 | `clickhouse-connect`, JS client | Connects | `system.columns` and `DESCRIBE` on metadata calls |
 | Grafana ClickHouse plugin | No | `system.*` browsing, then the time-function family |
 | BI tools (Metabase, Tableau) | No | Catalog introspection first, then functions |
@@ -140,7 +143,7 @@ dialect rewrite (`SmolqueryPg.PgCatalog.Rewrite`) and a fixture corpus of what
 clients actually send. The same shape applies here (PL-65):
 
 1. **Log unrecognized statements at the edge** to build a real corpus instead of guessing.
-2. **Cheap wins first:** strip a trailing `SETTINGS`, substitute `{name:Type}` parameters.
+2. **Cheap wins first:** strip a trailing `SETTINGS`, substitute `{name:Type}` parameters, read backticks and backslash escapes. Done (T-481).
 3. **Emulate `system.*`** plus `SHOW` and `DESCRIBE`, the way `pg_catalog` is emulated. `SHOW TABLES` matters most, since today it answers wrongly rather than failing.
 4. **A textual pre-pass** for constructs DuckDB refuses to parse (`ARRAY JOIN`, `LIMIT BY`, `PREWHERE`), and to drop `FINAL` rather than let it bind as an alias.
 5. **Macro shims** for the function families, one family per layer, skipping the names that already resolve.

@@ -34,8 +34,18 @@ defmodule SmolqueryClickHouse.Query do
 
   `max_execution_time`, in seconds, bounds the query; without it the query
   service's default applies. A value past what a timer takes, which is how a
-  client says "no limit", is held to the longest one, about 49 days. Every other setting is accepted and ignored.
-  `{name:Type}` query parameters are not substituted.
+  client says "no limit", is held to the longest one, about 49 days. Every
+  other setting is accepted and ignored. A setting arrives as a URL
+  parameter or in the statement's `SETTINGS` clause, before or after
+  `FORMAT`; the clause wins (`Statement.split_settings/1`).
+
+  ## Parameters and quoting
+
+  `{name:Type}` placeholders are filled from the request's `param_<name>`
+  values (`SmolqueryClickHouse.Params`). Backquoted identifiers and
+  ClickHouse's backslash escapes are then written the way the engine reads
+  them (`Statement.standard_quoting/1`), so a statement a ClickHouse client
+  quoted for ClickHouse parses here.
 
   ## Refusals
 
@@ -57,6 +67,7 @@ defmodule SmolqueryClickHouse.Query do
   alias Smolquery.QueryService.Job
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Format
+  alias SmolqueryClickHouse.Params
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
   alias SmolqueryPg.Sql
@@ -80,15 +91,30 @@ defmodule SmolqueryClickHouse.Query do
   """
   @spec call(Plug.Conn.t(), Runtime.t(), String.t(), keyword()) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, sql, opts \\ []) do
-    {statement, clause} = Statement.split_format(sql)
+    {statement, clause, settings} = clauses(sql)
 
     with :ok <- present(statement),
          :ok <- writable(statement, Keyword.get(opts, :read_only, false)),
          {:ok, format} <- format(clause, conn),
-         {:ok, timeout} <- timeout(conn.query_params) do
-      run(conn, runtime, rewrite(statement), format, timeout)
+         {:ok, timeout} <- timeout(Map.merge(conn.query_params, settings)),
+         {:ok, statement} <- Params.substitute(statement, conn.query_params) do
+      run(conn, runtime, statement |> Statement.standard_quoting() |> rewrite(), format, timeout)
     else
       {:error, exception} -> Errors.send_exception(conn, exception)
+    end
+  end
+
+  defp clauses(sql) do
+    {statement, format} = Statement.split_format(sql)
+    {statement, settings} = Statement.split_settings(statement)
+
+    case format do
+      nil ->
+        {statement, format} = Statement.split_format(statement)
+        {statement, format, settings}
+
+      format ->
+        {statement, format, settings}
     end
   end
 
