@@ -132,18 +132,36 @@ defmodule Smolquery.RowBinary do
   `{:ok, result}` carries the NDJSON of every row the schema takes, how many
   that is, and each refused row's index and reasons. An empty body is zero
   rows in every format.
-  """
-  @spec decode(Schema.t(), binary(), format()) ::
-          {:ok, result()} | {:error, {:invalid_rowbinary, String.t()}}
-  def decode(%Schema{}, <<>>, _format), do: {:ok, %{ndjson: [], row_count: 0, errors: []}}
 
-  def decode(%Schema{} = schema, body, format) when is_binary(body) do
-    case header(schema, body, format) do
+  ## Options
+
+    * `:columns` — for `:row_binary`, the names of the body's columns in order,
+      as an `INSERT` statement lists them; each is read as the type its schema
+      column implies, and a column left out is null. Without it, the schema's
+      regular columns in order. The header formats name their own columns and
+      ignore it.
+    * `:max_bytes` — stops decoding once the NDJSON written and the refusals
+      reported pass this many bytes, with
+      `{:error, {:decoded_too_large, bytes, limit}}`, where `bytes` is how far
+      it got. A RowBinary body can decode to many times its size — a row of
+      one `Int8` is a byte on the wire and a JSON object in the NDJSON — so the
+      limit is enforced while decoding, not after.
+  """
+  @spec decode(Schema.t(), binary(), format(), keyword()) ::
+          {:ok, result()}
+          | {:error, {:invalid_rowbinary, String.t()}}
+          | {:error, {:decoded_too_large, non_neg_integer(), pos_integer()}}
+  def decode(schema, body, format, opts \\ [])
+
+  def decode(%Schema{}, <<>>, _format, _opts), do: {:ok, %{ndjson: [], row_count: 0, errors: []}}
+
+  def decode(%Schema{} = schema, body, format, opts) when is_binary(body) do
+    case header(schema, body, format, Keyword.get(opts, :columns)) do
       {:ok, [], <<_byte, _rest::binary>>} ->
         invalid("the header names no columns, but bytes follow it")
 
       {:ok, columns, rows} ->
-        rows(columns, rows, 0, [], 0, [])
+        rows(columns, rows, {0, 0, Keyword.get(opts, :max_bytes)}, [], 0, [])
 
       {:malformed, detail} ->
         invalid("header: " <> detail)
@@ -172,10 +190,14 @@ defmodule Smolquery.RowBinary do
 
   defp invalid(message), do: {:error, {:invalid_rowbinary, message}}
 
-  defp header(schema, body, :row_binary),
-    do: {:ok, columns(Enum.map(Schema.regular_fields(schema), &{&1, schema_wire(&1)})), body}
+  defp header(schema, body, :row_binary, nil),
+    do: {:ok, columns(implied(Schema.regular_fields(schema))), body}
 
-  defp header(schema, body, format) when format in [:with_names, :with_names_and_types] do
+  defp header(schema, body, :row_binary, names) when is_list(names) do
+    with {:ok, fields} <- named_fields(schema, names), do: {:ok, columns(implied(fields)), body}
+  end
+
+  defp header(schema, body, format, _names) when format in [:with_names, :with_names_and_types] do
     with {:ok, count, rest} <- varint(body),
          {:ok, names, rest} <- strings(count, rest, []),
          {:ok, fields} <- named_fields(schema, names),
@@ -184,8 +206,7 @@ defmodule Smolquery.RowBinary do
     end
   end
 
-  defp wires(:with_names, fields, _count, rest),
-    do: {:ok, Enum.map(fields, &{&1, schema_wire(&1)}), rest}
+  defp wires(:with_names, fields, _count, rest), do: {:ok, implied(fields), rest}
 
   defp wires(:with_names_and_types, fields, count, body) do
     with {:ok, types, rest} <- strings(count, body, []),
@@ -193,6 +214,8 @@ defmodule Smolquery.RowBinary do
       {:ok, pairs, rest}
     end
   end
+
+  defp implied(fields), do: Enum.map(fields, &{&1, schema_wire(&1)})
 
   defp strings(0, rest, acc), do: {:ok, Enum.reverse(acc), rest}
 
@@ -302,17 +325,24 @@ defmodule Smolquery.RowBinary do
   defp key(name, 0), do: IO.iodata_to_binary([JSON.encode!(name), ?:])
   defp key(name, _index), do: IO.iodata_to_binary([?,, JSON.encode!(name), ?:])
 
-  defp rows(_columns, <<>>, _index, lines, count, errors),
+  defp rows(_columns, _body, {_index, bytes, limit}, _lines, _count, _errors)
+       when is_integer(limit) and bytes > limit,
+       do: {:error, {:decoded_too_large, bytes, limit}}
+
+  defp rows(_columns, <<>>, _progress, lines, count, errors),
     do: {:ok, %{ndjson: Enum.reverse(lines), row_count: count, errors: Enum.reverse(errors)}}
 
-  defp rows(columns, body, index, lines, count, errors) do
+  defp rows(columns, body, {index, bytes, limit}, lines, count, errors) do
     case row(columns, body, [], []) do
       {:ok, line, rest} ->
-        rows(columns, rest, index + 1, [line | lines], count + 1, errors)
+        progress = {index + 1, bytes + IO.iodata_length(line), limit}
+        rows(columns, rest, progress, [line | lines], count + 1, errors)
 
       {:refused, problems, rest} ->
         refusal = %{index: index, errors: problems}
-        rows(columns, rest, index + 1, lines, count, [refusal | errors])
+        reported = Enum.reduce(problems, 0, &(byte_size(&1.message) + &2))
+
+        rows(columns, rest, {index + 1, bytes + reported, limit}, lines, count, [refusal | errors])
 
       {:malformed, column, detail} ->
         invalid("row #{index}, column #{column}: #{detail}")

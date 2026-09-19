@@ -30,6 +30,7 @@ defmodule SmolqueryApi.Router do
       DELETE /v1/datasets/:ds/tables/:table/columns/:column  drop a column
       DELETE /v1/datasets/:ds/tables/:table/segments  drop segments by path
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
+      POST /?query=INSERT ... FORMAT RowBinary     ClickHouse HTTP insert (T-476)
       GET  /v1/connections                         list federated Postgres connections
       POST /v1/connections                         register one (replaces by name)
       GET  /v1/connections/:name                   one connection, never its password
@@ -53,11 +54,23 @@ defmodule SmolqueryApi.Router do
 
   use Phoenix.Router
 
+  pipeline :clickhouse do
+    plug :put_instance
+    plug SmolqueryApi.Auth
+    plug :admit_ingest
+  end
+
   pipeline :api do
     plug :put_instance
     plug SmolqueryApi.Auth
     plug :admit_ingest
     plug SmolqueryApi.Parsers
+  end
+
+  scope "/", SmolqueryApi do
+    pipe_through :clickhouse
+
+    post "/", ClickHouseController, :create
   end
 
   scope "/", SmolqueryApi do

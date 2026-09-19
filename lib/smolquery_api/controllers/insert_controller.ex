@@ -14,6 +14,7 @@ defmodule SmolqueryApi.InsertController do
 
   alias Smolquery.BufferService.Backlog
   alias Smolquery.IngestService
+  alias SmolqueryApi.Body
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Json
   alias SmolqueryApi.Runtime
@@ -80,7 +81,7 @@ defmodule SmolqueryApi.InsertController do
 
     with {:ok, batch_id} <- insert_id(conn.query_params),
          {:ok, skip?} <- skip_invalid_rows(conn.query_params),
-         {:ok, body, conn} <- read_ndjson(conn, max_bytes),
+         {:ok, body, conn} <- Body.read(conn, max_bytes),
          {:ok, result} <-
            insert_ndjson(runtime, table_ref, body, batch_id: batch_id, skip_invalid_rows: skip?) do
       respond(conn, result)
@@ -103,23 +104,6 @@ defmodule SmolqueryApi.InsertController do
       "insertedRows" => result.inserted,
       "insertErrors" => errors_json(result.errors)
     })
-  end
-
-  defp read_ndjson(conn, max_bytes, acc \\ []) do
-    case Plug.Conn.read_body(conn, length: max_bytes) do
-      {:ok, chunk, conn} ->
-        body = IO.iodata_to_binary(Enum.reverse([chunk | acc]))
-
-        if byte_size(body) > max_bytes,
-          do: {:error, :too_large},
-          else: {:ok, body, conn}
-
-      {:more, chunk, conn} ->
-        case Enum.reduce(acc, byte_size(chunk), &(byte_size(&1) + &2)) do
-          over when over > max_bytes -> {:error, :too_large}
-          _within -> read_ndjson(conn, max_bytes, [chunk | acc])
-        end
-    end
   end
 
   defp insert_ndjson(runtime, table_ref, body, opts),

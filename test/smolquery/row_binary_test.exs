@@ -447,6 +447,30 @@ defmodule Smolquery.RowBinaryTest do
     end
   end
 
+  describe "decode/4 with :max_bytes" do
+    test "stops decoding once the rows written pass the limit" do
+      schema = Schema.new!([{"n", :int64}])
+      header = IO.iodata_to_binary([1, [1, "n"], [4, "Int8"]])
+      body = header <> :binary.copy(<<7>>, 100_000)
+
+      assert {:error, {:decoded_too_large, bytes, 1_000}} =
+               RowBinary.decode(schema, body, :with_names_and_types, max_bytes: 1_000)
+
+      assert bytes > 1_000 and bytes < 1_100
+
+      assert {:ok, %{row_count: 100_000}} = RowBinary.decode(schema, body, :with_names_and_types)
+    end
+
+    test "counts the refusals it reports, so refused rows cannot grow without bound" do
+      schema = Schema.new!([{"n", :int64, nullable: false}])
+      header = IO.iodata_to_binary([1, [1, "n"], [15, "Nullable(Int64)"]])
+      body = header <> :binary.copy(<<1>>, 100_000)
+
+      assert {:error, {:decoded_too_large, _bytes, 1_000}} =
+               RowBinary.decode(schema, body, :with_names_and_types, max_bytes: 1_000)
+    end
+  end
+
   describe "parse_type/1" do
     test "reads the type names a ClickHouse header spells" do
       assert RowBinary.parse_type("Int64") == {:ok, {:int, 64, :signed}}
@@ -650,6 +674,28 @@ defmodule Smolquery.RowBinaryTest do
                )
 
       assert lines(decoded) == [%{"ts" => "2026-09-14 10:00:00.123456789"}]
+    end
+  end
+
+  describe "decode/4 with the columns an INSERT statement lists (T-476)" do
+    test "a plain body's columns are the named ones, in the named order" do
+      schema = Schema.new!([{"id", :int64, nullable: false}, {"note", :string}, {"ok", :bool}])
+      body = IO.iodata_to_binary([0, str("hi"), <<7::little-signed-64>>])
+
+      assert {:ok, decoded} =
+               RowBinary.decode(schema, body, :row_binary, columns: ["note", "id"])
+
+      assert decoded.row_count == 1
+      assert lines(decoded) == [%{"note" => "hi", "id" => 7}]
+    end
+
+    test "the named columns are checked like a header's" do
+      schema = Schema.new!([{"id", :int64, nullable: false}])
+
+      assert RowBinary.decode(schema, <<1>>, :row_binary, columns: ["nope"]) ==
+               {:error,
+                {:invalid_rowbinary,
+                 ~s(unknown column: "nope"; column id must not be null, and the header does not name it)}}
     end
   end
 end
