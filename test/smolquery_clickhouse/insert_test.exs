@@ -1,4 +1,4 @@
-defmodule SmolqueryApi.ClickHouseControllerTest do
+defmodule SmolqueryClickHouse.InsertTest do
   use ExUnit.Case, async: true
 
   import Bitwise
@@ -9,13 +9,13 @@ defmodule SmolqueryApi.ClickHouseControllerTest do
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
-  alias Smolquery.Test.ApiEndpoint
   alias Smolquery.Test.MapCatalog
-  alias SmolqueryApi.Runtime
+  alias SmolqueryClickHouse.Router
+  alias SmolqueryClickHouse.Runtime
 
   @moduletag :tmp_dir
 
-  @key "clickhouse-test-key"
+  @password "clickhouse-test-password"
   @table {"logs", "events"}
 
   setup context do
@@ -48,8 +48,8 @@ defmodule SmolqueryApi.ClickHouseControllerTest do
 
     on_exit(fn -> IngestService.Runtime.delete(ingest) end)
 
-    name = :"ch_api_#{:erlang.unique_integer([:positive])}"
-    Runtime.put(Runtime.new(name: name, api_key: @key, catalog: catalog, ingest_name: ingest))
+    name = :"ch_edge_#{:erlang.unique_integer([:positive])}"
+    Runtime.put(Runtime.new(name: name, password: @password, ingest_name: ingest))
     on_exit(fn -> Runtime.delete(name) end)
 
     %{name: name, buffer: buffer}
@@ -76,12 +76,13 @@ defmodule SmolqueryApi.ClickHouseControllerTest do
 
   defp post(name, params, body, headers \\ []) do
     conn(:post, "/?" <> URI.encode_query(params), body)
-    |> put_req_header("authorization", "Bearer #{@key}")
+    |> put_req_header("x-clickhouse-user", "default")
+    |> put_req_header("x-clickhouse-key", @password)
     |> put_req_header("content-type", "application/octet-stream")
     |> then(fn conn ->
       Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
     end)
-    |> then(&ApiEndpoint.request(name, &1))
+    |> Router.call(name)
   end
 
   defp landed(buffer) do
@@ -185,14 +186,6 @@ defmodule SmolqueryApi.ClickHouseControllerTest do
       assert get_resp_header(response, "x-clickhouse-exception-code") == [code]
       assert response.resp_body =~ "Code: #{code}. DB::Exception: "
     end
-  end
-
-  test "a request without the bearer key is refused before the body is read", %{name: name} do
-    response =
-      conn(:post, "/?query=INSERT%20INTO%20logs.events%20FORMAT%20RowBinary", "")
-      |> then(&ApiEndpoint.request(name, &1))
-
-    assert response.status == 401
   end
 
   test "a body that ends mid-row is CANNOT_READ_ALL_DATA and writes nothing", %{

@@ -1,11 +1,12 @@
-defmodule SmolqueryApi.ClickHouseController do
+defmodule SmolqueryClickHouse.Insert do
   @moduledoc """
-  ClickHouse's HTTP insert, for a client that already speaks it (T-476).
+  ClickHouse's HTTP insert, for a client that already speaks it (T-476), on
+  the `:clickhouse` role's own listener (T-477).
 
       POST /?query=INSERT INTO logs.events (id, ts) FORMAT RowBinary
       <RowBinary rows>
 
-  The statement is parsed by `SmolqueryApi.ClickHouseInsert`. The table is
+  The statement is parsed by `SmolqueryClickHouse.Statement`. The table is
   `{database, table}`: the statement's qualifier, else the `database`
   parameter, else the `X-ClickHouse-Database` header, else `default`. The body
   is `RowBinary`, `RowBinaryWithNames` or `RowBinaryWithNamesAndTypes`,
@@ -25,22 +26,22 @@ defmodule SmolqueryApi.ClickHouseController do
   accepted and ignored. Settings come from the URL and from the statement's
   `SETTINGS` clause, and the clause wins.
 
-  Authentication and ingest admission are the NDJSON route's: a bearer key,
-  and a body counted against the in-flight limit before it is read.
+  `SmolqueryClickHouse.Router` has already checked the password and counted
+  the body against ingest admission by the time this runs.
 
   A 200 carries an empty body and `X-ClickHouse-Summary`. A failure answers
-  the way ClickHouse does, a `text/plain` line `Code: N. DB::Exception: ...`
-  with `X-ClickHouse-Exception-Code`, and a retryable one carries
+  through `SmolqueryClickHouse.Errors`, and a retryable one carries
   `retry-after`.
   """
 
-  use SmolqueryApi, :controller
+  import Plug.Conn
 
   alias Smolquery.BufferService.Backlog
   alias Smolquery.IngestService
   alias SmolqueryApi.Body
-  alias SmolqueryApi.ClickHouseInsert
-  alias SmolqueryApi.Runtime
+  alias SmolqueryClickHouse.Errors
+  alias SmolqueryClickHouse.Runtime
+  alias SmolqueryClickHouse.Statement
 
   @formats %{
     "rowbinary" => :row_binary,
@@ -54,10 +55,9 @@ defmodule SmolqueryApi.ClickHouseController do
   @doc """
   Runs the `INSERT` in the `query` parameter against the request body.
   """
-  @spec create(Plug.Conn.t(), map()) :: Plug.Conn.t()
-  def create(conn, _params) do
+  @spec call(Plug.Conn.t(), Runtime.t()) :: Plug.Conn.t()
+  def call(conn, %Runtime{} = runtime) do
     conn = fetch_query_params(conn)
-    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
 
     with {:ok, query} <- query(conn.query_params),
          {:ok, insert} <- parse(query),
@@ -68,7 +68,7 @@ defmodule SmolqueryApi.ClickHouseController do
          {:ok, result} <- insert(runtime, table_ref(conn, insert), body, format, opts) do
       summary(read, result, byte_size(body))
     else
-      {:error, reason} -> exception(conn, reason, runtime)
+      {:error, reason} -> Errors.send_exception(conn, describe(reason, runtime))
     end
   end
 
@@ -76,7 +76,7 @@ defmodule SmolqueryApi.ClickHouseController do
   defp query(_params), do: {:error, {:syntax, "the query parameter holds no statement"}}
 
   defp parse(query) do
-    case ClickHouseInsert.parse(query) do
+    case Statement.parse(query) do
       {:ok, insert} ->
         {:ok, insert}
 
@@ -174,21 +174,6 @@ defmodule SmolqueryApi.ClickHouseController do
     |> put_resp_content_type("text/plain")
     |> send_resp(200, "")
   end
-
-  defp exception(conn, reason, runtime) do
-    {status, code, name, message, retry_after} = describe(reason, runtime)
-
-    conn
-    |> retry_after(retry_after)
-    |> put_resp_header("x-clickhouse-exception-code", Integer.to_string(code))
-    |> put_resp_content_type("text/plain")
-    |> send_resp(status, "Code: #{code}. DB::Exception: #{message}. (#{name})\n")
-  end
-
-  defp retry_after(conn, nil), do: conn
-
-  defp retry_after(conn, seconds),
-    do: put_resp_header(conn, "retry-after", Integer.to_string(seconds))
 
   defp describe({:syntax, message}, _runtime), do: {400, 62, "SYNTAX_ERROR", message, nil}
 

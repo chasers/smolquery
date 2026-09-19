@@ -62,6 +62,8 @@ config :smolquery, SmolqueryApi.Endpoint,
 
 config :smolquery, SmolqueryPg, ip: {127, 0, 0, 1}, port: 5432
 
+config :smolquery, SmolqueryClickHouse, ip: {127, 0, 0, 1}, port: 8123
+
 config :smolquery, SmolqueryWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

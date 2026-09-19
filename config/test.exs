@@ -16,6 +16,8 @@ config :smolquery, SmolqueryApi.Endpoint, http: [ip: {127, 0, 0, 1}, port: 0], s
 
 config :smolquery, SmolqueryPg, ip: {127, 0, 0, 1}, port: 0
 
+config :smolquery, SmolqueryClickHouse, ip: {127, 0, 0, 1}, port: 0
+
 config :smolquery, SmolqueryWeb, username: "smolquery", password: "smolquery"
 
 config :smolquery, SmolqueryWeb.ClusterLive.Index, pod_actions: false
