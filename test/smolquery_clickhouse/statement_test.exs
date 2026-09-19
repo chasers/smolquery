@@ -54,4 +54,49 @@ defmodule SmolqueryClickHouse.StatementTest do
                {:error, "a quoted name or value is never closed"}
     end
   end
+
+  describe "insert?/1" do
+    test "reads the first keyword, in any case" do
+      assert Statement.insert?("  insert into t FORMAT RowBinary")
+      refute Statement.insert?("SELECT 1")
+      refute Statement.insert?("INSERTED")
+      refute Statement.insert?("")
+    end
+  end
+
+  describe "split_format/1" do
+    test "splits a trailing FORMAT clause and a final semicolon" do
+      assert Statement.split_format("SELECT 1 FORMAT JSONEachRow ;\n") ==
+               {"SELECT 1", "JSONEachRow"}
+
+      assert Statement.split_format("select *\nfrom t\nformat TSV") == {"select *\nfrom t", "TSV"}
+    end
+
+    test "leaves a statement with no clause, or one only inside a string, whole" do
+      assert Statement.split_format(" SELECT 1; ") == {"SELECT 1", nil}
+      assert Statement.split_format("SELECT 'x FORMAT JSON'") == {"SELECT 'x FORMAT JSON'", nil}
+    end
+
+    test "takes a clause that follows a string literal" do
+      assert Statement.split_format("SELECT * FROM t WHERE name = 'x' FORMAT JSONEachRow") ==
+               {"SELECT * FROM t WHERE name = 'x'", "JSONEachRow"}
+
+      assert Statement.split_format("SELECT 'it''s' FORMAT TSV;") == {"SELECT 'it''s'", "TSV"}
+    end
+
+    test "a column named format is not a clause" do
+      assert Statement.split_format("SELECT a FROM t ORDER BY format desc") ==
+               {"SELECT a FROM t ORDER BY format desc", nil}
+
+      assert Statement.split_format("SELECT a FROM t ORDER BY format ASC") ==
+               {"SELECT a FROM t ORDER BY format ASC", nil}
+    end
+
+    test "reads past a trailing comment, and never inside one" do
+      assert Statement.split_format("SELECT 1 FORMAT JSON -- for the dashboard") ==
+               {"SELECT 1 -- for the dashboard", "JSON"}
+
+      assert Statement.split_format("SELECT 1 -- FORMAT JSON") == {"SELECT 1 -- FORMAT JSON", nil}
+    end
+  end
 end

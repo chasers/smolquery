@@ -34,7 +34,7 @@ defmodule SmolqueryClickHouse.SupervisorTest do
         retry: false
       )
 
-    assert response.status == 501
+    assert response.status == 503
   end
 
   test "takes a request line past Bandit's 10,000-byte default, as ClickHouse does" do

@@ -4,7 +4,7 @@ defmodule SmolqueryClickHouse.Runtime do
 
   The same shape as `SmolqueryPg.Runtime`: configuration becomes a struct
   once at boot and lands in `:persistent_term`, so every request reads the
-  password and the ingest-service name for free. Naming derives from one
+  password and the service names for free. Naming derives from one
   instance name, so a test can run an isolated edge beside the application's
   own.
 
@@ -34,7 +34,8 @@ defmodule SmolqueryClickHouse.Runtime do
   each with that limit.
 
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
-  through.
+  through, and `query_name` the `Smolquery.QueryService` instance every
+  query runs through (T-478).
   """
 
   @enforce_keys [:name, :password]
@@ -43,6 +44,7 @@ defmodule SmolqueryClickHouse.Runtime do
     :name,
     :password,
     ingest_name: Smolquery.IngestService,
+    query_name: Smolquery.QueryService,
     max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil,
     ip: {127, 0, 0, 1},
@@ -53,6 +55,7 @@ defmodule SmolqueryClickHouse.Runtime do
           name: atom(),
           password: String.t(),
           ingest_name: atom(),
+          query_name: atom(),
           max_ndjson_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil,
           ip: :inet.ip_address(),
@@ -90,7 +93,7 @@ defmodule SmolqueryClickHouse.Runtime do
           role: :clickhouse
         )
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :ip, :port | @api_defaults]))
+    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :ip, :port | @api_defaults]))
   end
 
   use Smolquery.Runtime

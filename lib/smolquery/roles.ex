@@ -5,7 +5,7 @@ defmodule Smolquery.Roles do
   A role maps one-to-one onto a top-level supervision subtree — the four
   services, plus `:api` for the HTTP front door, `:web` for the LiveView
   UI, `:pg` for the Postgres wire edge, and `:clickhouse` for the ClickHouse
-  HTTP insert edge. A node starts only the
+  HTTP edge. A node starts only the
   subtrees in its role set, so the same release deploys as a single-node dev
   instance (every role) or as a fleet of specialized nodes.
 

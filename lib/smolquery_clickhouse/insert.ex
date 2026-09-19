@@ -81,14 +81,11 @@ defmodule SmolqueryClickHouse.Insert do
         {:ok, insert}
 
       {:error, message} ->
-        if insert_statement?(query),
+        if Statement.insert?(query),
           do: {:error, {:syntax, message}},
           else: {:error, :not_insert}
     end
   end
-
-  defp insert_statement?(query),
-    do: query |> String.trim_leading() |> String.upcase() |> String.starts_with?("INSERT")
 
   defp format(name) do
     case Map.fetch(@formats, String.downcase(name)) do
