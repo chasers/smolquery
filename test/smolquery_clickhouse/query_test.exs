@@ -94,6 +94,35 @@ defmodule SmolqueryClickHouse.QueryTest do
     assert post(name, "SELECT timezone() AS tz").resp_body == "UTC\n"
   end
 
+  test "version() inside a string literal or a comment is left as written", %{name: name} do
+    response = post(name, "SELECT 'call version()' AS s, version() AS v /* version() */")
+
+    assert response.status == 200
+    assert response.resp_body == "call version()\t24.8.1.1\n"
+  end
+
+  test "a FORMAT clause after a string literal names the format", %{name: name} do
+    response = post(name, "SELECT 1 AS n WHERE 'x' = 'x' FORMAT JSONEachRow")
+
+    assert response.resp_body == ~s({"n":1}\n)
+  end
+
+  test "a max_execution_time past what a timer takes is held to the longest one", %{name: name} do
+    for seconds <- ["5000000", "1e300"] do
+      response = conn(:post, "/?max_execution_time=#{seconds}", "SELECT 1") |> request(name)
+
+      assert response.status == 200, seconds
+    end
+  end
+
+  test "a value that is not UTF-8 answers in every format, replaced in JSON", %{name: name} do
+    sql = "SELECT CAST(unhex('FF41') AS BLOB) AS b"
+
+    assert post(name, sql <> " FORMAT JSONEachRow").resp_body == ~s({"b":"�A"}\n)
+    assert post(name, sql <> " FORMAT TabSeparated").status == 200
+    assert post(name, sql <> " FORMAT RowBinaryWithNamesAndTypes").status == 200
+  end
+
   test "an unknown format is UNKNOWN_FORMAT", %{name: name} do
     response = post(name, "SELECT 1 FORMAT Native")
 

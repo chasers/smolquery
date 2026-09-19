@@ -82,6 +82,20 @@ defmodule SmolqueryClickHouse.RouterTest do
     assert get_resp_header(response, "x-clickhouse-exception-code") == ["62"]
   end
 
+  test "max_query_size counts the query parameter and the body together", %{name: name} do
+    half = "SELECT '" <> String.duplicate("x", 140_000) <> "'"
+
+    for conn <- [
+          conn(:post, "/?" <> URI.encode_query(%{"query" => half}), half),
+          conn(:get, "/?" <> URI.encode_query(%{"query" => half <> half}))
+        ] do
+      response = conn |> authed() |> request(name)
+
+      assert response.status == 400
+      assert get_resp_header(response, "x-clickhouse-exception-code") == ["62"]
+    end
+  end
+
   test "an unknown path with the password is a 404", %{name: name} do
     response = conn(:get, "/replicas_status") |> authed() |> request(name)
 

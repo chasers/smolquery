@@ -44,6 +44,14 @@ defmodule SmolqueryClickHouse.Format do
   bare number, and a non-finite float is `null`. A timestamp is
   `YYYY-MM-DD hh:mm:ss.ffffff` in both. In RowBinary a `NULL` map value is
   written as the empty string, since the map's values are not `Nullable`.
+
+  A `NULL` map answers as the empty map in every format, for the same
+  reason: its column's type is not `Nullable`, and in RowBinary a `Nullable`
+  marker there would be read as a map's size.
+
+  JSON text must be UTF-8, so a value that is not has its invalid bytes
+  replaced with U+FFFD in the JSON formats. `TabSeparated` and RowBinary
+  carry a string's bytes as they are.
   """
 
   import Bitwise
@@ -205,6 +213,7 @@ defmodule SmolqueryClickHouse.Format do
 
   defp tsv_line(values), do: [Enum.intersperse(values, "\t"), "\n"]
 
+  defp tsv(@map_dtype, false, nil), do: "{}"
   defp tsv(_dtype, _json?, nil), do: "\\N"
   defp tsv(_dtype, true, value), do: escape(json_text(value))
   defp tsv(@map_dtype, false, value) when is_map(value), do: map_text(value)
@@ -245,7 +254,7 @@ defmodule SmolqueryClickHouse.Format do
   defp json_object(columns, row) do
     fields =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
-        [JSON.encode!(name), ":", json(dtype, json?, row[name])]
+        [json_string(name), ":", json(dtype, json?, row[name])]
       end)
 
     ["{", fields, "}"]
@@ -260,21 +269,36 @@ defmodule SmolqueryClickHouse.Format do
     ["[", values, "]"]
   end
 
+  defp json(@map_dtype, false, nil), do: "{}"
   defp json(_dtype, _json?, nil), do: "null"
-  defp json(_dtype, true, value), do: JSON.encode!(json_text(value))
+  defp json(_dtype, true, value), do: json_string(json_text(value))
   defp json({kind, 64}, false, value) when kind in [:s, :u], do: [?", text(value), ?"]
   defp json(_dtype, false, value) when is_boolean(value), do: to_string(value)
   defp json(_dtype, false, value) when is_integer(value), do: Integer.to_string(value)
   defp json(_dtype, false, value) when value in [:nan, :infinity, :neg_infinity], do: "null"
   defp json(_dtype, false, value) when is_float(value), do: JSON.encode!(value)
   defp json(_dtype, false, %Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp json(@map_dtype, false, value) when is_map(value), do: JSON.encode!(value)
-  defp json(_dtype, false, value) when is_binary(value), do: JSON.encode!(value)
+  defp json(@map_dtype, false, value) when is_map(value), do: JSON.encode!(utf8(value))
+  defp json(_dtype, false, value) when is_binary(value), do: json_string(value)
 
   defp json(_dtype, false, value) when is_list(value) or (is_map(value) and not is_struct(value)),
-    do: JSON.encode!(json_text(value))
+    do: json_string(json_text(value))
 
-  defp json(_dtype, false, value), do: JSON.encode!(text(value))
+  defp json(_dtype, false, value), do: json_string(text(value))
+
+  defp json_string(text), do: JSON.encode!(utf8(text))
+
+  defp utf8(value) when is_binary(value),
+    do: if(String.valid?(value), do: value, else: String.replace_invalid(value))
+
+  defp utf8(value) when is_list(value), do: Enum.map(value, &utf8/1)
+
+  defp utf8(value) when is_map(value) and not is_struct(value),
+    do: Map.new(value, fn {key, entry} -> {utf8(key), utf8(entry)} end)
+
+  defp utf8(value), do: value
+
+  defp binary(@map_dtype, false, nil), do: <<0>>
 
   defp binary(@map_dtype, false, value) when is_map(value) do
     [
@@ -346,7 +370,7 @@ defmodule SmolqueryClickHouse.Format do
   defp json_text(value) when is_binary(value), do: value
 
   defp json_text(value) do
-    JSON.encode!(value)
+    JSON.encode!(utf8(value))
   rescue
     Protocol.UndefinedError -> inspect(value)
   end

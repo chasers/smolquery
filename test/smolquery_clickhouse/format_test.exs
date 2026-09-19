@@ -131,6 +131,27 @@ defmodule SmolqueryClickHouse.FormatTest do
                <<0, 150::little-signed-64, 0, 1_000_002::little-signed-64>>
     end
 
+    test "a NULL map answers as the empty map, since its type is not Nullable" do
+      columns = [{"m", @map_dtype, false}, {"n", {:s, 64}, false}]
+      rows = [%{"m" => nil, "n" => 7}]
+
+      assert encode(:tsv, columns, rows) == "{}\t7\n"
+      assert JSON.decode!(encode(:json_each_row, columns, rows)) == %{"m" => %{}, "n" => "7"}
+
+      body = encode(:row_binary_with_names_and_types, columns, rows)
+      assert binary_part(body, byte_size(body) - 10, 10) == <<0, 0, 7::little-signed-64>>
+    end
+
+    test "a string that is not UTF-8 is replaced in JSON and carried as it is elsewhere" do
+      columns = [{"s", :string, false}, {"m", @map_dtype, false}]
+      rows = [%{"s" => <<255, ?a>>, "m" => %{"k" => <<255>>}}]
+
+      assert JSON.decode!(encode(:json_each_row, columns, rows)) ==
+               %{"s" => "�a", "m" => %{"k" => "�"}}
+
+      assert encode(:tsv, columns, rows) == <<255, ?a, ?\t, "{'k':'", 255, "'}\n">>
+    end
+
     test "non-finite floats, decimals and booleans follow ClickHouse's defaults" do
       columns = [{"f", {:f, 64}, false}, {"d", {:decimal, 10, 2}, false}, {"b", :boolean, false}]
       rows = [%{"f" => :nan, "d" => Decimal.new("1.50"), "b" => true}]

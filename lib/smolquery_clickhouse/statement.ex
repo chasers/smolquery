@@ -14,6 +14,8 @@ defmodule SmolqueryClickHouse.Statement do
   between the URL and the request is not one smolquery takes.
   """
 
+  alias SmolqueryPg.Sql
+
   @type t :: %{
           database: String.t() | nil,
           table: String.t(),
@@ -44,6 +46,8 @@ defmodule SmolqueryClickHouse.Statement do
     end
   end
 
+  @format_clause ~r/\A(.*?)(?:\A|(?<=\s))FORMAT\s+([A-Za-z][A-Za-z0-9_]*)\s*\z/is
+
   @doc """
   Whether `query` is an `INSERT`, by its first keyword.
   """
@@ -55,18 +59,32 @@ defmodule SmolqueryClickHouse.Statement do
 
   Answers the statement without the clause, trimmed and without a final
   `;`, and the format's name, or `nil` when the statement names none. Only
-  the end of the text is read: a `FORMAT` earlier in the statement, or one
-  inside a string literal that ends it, is not a clause.
+  the end of the statement's code is read (`SmolqueryPg.Sql` tells code from
+  literals and comments): a `FORMAT` earlier in the statement, or inside a
+  string literal or a comment, is not a clause, and a clause that follows a
+  string literal is one. `ORDER BY format DESC` ends in a column named
+  `format`, so `asc` and `desc` are never taken for a format's name.
   """
   @spec split_format(String.t()) :: {String.t(), String.t() | nil}
   def split_format(query) when is_binary(query) do
     statement = query |> String.trim() |> String.trim_trailing(";") |> String.trim_trailing()
 
-    case Regex.run(~r/\A(.*[^\s'])\s+FORMAT\s+([A-Za-z][A-Za-z0-9_]*)\z/is, statement) do
-      [_match, rest, format] -> {rest, format}
-      nil -> {statement, nil}
+    {trailing, tokens} =
+      statement |> Sql.tokens() |> Enum.reverse() |> Enum.split_while(&(not code?(&1)))
+
+    with [{:code, tail} | before] <- tokens,
+         [_match, head, format] <- Regex.run(@format_clause, tail),
+         false <- String.downcase(format) in ["asc", "desc"] do
+      kept = Enum.reverse([{:code, head} | before], Enum.reverse(trailing))
+
+      {kept |> Enum.map_join(&elem(&1, 1)) |> String.trim(), format}
+    else
+      _no_clause -> {statement, nil}
     end
   end
+
+  defp code?({:code, text}), do: String.trim(text) != ""
+  defp code?(_literal_or_comment), do: false
 
   defp keyword(text, word) do
     trimmed = String.trim_leading(text)

@@ -1209,7 +1209,7 @@ is a ~500k-group group-by.
 
 One release holds four services plus four edges: the HTTP front door, the
 web UI (user interface), the Postgres wire listener, and the ClickHouse HTTP
-insert listener. A node starts only
+listener. A node starts only
 the subtrees its roles name.
 `SMOLQUERY_ROLES` is a comma-separated list, or `all`:
 

@@ -10,8 +10,8 @@ defmodule SmolqueryClickHouse.Router do
 
   A `POST` whose `query` parameter holds an `INSERT` is an insert, and its
   body is the rows. Any other `POST` is a query (T-478): the statement is the
-  `query` parameter followed by the body, as ClickHouse joins them, and it
-  is read up to #{262_144} bytes, ClickHouse's `max_query_size`. An `INSERT`
+  `query` parameter followed by the body, as ClickHouse joins them, and the
+  two together may run to #{262_144} bytes, ClickHouse's `max_query_size`. An `INSERT`
   in the body alone is refused, since its rows would have to follow it
   there.
 
@@ -112,7 +112,7 @@ defmodule SmolqueryClickHouse.Router do
   end
 
   defp authorized(%Plug.Conn{path_info: [], query_params: %{"query" => sql}} = conn, runtime),
-    do: Query.call(conn, runtime, sql, read_only: true)
+    do: query(conn, runtime, sql, read_only: true)
 
   defp authorized(conn, _runtime) do
     conn
@@ -137,12 +137,17 @@ defmodule SmolqueryClickHouse.Router do
 
         if Statement.insert?(sql),
           do: Errors.send_exception(conn, @body_insert),
-          else: Query.call(conn, runtime, sql)
+          else: query(conn, runtime, sql, [])
 
       {:error, :too_large} ->
         Errors.send_exception(conn, @query_too_large)
     end
   end
+
+  defp query(conn, _runtime, sql, _opts) when byte_size(sql) > @max_query_bytes,
+    do: Errors.send_exception(conn, @query_too_large)
+
+  defp query(conn, runtime, sql, opts), do: Query.call(conn, runtime, sql, opts)
 
   defp join(nil, body), do: body
   defp join(query, ""), do: query

@@ -23,7 +23,9 @@ defmodule SmolqueryClickHouse.Query do
   ## What a client asks on connect
 
   `version()` answers `#{"24.8.1.1"}` and `timezone()` answers `UTC`, each
-  rewritten to a literal before the statement runs, so the
+  rewritten to a literal before the statement runs, in the statement's code
+  only: the same text inside a string literal, a quoted identifier or a
+  comment, or after a `.`, is left as written. So the
   `select 1, version()` that `ch` runs on every new connection answers as
   ClickHouse's does. The version is the ClickHouse release whose HTTP
   behavior this edge follows, not smolquery's.
@@ -31,7 +33,8 @@ defmodule SmolqueryClickHouse.Query do
   ## Settings
 
   `max_execution_time`, in seconds, bounds the query; without it the query
-  service's default applies. Every other setting is accepted and ignored.
+  service's default applies. A value past what a timer takes, which is how a
+  client says "no limit", is held to the longest one, about 49 days. Every other setting is accepted and ignored.
   `{name:Type}` query parameters are not substituted.
 
   ## Refusals
@@ -56,13 +59,16 @@ defmodule SmolqueryClickHouse.Query do
   alias SmolqueryClickHouse.Format
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
+  alias SmolqueryPg.Sql
 
   @version "24.8.1.1"
 
   @rewrites [
-    {~r/\bversion\s*\(\s*\)/i, "'#{@version}'"},
-    {~r/\btimezone\s*\(\s*\)/i, "'UTC'"}
+    {~r/(?<![\w.])version\s*\(\s*\)/i, "'#{@version}'"},
+    {~r/(?<![\w.])timezone\s*\(\s*\)/i, "'UTC'"}
   ]
+
+  @max_timeout_ms 4_294_967_295
 
   @read_only_keywords ~w(select with show describe desc explain exists)
 
@@ -128,7 +134,7 @@ defmodule SmolqueryClickHouse.Query do
 
   defp timeout(%{"max_execution_time" => seconds}) do
     case Float.parse(seconds) do
-      {value, ""} when value > 0 -> {:ok, [timeout_ms: max(round(value * 1000), 1)]}
+      {value, ""} when value > 0 -> {:ok, [timeout_ms: bounded_ms(value)]}
       {value, ""} when value >= 0 -> {:ok, []}
       _invalid -> {:error, {400, 36, "BAD_ARGUMENTS", "max_execution_time is not a number", nil}}
     end
@@ -136,11 +142,16 @@ defmodule SmolqueryClickHouse.Query do
 
   defp timeout(_params), do: {:ok, []}
 
-  defp rewrite(statement),
-    do:
-      Enum.reduce(@rewrites, statement, fn {pattern, literal}, sql ->
+  defp bounded_ms(seconds) when seconds >= @max_timeout_ms / 1000, do: @max_timeout_ms
+  defp bounded_ms(seconds), do: max(round(seconds * 1000), 1)
+
+  defp rewrite(statement) do
+    Sql.map_code(statement, fn code ->
+      Enum.reduce(@rewrites, code, fn {pattern, literal}, sql ->
         Regex.replace(pattern, sql, literal)
       end)
+    end)
+  end
 
   defp run(conn, runtime, statement, format, opts) do
     case Client.query(runtime.query_name, statement, opts) do
