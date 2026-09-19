@@ -36,6 +36,12 @@ defmodule Smolquery.BufferService.Endpoint do
   accumulator (a rows batch is measured on arrival). The flush parses NDJSON,
   so a value the schema cannot take is
   reported per row after the fact (the committer's salvage), not before.
+
+  `:whole_request` carries `:rows`, or `:ndjson` and `:row_count`, in place of
+  the top-level keys, for a caller that wants the batch written whole or not
+  at all (T-474, `TableBuffer.write_whole/6`). The payload keys move rather
+  than a flag being added, so a buffer node on a release that predates it
+  answers `{:error, :invalid_batch}` instead of committing part of the batch.
   """
   @type batch :: %{
           required(:schema) => Schema.t(),
@@ -43,7 +49,12 @@ defmodule Smolquery.BufferService.Endpoint do
           optional(:ndjson) => binary(),
           optional(:row_count) => non_neg_integer(),
           optional(:byte_size) => non_neg_integer(),
-          optional(:batch_id) => String.t()
+          optional(:batch_id) => String.t(),
+          optional(:whole_request) => %{
+            optional(:rows) => [Writer.row()],
+            optional(:ndjson) => binary(),
+            optional(:row_count) => non_neg_integer()
+          }
         }
 
   @retries 5
@@ -92,6 +103,12 @@ defmodule Smolquery.BufferService.Endpoint do
     end
   end
 
+  defp payload(runtime, %{whole_request: inner} = batch)
+       when is_map(inner) and not is_map_key(inner, :whole_request) do
+    with {:ok, payload} <- payload(runtime, Map.merge(Map.take(batch, [:byte_size]), inner)),
+         do: {:ok, {:whole, payload}}
+  end
+
   defp payload(_runtime, %{rows: rows}) when is_list(rows), do: {:ok, rows}
 
   # NDJSON crosses the wire as the bytes the client sent, so there is nothing to
@@ -106,6 +123,7 @@ defmodule Smolquery.BufferService.Endpoint do
 
   defp payload_count(rows) when is_list(rows), do: length(rows)
   defp payload_count({:ndjson, _body, count}), do: count
+  defp payload_count({:whole, payload}), do: payload_count(payload)
 
   # The backlog valve (T-457) runs here, beside the drain check and before
   # `deliver/7` resolves — and, for a table this node has not seen, starts
@@ -359,6 +377,13 @@ defmodule Smolquery.BufferService.Endpoint do
 
             {:ok, ack}
 
+          # It joined a whole-request batch the flush refused, so nothing was
+          # accumulated for it and nothing drained it (T-474).
+          {:duplicate_invalid, errors} ->
+            Load.leave(load, count)
+
+            {:invalid, errors}
+
           {:error, reason} ->
             Load.leave(load, count)
 
@@ -374,6 +399,17 @@ defmodule Smolquery.BufferService.Endpoint do
 
         {:error, reason}
     end
+  end
+
+  defp buffer_write(buffer, runtime, schema, {:whole, payload}, byte_size, batch_id) do
+    TableBuffer.write_whole(
+      buffer,
+      schema,
+      payload,
+      byte_size,
+      runtime.write_timeout_ms,
+      batch_id
+    )
   end
 
   defp buffer_write(buffer, runtime, schema, rows, _byte_size, batch_id) when is_list(rows) do

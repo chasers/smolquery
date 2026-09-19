@@ -118,8 +118,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   """
   @type commit :: %{
           :schema => Smolquery.Schema.t(),
-          :chunks => [[Writer.row()] | {:ndjson, binary(), non_neg_integer()}],
-          :pending => [{GenServer.from(), :new | :duplicate | :flush}],
+          :chunks => [
+            [Writer.row()]
+            | {:ndjson, binary(), non_neg_integer()}
+            | {:whole, [Writer.row()] | {:ndjson, binary(), non_neg_integer()}, String.t() | nil}
+          ],
+          :pending => [{GenServer.from(), :new | {:duplicate, String.t()} | :flush}],
           :batch_ids => [String.t()],
           :row_count => non_neg_integer(),
           :byte_size => non_neg_integer(),
@@ -340,9 +344,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp write_spooled(runtime, prefix, commit, id, engine, paths) do
-    case write_ndjson(runtime, prefix, commit, id, engine, paths) do
-      {:ok, segment} ->
-        {:ok, segment}
+    with :ok <- whole_bodies_complete(engine, commit, paths),
+         {:ok, segment} <- write_ndjson(runtime, prefix, commit, id, engine, paths) do
+      {:ok, segment}
+    else
+      :incomplete ->
+        salvage(runtime, prefix, commit, id, engine, paths)
 
       {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} ->
         salvage(runtime, prefix, commit, id, engine, paths)
@@ -353,6 +360,33 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   after
     Enum.each(paths, &File.rm/1)
   end
+
+  # A `COPY` writes a NULL into a column that must not hold one without
+  # complaint, so a whole-request body missing a required value would land
+  # whole. Its caller was promised all or nothing, by the schema as well as by
+  # the flush (T-474), so such a body is probed before the write and sent
+  # through the salvage, where the row validator names the rows. Only
+  # whole-request NDJSON bodies pay for the probe.
+  defp whole_bodies_complete(engine, commit, paths) do
+    commit.chunks
+    |> Enum.zip(paths)
+    |> Enum.reduce_while(:ok, fn
+      {{:whole, {:ndjson, _body, _count}, _batch_id}, path}, :ok ->
+        case Writer.ndjson_problem(engine, path, commit.schema, required: true) do
+          {:refused, _message} -> {:halt, :incomplete}
+          _ok_or_engine_failure -> {:cont, :ok}
+        end
+
+      _other_chunk, :ok ->
+        {:cont, :ok}
+    end)
+  end
+
+  defp chunk_problem({:whole, {:ndjson, _body, _count}, _batch_id}, engine, path, schema),
+    do: Writer.ndjson_problem(engine, path, schema, required: true)
+
+  defp chunk_problem(_chunk, engine, path, schema),
+    do: Writer.ndjson_problem(engine, path, schema)
 
   defp write_ndjson(runtime, prefix, commit, id, engine, paths) do
     Writer.write({:ndjson, paths}, commit.schema,
@@ -379,8 +413,11 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # request for one row is what this path is fixing.
   defp salvage(runtime, prefix, commit, id, engine, paths) do
     problems =
-      Enum.map(Enum.with_index(paths), fn {path, index} ->
-        {path, index, Writer.ndjson_problem(engine, path, commit.schema)}
+      commit.chunks
+      |> Enum.zip(paths)
+      |> Enum.with_index()
+      |> Enum.map(fn {{chunk, path}, index} ->
+        {path, index, chunk_problem(chunk, engine, path, commit.schema)}
       end)
 
     with :ok <- engine_alive(problems),
@@ -460,14 +497,25 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     File.rm(probe)
 
     with {:ok, kept, refused} <- bisected do
+      refusals = Enum.sort_by(errors ++ refused, & &1.index)
+      chunk = Enum.at(commit.chunks, index)
+
       {:ok,
        %{
          index: index,
-         errors: Enum.sort_by(errors ++ refused, & &1.index),
-         paths: respool(runtime, id, index, kept)
+         errors: refusal(chunk, refusals),
+         paths: respool(runtime, id, index, kept(chunk, refusals, kept))
        }}
     end
   end
+
+  defp kept({:whole, _payload, _batch_id}, [_refused | _rest], _kept), do: []
+  defp kept(_chunk, _refusals, kept), do: kept
+
+  defp refusal({:whole, _payload, batch_id}, [_refused | _rest] = refusals),
+    do: {:whole, batch_id, refusals}
+
+  defp refusal(_chunk, refusals), do: refusals
 
   # The validator is the fast pre-check; DuckDB is the authority. A row the
   # validator takes and DuckDB refuses — an INT64 past 2^63, a NUMERIC past its
@@ -551,6 +599,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       {:error, {:invalid_rows, Exception.message(error)}}
   end
 
+  defp chunk_bytes({:whole, payload, _batch_id}), do: chunk_bytes(payload)
   defp chunk_bytes({:ndjson, body, _count}), do: body
   defp chunk_bytes(rows) when is_list(rows), do: ndjson_iodata(rows)
 
@@ -558,7 +607,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     encoded_at = System.monotonic_time(:microsecond)
 
     {encoded, rejected} = split_rejected(encoded)
-    {result, added_at} = commit_durably(state, commit, encoded, encoded_at)
+
+    {result, added_at} =
+      commit_durably(
+        state,
+        %{commit | batch_ids: spent(commit.batch_ids, rejected)},
+        encoded,
+        encoded_at
+      )
 
     done_at = System.monotonic_time(:microsecond)
     duration_us = done_at - started
@@ -599,6 +655,12 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   end
 
   defp inserts(pending), do: Enum.count(pending, fn {_from, kind} -> kind != :flush end)
+
+  defp spent(batch_ids, rejected) do
+    unspent = for {_index, {:whole, batch_id, _errors}} <- rejected, batch_id != nil, do: batch_id
+
+    batch_ids -- unspent
+  end
 
   # Split so the manifest append and the replication round can be timed apart:
   # they are the two serialized steps, and T-181 exists because the encode —
@@ -694,7 +756,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
           index + 1
 
         _not_a_chunk ->
-          GenServer.reply(from, reply_for(kind, result))
+          GenServer.reply(from, joined_reply(kind, result, rejected))
           index
       end
     end)
@@ -705,9 +767,23 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   # one: partial failure is a result, not an error. Its valid rows are in the
   # segment that just committed, so the ack is real; `errors` names the rows the
   # schema refused, at their index in that caller's body.
+  defp rejected_reply({:ok, _ack}, {:whole, _batch_id, errors}), do: {:invalid, errors}
+  defp rejected_reply({:rejected, _rejected}, {:whole, _batch_id, errors}), do: {:invalid, errors}
   defp rejected_reply({:ok, ack}, errors), do: {:ok, ack, errors}
   defp rejected_reply({:rejected, _rejected}, errors), do: {:invalid, errors}
   defp rejected_reply(error, _errors), do: error
+
+  defp joined_reply({:duplicate, batch_id} = kind, result, rejected) do
+    case Enum.find_value(rejected, fn {_index, refusal} -> whole_errors(refusal, batch_id) end) do
+      nil -> reply_for(kind, result)
+      errors -> {:duplicate_invalid, errors}
+    end
+  end
+
+  defp joined_reply(kind, result, _rejected), do: reply_for(kind, result)
+
+  defp whole_errors({:whole, batch_id, errors}, batch_id), do: errors
+  defp whole_errors(_refusal, _batch_id), do: nil
 
   defp split_rejected({:ok, segment, rejected}), do: {{:ok, segment}, rejected}
   defp split_rejected({:rejected, rejected}), do: {{:rejected, rejected}, rejected}
@@ -721,8 +797,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
     do: reply_for(kind, {:error, :ndjson_commit_failed})
 
   defp reply_for(:new, result), do: result
-  defp reply_for(:duplicate, {:ok, ack}), do: {:duplicate, ack}
-  defp reply_for(:duplicate, error), do: error
+  defp reply_for({:duplicate, _batch_id}, {:ok, ack}), do: {:duplicate, ack}
+  defp reply_for({:duplicate, _batch_id}, error), do: error
   defp reply_for(:flush, {:ok, _ack}), do: :ok
   defp reply_for(:flush, error), do: error
 

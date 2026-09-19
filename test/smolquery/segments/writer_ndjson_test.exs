@@ -261,6 +261,19 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       fine = spool(dir, "fine.ndjson", [%{"tenant" => "a", "id" => 1, "ratio" => 1.0}])
       assert Writer.ndjson_problem(@engine, fine, schema()) == :ok
     end
+
+    test "required: true refuses a NULL in a column that must not be null", %{tmp_dir: dir} do
+      schema = Schema.new!([{"id", :int64, nullable: false}, {"tenant", :string}])
+      path = spool(dir, "missing.ndjson", [%{"id" => 1}, %{"tenant" => "a"}, %{"id" => nil}])
+
+      assert Writer.ndjson_problem(@engine, path, schema) == :ok
+
+      assert {:refused, message} = Writer.ndjson_problem(@engine, path, schema, required: true)
+      assert message =~ "2 row(s) hold NULL"
+
+      whole = spool(dir, "whole.ndjson", [%{"id" => 1}, %{"id" => 2, "tenant" => nil}])
+      assert Writer.ndjson_problem(@engine, whole, schema, required: true) == :ok
+    end
   end
 
   describe "materialized columns (PL-61 L4)" do

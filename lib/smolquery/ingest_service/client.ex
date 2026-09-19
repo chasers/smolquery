@@ -41,30 +41,37 @@ defmodule Smolquery.IngestService.Client do
       timeout, or a buffer crash-before-reply — is answered with the
       original commit instead of writing the rows twice (T-41). Without
       one, writes are at-least-once, as before.
+    * `:skip_invalid_rows` — `true`, the default, writes the valid rows and
+      reports the refused ones. `false` writes nothing when any row is
+      refused, by the validator or by the flush, and answers
+      `{:ok, %{inserted: 0, errors: errors}}` (T-474). A buffer node on a
+      release that cannot honor it refuses the batch instead of writing part
+      of it, answered `{:error, :whole_request_unsupported}`.
   """
   @spec insert(atom(), Store.table_ref(), [term()], keyword()) ::
           {:ok, result()} | {:error, term()}
   def insert(name, table_ref, rows, opts \\ []) when is_list(rows) do
     with {:ok, runtime} <- runtime(name) do
       batch_id = Keyword.get(opts, :batch_id)
+      skip? = Keyword.get(opts, :skip_invalid_rows, true)
 
       with_fresh_schema(
         runtime,
         table_ref,
-        &validated_write(runtime, table_ref, &1, rows, batch_id)
+        &validated_write(runtime, table_ref, &1, rows, {batch_id, skip?})
       )
     end
   end
 
-  defp validated_write(runtime, table_ref, schema, rows, batch_id) do
+  defp validated_write(runtime, table_ref, schema, rows, {_batch_id, skip?} = write_opts) do
     case Validator.validate(schema, rows) do
-      {[], errors} ->
+      {valid, errors} when valid == [] or (errors != [] and not skip?) ->
         measure(0, errors)
 
         {:ok, %{inserted: 0, errors: errors}}
 
       {valid, errors} ->
-        write(runtime, table_ref, schema, valid, errors, batch_id)
+        write(runtime, table_ref, schema, valid, errors, write_opts)
     end
   end
 
@@ -95,7 +102,7 @@ defmodule Smolquery.IngestService.Client do
   parses it (T-180). The flush validates what this node did not: rows the
   schema refuses come back at their index in this body, the way `insert/4`
   reports them, and the rest are durable. Takes the same `:batch_id` option,
-  with the same dedup semantics.
+  with the same dedup semantics, and `:skip_invalid_rows` as `insert/4` takes it.
   """
   @spec insert_ndjson(atom(), Store.table_ref(), binary(), keyword()) ::
           {:ok, result()} | {:error, term()}
@@ -119,21 +126,14 @@ defmodule Smolquery.IngestService.Client do
     row_count = count_rows(body)
     count_us = System.monotonic_time(:microsecond) - started
 
-    batch = %{
-      schema: schema,
-      ndjson: body,
-      row_count: row_count,
-      byte_size: byte_size(body)
-    }
-
+    skip? = Keyword.get(opts, :skip_invalid_rows, true)
     batch_id = Keyword.get(opts, :batch_id)
     target = write_target(table_ref, schema, runtime, batch_id)
 
     batch =
-      case batch_id do
-        nil -> batch
-        batch_id -> Map.put(batch, :batch_id, batch_id)
-      end
+      %{schema: schema, byte_size: byte_size(body)}
+      |> Map.merge(ndjson_payload(body, row_count, skip?))
+      |> with_batch_id(batch_id)
 
     written_at = System.monotonic_time(:microsecond)
     written = BufferService.Client.write_batch(runtime.buffer_name, target, batch)
@@ -159,8 +159,8 @@ defmodule Smolquery.IngestService.Client do
 
         {:ok, %{inserted: 0, errors: errors}}
 
-      {:error, _reason} = error ->
-        error
+      {:error, reason} ->
+        {:error, unsupported(reason, skip?)}
     end
   end
 
@@ -200,8 +200,8 @@ defmodule Smolquery.IngestService.Client do
     end
   end
 
-  defp write(runtime, table_ref, schema, valid, errors, batch_id) do
-    batch = batch(schema, valid, batch_id)
+  defp write(runtime, table_ref, schema, valid, errors, {batch_id, skip?}) do
+    batch = batch(schema, valid, batch_id, skip?)
     target = write_target(table_ref, schema, runtime, batch_id)
 
     case BufferService.Client.write_batch(runtime.buffer_name, target, batch) do
@@ -216,8 +216,8 @@ defmodule Smolquery.IngestService.Client do
       {:invalid, refused} ->
         report(valid, errors, refused, 0)
 
-      {:error, _reason} = error ->
-        error
+      {:error, reason} ->
+        {:error, unsupported(reason, skip?)}
     end
   end
 
@@ -253,8 +253,22 @@ defmodule Smolquery.IngestService.Client do
     )
   end
 
-  defp batch(schema, rows, nil), do: %{schema: schema, rows: rows}
-  defp batch(schema, rows, batch_id), do: %{schema: schema, rows: rows, batch_id: batch_id}
+  defp batch(schema, rows, batch_id, true),
+    do: with_batch_id(%{schema: schema, rows: rows}, batch_id)
+
+  defp batch(schema, rows, batch_id, false),
+    do: with_batch_id(%{schema: schema, whole_request: %{rows: rows}}, batch_id)
+
+  defp ndjson_payload(body, row_count, true), do: %{ndjson: body, row_count: row_count}
+
+  defp ndjson_payload(body, row_count, false),
+    do: %{whole_request: %{ndjson: body, row_count: row_count}}
+
+  defp with_batch_id(batch, nil), do: batch
+  defp with_batch_id(batch, batch_id), do: Map.put(batch, :batch_id, batch_id)
+
+  defp unsupported(:invalid_batch, false), do: :whole_request_unsupported
+  defp unsupported(reason, _skip?), do: reason
 
   defp runtime(name) do
     case Runtime.fetch(name) do

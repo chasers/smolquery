@@ -147,9 +147,9 @@ defmodule Smolquery.Segments.Writer do
   this without the message; the salvage uses the message to tell a caller why
   a row was refused, and stops on an engine failure rather than blame the rows.
   """
-  @spec ndjson_problem(atom(), Path.t(), Schema.t()) ::
+  @spec ndjson_problem(atom(), Path.t(), Schema.t(), keyword()) ::
           :ok | {:refused, String.t()} | {:error, {:engine_failed, String.t()}}
-  def ndjson_problem(engine, path, %Schema{} = schema) do
+  def ndjson_problem(engine, path, %Schema{} = schema, opts \\ []) do
     # `count(*)` is not enough: it needs no column values, so DuckDB is free to
     # skip the casts and answer a row count for a body it could not actually
     # read. Counting every column forces each one to be evaluated, which is the
@@ -160,14 +160,35 @@ defmodule Smolquery.Segments.Writer do
       |> Enum.map_join(", ", &"count(#{Identifier.quote_name!(&1.name)})")
 
     sql = """
-    SELECT #{counts} FROM read_json([$1],
+    SELECT #{missing_required(schema, opts)}, #{counts} FROM read_json([$1],
       format = 'newline_delimited',
       columns = {#{columns_spec(schema)}})
     """
 
     case Engine.query(engine, sql, [path]) do
-      {:ok, _result} -> :ok
-      {:error, error} -> problem(classify(error, :refused))
+      {:ok, %{rows: [[missing | _counts] | _rest]}} when is_integer(missing) and missing > 0 ->
+        {:refused, "#{missing} row(s) hold NULL in a column that must not be null"}
+
+      {:ok, _result} ->
+        :ok
+
+      {:error, error} ->
+        problem(classify(error, :refused))
+    end
+  end
+
+  # A `COPY` does not refuse a NULL in a column the schema says must not hold
+  # one, so a body can be readable and still break the schema. `required: true`
+  # counts those rows too, for a caller that promised all or nothing (T-474).
+  defp missing_required(schema, opts) do
+    required =
+      for %Field{nullable: false} = field <- Schema.regular_fields(schema),
+          Keyword.get(opts, :required, false),
+          do: "#{Identifier.quote_name!(field.name)} IS NULL"
+
+    case required do
+      [] -> "0"
+      checks -> "count(*) FILTER (WHERE #{Enum.join(checks, " OR ")})"
     end
   end
 
