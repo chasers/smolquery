@@ -83,17 +83,33 @@ defmodule Smolquery.IngestService.Client do
   # re-added column may have another type. A second refusal is the caller's.
   defp with_fresh_schema(runtime, table_ref, write) do
     with {:ok, schema} <- SchemaCache.fetch(runtime, table_ref) do
-      schema |> write.() |> retried_fresh(runtime, table_ref, write)
+      schema |> write.() |> retried_fresh(schema, runtime, table_ref, write)
     end
   end
 
-  defp retried_fresh({:error, {:stale_schema, _ref, _names}}, runtime, table_ref, write) do
+  defp retried_fresh({:error, {:stale_schema, _ref, _names}}, _cached, runtime, table_ref, write) do
     :ok = SchemaCache.invalidate(runtime, table_ref)
 
     with {:ok, fresh} <- SchemaCache.fetch(runtime, table_ref), do: write.(fresh)
   end
 
-  defp retried_fresh(result, _runtime, _table_ref, _write), do: result
+  defp retried_fresh(
+         {:error, {:invalid_rowbinary, _}} = refused,
+         cached,
+         runtime,
+         table_ref,
+         write
+       ) do
+    :ok = SchemaCache.invalidate(runtime, table_ref)
+
+    case SchemaCache.fetch(runtime, table_ref) do
+      {:ok, ^cached} -> refused
+      {:ok, fresh} -> write.(fresh)
+      {:error, _reason} -> refused
+    end
+  end
+
+  defp retried_fresh(result, _cached, _runtime, _table_ref, _write), do: result
 
   @doc """
   Writes the NDJSON `body` to the table — `insert/4`'s contract, entered from
@@ -123,13 +139,20 @@ defmodule Smolquery.IngestService.Client do
   and writes nothing. Rows the decoder refuses and rows the flush refuses are
   both reported at their index in the RowBinary body.
 
+  The decoder reads against the cached schema, so before an unreadable body's
+  answer stands the cache is dropped and the catalog asked once: a body
+  that names a column added since the schema was cached decodes against the
+  fresh one. A plain `RowBinary` body with no column list cannot be checked
+  that way, since it names nothing; a producer that adds columns sends the
+  list, or a header format.
+
   ## Options
 
     * `:columns` — the names a plain `RowBinary` body's columns carry, in
       order, as an `INSERT` statement lists them
     * `:max_ndjson_bytes` — refuses a body whose rows decode past it, with
-      `{:error, {:decoded_too_large, bytes, limit}}`, before anything is
-      forwarded
+      `{:error, {:decoded_too_large, bytes, limit}}`. The decoder stops there,
+      so `bytes` is how far it got, and nothing is forwarded
     * `:batch_id` and `:skip_invalid_rows`, as `insert/4` takes them
   """
   @spec insert_rowbinary(atom(), Store.table_ref(), binary(), RowBinary.format(), keyword()) ::
@@ -146,7 +169,7 @@ defmodule Smolquery.IngestService.Client do
 
   defp forward_rowbinary(runtime, table_ref, schema, {body, format}, opts) do
     started = System.monotonic_time(:microsecond)
-    decoded = RowBinary.decode(schema, body, format, Keyword.take(opts, [:columns]))
+    decoded = RowBinary.decode(schema, body, format, decode_opts(opts))
     decode_us = System.monotonic_time(:microsecond) - started
     skip? = Keyword.get(opts, :skip_invalid_rows, true)
 
@@ -158,13 +181,9 @@ defmodule Smolquery.IngestService.Client do
         nothing_written(errors, decode_us)
 
       {:ok, %{ndjson: ndjson, row_count: count, errors: errors}} ->
-        ndjson = IO.iodata_to_binary(ndjson)
-
-        with :ok <- within(byte_size(ndjson), Keyword.get(opts, :max_ndjson_bytes)) do
-          runtime
-          |> forward(table_ref, schema, {ndjson, count}, decode_us, opts)
-          |> merge_refused(errors, count)
-        end
+        runtime
+        |> forward(table_ref, schema, {IO.iodata_to_binary(ndjson), count}, decode_us, opts)
+        |> merge_refused(errors, count)
 
       {:error, _reason} = error ->
         error
@@ -177,9 +196,11 @@ defmodule Smolquery.IngestService.Client do
     {:ok, %{inserted: 0, errors: errors}}
   end
 
-  defp within(_bytes, nil), do: :ok
-  defp within(bytes, limit) when bytes <= limit, do: :ok
-  defp within(bytes, limit), do: {:error, {:decoded_too_large, bytes, limit}}
+  defp decode_opts(opts) do
+    opts
+    |> Keyword.take([:columns])
+    |> Keyword.put(:max_bytes, Keyword.get(opts, :max_ndjson_bytes))
+  end
 
   defp merge_refused({:ok, result}, decode_errors, row_count),
     do: {:ok, %{result | errors: remapped(decode_errors, result.errors, row_count)}}

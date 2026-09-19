@@ -214,7 +214,7 @@ defmodule SmolqueryApi.ClickHouseController do
   defp describe({:decoded_too_large, bytes, limit}, _runtime),
     do:
       {413, 36, "BAD_ARGUMENTS",
-       "the block decodes to #{bytes} bytes of rows, over the #{limit}-byte insert limit; send smaller blocks",
+       "the block's rows decode past the #{limit}-byte insert limit (stopped at #{bytes} bytes); send smaller blocks",
        nil}
 
   defp describe({:invalid_rowbinary, message}, _runtime) do

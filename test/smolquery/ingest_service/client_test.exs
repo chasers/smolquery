@@ -418,6 +418,47 @@ defmodule Smolquery.IngestService.ClientTest do
                IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
     end
 
+    test "a body naming a column added since the schema was cached decodes against the fresh one",
+         context do
+      %{name: name, buffer: buffer, catalog: catalog} = start_stack(context)
+
+      assert {:ok, %{inserted: 1}} =
+               IngestService.Client.insert_rowbinary(
+                 name,
+                 @table,
+                 typed([{1, 0}]),
+                 :with_names_and_types
+               )
+
+      [added] = Schema.new!([{"msg", :string}]).fields
+      :ok = catalog.impl.alter_table(catalog.config, @table, {:add_column, added})
+
+      body =
+        IO.iodata_to_binary([
+          leb(2),
+          [str("id"), str("msg")],
+          [str("Int64"), str("String")],
+          [<<2::little-signed-64>>, str("hi")]
+        ])
+
+      assert {:ok, %{inserted: 1, errors: []}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
+
+      {:ok, entries} = BufferService.Client.hot_manifest(buffer, @table)
+      assert Enum.sum(Enum.map(entries, & &1.row_count)) == 2
+    end
+
+    test "a body the fresh schema cannot read either keeps its refusal", context do
+      %{name: name} = start_stack(context)
+
+      body = IO.iodata_to_binary([leb(1), str("nope"), str("Int64"), <<1::little-signed-64>>])
+
+      assert {:error, {:invalid_rowbinary, message}} =
+               IngestService.Client.insert_rowbinary(name, @table, body, :with_names_and_types)
+
+      assert message =~ "nope"
+    end
+
     test "rows that decode past max_ndjson_bytes are refused before forwarding", context do
       %{name: name, buffer: buffer} = start_stack(context)
       body = typed([{1, 0}, {2, 0}])

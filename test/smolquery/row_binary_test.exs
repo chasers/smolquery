@@ -447,6 +447,30 @@ defmodule Smolquery.RowBinaryTest do
     end
   end
 
+  describe "decode/4 with :max_bytes" do
+    test "stops decoding once the rows written pass the limit" do
+      schema = Schema.new!([{"n", :int64}])
+      header = IO.iodata_to_binary([1, [1, "n"], [4, "Int8"]])
+      body = header <> :binary.copy(<<7>>, 100_000)
+
+      assert {:error, {:decoded_too_large, bytes, 1_000}} =
+               RowBinary.decode(schema, body, :with_names_and_types, max_bytes: 1_000)
+
+      assert bytes > 1_000 and bytes < 1_100
+
+      assert {:ok, %{row_count: 100_000}} = RowBinary.decode(schema, body, :with_names_and_types)
+    end
+
+    test "counts the refusals it reports, so refused rows cannot grow without bound" do
+      schema = Schema.new!([{"n", :int64, nullable: false}])
+      header = IO.iodata_to_binary([1, [1, "n"], [15, "Nullable(Int64)"]])
+      body = header <> :binary.copy(<<1>>, 100_000)
+
+      assert {:error, {:decoded_too_large, _bytes, 1_000}} =
+               RowBinary.decode(schema, body, :with_names_and_types, max_bytes: 1_000)
+    end
+  end
+
   describe "parse_type/1" do
     test "reads the type names a ClickHouse header spells" do
       assert RowBinary.parse_type("Int64") == {:ok, {:int, 64, :signed}}
