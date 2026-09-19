@@ -15,6 +15,7 @@ defmodule Smolquery.Schema do
   | `:string` | `STRING` | `:string` | `VARCHAR` |
   | `:bool` | `BOOL` | `:boolean` | `BOOLEAN` |
   | `:timestamp` | `TIMESTAMP` | `{:naive_datetime, :microsecond}` | `TIMESTAMP` |
+  | `:timestamp_ns` | `TIMESTAMP_NS` | `{:naive_datetime, :nanosecond}` | `TIMESTAMP_NS` |
   | `:date` | `DATE` | `:date` | `DATE` |
   | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
   | `{:map, :string, :string}` | `MAP(STRING, STRING)` | — | `MAP(VARCHAR, VARCHAR)` |
@@ -24,6 +25,17 @@ defmodule Smolquery.Schema do
   table-schema JSON. `MAP(STRING, STRING)` is the one BigQuery does not have: it
   is ClickHouse's `Map(String, String)`, the shape OpenTelemetry attribute bags
   arrive in.
+
+  ## A nanosecond timestamp stays text in Elixir
+
+  `:timestamp_ns` stores nanoseconds (T-475), and a `NaiveDateTime` holds
+  microseconds. So a value never becomes one on its way in:
+  `value_from_json/2` checks the text and hands back a normalized string,
+  which the flush's `read_json` casts at full precision. On the way out, a
+  bound or a result value that has to be an Elixir term is a `NaiveDateTime`
+  at microseconds, and `Smolquery.Segments.Writer` rounds a segment's bounds
+  outward so pruning stays conservative. `CAST(ts AS VARCHAR)` shows every
+  digit. DuckDB takes 1677-09-22 through 2262-04-11 23:47:16.854775806.
 
   ## A map has no Explorer dtype
 
@@ -138,6 +150,7 @@ defmodule Smolquery.Schema do
           | :string
           | :bool
           | :timestamp
+          | :timestamp_ns
           | :date
           | {:numeric, pos_integer(), non_neg_integer()}
           | {:map, :string, :string}
@@ -154,6 +167,7 @@ defmodule Smolquery.Schema do
     {:string, :string, "VARCHAR", "STRING"},
     {:bool, :boolean, "BOOLEAN", "BOOL"},
     {:timestamp, {:naive_datetime, :microsecond}, "TIMESTAMP", "TIMESTAMP"},
+    {:timestamp_ns, {:naive_datetime, :nanosecond}, "TIMESTAMP_NS", "TIMESTAMP_NS"},
     {:date, :date, "DATE", "DATE"}
   ]
 
@@ -161,6 +175,7 @@ defmodule Smolquery.Schema do
   @map_type {:map, :string, :string}
   @map_duckdb "MAP(VARCHAR, VARCHAR)"
   @map_api "MAP(STRING, STRING)"
+  @timestamp_ns_text ~r/\A(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2})?\z/
   @logical_to_explorer Map.new(@mapping, fn {logical, dtype, _duckdb, _api} ->
                          {logical, dtype}
                        end)
@@ -526,6 +541,7 @@ defmodule Smolquery.Schema do
   | `:string` | string; valid UTF-8, since the flush re-encodes it as JSON | binary |
   | `:bool` | boolean | boolean |
   | `:timestamp` | ISO 8601 string; an offset is converted to UTC | `NaiveDateTime` |
+  | `:timestamp_ns` | ISO 8601 string, up to nine fractional digits; an offset is converted to UTC | the normalized string, `YYYY-MM-DD HH:MM:SS.fffffffff` |
   | `:date` | ISO 8601 string | `Date` |
   | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
   | `{:map, :string, :string}` | object; a non-string value becomes its JSON text | map of binaries |
@@ -588,6 +604,16 @@ defmodule Smolquery.Schema do
     end
   end
 
+  def value_from_json(:timestamp_ns, %NaiveDateTime{} = value),
+    do: {:ok, NaiveDateTime.to_string(value)}
+
+  def value_from_json(:timestamp_ns, value) when is_binary(value) do
+    case Regex.run(@timestamp_ns_text, value, capture: :all_but_first) do
+      [date, time | rest] -> timestamp_ns_text(value, date, time, rest)
+      nil -> invalid(:timestamp_ns, value)
+    end
+  end
+
   def value_from_json(:date, %Date{} = value), do: {:ok, value}
 
   def value_from_json(:date, value) when is_binary(value) do
@@ -627,6 +653,27 @@ defmodule Smolquery.Schema do
   defp map_value_text(value), do: JSON.encode!(value)
 
   defp invalid(type, value), do: {:error, {:invalid_value, type, value}}
+
+  defp timestamp_ns_text(value, date, time, rest) do
+    fraction = Enum.at(rest, 0, "")
+
+    case utc_seconds(date, time, Enum.at(rest, 1, "")) do
+      {:ok, utc} -> {:ok, NaiveDateTime.to_string(utc) <> fraction_suffix(fraction)}
+      {:error, _reason} -> invalid(:timestamp_ns, value)
+    end
+  end
+
+  defp utc_seconds(date, time, zone) when zone in ["", "Z"],
+    do: NaiveDateTime.from_iso8601("#{date}T#{time}")
+
+  defp utc_seconds(date, time, zone) do
+    with {:ok, datetime, _offset} <- DateTime.from_iso8601("#{date}T#{time}#{zone}") do
+      {:ok, DateTime.to_naive(DateTime.shift_zone!(datetime, "Etc/UTC"))}
+    end
+  end
+
+  defp fraction_suffix(""), do: ""
+  defp fraction_suffix(digits), do: "." <> digits
 
   @doc """
   The `column_name dtype` pairs Explorer needs to build a DataFrame.

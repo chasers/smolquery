@@ -56,7 +56,7 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 
 ## Schema types
 
-`INT64`, `FLOAT64`, `STRING`, `BOOL`, `TIMESTAMP`, `DATE`, `NUMERIC(p,s)`, `MAP(STRING, STRING)`, and `VARIANT`.
+`INT64`, `FLOAT64`, `STRING`, `BOOL`, `TIMESTAMP`, `TIMESTAMP_NS`, `DATE`, `NUMERIC(p,s)`, `MAP(STRING, STRING)`, and `VARIANT`.
 
 The last two are semi-structured, and each has limits a caller must know. The limits are listed here, once. The sections on values and results below refer back here. There is no `JSON` type: `VARIANT` covers it, and `attrs::JSON` gives the text.
 
@@ -118,6 +118,7 @@ Insert rows are JSON objects keyed by column name. Values coerce by the table's 
 
 - `INT64` accepts integers or digit strings. JavaScript clients lose precision past 2^53.
 - `TIMESTAMP` and `DATE` take ISO 8601 strings. Offsets convert to Coordinated Universal Time (UTC).
+- `TIMESTAMP_NS` takes the same strings with up to nine fractional digits and stores every one, from 1677-09-22 to 2262-04-11 23:47:16.854775806. Query results over HTTP and the Postgres wire carry microseconds; `CAST(ts AS VARCHAR)` shows all nine digits (T-475).
 - `NUMERIC` prefers strings; floats round.
 - `MAP(STRING, STRING)` takes a JSON object. Every value is stored as a string — see its limits under [Schema types](#schema-types).
 - `VARIANT` takes any JSON value, unchanged.

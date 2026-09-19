@@ -149,6 +149,7 @@ API key can over HTTP.
 | `STRING` | `text` | as is |
 | `BOOL` | `boolean` | `t` / `f` |
 | `TIMESTAMP` | `timestamp` | `2026-08-01 10:00:00` |
+| `TIMESTAMP_NS` | `timestamp` | `2026-08-01 10:00:00.123456` |
 | `DATE` | `date` | `2026-08-01` |
 | `NUMERIC(p,s)` | `numeric(p,s)` | `12.50` |
 | `MAP(STRING, STRING)` | `jsonb` | `{"host":"a"}` |
@@ -156,6 +157,11 @@ API key can over HTTP.
 
 A computed list or struct also arrives as `jsonb`. A smaller integer
 arrives as `bigint`.
+
+A `TIMESTAMP_NS` value arrives as `timestamp`, which holds microseconds, so
+its last three digits are dropped. Postgres has no nanosecond type. To read
+every digit, select `CAST(ts AS VARCHAR)` for the text, or `epoch_ns(ts)` for
+a `bigint` of nanoseconds (T-475).
 
 ## Transactions pin their read
 

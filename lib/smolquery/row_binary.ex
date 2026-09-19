@@ -22,7 +22,8 @@ defmodule Smolquery.RowBinary do
 
   The untyped variants read a column as the widest ClickHouse type that holds
   its values, wrapped in `Nullable` when the column is nullable: `Int64`,
-  `Float64`, `String`, `Bool`, `DateTime64(6)`, `Date32`, `Decimal(P, S)`, and
+  `Float64`, `String`, `Bool`, `DateTime64(6)`, `DateTime64(9)` for a `TIMESTAMP_NS`
+  column, `Date32`, `Decimal(P, S)`, and
   `String` for a variant. A map is read as `Map(String, String)` whether or not
   its column is nullable, because ClickHouse cannot declare a `Nullable(Map)`.
   A producer whose column types differ must send the typed variant: RowBinary
@@ -40,6 +41,7 @@ defmodule Smolquery.RowBinary do
   | `UUID` | `STRING`, as the 36-character lowercase text ClickHouse prints |
   | `Bool` | `BOOL` |
   | `DateTime`, `DateTime64(P)` | `TIMESTAMP`, at microseconds; the zone argument is ignored, the value is UTC |
+  | `DateTime`, `DateTime64(P)` | `TIMESTAMP_NS`, every digit, from 1677-09-22 to 2262-04-11 23:47:16.854775806; outside that the row is refused |
   | `Date`, `Date32` | `DATE` |
   | `Decimal(P, S)`, `Decimal32/64/128(S)` | `NUMERIC(_, S)`, scale equal; a value past the column's precision is refused |
   | `Map(K, V)` with string keys and string or `Nullable` string values | `MAP(STRING, STRING)` |
@@ -97,6 +99,8 @@ defmodule Smolquery.RowBinary do
   @epoch_gregorian_days 719_528
   @min_micros -62_135_596_800_000_000
   @max_micros 253_402_300_799_999_999
+  @min_nanos -9_223_286_400_000_000_000
+  @max_nanos 9_223_372_036_854_775_806
   @min_days -719_162
   @max_days 2_932_896
   @two_digits List.to_tuple(
@@ -263,6 +267,8 @@ defmodule Smolquery.RowBinary do
   defp storable?(:bool, :bool), do: true
   defp storable?(:datetime, :timestamp), do: true
   defp storable?({:datetime64, _precision}, :timestamp), do: true
+  defp storable?(:datetime, :timestamp_ns), do: true
+  defp storable?({:datetime64, _precision}, :timestamp_ns), do: true
   defp storable?(date, :date) when date in [:date, :date32], do: true
   defp storable?({:decimal, _precision, scale}, {:numeric, _target, scale}), do: true
 
@@ -282,6 +288,7 @@ defmodule Smolquery.RowBinary do
   defp base_wire(:float64), do: {:float, 64}
   defp base_wire(:bool), do: :bool
   defp base_wire(:timestamp), do: {:datetime64, 6}
+  defp base_wire(:timestamp_ns), do: {:datetime64, 9}
   defp base_wire(:date), do: :date32
   defp base_wire({:numeric, precision, scale}), do: {:decimal, precision, scale}
   defp base_wire(text) when text in [:string, :variant], do: :string
@@ -361,6 +368,12 @@ defmodule Smolquery.RowBinary do
 
   defp value(:bool, _type, <<byte, _rest::binary>>),
     do: {:malformed, "a Bool is #{byte}, not 0 or 1"}
+
+  defp value(:datetime, :timestamp_ns, <<seconds::little-unsigned-32, rest::binary>>),
+    do: {:ok, timestamp_ns(seconds * 1_000_000_000), rest}
+
+  defp value({:datetime64, precision}, :timestamp_ns, <<ticks::little-signed-64, rest::binary>>),
+    do: nanos(ticks * Integer.pow(10, 9 - precision), ticks, rest)
 
   defp value(:datetime, _type, <<seconds::little-unsigned-32, rest::binary>>),
     do: {:ok, timestamp(seconds * 1_000_000), rest}
@@ -513,6 +526,18 @@ defmodule Smolquery.RowBinary do
       two_digits(rem(fraction, 100)),
       ?"
     ]
+  end
+
+  defp nanos(ns, _ticks, rest) when ns in @min_nanos..@max_nanos,
+    do: {:ok, timestamp_ns(ns), rest}
+
+  defp nanos(_ns, ticks, rest), do: {:refused, Integer.to_string(ticks), rest}
+
+  defp timestamp_ns(ns) do
+    us = Integer.floor_div(ns, 1_000)
+    below = ns - us * 1_000
+
+    List.insert_at(timestamp(us), -2, [two_digits(div(below, 10)), ?0 + rem(below, 10)])
   end
 
   defp date(days), do: [?", calendar_date(days), ?"]

@@ -600,4 +600,56 @@ defmodule Smolquery.RowBinaryTest do
 
     sign |> Decimal.new(abs(unscaled), -2) |> Decimal.to_string(:normal)
   end
+
+  describe "nanosecond timestamps (T-475)" do
+    test "DateTime and DateTime64 decode into TIMESTAMP_NS with every digit" do
+      fields =
+        Enum.map(@typed_schema.fields, fn field ->
+          if field.name in ["at", "at_ns"], do: %{field | type: :timestamp_ns}, else: field
+        end)
+
+      schema = %{@typed_schema | fields: fields}
+
+      assert {:ok, decoded} =
+               RowBinary.decode(schema, fixture("typed.bin"), :with_names_and_types)
+
+      assert Enum.map(lines(decoded), &{&1["at"], &1["at_ns"]}) == [
+               {"2026-09-14 10:00:00.000000000", "2026-09-14 10:00:00.123456789"},
+               {"1970-01-01 00:00:00.000000000", "1969-12-31 23:59:59.999999999"}
+             ]
+    end
+
+    test "a value outside TIMESTAMP_NS's range refuses its row" do
+      schema = Schema.new!([{"ts", :timestamp_ns}])
+
+      body =
+        header(["ts"], ["DateTime64(9)"]) <>
+          <<9_223_372_036_854_775_807::little-signed-64, 0::little-signed-64>>
+
+      assert {:ok, decoded} = RowBinary.decode(schema, body, :with_names_and_types)
+      assert lines(decoded) == [%{"ts" => "1970-01-01 00:00:00.000000000"}]
+
+      assert decoded.errors == [
+               %{
+                 index: 0,
+                 errors: [
+                   %{message: "column ts (TIMESTAMP_NS) cannot accept 9223372036854775807"}
+                 ]
+               }
+             ]
+    end
+
+    test "RowBinary reads a TIMESTAMP_NS column as DateTime64(9)" do
+      schema = Schema.new!([{"ts", :timestamp_ns, nullable: false}])
+
+      assert {:ok, decoded} =
+               RowBinary.decode(
+                 schema,
+                 <<1_789_380_000_123_456_789::little-signed-64>>,
+                 :row_binary
+               )
+
+      assert lines(decoded) == [%{"ts" => "2026-09-14 10:00:00.123456789"}]
+    end
+  end
 end
