@@ -13,11 +13,18 @@ defmodule SmolqueryClickHouse.Supervisor do
   than a Phoenix endpoint, because an endpoint is a singleton and the
   instance name is what lets a test run an edge beside the application's
   own, as `SmolqueryPg.Supervisor` does with its `ThousandIsland` server.
+
+  ClickHouse's protocol carries the statement in the URL, so the listener
+  takes a request line of up to 1 MiB, ClickHouse's own `http_max_uri_size`,
+  where Bandit's default is 10,000 bytes. A longer one is Bandit's bare 414,
+  since it is refused before any plug runs.
   """
 
   use Supervisor
 
   alias SmolqueryClickHouse.Runtime
+
+  @max_request_line_bytes 1_048_576
 
   @doc """
   Starts the edge.
@@ -44,6 +51,7 @@ defmodule SmolqueryClickHouse.Supervisor do
        ip: runtime.ip,
        port: runtime.port,
        startup_log: false,
+       http_1_options: [max_request_line_length: @max_request_line_bytes],
        thousand_island_options: [supervisor_options: [name: Runtime.listener(runtime.name)]]}
     ]
 

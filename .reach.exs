@@ -26,7 +26,11 @@
       {:buffer_service, :pg},
       {:storage_service, :pg},
       {:query_service, :pg},
-      {:ingest_service, :pg}
+      {:ingest_service, :pg},
+      {:buffer_service, :clickhouse},
+      {:storage_service, :clickhouse},
+      {:query_service, :clickhouse},
+      {:ingest_service, :clickhouse}
     ]
   ],
   calls: [

@@ -13,6 +13,10 @@ defmodule SmolqueryClickHouse.Router do
   tells a stranger which paths exist. The health checks are the exception,
   as ClickHouse's are and as `/healthz` is on the API.
 
+  Every URL parameter holds one string. `database[x]=1` or `query[]=...`
+  parses to a map or a list, which nothing downstream takes, so it is a 400
+  `BAD_ARGUMENTS` here rather than a crash there.
+
   A query in a `GET`, ClickHouse's read path, is a 501: this edge only
   writes. No published runtime for the instance means the edge is not up
   here, and the answer is the same refusal as a wrong password.
@@ -41,6 +45,9 @@ defmodule SmolqueryClickHouse.Router do
   @admission_full {429, 202, "TOO_MANY_SIMULTANEOUS_QUERIES",
                    "too many insert bytes in flight, retry later", 1}
 
+  @repeated_parameter {400, 36, "BAD_ARGUMENTS",
+                       "a URL parameter takes one value, not a list or a map", nil}
+
   @read_only {501, 48, "NOT_IMPLEMENTED",
               "this endpoint runs INSERT ... FORMAT statements, sent with POST", nil}
 
@@ -65,11 +72,19 @@ defmodule SmolqueryClickHouse.Router do
 
   defp route(conn, name) do
     with {:ok, runtime} <- Runtime.fetch(name),
-         true <- Auth.authenticated?(conn, runtime.password) do
+         true <- Auth.authenticated?(conn, runtime.password),
+         :ok <- single_valued(conn.query_params) do
       authorized(conn, runtime)
     else
+      :repeated -> Errors.send_exception(conn, @repeated_parameter)
       _refused -> Errors.send_exception(conn, @unauthenticated)
     end
+  end
+
+  defp single_valued(params) do
+    if Enum.all?(params, fn {_name, value} -> is_binary(value) end),
+      do: :ok,
+      else: :repeated
   end
 
   defp authorized(%Plug.Conn{method: "POST", path_info: []} = conn, runtime) do

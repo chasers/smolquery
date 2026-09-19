@@ -37,6 +37,22 @@ defmodule SmolqueryClickHouse.SupervisorTest do
     assert response.status == 501
   end
 
+  test "takes a request line past Bandit's 10,000-byte default, as ClickHouse does" do
+    {_name, base} = start_edge()
+    columns = Enum.map_join(1..2_000, ", ", &"column_#{&1}")
+
+    response =
+      Req.post!(base <> "/",
+        params: [query: "INSERT INTO logs.wide (#{columns}) FORMAT RowBinary"],
+        headers: [{"x-clickhouse-key", @password}],
+        body: "",
+        retry: false
+      )
+
+    assert response.status != 414
+    assert [_code] = Req.Response.get_header(response, "x-clickhouse-exception-code")
+  end
+
   test "starts the edge's own admission counter" do
     {name, _base} = start_edge(insert_max_in_flight_bytes: 1_000)
 

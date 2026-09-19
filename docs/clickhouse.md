@@ -15,6 +15,7 @@ curl -sS "http://127.0.0.1:8123/?query=INSERT%20INTO%20logs.events%20FORMAT%20Ro
 ## The listener
 
 - **Port.** `8123`, ClickHouse's HTTP port (`18123` in dev). `SMOLQUERY_CLICKHOUSE_IP` and `SMOLQUERY_CLICKHOUSE_PORT` move it. It binds `127.0.0.1` by default.
+- **URL length.** The statement travels in the URL, so a request line may be up to 1 MiB, ClickHouse's `http_max_uri_size`. A longer one is a bare 414. Each URL parameter holds one value; a list or a map (`database[x]=1`) is a 400 `BAD_ARGUMENTS`.
 - **Plain HTTP.** The edge does not terminate TLS. Bind it beyond the node only behind a TLS terminator.
 - **Password.** The API key (`SMOLQUERY_API_KEY`), or `SMOLQUERY_CLICKHOUSE_PASSWORD` when set. A node with the `:clickhouse` role and neither refuses to boot.
 - **How a client sends the password.** The ways ClickHouse takes it: the `X-ClickHouse-Key` header, HTTP basic auth, or the `password` parameter. A `Bearer` token works too. When a request carries more than one, the first in that order wins. The user name is accepted as given.

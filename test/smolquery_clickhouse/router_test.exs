@@ -85,6 +85,17 @@ defmodule SmolqueryClickHouse.RouterTest do
     assert get_resp_header(response, "x-clickhouse-exception-code") == ["202"]
   end
 
+  test "a URL parameter that parses to a list or a map is BAD_ARGUMENTS, not a crash", %{
+    name: name
+  } do
+    for path <- [@insert <> "&database[x]=1", @insert <> "&insert_deduplication_token[]=a"] do
+      response = conn(:post, path, "") |> authed() |> request(name)
+
+      assert response.status == 400
+      assert get_resp_header(response, "x-clickhouse-exception-code") == ["36"]
+    end
+  end
+
   test "requests are counted by status class", %{name: name} do
     request(conn(:get, "/ping"), name)
 
