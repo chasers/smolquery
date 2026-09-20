@@ -89,4 +89,76 @@ defmodule SmolqueryClickHouse.RewriteTest do
     assert Rewrite.engine_type("Decimal(38, 2)") == {:ok, "DECIMAL(38, 2)"}
     assert Rewrite.engine_type("Tuple(String)") == :error
   end
+
+  describe "a parametric aggregate" do
+    test "moves its parameters behind its arguments" do
+      assert Rewrite.call("SELECT groupUniqArray(20)(param0) AS param0 FROM sampledData") ==
+               "SELECT groupUniqArray(param0, 20) AS param0 FROM sampledData"
+
+      assert Rewrite.call("SELECT groupUniqArrayArray(1000)(keys) as keysArr FROM sampledKeys") ==
+               "SELECT groupUniqArrayArray(keys, 1000) as keysArr FROM sampledKeys"
+    end
+
+    test "quantile is the engine's interpolating one, and -If keeps its condition" do
+      assert Rewrite.call("SELECT quantile(0.95)(toFloat64OrDefault(toString(d))) FROM t") ==
+               "SELECT quantile_cont(toFloat64OrDefault(toString(d)), 0.95) FROM t"
+
+      assert Rewrite.call("SELECT quantileIf(0.5)(d, (s = 'a') AND d IS NOT NULL) FROM t") ==
+               "SELECT quantileIf(d, (s = 'a') AND d IS NOT NULL, 0.5) FROM t"
+    end
+
+    test "rewrites what its arguments hold, too" do
+      assert Rewrite.call("SELECT groupUniqArray(5)(CAST(x, 'String')) FROM t") ==
+               "SELECT groupUniqArray(CAST(x AS VARCHAR), 5) FROM t"
+    end
+
+    test "an ordinary call by the same name, and another function, are left alone" do
+      for sql <- [
+            "SELECT quantile(x, 0.5) FROM t",
+            "SELECT groupUniqArray(x) FROM t",
+            "SELECT f(1)(2)"
+          ] do
+        assert Rewrite.call(sql) == sql
+      end
+    end
+  end
+
+  describe "LIKE with a backslash in its pattern" do
+    test "gets the escape character ClickHouse assumes" do
+      assert Rewrite.call(~S|SELECT 1 WHERE (lower(Body) LIKE lower('%user\_id%'))|) ==
+               ~S|SELECT 1 WHERE (lower(Body) LIKE lower('%user\_id%') ESCAPE '\')|
+
+      assert Rewrite.call(~S|SELECT 1 WHERE a NOT ILIKE '%50\%%' AND b = 1|) ==
+               ~S|SELECT 1 WHERE a NOT ILIKE '%50\%%' ESCAPE '\' AND b = 1|
+    end
+
+    test "a pattern with no backslash, and one that is not a literal, are left alone" do
+      for sql <- [
+            "SELECT 1 WHERE a LIKE '%b%'",
+            "SELECT 1 WHERE a LIKE lower(b)",
+            "SELECT 1 WHERE a LIKE b"
+          ] do
+        assert Rewrite.call(sql) == sql
+      end
+    end
+  end
+
+  describe "words the engine keeps for itself" do
+    test "a bare default database is quoted; a column or a quoted one is not" do
+      assert Rewrite.call("SELECT * FROM default.otel_logs") ==
+               ~s|SELECT * FROM "default".otel_logs|
+
+      assert Rewrite.call(~s|SELECT t.default, "default".x FROM t|) ==
+               ~s|SELECT t.default, "default".x FROM t|
+
+      assert Rewrite.call("SELECT 1 AS x DEFAULT") == "SELECT 1 AS x DEFAULT"
+    end
+
+    test "isNull, isNotNull and any are calls the parser can read" do
+      assert Rewrite.call(
+               "SELECT any(x), isNull(y), isNotNull(z) FROM t WHERE x = ANY (SELECT 1)"
+             ) ==
+               "SELECT any_value(x), clickhouse_isNull(y), clickhouse_isNotNull(z) FROM t WHERE x = ANY (SELECT 1)"
+    end
+  end
 end

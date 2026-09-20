@@ -38,7 +38,8 @@ defmodule SmolqueryClickHouse.Format do
   | `:date` | `Date32` |
   | `{:decimal, p, s}` | `Decimal(p, s)` |
   | `MAP(STRING, STRING)` | `Map(String, String)` |
-  | `VARIANT`, a list, a struct, anything else | `String`, holding JSON or text |
+  | a list | `Array(Nullable(T))`, and `Array(Array(...))` for a list of lists |
+  | `VARIANT`, a struct, anything else | `String`, holding JSON or text |
 
   ## Values
 
@@ -51,6 +52,10 @@ defmodule SmolqueryClickHouse.Format do
   under `date_time: :iso`, which is ClickHouse's
   `date_time_output_format = 'iso'`. In RowBinary a `NULL` map value is
   written as the empty string, since the map's values are not `Nullable`.
+
+  An array is a JSON array, `['a','b']` in a tab-separated row, and a
+  length then its elements in RowBinary. A `NULL` array answers as the empty
+  one, as a `NULL` map does.
 
   A `NULL` map answers as the empty map in every format, for the same
   reason: its column's type is not `Nullable`, and in RowBinary a `Nullable`
@@ -145,6 +150,7 @@ defmodule SmolqueryClickHouse.Format do
   @spec type_name(term(), boolean()) :: String.t()
   def type_name(_dtype, true), do: "Nullable(String)"
   def type_name(@map_dtype, false), do: "Map(String, String)"
+  def type_name({:list, _element} = dtype, false), do: base_type(dtype)
   def type_name(dtype, false), do: "Nullable(" <> base_type(dtype) <> ")"
 
   defp base_type({:s, bits}), do: "Int#{bits}"
@@ -158,6 +164,8 @@ defmodule SmolqueryClickHouse.Format do
   defp base_type({:datetime, _precision, _zone}), do: "DateTime64(6, 'UTC')"
   defp base_type(:date), do: "Date32"
   defp base_type({:decimal, precision, scale}), do: "Decimal(#{precision}, #{scale})"
+  defp base_type({:list, {:list, _element} = nested}), do: "Array(#{base_type(nested)})"
+  defp base_type({:list, element}), do: "Array(Nullable(#{base_type(element)}))"
   defp base_type(_other), do: "String"
 
   @doc """
@@ -285,6 +293,11 @@ defmodule SmolqueryClickHouse.Format do
   defp tsv_line(values), do: [Enum.intersperse(values, "\t"), "\n"]
 
   defp tsv(@map_dtype, false, nil, _escape), do: "{}"
+  defp tsv({:list, _element}, false, nil, _escape), do: "[]"
+
+  defp tsv({:list, _element}, false, value, _escape) when is_list(value),
+    do: array_text(value)
+
   defp tsv(_dtype, _json?, nil, _escape), do: "\\N"
   defp tsv(_dtype, true, value, escape), do: escape.(json_text(value))
   defp tsv(@map_dtype, false, value, _escape) when is_map(value), do: map_text(value)
@@ -295,6 +308,18 @@ defmodule SmolqueryClickHouse.Format do
        do: escape.(json_text(value))
 
   defp tsv(_dtype, false, value, escape), do: escape.(text(value))
+
+  defp array_text(values) do
+    elements =
+      Enum.map_intersperse(values, ",", fn
+        nil -> "NULL"
+        nested when is_list(nested) -> array_text(nested)
+        text when is_binary(text) -> quoted(text)
+        other -> escape(text(other))
+      end)
+
+    ["[", elements, "]"]
+  end
 
   defp map_text(map) do
     entries =
@@ -342,6 +367,11 @@ defmodule SmolqueryClickHouse.Format do
   end
 
   defp json(@map_dtype, false, nil), do: "{}"
+  defp json({:list, _element}, false, nil), do: "[]"
+
+  defp json({:list, element}, false, value) when is_list(value),
+    do: ["[", Enum.map_intersperse(value, ",", &json(element, false, &1)), "]"]
+
   defp json(_dtype, _json?, nil), do: "null"
   defp json(_dtype, true, value), do: json_string(json_text(value))
   defp json({kind, 64}, false, value) when kind in [:s, :u], do: [?", text(value), ?"]
@@ -371,6 +401,10 @@ defmodule SmolqueryClickHouse.Format do
   defp utf8(value), do: value
 
   defp binary(@map_dtype, false, nil), do: <<0>>
+  defp binary({:list, _element}, false, nil), do: <<0>>
+
+  defp binary({:list, element}, false, value) when is_list(value),
+    do: [leb128(length(value)), Enum.map(value, &binary(element, false, &1))]
 
   defp binary(@map_dtype, false, value) when is_map(value) do
     [

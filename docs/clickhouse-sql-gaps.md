@@ -73,9 +73,10 @@ The Postgres edge solved the same problem for its clients with an emulated
 | `GLOBAL IN` / `GLOBAL JOIN` | **Parse error** | Distributed-only in ClickHouse |
 | `FINAL` | **Silently accepted** | `FROM t FINAL` parses with `FINAL` read as the table's *alias*, so the query runs and any `t.column` reference then fails. After an explicit alias it is a parse error. There are no merge semantics here to skip, so accepting and dropping it is the right fix |
 | Backtick-quoted identifiers | Works (T-481) | Rewritten to double quotes on the edge |
-| Backslash escapes in literals (`'it\'s'`) | Works (T-481) | Rewritten to the characters they stand for. `LIKE '%a\_b%'` keeps its backslash, but DuckDB's `LIKE` has no default escape character, so `\_` matches a backslash and any character, not a literal `_` — differs |
-| Parametric aggregates: `quantile(0.5)(x)`, `topK(1)(x)` | **Parse error** | The two-argument `quantile(x, 0.5)` works |
-| `any(x)` | **Parse error** | `ANY` is a keyword in DuckDB; `any_value(x)` is the equivalent |
+| Backslash escapes in literals (`'it\'s'`) | Works (T-481) | Rewritten to the characters they stand for. `LIKE '%a\_b%'` keeps its backslash, and the edge adds `ESCAPE '\'` so it means what it does in ClickHouse (T-496) |
+| Parametric aggregates: `quantile(0.5)(x)`, `quantileIf`, `groupUniqArray(20)(x)`, `groupUniqArrayArray`, `groupArray` | Works (T-496) | Rewritten to `f(args, params)`; `quantile` is the engine's interpolating `quantile_cont`. `topK(1)(x)`, `quantiles(...)(x)` and `histogram(n)(x)` are still parse errors |
+| `any(x)`, `isNull(x)`, `isNotNull(x)` | Works (T-496) | Words of the parser's own; renamed to `any_value` and to macros |
+| A bare `default.table` | Works (T-496) | `default` is a reserved word to the engine; the edge quotes it |
 | `position(haystack, needle)` | **Parse error** | DuckDB takes `position(needle IN haystack)` |
 | Table functions: `numbers()`, `remote()`, `url()`, `s3()`, `file()` | **Refused** | The planner refuses table functions it does not know. `numbers()` is trivial; the remote ones are deliberately out of scope |
 
@@ -102,7 +103,7 @@ function a shim would call.
 
 | ClickHouse | Status |
 |---|---|
-| `Array(T)`, `Tuple(...)`, `Nested` | **Missing** — blocks Logflare's metrics and traces tables; `VARIANT` is the likely store |
+| `Array(T)`, `Tuple(...)`, `Nested` | **Missing** as a column type — blocks Logflare's metrics and traces tables; `VARIANT` is the likely store. A computed list answers as `Array(Nullable(T))` (T-496) |
 | `Enum8` / `Enum16` | **Missing** — decode as the integer, or map to the label |
 | `LowCardinality(T)` | Unwrapped on ingest; no read-side meaning |
 | `FixedString(N)` | Read as `STRING` on ingest |

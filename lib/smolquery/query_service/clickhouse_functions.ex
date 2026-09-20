@@ -32,6 +32,14 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
     a number (`notEmpty(x) = 1`). `mapContains` answers a boolean.
   - `indexHint(x)` is `TRUE`: it only ever told ClickHouse which index to
     read, and the predicate beside it still filters.
+  - `groupUniqArray`, `groupUniqArrayArray`, `groupArray` and their `-If`
+    forms take their size as a last argument: the edge writes ClickHouse's
+    `groupUniqArray(20)(x)` as `groupUniqArray(x, 20)`. Which values a
+    capped one keeps is not ClickHouse's choice, in either engine.
+  - `getSubcolumn(map, 'keys')` and `'values'` are a map's two halves; no
+    other subcolumn exists here.
+  - `clickhouse_isNull` and `clickhouse_isNotNull` stand in for `isNull`
+    and `isNotNull`, which the parser keeps as words of its own.
   - The `-OrZero`, `-OrNull` and `-OrDefault` casts answer `0`, `NULL` and
     `0` for a value that does not parse, as ClickHouse's do.
   """
@@ -95,6 +103,23 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"avgIf(x, c)", "avg(x) FILTER (WHERE c)"},
             {"minIf(x, c)", "min(x) FILTER (WHERE c)"},
             {"maxIf(x, c)", "max(x) FILTER (WHERE c)"},
+            {"quantileIf(x, c, p)", "quantile_cont(x, p) FILTER (WHERE c)"},
+            {"groupArray(x)", "list(x), (x, n) AS list_slice(list(x), 1, n)"},
+            {"groupArrayIf(x, c)",
+             "list(x) FILTER (WHERE c), (x, c, n) AS list_slice(list(x) FILTER (WHERE c), 1, n)"},
+            {"groupUniqArray(x)",
+             "list(DISTINCT x), (x, n) AS list_slice(list(DISTINCT x), 1, n)"},
+            {"groupUniqArrayIf(x, c)",
+             "list(DISTINCT x) FILTER (WHERE c), " <>
+               "(x, c, n) AS list_slice(list(DISTINCT x) FILTER (WHERE c), 1, n)"},
+            {"groupUniqArrayArray(x)",
+             "list_distinct(flatten(list(x))), " <>
+               "(x, n) AS list_slice(list_distinct(flatten(list(x))), 1, n)"},
+            {"getSubcolumn(m, part)",
+             "CASE part WHEN 'keys' THEN map_keys(m) WHEN 'values' THEN map_values(m) END"},
+            {"lowCardinalityKeys(x)", "x"},
+            {"clickhouse_isNull(x)", "x IS NULL"},
+            {"clickhouse_isNotNull(x)", "x IS NOT NULL"},
             {"uniq(x)", "count(DISTINCT x)"},
             {"uniqExact(x)", "count(DISTINCT x)"}
           ] ++

@@ -22,6 +22,24 @@ defmodule SmolqueryClickHouse.Rewrite do
     nothing of it reaches the statement's code but a name from a fixed table
     or a `DECIMAL(p, s)` whose two numbers were checked to be numbers.
 
+  - **A parametric aggregate, `f(params)(args)`.** HyperDX's filters sidebar
+    asks for `groupUniqArray(20)(x)` and its charts for `quantile(0.95)(x)`.
+    The parameters move behind the arguments, `f(args, params)`, which is
+    the shape a macro or the engine's own function takes. `quantile` is the
+    engine's `quantile_cont`, since ClickHouse's interpolates. Only the
+    names in `@parametric` are read this way: `f(a)(b)` means nothing else
+    to either dialect.
+  - **`LIKE` with a backslash in its pattern.** ClickHouse's `LIKE` escapes
+    with a backslash, and HyperDX writes `LIKE lower('%user\_id%')` for a
+    term with an underscore. The engine's `LIKE` has no escape character
+    unless told, so `ESCAPE '\'` is added after such a pattern — a literal,
+    or a literal inside `lower(...)` or `upper(...)`.
+  - **A bare `default.`** ClickHouse's default database is named by a word
+    the engine reserves; it is quoted.
+  - **`isNull(x)`, `isNotNull(x)` and `any(x)`.** `ISNULL` and `ANY` are the
+    parser's own words, so the calls are renamed to macros and to
+    `any_value`.
+
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
   are whole tokens that are never read as code.
@@ -32,6 +50,24 @@ defmodule SmolqueryClickHouse.Rewrite do
   @piece ~r/[A-Za-z_][A-Za-z0-9_]*|[(),]/
 
   @clause_ends ~w(having limit union window qualify settings format intersect except offset fetch)
+
+  @parametric %{
+    "quantile" => "quantile_cont",
+    "quantileexact" => "quantile_disc",
+    "quantileif" => "quantileIf",
+    "median" => "median",
+    "groupuniqarray" => "groupUniqArray",
+    "groupuniqarrayif" => "groupUniqArrayIf",
+    "groupuniqarrayarray" => "groupUniqArrayArray",
+    "grouparray" => "groupArray",
+    "grouparrayif" => "groupArrayIf"
+  }
+
+  @renamed %{
+    "isnull" => "clickhouse_isNull",
+    "isnotnull" => "clickhouse_isNotNull",
+    "any" => "any_value"
+  }
 
   @types %{
     "int8" => "TINYINT",
@@ -121,6 +157,41 @@ defmodule SmolqueryClickHouse.Rewrite do
     end
   end
 
+  defp walk([{:word, _text, "default"} = word, {:other, "." <> _after} = dot | rest], state, acc),
+    do: walk([dot | rest], %{state | last: "default"}, [quote_unless_member(word, state) | acc])
+
+  defp walk([{:word, text, lower}, :open | rest], state, acc)
+       when is_map_key(@parametric, lower) do
+    with {:ok, params, [:open | after_params]} <- group(rest),
+         {:ok, args, after_args} <- group(after_params) do
+      call = [
+        Map.fetch!(@parametric, lower),
+        "(",
+        walk(args, inner(state), []),
+        ", ",
+        walk(params, inner(state), []),
+        ")"
+      ]
+
+      walk(after_args, %{state | last: nil}, [call | acc])
+    else
+      _ordinary_call -> walk([:open | rest], %{state | last: lower}, [text | acc])
+    end
+  end
+
+  defp walk([{:word, _text, lower}, :open | rest], state, acc) when is_map_key(@renamed, lower),
+    do: walk([:open | rest], %{state | last: lower}, [Map.fetch!(@renamed, lower) | acc])
+
+  defp walk([{:word, text, lower} | rest], state, acc) when lower in ["like", "ilike"] do
+    case pattern(rest) do
+      {:ok, pattern, after_pattern} ->
+        walk(after_pattern, %{state | last: nil}, [" ESCAPE '\\'", pattern, text | acc])
+
+      :error ->
+        walk(rest, %{state | last: lower}, [text | acc])
+    end
+  end
+
   defp walk([{:word, text, "as"} | rest], %{depth: depth, clauses: [depth | _]} = state, acc) do
     case aliased(rest) do
       {:ok, after_alias} -> walk(after_alias, state, trim_space(acc))
@@ -168,6 +239,38 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   defp walk([{_kind, text} | rest], state, acc),
     do: walk(rest, %{state | last: nil}, [text | acc])
+
+  defp quote_unless_member({:word, text, _lower}, %{last: "."}), do: text
+  defp quote_unless_member({:word, _text, _lower}, _state), do: ~s("default")
+
+  defp inner(state), do: %{state | depth: state.depth + 1, last: nil}
+
+  defp group(pieces), do: group(pieces, 1, [])
+
+  defp group([], _depth, _acc), do: :error
+  defp group([:close | rest], 1, acc), do: {:ok, Enum.reverse(acc), rest}
+  defp group([:close | rest], depth, acc), do: group(rest, depth - 1, [:close | acc])
+  defp group([:open | rest], depth, acc), do: group(rest, depth + 1, [:open | acc])
+  defp group([piece | rest], depth, acc), do: group(rest, depth, [piece | acc])
+
+  defp pattern(pieces) do
+    case drop_space(pieces) do
+      [{:string, literal} | rest] ->
+        escaped(literal, [" ", literal], rest)
+
+      [{:word, text, lower}, :open | rest] when lower in ["lower", "upper"] ->
+        with {:ok, literal, [:close | after_close]} <- literal_then_close(rest) do
+          escaped(literal, [" ", text, "(", literal, ")"], after_close)
+        end
+
+      _expression ->
+        :error
+    end
+  end
+
+  defp escaped(literal, written, rest) do
+    if String.contains?(literal, "\\"), do: {:ok, written, rest}, else: :error
+  end
 
   defp enter_clause(%{depth: depth, clauses: clauses} = state),
     do: %{state | clauses: [depth | Enum.drop_while(clauses, &(&1 >= depth))], last: "by"}

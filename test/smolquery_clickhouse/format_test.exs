@@ -230,4 +230,34 @@ defmodule SmolqueryClickHouse.FormatTest do
                |> IO.iodata_to_binary()
     end
   end
+
+  describe "an array (T-496)" do
+    @array_columns [{"keys", {:list, :string}, false}, {"ns", {:list, {:s, 64}}, false}]
+    @array_rows [%{"keys" => ["a", "it's"], "ns" => [1, nil]}, %{"keys" => nil, "ns" => []}]
+
+    test "is typed Array(Nullable(T)), and a list of lists Array(Array(...))" do
+      assert Format.type_name({:list, :string}, false) == "Array(Nullable(String))"
+
+      assert Format.type_name({:list, {:list, {:f, 64}}}, false) ==
+               "Array(Array(Nullable(Float64)))"
+    end
+
+    test "is a JSON array, with a NULL one empty" do
+      assert encode(:json_each_row, @array_columns, @array_rows) ==
+               ~s|{"keys":["a","it's"],"ns":["1",null]}\n{"keys":[],"ns":[]}\n|
+    end
+
+    test "is bracketed and quoted in a tab-separated row" do
+      assert encode(:tsv, @array_columns, @array_rows) == "['a','it\\'s']\t[1,NULL]\n[]\t[]\n"
+    end
+
+    test "is a length and its nullable elements in RowBinary" do
+      body =
+        encode(:row_binary_with_names_and_types, [{"keys", {:list, :string}, false}], [
+          %{"keys" => ["a", nil]}
+        ])
+
+      assert String.ends_with?(body, <<2, 0, 1, ?a, 1>>)
+    end
+  end
 end

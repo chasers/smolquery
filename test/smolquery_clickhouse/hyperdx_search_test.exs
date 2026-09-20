@@ -72,7 +72,8 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
         "Timestamp" => NaiveDateTime.add(@first, i),
         "ServiceName" => if(rem(i, 2) == 0, do: "api", else: "worker"),
         "SeverityText" => if(error?, do: "error", else: "info"),
-        "Body" => if(error?, do: "payment failed, id=#{i}", else: "user login ok id=#{i}"),
+        "Body" =>
+          if(error?, do: "payment failed, id=#{i} user_id=u#{i}", else: "user login ok id=#{i}"),
         "LogAttributes" => %{"http.status" => if(error?, do: "500", else: "200")}
       }
     end
@@ -134,7 +135,7 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
              "2026-09-19T10:11:00.000000Z",
              "api",
              "error",
-             "payment failed, id=0"
+             "payment failed, id=0 user_id=u0"
            ]
   end
 
@@ -179,5 +180,22 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
 
   test "field, existence and map-key filters count the rows they name", context do
     assert [%{"count()" => "30"}] = json(context, "count_field_filters")["data"]
+  end
+
+  test "the filters sidebar: a map's keys and each field's values (T-496)", context do
+    assert [%{"keysArr" => ["http.status"]}] = json(context, "map_keys")["data"]
+
+    assert %{"meta" => meta, "data" => [values]} = json(context, "key_values")
+
+    assert Enum.map(meta, & &1["type"]) == ["Array(Nullable(String))", "Array(Nullable(String))"]
+    assert Enum.sort(values["param0"]) == ["api", "worker"]
+    assert Enum.sort(values["param1"]) == ["error", "info"]
+  end
+
+  test "a term with an underscore matches it, not any character (T-496)", context do
+    assert [_names, _types | rows] = lines(context, "rows_underscore_term")
+
+    assert Enum.count(rows) == 30
+    assert Enum.all?(rows, fn [_ts, _service, _severity, body] -> body =~ "user_id=" end)
   end
 end

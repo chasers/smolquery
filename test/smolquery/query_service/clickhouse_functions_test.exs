@@ -163,4 +163,37 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert one(engine, "mapKeys(MAP {'a': 'b'})") == ["a"]
     end
   end
+
+  describe "what HyperDX's filters sidebar asks (T-496)" do
+    test "map keys, as the edge writes groupUniqArrayArray(1000)(keys)", %{engine: engine} do
+      sql =
+        "WITH sampledKeys as (SELECT getSubcolumn(attrs, 'keys') AS keys FROM logs LIMIT 3000000) " <>
+          "SELECT groupUniqArrayArray(keys, 1000) as keysArr FROM sampledKeys"
+
+      assert rows(engine, sql) == [%{"keysArr" => ["k8s.pod.name"]}]
+    end
+
+    test "a field's values, capped", %{engine: engine} do
+      assert [%{"v" => values}] = rows(engine, "SELECT groupUniqArray(svc, 2) AS v FROM logs")
+      assert Enum.count(values) == 2
+
+      assert [%{"v" => all}] = rows(engine, "SELECT groupUniqArray(svc) AS v FROM logs")
+      assert Enum.sort(all) == ["svc0", "svc1", "svc2"]
+
+      assert rows(engine, "SELECT groupUniqArrayIf(svc, n < 1, 5) AS v FROM logs") == [
+               %{"v" => ["svc0"]}
+             ]
+
+      assert rows(engine, "SELECT groupArray(n, 3) AS v FROM logs WHERE n < 10") == [
+               %{"v" => [0, 1, 2]}
+             ]
+    end
+
+    test "null checks and a conditional quantile", %{engine: engine} do
+      assert one(engine, "clickhouse_isNull(NULL) AND clickhouse_isNotNull(1)")
+      assert rows(engine, "SELECT quantileIf(n, n < 11, 0.5) AS q FROM logs") == [%{"q" => 5.0}]
+      assert one(engine, "getSubcolumn(MAP {'a': 'b'}, 'values')") == ["b"]
+      assert one(engine, "lowCardinalityKeys('x')") == "x"
+    end
+  end
 end

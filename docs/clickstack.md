@@ -5,12 +5,21 @@ log and trace UI, on top of ClickHouse. HyperDX can read a smolquery table in
 ClickHouse's place, through the `:clickhouse` edge ([clickhouse.md](clickhouse.md)).
 This page is the recipe, and the list of what works.
 
-> **How this was checked.** Every statement HyperDX sends to open its Search page is a
-> fixture (`test/support/fixtures/clickstack/hyperdx_search.json`), taken from HyperDX's
-> source (`hyperdxio/hyperdx @ c42dda8`, 2026-09-19) and run against real rows in
-> `test/smolquery_clickhouse/hyperdx_search_test.exs`. A live HyperDX has **not** been
-> pointed at smolquery yet: no container runs on the dev box. The first real run will
-> find what the source did not show; T-480 is how those statements get recorded.
+> **How this was checked.** Two ways, neither of them the browser.
+>
+> 1. HyperDX's own code was run against a smolquery node (2026-09-20,
+>    `hyperdxio/hyperdx @ c42dda8`): its SQL generator, its metadata reader and its
+>    ClickHouse client wrapper, over the real `@clickhouse/client`. `scripts/hyperdx-probe/`
+>    is that run, and says how to repeat it. It reads the source, lists fields and map
+>    keys, runs eleven Lucene searches, the histogram and the filters sidebar's values:
+>    17 of 17 answer. Five chart configurations through its chart builder answer too.
+> 2. The statements it sent are a fixture
+>    (`test/support/fixtures/clickstack/hyperdx_search.json`) run against real rows in
+>    `test/smolquery_clickhouse/hyperdx_search_test.exs`, so they keep working.
+>
+> The HyperDX **UI and API server have not** been pointed at smolquery: no container
+> runs on the dev box. That first run will find what the library did not show; T-480 is
+> how those statements get recorded.
 
 ## Scope
 
@@ -135,10 +144,11 @@ services:
 | Search: histogram by severity | Works |
 | Search: a term (`error`), a phrase, a negation | Works; a term is a whole token, found whatever its case |
 | Search: `field:value`, `field:"exact"`, `field:*`, a map key (`LogAttributes.http.status:500`), a number or a range | Works |
-| Search: a term with `_` or `%` in it | **Differs.** HyperDX escapes them with a backslash for `LIKE`, and the engine's `LIKE` has no default escape character (T-496) |
-| Filters sidebar (values per field) | **Not yet.** Parametric aggregates, `groupUniqArray(20)(x)` (T-496) |
-| Row click (the side panel) | **Not yet.** `isNull`, `JSONExtract`, `WITH expr AS alias` (T-496) |
-| Charts beyond the histogram: `quantile(0.95)(x)`, formulas | **Not yet** (T-496) |
+| Search: a term with `_` or `%` in it | Works: the edge gives `LIKE` the backslash escape ClickHouse assumes |
+| Field list, map keys, and the filters sidebar's values per field | Works: `groupUniqArray(20)(x)` and its kin are rewritten, and answer as `Array` |
+| Charts: `quantile(0.95)(x)` by a group, `avg`, `max`, a filtered `count` and `sum`, `count(DISTINCT x)` | Works, through HyperDX's chart builder |
+| Row click (the side panel) | **Partly.** `isNull` works; `JSONExtract(s, 'Map(...)')`, `toJSONString` and `WITH expr AS alias` do not yet |
+| A source whose select uses `x as y` | **Not yet.** `WITH (expr) AS alias` |
 | Alerts | **Not yet.** `CSV` output |
 | Traces, service map, sessions, metrics | **Not yet** (T-501) |
 | ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
@@ -153,6 +163,11 @@ services:
   path. `hasToken` here scans; there is no token index behind it.
 - `system.settings` is empty, so HyperDX sends none of its optimization settings.
 - Timestamps are UTC.
+- An expression with no alias is named as the engine writes it, not as ClickHouse does:
+  `quantile_cont(tofloat64ordefault(tostring(x)), 0.95)`, where ClickHouse answers
+  `quantile(0.95)(toFloat64OrDefault(toString(x)))`. Only `count()` is renamed, since
+  HyperDX looks that one up by name. Whether its charts read any other column by name
+  is not known until the UI runs.
 
 When something fails, the statement and the error are in HyperDX's UI: it prints the
 rendered SQL beside the message. [clickhouse-sql-gaps.md](clickhouse-sql-gaps.md) says
