@@ -38,7 +38,8 @@ defmodule SmolqueryClickHouse.Rewrite do
     the engine reserves; it is quoted.
   - **`isNull(x)`, `isNotNull(x)` and `any(x)`.** `ISNULL` and `ANY` are the
     parser's own words, so the calls are renamed to macros and to
-    `any_value`.
+    `any_value`. An `ANY(` after a comparison operator is the quantifier both
+    dialects have, `x = ANY(SELECT ...)`, and is left alone.
 
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
@@ -179,8 +180,11 @@ defmodule SmolqueryClickHouse.Rewrite do
     end
   end
 
-  defp walk([{:word, _text, lower}, :open | rest], state, acc) when is_map_key(@renamed, lower),
-    do: walk([:open | rest], %{state | last: lower}, [Map.fetch!(@renamed, lower) | acc])
+  defp walk([{:word, text, lower}, :open | rest], state, acc) when is_map_key(@renamed, lower) do
+    name = if quantifier?(lower, acc), do: text, else: Map.fetch!(@renamed, lower)
+
+    walk([:open | rest], %{state | last: lower}, [name | acc])
+  end
 
   defp walk([{:word, text, lower} | rest], state, acc) when lower in ["like", "ilike"] do
     case pattern(rest) do
@@ -242,6 +246,15 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   defp quote_unless_member({:word, text, _lower}, %{last: "."}), do: text
   defp quote_unless_member({:word, _text, _lower}, _state), do: ~s("default")
+
+  defp quantifier?("any", acc) do
+    case Enum.find(acc, &(not is_binary(&1) or String.trim(&1) != "")) do
+      text when is_binary(text) -> String.ends_with?(String.trim_trailing(text), ["=", "<", ">"])
+      _call_or_nothing -> false
+    end
+  end
+
+  defp quantifier?(_name, _acc), do: false
 
   defp inner(state), do: %{state | depth: state.depth + 1, last: nil}
 

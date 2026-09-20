@@ -161,4 +161,18 @@ defmodule SmolqueryClickHouse.RewriteTest do
                "SELECT any_value(x), clickhouse_isNull(y), clickhouse_isNotNull(z) FROM t WHERE x = ANY (SELECT 1)"
     end
   end
+
+  test "a quantified comparison keeps its ANY, with or without a space (review of T-496)" do
+    for sql <- [
+          "SELECT 1 WHERE x = ANY(SELECT y FROM u)",
+          "SELECT 1 WHERE x = any (SELECT y FROM u)",
+          "SELECT 1 WHERE x <> ANY([1, 2]) AND y >= ANY(SELECT 1)",
+          "SELECT 1 WHERE x IN (1) AND z < ANY(SELECT 2)"
+        ] do
+      assert Rewrite.call(sql) == sql
+    end
+
+    assert Rewrite.call("SELECT any(x) FROM t WHERE y = ANY(SELECT 1)") ==
+             "SELECT any_value(x) FROM t WHERE y = ANY(SELECT 1)"
+  end
 end

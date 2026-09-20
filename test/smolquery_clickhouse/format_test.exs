@@ -260,4 +260,34 @@ defmodule SmolqueryClickHouse.FormatTest do
       assert String.ends_with?(body, <<2, 0, 1, ?a, 1>>)
     end
   end
+
+  describe "a list of structs is not an array (review of T-496)" do
+    @entries {:list, {:struct, [{"key", {:s, 32}}, {"value", {:s, 32}}]}}
+    @struct_columns [{"im", @entries, false}]
+    @struct_rows [%{"im" => [%{"key" => 1, "value" => 2}]}, %{"im" => nil}]
+
+    test "answers as a String holding JSON, as it did before arrays" do
+      assert Format.type_name(@entries, false) == "Nullable(String)"
+
+      assert encode(:json_each_row, @struct_columns, @struct_rows) ==
+               ~s|{"im":"[{\\"key\\":1,\\"value\\":2}]"}\n{"im":null}\n|
+
+      assert encode(:tsv, @struct_columns, @struct_rows) == ~s|[{"key":1,"value":2}]\n\\N\n|
+    end
+
+    test "inside an array it is a nullable String, in the type and in RowBinary alike" do
+      dtype = {:list, @entries}
+
+      assert Format.type_name(dtype, false) == "Array(Nullable(String))"
+
+      body =
+        encode(:row_binary_with_names_and_types, [{"a", dtype, false}], [
+          %{"a" => [[%{"key" => 1, "value" => 2}]]}
+        ])
+
+      json = ~s|[{"key":1,"value":2}]|
+
+      assert String.ends_with?(body, <<1, 0, byte_size(json)>> <> json)
+    end
+  end
 end

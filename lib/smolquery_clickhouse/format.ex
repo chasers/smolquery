@@ -39,6 +39,7 @@ defmodule SmolqueryClickHouse.Format do
   | `{:decimal, p, s}` | `Decimal(p, s)` |
   | `MAP(STRING, STRING)` | `Map(String, String)` |
   | a list | `Array(Nullable(T))`, and `Array(Array(...))` for a list of lists |
+  | a list of structs, such as a map whose values are not strings | `String`, holding JSON |
   | `VARIANT`, a struct, anything else | `String`, holding JSON or text |
 
   ## Values
@@ -150,6 +151,7 @@ defmodule SmolqueryClickHouse.Format do
   @spec type_name(term(), boolean()) :: String.t()
   def type_name(_dtype, true), do: "Nullable(String)"
   def type_name(@map_dtype, false), do: "Map(String, String)"
+  def type_name({:list, {:struct, _fields}}, false), do: "Nullable(String)"
   def type_name({:list, _element} = dtype, false), do: base_type(dtype)
   def type_name(dtype, false), do: "Nullable(" <> base_type(dtype) <> ")"
 
@@ -164,9 +166,13 @@ defmodule SmolqueryClickHouse.Format do
   defp base_type({:datetime, _precision, _zone}), do: "DateTime64(6, 'UTC')"
   defp base_type(:date), do: "Date32"
   defp base_type({:decimal, precision, scale}), do: "Decimal(#{precision}, #{scale})"
-  defp base_type({:list, {:list, _element} = nested}), do: "Array(#{base_type(nested)})"
-  defp base_type({:list, element}), do: "Array(Nullable(#{base_type(element)}))"
+  defp base_type({:list, {:struct, _fields}}), do: "String"
+  defp base_type({:list, element}), do: "Array(#{element_type(element)})"
   defp base_type(_other), do: "String"
+
+  defp element_type({:list, {:struct, _fields}}), do: "Nullable(String)"
+  defp element_type({:list, _element} = nested), do: base_type(nested)
+  defp element_type(other), do: "Nullable(#{base_type(other)})"
 
   @doc """
   `rows` of `columns` in `format`.
@@ -293,6 +299,11 @@ defmodule SmolqueryClickHouse.Format do
   defp tsv_line(values), do: [Enum.intersperse(values, "\t"), "\n"]
 
   defp tsv(@map_dtype, false, nil, _escape), do: "{}"
+  defp tsv({:list, {:struct, _fields}}, false, nil, _escape), do: "\\N"
+
+  defp tsv({:list, {:struct, _fields}}, false, value, escape) when is_list(value),
+    do: escape.(json_text(value))
+
   defp tsv({:list, _element}, false, nil, _escape), do: "[]"
 
   defp tsv({:list, _element}, false, value, _escape) when is_list(value),
@@ -367,6 +378,11 @@ defmodule SmolqueryClickHouse.Format do
   end
 
   defp json(@map_dtype, false, nil), do: "{}"
+  defp json({:list, {:struct, _fields}}, false, nil), do: "null"
+
+  defp json({:list, {:struct, _fields}}, false, value) when is_list(value),
+    do: json_string(json_text(value))
+
   defp json({:list, _element}, false, nil), do: "[]"
 
   defp json({:list, element}, false, value) when is_list(value),
@@ -401,6 +417,11 @@ defmodule SmolqueryClickHouse.Format do
   defp utf8(value), do: value
 
   defp binary(@map_dtype, false, nil), do: <<0>>
+  defp binary({:list, {:struct, _fields}}, false, nil), do: <<1>>
+
+  defp binary({:list, {:struct, _fields}}, false, value) when is_list(value),
+    do: [0, binary_string(json_text(value))]
+
   defp binary({:list, _element}, false, nil), do: <<0>>
 
   defp binary({:list, element}, false, value) when is_list(value),
