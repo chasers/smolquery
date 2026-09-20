@@ -54,6 +54,21 @@ defmodule Smolquery.QueryService.ClientTest do
       end
     end
 
+    test "only the statement's own result says which columns are never NULL: a DESCRIBE's frame is another shape (review of T-510)" do
+      name = start_service()
+      sql = "SELECT 1 AS a, 2 AS b, 3 AS c, 4 AS d, 5 AS e, 6 AS f"
+
+      assert {:ok, %{non_null_columns: [true, true, true, true, true, true]}, _frame} =
+               Client.query(name, sql)
+
+      assert {:ok, %{non_null_columns: :unknown}, described} =
+               Client.query(name, sql, explain: :describe)
+
+      assert DataFrame.n_columns(described) == 6
+
+      assert {:ok, %{non_null_columns: :unknown}, nil} = Client.query(name, sql, explain: :plan)
+    end
+
     test "read_engine_threads sets the job engine's DuckDB threads (T-279)" do
       name = start_service(read_engine_threads: 2)
 

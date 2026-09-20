@@ -301,7 +301,7 @@ defmodule SmolqueryClickHouse.Format do
       leb128(length(columns)),
       Enum.map(columns, fn {name, _dtype, _json?} -> binary_string(name) end),
       Enum.map(type_names(columns, required), &binary_string/1),
-      Enum.map(rows, fn row -> Enum.map(columns, &binary_cell(&1, row, required)) end)
+      binary_rows(columns, rows, required)
     ]
   end
 
@@ -338,10 +338,15 @@ defmodule SmolqueryClickHouse.Format do
     ]
   end
 
-  defp binary_cell({name, dtype, json?} = column, row, required) do
-    if column_type(column, required) == type_name(dtype, json?),
-      do: binary(dtype, json?, row[name]),
-      else: binary_value(dtype, row[name])
+  defp binary_rows(columns, rows, required) do
+    writers =
+      Enum.map(columns, fn {name, dtype, json?} = column ->
+        if column_type(column, required) == type_name(dtype, json?),
+          do: {name, &binary(dtype, json?, &1)},
+          else: {name, &binary_value(dtype, &1)}
+      end)
+
+    Enum.map(rows, fn row -> Enum.map(writers, fn {name, write} -> write.(row[name]) end) end)
   end
 
   defp type_names(columns, required),

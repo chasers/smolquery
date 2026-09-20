@@ -20,6 +20,8 @@ defmodule Smolquery.QueryService.Nullability do
       materialized one that stores its type's default
       (`Smolquery.Schema.computed_expression/1`, T-515) — reached through any
       depth of subquery or CTE whose own output is non-null by this rule
+    * a relation's column alias list (`FROM t AS x(a, b)`, `WITH c(a, b) AS`)
+      renames its columns in order, and a name is resolved under the alias
     * a plain `CAST` of a non-null expression: a cast that fails is an error,
       not a `NULL`; `TRY_CAST` may be `NULL`
     * a function this module lists as answering `NULL` only for a `NULL`
@@ -32,7 +34,8 @@ defmodule Smolquery.QueryService.Nullability do
       non-null
 
   Everything else may be `NULL`: a function not listed, an outer join's
-  columns, a set operation, grouping sets, a `*` over something whose columns
+  columns, a `POSITIONAL JOIN`'s (the shorter side is padded with `NULL`,
+  though DuckDB calls the join inner), a set operation, grouping sets, a `*` over something whose columns
   are not known. Wrong in that direction costs a `Nullable(...)` a client did
   not need; wrong in the other would put a `NULL` under a type that cannot
   hold one, so the edge also checks the rows it is about to send
@@ -60,14 +63,13 @@ defmodule Smolquery.QueryService.Nullability do
     fromunixtimestamp fromunixtimestamp64milli fromunixtimestamp64micro fromunixtimestamp64nano
     tounixtimestamp tounixtimestamp64milli tounixtimestamp64micro tounixtimestamp64nano
     toint64 toint32 touint64 touint32 touint8 tofloat64 tofloat32 tostring
-    toint64orzero toint32orzero touint64orzero touint32orzero touint8orzero
-    tofloat64orzero tofloat32orzero tofloat64ordefault
-    notempty empty indexhint clickhouse_isnull clickhouse_isnotnull lowcardinalitykeys
+    lowcardinalitykeys
   )
 
   @always ~w(count count_star uniq uniqexact notempty empty indexhint
     clickhouse_isnull clickhouse_isnotnull toint64orzero toint32orzero touint64orzero
     touint32orzero touint8orzero tofloat64orzero tofloat32orzero tofloat64ordefault)
+  @counts ~w(count count_star uniq uniqexact)
 
   @grouped ~w(min max sum avg any_value first last arg_min arg_max)
 
@@ -122,7 +124,11 @@ defmodule Smolquery.QueryService.Nullability do
   defp ctes(%{"cte_map" => %{"map" => entries}}, schemas, outer) when is_list(entries) do
     Enum.reduce(entries, %{}, fn %{"key" => name} = entry, known ->
       inner = get_in(entry, ["value", "query", "node"])
-      Map.put(known, String.downcase(name), outputs(inner, schemas, Map.merge(outer, known)))
+
+      columns =
+        inner |> outputs(schemas, Map.merge(outer, known)) |> renamed(entry["value"]["aliases"])
+
+      Map.put(known, String.downcase(name), columns)
     end)
   end
 
@@ -166,21 +172,31 @@ defmodule Smolquery.QueryService.Nullability do
 
     columns =
       case {table["schema_name"], Map.fetch(ctes, name)} do
-        {schema, {:ok, outputs}} when schema in [nil, ""] -> named(outputs)
+        {schema, {:ok, outputs}} when schema in [nil, ""] -> outputs
         {schema, _not_a_cte} -> declared(schemas, schema, table["table_name"])
       end
 
-    [%{name: alias, columns: columns}]
+    [%{name: alias, columns: renamed(columns, table["column_name_alias"])}]
   end
 
   defp relations(%{"type" => "SUBQUERY"} = subquery, schemas, ctes) do
     outputs = outputs(get_in(subquery, ["subquery", "node"]), schemas, ctes)
 
-    [%{name: relation_alias(subquery, nil), columns: named(outputs)}]
+    [
+      %{
+        name: relation_alias(subquery, nil),
+        columns: renamed(outputs, subquery["column_name_alias"])
+      }
+    ]
   end
 
-  defp relations(%{"type" => "JOIN", "join_type" => "INNER"} = join, schemas, ctes),
-    do: Enum.flat_map([join["left"], join["right"]], &relations(&1, schemas, ctes))
+  defp relations(
+         %{"type" => "JOIN", "join_type" => "INNER", "ref_type" => kind} = join,
+         schemas,
+         ctes
+       )
+       when kind in ["REGULAR", "CROSS", "ASOF"],
+       do: Enum.flat_map([join["left"], join["right"]], &relations(&1, schemas, ctes))
 
   defp relations(%{"type" => "JOIN"} = join, schemas, ctes) do
     [join["left"], join["right"]]
@@ -195,8 +211,17 @@ defmodule Smolquery.QueryService.Nullability do
 
   defp relation_alias(_relation, default), do: default
 
-  defp named(:unknown), do: :unknown
-  defp named(outputs), do: outputs
+  defp renamed(:unknown, _aliases), do: :unknown
+  defp renamed(columns, aliases) when aliases in [nil, []], do: columns
+
+  defp renamed(columns, aliases) do
+    {given, kept} = Enum.split(columns, length(aliases))
+
+    given
+    |> Enum.zip(aliases)
+    |> Enum.map(fn {{_name, flag}, alias} -> {String.downcase(alias), flag} end)
+    |> Enum.concat(kept)
+  end
 
   defp nullable(:unknown), do: :unknown
   defp nullable(columns), do: Enum.map(columns, fn {name, _flag} -> {name, false} end)
@@ -258,7 +283,7 @@ defmodule Smolquery.QueryService.Nullability do
     filtered = match?(%{"class" => _some}, call["filter"])
 
     cond do
-      name in ~w(count count_star uniq uniqexact) -> true
+      name in @counts -> true
       filtered -> false
       name in @always -> true
       name in @grouped -> grouped and arguments_non_null?(call, scope, grouped)

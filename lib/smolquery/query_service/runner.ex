@@ -369,7 +369,7 @@ defmodule Smolquery.QueryService.Runner do
          result: result,
          scatter: scatter,
          json_columns: json_columns,
-         non_null: plan.non_null,
+         non_null: if(explain == nil, do: plan.non_null, else: :unknown),
          snapshot: plan.snapshot,
          hot_members: plan.hot_members,
          duration_ms: duration,

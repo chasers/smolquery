@@ -80,6 +80,34 @@ defmodule Smolquery.QueryService.NullabilityTest do
     assert columns("SELECT sum(id) FILTER (WHERE id > 1) FROM logs.events GROUP BY id") == [false]
   end
 
+  test "a column alias list renames a relation's columns, so a name is not resolved under the inner one (review of T-510)" do
+    assert columns(
+             "WITH c(id, other) AS (SELECT level AS x, id FROM logs.events) SELECT id, other FROM c"
+           ) ==
+             [false, true]
+
+    assert columns("SELECT a, b FROM logs.events AS x(a, b)") == [true, false]
+    assert columns("SELECT id FROM logs.events AS x(a, b)") == [false]
+
+    assert columns("SELECT id, x FROM (SELECT level, id FROM logs.events) AS s(id, x)") == [
+             false,
+             true
+           ]
+  end
+
+  test "a positional join pads its shorter side with NULL, though DuckDB calls it inner (review of T-510)" do
+    assert columns("SELECT e.id, o.id FROM logs.events e POSITIONAL JOIN logs.events o") ==
+             [false, false]
+
+    assert columns("SELECT e.id, o.id FROM logs.events e CROSS JOIN logs.events o") == [
+             true,
+             true
+           ]
+
+    assert columns("SELECT e.id, o.id FROM logs.events e ASOF JOIN logs.events o ON e.id >= o.id") ==
+             [true, true]
+  end
+
   test "what it cannot rule out may be NULL" do
     assert columns("SELECT e.id, o.id FROM logs.events e LEFT JOIN logs.events o ON e.id = o.id") ==
              [false, false]
