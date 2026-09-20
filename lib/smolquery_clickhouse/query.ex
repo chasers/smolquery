@@ -269,7 +269,7 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp answer(:rows, conn, runtime, statement, format, opts) do
-    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
+    case SystemCatalog.answer(runtime.name, statement, database(conn), opts) do
       {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
       :pass -> run(conn, runtime, statement, format, opts)
       {:error, exception} -> refuse(conn, runtime, exception)
@@ -277,7 +277,7 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp answer(:estimate, conn, runtime, statement, format, opts) do
-    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
+    case SystemCatalog.answer(runtime.name, statement, database(conn), opts) do
       {:ok, _frame} -> rows(conn, catalog_job(conn), estimate_frame({0, 0}), format)
       :pass -> estimate(conn, runtime, statement, format, opts)
       {:error, exception} -> refuse(conn, runtime, exception)

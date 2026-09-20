@@ -242,4 +242,68 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
     assert response.status == 200, response.resp_body
     assert [%{"total_rows" => 120}] = JSON.decode!(response.resp_body)["data"]
   end
+
+  describe "total_rows is the statement's own (review of T-507)" do
+    defp catalog(context, sql, query \\ %{}) do
+      response =
+        conn(:post, "/?" <> URI.encode_query(query), sql <> " FORMAT JSONCompact")
+        |> put_req_header("x-clickhouse-key", @password)
+        |> Router.call(context.name)
+
+      {response.status, response}
+    end
+
+    defp data(context, sql) do
+      {200, response} = catalog(context, sql)
+
+      JSON.decode!(response.resp_body)["data"]
+    end
+
+    test "one statement's counts are not the next statement's", context do
+      assert data(context, "SELECT total_rows FROM system.tables WHERE name = 'events'") == [
+               ["120"]
+             ]
+
+      assert data(context, "SELECT name, engine FROM system.tables WHERE name = 'events'") == [
+               ["events", "MergeTree"]
+             ]
+
+      {200, response} = catalog(context, "SELECT * FROM system.tables WHERE name = 'events'")
+      [row] = JSON.decode!(response.resp_body)["data"]
+      names = Enum.map(JSON.decode!(response.resp_body)["meta"], & &1["name"])
+
+      assert Enum.at(row, Enum.find_index(names, &(&1 == "total_rows"))) == nil
+    end
+
+    test "the tables counted are the rows the statement's own WHERE selects", context do
+      for where <- [
+            "database = 'analytics'",
+            "name LIKE 'eve%'",
+            "name != 'nothing'",
+            "database != 'system' AND name = 'events'",
+            "1 = 1"
+          ] do
+        assert data(context, "SELECT sum(total_rows) AS n FROM system.tables WHERE #{where}") == [
+                 [120]
+               ],
+               where
+      end
+
+      assert data(
+               context,
+               "SELECT sum(total_rows) AS n FROM system.tables WHERE name != 'events'"
+             ) == [[nil]]
+    end
+
+    test "a qualified or quoted total_rows, and a spaced or quoted table name, are read the same",
+         context do
+      for sql <- [
+            "SELECT t.total_rows FROM system.tables AS t WHERE t.name = 'events'",
+            ~s|SELECT "total_rows" FROM system.tables WHERE name = 'events'|,
+            ~s|SELECT total_rows FROM "system" . "tables" WHERE name = 'events'|
+          ] do
+        assert data(context, sql) == [["120"]], sql
+      end
+    end
+  end
 end

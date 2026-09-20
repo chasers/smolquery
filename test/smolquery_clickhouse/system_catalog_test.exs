@@ -313,23 +313,56 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
       end
     end
 
-    test "HyperDX's onboarding row count reads the table column, as ClickHouse names it", %{
-      name: name
-    } do
+    test "the table column, as ClickHouse names it, filters like name", %{name: name} do
       sql =
-        "SELECT sum(total_rows) as total_rows FROM {d:Identifier}.{t:Identifier} " <>
+        "SELECT count() AS n FROM {d:Identifier}.{t:Identifier} " <>
           "WHERE ((table = 'otel_logs' AND database = 'default')) FORMAT JSON"
 
       response = post(name, sql, %{"param_d" => "system", "param_t" => "tables"})
 
       assert response.status == 200, response.resp_body
-      assert [%{"total_rows" => _rows}] = JSON.decode!(response.resp_body)["data"]
+      assert [%{"n" => "1"}] = JSON.decode!(response.resp_body)["data"]
     end
 
     test "a quoted name that only looks like it is left to the query service", %{name: name} do
       response = post(name, ~s|SELECT * FROM "system"."tables", default.otel_logs|)
 
       refute response.status == 200
+    end
+  end
+
+  describe "a count that cannot be had (review of T-507)" do
+    test "is a retryable refusal, not a NULL the checklist reads as no data", %{name: name} do
+      {:ok, runtime} = Runtime.fetch(name)
+
+      Runtime.put(%{
+        runtime
+        | query_name: :"no_such_query_service_#{:erlang.unique_integer([:positive])}"
+      })
+
+      response =
+        post(name, "SELECT sum(total_rows) AS n FROM system.tables WHERE name = 'otel_logs'")
+
+      assert response.status == 503
+      assert get_resp_header(response, "retry-after") != []
+      assert response.resp_body =~ "default.otel_logs"
+    end
+
+    test "a statement that reads total_rows from more tables than it may count says so", %{
+      name: name,
+      catalog: catalog
+    } do
+      for i <- 1..33,
+          do:
+            :ok = Catalog.create_table(catalog, {"empty", "t#{i}"}, Schema.new!([{"id", :int64}]))
+
+      Process.sleep(1_100)
+
+      response =
+        post(name, "SELECT sum(total_rows) AS n FROM system.tables WHERE database = 'empty'")
+
+      assert response.status == 400
+      assert response.resp_body =~ "at most 32 tables"
     end
   end
 end

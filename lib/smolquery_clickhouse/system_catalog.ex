@@ -48,15 +48,32 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   onboarding checklist sums it to decide whether a source has any data. The
   catalog holds no such number: rows are in two tiers, and only the planner
   knows both. So a statement that reads `total_rows` has it filled in, for
-  the tables it names, by asking the query service for `count(*)` — which the
-  engine answers from file metadata, hot tier included, without a scan. The
-  tables it names are the string literals in it that are tables
-  (`table = 'otel_logs' AND database = 'default'`), at most
-  `@max_counted_tables`; every other row's `total_rows` is `NULL`, as it is
-  for a statement that does not read the column, such as a `SELECT *`. The
-  counts are fetched by the caller, before the server is asked, so a slow
-  count holds up its own request and not the catalog. `total_bytes` is
-  always `NULL`.
+  the rows it reads it from:
+
+  - **Which tables.** The statement's own `WHERE` says. Its `SELECT` list is
+    replaced by `database, name`, its grouping, ordering and limit dropped,
+    and the engine runs what is left, so `name != 'x'`, `name LIKE 'otel%'`
+    and `database = 'default'` each select what they say. That holds for one
+    `SELECT` over `system.tables` alone; any other shape gets no counts. More
+    than `@max_counted_tables` tables is a refusal that says so, never a
+    partial sum.
+  - **The count.** The query service plans `SELECT * FROM db.t` without
+    running it (`explain: :plan`), and the plan's sizes give the rows in both
+    tiers, hot included, with no scan. `@count_concurrency` run at a time, so
+    the counts do not take every job slot, each under the request's own
+    `max_execution_time`.
+  - **A count that cannot be had** — a full node, a timeout, a table the
+    query service cannot plan — refuses the statement, with `retry-after`.
+    A `NULL` there would be read as "this source has no data".
+  - **Whose counts.** The statement's alone. They are written into the
+    emulation's table for the one call that runs the statement and cleared
+    when it returns, so a `SELECT *` a moment later reads `NULL`, as the
+    docs say, and not what another client asked for.
+
+  The counts are fetched by the caller, between two calls to the server, so
+  a slow count holds up its own request and not the catalog. A statement
+  that does not read the column pays none of this. `total_bytes` is always
+  `NULL`.
 
   ## A name that arrives quoted
 
@@ -98,6 +115,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.Schema.Field
   alias Smolquery.Sql
   alias SmolqueryClickHouse.Errors
@@ -107,7 +125,8 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @call_timeout_ms 30_000
   @statement_timeout_ms 10_000
   @max_rows 10_000
-  @max_counted_tables 8
+  @max_counted_tables 32
+  @count_concurrency 2
 
   @lockdown ["SET enable_external_access = false", "SET lock_configuration = true"]
 
@@ -160,14 +179,16 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   """
   @spec answer(atom(), String.t(), String.t()) ::
           {:ok, DataFrame.t()} | :pass | {:error, Errors.t()}
-  def answer(name, statement, database) do
-    statement = unquoted_system(statement)
+  def answer(name, statement, database, opts \\ []) do
+    statement = statement |> Sql.tokens() |> unquote_names() |> Enum.map_join(&elem(&1, 1))
+    tokens = Sql.tokens(statement)
 
-    if mentions_catalog?(statement) do
+    if mentions_catalog?(tokens) do
       server = Runtime.system_catalog(name)
-      counts = row_counts(name, server, statement)
 
-      GenServer.call(server, {:answer, statement, database, counts}, @call_timeout_ms)
+      with {:ok, counts} <- row_counts(name, server, tokens, statement, opts) do
+        GenServer.call(server, {:answer, statement, database, counts}, @call_timeout_ms)
+      end
     else
       :pass
     end
@@ -175,15 +196,11 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     :exit, _reason -> {:error, unavailable()}
   end
 
-  defp unquoted_system(statement) do
-    statement
-    |> Sql.tokens()
-    |> unquote_names()
-    |> Enum.map_join(&elem(&1, 1))
+  defp unquote_names([{:quoted, ~s("system")}, {:code, dot} | rest]) do
+    if Regex.match?(~r/\A\s*\./, dot),
+      do: unquote_names([{:code, "system" <> dot} | rest]),
+      else: [{:quoted, ~s("system")} | unquote_names([{:code, dot} | rest])]
   end
-
-  defp unquote_names([{:quoted, ~s("system")}, {:code, "." <> _rest = dot} | rest]),
-    do: unquote_names([{:code, "system" <> dot} | rest])
 
   defp unquote_names([{:code, code} = database, {:quoted, quoted} = table | rest]) do
     with true <- Regex.match?(~r/(?<![\w."])system\s*\.\s*\z/i, code),
@@ -197,41 +214,62 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp unquote_names([token | rest]), do: [token | unquote_names(rest)]
   defp unquote_names([]), do: []
 
-  defp row_counts(name, server, statement) do
-    with true <- asks_for_rows?(statement),
+  defp row_counts(name, server, tokens, statement, opts) do
+    with true <- asks_for_rows?(tokens),
          {:ok, %Runtime{query_name: query_name}} <- Runtime.fetch(name),
-         refs when refs != [] <-
-           GenServer.call(server, {:named_tables, literals(statement)}, @call_timeout_ms) do
-      Map.new(refs, fn ref -> {ref, count(query_name, ref)} end)
+         {:ok, [_table | _more] = refs} <-
+           GenServer.call(server, {:counted_tables, statement}, @call_timeout_ms) do
+      counted(query_name, refs, Keyword.get(opts, :timeout_ms, @statement_timeout_ms))
     else
-      _no_count_asked_for -> %{}
+      {:error, exception} -> {:error, exception}
+      _no_count_asked_for -> {:ok, %{}}
     end
   end
 
-  defp asks_for_rows?(statement) do
-    Enum.any?(Sql.tokens(statement), fn
-      {:code, code} -> Regex.match?(~r/(?<![\w.])total_rows(?!\w)/i, code)
+  defp asks_for_rows?(tokens) do
+    Enum.any?(tokens, fn
+      {:code, code} -> Regex.match?(~r/(?<!\w)total_rows(?!\w)/i, code)
+      {:quoted, quoted} -> String.downcase(quoted) == ~s("total_rows")
       {_kind, _text} -> false
     end)
   end
 
-  defp literals(statement) do
-    for {:string, text} <- Sql.tokens(statement),
-        do: text |> String.slice(1..-2//1) |> String.replace("''", "'")
+  defp counted(query_name, refs, timeout_ms) do
+    refs
+    |> Task.async_stream(&{&1, count(query_name, &1, timeout_ms)},
+      max_concurrency: @count_concurrency,
+      timeout: :infinity
+    )
+    |> Enum.reduce_while({:ok, %{}}, fn
+      {:ok, {ref, {:ok, rows}}}, {:ok, counts} -> {:cont, {:ok, Map.put(counts, ref, rows)}}
+      {:ok, {ref, {:error, reason}}}, _counts -> {:halt, {:error, uncounted(ref, reason)}}
+    end)
   end
 
-  defp count(query_name, {dataset, table}) do
-    sql =
-      "SELECT count(*) AS n FROM #{Identifier.quote_label(dataset)}.#{Identifier.quote_label(table)}"
+  defp count(query_name, {dataset, table}, timeout_ms) do
+    sql = "SELECT * FROM #{Identifier.quote_label(dataset)}.#{Identifier.quote_label(table)}"
 
-    case Client.query(query_name, sql, timeout_ms: @statement_timeout_ms) do
-      {:ok, %Job{state: :done}, %DataFrame{} = frame} ->
-        frame |> DataFrame.to_rows() |> hd() |> Map.fetch!("n")
+    case Client.query(query_name, sql, explain: :plan, timeout_ms: timeout_ms) do
+      {:ok, %Job{state: :done, statistics: %Statistics{} = statistics}, _plan} ->
+        {:ok, Statistics.rows_scanned(statistics)}
 
-      _failed_or_refused ->
-        nil
+      {:ok, %Job{error: error}, _plan} ->
+        {:error, error}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp uncounted({dataset, table}, :too_many_jobs),
+    do:
+      {429, 202, "TOO_MANY_SIMULTANEOUS_QUERIES",
+       "too many queries in flight to count the rows of #{dataset}.#{table}; retry later", 1}
+
+  defp uncounted({dataset, table}, _reason),
+    do:
+      {503, 1002, "UNKNOWN_EXCEPTION",
+       "the rows of #{dataset}.#{table} could not be counted for total_rows; retry", 1}
 
   @doc """
   The ClickHouse type of a smolquery column.
@@ -251,9 +289,11 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp base_type({:numeric, precision, scale}), do: "Decimal(#{precision}, #{scale})"
   defp base_type(:variant), do: "String"
 
-  defp mentions_catalog?(statement) do
-    Sql.leading_keyword(statement) in ~w(describe desc show exists) or
-      Enum.any?(Sql.tokens(statement), fn
+  defp mentions_catalog?(tokens) do
+    leading = tokens |> Enum.map_join(&elem(&1, 1)) |> Sql.leading_keyword()
+
+    leading in ~w(describe desc show exists) or
+      Enum.any?(tokens, fn
         {:code, code} -> Regex.match?(@system_table, code)
         {_kind, _text} -> false
       end)
@@ -266,36 +306,69 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
     Enum.each(@static ++ @lockdown, &Engine.query!(engine, &1))
 
-    {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil, counts: %{}}}
+    {:ok, _ast, _canonical} =
+      serialized = CatalogEmulation.serialize(engine, "SELECT database, name FROM system_tables")
+
+    {:ok, %{"statements" => [%{"node" => %{"select_list" => columns}}]}, _sql} = serialized
+
+    {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil, columns: columns}}
   end
 
   @impl GenServer
-  def handle_call({:named_tables, literals}, _from, state) do
+  def handle_call({:counted_tables, statement}, _from, state) do
     with {:ok, state} <- ensure_fresh(state),
-         {:ok, result} <- Engine.query(state.engine, named_tables_sql(literals)) do
-      {:reply, Enum.map(result.rows, fn [dataset, table] -> {dataset, table} end), state}
+         {:ok, ast, _canonical} <- CatalogEmulation.serialize(state.engine, renamed(statement)),
+         {:ok, probe} <- counted_probe(ast, state.columns),
+         {:ok, result} <- Engine.query(state.engine, probe) do
+      {:reply, within_limit(result.rows), state}
     else
-      _unavailable -> {:reply, [], state}
+      _not_countable -> {:reply, {:ok, []}, state}
     end
   end
 
   def handle_call({:answer, statement, database, counts}, _from, state) do
-    state = %{state | counts: counts}
-
     case read(statement, database) do
-      {:select, sql} -> classified(sql, state)
-      {:catalog, sql, empty} -> state |> run(sql) |> or_empty(empty)
+      {:select, sql} -> classified(sql, state, counts)
+      {:catalog, sql, empty} -> state |> run(sql, counts) |> or_empty(empty)
     end
   end
 
-  defp named_tables_sql(literals) do
-    names = Enum.map_join(["" | literals], ", ", &Identifier.sql_string/1)
+  defp counted_probe(%{"statements" => [%{"node" => node} = statement]} = ast, columns) do
+    with %{"type" => "SELECT_NODE", "from_table" => %{"type" => "BASE_TABLE"} = from} <- node,
+         "system_tables" <- String.downcase(from["table_name"]),
+         true <- node["cte_map"]["map"] in [nil, []] do
+      probe =
+        node
+        |> Map.merge(%{
+          "select_list" => columns,
+          "group_expressions" => [],
+          "group_sets" => [],
+          "aggregate_handling" => "STANDARD_HANDLING",
+          "having" => nil,
+          "qualify" => nil,
+          "modifiers" => []
+        })
 
-    "SELECT database, name FROM system_tables WHERE name IN (#{names}) " <>
-      "AND (database IN (#{names}) OR NOT EXISTS " <>
-      "(SELECT 1 FROM system_databases WHERE name IN (#{names}))) " <>
-      "ORDER BY database, name LIMIT #{@max_counted_tables}"
+      json = JSON.encode!(%{ast | "statements" => [%{statement | "node" => probe}]})
+
+      {:ok,
+       "SELECT DISTINCT * FROM query(json_deserialize_sql(#{Identifier.sql_string(json)})) " <>
+         "LIMIT #{@max_counted_tables + 1}"}
+    else
+      _another_shape -> :error
+    end
   end
+
+  defp counted_probe(_ast, _columns), do: :error
+
+  defp within_limit(rows) when length(rows) > @max_counted_tables,
+    do:
+      {:error,
+       {400, 36, "BAD_ARGUMENTS",
+        "total_rows is answered for at most #{@max_counted_tables} tables, and this statement reads it " <>
+          "from more; name the tables it should be read from", nil}}
+
+  defp within_limit(rows), do: {:ok, Enum.map(rows, fn [dataset, table] -> {dataset, table} end)}
 
   defp read(statement, database) do
     cond do
@@ -349,11 +422,11 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     end)
   end
 
-  defp classified(sql, state) do
+  defp classified(sql, state, counts) do
     case CatalogEmulation.serialize(state.engine, sql) do
       {:ok, ast, _canonical} ->
         if system_only?(CatalogEmulation.base_tables(ast)) and not unbounded?(ast, sql),
-          do: run(state, "SELECT * FROM (#{sql}) LIMIT #{@max_rows}"),
+          do: run(state, "SELECT * FROM (#{sql}) LIMIT #{@max_rows}", counts),
           else: {:reply, :pass, state}
 
       {:error, _unparseable} ->
@@ -380,10 +453,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     end)
   end
 
-  defp run(state, sql) do
+  defp run(state, sql, counts) do
     with {:ok, state} <- ensure_fresh(state),
-         :ok <- put_counts(state.engine, state.counts),
-         {:ok, frame} <- frame(state.engine, sql) do
+         :ok <- put_counts(state.engine, counts),
+         {:ok, frame} <- counted_frame(state.engine, sql, counts) do
       {:reply, {:ok, frame}, state}
     else
       {:error, :statement_timeout} -> {:reply, {:error, unavailable()}, state}
@@ -410,6 +483,17 @@ defmodule SmolqueryClickHouse.SystemCatalog do
       end
 
     if updates == [], do: :ok, else: Engine.transaction(engine, updates)
+  end
+
+  defp counted_frame(engine, sql, counts) when map_size(counts) == 0, do: frame(engine, sql)
+
+  defp counted_frame(engine, sql, _counts) do
+    frame(engine, sql)
+  after
+    Engine.query(
+      engine,
+      "UPDATE system_tables SET total_rows = NULL WHERE total_rows IS NOT NULL"
+    )
   end
 
   defp frame(engine, sql) do
