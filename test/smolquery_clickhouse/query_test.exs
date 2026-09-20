@@ -467,4 +467,41 @@ defmodule SmolqueryClickHouse.QueryTest do
 
     assert post(name, sql).resp_body == ~s|{"ts":"2026-09-19T10:11:29.500000Z"}\n|
   end
+
+  describe "EXPLAIN ESTIMATE (T-506)" do
+    test "answers ClickHouse's five columns for a statement, without running it", %{name: name} do
+      response = post(name, "EXPLAIN ESTIMATE SELECT count() FROM range(10) r(i) FORMAT JSON")
+
+      assert response.status == 200, response.resp_body
+
+      assert %{"meta" => meta, "data" => [row], "rows" => 1} = JSON.decode!(response.resp_body)
+      assert Enum.map(meta, & &1["name"]) == ~w(database table parts rows marks)
+
+      assert row == %{
+               "database" => "",
+               "table" => "",
+               "parts" => "0",
+               "rows" => "0",
+               "marks" => "0"
+             }
+    end
+
+    test "is a read, so a GET may send it, in any case and with a parameter", %{name: name} do
+      query =
+        URI.encode_query(%{"query" => "explain estimate SELECT {n:Int32} AS n", "param_n" => "1"})
+
+      response = conn(:get, "/?" <> query) |> request(name)
+
+      assert response.status == 200
+      assert response.resp_body == "\t\t0\t0\t0\n"
+    end
+
+    test "a statement that does not bind answers its error, which is how HyperDX validates an expression",
+         %{name: name} do
+      response = post(name, "EXPLAIN ESTIMATE SELECT no_such_function(1)")
+
+      assert response.status == 404
+      assert exception_code(response) == ["46"]
+    end
+  end
 end

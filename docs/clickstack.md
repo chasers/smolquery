@@ -141,6 +141,8 @@ services:
 | Reading the source's columns and sorting key (`DESCRIBE`, `system.tables`) | Works |
 | Search: results table, newest first, paged | Works |
 | Search: histogram by severity | Works |
+| Search: the rows a search will scan (`EXPLAIN ESTIMATE`, sent before each search) | Works: the rows and files the plan keeps, after pruning |
+| Source form: checking an expression a user typed | Works: `EXPLAIN ESTIMATE` of a statement that does not bind answers its error |
 | Search: a term (`error`), a phrase, a negation | Works; a term is a whole token, found whatever its case |
 | Search: `field:value`, `field:"exact"`, `field:*`, a map key (`LogAttributes.http.status:500`), a number or a range | Works |
 | Search: a term with `_` or `%` in it | Works: the edge gives `LIKE` the backslash escape ClickHouse assumes |

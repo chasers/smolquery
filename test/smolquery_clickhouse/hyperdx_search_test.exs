@@ -203,4 +203,25 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
     assert Enum.count(rows) == 30
     assert Enum.all?(rows, fn [_ts, _service, _severity, body] -> body =~ "user_id=" end)
   end
+
+  test "EXPLAIN ESTIMATE of the search answers the rows its plan reads (T-506)", context do
+    %{"sql" => sql, "params" => params} =
+      Enum.find(context.fixture["steps"], &(&1["step"] == "rows"))
+
+    query =
+      context.fixture["settings"]
+      |> Map.merge(Map.new(params, fn {key, value} -> {"param_" <> key, value} end))
+
+    response =
+      conn(
+        :post,
+        "/?" <> URI.encode_query(query),
+        "EXPLAIN ESTIMATE " <> sql <> " \nFORMAT JSONEachRow"
+      )
+      |> put_req_header("x-clickhouse-key", @password)
+      |> Router.call(context.name)
+
+    assert response.status == 200, response.resp_body
+    assert %{"rows" => "120", "parts" => "1"} = JSON.decode!(String.trim(response.resp_body))
+  end
 end

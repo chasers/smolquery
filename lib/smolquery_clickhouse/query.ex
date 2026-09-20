@@ -43,6 +43,21 @@ defmodule SmolqueryClickHouse.Query do
   parameter or in the statement's `SETTINGS` clause, before or after
   `FORMAT`; the clause wins (`Statement.split_settings/1`).
 
+  ## EXPLAIN ESTIMATE
+
+  `EXPLAIN ESTIMATE <statement>` answers what the statement would read,
+  without running it (T-506): ClickHouse's five columns, `database`, `table`,
+  `parts`, `rows` and `marks`, in one row. HyperDX sends it before each search
+  to show the rows the search will scan, and reads `rows`. The statement is
+  planned as it would be to run — the same snapshot, the same pruning, the
+  same Top-N bound — and `rows` and `parts` are the rows and files the plan
+  keeps, in both tiers (`Smolquery.QueryService.Statistics`). They are the
+  plan's sizes, as ClickHouse's are its index's: what will be read, not what
+  will match. `database` and `table` are empty and `marks` is `0`: one row
+  stands for the whole statement, and smolquery has no marks. A statement
+  that does not plan or bind answers its error, which is how HyperDX checks
+  an expression a user typed.
+
   ## The catalog
 
   `system.*`, `DESCRIBE`, `SHOW` and `EXISTS` are answered by
@@ -96,6 +111,7 @@ defmodule SmolqueryClickHouse.Query do
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.Sql
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Format
@@ -235,6 +251,49 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp answer(conn, runtime, statement, format, opts) do
+    case estimated(statement) do
+      {:ok, inner} -> estimate(conn, runtime, inner, format, opts)
+      :error -> answer_rows(conn, runtime, statement, format, opts)
+    end
+  end
+
+  defp estimated(statement) do
+    with {:word, "explain", rest} <- Sql.next_token(statement),
+         {:word, "estimate", inner} <- Sql.next_token(rest) do
+      {:ok, Sql.skip_trivia(inner)}
+    else
+      _another_statement -> :error
+    end
+  end
+
+  defp estimate(conn, runtime, inner, format, opts) do
+    case Client.query(runtime.query_name, inner, [explain: :plan] ++ opts) do
+      {:ok, %Job{state: :done} = job, _plan} ->
+        rows(conn, job, estimate_frame(job.statistics), format)
+
+      {:ok, %Job{error: error}, _plan} ->
+        refuse(conn, runtime, describe(error))
+
+      {:error, reason} ->
+        refuse(conn, runtime, refusal(reason))
+    end
+  end
+
+  defp estimate_frame(statistics) do
+    {files, rows} = planned(statistics)
+
+    DataFrame.new(
+      [database: [""], table: [""], parts: [files], rows: [rows], marks: [0]],
+      dtypes: [parts: {:u, 64}, rows: {:u, 64}, marks: {:u, 64}]
+    )
+  end
+
+  defp planned(%Statistics{} = statistics),
+    do: {Statistics.files_scanned(statistics), Statistics.rows_scanned(statistics)}
+
+  defp planned(_none), do: {0, 0}
+
+  defp answer_rows(conn, runtime, statement, format, opts) do
     case SystemCatalog.answer(runtime.name, statement, database(conn)) do
       {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
       :pass -> run(conn, runtime, statement, format, opts)
