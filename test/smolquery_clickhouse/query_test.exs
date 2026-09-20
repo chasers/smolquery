@@ -294,4 +294,10 @@ defmodule SmolqueryClickHouse.QueryTest do
       assert response.resp_body == ~s|{"ts":"2026-09-19T10:11:29.500000Z"}\n|
     end
   end
+
+  test "a literal or a comment that mentions system. asks nothing of the catalog (review of T-482)",
+       %{name: name} do
+    assert post(name, "SELECT 'kube-system.pod' AS s").resp_body == "kube-system.pod\n"
+    assert post(name, "SELECT 1 AS n -- system.tables").resp_body == "1\n"
+  end
 end

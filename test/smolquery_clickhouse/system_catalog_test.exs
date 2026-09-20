@@ -224,4 +224,53 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
     assert SystemCatalog.column_type(%Field{name: "a", type: :variant}) == "Nullable(String)"
     assert SystemCatalog.column_type(%Field{name: "a", type: :date}) == "Nullable(Date32)"
   end
+
+  describe "the catalog's engine answers the catalog and nothing else (review of T-482)" do
+    test "a table function beside a system table does not read the host", %{name: name} do
+      File.write!(Path.join(System.tmp_dir!(), "smolquery-catalog-probe.txt"), "host-secret")
+      path = Path.join(System.tmp_dir!(), "smolquery-catalog-probe.txt")
+
+      for sql <- [
+            "SELECT * FROM system.one, read_text('#{path}')",
+            "SELECT * FROM system.one WHERE (SELECT count(*) FROM read_text('#{path}')) > 0",
+            "SELECT * FROM system.one, read_csv('#{path}')"
+          ] do
+        response = post(name, sql)
+
+        assert response.status != 200, sql
+        refute response.resp_body =~ "host-secret"
+      end
+    end
+
+    test "the engine itself refuses the file system, whatever reaches it", %{name: name} do
+      engine = Runtime.catalog_engine(name)
+
+      assert {:error, error} =
+               Smolquery.Engine.query(engine, "SELECT * FROM read_text('/etc/hostname')")
+
+      assert Exception.message(error) =~ ~r/disabled|permission/i
+    end
+
+    test "a generator and a recursive query are not the catalog's to run", %{name: name} do
+      for sql <- [
+            "SELECT count(*) FROM system.columns a, range(100000000000) r",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT n FROM r, system.one"
+          ] do
+        response = post(name, sql)
+
+        assert response.status != 200, sql
+      end
+
+      assert post(name, "SELECT dummy FROM system.one").resp_body == "0\n"
+    end
+
+    test "an answer is capped", %{name: name} do
+      sql =
+        "SELECT a.name FROM system.columns a, system.columns b, system.columns c, system.columns d, system.columns e, system.columns f, system.columns g"
+
+      rows = post(name, sql).resp_body |> String.split("\n", trim: true)
+
+      assert Enum.count(rows) == 10_000
+    end
+  end
 end

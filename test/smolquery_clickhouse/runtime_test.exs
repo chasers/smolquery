@@ -55,8 +55,11 @@ defmodule SmolqueryClickHouse.RuntimeTest do
     refute inspect(Runtime.new(password: "hidden-password")) =~ "hidden-password"
   end
 
-  test "names its supervisor and listener after the instance" do
+  test "names its supervisor, listener, catalog server and engines after the instance" do
     assert Runtime.supervisor(Edge) == Edge.Supervisor
     assert Runtime.listener(Edge) == Edge.Listener
+    assert Runtime.system_catalog(Edge) == Edge.SystemCatalog
+    assert Runtime.catalog_engine(Edge) == Edge.CatalogEngine
+    assert Runtime.lake_engine(Edge) == Edge.Lake
   end
 end

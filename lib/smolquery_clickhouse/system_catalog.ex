@@ -42,6 +42,24 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   a bare `table` — a column of `system.columns`, and a reserved word to
   DuckDB — is quoted.
 
+  ## The engine answers the catalog and nothing else
+
+  The job engines that run a user's SQL are locked down by the query
+  service. This one runs a client's `SELECT` too, so it is held as tightly,
+  by four rules a statement must pass before it runs here:
+
+  - the engine has external access off and its configuration locked, from
+    the moment its tables exist, so no statement reads a file or a URL
+    whatever reaches it;
+  - a statement that names a table function (`read_text`, `range`), in its
+    `FROM` or anywhere under it, or a `RECURSIVE` table expression, is not
+    the catalog's: it has nothing here to read but a generator, and a
+    generator has no end;
+  - an answer is cut at `@max_rows`, and a statement is given
+    `@statement_timeout_ms`;
+  - a statement that outlives that does not take the server with it: the
+    call's exit is caught, and the client is told to retry.
+
   ## Types
 
   `column_type/1` is the ClickHouse type of a smolquery column, the same one
@@ -62,6 +80,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
   @refresh_ttl_ms 1_000
   @call_timeout_ms 30_000
+  @statement_timeout_ms 10_000
+  @max_rows 10_000
+
+  @lockdown ["SET enable_external_access = false", "SET lock_configuration = true"]
 
   @name ~S/("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_]*)/
   @qualified "(?:#{@name}\\s*\\.\\s*)?#{@name}"
@@ -145,7 +167,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
   defp mentions_catalog?(statement) do
     Sql.leading_keyword(statement) in ~w(describe desc show exists) or
-      Regex.match?(@system_table, statement)
+      Enum.any?(Sql.tokens(statement), fn
+        {:code, code} -> Regex.match?(@system_table, code)
+        {_kind, _text} -> false
+      end)
   end
 
   @impl GenServer
@@ -153,7 +178,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     engine = Runtime.catalog_engine(runtime.name)
     {:ok, _pid} = Engine.start_link(name: engine)
 
-    Enum.each(@static, &Engine.query!(engine, &1))
+    Enum.each(@static ++ @lockdown, &Engine.query!(engine, &1))
 
     {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil}}
   end
@@ -221,14 +246,25 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp classified(sql, state) do
     case CatalogEmulation.serialize(state.engine, sql) do
       {:ok, ast, _canonical} ->
-        if system_only?(CatalogEmulation.base_tables(ast)),
-          do: run(state, sql),
+        if system_only?(CatalogEmulation.base_tables(ast)) and not unbounded?(ast, sql),
+          do: run(state, "SELECT * FROM (#{sql}) LIMIT #{@max_rows}"),
           else: {:reply, :pass, state}
 
       {:error, _unparseable} ->
         {:reply, :pass, state}
     end
   end
+
+  defp unbounded?(ast, sql),
+    do: table_function?(ast) or Regex.match?(~r/(?<![\w.])RECURSIVE(?![\w.])/i, sql)
+
+  defp table_function?(%{"type" => "TABLE_FUNCTION"}), do: true
+
+  defp table_function?(node) when is_map(node),
+    do: Enum.any?(node, fn {_key, child} -> table_function?(child) end)
+
+  defp table_function?(node) when is_list(node), do: Enum.any?(node, &table_function?/1)
+  defp table_function?(_leaf), do: false
 
   defp system_only?([]), do: false
 
@@ -240,9 +276,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
   defp run(state, sql) do
     with {:ok, state} <- ensure_fresh(state),
-         {:ok, frame} <- Engine.frame(state.engine, sql) do
+         {:ok, frame} <- frame(state.engine, sql) do
       {:reply, {:ok, frame}, state}
     else
+      {:error, :statement_timeout} -> {:reply, {:error, unavailable()}, state}
       {:error, :catalog_unavailable} -> {:reply, {:error, unavailable()}, state}
       {:error, reason} -> {:reply, {:error, failure(reason)}, state}
     end
@@ -257,6 +294,15 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   end
 
   defp or_empty(reply, _empty), do: reply
+
+  defp frame(engine, sql) do
+    task = Task.async(fn -> Engine.frame(engine, sql) end)
+
+    case Task.yield(task, @statement_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _timed_out_or_exited -> {:error, :statement_timeout}
+    end
+  end
 
   defp failure(reason) do
     message = Exception.message(reason)
