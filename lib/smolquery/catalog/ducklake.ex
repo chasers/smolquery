@@ -127,6 +127,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
   import Bitwise
 
+  require Logger
+
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
@@ -328,7 +330,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
     "ATTACH IF NOT EXISTS #{Identifier.sql_string("ducklake:" <> metadata)} " <>
       "AS #{Identifier.quote_name!(catalog)} " <>
-      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0#{migration})"
+      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0" <>
+      "#{migration})"
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))
@@ -1314,8 +1317,18 @@ defmodule Smolquery.Catalog.DuckLake do
           Process.sleep(backoff(attempt))
           with_commit_retries(run, attempt + 1)
         else
+          gave_up(error, attempt)
           {:error, classify(error)}
         end
+    end
+  end
+
+  defp gave_up(error, attempt) do
+    if retryable?(error) do
+      Logger.warning(
+        "catalog commit gave up after #{attempt} attempts, answering :commit_conflict: " <>
+          Exception.message(error)
+      )
     end
   end
 

@@ -17,6 +17,13 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   engine pool that attaches the same sqlite lake, and under CI load those
   attaches held the file lock long enough to exhaust the catalog's commit
   retries (`{:error, :commit_conflict}` out of `seed/3`).
+
+  A test that changes the table's columns does it there too, as `@tag alter:`
+  (T-517). Run from the test body, the `ALTER` raced the same warm-up and lost
+  about one run in ten: sqlite answered `database is locked` to every one of
+  the catalog's five attempts. What such a test proves is how files sealed
+  before the change read after it, on every shard, and that does not depend on
+  which side of the services' start the change was made.
   """
 
   use ExUnit.Case, async: false
@@ -60,6 +67,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     on_exit(fn -> BufferService.Runtime.delete(buffer) end)
 
     seed(catalog, buffer, context.tmp_dir)
+
+    for change <- Map.get(context, :alter, []),
+        do: :ok = Catalog.alter_table(catalog, @table, change)
 
     shared = [
       catalog: catalog,
@@ -273,11 +283,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     refute_received {:scatter, _measurements, _meta}
   end
 
+  @tag alter: [{:drop_column, "name"}, {:add_column, Field.new!("name", :int64)}]
   test "a dropped name re-added as a new column reads NULL from sealed files on every shard (PL-62)",
-       %{control: control, distributed: distributed, catalog: catalog} do
-    :ok = Catalog.alter_table(catalog, @table, {:drop_column, "name"})
-    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("name", :int64)})
-
+       %{control: control, distributed: distributed} do
     both(control, distributed, "SELECT count(name) AS named, count(*) AS n FROM analytics.events")
 
     assert {:ok, %{state: :done} = job, frame} =
@@ -290,10 +298,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert DataFrame.to_columns(frame) == %{"named" => [0], "s" => [nil]}
   end
 
+  @tag alter: [{:add_column, Field.new!("late", :string)}]
   test "a column added after the files sealed still scatters, and reads NULL from them (PL-61)",
-       %{distributed: distributed, catalog: catalog} do
-    :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
-
+       %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, frame} =
              Client.query(
                distributed,
