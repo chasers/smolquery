@@ -126,6 +126,8 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @statement_timeout_ms 10_000
   @max_rows 10_000
   @max_counted_tables 32
+  @emulated_type "CASE data_type WHEN 'VARCHAR' THEN 'String' WHEN 'UTINYINT' THEN 'UInt8' " <>
+                   "WHEN 'UBIGINT' THEN 'UInt64' WHEN 'BIGINT' THEN 'Int64' ELSE data_type END"
   @count_concurrency 2
 
   @lockdown ["SET enable_external_access = false", "SET lock_configuration = true"]
@@ -373,13 +375,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp read(statement, database) do
     cond do
       names = Regex.run(@describe, statement, capture: :all_but_first) ->
-        {db, table} = qualified(names, database)
-
-        {:catalog,
-         "SELECT name, type, default_kind AS default_type, default_expression, comment, " <>
-           "compression_codec AS codec_expression, '' AS ttl_expression FROM system_columns " <>
-           "WHERE database = #{Identifier.sql_string(db)} AND \"table\" = #{Identifier.sql_string(table)} " <>
-           "ORDER BY position", {:unknown_table, db, table}}
+        names |> qualified(database) |> described()
 
       names = Regex.run(@exists, statement, capture: :all_but_first) ->
         {db, table} = qualified(names, database)
@@ -402,6 +398,25 @@ defmodule SmolqueryClickHouse.SystemCatalog do
       true ->
         {:select, renamed(statement)}
     end
+  end
+
+  defp described({"system", table}) do
+    {:catalog,
+     "SELECT column_name AS name, " <>
+       "CASE WHEN column_name IN ('total_rows', 'total_bytes') " <>
+       "THEN 'Nullable(' || #{@emulated_type} || ')' ELSE #{@emulated_type} END AS type, " <>
+       "'' AS default_type, '' AS default_expression, '' AS comment, " <>
+       "'' AS codec_expression, '' AS ttl_expression FROM duckdb_columns() " <>
+       "WHERE table_name = #{Identifier.sql_string("system_" <> table)} ORDER BY column_index",
+     {:unknown_table, "system", table}}
+  end
+
+  defp described({db, table}) do
+    {:catalog,
+     "SELECT name, type, default_kind AS default_type, default_expression, comment, " <>
+       "compression_codec AS codec_expression, '' AS ttl_expression FROM system_columns " <>
+       "WHERE database = #{Identifier.sql_string(db)} AND \"table\" = #{Identifier.sql_string(table)} " <>
+       "ORDER BY position", {:unknown_table, db, table}}
   end
 
   defp qualified(["", table], database), do: {database, unquoted(table, table)}

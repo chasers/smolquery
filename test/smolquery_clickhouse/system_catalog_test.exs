@@ -82,6 +82,47 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
                JSON.decode!(response.resp_body)["meta"]
     end
 
+    test "DESCRIBE of a system table lists the columns a SELECT from it answers (T-512)", %{
+      name: name
+    } do
+      for response <- [
+            post(name, "DESCRIBE system.tables FORMAT JSON"),
+            post(name, "DESCRIBE TABLE {db:Identifier}.{tbl:Identifier} FORMAT JSON", %{
+              "param_db" => "system",
+              "param_tbl" => "tables"
+            })
+          ] do
+        assert response.status == 200, response.resp_body
+
+        described = Map.new(data(response), &{&1["name"], &1["type"]})
+
+        assert %{
+                 "database" => "String",
+                 "name" => "String",
+                 "table" => "String",
+                 "is_temporary" => "UInt8",
+                 "sorting_key" => "String",
+                 "total_rows" => "Nullable(UInt64)",
+                 "total_bytes" => "Nullable(UInt64)"
+               } = described
+
+        selected = post(name, "SELECT * FROM system.tables LIMIT 0 FORMAT JSON")
+
+        assert Enum.map(JSON.decode!(selected.resp_body)["meta"], & &1["name"]) ==
+                 Enum.map(data(response), & &1["name"])
+      end
+
+      assert ["database", "table", "name", "type" | _rest] =
+               name
+               |> post("DESCRIBE system.columns FORMAT JSON")
+               |> data()
+               |> Enum.map(& &1["name"])
+
+      missing = post(name, "DESCRIBE system.no_such_table FORMAT JSON")
+      assert missing.status == 404
+      assert missing.resp_body =~ "Table system.no_such_table does not exist"
+    end
+
     test "DESCRIBE with Identifier parameters lists columns and their ClickHouse types", %{
       name: name
     } do
