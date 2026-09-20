@@ -163,9 +163,28 @@ defmodule SmolqueryClickHouse.VariantJsonTest do
              "i" => "Int64",
              "f" => "Float64",
              "s" => "String",
-             "a" => "Array(Dynamic)",
+             "a" => "Array(Nullable(String))",
              "o" => "JSON",
              "none" => "None"
+           }
+  end
+
+  test "a path read without toString is Dynamic, and a string it holds is valid JSON (review of T-521)",
+       context do
+    assert %{"meta" => meta, "data" => [row]} =
+             json(
+               context.name,
+               "SELECT metadata.cluster AS c, metadata.attempts AS n, metadata.tags AS t, " <>
+                 "metadata.context AS o FROM #{context.from} WHERE id = 1"
+             )
+
+    assert Enum.map(meta, & &1["type"]) == ["Dynamic", "Dynamic", "Dynamic", "JSON"]
+
+    assert row == %{
+             "c" => "prod-d",
+             "n" => 5,
+             "t" => ["a", "b"],
+             "o" => %{"application" => "logflare", "vm" => %{"node" => "n1"}}
            }
   end
 

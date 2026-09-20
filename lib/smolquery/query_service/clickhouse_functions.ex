@@ -145,14 +145,15 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"lowCardinalityKeys(x)", "x"},
             {"toJSONString(x)", "CAST(to_json(x) AS VARCHAR)"},
             {"dynamicType(x)",
-             "CASE regexp_extract(variant_typeof(x), '^[A-Z]+') " <>
+             "CASE WHEN x IS NULL THEN 'None' ELSE CASE regexp_extract(variant_typeof(x), '^[A-Z]+') " <>
                "WHEN 'VARCHAR' THEN 'String' WHEN 'BOOL' THEN 'Bool' " <>
                "WHEN 'DOUBLE' THEN 'Float64' WHEN 'FLOAT' THEN 'Float64' WHEN 'DECIMAL' THEN 'Float64' " <>
                "WHEN 'INT' THEN 'Int64' WHEN 'UINT' THEN 'Int64' WHEN 'TINYINT' THEN 'Int64' " <>
                "WHEN 'SMALLINT' THEN 'Int64' WHEN 'INTEGER' THEN 'Int64' WHEN 'BIGINT' THEN 'Int64' " <>
                "WHEN 'UTINYINT' THEN 'Int64' WHEN 'USMALLINT' THEN 'Int64' WHEN 'UINTEGER' THEN 'Int64' " <>
-               "WHEN 'UBIGINT' THEN 'Int64' WHEN 'ARRAY' THEN 'Array(Dynamic)' WHEN 'OBJECT' THEN 'JSON' " <>
-               "ELSE 'None' END"},
+               "WHEN 'UBIGINT' THEN 'Int64' WHEN 'ARRAY' THEN 'Array(Nullable(String))' " <>
+               "WHEN 'OBJECT' THEN 'JSON' WHEN 'VARIANT' THEN 'None' WHEN 'TIMESTAMP' THEN 'DateTime64(6)' " <>
+               "WHEN 'DATE' THEN 'Date' ELSE 'String' END END"},
             {"leftUTF8(s, n)", "left(s, n)"},
             {"clickhouse_MD5(x)", "unhex(md5(x))"},
             {"clickhouse_isNull(x)", "x IS NULL"},

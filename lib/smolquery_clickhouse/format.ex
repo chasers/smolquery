@@ -58,6 +58,17 @@ defmodule SmolqueryClickHouse.Format do
   form of `JSON` is a layout of typed dynamic paths, not text, so there the
   column is declared `Nullable(String)` and carries the JSON text.
 
+  A `VARIANT` result column that holds something other than an object, a
+  path read without `toString` such as `metadata.attempts` or
+  `metadata.tags`, answers as `Dynamic`, which is ClickHouse's type for a
+  path of a `JSON` column: a client that reads `JSON` as "an object I can
+  list the keys of" must not be told that of a number. The frame does not
+  say which a column is, so the rows decide: `JSON` unless one of them
+  holds a value that is not an object. Inside a document a number is
+  written as the document had it, a 64-bit integer included, where a
+  64-bit integer *column* is quoted: the document is the client's own
+  JSON, and quoting inside it would turn its numbers into strings.
+
   ## Values
 
   Text follows ClickHouse's defaults. In a tab-separated row a backslash, a
@@ -235,7 +246,12 @@ defmodule SmolqueryClickHouse.Format do
         ) :: iodata()
   def encode(format, columns, rows, opts \\ []) do
     style = Keyword.get(opts, :date_time, :simple)
-    required = MapSet.new(Keyword.get(opts, :non_null, []))
+
+    required =
+      opts
+      |> Keyword.get(:non_null, [])
+      |> MapSet.new()
+      |> MapSet.union(dynamic(columns, rows))
 
     body(format, columns, rows, style, Keyword.get(opts, :elapsed_ms, 0), required)
   end
@@ -371,7 +387,18 @@ defmodule SmolqueryClickHouse.Format do
       else: type_name(dtype, false)
   end
 
-  defp column_type({_name, dtype, json?}, _required), do: type_name(dtype, json?)
+  defp column_type({name, dtype, true}, required) do
+    if MapSet.member?(required, {:dynamic, name}),
+      do: "Dynamic",
+      else: type_name(dtype, true)
+  end
+
+  defp dynamic(columns, rows) do
+    for {name, _dtype, true} <- columns,
+        Enum.any?(rows, &(not is_nil(&1[name]) and not is_map(&1[name]))),
+        into: MapSet.new(),
+        do: {:dynamic, name}
+  end
 
   defp nullable_type?(@map_dtype), do: false
   defp nullable_type?({:list, _element}), do: false
@@ -547,6 +574,7 @@ defmodule SmolqueryClickHouse.Format do
     do: ["[", Enum.map_intersperse(value, ",", &json(element, false, &1)), "]"]
 
   defp json(_dtype, _json?, nil), do: "null"
+  defp json(_dtype, true, value) when is_binary(value), do: json_string(value)
   defp json(_dtype, true, value), do: json_text(value)
   defp json({kind, 64}, false, value) when kind in [:s, :u], do: [?", text(value), ?"]
   defp json(_dtype, false, value) when is_boolean(value), do: to_string(value)

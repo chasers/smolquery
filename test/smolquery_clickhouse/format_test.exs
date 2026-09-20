@@ -405,4 +405,37 @@ defmodule SmolqueryClickHouse.FormatTest do
                ])
     end
   end
+
+  describe "a VARIANT result column (review of T-521)" do
+    defp variant(format, rows),
+      do: format |> Format.encode([{"v", :string, true}], rows) |> IO.iodata_to_binary()
+
+    test "a string it holds is a JSON string, quotes and newlines escaped, never raw text" do
+      rows = [%{"v" => "prod-d"}, %{"v" => ~s(say "hi"\nthere)}]
+
+      assert %{"data" => [%{"v" => "prod-d"}, %{"v" => ~s(say "hi"\nthere)}]} =
+               :json |> variant(rows) |> JSON.decode!()
+
+      assert [first, second, ""] = :json_each_row |> variant(rows) |> String.split("\n")
+      assert JSON.decode!(first) == %{"v" => "prod-d"}
+      assert JSON.decode!(second) == %{"v" => ~s(say "hi"\nthere)}
+    end
+
+    test "is JSON when every value is an object, and Dynamic when one is not" do
+      type = fn rows ->
+        (:json |> variant(rows) |> JSON.decode!())["meta"] |> hd() |> Map.fetch!("type")
+      end
+
+      assert type.([%{"v" => %{"a" => 1}}, %{"v" => nil}]) == "JSON"
+      assert type.([]) == "JSON"
+      assert type.([%{"v" => 5}]) == "Dynamic"
+      assert type.([%{"v" => %{"a" => 1}}, %{"v" => ["a", "b"]}]) == "Dynamic"
+      assert type.([%{"v" => "text"}]) == "Dynamic"
+    end
+
+    test "a number inside a document is written as the document had it" do
+      assert variant(:json_each_row, [%{"v" => %{"id" => 9_007_199_254_740_993}}]) ==
+               ~s({"v":{"id":9007199254740993}}\n)
+    end
+  end
 end
