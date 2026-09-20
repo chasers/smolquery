@@ -1,0 +1,98 @@
+{
+  "source": "hyperdxio/hyperdx @ c42dda8 (2026-09-19): packages/common-utils/src/core/metadata.ts, core/renderChartConfig.ts, queryParser.ts and their tests. Each statement is what the browser sends through /api/clickhouse-proxy, before clickhouse-js appends ' \\nFORMAT <format>'. Parameter names are HyperDX's HYPERDX_PARAM_<hash of the value>; the values here are this fixture's.",
+  "settings": {
+    "allow_experimental_analyzer": "1",
+    "date_time_output_format": "iso",
+    "wait_end_of_query": "0",
+    "cancel_http_readonly_queries_on_client_close": "1",
+    "output_format_json_quote_64bit_integers": "1",
+    "max_execution_time": "60"
+  },
+  "steps": [
+    {
+      "step": "settings",
+      "format": "JSON",
+      "sql": "SELECT name, value FROM system.settings",
+      "params": {}
+    },
+    {
+      "step": "version",
+      "format": "JSON",
+      "sql": "SELECT version() AS version",
+      "params": {}
+    },
+    {
+      "step": "describe",
+      "format": "JSON",
+      "sql": "DESCRIBE {HYPERDX_PARAM_1544803905:Identifier}.{HYPERDX_PARAM_129845054:Identifier}",
+      "params": {"HYPERDX_PARAM_1544803905": "analytics", "HYPERDX_PARAM_129845054": "events"}
+    },
+    {
+      "step": "table_metadata",
+      "format": "JSON",
+      "sql": "SELECT * FROM system.tables WHERE database = {HYPERDX_PARAM_1544803905:String} AND name = {HYPERDX_PARAM_129845054:String} LIMIT 1",
+      "params": {"HYPERDX_PARAM_1544803905": "analytics", "HYPERDX_PARAM_129845054": "events"}
+    },
+    {
+      "step": "skip_indices",
+      "format": "JSON",
+      "sql": "SELECT name, type, type_full as typeFull, expr as expression, granularity FROM system.data_skipping_indices WHERE database = {HYPERDX_PARAM_1544803905:String} AND table = {HYPERDX_PARAM_129845054:String}",
+      "params": {"HYPERDX_PARAM_1544803905": "analytics", "HYPERDX_PARAM_129845054": "events"}
+    },
+    {
+      "step": "cloud_probe",
+      "format": "JSON",
+      "sql": "SELECT count() > 0 AS is_cloud FROM system.table_engines WHERE name = 'SharedMergeTree'",
+      "params": {}
+    },
+    {
+      "step": "rows",
+      "format": "JSONCompactEachRowWithNamesAndTypes",
+      "sql": "SELECT Timestamp,ServiceName,SeverityText,Body FROM {HYPERDX_PARAM_1544803905:Identifier}.{HYPERDX_PARAM_129845054:Identifier} WHERE (Timestamp >= fromUnixTimestamp64Milli({HYPERDX_PARAM_1456399765:Int64}) AND Timestamp <= fromUnixTimestamp64Milli({HYPERDX_PARAM_1719057412:Int64})) ORDER BY Timestamp DESC LIMIT {HYPERDX_PARAM_49586:Int32} OFFSET {HYPERDX_PARAM_48:Int32}",
+      "params": {
+        "HYPERDX_PARAM_1544803905": "analytics",
+        "HYPERDX_PARAM_129845054": "events",
+        "HYPERDX_PARAM_1456399765": "1789812660000",
+        "HYPERDX_PARAM_1719057412": "1789812780000",
+        "HYPERDX_PARAM_49586": "200",
+        "HYPERDX_PARAM_48": "0"
+      }
+    },
+    {
+      "step": "histogram",
+      "format": "JSON",
+      "sql": "SELECT count(),SeverityText,toStartOfInterval(toDateTime(Timestamp), INTERVAL 1 minute) AS `__hdx_time_bucket` FROM {HYPERDX_PARAM_1544803905:Identifier}.{HYPERDX_PARAM_129845054:Identifier} WHERE (Timestamp >= fromUnixTimestamp64Milli({HYPERDX_PARAM_1456399765:Int64}) AND Timestamp <= fromUnixTimestamp64Milli({HYPERDX_PARAM_1719057412:Int64})) GROUP BY SeverityText,toStartOfInterval(toDateTime(Timestamp), INTERVAL 1 minute) AS `__hdx_time_bucket` ORDER BY toStartOfInterval(toDateTime(Timestamp), INTERVAL 1 minute) AS `__hdx_time_bucket` LIMIT {HYPERDX_PARAM_1448635039:Int32}",
+      "params": {
+        "HYPERDX_PARAM_1544803905": "analytics",
+        "HYPERDX_PARAM_129845054": "events",
+        "HYPERDX_PARAM_1456399765": "1789812660000",
+        "HYPERDX_PARAM_1719057412": "1789812780000",
+        "HYPERDX_PARAM_1448635039": "100000"
+      }
+    },
+    {
+      "step": "rows_term",
+      "format": "JSONCompactEachRowWithNamesAndTypes",
+      "sql": "SELECT Timestamp,ServiceName,SeverityText,Body FROM {HYPERDX_PARAM_1544803905:Identifier}.{HYPERDX_PARAM_129845054:Identifier} WHERE (Timestamp >= fromUnixTimestamp64Milli({HYPERDX_PARAM_1456399765:Int64}) AND Timestamp <= fromUnixTimestamp64Milli({HYPERDX_PARAM_1719057412:Int64})) AND ((hasToken(lower(Body), lower('Payment')))) ORDER BY Timestamp DESC LIMIT {HYPERDX_PARAM_49586:Int32} OFFSET {HYPERDX_PARAM_48:Int32}",
+      "params": {
+        "HYPERDX_PARAM_1544803905": "analytics",
+        "HYPERDX_PARAM_129845054": "events",
+        "HYPERDX_PARAM_1456399765": "1789812660000",
+        "HYPERDX_PARAM_1719057412": "1789812780000",
+        "HYPERDX_PARAM_49586": "200",
+        "HYPERDX_PARAM_48": "0"
+      }
+    },
+    {
+      "step": "count_field_filters",
+      "format": "JSON",
+      "sql": "SELECT count() FROM {HYPERDX_PARAM_1544803905:Identifier}.{HYPERDX_PARAM_129845054:Identifier} WHERE (Timestamp >= fromUnixTimestamp64Milli({HYPERDX_PARAM_1456399765:Int64}) AND Timestamp <= fromUnixTimestamp64Milli({HYPERDX_PARAM_1719057412:Int64})) AND ((ServiceName = 'api') AND (SeverityText ILIKE '%ERR%') AND (notEmpty(Body) = 1) AND (`LogAttributes`['http.status'] = '500' AND indexHint(mapContains(`LogAttributes`, 'http.status'))))",
+      "params": {
+        "HYPERDX_PARAM_1544803905": "analytics",
+        "HYPERDX_PARAM_129845054": "events",
+        "HYPERDX_PARAM_1456399765": "1789812660000",
+        "HYPERDX_PARAM_1719057412": "1789812780000"
+      }
+    }
+  ]
+}
