@@ -134,7 +134,7 @@ defmodule Smolquery.QueryService.ViewsTest do
              Views.table_view({"analytics", "events"}, schema, "SELECT 1", ["host"])
 
     assert computed ==
-             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "attrs"::VARIANT AS "attrs", | <>
+             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "attrs", | <>
                ~s|coalesce("host", TRY(CAST((CAST(attrs['host'] AS VARCHAR)) AS VARCHAR))) AS "host" | <>
                ~s|FROM (SELECT * REPLACE ("attrs"::VARIANT AS "attrs") FROM (SELECT 1))|
   end

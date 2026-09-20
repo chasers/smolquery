@@ -214,6 +214,27 @@ defmodule Smolquery.SchemaTest do
       assert Schema.queried(schema, "(SELECT 1)") ==
                ~s|(SELECT * REPLACE ("attrs"::VARIANT AS "attrs") FROM (SELECT 1))|
 
+      assert Schema.retyped(schema) == ["attrs"]
+
+      unread =
+        Schema.new!([
+          Field.new!("id", :int64, id: 1),
+          Field.new!("attrs", :variant, id: 2),
+          Field.new!("raw", :string,
+            id: 3,
+            materialized: %Smolquery.Schema.Materialized{
+              expression: "CAST(id AS VARCHAR)",
+              canonical: "CAST(id AS VARCHAR)",
+              sources: [1]
+            }
+          )
+        ])
+
+      assert Schema.retyped(unread) == []
+
+      assert Schema.computed_select(unread, "spooled") ==
+               ~s|SELECT "id", "attrs", TRY(CAST((CAST(id AS VARCHAR)) AS VARCHAR)) AS "raw" FROM spooled|
+
       plain = Schema.new!([{"id", :int64}, {"attrs", :variant}])
 
       assert Schema.computed_select(plain, "spooled") == ~s|SELECT "id", "attrs" FROM spooled|

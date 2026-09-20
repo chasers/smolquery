@@ -763,7 +763,8 @@ defmodule Smolquery.Schema do
   """
   @spec computed_select(t(), String.t()) :: String.t()
   def computed_select(%__MODULE__{fields: fields} = schema, from) do
-    retyped = retyped(schema)
+    retyped = retyped_fields(schema)
+    stored = Enum.map(retyped, & &1.name)
 
     columns =
       Enum.map_join(fields, ", ", fn %Field{} = field ->
@@ -775,7 +776,7 @@ defmodule Smolquery.Schema do
             {:ok, type} = duckdb_type(field.type)
             "TRY(CAST((#{canonical || expression}) AS #{type})) AS #{name}"
 
-          field in retyped ->
+          field.name in stored ->
             "#{stored_name(field)} AS #{name}"
 
           true ->
@@ -783,45 +784,57 @@ defmodule Smolquery.Schema do
         end
       end)
 
-    "SELECT #{columns} FROM #{queried_relation(from, retyped, true)}"
+    beside = Enum.map_join(retyped, &", #{Identifier.quote_name!(&1.name)} AS #{stored_name(&1)}")
+
+    "SELECT #{columns} FROM #{replaced(from, retyped, beside)}"
   end
 
   @doc """
-  `from` as a query sees it: every column with a `view_cast/1` cast to the
-  type it is queried as, the rest as they are. It is the relation a
-  materialized expression is evaluated over, on the write path
-  (`computed_select/2`) and in a view that fills the column for a file that
-  predates it (`Smolquery.QueryService.Views`), so the two agree with each
-  other and with the same expression in a query.
-
-  A schema with no materialized column answers `from` unchanged: nothing
-  would read the cast.
+  `from` as a query sees it: every column of `retyped/1` cast to the type it
+  is queried as, the rest as they are. It is the relation a materialized
+  expression is evaluated over, on the write path (`computed_select/2`) and
+  in a view that fills the column for a file that predates it
+  (`Smolquery.QueryService.Views`), so the two agree with each other and
+  with the same expression in a query.
   """
   @spec queried(t(), String.t()) :: String.t()
-  def queried(%__MODULE__{} = schema, from), do: queried_relation(from, retyped(schema), false)
+  def queried(%__MODULE__{} = schema, from), do: replaced(from, retyped_fields(schema), "")
 
-  defp retyped(%__MODULE__{fields: fields} = schema) do
-    case materialized_fields(schema) do
-      [] -> []
-      _some -> Enum.filter(fields, &(&1.materialized == nil and view_cast(&1.type) != :none))
-    end
+  @doc """
+  The columns `queried/2` casts, by name: a regular column with a
+  `view_cast/1` that some materialized expression reads
+  (`Smolquery.Schema.Materialized` `sources`). A definition the catalog has
+  not validated names no sources, and is taken to read them all. A table
+  whose expressions read no such column has none, and its writes and views
+  render as they would without the cast.
+  """
+  @spec retyped(t()) :: [String.t()]
+  def retyped(%__MODULE__{} = schema), do: schema |> retyped_fields() |> Enum.map(& &1.name)
+
+  defp retyped_fields(%__MODULE__{fields: fields} = schema) do
+    definitions = schema |> materialized_fields() |> Enum.map(& &1.materialized)
+
+    for %Field{materialized: nil} = field <- fields,
+        view_cast(field.type) != :none,
+        Enum.any?(definitions, &reads?(&1, field)),
+        do: field
   end
 
-  defp queried_relation(from, [], _stored), do: from
+  defp reads?(%{sources: []}, _field), do: true
 
-  defp queried_relation(from, retyped, stored) do
+  defp reads?(%{sources: sources}, %Field{id: id, name: name}),
+    do: id in sources or name in sources
+
+  defp replaced(from, [], _beside), do: from
+
+  defp replaced(from, retyped, beside) do
     casts =
       Enum.map_join(retyped, ", ", fn %Field{name: name, type: type} ->
         {:cast, queried} = view_cast(type)
         "#{Identifier.quote_name!(name)}::#{queried} AS #{Identifier.quote_name!(name)}"
       end)
 
-    kept =
-      if stored,
-        do: Enum.map_join(retyped, &", #{Identifier.quote_name!(&1.name)} AS #{stored_name(&1)}"),
-        else: ""
-
-    "(SELECT * REPLACE (#{casts})#{kept} FROM #{from})"
+    "(SELECT * REPLACE (#{casts})#{beside} FROM #{from})"
   end
 
   defp stored_name(%Field{name: name}), do: ~s|"stored:#{name}"|

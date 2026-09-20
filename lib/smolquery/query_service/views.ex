@@ -148,20 +148,22 @@ defmodule Smolquery.QueryService.Views do
   While it is, the expression reads `from_sql` as a query would
   (`Smolquery.Schema.queried/2`), a variant as `VARIANT` — the types the
   write path evaluates it over too, so `attrs['host']::VARCHAR` is the
-  scalar in both (T-508).
+  scalar in both (T-508). A column that relation already casts is named
+  plainly here, so the cast is rendered once.
   """
   @spec table_view(Smolquery.Catalog.table_ref(), Schema.t(), String.t(), [String.t()]) ::
           [String.t()]
   def table_view({dataset, table}, schema, from_sql, recompute \\ []) do
     ds = Identifier.quote_name!(dataset)
     t = Identifier.quote_name!(table)
-    columns = Enum.map_join(schema.fields, ", ", &column_expression(&1, recompute))
 
-    from =
+    {from, queried} =
       case recompute do
-        [] -> "(#{from_sql})"
-        _some -> Schema.queried(schema, "(#{from_sql})")
+        [] -> {"(#{from_sql})", []}
+        _some -> {Schema.queried(schema, "(#{from_sql})"), Schema.retyped(schema)}
       end
+
+    columns = Enum.map_join(schema.fields, ", ", &column_expression(&1, recompute, queried))
 
     [
       "CREATE SCHEMA IF NOT EXISTS #{ds}",
@@ -169,7 +171,7 @@ defmodule Smolquery.QueryService.Views do
     ]
   end
 
-  defp column_expression(%Schema.Field{name: name, type: type} = field, recompute) do
+  defp column_expression(%Schema.Field{name: name, type: type} = field, recompute, queried) do
     quoted = Identifier.quote_name!(name)
 
     cond do
@@ -179,9 +181,12 @@ defmodule Smolquery.QueryService.Views do
 
         "coalesce(#{quoted}, TRY(CAST((#{canonical || expression}) AS #{duckdb}))) AS #{quoted}"
 
-      match?({:cast, _queried}, Schema.view_cast(type)) ->
-        {:cast, queried} = Schema.view_cast(type)
-        "#{quoted}::#{queried} AS #{quoted}"
+      name in queried ->
+        quoted
+
+      match?({:cast, _type}, Schema.view_cast(type)) ->
+        {:cast, cast} = Schema.view_cast(type)
+        "#{quoted}::#{cast} AS #{quoted}"
 
       true ->
         quoted
