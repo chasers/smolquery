@@ -437,9 +437,8 @@ defmodule Smolquery.Catalog.DuckLake do
           Identifier.sql_string(Enum.map_join(definition.sources, ",", &Integer.to_string/1))
         ]
 
-        required =
-          "INSERT INTO #{required_table(config.catalog)} VALUES " <>
-            "(#{values |> Enum.take(3) |> Enum.join(", ")})"
+        key = values |> Enum.take(3) |> Enum.join(", ")
+        required = "INSERT INTO #{required_table(config.catalog)} VALUES (#{key})"
 
         defined =
           "INSERT INTO #{materialized_table(config.catalog)} VALUES (#{Enum.join(values, ", ")})"
