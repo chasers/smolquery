@@ -157,8 +157,17 @@ services:
 
 ## What differs from ClickHouse underneath
 
-- Every column but a map answers as `Nullable(...)` unless the schema says `nullable:
-  false`. HyperDX unwraps `Nullable` when it reads a type.
+- A result column answers its plain type where it can never be `NULL`, as ClickHouse
+  does, and `Nullable(...)` otherwise (T-510). The rule is ClickHouse's: it starts at the
+  schema's `nullable: false` and carries through an expression — a cast, a listed function
+  such as `toStartOfInterval`, `count()`, a `CASE` with an `ELSE`, another aggregate under
+  a `GROUP BY` — and through subqueries and CTEs. A function that is not listed, an outer
+  join or a `UNION` answers `Nullable`. HyperDX unwraps `Nullable` when it reads a source's
+  column types, but **not** in a chart's `meta`: its histogram needs the time bucket to be
+  `DateTime64`, so the source's timestamp column must be `nullable: false`. A
+  `MATERIALIZED` timestamp can be: `ADD COLUMN ts TIMESTAMP NOT NULL MATERIALIZED
+  epoch_ms(ts_int)`, or `"nullable": false` beside `"materialized"` (T-515). One that was
+  added nullable has to be dropped and added again.
 - A map column is `Map(String, String)`, not `Map(LowCardinality(String), String)`.
   HyperDX picks its map-key query by that prefix.
 - There are no skip indexes, so HyperDX takes its plain `hasToken(lower(Body), ...)`

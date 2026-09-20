@@ -365,4 +365,44 @@ defmodule SmolqueryClickHouse.FormatTest do
       assert String.ends_with?(body, <<0, 1_789_869_796_123_456_789::little-signed-64>>)
     end
   end
+
+  describe "non_null: a column that can never be NULL answers its plain type (T-510)" do
+    @typed [
+      {"n", {:s, 64}, false},
+      {"t", {:naive_datetime, :microsecond}, false},
+      {"j", :string, true}
+    ]
+    @typed_rows [%{"n" => 2, "t" => ~N[1970-01-01 00:00:01.000000], "j" => %{"a" => 1}}]
+
+    defp non_null(format, names),
+      do: format |> Format.encode(@typed, @typed_rows, non_null: names) |> IO.iodata_to_binary()
+
+    test "in meta and in the types line, and only for the columns named" do
+      assert %{"meta" => meta} = :json |> non_null(["t", "j"]) |> JSON.decode!()
+
+      assert Enum.map(meta, & &1["type"]) == [
+               "Nullable(Int64)",
+               "DateTime64(6)",
+               "Nullable(String)"
+             ]
+
+      assert [_names, types, _row, ""] =
+               :json_compact_each_row_names_types |> non_null(["n", "t"]) |> String.split("\n")
+
+      assert JSON.decode!(types) == ["Int64", "DateTime64(6)", "Nullable(String)"]
+
+      assert [_names, "Int64\tDateTime64(6)\tNullable(String)", _row, ""] =
+               :tsv_names_types |> non_null(["n", "t"]) |> String.split("\n")
+    end
+
+    test "RowBinary writes such a column without the null marker" do
+      assert non_null(:row_binary_with_names_and_types, ["n", "t"]) ==
+               IO.iodata_to_binary([
+                 3,
+                 [1, "n", 1, "t", 1, "j"],
+                 [5, "Int64", 13, "DateTime64(6)", 16, "Nullable(String)"],
+                 [<<2::little-signed-64>>, <<1_000_000::little-signed-64>>, 0, 7, ~s({"a":1})]
+               ])
+    end
+  end
 end

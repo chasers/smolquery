@@ -28,6 +28,9 @@ defmodule Smolquery.QueryService.Plan do
   trailing semicolon — which is what makes the runner's result-budget wrap
   safe to parenthesize.
 
+  `non_null` says, per result column in order, whether it can never be
+  `NULL` (`Smolquery.QueryService.Nullability`, T-510), or `:unknown`.
+
   `schemas` carries each referenced table's catalog schema, keyed by table:
   what the runner reads to decide whether a result can carry a `VARIANT`
   column that needs casting before it crosses Arrow
@@ -61,6 +64,7 @@ defmodule Smolquery.QueryService.Plan do
     hot: %{},
     hot_members: %{},
     schemas: %{},
+    non_null: :unknown,
     federated: false,
     params: []
   ]
@@ -74,6 +78,7 @@ defmodule Smolquery.QueryService.Plan do
           hot: %{Catalog.table_ref() => [HotClient.entry()]},
           hot_members: %{Catalog.table_ref() => [String.t()]},
           schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
+          non_null: [boolean()] | :unknown,
           statistics: Statistics.t() | nil,
           federated: boolean(),
           params: [term()]

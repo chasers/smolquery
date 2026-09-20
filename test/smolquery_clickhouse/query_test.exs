@@ -281,7 +281,7 @@ defmodule SmolqueryClickHouse.QueryTest do
                "JSONCompactEachRowWithNamesAndTypes"
              ]
 
-      assert response.resp_body == ~s|["a"]\n["Nullable(Int32)"]\n[1]\n|
+      assert response.resp_body == ~s|["a"]\n["Int32"]\n[1]\n|
     end
 
     test "date_time_output_format=iso writes a timestamp as ISO 8601", %{name: name} do
@@ -383,8 +383,8 @@ defmodule SmolqueryClickHouse.QueryTest do
                     "GROUP BY level, `__hdx_time_bucket` ORDER BY `__hdx_time_bucket`"
 
     @meta [
-      %{"name" => "count()", "type" => "Nullable(Int64)"},
-      %{"name" => "level", "type" => "Nullable(String)"},
+      %{"name" => "count()", "type" => "Int64"},
+      %{"name" => "level", "type" => "String"},
       %{"name" => "__hdx_time_bucket", "type" => "Nullable(DateTime64(6))"}
     ]
 

@@ -293,6 +293,7 @@ defmodule Smolquery.QueryService.Runner do
              job
              | scatter: done.scatter,
                json_columns: done.json_columns,
+               non_null_columns: done.non_null,
                hot_members: done.hot_members
            }, frame}
 
@@ -368,6 +369,7 @@ defmodule Smolquery.QueryService.Runner do
          result: result,
          scatter: scatter,
          json_columns: json_columns,
+         non_null: plan.non_null,
          snapshot: plan.snapshot,
          hot_members: plan.hot_members,
          duration_ms: duration,

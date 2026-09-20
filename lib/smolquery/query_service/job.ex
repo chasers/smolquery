@@ -18,6 +18,11 @@ defmodule Smolquery.QueryService.Job do
   distributed answer from a quiet refusal. Like `statistics`, history does
   not persist it.
 
+  `non_null_columns` says, per result column in order, whether it can never
+  be `NULL` (`Smolquery.QueryService.Nullability`, T-510): what lets the
+  ClickHouse edge answer `DateTime64(6)` where ClickHouse would, rather than
+  `Nullable(DateTime64(6))`. `:unknown` when the statement cannot be laid out.
+
   `hot_members` is the exact hot tier the plan read: per table, the ids of
   the micro-segments that passed the membership rule (PL-58 layer 8,
   T-418). A caller that must read the same hot tier again — a wire
@@ -55,6 +60,7 @@ defmodule Smolquery.QueryService.Job do
     :ddl,
     :error,
     json_columns: [],
+    non_null_columns: :unknown,
     hot_members: %{}
   ]
 
@@ -76,6 +82,7 @@ defmodule Smolquery.QueryService.Job do
           ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),
           json_columns: [String.t()],
+          non_null_columns: [boolean()] | :unknown,
           hot_members: %{Catalog.table_ref() => [String.t()]}
         }
 

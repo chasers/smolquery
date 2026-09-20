@@ -149,6 +149,9 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
 
     assert Enum.map(meta, & &1["name"]) == ["count()", "SeverityText", "__hdx_time_bucket"]
 
+    assert Enum.map(meta, & &1["type"]) == ["Int64", "Nullable(String)", "DateTime64(6)"],
+           "HyperDX's chart looks for a date-typed column in meta and does not unwrap Nullable (T-510)"
+
     assert Enum.sort_by(data, &{&1["__hdx_time_bucket"], &1["SeverityText"]}) == [
              %{
                "count()" => "15",

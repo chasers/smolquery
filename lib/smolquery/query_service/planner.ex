@@ -263,6 +263,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Identifier
   alias Smolquery.Partitions
   alias Smolquery.QueryService.AnyN
+  alias Smolquery.QueryService.Nullability
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
@@ -316,7 +317,7 @@ defmodule Smolquery.QueryService.Planner do
         |> bounded(connection, statement, tables, pruned, params, top_n)
         |> trimmed(tables, any_n)
 
-      query = %{sql: sql, canonical: canonical, params: params}
+      query = %{sql: sql, canonical: canonical, params: params, statement: statement}
 
       {:ok,
        Trace.span(:build, fn ->
@@ -839,6 +840,7 @@ defmodule Smolquery.QueryService.Planner do
 
   defp build(query, snapshot, refs, tables, members, hot, attaches, page) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
+    schemas = Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end)
 
     %Plan{
       sql: query.sql,
@@ -853,7 +855,8 @@ defmodule Smolquery.QueryService.Planner do
         members
         |> pinnable(page)
         |> Map.new(fn {ref, entries} -> {ref, Enum.map(entries, &:binary.copy(&1["id"]))} end),
-      schemas: Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end),
+      schemas: schemas,
+      non_null: Nullability.columns(query.statement, schemas),
       statistics: statistics(members, hot, tables)
     }
   end

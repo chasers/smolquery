@@ -28,7 +28,11 @@ defmodule SmolqueryClickHouse.Format do
 
   Each column's ClickHouse type derives from the result frame's Explorer
   dtype, the only type a query result carries. A frame does not say whether
-  a column can hold `NULL`, so every type but a map is `Nullable`.
+  a column can hold `NULL`, so every type but a map is `Nullable` — unless
+  the caller names the column in `non_null:`, which the query edge does for
+  one the statement and the schema rule out a `NULL` in
+  (`Smolquery.QueryService.Nullability`, T-510). Such a column answers the
+  plain type, and in RowBinary goes without the null marker.
 
   | dtype | ClickHouse type |
   |---|---|
@@ -210,36 +214,43 @@ defmodule SmolqueryClickHouse.Format do
   `elapsed_ms:` is reported in the `statistics` of the `JSON` formats.
   `date_time: :iso` writes a timestamp as ISO 8601 with a `Z`, in the text
   formats; RowBinary carries a timestamp as a number either way.
+  `non_null:` names the columns that answer their plain type rather than
+  `Nullable(...)` (T-510), and in RowBinary go without the null marker; the
+  caller vouches that none of `rows` holds a `NULL` in one.
   """
-  @spec encode(t(), [column()], [map()], elapsed_ms: non_neg_integer(), date_time: :simple | :iso) ::
-          iodata()
+  @spec encode(t(), [column()], [map()],
+          elapsed_ms: non_neg_integer(),
+          date_time: :simple | :iso,
+          non_null: [String.t()]
+        ) :: iodata()
   def encode(format, columns, rows, opts \\ []) do
     style = Keyword.get(opts, :date_time, :simple)
+    required = MapSet.new(Keyword.get(opts, :non_null, []))
 
-    body(format, columns, rows, style, Keyword.get(opts, :elapsed_ms, 0))
+    body(format, columns, rows, style, Keyword.get(opts, :elapsed_ms, 0), required)
   end
 
-  defp body(:tsv, columns, rows, style, _elapsed_ms),
+  defp body(:tsv, columns, rows, style, _elapsed_ms, _required),
     do: tsv_rows(columns, rows, style, &escape/1)
 
-  defp body(:tsv_raw, columns, rows, style, _elapsed_ms),
+  defp body(:tsv_raw, columns, rows, style, _elapsed_ms, _required),
     do: tsv_rows(columns, rows, style, &Function.identity/1)
 
-  defp body(:tsv_names, columns, rows, style, _elapsed_ms),
+  defp body(:tsv_names, columns, rows, style, _elapsed_ms, _required),
     do: [
       tsv_line(Enum.map(columns, &escape(elem(&1, 0)))),
       tsv_rows(columns, rows, style, &escape/1)
     ]
 
-  defp body(:tsv_names_types, columns, rows, style, _elapsed_ms) do
+  defp body(:tsv_names_types, columns, rows, style, _elapsed_ms, required) do
     [
       tsv_line(Enum.map(columns, &escape(elem(&1, 0)))),
-      tsv_line(type_names(columns)),
+      tsv_line(type_names(columns, required)),
       tsv_rows(columns, rows, style, &escape/1)
     ]
   end
 
-  defp body(:csv, columns, rows, style, _elapsed_ms) do
+  defp body(:csv, columns, rows, style, _elapsed_ms, _required) do
     Enum.map(rows, fn row ->
       csv_line(
         Enum.map(columns, fn {name, dtype, json?} ->
@@ -249,58 +260,60 @@ defmodule SmolqueryClickHouse.Format do
     end)
   end
 
-  defp body(:csv_names, columns, rows, style, elapsed_ms) do
+  defp body(:csv_names, columns, rows, style, elapsed_ms, required) do
     [
       csv_line(Enum.map(columns, fn {name, _dtype, _json?} -> csv_text(name) end)),
-      body(:csv, columns, rows, style, elapsed_ms)
+      body(:csv, columns, rows, style, elapsed_ms, required)
     ]
   end
 
-  defp body(:csv_names_types, columns, rows, style, elapsed_ms) do
+  defp body(:csv_names_types, columns, rows, style, elapsed_ms, required) do
     [
       csv_line(Enum.map(columns, fn {name, _dtype, _json?} -> csv_text(name) end)),
-      csv_line(Enum.map(type_names(columns), &csv_text/1)),
-      body(:csv, columns, rows, style, elapsed_ms)
+      csv_line(Enum.map(type_names(columns, required), &csv_text/1)),
+      body(:csv, columns, rows, style, elapsed_ms, required)
     ]
   end
 
-  defp body(:json_each_row, columns, rows, style, _elapsed_ms),
+  defp body(:json_each_row, columns, rows, style, _elapsed_ms, _required),
     do: Enum.map(rows, &[json_object(columns, &1, style), "\n"])
 
-  defp body(:json_compact_each_row, columns, rows, style, _elapsed_ms),
+  defp body(:json_compact_each_row, columns, rows, style, _elapsed_ms, _required),
     do: Enum.map(rows, &[json_array(columns, &1, style), "\n"])
 
-  defp body(:json_compact_each_row_names, columns, rows, style, elapsed_ms),
-    do: [json_names(columns), body(:json_compact_each_row, columns, rows, style, elapsed_ms)]
+  defp body(:json_compact_each_row_names, columns, rows, style, elapsed_ms, required),
+    do: [
+      json_names(columns),
+      body(:json_compact_each_row, columns, rows, style, elapsed_ms, required)
+    ]
 
-  defp body(:json_compact_each_row_names_types, columns, rows, style, elapsed_ms) do
+  defp body(:json_compact_each_row_names_types, columns, rows, style, elapsed_ms, required) do
     [
       json_names(columns),
-      JSON.encode_to_iodata!(type_names(columns)),
+      JSON.encode_to_iodata!(type_names(columns, required)),
       "\n",
-      body(:json_compact_each_row, columns, rows, style, elapsed_ms)
+      body(:json_compact_each_row, columns, rows, style, elapsed_ms, required)
     ]
   end
 
-  defp body(:row_binary_with_names_and_types, columns, rows, _style, _elapsed_ms) do
+  defp body(:row_binary_with_names_and_types, columns, rows, _style, _elapsed_ms, required) do
     [
       leb128(length(columns)),
       Enum.map(columns, fn {name, _dtype, _json?} -> binary_string(name) end),
-      Enum.map(type_names(columns), &binary_string/1),
-      Enum.map(rows, fn row ->
-        Enum.map(columns, fn {name, dtype, json?} -> binary(dtype, json?, row[name]) end)
-      end)
+      Enum.map(type_names(columns, required), &binary_string/1),
+      Enum.map(rows, fn row -> Enum.map(columns, &binary_cell(&1, row, required)) end)
     ]
   end
 
-  defp body(format, columns, rows, style, elapsed_ms) when format in [:json, :json_compact] do
+  defp body(format, columns, rows, style, elapsed_ms, required)
+       when format in [:json, :json_compact] do
     meta =
-      Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
+      Enum.map_intersperse(columns, ",", fn {name, _dtype, _json?} = column ->
         [
           ~s({"name":),
           JSON.encode!(name),
           ~s(,"type":),
-          JSON.encode!(type_name(dtype, json?)),
+          JSON.encode!(column_type(column, required)),
           "}"
         ]
       end)
@@ -325,8 +338,26 @@ defmodule SmolqueryClickHouse.Format do
     ]
   end
 
-  defp type_names(columns),
-    do: Enum.map(columns, fn {_name, dtype, json?} -> type_name(dtype, json?) end)
+  defp binary_cell({name, dtype, json?} = column, row, required) do
+    if column_type(column, required) == type_name(dtype, json?),
+      do: binary(dtype, json?, row[name]),
+      else: binary_value(dtype, row[name])
+  end
+
+  defp type_names(columns, required),
+    do: Enum.map(columns, &column_type(&1, required))
+
+  defp column_type({name, dtype, false}, required) do
+    if MapSet.member?(required, name) and nullable_type?(dtype),
+      do: base_type(dtype),
+      else: type_name(dtype, false)
+  end
+
+  defp column_type({_name, dtype, json?}, _required), do: type_name(dtype, json?)
+
+  defp nullable_type?(@map_dtype), do: false
+  defp nullable_type?({:list, _element}), do: false
+  defp nullable_type?(_dtype), do: true
 
   defp json_names(columns),
     do: [

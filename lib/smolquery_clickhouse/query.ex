@@ -355,11 +355,27 @@ defmodule SmolqueryClickHouse.Query do
       |> nanoseconds(dtypes)
       |> Frame.to_rows(json_columns: job.json_columns, map_entries: true)
 
+    encoding = [{:non_null, non_null(job, frame)} | encoding(conn, job)]
+
     conn
     |> headers(job, length(rows))
     |> put_resp_header("x-clickhouse-format", Format.name(format))
     |> put_resp_header("content-type", Format.content_type(format))
-    |> send_resp(200, Format.encode(format, columns, rows, encoding(conn, job)))
+    |> send_resp(200, Format.encode(format, columns, rows, encoding))
+  end
+
+  defp non_null(job, frame) do
+    names = DataFrame.names(frame)
+
+    case Map.get(job, :non_null_columns, :unknown) do
+      flags when is_list(flags) and length(flags) == length(names) ->
+        for {name, true} <- Enum.zip(names, flags),
+            Explorer.Series.nil_count(frame[name]) == 0,
+            do: name
+
+      _unknown_or_another_width ->
+        []
+    end
   end
 
   defp nanoseconds(frame, dtypes) do
