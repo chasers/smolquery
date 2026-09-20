@@ -100,16 +100,20 @@ defmodule Smolquery.QueryService.Nullability do
         match?([_one], node["group_sets"])
 
     node["select_list"]
-    |> Enum.reduce_while([], fn item, acc ->
+    |> Enum.reduce_while([], fn item, reversed ->
       case laid_out(item, scope, grouped and plain) do
         :unknown -> {:halt, :unknown}
-        columns -> {:cont, acc ++ columns}
+        columns -> {:cont, Enum.reverse(columns, reversed)}
       end
     end)
+    |> in_order()
     |> unless_sets(plain)
   end
 
   defp outputs(_set_operation_or_other, _schemas, _ctes), do: :unknown
+
+  defp in_order(:unknown), do: :unknown
+  defp in_order(reversed), do: Enum.reverse(reversed)
 
   defp unless_sets(:unknown, _plain), do: :unknown
   defp unless_sets(columns, true), do: columns
@@ -176,10 +180,11 @@ defmodule Smolquery.QueryService.Nullability do
   end
 
   defp relations(%{"type" => "JOIN", "join_type" => "INNER"} = join, schemas, ctes),
-    do: relations(join["left"], schemas, ctes) ++ relations(join["right"], schemas, ctes)
+    do: Enum.flat_map([join["left"], join["right"]], &relations(&1, schemas, ctes))
 
   defp relations(%{"type" => "JOIN"} = join, schemas, ctes) do
-    (relations(join["left"], schemas, ctes) ++ relations(join["right"], schemas, ctes))
+    [join["left"], join["right"]]
+    |> Enum.flat_map(&relations(&1, schemas, ctes))
     |> Enum.map(&%{&1 | columns: nullable(&1.columns)})
   end
 
