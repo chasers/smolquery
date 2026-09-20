@@ -42,10 +42,24 @@ spec:
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
+          # The probe is an exec, and an exec on a busy kind node can take
+          # longer than the default one second to start pg_isready at all.
+          # Three of those in a row mark a Postgres that is serving as not
+          # Ready, its Service loses its only endpoint, every connection is
+          # refused, and smolquery-api crash-loops until the rollout wait
+          # gives up (T-505). So the probe gets time, and Postgres gets a
+          # request, which takes it out of the BestEffort class the node
+          # starves first.
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "postgres"]
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
   volumeClaimTemplates:
     - metadata:
         name: pgdata

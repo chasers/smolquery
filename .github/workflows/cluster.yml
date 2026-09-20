@@ -57,6 +57,12 @@ jobs:
         run: |
           kubectl --context kind-smolquery -n smolquery get pods -o wide
           kubectl --context kind-smolquery -n smolquery describe pods
+          # describe printed no events in the runs that failed, and a pod that
+          # is Running and not Ready is explained nowhere else: a probe that
+          # failed says so here, with its reason (T-505).
+          kubectl --context kind-smolquery -n smolquery get events \
+            --sort-by=.lastTimestamp || true
+          kubectl --context kind-smolquery describe node | sed -n '/Allocated resources/,/Events/p' || true
           kubectl --context kind-smolquery -n smolquery logs -l app=smolquery-buffer \
             --tail=200 --prefix --all-containers
           # The rollout wait most often times out on smolquery-api (T-505). Its
