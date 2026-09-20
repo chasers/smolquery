@@ -40,6 +40,20 @@ defmodule Smolquery.QueryService.ClientTest do
       assert DataFrame.to_columns(frame)["n"] == [2]
     end
 
+    test "a result with no rows keeps its columns, bounded or not, however the statement ends (T-509)" do
+      for opts <- [[], [result_max_rows: :infinity]],
+          sql <- [
+            "SELECT 1::BIGINT AS n, 'a' AS s WHERE false",
+            "SELECT 1::BIGINT AS n, 'a' AS s WHERE false; -- none"
+          ] do
+        name = start_service(opts)
+
+        assert {:ok, %{state: :done, row_count: 0}, frame} = Client.query(name, sql)
+        assert DataFrame.names(frame) == ["n", "s"]
+        assert DataFrame.dtypes(frame) == %{"n" => {:s, 64}, "s" => :string}
+      end
+    end
+
     test "read_engine_threads sets the job engine's DuckDB threads (T-279)" do
       name = start_service(read_engine_threads: 2)
 

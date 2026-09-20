@@ -374,6 +374,80 @@ defmodule SmolqueryClickHouse.QueryTest do
     end
   end
 
+  describe "a result with no rows still says its columns (T-509)" do
+    @empty_window "SELECT count(), level, " <>
+                    "toStartOfInterval(toDateTime(ts), INTERVAL 1 minute) AS `__hdx_time_bucket` " <>
+                    "FROM (SELECT TIMESTAMP '2026-09-19 10:11:00' + INTERVAL (i) SECOND AS ts, " <>
+                    "'info' AS level FROM range(120) r(i)) " <>
+                    "WHERE ts >= fromUnixTimestamp64Milli({from:Int64}) " <>
+                    "GROUP BY level, `__hdx_time_bucket` ORDER BY `__hdx_time_bucket`"
+
+    @meta [
+      %{"name" => "count()", "type" => "Nullable(Int64)"},
+      %{"name" => "level", "type" => "Nullable(String)"},
+      %{"name" => "__hdx_time_bucket", "type" => "Nullable(DateTime64(6))"}
+    ]
+
+    defp empty_window(name, format) do
+      response =
+        conn(
+          :post,
+          "/?" <> URI.encode_query(%{"param_from" => "1900000000000"}),
+          @empty_window <> " FORMAT " <> format
+        )
+        |> request(name)
+
+      assert response.status == 200, response.resp_body
+      assert [summary] = get_resp_header(response, "x-clickhouse-summary")
+      assert %{"result_rows" => "0"} = JSON.decode!(summary)
+
+      response.resp_body
+    end
+
+    test "JSON and JSONCompact answer meta with no data, as HyperDX's histogram reads it", %{
+      name: name
+    } do
+      for format <- ["JSON", "JSONCompact"] do
+        assert %{"meta" => @meta, "data" => [], "rows" => 0} =
+                 name |> empty_window(format) |> JSON.decode!()
+      end
+    end
+
+    test "the names and types lines answer in the line formats", %{name: name} do
+      names = Enum.map(@meta, & &1["name"])
+      types = Enum.map(@meta, & &1["type"])
+
+      assert [names_line, types_line, ""] =
+               name
+               |> empty_window("JSONCompactEachRowWithNamesAndTypes")
+               |> String.split("\n")
+
+      assert JSON.decode!(names_line) == names
+      assert JSON.decode!(types_line) == types
+
+      assert empty_window(name, "TabSeparatedWithNamesAndTypes") ==
+               Enum.join(names, "\t") <> "\n" <> Enum.join(types, "\t") <> "\n"
+
+      assert empty_window(name, "TabSeparatedWithNames") == Enum.join(names, "\t") <> "\n"
+      assert empty_window(name, "TabSeparated") == ""
+    end
+
+    test "the types are the ones the same statement answers with rows", %{name: name} do
+      sql = "SELECT 1::BIGINT AS n, 'a' AS s, [1, 2] AS l, DATE '2026-01-01' AS d"
+
+      meta = fn statement ->
+        name
+        |> post(statement <> " FORMAT JSON")
+        |> Map.fetch!(:resp_body)
+        |> JSON.decode!()
+        |> Map.fetch!("meta")
+      end
+
+      assert [_n, _s, _l, _d] = meta.(sql)
+      assert meta.("SELECT * FROM (" <> sql <> ") WHERE n = 0") == meta.(sql)
+    end
+  end
+
   describe "a row click's round trip (T-496)" do
     test "a map answers in its stored key order, and sent back as it was answered, finds its row",
          %{name: name} do

@@ -188,4 +188,36 @@ defmodule Smolquery.Engine.ConnectionTest do
       assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
     end
   end
+
+  describe "frame/4 on a statement that selects nothing (T-509)" do
+    setup do
+      {:ok, conn} = Connection.start_link(database: @database)
+      %{conn: conn}
+    end
+
+    @columns "SELECT 1::BIGINT AS n, 'a' AS s, TIMESTAMP '2026-01-01' AS t, [1, 2] AS l, $1::DATE AS d"
+
+    test "keeps the names and the dtypes the same statement has with rows", %{conn: conn} do
+      params = [~D[2026-01-01]]
+
+      {:ok, with_rows} = Connection.frame(conn, @columns, params)
+      {:ok, without} = Connection.frame(conn, @columns <> " WHERE false", params)
+
+      assert Explorer.DataFrame.n_rows(without) == 0
+      assert Explorer.DataFrame.names(without) == ["n", "s", "t", "l", "d"]
+      assert Explorer.DataFrame.dtypes(without) == Explorer.DataFrame.dtypes(with_rows)
+    end
+
+    test "a statement that is not a query runs once and keeps the frame it had", %{conn: conn} do
+      table = "shaped_#{:erlang.unique_integer([:positive])}"
+
+      assert {:ok, created} = Connection.frame(conn, "CREATE TABLE #{table} AS SELECT 1 AS n")
+      assert Explorer.DataFrame.n_columns(created) <= 1
+
+      assert {:ok, %Result{rows: [[1]]}} = Connection.query(conn, "SELECT count(*) FROM #{table}")
+
+      assert {:ok, unwrappable} = Connection.frame(conn, "SELECT 1 AS n WHERE false;")
+      assert Explorer.DataFrame.n_columns(unwrappable) == 0
+    end
+  end
 end

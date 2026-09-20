@@ -158,6 +158,16 @@ defmodule Smolquery.Engine.Connection do
   make — a `VARIANT` column, which Arrow has no type for — its NIF answers a bare
   string. That string is wrapped in an `Adbc.Error` here, so every caller sees one
   error shape and `fatal?/1` can read it.
+
+  A statement that selects nothing hands no Arrow batch over, and a frame built
+  from no batch has no columns: the names and types are gone (T-509). So a frame
+  that comes back with none is asked for once more — the statement under
+  `LIMIT 0`, left-joined to one row, answers a single all-`NULL` row carrying every
+  column's type, and its head of zero rows is the result. `LIMIT 0` reads nothing,
+  so the second statement costs a bind, and the dtypes are the ones Explorer gives
+  the same statement with rows, by construction. Only a query wraps as a
+  subquery, so a `CREATE`, a `SET` or a statement ending in a semicolon fails to
+  parse there, runs nothing twice, and keeps the frame it had.
   """
   @spec frame(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
@@ -243,6 +253,7 @@ defmodule Smolquery.Engine.Connection do
   def handle_call({:frame, sql, params}, _from, state) do
     state.adbc
     |> Explorer.DataFrame.from_query(sql, params)
+    |> shaped(state.adbc, sql, params)
     |> exception_shaped()
     |> reply_or_stop(state)
   end
@@ -257,6 +268,22 @@ defmodule Smolquery.Engine.Connection do
   @impl true
   def handle_call(:adbc_connection, _from, state) do
     {:reply, state.adbc, state}
+  end
+
+  defp shaped({:ok, frame} = answer, adbc, sql, params) do
+    with 0 <- Explorer.DataFrame.n_columns(frame),
+         {:ok, one} <- Explorer.DataFrame.from_query(adbc, shape_sql(sql), params) do
+      {:ok, Explorer.DataFrame.head(one, 0)}
+    else
+      _carries_its_columns_or_cannot_be_shaped -> answer
+    end
+  end
+
+  defp shaped(answer, _adbc, _sql, _params), do: answer
+
+  defp shape_sql(sql) do
+    "SELECT shape.* FROM (SELECT 1) AS one LEFT JOIN " <>
+      "(SELECT * FROM (#{sql}) LIMIT 0) AS shape ON true"
   end
 
   @dialyzer {:nowarn_function, exception_shaped: 1}

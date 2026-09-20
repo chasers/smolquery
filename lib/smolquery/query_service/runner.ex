@@ -35,6 +35,17 @@ defmodule Smolquery.QueryService.Runner do
   materializes, which is the point. The `+ 1` is how a truncated result is
   told apart from one that exactly fits.
 
+  ## A result with no rows keeps its columns (T-509)
+
+  A client reads a result's names and types whatever the row count —
+  ClickHouse's `meta`, BigQuery's `schema`, the wire's `RowDescription` —
+  and `Smolquery.Engine.Connection.frame/4` recovers them for a statement
+  that selects nothing, when it can wrap the statement as it was sent. The
+  unbounded path sends the user's own bytes, which a trailing semicolon or
+  a comment makes unwrappable, and the distributed detour builds its frame
+  elsewhere. So a frame that still has no columns is asked for once more
+  as the canonical text under `LIMIT 0`, which always wraps.
+
   ## The distributed detour (PL-49, PoC)
 
   With `runtime.distributed.enabled`, a planned query first offers itself to
@@ -387,12 +398,28 @@ defmodule Smolquery.QueryService.Runner do
   defp run_prepared(runtime, connection, plan, prepared, max_rows, job_id, timeout_ms) do
     case scatter(runtime, connection, plan, prepared, job_id, timeout_ms) do
       {:ok, frame, scatter} ->
-        checked(frame, max_rows, scatter, prepared.json_columns)
+        checked(
+          shaped(connection, prepared.plan, frame),
+          max_rows,
+          scatter,
+          prepared.json_columns
+        )
 
       :fallback ->
         with {:ok, frame} <- frame(connection, prepared.plan, bounded(prepared.plan, max_rows)) do
-          checked(frame, max_rows, nil, prepared.json_columns)
+          checked(shaped(connection, prepared.plan, frame), max_rows, nil, prepared.json_columns)
         end
+    end
+  end
+
+  defp shaped(connection, plan, frame) do
+    canonical = "SELECT * FROM (#{plan.canonical_sql}) LIMIT 0"
+
+    with 0 <- DataFrame.n_columns(frame),
+         {:ok, shaped} <- Connection.frame(connection, canonical, plan.params, :infinity) do
+      shaped
+    else
+      _carries_its_columns_or_cannot_be_shaped -> frame
     end
   end
 

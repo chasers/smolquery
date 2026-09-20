@@ -71,8 +71,15 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
   end
 
   describe "what HyperDX asks before its first query" do
-    test "system.settings answers no rows, not a failure", %{name: name} do
-      assert data(post(name, "SELECT name, value FROM system.settings FORMAT JSON")) == []
+    test "system.settings answers no rows, not a failure, and still names its columns (T-509)", %{
+      name: name
+    } do
+      response = post(name, "SELECT name, value FROM system.settings FORMAT JSON")
+
+      assert data(response) == []
+
+      assert [%{"name" => "name"}, %{"name" => "value"}] =
+               JSON.decode!(response.resp_body)["meta"]
     end
 
     test "DESCRIBE with Identifier parameters lists columns and their ClickHouse types", %{
