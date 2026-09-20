@@ -163,16 +163,33 @@ defmodule Smolquery.Engine.Connection do
   from no batch has no columns: the names and types are gone (T-509). So a frame
   that comes back with none is asked for once more — the statement under
   `LIMIT 0`, left-joined to one row, answers a single all-`NULL` row carrying every
-  column's type, and its head of zero rows is the result. `LIMIT 0` reads nothing,
-  so the second statement costs a bind, and the dtypes are the ones Explorer gives
-  the same statement with rows, by construction. Only a query wraps as a
-  subquery, so a `CREATE`, a `SET` or a statement ending in a semicolon fails to
-  parse there, runs nothing twice, and keeps the frame it had.
+  column's type, and its head of zero rows is the result. `LIMIT 0` reads no row,
+  but the second statement is bound again, and a bind is not free: a view over
+  `read_parquet` reads its files' footers to bind, so an empty result over a
+  remote tier pays that I/O twice. It is paid only by a result with no rows. The
+  dtypes are the ones Explorer gives the same statement with rows, by
+  construction. Only a query wraps as a subquery, so a `CREATE`, a `SET` or a
+  statement ending in a semicolon fails to parse there, runs nothing twice, and
+  keeps the frame it had. Any other failure of the second statement keeps the
+  frame too, except a fatal one, which is answered and stops the connection as
+  it would have on the first (`fatal?/1`).
   """
   @spec frame(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
   def frame(conn, sql, params \\ [], timeout \\ 30_000) do
     GenServer.call(conn, {:frame, sql, Params.normalize(params)}, timeout)
+  end
+
+  @doc """
+  The columns `sql` answers, as a frame of no rows: what `frame/4` falls back
+  to, asked for directly. `sql` has to wrap as a subquery, so a caller passes
+  text with no trailing semicolon or comment. One statement, never the
+  statement itself: it runs under `LIMIT 0`.
+  """
+  @spec shape(GenServer.server(), String.t(), [term()], timeout()) ::
+          {:ok, Explorer.DataFrame.t()} | {:error, Exception.t()}
+  def shape(conn, sql, params \\ [], timeout \\ 30_000) do
+    GenServer.call(conn, {:shape, sql, Params.normalize(params)}, timeout)
   end
 
   @doc """
@@ -259,6 +276,13 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @impl true
+  def handle_call({:shape, sql, params}, _from, state) do
+    state.adbc
+    |> shape_of(sql, params)
+    |> reply_or_stop(state)
+  end
+
+  @impl true
   def handle_call({:transaction, statements}, _from, state) do
     state.adbc
     |> run_transaction(statements)
@@ -272,14 +296,22 @@ defmodule Smolquery.Engine.Connection do
 
   defp shaped({:ok, frame} = answer, adbc, sql, params) do
     with 0 <- Explorer.DataFrame.n_columns(frame),
-         {:ok, one} <- Explorer.DataFrame.from_query(adbc, shape_sql(sql), params) do
-      {:ok, Explorer.DataFrame.head(one, 0)}
+         {:ok, shape} <- shape_of(adbc, sql, params) do
+      {:ok, shape}
     else
-      _carries_its_columns_or_cannot_be_shaped -> answer
+      {:error, error} -> if fatal?(error), do: {:error, error}, else: answer
+      _carries_its_columns -> answer
     end
   end
 
   defp shaped(answer, _adbc, _sql, _params), do: answer
+
+  defp shape_of(adbc, sql, params) do
+    case adbc |> Explorer.DataFrame.from_query(shape_sql(sql), params) |> exception_shaped() do
+      {:ok, one} -> {:ok, Explorer.DataFrame.head(one, 0)}
+      {:error, error} -> {:error, error}
+    end
+  end
 
   defp shape_sql(sql) do
     "SELECT shape.* FROM (SELECT 1) AS one LEFT JOIN " <>

@@ -43,8 +43,9 @@ defmodule Smolquery.QueryService.Runner do
   that selects nothing, when it can wrap the statement as it was sent. The
   unbounded path sends the user's own bytes, which a trailing semicolon or
   a comment makes unwrappable, and the distributed detour builds its frame
-  elsewhere. So a frame that still has no columns is asked for once more
-  as the canonical text under `LIMIT 0`, which always wraps.
+  elsewhere. So a frame that still has no columns is asked for its shape
+  from the canonical text, which always wraps
+  (`Smolquery.Engine.Connection.shape/4`): one more statement, not two.
 
   ## The distributed detour (PL-49, PoC)
 
@@ -413,10 +414,9 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp shaped(connection, plan, frame) do
-    canonical = "SELECT * FROM (#{plan.canonical_sql}) LIMIT 0"
-
     with 0 <- DataFrame.n_columns(frame),
-         {:ok, shaped} <- Connection.frame(connection, canonical, plan.params, :infinity) do
+         {:ok, shaped} <-
+           Connection.shape(connection, plan.canonical_sql, plan.params, :infinity) do
       shaped
     else
       _carries_its_columns_or_cannot_be_shaped -> frame

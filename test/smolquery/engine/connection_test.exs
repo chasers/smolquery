@@ -219,5 +219,15 @@ defmodule Smolquery.Engine.ConnectionTest do
       assert {:ok, unwrappable} = Connection.frame(conn, "SELECT 1 AS n WHERE false;")
       assert Explorer.DataFrame.n_columns(unwrappable) == 0
     end
+
+    test "shape/4 answers the columns in one statement, and an error as an error (review of T-509)",
+         %{conn: conn} do
+      assert {:ok, shape} = Connection.shape(conn, "SELECT $1::BIGINT AS n, 'a' AS s", [7])
+      assert Explorer.DataFrame.n_rows(shape) == 0
+      assert Explorer.DataFrame.dtypes(shape) == %{"n" => {:s, 64}, "s" => :string}
+
+      assert {:error, %Adbc.Error{}} = Connection.shape(conn, "SELECT 1;")
+      assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
+    end
   end
 end
