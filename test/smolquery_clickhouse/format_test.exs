@@ -47,7 +47,7 @@ defmodule SmolqueryClickHouse.FormatTest do
     assert Format.type_name({:decimal, 18, 2}, false) == "Nullable(Decimal(18, 2))"
     assert Format.type_name({:naive_datetime, :nanosecond}, false) == "Nullable(DateTime64(9))"
     assert Format.type_name(@map_dtype, false) == "Map(String, String)"
-    assert Format.type_name({:s, 64}, true) == "Nullable(String)"
+    assert Format.type_name({:s, 64}, true) == "JSON"
   end
 
   describe "encode/4" do
@@ -63,7 +63,7 @@ defmodule SmolqueryClickHouse.FormatTest do
       assert names == "id\tmsg\tts\tattrs\tdoc"
 
       assert types ==
-               "Nullable(Int64)\tNullable(String)\tNullable(DateTime64(6))\tMap(String, String)\tNullable(String)"
+               "Nullable(Int64)\tNullable(String)\tNullable(DateTime64(6))\tMap(String, String)\tJSON"
     end
 
     test "JSONEachRow quotes 64-bit integers and keeps maps as objects" do
@@ -74,7 +74,7 @@ defmodule SmolqueryClickHouse.FormatTest do
                "msg" => "tab\there, it's",
                "ts" => "2026-09-15 12:00:00.123456",
                "attrs" => %{"host" => "a"},
-               "doc" => ~s({"n":1})
+               "doc" => %{"n" => 1}
              }
 
       assert %{"id" => nil, "attrs" => %{}} = JSON.decode!(second)
@@ -170,8 +170,8 @@ defmodule SmolqueryClickHouse.FormatTest do
     test "JSONCompactEachRowWithNamesAndTypes is names, types, then a row per line" do
       assert encode(:json_compact_each_row_names_types) ==
                ~s|["id","msg","ts","attrs","doc"]\n| <>
-                 ~s|["Nullable(Int64)","Nullable(String)","Nullable(DateTime64(6))","Map(String, String)","Nullable(String)"]\n| <>
-                 ~s|["1","tab\\there, it's","2026-09-15 12:00:00.123456",{"host":"a"},"{\\"n\\":1}"]\n| <>
+                 ~s|["Nullable(Int64)","Nullable(String)","Nullable(DateTime64(6))","Map(String, String)","JSON"]\n| <>
+                 ~s|["1","tab\\there, it's","2026-09-15 12:00:00.123456",{"host":"a"},{"n":1}]\n| <>
                  ~s|[null,null,null,{},null]\n|
     end
 
@@ -383,15 +383,15 @@ defmodule SmolqueryClickHouse.FormatTest do
       assert Enum.map(meta, & &1["type"]) == [
                "Nullable(Int64)",
                "DateTime64(6)",
-               "Nullable(String)"
+               "JSON"
              ]
 
       assert [_names, types, _row, ""] =
                :json_compact_each_row_names_types |> non_null(["n", "t"]) |> String.split("\n")
 
-      assert JSON.decode!(types) == ["Int64", "DateTime64(6)", "Nullable(String)"]
+      assert JSON.decode!(types) == ["Int64", "DateTime64(6)", "JSON"]
 
-      assert [_names, "Int64\tDateTime64(6)\tNullable(String)", _row, ""] =
+      assert [_names, "Int64\tDateTime64(6)\tJSON", _row, ""] =
                :tsv_names_types |> non_null(["n", "t"]) |> String.split("\n")
     end
 

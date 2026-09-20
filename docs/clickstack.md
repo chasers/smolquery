@@ -169,6 +169,14 @@ services:
   epoch_ms(ts_int)`, or `"nullable": false` beside `"materialized"` (T-515). One that was
   added nullable has to be dropped and added again.
 - A map column is `Map(String, String)`, not `Map(LowCardinality(String), String)`.
+- A `VARIANT` column is `JSON` (T-521). Use one where attributes nest or hold more than
+  strings, which `MAP(STRING, STRING)` has no room for: a Logflare drain's `metadata` is
+  the case it was done for. HyperDX reads the type's prefix and searches a nested key as
+  `toString(metadata.context.application)`, which answers. Listing a `JSON` column's keys
+  for the filters sidebar (`JSONDynamicPathsWithTypes`) does not answer yet. This needs a
+  HyperDX that knows the `JSON` type: the recipe is checked against `@hyperdx/app@2.39.1`.
+  2.1.0, a year older, has only a stub for it, and words a term search in a function the
+  edge does not have (`hasTokenCaseInsensitive`).
   HyperDX picks its map-key query by that prefix.
 - There are no skip indexes, so HyperDX takes its plain `hasToken(lower(Body), ...)`
   path. `hasToken` here scans; there is no token index behind it.

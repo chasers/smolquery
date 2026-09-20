@@ -294,6 +294,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   """
   @spec column_type(Field.t()) :: String.t()
   def column_type(%Field{type: {:map, :string, :string}}), do: "Map(String, String)"
+  def column_type(%Field{type: :variant}), do: "JSON"
   def column_type(%Field{type: type, nullable: false}), do: base_type(type)
   def column_type(%Field{type: type}), do: "Nullable(" <> base_type(type) <> ")"
 
@@ -305,7 +306,6 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp base_type(:timestamp_ns), do: "DateTime64(9)"
   defp base_type(:date), do: "Date32"
   defp base_type({:numeric, precision, scale}), do: "Decimal(#{precision}, #{scale})"
-  defp base_type(:variant), do: "String"
 
   defp mentions_catalog?(tokens) do
     leading = tokens |> Enum.map_join(&elem(&1, 1)) |> Sql.leading_keyword()

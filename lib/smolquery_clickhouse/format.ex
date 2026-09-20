@@ -46,7 +46,17 @@ defmodule SmolqueryClickHouse.Format do
   | `MAP(STRING, STRING)` | `Map(String, String)` |
   | a list | `Array(Nullable(T))`, and `Array(Array(...))` for a list of lists |
   | a list of structs, such as a map whose values are not strings | `String`, holding JSON |
-  | `VARIANT`, a struct, anything else | `String`, holding JSON or text |
+  | `VARIANT` | `JSON` |
+  | a struct, anything else | `String`, holding JSON or text |
+
+  A `VARIANT` answers as ClickHouse's `JSON` (T-521): a client such as
+  HyperDX picks how to read a nested key off the column's type string, and
+  `JSON` is the one that is true of a document that nests and holds more
+  than strings. In the JSON formats its value is the document itself,
+  nested, as ClickHouse writes a `JSON` column; in the text formats it is
+  the document's JSON text. RowBinary is the exception: ClickHouse's binary
+  form of `JSON` is a layout of typed dynamic paths, not text, so there the
+  column is declared `Nullable(String)` and carries the JSON text.
 
   ## Values
 
@@ -183,7 +193,7 @@ defmodule SmolqueryClickHouse.Format do
   The ClickHouse type a result column answers as.
   """
   @spec type_name(term(), boolean()) :: String.t()
-  def type_name(_dtype, true), do: "Nullable(String)"
+  def type_name(_dtype, true), do: "JSON"
   def type_name(@map_dtype, false), do: "Map(String, String)"
   def type_name({:list, {:struct, _fields}}, false), do: "Nullable(String)"
   def type_name({:list, _element} = dtype, false), do: base_type(dtype)
@@ -300,7 +310,7 @@ defmodule SmolqueryClickHouse.Format do
     [
       leb128(length(columns)),
       Enum.map(columns, fn {name, _dtype, _json?} -> binary_string(name) end),
-      Enum.map(type_names(columns, required), &binary_string/1),
+      Enum.map(columns, &binary_string(binary_type(&1, required))),
       binary_rows(columns, rows, required)
     ]
   end
@@ -348,6 +358,9 @@ defmodule SmolqueryClickHouse.Format do
 
     Enum.map(rows, fn row -> Enum.map(writers, fn {name, write} -> write.(row[name]) end) end)
   end
+
+  defp binary_type({_name, _dtype, true}, _required), do: "Nullable(String)"
+  defp binary_type(column, required), do: column_type(column, required)
 
   defp type_names(columns, required),
     do: Enum.map(columns, &column_type(&1, required))
@@ -534,7 +547,7 @@ defmodule SmolqueryClickHouse.Format do
     do: ["[", Enum.map_intersperse(value, ",", &json(element, false, &1)), "]"]
 
   defp json(_dtype, _json?, nil), do: "null"
-  defp json(_dtype, true, value), do: json_string(json_text(value))
+  defp json(_dtype, true, value), do: json_text(value)
   defp json({kind, 64}, false, value) when kind in [:s, :u], do: [?", text(value), ?"]
   defp json(_dtype, false, value) when is_boolean(value), do: to_string(value)
   defp json(_dtype, false, value) when is_integer(value), do: Integer.to_string(value)
