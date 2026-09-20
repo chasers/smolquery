@@ -44,6 +44,7 @@ defmodule SmolqueryClickHouse.Format do
   | `:date` | `Date32` |
   | `{:decimal, p, s}` | `Decimal(p, s)` |
   | `MAP(STRING, STRING)` | `Map(String, String)` |
+  | a map of string lists, which `groupUniqArrayMap` answers | `Map(String, Array(String))` |
   | a list | `Array(Nullable(T))`, and `Array(Array(...))` for a list of lists |
   | a list of structs, such as a map whose values are not strings | `String`, holding JSON |
   | `VARIANT` | `JSON` |
@@ -171,6 +172,7 @@ defmodule SmolqueryClickHouse.Format do
   }
 
   @map_dtype {:list, {:struct, [{"key", :string}, {"value", :string}]}}
+  @map_of_lists_dtype {:list, {:struct, [{"key", :string}, {"value", {:list, :string}}]}}
   @unix_epoch ~N[1970-01-01 00:00:00]
 
   @doc """
@@ -206,6 +208,7 @@ defmodule SmolqueryClickHouse.Format do
   @spec type_name(term(), boolean()) :: String.t()
   def type_name(_dtype, true), do: "JSON"
   def type_name(@map_dtype, false), do: "Map(String, String)"
+  def type_name(@map_of_lists_dtype, false), do: "Map(String, Array(String))"
   def type_name({:list, {:struct, _fields}}, false), do: "Nullable(String)"
   def type_name({:list, _element} = dtype, false), do: base_type(dtype)
   def type_name(dtype, false), do: "Nullable(" <> base_type(dtype) <> ")"
@@ -376,6 +379,7 @@ defmodule SmolqueryClickHouse.Format do
   end
 
   defp binary_type({_name, _dtype, true}, _required), do: "Nullable(String)"
+  defp binary_type({_name, @map_of_lists_dtype, false}, _required), do: "Nullable(String)"
   defp binary_type(column, required), do: column_type(column, required)
 
   defp type_names(columns, required),
@@ -401,6 +405,7 @@ defmodule SmolqueryClickHouse.Format do
   end
 
   defp nullable_type?(@map_dtype), do: false
+  defp nullable_type?(@map_of_lists_dtype), do: false
   defp nullable_type?({:list, _element}), do: false
   defp nullable_type?(_dtype), do: true
 
@@ -471,6 +476,17 @@ defmodule SmolqueryClickHouse.Format do
 
   defp tsv(@map_dtype, false, value, _escape) when is_map(value) or is_list(value),
     do: map_text(pairs(value))
+
+  defp tsv(@map_of_lists_dtype, false, nil, _escape), do: "{}"
+
+  defp tsv(@map_of_lists_dtype, false, value, _escape) when is_map(value) or is_list(value) do
+    entries =
+      Enum.map_intersperse(pairs(value), ",", fn {key, values} ->
+        [quoted(key), ":", array_text(values || [])]
+      end)
+
+    ["{", entries, "}"]
+  end
 
   defp tsv({:list, {:struct, _fields}}, false, nil, _escape), do: "\\N"
 
@@ -550,6 +566,17 @@ defmodule SmolqueryClickHouse.Format do
       end)
 
     ["[", values, "]"]
+  end
+
+  defp json(@map_of_lists_dtype, false, nil), do: "{}"
+
+  defp json(@map_of_lists_dtype, false, value) when is_map(value) or is_list(value) do
+    fields =
+      Enum.map_intersperse(pairs(value), ",", fn {key, values} ->
+        [json_string(key), ":", json_text(values || [])]
+      end)
+
+    ["{", fields, "}"]
   end
 
   defp json(@map_dtype, false, nil), do: "{}"

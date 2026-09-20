@@ -199,4 +199,49 @@ defmodule SmolqueryClickHouse.VariantJsonTest do
            ] =
              data
   end
+
+  test "the keys of a JSON column list as HyperDX's getJSONKeys asks, for the filters sidebar",
+       context do
+    sql = """
+    WITH all_paths AS
+    (
+        SELECT DISTINCT JSONDynamicPathsWithTypes(`metadata`) as paths
+        FROM #{context.from}
+        LIMIT 1000
+        SETTINGS timeout_overflow_mode = 'break', max_execution_time = 2
+    )
+    SELECT groupUniqArrayMap(paths) as pathMap
+    FROM all_paths;
+    """
+
+    response =
+      conn(:post, "/?default_format=JSON", sql)
+      |> put_req_header("x-clickhouse-key", @password)
+      |> Router.call(context.name)
+
+    assert response.status == 200, response.resp_body
+
+    assert %{
+             "meta" => [%{"name" => "pathMap", "type" => "Map(String, Array(String))"}],
+             "data" => [row]
+           } =
+             JSON.decode!(response.resp_body)
+
+    assert row["pathMap"] == %{
+             "cluster" => ["String"],
+             "level" => ["String"],
+             "attempts" => ["Int64"],
+             "ratio" => ["Float64"],
+             "context.application" => ["String"],
+             "context.vm.node" => ["String"],
+             "tags" => ["Array(Nullable(String))"]
+           }
+
+    assert %{"data" => [%{"pathMap" => %{}}]} =
+             json(
+               context.name,
+               "WITH all_paths AS (SELECT DISTINCT JSONDynamicPathsWithTypes(metadata) as paths " <>
+                 "FROM #{context.from} WHERE id > 99) SELECT groupUniqArrayMap(paths) as pathMap FROM all_paths"
+             )
+  end
 end

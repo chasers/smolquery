@@ -288,12 +288,15 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       unstable =
         rows(
           engine,
-          "SELECT DISTINCT function_name AS name, stability FROM duckdb_functions() " <>
+          "SELECT DISTINCT function_name AS name, function_type AS kind, stability FROM duckdb_functions() " <>
             "WHERE lower(function_name) IN (#{names}) AND function_type <> 'macro' " <>
             "AND coalesce(stability, '') NOT IN ('CONSISTENT', 'CONSISTENT_WITHIN_QUERY')"
         )
 
-      assert unstable == []
+      assert unstable == [%{"name" => "json_tree", "kind" => "table", "stability" => nil}],
+             "the catalog rates no table function, so json_tree has no stability to read; it is a " <>
+               "pure function of the document it is given, which is what JSONDynamicPathsWithTypes " <>
+               "leans on (T-521). Any other name here is a macro calling something unrated."
     end
 
     test "no macro shares its name with a function of the engine's own (review of T-504)" do

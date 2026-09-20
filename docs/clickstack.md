@@ -173,8 +173,10 @@ services:
 - A `VARIANT` column is `JSON` (T-521). Use one where attributes nest or hold more than
   strings, which `MAP(STRING, STRING)` has no room for: a Logflare drain's `metadata` is
   the case it was done for. HyperDX reads the type's prefix and searches a nested key as
-  `toString(metadata.context.application)`, which answers. Listing a `JSON` column's keys
-  for the filters sidebar (`JSONDynamicPathsWithTypes`) does not answer yet. This needs a
+  `toString(metadata.context.application)`, which answers, and lists the column's keys for
+  the filters sidebar with `JSONDynamicPathsWithTypes` and `groupUniqArrayMap`, which answer
+  too: every leaf path, dotted, with the types seen at it. An array is one leaf; a key that
+  holds `null` everywhere is not listed. This needs a
   HyperDX that knows the `JSON` type: the recipe is checked against `@hyperdx/app@2.39.1`.
   2.1.0, a year older, has only a stub for it, and words a term search in a function the
   edge does not have (`hasTokenCaseInsensitive`).

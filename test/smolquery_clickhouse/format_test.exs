@@ -438,4 +438,40 @@ defmodule SmolqueryClickHouse.FormatTest do
                ~s({"v":{"id":9007199254740993}}\n)
     end
   end
+
+  describe "a map of string lists, which groupUniqArrayMap answers (T-521)" do
+    @paths {:list, {:struct, [{"key", :string}, {"value", {:list, :string}}]}}
+    @path_columns [{"pathMap", @paths, false}]
+    @path_rows [
+      %{
+        "pathMap" => [
+          %{"key" => "cluster", "value" => ["Int64", "String"]},
+          %{"key" => "it's", "value" => []}
+        ]
+      },
+      %{"pathMap" => nil}
+    ]
+
+    defp paths(format),
+      do: format |> Format.encode(@path_columns, @path_rows) |> IO.iodata_to_binary()
+
+    test "is a Map(String, Array(String)), an object of arrays in JSON and a NULL one empty" do
+      assert Format.type_name(@paths, false) == "Map(String, Array(String))"
+
+      assert %{"meta" => [%{"type" => "Map(String, Array(String))"}], "data" => data} =
+               :json |> paths() |> JSON.decode!()
+
+      assert data == [
+               %{"pathMap" => %{"cluster" => ["Int64", "String"], "it's" => []}},
+               %{"pathMap" => %{}}
+             ]
+    end
+
+    test "is ClickHouse's map text in the tab-separated formats, and JSON text under Nullable(String) in RowBinary" do
+      assert paths(:tsv) == "{'cluster':['Int64','String'],'it\\'s':[]}\n{}\n"
+
+      assert <<1, 7, "pathMap", 16, "Nullable(String)", 0, _text::binary>> =
+               paths(:row_binary_with_names_and_types)
+    end
+  end
 end
