@@ -76,6 +76,8 @@ The Postgres edge solved the same problem for its clients with an emulated
 | Backslash escapes in literals (`'it\'s'`) | Works (T-481) | Rewritten to the characters they stand for. `LIKE '%a\_b%'` keeps its backslash, and the edge adds `ESCAPE '\'` so it means what it does in ClickHouse (T-496) |
 | Parametric aggregates: `quantile(0.5)(x)`, `quantileIf`, `groupUniqArray(20)(x)`, `groupUniqArrayArray`, `groupArray` | Works (T-496) | Rewritten to `f(args, params)`; `quantile` is the engine's interpolating `quantile_cont`. `topK(1)(x)`, `quantiles(...)(x)` and `histogram(n)(x)` are still parse errors |
 | `any(x)`, `isNull(x)`, `isNotNull(x)` | Works (T-496) | Words of the parser's own; renamed to `any_value` and to macros |
+| `WITH (expr) AS alias` | Works (T-496) | The alias is written as its expression wherever it is read; a common table expression beside it stays. `WITH expr AS alias` without parentheses is still a parse error |
+| `JSONExtract(json, 'Type')` | Works (T-496) | A cast of the JSON to the type, for scalars, `Map(K, V)` and `Array(T)`. The forms with a path do not resolve |
 | A bare `default.table` | Works (T-496) | `default` is a reserved word to the engine; the edge quotes it |
 | `position(haystack, needle)` | **Parse error** | DuckDB takes `position(needle IN haystack)` |
 | Table functions: `numbers()`, `remote()`, `url()`, `s3()`, `file()` | **Refused** | The planner refuses table functions it does not know. `numbers()` is trivial; the remote ones are deliberately out of scope |

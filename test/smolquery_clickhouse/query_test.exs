@@ -1,6 +1,8 @@
 defmodule SmolqueryClickHouse.QueryTest do
   use ExUnit.Case, async: false
 
+  @moduletag :capture_log
+
   import Plug.Conn, only: [put_req_header: 3, get_resp_header: 2]
   import Plug.Test
 
@@ -370,5 +372,51 @@ defmodule SmolqueryClickHouse.QueryTest do
       assert exception_code(response) == ["46"]
       assert response.resp_body =~ "todate"
     end
+  end
+
+  describe "a row click's round trip (T-496)" do
+    test "a map answers in its stored key order, and sent back as it was answered, finds its row",
+         %{name: name} do
+      from = "FROM (SELECT MAP {'z.last': '1', 'a.first': '2'} AS attrs, 7 AS id)"
+
+      answered = post(name, "SELECT attrs #{from} FORMAT JSONEachRow").resp_body
+
+      assert answered == ~s|{"attrs":{"z.last":"1","a.first":"2"}}\n|
+
+      json =
+        answered
+        |> String.trim()
+        |> String.replace_prefix(~s|{"attrs":|, "")
+        |> String.replace_suffix("}", "")
+
+      where = "attrs=JSONExtract('#{json}', 'Map(String, String)') AND isNull(NULL)"
+
+      assert post(name, "SELECT id #{from} WHERE #{where}").resp_body == "7\n"
+    end
+
+    test "a tab-separated row and RowBinary keep that order too", %{name: name} do
+      sql = "SELECT MAP {'z': '1', 'a': '2'} AS attrs"
+
+      assert post(name, sql).resp_body == "{'z':'1','a':'2'}\n"
+
+      assert post(name, sql <> " FORMAT RowBinaryWithNamesAndTypes").resp_body =~
+               <<2, 1, ?z, 1, ?1, 1, ?a, 1, ?2>>
+    end
+  end
+
+  test "a TIMESTAMP_NS answers all nine digits, and sent back finds its row (T-496)", %{
+    name: name
+  } do
+    from = "FROM (SELECT CAST('2026-09-20 02:03:16.123456789' AS TIMESTAMP_NS) AS ts, 7 AS id)"
+
+    response =
+      conn(:post, "/?date_time_output_format=iso", "SELECT ts #{from} FORMAT JSONEachRow")
+      |> request(name)
+
+    assert response.resp_body == ~s|{"ts":"2026-09-20T02:03:16.123456789Z"}\n|
+
+    where = "ts=parseDateTime64BestEffort('2026-09-20T02:03:16.123456789Z', 9)"
+
+    assert post(name, "SELECT id #{from} WHERE #{where}").resp_body == "7\n"
   end
 end

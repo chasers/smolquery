@@ -290,4 +290,79 @@ defmodule SmolqueryClickHouse.FormatTest do
       assert String.ends_with?(body, <<1, 0, byte_size(json)>> <> json)
     end
   end
+
+  describe "CSV" do
+    test "quotes text, timestamps, maps and JSON; leaves a number bare; NULL is \\N" do
+      assert encode(:csv) ==
+               ~s|1,"tab\there, it's","2026-09-15 12:00:00.123456","{'host':'a'}","{""n"":1}"\n| <>
+                 ~s|\\N,\\N,\\N,"{}",\\N\n|
+    end
+
+    test "doubles a quote inside a string, and writes a boolean, a float and a decimal bare" do
+      columns = [
+        {"s", :string, false},
+        {"b", :boolean, false},
+        {"f", {:f, 64}, false},
+        {"d", {:decimal, 10, 2}, false},
+        {"a", {:list, :string}, false}
+      ]
+
+      rows = [
+        %{
+          "s" => ~s|say "hi", ok|,
+          "b" => true,
+          "f" => 1.5,
+          "d" => Decimal.new("12.50"),
+          "a" => ["x", "y"]
+        }
+      ]
+
+      assert encode(:csv, columns, rows) == ~s|"say ""hi"", ok",true,1.5,12.50,"['x','y']"\n|
+    end
+
+    test "the headed forms write names, then types, quoted" do
+      columns = [{"id", {:s, 64}, false}]
+
+      assert encode(:csv_names, columns, [%{"id" => 1}]) == ~s|"id"\n1\n|
+      assert encode(:csv_names_types, columns, [%{"id" => 1}]) == ~s|"id"\n"Nullable(Int64)"\n1\n|
+    end
+
+    test "is fetched by ClickHouse's names, with a header flag in its content type" do
+      assert Format.fetch("CSVWithNames") == {:ok, :csv_names}
+      assert Format.name(:csv) == "CSV"
+      assert Format.content_type(:csv) == "text/csv; charset=UTF-8; header=absent"
+      assert Format.content_type(:csv_names) == "text/csv; charset=UTF-8; header=present"
+    end
+
+    test "date_time: :iso applies" do
+      columns = [{"ts", {:naive_datetime, :microsecond}, false}]
+      rows = [%{"ts" => ~N[2026-09-15 12:00:00.123456]}]
+
+      assert :csv |> Format.encode(columns, rows, date_time: :iso) |> IO.iodata_to_binary() ==
+               ~s|"2026-09-15T12:00:00.123456Z"\n|
+    end
+  end
+
+  describe "a DateTime64(9) given as integer nanoseconds" do
+    @ns_columns [{"ts", {:naive_datetime, :nanosecond}, false}]
+    @ns_rows [%{"ts" => 1_789_869_796_123_456_789}, %{"ts" => -1}, %{"ts" => nil}]
+
+    test "is written with all nine digits, in both styles, before the epoch too" do
+      assert encode(:json_each_row, @ns_columns, @ns_rows) ==
+               ~s|{"ts":"2026-09-20 02:03:16.123456789"}\n{"ts":"1969-12-31 23:59:59.999999999"}\n{"ts":null}\n|
+
+      assert :tsv
+             |> Format.encode(@ns_columns, @ns_rows, date_time: :iso)
+             |> IO.iodata_to_binary() ==
+               "2026-09-20T02:03:16.123456789Z\n1969-12-31T23:59:59.999999999Z\n\\N\n"
+
+      assert encode(:csv, @ns_columns, [hd(@ns_rows)]) == ~s|"2026-09-20 02:03:16.123456789"\n|
+    end
+
+    test "is the same number in RowBinary" do
+      body = encode(:row_binary_with_names_and_types, @ns_columns, [hd(@ns_rows)])
+
+      assert String.ends_with?(body, <<0, 1_789_869_796_123_456_789::little-signed-64>>)
+    end
+  end
 end

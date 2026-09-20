@@ -129,10 +129,15 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
     assert hd(types) =~ "DateTime64(9)"
     assert Enum.count(rows) == 120
 
-    assert hd(rows) == ["2026-09-19T10:12:59.000000Z", "worker", "info", "user login ok id=119"]
+    assert hd(rows) == [
+             "2026-09-19T10:12:59.000000000Z",
+             "worker",
+             "info",
+             "user login ok id=119"
+           ]
 
     assert List.last(rows) == [
-             "2026-09-19T10:11:00.000000Z",
+             "2026-09-19T10:11:00.000000000Z",
              "api",
              "error",
              "payment failed, id=0 user_id=u0"

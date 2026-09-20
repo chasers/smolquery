@@ -1,6 +1,8 @@
 defmodule SmolqueryClickHouse.SystemCatalogTest do
   use ExUnit.Case, async: false
 
+  @moduletag :capture_log
+
   import Plug.Conn, only: [put_req_header: 3, get_resp_header: 2]
   import Plug.Test
 

@@ -127,10 +127,9 @@ services:
 - **`host`** must be a name, not a private IP literal: HyperDX's connection test refuses
   `127.0.0.1` and takes `localhost` or a service name. Its test is
   `GET /?query=SELECT 1`, which the edge answers `1`.
-- **`defaultTableSelectExpression`** is a plain column list on purpose. A select with
-  `x as y` makes HyperDX send ClickHouse's `WITH (expr) AS alias`, which the edge does
-  not take yet (T-496). The source HyperDX auto-creates from its form uses `as`, so
-  configure the source here instead.
+- **`defaultTableSelectExpression`** may name its columns (`ServiceName as service`), as
+  the source HyperDX auto-creates from its form does. HyperDX then sends ClickHouse's
+  `WITH (expr) AS alias`, which the edge rewrites.
 - **No `metadataMaterializedViews`, trace, session or metric source.** HyperDX's stock
   defaults name rollup tables and three more sources; leave them out.
 
@@ -147,9 +146,9 @@ services:
 | Search: a term with `_` or `%` in it | Works: the edge gives `LIKE` the backslash escape ClickHouse assumes |
 | Field list, map keys, and the filters sidebar's values per field | Works: `groupUniqArray(20)(x)` and its kin are rewritten, and answer as `Array` |
 | Charts: `quantile(0.95)(x)` by a group, `avg`, `max`, a filtered `count` and `sum`, `count(DISTINCT x)` | Works, through HyperDX's chart builder |
-| Row click (the side panel) | **Partly.** `isNull` works; `JSONExtract(s, 'Map(...)')`, `toJSONString` and `WITH expr AS alias` do not yet |
-| A source whose select uses `x as y` | **Not yet.** `WITH (expr) AS alias` |
-| Alerts | **Not yet.** `CSV` output |
+| Row click (the side panel) | Works: HyperDX finds the row by the values it was shown. A `TIMESTAMP_NS` answers all nine digits and a map keeps its stored key order, so both match when sent back; `JSONExtract(s, 'Map(String, String)')`, `isNull` and the `MD5` of a long string are rewritten |
+| A source whose select uses `x as y` | Works: `WITH (expr) AS alias` is rewritten |
+| Alert sample rows | `CSV` output answers; alerts themselves have not been run |
 | Traces, service map, sessions, metrics | **Not yet** (T-501) |
 | ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
 
@@ -168,6 +167,15 @@ services:
   `quantile(0.95)(toFloat64OrDefault(toString(x)))`. Only `count()` is renamed, since
   HyperDX looks that one up by name. Whether its charts read any other column by name
   is not known until the UI runs.
+
+## Running it on one node with a SQLite catalog
+
+HyperDX sends its metadata queries in parallel. On a single node whose DuckLake catalog
+is SQLite, several job engines attaching the catalog at once can hit SQLite's
+`database is locked`, and the node then stays locked until it restarts. This is
+smolquery's existing SQLite issue, not HyperDX's: eight concurrent queries through the
+plain API do the same. A Postgres catalog (`CATALOG_DATABASE_URL`) does not have it, and
+is what a HyperDX deployment should use.
 
 When something fails, the statement and the error are in HyperDX's UI: it prints the
 rendered SQL beside the message. [clickhouse-sql-gaps.md](clickhouse-sql-gaps.md) says

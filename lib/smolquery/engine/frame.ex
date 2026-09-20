@@ -35,10 +35,15 @@ defmodule Smolquery.Engine.Frame do
   @doc """
   `frame` as maps keyed by column name, with each map column's entries
   folded back into a map and each `:json_columns` column's text decoded.
+
+  `map_entries: true` leaves a map column as its list of
+  `%{"key" => k, "value" => v}` entries, in stored order. An Elixir map
+  has no order, and a reader that must answer the map as it was stored
+  needs one.
   """
   @spec to_rows(DataFrame.t(), keyword()) :: [%{optional(String.t()) => term()}]
   def to_rows(%DataFrame{} = frame, opts \\ []) do
-    maps = map_columns(frame)
+    maps = if Keyword.get(opts, :map_entries, false), do: [], else: map_columns(frame)
     json = Keyword.get(opts, :json_columns, [])
 
     frame

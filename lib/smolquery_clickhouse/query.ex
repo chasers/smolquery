@@ -54,7 +54,9 @@ defmodule SmolqueryClickHouse.Query do
   An unaliased `count()` or `count(*)` answers as `count()`, ClickHouse's
   name for it, not the engine's `count_star()`: HyperDX reads its total by
   that name. With `date_time_output_format=iso` a timestamp answers as ISO
-  8601 with a `Z` in the text formats.
+  8601 with a `Z` in the text formats. A `TIMESTAMP_NS` column answers all
+  nine of its digits, read from the frame as integer nanoseconds: HyperDX
+  finds a clicked row by the timestamp it was shown.
 
   ## Parameters and quoting
 
@@ -80,6 +82,7 @@ defmodule SmolqueryClickHouse.Query do
   import Plug.Conn
 
   alias Explorer.DataFrame
+  alias Explorer.Series
   alias Smolquery.Ddl
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
@@ -178,7 +181,7 @@ defmodule SmolqueryClickHouse.Query do
       :error ->
         {:error,
          {404, 73, "UNKNOWN_FORMAT",
-          "Unknown output format #{name}; use the TabSeparated, JSON, JSONCompact, JSONEachRow or JSONCompactEachRow families, or RowBinaryWithNamesAndTypes",
+          "Unknown output format #{name}; use the TabSeparated, CSV, JSON, JSONCompact, JSONEachRow or JSONCompactEachRow families, or RowBinaryWithNamesAndTypes",
           nil}}
     end
   end
@@ -257,13 +260,22 @@ defmodule SmolqueryClickHouse.Query do
     columns =
       Enum.map(DataFrame.names(frame), &{&1, Map.fetch!(dtypes, &1), &1 in job.json_columns})
 
-    rows = Frame.to_rows(frame, json_columns: job.json_columns)
+    rows =
+      frame
+      |> nanoseconds(dtypes)
+      |> Frame.to_rows(json_columns: job.json_columns, map_entries: true)
 
     conn
     |> headers(job, length(rows))
     |> put_resp_header("x-clickhouse-format", Format.name(format))
     |> put_resp_header("content-type", Format.content_type(format))
     |> send_resp(200, Format.encode(format, columns, rows, encoding(conn, job)))
+  end
+
+  defp nanoseconds(frame, dtypes) do
+    for {name, {:naive_datetime, :nanosecond}} <- dtypes, reduce: frame do
+      frame -> DataFrame.put(frame, name, Series.cast(frame[name], {:s, 64}))
+    end
   end
 
   defp clickhouse_names(frame) do

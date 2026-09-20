@@ -242,4 +242,17 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       )
     end
   end
+
+  describe "what HyperDX's row click calls" do
+    test "the hash of a long string matches the MD5 a client computed", %{engine: engine} do
+      expected = :crypto.hash(:md5, String.duplicate("x", 1000)) |> Base.encode16(case: :lower)
+
+      assert one(engine, "lower(hex(clickhouse_MD5(leftUTF8(repeat('x', 1200), 1000))))") ==
+               expected
+    end
+
+    test "toJSONString is compact JSON text", %{engine: engine} do
+      assert one(engine, "toJSONString({'a': 1, 'b': 'x'})") == ~s|{"a":1,"b":"x"}|
+    end
+  end
 end

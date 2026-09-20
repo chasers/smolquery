@@ -8,6 +8,8 @@ defmodule SmolqueryClickHouse.Format do
   | `TabSeparatedWithNames`, `TSVWithNames` | a line of column names first |
   | `TabSeparatedWithNamesAndTypes`, `TSVWithNamesAndTypes` | then a line of types |
   | `TabSeparatedRaw`, `TSVRaw` | `TabSeparated` with no escaping |
+  | `CSV` | one line per row, values comma-separated, text in double quotes |
+  | `CSVWithNames`, `CSVWithNamesAndTypes` | a line of column names first, then a line of types |
   | `JSON` | `meta`, `data` as objects, `rows`, `statistics` |
   | `JSONCompact` | the same, with `data` as arrays |
   | `JSONEachRow` | one JSON object per line |
@@ -51,12 +53,26 @@ defmodule SmolqueryClickHouse.Format do
   bare number, and a non-finite float is `null`. A timestamp is
   `YYYY-MM-DD hh:mm:ss.ffffff` in both, or `YYYY-MM-DDThh:mm:ss.ffffffZ`
   under `date_time: :iso`, which is ClickHouse's
-  `date_time_output_format = 'iso'`. In RowBinary a `NULL` map value is
+  `date_time_output_format = 'iso'`. A `DateTime64(9)` column given as its
+  integer nanoseconds is written with all nine digits, in every format: a
+  `NaiveDateTime` holds six, and a client that sends a timestamp back to
+  find its row needs the one that was stored. In RowBinary a `NULL` map value is
   written as the empty string, since the map's values are not `Nullable`.
+
+  In CSV a string, a timestamp, a date, a map and an array are in double
+  quotes, with a quote inside doubled; a number and a boolean are bare, and
+  `NULL` is `\\N`. A map and an array are written as they are in a
+  tab-separated row, then quoted.
 
   An array is a JSON array, `['a','b']` in a tab-separated row, and a
   length then its elements in RowBinary. A `NULL` array answers as the empty
   one, as a `NULL` map does.
+
+  A map's keys keep the order they were stored in when a row carries the
+  map as its entries (`Smolquery.Engine.Frame.to_rows/2` with
+  `map_entries: true`), as ClickHouse keeps it. The engine compares maps
+  entry by entry, in order, so a client that sends a map back to find its
+  row — HyperDX does, on a row click — must get it in that order.
 
   A `NULL` map answers as the empty map in every format, for the same
   reason: its column's type is not `Nullable`, and in RowBinary a `Nullable`
@@ -74,6 +90,9 @@ defmodule SmolqueryClickHouse.Format do
           | :tsv_names
           | :tsv_names_types
           | :tsv_raw
+          | :csv
+          | :csv_names
+          | :csv_names_types
           | :json
           | :json_compact
           | :json_each_row
@@ -97,6 +116,9 @@ defmodule SmolqueryClickHouse.Format do
     "tsvwithnamesandtypes" => :tsv_names_types,
     "tabseparatedraw" => :tsv_raw,
     "tsvraw" => :tsv_raw,
+    "csv" => :csv,
+    "csvwithnames" => :csv_names,
+    "csvwithnamesandtypes" => :csv_names_types,
     "json" => :json,
     "jsoncompact" => :json_compact,
     "jsoneachrow" => :json_each_row,
@@ -111,6 +133,9 @@ defmodule SmolqueryClickHouse.Format do
     tsv_names: "TabSeparatedWithNames",
     tsv_names_types: "TabSeparatedWithNamesAndTypes",
     tsv_raw: "TabSeparatedRaw",
+    csv: "CSV",
+    csv_names: "CSVWithNames",
+    csv_names_types: "CSVWithNamesAndTypes",
     json: "JSON",
     json_compact: "JSONCompact",
     json_each_row: "JSONEachRow",
@@ -141,6 +166,11 @@ defmodule SmolqueryClickHouse.Format do
   @spec content_type(t()) :: String.t()
   def content_type(format) when format in [:tsv, :tsv_names, :tsv_names_types, :tsv_raw],
     do: "text/tab-separated-values; charset=UTF-8"
+
+  def content_type(:csv), do: "text/csv; charset=UTF-8; header=absent"
+
+  def content_type(format) when format in [:csv_names, :csv_names_types],
+    do: "text/csv; charset=UTF-8; header=present"
 
   def content_type(:row_binary_with_names_and_types), do: "application/octet-stream"
   def content_type(_json), do: "application/json; charset=UTF-8"
@@ -206,6 +236,31 @@ defmodule SmolqueryClickHouse.Format do
       tsv_line(Enum.map(columns, &escape(elem(&1, 0)))),
       tsv_line(type_names(columns)),
       tsv_rows(columns, rows, style, &escape/1)
+    ]
+  end
+
+  defp body(:csv, columns, rows, style, _elapsed_ms) do
+    Enum.map(rows, fn row ->
+      csv_line(
+        Enum.map(columns, fn {name, dtype, json?} ->
+          csv(dtype, json?, styled(dtype, row[name], style))
+        end)
+      )
+    end)
+  end
+
+  defp body(:csv_names, columns, rows, style, elapsed_ms) do
+    [
+      csv_line(Enum.map(columns, fn {name, _dtype, _json?} -> csv_text(name) end)),
+      body(:csv, columns, rows, style, elapsed_ms)
+    ]
+  end
+
+  defp body(:csv_names_types, columns, rows, style, elapsed_ms) do
+    [
+      csv_line(Enum.map(columns, fn {name, _dtype, _json?} -> csv_text(name) end)),
+      csv_line(Enum.map(type_names(columns), &csv_text/1)),
+      body(:csv, columns, rows, style, elapsed_ms)
     ]
   end
 
@@ -279,18 +334,37 @@ defmodule SmolqueryClickHouse.Format do
       "\n"
     ]
 
-  defp styled(%NaiveDateTime{} = value, :iso), do: NaiveDateTime.to_iso8601(value) <> "Z"
+  defp styled({:naive_datetime, :nanosecond}, nanoseconds, style) when is_integer(nanoseconds) do
+    second =
+      nanoseconds
+      |> Integer.floor_div(1_000_000_000)
+      |> DateTime.from_unix!()
+      |> DateTime.to_naive()
 
-  defp styled(%DateTime{} = value, :iso),
-    do: value |> DateTime.to_naive() |> styled(:iso)
+    fraction =
+      nanoseconds
+      |> Integer.mod(1_000_000_000)
+      |> Integer.to_string()
+      |> String.pad_leading(9, "0")
 
-  defp styled(value, _style), do: value
+    case style do
+      :iso -> NaiveDateTime.to_iso8601(second) <> "." <> fraction <> "Z"
+      :simple -> NaiveDateTime.to_string(second) <> "." <> fraction
+    end
+  end
+
+  defp styled(_dtype, %NaiveDateTime{} = value, :iso), do: NaiveDateTime.to_iso8601(value) <> "Z"
+
+  defp styled(dtype, %DateTime{} = value, :iso),
+    do: styled(dtype, DateTime.to_naive(value), :iso)
+
+  defp styled(_dtype, value, _style), do: value
 
   defp tsv_rows(columns, rows, style, escape) do
     Enum.map(rows, fn row ->
       tsv_line(
         Enum.map(columns, fn {name, dtype, json?} ->
-          tsv(dtype, json?, styled(row[name], style), escape)
+          tsv(dtype, json?, styled(dtype, row[name], style), escape)
         end)
       )
     end)
@@ -298,7 +372,30 @@ defmodule SmolqueryClickHouse.Format do
 
   defp tsv_line(values), do: [Enum.intersperse(values, "\t"), "\n"]
 
+  defp csv_line(values), do: [Enum.intersperse(values, ","), "\n"]
+
+  defp csv(@map_dtype, false, nil), do: csv_text("{}")
+  defp csv({:list, _element}, false, nil), do: csv_text("[]")
+  defp csv(_dtype, _json?, nil), do: "\\N"
+  defp csv(_dtype, false, value) when is_boolean(value), do: to_string(value)
+
+  defp csv(_dtype, false, value) when is_number(value) or is_struct(value, Decimal),
+    do: text(value)
+
+  defp csv(dtype, json?, value),
+    do: dtype |> tsv(json?, value, &Function.identity/1) |> csv_text()
+
+  defp csv_text(text) do
+    binary = IO.iodata_to_binary(text)
+
+    [?", String.replace(binary, "\"", "\"\""), ?"]
+  end
+
   defp tsv(@map_dtype, false, nil, _escape), do: "{}"
+
+  defp tsv(@map_dtype, false, value, _escape) when is_map(value) or is_list(value),
+    do: map_text(pairs(value))
+
   defp tsv({:list, {:struct, _fields}}, false, nil, _escape), do: "\\N"
 
   defp tsv({:list, {:struct, _fields}}, false, value, escape) when is_list(value),
@@ -311,7 +408,6 @@ defmodule SmolqueryClickHouse.Format do
 
   defp tsv(_dtype, _json?, nil, _escape), do: "\\N"
   defp tsv(_dtype, true, value, escape), do: escape.(json_text(value))
-  defp tsv(@map_dtype, false, value, _escape) when is_map(value), do: map_text(value)
   defp tsv(_dtype, false, value, escape) when is_binary(value), do: escape.(value)
 
   defp tsv(_dtype, false, value, escape)
@@ -332,9 +428,12 @@ defmodule SmolqueryClickHouse.Format do
     ["[", elements, "]"]
   end
 
-  defp map_text(map) do
+  defp pairs(map) when is_map(map), do: Map.to_list(map)
+  defp pairs(entries) when is_list(entries), do: Enum.map(entries, &{&1["key"], &1["value"]})
+
+  defp map_text(pairs) do
     entries =
-      Enum.map_intersperse(map, ",", fn {key, value} ->
+      Enum.map_intersperse(pairs, ",", fn {key, value} ->
         [quoted(key), ":", if(is_nil(value), do: "NULL", else: quoted(value))]
       end)
 
@@ -362,7 +461,7 @@ defmodule SmolqueryClickHouse.Format do
   defp json_object(columns, row, style) do
     fields =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
-        [json_string(name), ":", json(dtype, json?, styled(row[name], style))]
+        [json_string(name), ":", json(dtype, json?, styled(dtype, row[name], style))]
       end)
 
     ["{", fields, "}"]
@@ -371,13 +470,23 @@ defmodule SmolqueryClickHouse.Format do
   defp json_array(columns, row, style) do
     values =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
-        json(dtype, json?, styled(row[name], style))
+        json(dtype, json?, styled(dtype, row[name], style))
       end)
 
     ["[", values, "]"]
   end
 
   defp json(@map_dtype, false, nil), do: "{}"
+
+  defp json(@map_dtype, false, value) when is_map(value) or is_list(value) do
+    fields =
+      Enum.map_intersperse(pairs(value), ",", fn {key, entry} ->
+        [json_string(key), ":", if(is_nil(entry), do: "null", else: json_string(entry))]
+      end)
+
+    ["{", fields, "}"]
+  end
+
   defp json({:list, {:struct, _fields}}, false, nil), do: "null"
 
   defp json({:list, {:struct, _fields}}, false, value) when is_list(value),
@@ -396,7 +505,6 @@ defmodule SmolqueryClickHouse.Format do
   defp json(_dtype, false, value) when value in [:nan, :infinity, :neg_infinity], do: "null"
   defp json(_dtype, false, value) when is_float(value), do: JSON.encode!(value)
   defp json(_dtype, false, %Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp json(@map_dtype, false, value) when is_map(value), do: JSON.encode!(utf8(value))
   defp json(_dtype, false, value) when is_binary(value), do: json_string(value)
 
   defp json(_dtype, false, value) when is_list(value) or (is_map(value) and not is_struct(value)),
@@ -417,6 +525,16 @@ defmodule SmolqueryClickHouse.Format do
   defp utf8(value), do: value
 
   defp binary(@map_dtype, false, nil), do: <<0>>
+
+  defp binary(@map_dtype, false, value) when is_map(value) or is_list(value) do
+    entries = pairs(value)
+
+    [
+      leb128(length(entries)),
+      Enum.map(entries, fn {key, entry} -> [binary_string(key), binary_string(entry || "")] end)
+    ]
+  end
+
   defp binary({:list, {:struct, _fields}}, false, nil), do: <<1>>
 
   defp binary({:list, {:struct, _fields}}, false, value) when is_list(value),
@@ -426,13 +544,6 @@ defmodule SmolqueryClickHouse.Format do
 
   defp binary({:list, element}, false, value) when is_list(value),
     do: [leb128(length(value)), Enum.map(value, &binary(element, false, &1))]
-
-  defp binary(@map_dtype, false, value) when is_map(value) do
-    [
-      leb128(map_size(value)),
-      Enum.map(value, fn {key, entry} -> [binary_string(key), binary_string(entry || "")] end)
-    ]
-  end
 
   defp binary(_dtype, _json?, nil), do: <<1>>
   defp binary(_dtype, true, value), do: [0, binary_string(json_text(value))]
@@ -446,6 +557,9 @@ defmodule SmolqueryClickHouse.Format do
 
   defp binary_value({:f, bits}, value), do: binary_float(bits, value)
   defp binary_value(:boolean, value), do: if(value, do: <<1>>, else: <<0>>)
+
+  defp binary_value({:naive_datetime, :nanosecond}, nanoseconds) when is_integer(nanoseconds),
+    do: <<nanoseconds::little-signed-64>>
 
   defp binary_value({:naive_datetime, :nanosecond}, %NaiveDateTime{} = value),
     do: <<NaiveDateTime.diff(value, @unix_epoch, :nanosecond)::little-signed-64>>

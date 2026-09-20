@@ -34,6 +34,24 @@ defmodule SmolqueryClickHouse.Rewrite do
     term with an underscore. The engine's `LIKE` has no escape character
     unless told, so `ESCAPE '\'` is added after such a pattern — a literal,
     or a literal inside `lower(...)` or `upper(...)`.
+  - **`WITH (expr) AS alias`.** ClickHouse names an expression in a `WITH`
+    list, where the engine takes only subqueries. HyperDX sends one per
+    alias of a source's select list (`ServiceName as service`), so that a
+    filter can say `service` in a statement whose `SELECT` does not define
+    it, as its histogram's does not. The item leaves the list, the list
+    leaves the statement when nothing else is in it, and the alias is
+    written as its expression, in parentheses, wherever it is read: not
+    where a `SELECT` defines it (`... as service`), not after a `.`, and not
+    before a `(`. Only the statement's leading `WITH` is read, and only a
+    parenthesized expression: a common table expression is left as it is.
+  - **`JSONExtract(json, 'Type')`.** The form with a type and no path,
+    which HyperDX writes on a row click to find the row by a map or an array
+    it was shown: `LogAttributes=JSONExtract('{"k":"v"}', 'Map(String,
+    String)')`. It becomes a cast of the JSON to the engine's name for the
+    type. A form with a path is left for the engine to refuse.
+  - **`MD5(x)`.** ClickHouse's answers sixteen bytes, which HyperDX wraps as
+    `lower(hex(MD5(...)))`; the engine's answers the hex text already. The
+    call is renamed to a macro that answers the bytes.
   - **A bare `default.`** ClickHouse's default database is named by a word
     the engine reserves; it is quoted.
   - **`isNull(x)`, `isNotNull(x)` and `any(x)`.** `ISNULL` and `ANY` are the
@@ -67,7 +85,8 @@ defmodule SmolqueryClickHouse.Rewrite do
   @renamed %{
     "isnull" => "clickhouse_isNull",
     "isnotnull" => "clickhouse_isNotNull",
-    "any" => "any_value"
+    "any" => "any_value",
+    "md5" => "clickhouse_MD5"
   }
 
   @types %{
@@ -98,6 +117,7 @@ defmodule SmolqueryClickHouse.Rewrite do
     statement
     |> Sql.tokens()
     |> Enum.flat_map(&pieces/1)
+    |> expression_aliases()
     |> walk(%{depth: 0, clauses: [], casts: [], last: nil}, [])
     |> IO.iodata_to_binary()
   end
@@ -110,8 +130,10 @@ defmodule SmolqueryClickHouse.Rewrite do
   @spec engine_type(String.t()) :: {:ok, String.t()} | :error
   def engine_type(type) when is_binary(type) do
     case type |> String.trim() |> String.downcase() do
-      "nullable(" <> rest -> rest |> String.trim_trailing(")") |> engine_type()
-      "lowcardinality(" <> rest -> rest |> String.trim_trailing(")") |> engine_type()
+      "nullable(" <> rest -> rest |> inside() |> engine_type()
+      "lowcardinality(" <> rest -> rest |> inside() |> engine_type()
+      "array(" <> rest -> array_type(inside(rest))
+      "map(" <> rest -> map_type(inside(rest))
       "datetime64(" <> _precision -> {:ok, "TIMESTAMP"}
       "datetime(" <> _zone -> {:ok, "TIMESTAMP"}
       "decimal(" <> _rest = decimal -> decimal_type(decimal)
@@ -124,6 +146,132 @@ defmodule SmolqueryClickHouse.Rewrite do
       do: {:ok, String.upcase(decimal)},
       else: :error
   end
+
+  defp inside(rest), do: String.slice(rest, 0..-2//1)
+
+  defp array_type(element) do
+    with {:ok, type} <- engine_type(element), do: {:ok, type <> "[]"}
+  end
+
+  defp map_type(inner) do
+    with [key, value] <- split_types(inner),
+         {:ok, key} <- engine_type(key),
+         {:ok, value} <- engine_type(value) do
+      {:ok, "MAP(#{key}, #{value})"}
+    else
+      _not_two_types -> :error
+    end
+  end
+
+  defp split_types(inner), do: split_types(inner, 0, <<>>, [])
+
+  defp split_types(<<>>, _depth, current, acc), do: Enum.reverse([current | acc])
+
+  defp split_types(<<?,, rest::binary>>, 0, current, acc),
+    do: split_types(rest, 0, <<>>, [current | acc])
+
+  defp split_types(<<?(, rest::binary>>, depth, current, acc),
+    do: split_types(rest, depth + 1, <<current::binary, ?(>>, acc)
+
+  defp split_types(<<?), rest::binary>>, depth, current, acc),
+    do: split_types(rest, depth - 1, <<current::binary, ?)>>, acc)
+
+  defp split_types(<<char, rest::binary>>, depth, current, acc),
+    do: split_types(rest, depth, <<current::binary, char>>, acc)
+
+  defp expression_aliases(pieces) do
+    {lead, rest} = Enum.split_while(pieces, &trivia?/1)
+
+    with [{:word, _text, "with"} = with_word | list] <- rest,
+         {items, body} <- with_items(list, [], [], 0),
+         {aliases, tables} when aliases != [] <-
+           Enum.split_with(items, &match?({:alias, _, _}, &1)) do
+      names = Map.new(aliases, fn {:alias, name, expression} -> {name, expression} end)
+
+      lead ++ with_clause(with_word, tables) ++ substitute(body, names, nil, [])
+    else
+      _no_expression_alias -> pieces
+    end
+  end
+
+  defp trivia?({:comment, _text}), do: true
+  defp trivia?({:other, text}), do: String.trim(text) == ""
+  defp trivia?(_piece), do: false
+
+  defp with_items([], _item, _items, _depth), do: :error
+
+  defp with_items([{:word, _text, "select"} | _rest] = body, item, items, 0),
+    do: {Enum.reverse([with_item(item) | items]), body}
+
+  defp with_items([:comma | rest], item, items, 0),
+    do: with_items(rest, [], [with_item(item) | items], 0)
+
+  defp with_items([:open | rest], item, items, depth),
+    do: with_items(rest, [:open | item], items, depth + 1)
+
+  defp with_items([:close | rest], item, items, depth),
+    do: with_items(rest, [:close | item], items, depth - 1)
+
+  defp with_items([piece | rest], item, items, depth),
+    do: with_items(rest, [piece | item], items, depth)
+
+  defp with_item(reversed) do
+    item = Enum.reverse(reversed)
+
+    with [:open | rest] <- drop_space(item),
+         {:ok, expression, after_expression} <- group(rest),
+         [{:word, _as, "as"} | after_as] <- drop_space(after_expression),
+         [name | trailing] <- drop_space(after_as),
+         {:ok, name} <- alias_text(name),
+         [] <- drop_space(trailing) do
+      {:alias, name, expression}
+    else
+      _table_expression -> {:table, item}
+    end
+  end
+
+  defp alias_text({:word, text, _lower}), do: {:ok, text}
+
+  defp alias_text({:quoted, text}),
+    do: {:ok, text |> String.slice(1..-2//1) |> String.replace(~s(""), ~s("))}
+
+  defp alias_text(_piece), do: :error
+
+  defp with_clause(_with_word, []), do: []
+
+  defp with_clause(with_word, tables) do
+    [with_word, {:other, " "}] ++
+      Enum.flat_map(Enum.intersperse(tables, :comma), fn
+        {:table, item} -> drop_space(item)
+        :comma -> [:comma]
+      end)
+  end
+
+  defp substitute([], _names, _previous, acc), do: Enum.reverse(acc)
+
+  defp substitute([piece | rest], names, previous, acc) do
+    with {:ok, name} <- alias_text(piece),
+         {:ok, expression} <- Map.fetch(names, name),
+         true <- read?(previous, rest) do
+      substitute(rest, names, piece, Enum.reverse([:open | expression] ++ [:close], acc))
+    else
+      _not_a_read -> substitute(rest, names, significant(piece, previous), [piece | acc])
+    end
+  end
+
+  defp read?({:word, _text, "as"}, _rest), do: false
+  defp read?({:other, text}, rest), do: not String.ends_with?(text, ".") and not called?(rest)
+  defp read?(_previous, rest), do: not called?(rest)
+
+  defp called?([:open | _rest]), do: true
+  defp called?([{:other, "." <> _member} | _rest]), do: true
+  defp called?(_rest), do: false
+
+  defp significant({:other, text} = piece, previous),
+    do: if(String.trim(text) == "", do: previous, else: piece)
+
+  defp significant({:comment, _text}, previous), do: previous
+  defp significant(piece, _previous), do: piece
 
   defp pieces({:code, text}) do
     @piece
@@ -177,6 +325,18 @@ defmodule SmolqueryClickHouse.Rewrite do
       walk(after_args, %{state | last: nil}, [call | acc])
     else
       _ordinary_call -> walk([:open | rest], %{state | last: lower}, [text | acc])
+    end
+  end
+
+  defp walk([{:word, text, "jsonextract"}, :open | rest], state, acc) do
+    with {:ok, arguments, after_call} <- group(rest),
+         {:ok, value, literal} <- value_and_type(arguments),
+         {:ok, type} <- literal |> String.slice(1..-2//1) |> engine_type() do
+      call = ["CAST(CAST(", walk(value, inner(state), []), " AS JSON) AS ", type, ")"]
+
+      walk(after_call, %{state | last: nil}, [call | acc])
+    else
+      _a_path_form -> walk([:open | rest], %{state | last: "jsonextract"}, [text | acc])
     end
   end
 
@@ -257,6 +417,29 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp quantifier?(_name, _acc), do: false
 
   defp inner(state), do: %{state | depth: state.depth + 1, last: nil}
+
+  defp value_and_type(arguments) do
+    {type, value} = arguments |> Enum.reverse() |> Enum.split_while(&(&1 != :comma))
+
+    with [:comma | reversed_value] <- value,
+         [{:string, literal}] <- type |> Enum.reverse() |> drop_space() |> Enum.reject(&trivia?/1),
+         false <- Enum.member?(depth_zero(Enum.reverse(reversed_value)), :comma) do
+      {:ok, Enum.reverse(reversed_value), literal}
+    else
+      _other_shape -> :error
+    end
+  end
+
+  defp depth_zero(pieces) do
+    pieces
+    |> Enum.reduce({0, []}, fn
+      :open, {depth, acc} -> {depth + 1, acc}
+      :close, {depth, acc} -> {depth - 1, acc}
+      piece, {0, acc} -> {0, [piece | acc]}
+      _nested, state -> state
+    end)
+    |> elem(1)
+  end
 
   defp group(pieces), do: group(pieces, 1, [])
 
