@@ -6,10 +6,13 @@ defmodule SmolqueryClickHouse.Query do
       GET  /?query=SELECT count() FROM logs.events
       POST /   SELECT id, msg FROM logs.events LIMIT 10
 
-  The statement is smolquery's SQL, run as the API and the Postgres wire run
-  it: the same planner, the same two tiers, the same result cap. It is not
-  translated from ClickHouse's dialect, so a ClickHouse function smolquery's
-  engine lacks fails as an unknown function.
+  The statement runs as the API and the Postgres wire run theirs: the same
+  planner, the same two tiers, the same result cap. ClickHouse's dialect is
+  met part of the way. Its function names are macros every job engine
+  defines (`Smolquery.QueryService.ClickHouseFunctions`), and the syntax the
+  engine's parser refuses is rewritten first (`SmolqueryClickHouse.Rewrite`).
+  What neither covers fails as the engine reports it;
+  `docs/clickhouse-sql-gaps.md` lists what that is.
 
   ## Format
 
@@ -85,6 +88,7 @@ defmodule SmolqueryClickHouse.Query do
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Format
   alias SmolqueryClickHouse.Params
+  alias SmolqueryClickHouse.Rewrite
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
   alias SmolqueryClickHouse.SystemCatalog
@@ -119,7 +123,7 @@ defmodule SmolqueryClickHouse.Query do
          {:ok, timeout} <- timeout(Map.merge(conn.query_params, settings)),
          {:ok, statement} <-
            statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
-      answer(conn, runtime, rewrite(statement), format, timeout)
+      answer(conn, runtime, translate(statement), format, timeout)
     else
       {:error, exception} -> Errors.send_exception(conn, exception)
     end
@@ -192,7 +196,10 @@ defmodule SmolqueryClickHouse.Query do
   defp bounded_ms(seconds) when seconds >= @max_timeout_ms / 1000, do: @max_timeout_ms
   defp bounded_ms(seconds), do: max(round(seconds * 1000), 1)
 
-  defp rewrite(statement) do
+  defp translate(statement),
+    do: statement |> Rewrite.call() |> server_constants()
+
+  defp server_constants(statement) do
     Sql.map_code(statement, fn code ->
       Enum.reduce(@rewrites, code, fn {pattern, literal}, sql ->
         Regex.replace(pattern, sql, literal)
@@ -300,21 +307,10 @@ defmodule SmolqueryClickHouse.Query do
 
   defp scanned(_none), do: {0, 0}
 
-  defp describe({:invalid_query, message}) when is_binary(message) do
-    cond do
-      Regex.match?(~r/Parser Error|syntax error/i, message) ->
-        {400, 62, "SYNTAX_ERROR", message, nil}
+  defp describe({:invalid_query, message}) when is_binary(message), do: engine_failure(message)
 
-      Regex.match?(~r/Catalog Error: Table|Table with name .* does not exist/i, message) ->
-        {404, 60, "UNKNOWN_TABLE", message, nil}
-
-      String.contains?(message, "Binder Error") and String.contains?(message, "column") ->
-        {400, 47, "UNKNOWN_IDENTIFIER", message, nil}
-
-      true ->
-        {400, 1002, "UNKNOWN_EXCEPTION", message, nil}
-    end
-  end
+  defp describe(error) when is_exception(error),
+    do: error |> Exception.message() |> engine_failure()
 
   defp describe({:unknown_table, {dataset, table}}),
     do: {404, 60, "UNKNOWN_TABLE", "Table #{dataset}.#{table} does not exist", nil}
@@ -337,6 +333,28 @@ defmodule SmolqueryClickHouse.Query do
     if Ddl.error?(error),
       do: {400, 1002, "UNKNOWN_EXCEPTION", Ddl.message(error), nil},
       else: {500, 1002, "UNKNOWN_EXCEPTION", "query failed: #{inspect(error)}", nil}
+  end
+
+  defp engine_failure(message) do
+    cond do
+      Regex.match?(~r/Parser Error|syntax error/i, message) ->
+        {400, 62, "SYNTAX_ERROR", message, nil}
+
+      Regex.match?(~r/Catalog Error: Table|Table with name .* does not exist/i, message) ->
+        {404, 60, "UNKNOWN_TABLE", message, nil}
+
+      Regex.match?(~r/Function with name .* does not exist/i, message) ->
+        {404, 46, "UNKNOWN_FUNCTION", message, nil}
+
+      String.contains?(message, "Binder Error") and String.contains?(message, "column") ->
+        {400, 47, "UNKNOWN_IDENTIFIER", message, nil}
+
+      Regex.match?(~r/\A(IO|Internal|Out of Memory) Error|INTERNAL Error/i, message) ->
+        {500, 1002, "UNKNOWN_EXCEPTION", message, nil}
+
+      true ->
+        {400, 1002, "UNKNOWN_EXCEPTION", message, nil}
+    end
   end
 
   defp hot_tier_unavailable,

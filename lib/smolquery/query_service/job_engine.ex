@@ -29,6 +29,7 @@ defmodule Smolquery.QueryService.JobEngine do
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.EnginePool
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Telemetry
@@ -48,7 +49,7 @@ defmodule Smolquery.QueryService.JobEngine do
     [
       extensions: extensions(runtime),
       settings: settings(runtime),
-      statements: secrets(runtime) ++ runtime.job_bootstrap,
+      statements: secrets(runtime) ++ runtime.job_bootstrap ++ functions(runtime),
       max_rows: :infinity
     ]
   end
@@ -156,6 +157,9 @@ defmodule Smolquery.QueryService.JobEngine do
       {:ok, engine, :cold}
     end
   end
+
+  defp functions(%Runtime{clickhouse_functions: true}), do: ClickHouseFunctions.statements()
+  defp functions(%Runtime{}), do: []
 
   defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, extensions)

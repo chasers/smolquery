@@ -66,6 +66,8 @@ The Postgres edge solved the same problem for its clients with an emulated
 | `ARRAY JOIN` / `LEFT ARRAY JOIN` | **Parse error** | DuckDB's `UNNEST` is the equivalent shape |
 | `LIMIT n BY expr` | **Parse error** | Rewritable as a windowed row-number filter |
 | `PREWHERE` | **Parse error** | Could be accepted and folded into `WHERE` |
+| `expr AS alias` inside `GROUP BY` / `ORDER BY` | Works (T-494) | The alias is dropped from the clause; HyperDX's histogram names its bucket in all three places |
+| `CAST(x, 'Type')` | Works (T-494) | Rewritten to `CAST(x AS type)` for the scalar types |
 | `SAMPLE` | **Parse error** | |
 | `WITH FILL`, `INTERPOLATE` | **Parse error** | Gap-filling time series |
 | `GLOBAL IN` / `GLOBAL JOIN` | **Parse error** | Distributed-only in ClickHouse |
@@ -84,16 +86,17 @@ function a shim would call.
 
 | Family | ClickHouse names that fail today | DuckDB equivalent |
 |---|---|---|
-| Date/time | `toStartOfInterval`, `toStartOfDay/Hour/Minute`, `toDate`, `toDateTime`, `toYYYYMM`, `formatDateTime`, `now64`, `toUnixTimestamp64Nano` | `date_trunc`, `time_bucket`, `strftime`, `epoch_ns`, casts |
-| Arrays | `has`, `hasAny`, `arrayExists`, `arrayMap`, `arrayFilter`, `arrayJoin`, `groupArray` | `list_contains`, `list_has_any`, `list_filter`, `list_transform`, `unnest`, `list()` |
-| Aggregate combinators | `sumIf`, `avgIf` and the rest of `-If` (only `countIf` resolves), `-Array`, `-State`, `-Merge` | `sum(x) FILTER (WHERE …)`; `-State`/`-Merge` have no equivalent |
-| Approximate aggregates | `uniq`, `uniqExact`, `uniqCombined`, `quantiles`, `quantileTDigest`, `topK` | `approx_count_distinct`, `count(DISTINCT …)`, `quantile_cont`, `approx_top_k` |
-| Strings/regex | `match`, `splitByChar`, `extractAll`, `positionCaseInsensitive`, `multiSearchAny` | `regexp_matches`, `str_split`, `regexp_extract_all`, `position(… IN …)` |
+| Date/time | `toYYYYMM`, `formatDateTime`, `dateDiff`, `toIntervalSecond`. **Resolve since T-485:** `toStartOfInterval`, the `toStartOf*` family, `toDate`, `toDateTime`, `toDateTime64`, `fromUnixTimestamp*`, `toUnixTimestamp*`, `now64`, `parseDateTime64BestEffort` | `date_trunc`, `time_bucket`, `strftime`, `epoch_ns`, casts |
+| Arrays | `hasAny`, `arrayExists`, `arrayMap`, `arrayFilter`, `arrayJoin`, `groupArray`. **Resolves since T-485:** `has` | `list_contains`, `list_has_any`, `list_filter`, `list_transform`, `unnest`, `list()` |
+| Aggregate combinators | `-Array`, `-State`, `-Merge`, and `-If` beyond `countIf`, `sumIf`, `avgIf`, `minIf`, `maxIf`, which resolve (T-485) | `sum(x) FILTER (WHERE …)`; `-State`/`-Merge` have no equivalent |
+| Approximate aggregates | `uniqCombined`, `quantiles`, `quantileTDigest`, `topK`. **Resolve since T-485, exactly:** `uniq`, `uniqExact` | `approx_count_distinct`, `count(DISTINCT …)`, `quantile_cont`, `approx_top_k` |
+| Strings/regex | `splitByChar`, `extractAll`, `positionCaseInsensitive`, `multiSearchAny`. **Resolve since T-485:** `match`, `hasToken`, `startsWith`, `endsWith`, `notEmpty`, `empty` | `regexp_matches`, `str_split`, `regexp_extract_all`, `position(… IN …)` |
 | Conditional | `multiIf` | `CASE` |
 | JSON | `JSONExtract*`, `simpleJSONExtract*`, `visitParamExtract*` | `json_extract` family, `VARIANT` |
 | Hashes | `cityHash64`, `sipHash64`, `xxHash64` | `hash`; values will not match ClickHouse's |
 | Dictionaries | `dictGet*` | **No equivalent**; out of scope |
-| Type helpers | `toInt64`, `toString`, `toFloat64`, `toTypeName`, `assumeNotNull`, `intDiv` | casts, `typeof`, `//` |
+| Type helpers | `toTypeName`, `assumeNotNull`, `intDiv`, `isNull` (a keyword to the parser). **Resolve since T-485:** `toString`, `toInt64`, `toUInt64`, `toFloat64` and their `-OrZero`/`-OrNull` forms, `toFloat64OrDefault` | casts, `typeof`, `//` |
+| Maps and hints | **Resolve since T-485:** `mapContains`, `mapKeys`, `mapValues`, `indexHint` (always true) | `map_contains`, `map_keys`, `map_values` |
 
 ## 4. Types with no home
 
@@ -117,6 +120,12 @@ These return an answer, just not always ClickHouse's.
 | Behavior | ClickHouse | smolquery (DuckDB, observed) |
 |---|---|---|
 | `sum()` over zero rows | `0` | **`NULL`** — differs |
+| `toDateTime(x)` | A `DateTime`, in the session's zone; a number is seconds since the epoch | A `TIMESTAMP` truncated to the second, UTC; a number is refused — differs |
+| `toStartOfInterval(t, INTERVAL 7 day)` | Buckets from 1970-01-01, a Thursday | The same, by an explicit origin — same |
+| `uniq(x)` | Approximate | Exact, `count(DISTINCT x)` — a superset |
+| `hasToken(s, t)` | Reads the token index; `t` must be one token | Splits `s` on non-alphanumerics and scans — same answer, no index |
+| `sumIf(x, c)` result type | `Int64`/`UInt64` | A `HUGEINT`, which answers as a `Decimal` — differs |
+| `notEmpty(x)` | `UInt8` | `UInt8`; `mapContains` answers a `Bool`, where ClickHouse answers `UInt8` — differs |
 | `countIf` result type | `UInt64` | A `HUGEINT`, which answers as a `Decimal` in a result — differs |
 | Column nullability | Columns are non-null unless `Nullable` | Every result column is `Nullable`, and `NULL` can appear where ClickHouse guarantees a value — differs |
 | Timezones | `DateTime` carries a session timezone | UTC only — differs |
@@ -148,7 +157,7 @@ clients actually send. The same shape applies here (PL-65):
 2. **Cheap wins first:** strip a trailing `SETTINGS`, substitute `{name:Type}` parameters, read backticks and backslash escapes. Done (T-481).
 3. **Emulate `system.*`** plus `SHOW` and `DESCRIBE`, the way `pg_catalog` is emulated. Done (T-482, T-483).
 4. **A textual pre-pass** for constructs DuckDB refuses to parse (`ARRAY JOIN`, `LIMIT BY`, `PREWHERE`), and to drop `FINAL` rather than let it bind as an alias.
-5. **Macro shims** for the function families, one family per layer, skipping the names that already resolve.
+5. **Macro shims** for the function families, one family per layer, skipping the names that already resolve. The date and time family and what HyperDX's Search page calls are done (T-485).
 6. **Pin the semantic differences with tests**, since those are the ones that fail quietly.
 
 **Non-goals:** full dialect parity, `AggregateFunction` states and materialized-view

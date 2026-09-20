@@ -83,6 +83,13 @@ defmodule Smolquery.QueryService.Runtime do
   `%Smolquery.Catalog{}` handle must pass the bootstrap too, or job engines
   see no sealed tier.
 
+  `clickhouse_functions` is whether each job engine defines ClickHouse's
+  function names as macros (`Smolquery.QueryService.ClickHouseFunctions`),
+  so the SQL a ClickHouse client generates runs as written. On by default:
+  the names collide with none of DuckDB's, and a deployment with no
+  ClickHouse client can switch them off to save the definitions at engine
+  start.
+
   `history_metadata` is where `QueryService.History` durably records terminal
   jobs (PL-8 D8) — by default the same `sqlite:` database the catalog
   configuration names, resolved the same way `job_bootstrap` is: a deployment
@@ -174,6 +181,7 @@ defmodule Smolquery.QueryService.Runtime do
     :allowed_directories,
     :store,
     lockdown: true,
+    clickhouse_functions: true,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
     buffer_hot_port: 4001,
@@ -209,6 +217,7 @@ defmodule Smolquery.QueryService.Runtime do
           history_metadata: String.t() | nil,
           allowed_directories: [String.t()],
           lockdown: boolean(),
+          clickhouse_functions: boolean(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
           buffer_hot_port: :inet.port_number(),
@@ -240,6 +249,7 @@ defmodule Smolquery.QueryService.Runtime do
 
   @limits [
     :lockdown,
+    :clickhouse_functions,
     :buffer_name,
     :buffer_base_url,
     :buffer_hot_port,
