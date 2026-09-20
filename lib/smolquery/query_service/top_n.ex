@@ -77,6 +77,9 @@ defmodule Smolquery.QueryService.TopN do
   (T-504). Those are this codebase's own, a client cannot define or replace
   one, and a test holds each of their bodies to the same rule: every
   function a body calls is `CONSISTENT` or `CONSISTENT_WITHIN_QUERY`.
+  They are trusted by name, so a second test keeps the names theirs: none
+  may be a function of the engine's own, or an engine release that adds a
+  builtin called `has` or `match` would have it exempted unseen.
   Without that, every search a ClickHouse client sends — HyperDX filters
   with `fromUnixTimestamp64Milli` and orders by `Timestamp DESC LIMIT 200`,
   the very shape the bound exists for — read a footer per hot entry.

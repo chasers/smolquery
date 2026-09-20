@@ -296,6 +296,21 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert unstable == []
     end
 
+    test "no macro shares its name with a function of the engine's own (review of T-504)" do
+      engine = :"clickhouse_functions_bare_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({Engine, name: engine}, id: engine)
+
+      names = Enum.map_join(ClickHouseFunctions.names(), ", ", &"'#{String.downcase(&1)}'")
+
+      builtins =
+        rows(
+          engine,
+          "SELECT DISTINCT function_name AS name FROM duckdb_functions() WHERE lower(function_name) IN (#{names})"
+        )
+
+      assert builtins == []
+    end
+
     test "the check would catch a macro over a volatile function", %{engine: engine} do
       assert [%{"stability" => "VOLATILE"} | _more] =
                rows(
