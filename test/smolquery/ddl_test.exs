@@ -284,4 +284,73 @@ defmodule Smolquery.DdlTest do
       assert Ddl.message({:weird, 1}) == "{:weird, 1}"
     end
   end
+
+  describe "what the scanner reads (pinned before T-503 moved it onto Smolquery.Sql)" do
+    test "an unquoted name keeps the case it was typed in, and a quoted one is verbatim" do
+      assert {:ok, %AlterTable{table: {"Analytics", "Events"}, change: {:add_column, field}}} =
+               Ddl.parse(~s|alter table Analytics.Events add column "UserId" bigint|)
+
+      assert field.name == "UserId"
+
+      assert {:ok, %AlterTable{change: {:drop_column, "CamelCase"}}} =
+               Ddl.parse("ALTER TABLE a.t DROP COLUMN CamelCase")
+    end
+
+    test "a doubled quote inside a quoted name is one quote, which no identifier may hold" do
+      assert {:error, {:invalid_identifier, ~s|we"ird|}} =
+               Ddl.parse(~s|ALTER TABLE a.t DROP COLUMN "we""ird"|)
+    end
+
+    test "a quoted name that never closes is refused" do
+      for sql <- [
+            ~s|ALTER TABLE a.t DROP COLUMN "open|,
+            ~s|ALTER TABLE a.t DROP COLUMN "open""|,
+            ~s|ALTER TABLE a.t DROP COLUMN "|
+          ] do
+        assert Ddl.parse(sql) == {:error, {:invalid_ddl, "unterminated quoted identifier"}}
+      end
+    end
+
+    test "a character the grammar has no use for is refused by name" do
+      assert Ddl.parse("ALTER TABLE a.t DROP COLUMN x = 1") ==
+               {:error, {:invalid_ddl, ~s|unexpected "="|}}
+
+      assert Ddl.parse("ALTER TABLE a.t DROP COLUMN é") ==
+               {:error, {:invalid_ddl, ~s|unexpected "é"|}}
+    end
+
+    test "MATERIALIZED takes the rest of the statement as written, less a final semicolon" do
+      assert {:ok, %AlterTable{change: {:add_column, field}}} =
+               Ddl.parse(
+                 "ALTER TABLE a.t ADD COLUMN ms TIMESTAMP MATERIALIZED  epoch_ms(\"Ts\") + 1 ; "
+               )
+
+      assert field.materialized.expression =~ ~s|epoch_ms("Ts") + 1|
+      refute field.materialized.expression =~ ";"
+    end
+
+    test "a final semicolon ends the statement, and anything after it is a second statement" do
+      assert {:ok, %AlterTable{}} = Ddl.parse("ALTER TABLE a.t DROP COLUMN x ;  \n")
+
+      assert Ddl.parse("ALTER TABLE a.t DROP COLUMN x; SELECT 1") ==
+               {:error, :multiple_statements}
+    end
+
+    test "a comment between two words is skipped, as the lexer skips it (T-503)" do
+      assert {:ok, %AlterTable{table: {"a", "t"}, change: {:drop_column, "x"}}} =
+               Ddl.parse(
+                 "ALTER /* why */ TABLE a.t -- the table\n DROP COLUMN x /* done */ ; -- bye"
+               )
+    end
+
+    test "NUMERIC takes its two numbers, and a number alone is not a name" do
+      assert {:ok, %AlterTable{change: {:add_column, field}}} =
+               Ddl.parse("ALTER TABLE a.t ADD COLUMN amount NUMERIC ( 38 , 2 )")
+
+      assert field.type == {:numeric, 38, 2}
+
+      assert {:error, {:invalid_ddl, "expected an identifier, got 42"}} =
+               Ddl.parse("ALTER TABLE a.t DROP COLUMN 42")
+    end
+  end
 end

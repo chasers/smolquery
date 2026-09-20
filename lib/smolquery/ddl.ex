@@ -17,13 +17,16 @@ defmodule Smolquery.Ddl do
   business: `parse/1` answers `:not_ddl` for anything that does not begin
   with `ALTER`, so what the query path pays is one keyword check.
 
-  This module scans for itself: it was written when the SQL lexer lived in
-  an edge (`Smolquery.Sql` was `SmolqueryPg.Sql`), which the query service
-  may not depend on (`.reach.exs`). Its scanner knows less than the lexer
-  and needs no more: words, quoted identifiers, integers, and the four punctuation marks
-  the grammar needs. The accepted grammar has no comments inside it and no
-  string literals — leading whitespace and comments are stripped before the
-  scan, as the wire's own lexer strips them — so there is nothing else to scan — except a `MATERIALIZED`
+  The statement is read through `Smolquery.Sql`, the lexer the edges read
+  SQL with (T-503): words, quoted identifiers, numbers and single
+  characters, past whitespace and comments. This module had a scanner of its
+  own while that lexer lived in an edge, which the query service may not
+  depend on (`.reach.exs`). The grammar uses four punctuation marks — `(`,
+  `)`, `,`, `.` — and refuses any other character by name, and a quoted
+  identifier that never closes is refused, which the lexer by itself would
+  read to the end of the statement. A comment between two words is skipped,
+  as the lexer skips it everywhere. There are no string literals in the
+  grammar, so there is nothing else to read — except a `MATERIALIZED`
   expression, which is arbitrary SQL and is therefore kept as the raw text
   after the keyword for `Smolquery.Catalog` to validate through DuckDB.
 
@@ -69,6 +72,7 @@ defmodule Smolquery.Ddl do
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
   alias Smolquery.Schema.Materialized
+  alias Smolquery.Sql
 
   defmodule AlterTable do
     @moduledoc """
@@ -96,8 +100,6 @@ defmodule Smolquery.Ddl do
           column: String.t(),
           performed: boolean()
         }
-
-  @leading ~r/\A\s*alter\b/i
 
   @types %{
     "bigint" => "INT64",
@@ -135,35 +137,13 @@ defmodule Smolquery.Ddl do
       not String.valid?(sql) ->
         {:error, {:invalid_ddl, "the statement is not valid UTF-8"}}
 
-      not Regex.match?(@leading, trivia_stripped(sql)) ->
+      Sql.leading_keyword(sql) != "alter" ->
         :not_ddl
 
       true ->
-        with({:ok, tokens, remainder} <- scan(trivia_stripped(sql)), do: alter(tokens, remainder))
+        with({:ok, tokens, remainder} <- scan(sql), do: alter(tokens, remainder))
     end
   end
-
-  defp trivia_stripped(sql) do
-    case sql do
-      <<char, rest::binary>> when char in [?\s, ?\t, ?\n, ?\r] -> trivia_stripped(rest)
-      "--" <> rest -> rest |> line_comment_end() |> trivia_stripped()
-      "/*" <> rest -> rest |> block_comment_end(1) |> trivia_stripped()
-      _other -> sql
-    end
-  end
-
-  defp line_comment_end(rest) do
-    case String.split(rest, "\n", parts: 2) do
-      [_comment, after_line] -> after_line
-      [_comment] -> ""
-    end
-  end
-
-  defp block_comment_end(rest, 0), do: rest
-  defp block_comment_end("", _depth), do: ""
-  defp block_comment_end("/*" <> rest, depth), do: block_comment_end(rest, depth + 1)
-  defp block_comment_end("*/" <> rest, depth), do: block_comment_end(rest, depth - 1)
-  defp block_comment_end(<<_char, rest::binary>>, depth), do: block_comment_end(rest, depth)
 
   @doc """
   Runs a parsed statement against the catalog.
@@ -272,7 +252,7 @@ defmodule Smolquery.Ddl do
 
   defp skipped(ddl), do: {:ok, outcome(ddl, false)}
 
-  defp alter([{:word, "alter", _, _}, {:word, "table", _, _} | rest], remainder) do
+  defp alter([{:word, "alter", _}, {:word, "table", _} | rest], remainder) do
     with {:ok, table, rest} <- table_ref(rest) do
       action(table, rest, remainder)
     end
@@ -281,7 +261,7 @@ defmodule Smolquery.Ddl do
   defp alter(_tokens, _remainder),
     do: {:error, {:invalid_ddl, "only ALTER TABLE is supported"}}
 
-  defp table_ref([first, {:punct, ".", _}, second, {:punct, ".", _} | _rest]) do
+  defp table_ref([first, {:punct, "."}, second, {:punct, "."} | _rest]) do
     with {:ok, dataset} <- name(first), {:ok, table} <- name(second) do
       {:error,
        {:invalid_ddl,
@@ -289,7 +269,7 @@ defmodule Smolquery.Ddl do
     end
   end
 
-  defp table_ref([first, {:punct, ".", _}, second | rest]) do
+  defp table_ref([first, {:punct, "."}, second | rest]) do
     with {:ok, dataset} <- name(first),
          {:ok, table} <- name(second),
          {:ok, dataset} <- Identifier.validate(dataset),
@@ -304,7 +284,7 @@ defmodule Smolquery.Ddl do
 
   defp table_ref([]), do: {:error, {:invalid_ddl, "ALTER TABLE needs a dataset.table"}}
 
-  defp action(table, [{:word, "add", _, _} | rest], remainder) do
+  defp action(table, [{:word, "add", _} | rest], remainder) do
     rest = skip(rest, ["column"])
     {if_not_exists, rest} = guard(rest, ["if", "not", "exists"])
 
@@ -316,7 +296,7 @@ defmodule Smolquery.Ddl do
     end
   end
 
-  defp action(table, [{:word, "drop", _, _} | rest], _remainder) do
+  defp action(table, [{:word, "drop", _} | rest], _remainder) do
     rest = skip(rest, ["column"])
     {if_exists, rest} = guard(rest, ["if", "exists"])
 
@@ -340,12 +320,12 @@ defmodule Smolquery.Ddl do
   defp column([]), do: {:error, {:invalid_ddl, "expected a column name"}}
 
   defp type([
-         {:word, word, _, _},
-         {:punct, "(", _},
-         {:int, precision, _},
-         {:punct, ",", _},
-         {:int, scale, _},
-         {:punct, ")", _} | rest
+         {:word, word, _},
+         {:punct, "("},
+         {:int, precision},
+         {:punct, ","},
+         {:int, scale},
+         {:punct, ")"} | rest
        ])
        when word in ["decimal", "numeric"] do
     with {:ok, type} <- Schema.type_from_api("NUMERIC(#{precision},#{scale})") do
@@ -354,18 +334,18 @@ defmodule Smolquery.Ddl do
   end
 
   defp type([
-         {:word, "map", _, _},
-         {:punct, "(", _},
-         {:word, key, _, _},
-         {:punct, ",", _},
-         {:word, value, _, _},
-         {:punct, ")", _} | rest
+         {:word, "map", _},
+         {:punct, "("},
+         {:word, key, _},
+         {:punct, ","},
+         {:word, value, _},
+         {:punct, ")"} | rest
        ])
        when key in ["string", "varchar"] and value in ["string", "varchar"] do
     with {:ok, type} <- Schema.type_from_api("MAP(STRING, STRING)"), do: {:ok, type, rest}
   end
 
-  defp type([{:word, word, original, _} | rest]) do
+  defp type([{:word, word, original} | rest]) do
     case Map.fetch(@types, word) do
       {:ok, api} ->
         with {:ok, type} <- Schema.type_from_api(api), do: {:ok, type, rest}
@@ -379,14 +359,14 @@ defmodule Smolquery.Ddl do
 
   defp tail([], _remainder), do: {:ok, nil}
 
-  defp tail([{:word, "materialized", _, _}], remainder) do
+  defp tail([{:word, "materialized", _}], remainder) do
     case String.trim(remainder) do
       "" -> {:error, {:invalid_ddl, "MATERIALIZED needs an expression"}}
       expression -> {:ok, expression}
     end
   end
 
-  defp tail([{:word, "not", _, _}, {:word, "null", _, _} | _rest], _remainder),
+  defp tail([{:word, "not", _}, {:word, "null", _} | _rest], _remainder),
     do: {:error, {:unsupported_ddl, "NOT NULL"}}
 
   defp tail([other | _rest], _remainder), do: {:error, {:unsupported_ddl, describe(other)}}
@@ -394,11 +374,11 @@ defmodule Smolquery.Ddl do
   defp nothing_after([]), do: :ok
   defp nothing_after([other | _rest]), do: {:error, {:unsupported_ddl, describe(other)}}
 
-  defp name({:word, _down, original, _at}), do: {:ok, original}
-  defp name({:quoted, quoted, _at}), do: {:ok, quoted}
+  defp name({:word, _down, original}), do: {:ok, original}
+  defp name({:quoted, quoted}), do: {:ok, quoted}
   defp name(other), do: {:error, {:invalid_ddl, "expected an identifier, got #{describe(other)}"}}
 
-  defp skip([{:word, word, _, _} | rest], [word]), do: rest
+  defp skip([{:word, word, _} | rest], [word]), do: rest
   defp skip(tokens, _words), do: tokens
 
   defp guard(tokens, words) do
@@ -411,80 +391,49 @@ defmodule Smolquery.Ddl do
     end
   end
 
-  defp keyword({:word, word, _, _}), do: word
+  defp keyword({:word, word, _}), do: word
   defp keyword(_other), do: nil
 
-  defp describe({:word, _down, original, _at}), do: original
-  defp describe({:quoted, quoted, _at}), do: ~s|"#{quoted}"|
-  defp describe({:punct, punct, _at}), do: punct
-  defp describe({:int, int, _at}), do: Integer.to_string(int)
+  defp describe({:word, _down, original}), do: original
+  defp describe({:quoted, quoted}), do: ~s|"#{quoted}"|
+  defp describe({:punct, punct}), do: punct
+  defp describe({:int, int}), do: Integer.to_string(int)
 
-  defp scan(sql), do: scan(sql, 0, [])
+  defp scan(sql), do: scan(Sql.skip_trivia(sql), [])
 
-  defp scan(<<>>, _at, acc), do: {:ok, Enum.reverse(acc), ""}
+  defp scan(text, acc), do: token(Sql.next_token(text), text, acc)
 
-  defp scan(<<char, rest::binary>>, at, acc) when char in [?\s, ?\t, ?\n, ?\r],
-    do: scan(rest, at + 1, acc)
+  defp token(:eof, _text, acc), do: {:ok, Enum.reverse(acc), ""}
 
-  defp scan(<<?;, rest::binary>>, _at, acc) do
-    if String.trim(rest) == "",
+  defp token({:word, "materialized" = word, rest}, text, acc),
+    do: {:ok, Enum.reverse([{:word, word, written(text, rest)} | acc]), expression(rest)}
+
+  defp token({:word, word, rest}, text, acc),
+    do: scan(Sql.skip_trivia(rest), [{:word, word, written(text, rest)} | acc])
+
+  defp token({:quoted, name, rest}, text, acc) do
+    if written(text, rest) == Identifier.quote_label(name),
+      do: scan(Sql.skip_trivia(rest), [{:quoted, name} | acc]),
+      else: {:error, {:invalid_ddl, "unterminated quoted identifier"}}
+  end
+
+  defp token({:number, digits, rest}, _text, acc),
+    do: scan(Sql.skip_trivia(rest), [{:int, String.to_integer(digits)} | acc])
+
+  defp token({:symbol, ";", rest}, _text, acc) do
+    if Sql.skip_trivia(rest) == "",
       do: {:ok, Enum.reverse(acc), ""},
       else: {:error, :multiple_statements}
   end
 
-  defp scan(<<?", rest::binary>>, at, acc) do
-    case quoted(rest, []) do
-      {:ok, name, next} ->
-        scan(next, at + byte_size(name) + 2, [{:quoted, name, at} | acc])
+  defp token({:symbol, punct, rest}, _text, acc) when punct in ["(", ")", ",", "."],
+    do: scan(Sql.skip_trivia(rest), [{:punct, punct} | acc])
 
-      :error ->
-        {:error, {:invalid_ddl, "unterminated quoted identifier"}}
-    end
-  end
-
-  defp scan(<<char, _::binary>> = sql, at, acc) when char in ?0..?9 do
-    {digits, rest} = take(sql, &(&1 in ?0..?9))
-
-    scan(rest, at + byte_size(digits), [{:int, String.to_integer(digits), at} | acc])
-  end
-
-  defp scan(<<?_, _::binary>> = sql, at, acc), do: word(sql, at, acc)
-
-  defp scan(<<char, _::binary>> = sql, at, acc) when char in ?a..?z or char in ?A..?Z,
-    do: word(sql, at, acc)
-
-  defp scan(<<char, rest::binary>>, at, acc) when char in [?(, ?), ?,, ?.],
-    do: scan(rest, at + 1, [{:punct, <<char>>, at} | acc])
-
-  defp scan(<<char::utf8, _::binary>>, _at, _acc),
+  defp token({:symbol, _byte, _rest}, <<char::utf8, _more::binary>>, _acc),
     do: {:error, {:invalid_ddl, "unexpected #{inspect(<<char::utf8>>)}"}}
 
-  defp word(sql, at, acc) do
-    {word, rest} = take(sql, &word_char?/1)
-    token = {:word, String.downcase(word), word, at}
+  defp written(text, rest), do: binary_part(text, 0, byte_size(text) - byte_size(rest))
 
-    if String.downcase(word) == "materialized",
-      do: {:ok, Enum.reverse([token | acc]), String.trim_trailing(rest, ";")},
-      else: scan(rest, at + byte_size(word), [token | acc])
-  end
-
-  defp quoted(<<>>, _acc), do: :error
-  defp quoted(<<?", ?", rest::binary>>, acc), do: quoted(rest, [?" | acc])
-  defp quoted(<<?", rest::binary>>, acc), do: {:ok, acc |> Enum.reverse() |> to_string(), rest}
-  defp quoted(<<char, rest::binary>>, acc), do: quoted(rest, [char | acc])
-
-  defp word_char?(char),
-    do: char in ?a..?z or char in ?A..?Z or char in ?0..?9 or char == ?_
-
-  defp take(binary, fun), do: take(binary, fun, [])
-
-  defp take(<<char, rest::binary>>, fun, acc) do
-    if fun.(char),
-      do: take(rest, fun, [char | acc]),
-      else: finish_take(acc, <<char, rest::binary>>)
-  end
-
-  defp take(<<>>, _fun, acc), do: finish_take(acc, <<>>)
-
-  defp finish_take(acc, rest), do: {acc |> Enum.reverse() |> to_string(), rest}
+  defp expression(rest),
+    do: rest |> String.trim() |> String.trim_trailing(";") |> String.trim_trailing()
 end
