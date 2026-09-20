@@ -3,6 +3,7 @@ defmodule Smolquery.MemoryMetricsTest do
 
   alias Smolquery.CgroupMemory
   alias Smolquery.MemoryMetrics
+  alias Smolquery.ProcMaps
   alias Smolquery.Telemetry
   alias Smolquery.Test.Eventually
 
@@ -123,6 +124,69 @@ defmodule Smolquery.MemoryMetricsTest do
       assert Eventually.until(fn ->
                Telemetry.render() =~ "smolquery_memory_cgroup_peak_bytes #{400 * @mib}"
              end)
+    end
+
+    test "publishes the resident set split by mapping class", %{tmp_dir: dir} do
+      cgroup = fake_cgroup(dir, 500)
+      arena = ProcMaps.arena_max_bytes() - 4096
+
+      maps = Path.join(dir, "smaps")
+
+      File.write!(maps, """
+      556000000000-556000c80000 rw-p 00000000 00:00 0 [heap]
+      Rss:            #{div(180 * @mib, 1024)} kB
+      7f0000000000-#{Integer.to_string(0x7F0000000000 + arena, 16)} rw-p 00000000 00:00 0 
+      Rss:            #{div(arena, 1024)} kB
+      7fa000000000-7fa080000000 rw-p 00000000 00:00 0 
+      Rss:            #{div(2 * @mib, 1024)} kB
+      7fb000000000-7fb000400000 r--p 00000000 fd:01 42 /usr/lib/libfoo.so
+      Rss:            #{div(3 * @mib, 1024)} kB
+      """)
+
+      start_supervised!(
+        {MemoryMetrics,
+         enabled: true,
+         name: :t451_mappings,
+         cgroup_root: cgroup,
+         maps_path: maps,
+         interval_ms: 10,
+         maps_interval_ms: 10}
+      )
+
+      assert Eventually.until(fn ->
+               Telemetry.render() =~
+                 ~s(smolquery_memory_mapping_bytes{kind="heap"} #{180 * @mib})
+             end)
+
+      metrics = Telemetry.render()
+      assert metrics =~ "# TYPE smolquery_memory_mapping_bytes gauge"
+      assert metrics =~ ~s(smolquery_memory_mapping_bytes{kind="anon_arena"} #{arena})
+      assert metrics =~ ~s(smolquery_memory_mapping_bytes{kind="anon_reserved"} #{2 * @mib})
+      assert metrics =~ ~s(smolquery_memory_mapping_bytes{kind="file"} #{3 * @mib})
+      assert metrics =~ "smolquery_memory_mapping_arenas 1"
+    end
+
+    test "keeps sampling where /proc carries no smaps", %{tmp_dir: dir} do
+      sampler =
+        start_supervised!(
+          {MemoryMetrics,
+           enabled: true,
+           name: :t451_no_maps,
+           cgroup_root: fake_cgroup(dir, 100),
+           maps_path: Path.join(dir, "absent"),
+           interval_ms: 10,
+           maps_interval_ms: 10}
+        )
+
+      assert Eventually.until(fn ->
+               Telemetry.render() =~
+                 ~s(smolquery_memory_cgroup_bytes{kind="current"} #{100 * @mib})
+             end)
+
+      # The mapping read is best-effort: a missing file publishes nothing and
+      # must not take the sampler down with it.
+      Process.sleep(50)
+      assert Process.alive?(sampler)
     end
 
     test "without a cgroup filesystem the resident set is what it publishes", %{tmp_dir: dir} do

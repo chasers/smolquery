@@ -28,6 +28,20 @@ defmodule Smolquery.MemoryMetrics do
       smolquery_memory_rss_bytes                                      gauge
       smolquery_memory_rss_peak_bytes                                 gauge, 60 s window
       smolquery_memory_beam_bytes{kind="total|processes|binary|ets"}  gauge
+      smolquery_memory_mapping_bytes{kind="heap|anon_arena|…"}        gauge
+      smolquery_memory_mapping_arenas                                 gauge
+
+  The last two answer *where* the resident set sits, which the total alone
+  never did: `Smolquery.ProcMaps` splits it by mapping class, so a node that
+  grows can say whether the memory is in glibc's main arena, in arena-shaped
+  mappings, or merely reserved address space that is not resident at all.
+  That reading used to need a shell inside the container.
+
+  It runs on its own slower timer (`maps_interval_ms`, 10 s). Parsing
+  `/proc/self/smaps` on a busy node costs ~120 ms against the ~11,000 lines a
+  storage pod carries, which is far too much at the 250 ms cadence the rest of
+  the sample uses — and the classes it reports are a slow-moving baseline, not
+  a spike a coarse sample would lose.
 
   Without a cgroup filesystem (a laptop, a bare host) the cgroup series are
   absent and the resident set stands in. A sample is three small file reads
@@ -41,9 +55,11 @@ defmodule Smolquery.MemoryMetrics do
   use GenServer
 
   alias Smolquery.CgroupMemory
+  alias Smolquery.ProcMaps
   alias Smolquery.Telemetry
 
   @default_interval_ms 250
+  @default_maps_interval_ms 10_000
   @window_ms 60_000
 
   @type sample :: %{
@@ -87,16 +103,20 @@ defmodule Smolquery.MemoryMetrics do
   def init(config) do
     state = %{
       root: Keyword.get(config, :cgroup_root, "/sys/fs/cgroup"),
+      maps_path: Keyword.get(config, :maps_path, "/proc/self/smaps"),
       interval_ms: Keyword.get(config, :interval_ms, @default_interval_ms),
+      maps_interval_ms: Keyword.get(config, :maps_interval_ms, @default_maps_interval_ms),
       window_ms: Keyword.get(config, :window_ms, @window_ms),
       recent: []
     }
 
-    {:ok, state |> tick() |> schedule()}
+    {:ok, state |> tick() |> tick_maps() |> schedule() |> schedule_maps()}
   end
 
   @impl GenServer
   def handle_info(:sample, state), do: {:noreply, state |> tick() |> schedule()}
+
+  def handle_info(:sample_maps, state), do: {:noreply, state |> tick_maps() |> schedule_maps()}
 
   defp tick(state) do
     sample = sample(state.root)
@@ -109,6 +129,26 @@ defmodule Smolquery.MemoryMetrics do
     publish_limit(state.root)
 
     %{state | recent: recent}
+  end
+
+  defp tick_maps(state) do
+    publish_maps(state.maps_path)
+
+    state
+  end
+
+  defp publish_maps(path) do
+    case ProcMaps.breakdown(path) do
+      {:ok, breakdown} ->
+        for kind <- [:heap, :anon_arena, :anon_reserved, :anon, :file] do
+          Telemetry.put_gauge("smolquery_memory_mapping_bytes", [kind: kind], breakdown[kind])
+        end
+
+        Telemetry.put_gauge("smolquery_memory_mapping_arenas", [], breakdown.anon_arena_count)
+
+      :none ->
+        :ok
+    end
   end
 
   # Republished every tick like every other series: the metrics table is
@@ -159,6 +199,12 @@ defmodule Smolquery.MemoryMetrics do
 
   defp schedule(state) do
     Process.send_after(self(), :sample, state.interval_ms)
+
+    state
+  end
+
+  defp schedule_maps(state) do
+    Process.send_after(self(), :sample_maps, state.maps_interval_ms)
 
     state
   end

@@ -101,6 +101,14 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### `/metrics` says where the resident set is (#344)
+
+`smolquery_memory_rss_bytes` is one number and `smolquery_memory_cgroup_bytes{kind="anon"}` lumps every anonymous mapping together, so a node that grows could say it was growing and not why. Two new gauges split the resident set by mapping class: `smolquery_memory_mapping_bytes{kind="heap|anon_arena|anon_reserved|anon|file"}` and `smolquery_memory_mapping_arenas`. A sandbox storage pod that grew 613 MiB to 2543 MiB over 40 hours had 1778 MiB of it in arena-shaped mappings and 2 MiB in DuckDB's engine pools; that reading previously needed `/proc/1/smaps` run by hand inside the container, and vanished with the shell.
+
+Read `heap` for glibc's main arena, which grows through `brk` and returns memory only from its top — it is where fragmentation parks once `MALLOC_ARENA_MAX` caps the secondary arenas. **`anon_reserved` is address space, not usage**: the same pod mapped 10,165 MiB across nine reservations while holding 194 MiB of them resident, so adding it to the others overstates the node badly. Arena-shaped mappings measure just under 64 MiB rather than at it, because the arena header takes the first page, which is why `anon_arena` is bounded by `HEAP_MAX_SIZE` rather than tested for equality with it.
+
+The read runs on its own timer, `maps_interval_ms` (10 s), not the 250 ms cadence of the rest of the sample: parsing `/proc/self/smaps` costs ~120 ms against the ~11,000 lines a storage pod carries. The classes are a slow-moving baseline, so a coarser read loses nothing. Nothing is published on a host whose `/proc` carries no `smaps`.
+
 ### The web UI no longer falls back to long polling (T-468)
 
 The LiveView socket used to switch a tab to HTTP long polling whenever a WebSocket took more than 2.5 seconds to open, which is routine after a laptop wakes from sleep and Wi-Fi comes back. phoenix.js closes the still-connecting socket (the console shows "WebSocket is closed before the connection is established"), swaps the transport, and never tries the WebSocket again until a full page load. Long polling cannot survive a sleep: its server-side session dies after 15 seconds without a poll, so every later wake-up got a `410 Gone` and the "Something went wrong!" flash, with nothing in the server log because an idle shutdown is a normal exit. With three web pods and no session affinity, each poll also depended on a PubSub hop to the owning pod.
