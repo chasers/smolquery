@@ -75,6 +75,14 @@ defmodule SmolqueryClickHouse.RewriteTest do
     end
   end
 
+  test "a type's text never reaches the statement's code unchecked" do
+    sql = "SELECT CAST(x, 'Decimal(1)) FROM secrets --') FROM t"
+
+    assert Rewrite.call(sql) == sql
+    assert Rewrite.engine_type("Decimal(1)) FROM secrets --") == :error
+    assert Rewrite.engine_type("Decimal( 38 , 2 )") == {:ok, "DECIMAL( 38 , 2 )"}
+  end
+
   test "engine_type/1 reads wrapped and parameterized types" do
     assert Rewrite.engine_type("LowCardinality(String)") == {:ok, "VARCHAR"}
     assert Rewrite.engine_type("DateTime64(9)") == {:ok, "TIMESTAMP"}

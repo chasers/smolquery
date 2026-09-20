@@ -17,7 +17,10 @@ defmodule SmolqueryClickHouse.Rewrite do
   - **`CAST(x, 'Type')`.** ClickHouse's function form, which HyperDX writes
     for a number filter (`CAST('250', 'Float64')`), becomes `CAST(x AS
     type)` with the engine's name for the type. A type this module does not
-    know is left as written, for the engine to refuse by name.
+    know is left as written, for the engine to refuse by name. The type's
+    text is a literal, and a literal may have come from a parameter, so
+    nothing of it reaches the statement's code but a name from a fixed table
+    or a `DECIMAL(p, s)` whose two numbers were checked to be numbers.
 
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
@@ -74,9 +77,15 @@ defmodule SmolqueryClickHouse.Rewrite do
       "lowcardinality(" <> rest -> rest |> String.trim_trailing(")") |> engine_type()
       "datetime64(" <> _precision -> {:ok, "TIMESTAMP"}
       "datetime(" <> _zone -> {:ok, "TIMESTAMP"}
-      "decimal(" <> _rest = decimal -> {:ok, String.upcase(decimal)}
+      "decimal(" <> _rest = decimal -> decimal_type(decimal)
       name -> Map.fetch(@types, name)
     end
+  end
+
+  defp decimal_type(decimal) do
+    if Regex.match?(~r/\Adecimal\(\s*\d+\s*(,\s*\d+\s*)?\)\z/, decimal),
+      do: {:ok, String.upcase(decimal)},
+      else: :error
   end
 
   defp pieces({:code, text}) do

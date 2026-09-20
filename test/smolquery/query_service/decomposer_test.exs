@@ -316,6 +316,11 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
       assert {:volatile_function, "random"} =
                refused("SELECT count(*) FROM analytics.events WHERE value > random()")
+
+      assert {:volatile_function, "now64"} =
+               refused(
+                 "SELECT k, count(*) FROM analytics.events WHERE ts > now64(3) - INTERVAL 1 HOUR GROUP BY k"
+               )
     end
   end
 end

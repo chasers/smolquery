@@ -84,7 +84,7 @@ defmodule Smolquery.QueryService.Decomposer do
   @aggregates ["avg" | @mergeable]
   @prefix "__pq_"
   @refused_classes ~w(SUBQUERY WINDOW STAR)
-  @volatile ~w(now get_current_timestamp current_date current_localtime
+  @volatile ~w(now now64 get_current_timestamp current_date current_localtime
                current_localtimestamp today random uuid uuidv4 uuidv7
                gen_random_uuid setseed nextval currval)
 
