@@ -95,6 +95,24 @@ defmodule Smolquery.DdlTest do
                {:error, {:invalid_ddl, "MATERIALIZED needs an expression"}}
     end
 
+    test "NOT NULL before MATERIALIZED declares a computed column that is never NULL (T-515)" do
+      assert {:ok,
+              %{
+                change:
+                  {:add_column,
+                   %Field{nullable: false, materialized: %{expression: "epoch_ms(n)"}}}
+              }} =
+               Ddl.parse(
+                 "ALTER TABLE ds.t ADD COLUMN ts TIMESTAMP NOT NULL MATERIALIZED epoch_ms(n)"
+               )
+
+      assert {:ok, %{change: {:add_column, %Field{nullable: true}}}} =
+               Ddl.parse("ALTER TABLE ds.t ADD COLUMN ts TIMESTAMP MATERIALIZED epoch_ms(n)")
+
+      assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN doc VARIANT NOT NULL MATERIALIZED attrs") ==
+               {:error, {:column_must_be_nullable, "doc"}}
+    end
+
     test "NOT NULL, DEFAULT and other trailing clauses are refused with the clause named" do
       assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN n BIGINT NOT NULL") ==
                {:error, {:unsupported_ddl, "NOT NULL"}}

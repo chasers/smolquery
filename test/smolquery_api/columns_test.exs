@@ -83,6 +83,38 @@ defmodule SmolqueryApi.ColumnControllerTest do
                3
     end
 
+    test "a materialized column may be declared non-nullable; a variant one may not (T-515)", %{
+      name: name
+    } do
+      response =
+        add(name, %{
+          "name" => "day",
+          "type" => "DATE",
+          "nullable" => false,
+          "materialized" => "CAST(ts AS DATE)"
+        })
+
+      assert response.status == 200
+
+      assert List.last(schema_of(response)) == %{
+               "name" => "day",
+               "type" => "DATE",
+               "nullable" => false,
+               "materialized" => "CAST(ts AS DATE)"
+             }
+
+      refused =
+        add(name, %{
+          "name" => "doc",
+          "type" => "VARIANT",
+          "nullable" => false,
+          "materialized" => "ts"
+        })
+
+      assert {422, "INVALID_ARGUMENT", message} = error_of(refused)
+      assert message =~ "materialized"
+    end
+
     test "a materialized column carries its expression, and takes no insert value (PL-61 L4)",
          %{name: name} do
       response =

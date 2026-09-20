@@ -736,7 +736,7 @@ defmodule Smolquery.Schema do
   @spec column_definition(Field.t()) :: {:ok, String.t()} | {:error, term()}
   def column_definition(%Field{} = field) do
     with {:ok, type} <- duckdb_type(field.type) do
-      null = if field.nullable, do: "", else: " NOT NULL"
+      null = if field.nullable or materialized?(field), do: "", else: " NOT NULL"
       {:ok, "#{Identifier.quote_name!(field.name)} #{type}#{null}"}
     end
   end
@@ -772,9 +772,7 @@ defmodule Smolquery.Schema do
 
         cond do
           field.materialized != nil ->
-            %{expression: expression, canonical: canonical} = field.materialized
-            {:ok, type} = duckdb_type(field.type)
-            "TRY(CAST((#{canonical || expression}) AS #{type})) AS #{name}"
+            "#{computed_expression(field)} AS #{name}"
 
           field.name in stored ->
             "#{stored_name(field)} AS #{name}"
@@ -788,6 +786,50 @@ defmodule Smolquery.Schema do
 
     "SELECT #{columns} FROM #{replaced(from, retyped, beside)}"
   end
+
+  @doc """
+  A materialized column's value, as every evaluation renders it: the
+  expression cast to the column's type under `TRY`, so a row it cannot take
+  gives `NULL` rather than failing the file.
+
+  A column declared `nullable: false` gives its type's default there
+  instead (`default_literal/1`), and for a `NULL` the expression answers
+  too — ClickHouse's value for a non-`Nullable` column with nothing to
+  hold (T-515). That is what makes the declaration true of every row: the
+  writers and the view's fill all render through here, so no evaluation
+  can store or answer a `NULL`.
+  """
+  @spec computed_expression(Field.t()) :: String.t()
+  def computed_expression(%Field{materialized: %{} = definition} = field) do
+    {:ok, type} = duckdb_type(field.type)
+    tried = "TRY(CAST((#{definition.canonical || definition.expression}) AS #{type}))"
+
+    with false <- field.nullable,
+         {:ok, default} <- default_literal(field.type) do
+      "coalesce(#{tried}, #{default})"
+    else
+      _nullable_or_no_default -> tried
+    end
+  end
+
+  @doc """
+  The value a non-nullable materialized column holds where its expression
+  gives nothing, as a DuckDB literal: zero, the empty string, `false`, the
+  epoch. A map or a variant has none.
+  """
+  @spec default_literal(logical_type()) :: {:ok, String.t()} | :error
+  def default_literal(:int64), do: {:ok, "CAST(0 AS BIGINT)"}
+  def default_literal(:float64), do: {:ok, "CAST(0 AS DOUBLE)"}
+  def default_literal(:string), do: {:ok, "''"}
+  def default_literal(:bool), do: {:ok, "false"}
+  def default_literal(:timestamp), do: {:ok, "TIMESTAMP '1970-01-01 00:00:00'"}
+  def default_literal(:timestamp_ns), do: {:ok, "TIMESTAMP_NS '1970-01-01 00:00:00'"}
+  def default_literal(:date), do: {:ok, "DATE '1970-01-01'"}
+
+  def default_literal({:numeric, precision, scale}),
+    do: {:ok, "CAST(0 AS DECIMAL(#{precision},#{scale}))"}
+
+  def default_literal(_type), do: :error
 
   @doc """
   `from` as a query sees it: every column of `retyped/1` cast to the type it

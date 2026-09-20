@@ -221,7 +221,8 @@ defmodule Smolquery.Catalog.DuckLake do
       create_clustering_statement(catalog),
       create_partitions_statement(catalog),
       create_connections_statement(catalog),
-      create_materialized_statement(catalog)
+      create_materialized_statement(catalog),
+      create_required_statement(catalog)
     ]
 
     config
@@ -380,7 +381,7 @@ defmodule Smolquery.Catalog.DuckLake do
     |> Schema.materialized_fields()
     |> Enum.reduce_while({:ok, []}, fn %Field{} = field, {:ok, acc} ->
       case Materialized.validate(regular, field) do
-        {:ok, definition} -> {:cont, {:ok, [{field.name, definition} | acc]}}
+        {:ok, definition} -> {:cont, {:ok, [{field, definition} | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
@@ -391,8 +392,8 @@ defmodule Smolquery.Catalog.DuckLake do
   defp record_materialized(config, table, definitions) do
     with {:ok, %Schema{} = created} <- table_schema(config, table) do
       definitions
-      |> Enum.reject(fn {name, _definition} -> recorded?(created, name) end)
-      |> Enum.map(fn {name, definition} -> materialized_row(created, name, definition) end)
+      |> Enum.reject(fn {%Field{name: name}, _definition} -> recorded?(created, name) end)
+      |> Enum.map(fn {field, definition} -> materialized_row(created, field, definition) end)
       |> materialized_inserts(config, table)
     end
   end
@@ -404,8 +405,8 @@ defmodule Smolquery.Catalog.DuckLake do
     )
   end
 
-  defp materialized_row(%Schema{} = schema, name, %Materialized{} = definition) do
-    {:ok, %Field{id: id}} = Schema.field(schema, name)
+  defp materialized_row(%Schema{} = schema, %Field{} = declared, %Materialized{} = definition) do
+    {:ok, %Field{id: id}} = Schema.field(schema, declared.name)
 
     sources =
       Enum.flat_map(definition.sources, fn
@@ -419,14 +420,14 @@ defmodule Smolquery.Catalog.DuckLake do
           end
       end)
 
-    {id, %{definition | sources: sources}}
+    {id, %{definition | sources: sources}, declared.nullable}
   end
 
   defp materialized_inserts([], _config, _table), do: :ok
 
   defp materialized_inserts(rows, config, {dataset, table}) do
     statements =
-      Enum.map(rows, fn {id, %Materialized{} = definition} ->
+      Enum.flat_map(rows, fn {id, %Materialized{} = definition, nullable} ->
         values = [
           Identifier.sql_string(dataset),
           Identifier.sql_string(table),
@@ -436,7 +437,14 @@ defmodule Smolquery.Catalog.DuckLake do
           Identifier.sql_string(Enum.map_join(definition.sources, ",", &Integer.to_string/1))
         ]
 
-        "INSERT INTO #{materialized_table(config.catalog)} VALUES (#{Enum.join(values, ", ")})"
+        required =
+          "INSERT INTO #{required_table(config.catalog)} VALUES " <>
+            "(#{values |> Enum.take(3) |> Enum.join(", ")})"
+
+        defined =
+          "INSERT INTO #{materialized_table(config.catalog)} VALUES (#{Enum.join(values, ", ")})"
+
+        if nullable, do: [defined], else: [defined, required]
       end)
 
     Engine.try_transaction(config.engine, statements)
@@ -460,11 +468,13 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, table} <- Identifier.validate(table),
          {:ok, result} <- query(config, columns_sql(config), [config.catalog, dataset, table]),
          {:ok, schema} <- build_schema(result.rows, {dataset, table}),
-         {:ok, clustering, partitions, materialized} <- side_options(config, {dataset, table}) do
+         {:ok, clustering, partitions, materialized, required} <-
+           side_options(config, {dataset, table}) do
       {:ok,
        %{
          schema
-         | fields: attach_materialized(schema.fields, materialized),
+         | fields:
+             schema.fields |> attach_materialized(materialized) |> attach_required(required),
            clustering: clustering,
            partitions: partitions
        }}
@@ -480,6 +490,8 @@ defmodule Smolquery.Catalog.DuckLake do
         "FROM #{partitions_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
         "UNION ALL SELECT 2, NULL, column_id, expression, canonical, sources " <>
         "FROM #{materialized_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
+        "UNION ALL SELECT 3, NULL, column_id, NULL, NULL, NULL " <>
+        "FROM #{required_table(config.catalog)} WHERE dataset = $1 AND table_name = $2 " <>
         "ORDER BY kind, value"
 
     with {:ok, result} <- query(config, sql, [dataset, table]) do
@@ -496,9 +508,11 @@ defmodule Smolquery.Catalog.DuckLake do
            }}
         end)
 
+      required = MapSet.new(Map.get(rows, 3, []), fn [_kind, _name, id | _rest] -> id end)
+
       case Map.get(rows, 1, []) do
-        [] -> {:ok, clustering, nil, materialized}
-        [[_kind, _name, count | _rest]] -> {:ok, clustering, count, materialized}
+        [] -> {:ok, clustering, nil, materialized, required}
+        [[_kind, _name, count | _rest]] -> {:ok, clustering, count, materialized, required}
         partition_rows -> {:error, {:ambiguous_partitions, partition_rows}}
       end
     end
@@ -511,6 +525,14 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp attach_materialized(fields, materialized),
     do: Enum.map(fields, &%{&1 | materialized: Map.get(materialized, &1.id)})
+
+  defp attach_required(fields, required) do
+    Enum.map(fields, fn %Field{} = field ->
+      if Schema.materialized?(field) and MapSet.member?(required, field.id),
+        do: %{field | nullable: false},
+        else: field
+    end)
+  end
 
   @impl Catalog
   def register_segments(%__MODULE__{} = config, {dataset, table}, segments) do
@@ -947,7 +969,7 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, %Schema{} = before} <- table_schema(config, ref),
          {:ok, validated} <- Materialized.validate(before, field),
          :ok <- transact(config, ["ALTER TABLE #{name} ADD COLUMN #{definition}"]) do
-      case record_materialized(config, ref, [{field.name, validated}]) do
+      case record_materialized(config, ref, [{field, validated}]) do
         :ok ->
           :ok
 
@@ -973,13 +995,13 @@ defmodule Smolquery.Catalog.DuckLake do
          {dataset, table},
          {:ok, %Field{materialized: %Materialized{}, id: id}}
        ) do
-    with {:ok, _result} <-
-           query(
-             config,
-             "DELETE FROM #{materialized_table(config.catalog)} " <>
-               "WHERE dataset = $1 AND table_name = $2 AND column_id = $3",
-             [dataset, table, id]
-           ) do
+    where = "WHERE dataset = $1 AND table_name = $2 AND column_id = $3"
+    key = [dataset, table, id]
+
+    with {:ok, _defined} <-
+           query(config, "DELETE FROM #{materialized_table(config.catalog)} " <> where, key),
+         {:ok, _required} <-
+           query(config, "DELETE FROM #{required_table(config.catalog)} " <> where, key) do
       :ok
     end
   end
@@ -1083,6 +1105,27 @@ defmodule Smolquery.Catalog.DuckLake do
       "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>
       "column_id BIGINT NOT NULL, expression VARCHAR NOT NULL, " <>
       "canonical VARCHAR NOT NULL, sources VARCHAR NOT NULL, " <>
+      "PRIMARY KEY (dataset, table_name, column_id))"
+  end
+
+  defp required_table(catalog), do: "#{metadata_schema(catalog)}.smolquery_required_columns"
+
+  @doc """
+  The `CREATE TABLE IF NOT EXISTS` that gives a lake its side table of
+  materialized columns declared `nullable: false` (T-515).
+
+  DuckLake cannot add a constrained column, so the column it holds stays
+  nullable and the declaration is smolquery's own, kept here by column id
+  like the expression it belongs to. It is true of every row because every
+  evaluation stores the type's default where the expression gives nothing
+  (`Smolquery.Schema.computed_expression/1`). A table of its own rather
+  than a column on the materialized one: a bootstrap that only ever
+  creates what is missing needs no migration of a lake that already has it.
+  """
+  @spec create_required_statement(String.t()) :: String.t()
+  def create_required_statement(catalog) do
+    "CREATE TABLE IF NOT EXISTS #{required_table(catalog)} (" <>
+      "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, column_id BIGINT NOT NULL, " <>
       "PRIMARY KEY (dataset, table_name, column_id))"
   end
 

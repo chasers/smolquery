@@ -3,7 +3,7 @@ defmodule Smolquery.Ddl do
   The two `ALTER TABLE` statements smolquery accepts as SQL, and nothing else
   (PL-61 L3).
 
-      ALTER TABLE dataset.table ADD [COLUMN] [IF NOT EXISTS] name TYPE [MATERIALIZED expr]
+      ALTER TABLE dataset.table ADD [COLUMN] [IF NOT EXISTS] name TYPE [[NOT NULL] MATERIALIZED expr]
       ALTER TABLE dataset.table DROP [COLUMN] [IF EXISTS] name
 
   ## Why a parser of its own
@@ -46,7 +46,9 @@ defmodule Smolquery.Ddl do
   `NOT NULL`, `DEFAULT`, and anything else after the type are refused with a
   reason rather than ignored: an added column is nullable and has no default,
   because that is the only claim true of the rows that already exist
-  (`Smolquery.Catalog.alter_table/3`).
+  (`Smolquery.Catalog.alter_table/3`). The one exception is `NOT NULL`
+  before `MATERIALIZED`: a computed column has a value for every row,
+  the type's default where the expression gives nothing (T-515).
 
   ## What executing one does
 
@@ -213,7 +215,8 @@ defmodule Smolquery.Ddl do
   def message({:column_must_be_nullable, name}),
     do:
       "column #{name} must be nullable: an added column has no value for the rows that " <>
-        "already exist"
+        "already exist; only a materialized column whose type has a default, not a MAP or a " <>
+        "VARIANT, may be declared non-nullable"
 
   def message({:clustering_column, name}),
     do: "column #{name} is in the clustering key; clear the key before dropping it"
@@ -290,8 +293,8 @@ defmodule Smolquery.Ddl do
 
     with {:ok, column, rest} <- column(rest),
          {:ok, type, rest} <- type(rest),
-         {:ok, materialized} <- tail(rest, remainder),
-         {:ok, field} <- Field.new(column, type, materialized: materialized) do
+         {:ok, materialized, nullable} <- tail(rest, remainder),
+         {:ok, field} <- Field.new(column, type, materialized: materialized, nullable: nullable) do
       {:ok, %AlterTable{table: table, change: {:add_column, field}, if_exists: if_not_exists}}
     end
   end
@@ -357,19 +360,24 @@ defmodule Smolquery.Ddl do
 
   defp type(_tokens), do: {:error, {:invalid_ddl, "expected a column type"}}
 
-  defp tail([], _remainder), do: {:ok, nil}
+  defp tail([], _remainder), do: {:ok, nil, true}
 
-  defp tail([{:word, "materialized", _}], remainder) do
-    case String.trim(remainder) do
-      "" -> {:error, {:invalid_ddl, "MATERIALIZED needs an expression"}}
-      expression -> {:ok, expression}
-    end
-  end
+  defp tail([{:word, "materialized", _}], remainder), do: expression(remainder, true)
+
+  defp tail([{:word, "not", _}, {:word, "null", _}, {:word, "materialized", _}], remainder),
+    do: expression(remainder, false)
 
   defp tail([{:word, "not", _}, {:word, "null", _} | _rest], _remainder),
     do: {:error, {:unsupported_ddl, "NOT NULL"}}
 
   defp tail([other | _rest], _remainder), do: {:error, {:unsupported_ddl, describe(other)}}
+
+  defp expression(remainder, nullable) do
+    case String.trim(remainder) do
+      "" -> {:error, {:invalid_ddl, "MATERIALIZED needs an expression"}}
+      expression -> {:ok, expression, nullable}
+    end
+  end
 
   defp nothing_after([]), do: :ok
   defp nothing_after([other | _rest]), do: {:error, {:unsupported_ddl, describe(other)}}

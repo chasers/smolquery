@@ -176,10 +176,7 @@ defmodule Smolquery.QueryService.Views do
 
     cond do
       name in recompute and Schema.materialized?(field) ->
-        {:ok, duckdb} = Schema.duckdb_type(type)
-        %{expression: expression, canonical: canonical} = field.materialized
-
-        "coalesce(#{quoted}, TRY(CAST((#{canonical || expression}) AS #{duckdb}))) AS #{quoted}"
+        "coalesce(#{quoted}, #{Schema.computed_expression(field)}) AS #{quoted}"
 
       name in queried ->
         quoted

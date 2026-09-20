@@ -795,6 +795,37 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.alter_table(catalog, @table, {:drop_column, "ts"}) == :ok
     end
 
+    test "a materialized column declared non-nullable reads back so, by its id, and a plain one still may not be (T-515)",
+         %{catalog: catalog} do
+      day = Field.new!("day", :date, materialized: "CAST(ts AS DATE)", nullable: false)
+      maybe = Field.new!("maybe", :date, materialized: "CAST(ts AS DATE)")
+
+      assert Catalog.alter_table(catalog, @table, {:add_column, day}) == :ok
+      assert Catalog.alter_table(catalog, @table, {:add_column, maybe}) == :ok
+
+      {:ok, read} = Catalog.table_schema(catalog, @table)
+
+      assert [%Field{name: "day", nullable: false}, %Field{name: "maybe", nullable: true}] =
+               Enum.take(read.fields, -2)
+
+      assert Catalog.alter_table(
+               catalog,
+               @table,
+               {:add_column, Field.new!("plain", :date, nullable: false)}
+             ) == {:error, {:column_must_be_nullable, "plain"}}
+
+      assert Catalog.alter_table(catalog, @table, {:drop_column, "day"}) == :ok
+
+      assert Catalog.alter_table(
+               catalog,
+               @table,
+               {:add_column, Field.new!("day", :date, materialized: "CAST(ts AS DATE)")}
+             ) == :ok
+
+      {:ok, again} = Catalog.table_schema(catalog, @table)
+      assert %Field{name: "day", nullable: true} = List.last(again.fields)
+    end
+
     test "a table created with a materialized column records it once the ids exist (PL-61 L4)",
          %{catalog: catalog} do
       schema =

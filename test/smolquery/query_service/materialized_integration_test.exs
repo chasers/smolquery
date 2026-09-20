@@ -133,4 +133,46 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
              %{"id" => 2, "ts" => ~N[2023-11-14 22:14:20.000000]}
            ]
   end
+
+  test "a NOT NULL materialized column answers its type's default, never NULL, in the fill and in both tiers (T-515)",
+       %{node: node} do
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
+
+    {:ok, plain} = Catalog.table_schema(node.catalog, @table)
+    {:ok, _one} = write(node, plain, [%{"id" => 1, "ts_int" => 1_700_000_000_000}, %{"id" => 2}])
+
+    assert {:ok, %{state: :done}, nil} =
+             QueryService.Client.query(
+               node.query,
+               "ALTER TABLE analytics.events ADD COLUMN ts TIMESTAMP NOT NULL MATERIALIZED epoch_ms(ts_int)"
+             )
+
+    {:ok, widened} = Catalog.table_schema(node.catalog, @table)
+    assert {:ok, %Field{nullable: false, materialized: %{}}} = Schema.field(widened, "ts")
+
+    assert SmolqueryClickHouse.SystemCatalog.column_type(elem(Schema.field(widened, "ts"), 1)) ==
+             "DateTime64(6)"
+
+    filled = [
+      %{"id" => 1, "ts" => ~N[2023-11-14 22:13:20.000000]},
+      %{"id" => 2, "ts" => ~N[1970-01-01 00:00:00.000000]}
+    ]
+
+    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == filled
+
+    {:ok, _two} = write(node, widened, [%{"id" => 3, "ts_int" => 9_999_999_999_999_999}])
+    assert Eventually.until(fn -> FullNode.sealed_count(node) >= 1 end, 200, 25)
+
+    sealed = filled ++ [%{"id" => 3, "ts" => ~N[1970-01-01 00:00:00.000000]}]
+    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == sealed
+
+    {:ok, _hot} = write(node, widened, [%{"id" => 4}])
+
+    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") ==
+             sealed ++ [%{"id" => 4, "ts" => ~N[1970-01-01 00:00:00.000000]}]
+
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events WHERE ts IS NULL") == [
+             %{"n" => 0}
+           ]
+  end
 end

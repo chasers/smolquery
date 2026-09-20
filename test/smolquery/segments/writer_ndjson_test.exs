@@ -364,6 +364,36 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert segment.stats["host"].min == "web-1"
     end
 
+    test "a non-nullable materialized column stores its type's default for a row the expression cannot take (T-515)",
+         %{tmp_dir: dir} do
+      schema =
+        Schema.new!([
+          {"id", :int64},
+          {"ts_int", :int64},
+          {"ts", :timestamp, materialized: "epoch_ms(ts_int)", nullable: false}
+        ])
+
+      path =
+        spool(dir, "required.ndjson", [
+          %{"id" => 1, "ts_int" => 1_700_000_000_000},
+          %{"id" => 2},
+          %{"id" => 3, "ts_int" => 9_999_999_999_999_999}
+        ])
+
+      {:ok, segment} = Writer.write({:ndjson, [path]}, schema, store: store(dir), engine: @engine)
+
+      {:ok, result} =
+        Engine.query(@engine, "SELECT id, ts FROM read_parquet($1) ORDER BY id", [segment.path])
+
+      assert result.rows == [
+               [1, ~N[2023-11-14 22:13:20.000000]],
+               [2, ~N[1970-01-01 00:00:00.000000]],
+               [3, ~N[1970-01-01 00:00:00.000000]]
+             ]
+
+      assert segment.stats["ts"].null_count == 0
+    end
+
     test "a body naming the materialized column is readable: the value is ignored, not read",
          %{tmp_dir: dir} do
       path =

@@ -241,6 +241,45 @@ defmodule Smolquery.SchemaTest do
       assert Schema.queried(plain, "(SELECT 1)") == "(SELECT 1)"
     end
 
+    test "a non-nullable materialized column gives its type's default where the expression gives nothing (T-515)" do
+      schema =
+        Schema.new!([
+          Field.new!("ts_int", :int64),
+          Field.new!("ts", :timestamp, materialized: "epoch_ms(ts_int)", nullable: false),
+          Field.new!("maybe", :timestamp, materialized: "epoch_ms(ts_int)")
+        ])
+
+      {:ok, required} = Schema.field(schema, "ts")
+      {:ok, nullable} = Schema.field(schema, "maybe")
+
+      assert Schema.computed_expression(required) ==
+               "coalesce(TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP)), TIMESTAMP '1970-01-01 00:00:00')"
+
+      assert Schema.computed_expression(nullable) == "TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP))"
+
+      assert Schema.computed_select(schema, "spooled") ==
+               ~s|SELECT "ts_int", #{Schema.computed_expression(required)} AS "ts", | <>
+                 ~s|#{Schema.computed_expression(nullable)} AS "maybe" FROM spooled|
+
+      assert Schema.column_definition(required) == {:ok, ~s|"ts" TIMESTAMP|}
+
+      for type <- [
+            :int64,
+            :float64,
+            :string,
+            :bool,
+            :timestamp,
+            :timestamp_ns,
+            :date,
+            {:numeric, 10, 2}
+          ] do
+        assert {:ok, _literal} = Schema.default_literal(type)
+      end
+
+      assert Schema.default_literal(:variant) == :error
+      assert Schema.default_literal({:map, :string, :string}) == :error
+    end
+
     test "queried_type/1 is the view's cast where there is one, the stored type otherwise" do
       assert Schema.queried_type(:variant) == {:ok, "VARIANT"}
       assert Schema.queried_type(:int64) == Schema.duckdb_type(:int64)

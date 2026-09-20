@@ -44,8 +44,11 @@ defmodule Smolquery.Schema.Field do
     * `:since` — the catalog snapshot the column began at, likewise
     * `:materialized` — the expression the column is computed from, as text
       a client wrote or as a `Smolquery.Schema.Materialized` the catalog
-      validated; a materialized column is nullable, so `nullable: false`
-      beside it is refused as `{:column_must_be_nullable, name}`
+      validated. `nullable: false` beside it declares that the column
+      never holds `NULL`: where the expression gives nothing, the type's
+      default is stored (`Smolquery.Schema.computed_expression/1`, T-515).
+      A type with no default, a map or a variant, is refused as
+      `{:column_must_be_nullable, name}`
 
   """
   @spec new(term(), term(), keyword()) :: {:ok, t()} | {:error, term()}
@@ -53,7 +56,7 @@ defmodule Smolquery.Schema.Field do
     with {:ok, name} <- Identifier.validate(name),
          {:ok, type} <- Schema.validate_type(type),
          {:ok, materialized} <- materialized(Keyword.get(opts, :materialized)),
-         :ok <- nullable_if_materialized(name, materialized, Keyword.get(opts, :nullable, true)) do
+         :ok <- defaulted(name, type, materialized, Keyword.get(opts, :nullable, true)) do
       {:ok,
        %__MODULE__{
          name: name,
@@ -66,11 +69,15 @@ defmodule Smolquery.Schema.Field do
     end
   end
 
-  defp nullable_if_materialized(_name, nil, _nullable), do: :ok
-  defp nullable_if_materialized(_name, _definition, true), do: :ok
+  defp defaulted(_name, _type, nil, _nullable), do: :ok
+  defp defaulted(_name, _type, _definition, true), do: :ok
 
-  defp nullable_if_materialized(name, _definition, false),
-    do: {:error, {:column_must_be_nullable, name}}
+  defp defaulted(name, type, _definition, false) do
+    case Schema.default_literal(type) do
+      {:ok, _literal} -> :ok
+      :error -> {:error, {:column_must_be_nullable, name}}
+    end
+  end
 
   defp materialized(nil), do: {:ok, nil}
   defp materialized(%Materialized{} = definition), do: {:ok, definition}

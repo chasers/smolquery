@@ -190,7 +190,8 @@ defmodule SmolqueryApi.Errors do
       422,
       "INVALID_ARGUMENT",
       "column #{name} must be nullable: an added column has no value for the rows that " <>
-        "already exist"
+        "already exist; only a materialized column whose type has a default, not a MAP or a " <>
+        "VARIANT, may be declared non-nullable"
     )
   end
 

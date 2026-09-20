@@ -573,8 +573,12 @@ defmodule Smolquery.Catalog do
     if Partitions.reserved?(table), do: {:error, {:partition_ref, ref}}, else: :ok
   end
 
-  defp admissible(_schema, _policy, {:add_column, %Field{nullable: false, name: name}}),
-    do: {:error, {:column_must_be_nullable, name}}
+  defp admissible(
+         _schema,
+         _policy,
+         {:add_column, %Field{nullable: false, materialized: nil, name: name}}
+       ),
+       do: {:error, {:column_must_be_nullable, name}}
 
   defp admissible(schema, _policy, {:add_column, %Field{} = field}),
     do: with({:ok, _schema} <- Schema.add_field(schema, field), do: :ok)
