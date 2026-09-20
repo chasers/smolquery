@@ -44,7 +44,7 @@ anything a user typed.
 
 | ClickHouse | Status | Note |
 |---|---|---|
-| `system.tables`, `system.databases`, `system.columns` | Works (T-482) | Emulated from smolquery's catalog. `engine` is `MergeTree`; `sorting_key` and `primary_key` are the clustering key; `total_rows` is `NULL` |
+| `system.tables`, `system.databases`, `system.columns` | Works (T-482) | Emulated from smolquery's catalog. `engine` is `MergeTree`; `sorting_key` and `primary_key` are the clustering key; `total_rows` is a `count(*)` for the tables a statement names, and `NULL` otherwise (T-507) |
 | `system.settings`, `system.data_skipping_indices` | Works, empty (T-482) | HyperDX reads both before its first query and fails every query if `system.settings` fails |
 | `system.table_engines`, `system.one` | Works (T-482) | |
 | `system.numbers` | **Missing** | Unbounded; needs a table function, not a table |

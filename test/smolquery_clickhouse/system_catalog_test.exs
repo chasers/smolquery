@@ -298,4 +298,38 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
     assert response.status == 200, response.resp_body
     assert %{"rows" => "0", "parts" => "0"} = JSON.decode!(String.trim(response.resp_body))
   end
+
+  describe "a system table named with Identifier parameters (T-507)" do
+    test "is the catalog's whether its name arrives quoted, half quoted or bare", %{name: name} do
+      for from <- [
+            ~s|"system"."tables"|,
+            ~s|system."tables"|,
+            ~s|"system".tables|,
+            "system.tables"
+          ] do
+        sql = "SELECT name FROM #{from} WHERE database = 'default' FORMAT JSONCompact"
+
+        assert data(post(name, sql)) == [["otel_logs"]], from
+      end
+    end
+
+    test "HyperDX's onboarding row count reads the table column, as ClickHouse names it", %{
+      name: name
+    } do
+      sql =
+        "SELECT sum(total_rows) as total_rows FROM {d:Identifier}.{t:Identifier} " <>
+          "WHERE ((table = 'otel_logs' AND database = 'default')) FORMAT JSON"
+
+      response = post(name, sql, %{"param_d" => "system", "param_t" => "tables"})
+
+      assert response.status == 200, response.resp_body
+      assert [%{"total_rows" => _rows}] = JSON.decode!(response.resp_body)["data"]
+    end
+
+    test "a quoted name that only looks like it is left to the query service", %{name: name} do
+      response = post(name, ~s|SELECT * FROM "system"."tables", default.otel_logs|)
+
+      refute response.status == 200
+    end
+  end
 end

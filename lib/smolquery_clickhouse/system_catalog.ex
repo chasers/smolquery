@@ -42,6 +42,29 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   a bare `table` — a column of `system.columns`, and a reserved word to
   DuckDB — is quoted.
 
+  ## `total_rows`
+
+  ClickHouse keeps a table's row count in `system.tables`, and HyperDX's
+  onboarding checklist sums it to decide whether a source has any data. The
+  catalog holds no such number: rows are in two tiers, and only the planner
+  knows both. So a statement that reads `total_rows` has it filled in, for
+  the tables it names, by asking the query service for `count(*)` — which the
+  engine answers from file metadata, hot tier included, without a scan. The
+  tables it names are the string literals in it that are tables
+  (`table = 'otel_logs' AND database = 'default'`), at most
+  `@max_counted_tables`; every other row's `total_rows` is `NULL`, as it is
+  for a statement that does not read the column, such as a `SELECT *`. The
+  counts are fetched by the caller, before the server is asked, so a slow
+  count holds up its own request and not the catalog. `total_bytes` is
+  always `NULL`.
+
+  ## A name that arrives quoted
+
+  HyperDX names every table with `Identifier` parameters, the `system` ones
+  too, so its statement reads `FROM "system"."tables"`. The quotes are taken
+  off a `system` database and a plain table name after it before anything
+  else is read, so the four spellings are one.
+
   ## The engine answers the catalog and nothing else
 
   The job engines that run a user's SQL are locked down by the query
@@ -73,6 +96,8 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   alias Smolquery.CatalogEmulation
   alias Smolquery.Engine
   alias Smolquery.Identifier
+  alias Smolquery.QueryService.Client
+  alias Smolquery.QueryService.Job
   alias Smolquery.Schema.Field
   alias Smolquery.Sql
   alias SmolqueryClickHouse.Errors
@@ -82,6 +107,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @call_timeout_ms 30_000
   @statement_timeout_ms 10_000
   @max_rows 10_000
+  @max_counted_tables 8
 
   @lockdown ["SET enable_external_access = false", "SET lock_configuration = true"]
 
@@ -98,7 +124,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @static [
     "CREATE TABLE system_databases (name VARCHAR, engine VARCHAR, data_path VARCHAR, " <>
       "metadata_path VARCHAR, uuid VARCHAR, engine_full VARCHAR, comment VARCHAR)",
-    "CREATE TABLE system_tables (database VARCHAR, name VARCHAR, uuid VARCHAR, engine VARCHAR, " <>
+    ~s|CREATE TABLE system_tables (database VARCHAR, name VARCHAR, "table" VARCHAR, uuid VARCHAR, engine VARCHAR, | <>
       "is_temporary UTINYINT, create_table_query VARCHAR, engine_full VARCHAR, as_select VARCHAR, " <>
       "partition_key VARCHAR, sorting_key VARCHAR, primary_key VARCHAR, sampling_key VARCHAR, " <>
       "storage_policy VARCHAR, total_rows UBIGINT, total_bytes UBIGINT, comment VARCHAR)",
@@ -135,16 +161,76 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @spec answer(atom(), String.t(), String.t()) ::
           {:ok, DataFrame.t()} | :pass | {:error, Errors.t()}
   def answer(name, statement, database) do
-    if mentions_catalog?(statement),
-      do:
-        GenServer.call(
-          Runtime.system_catalog(name),
-          {:answer, statement, database},
-          @call_timeout_ms
-        ),
-      else: :pass
+    statement = unquoted_system(statement)
+
+    if mentions_catalog?(statement) do
+      server = Runtime.system_catalog(name)
+      counts = row_counts(name, server, statement)
+
+      GenServer.call(server, {:answer, statement, database, counts}, @call_timeout_ms)
+    else
+      :pass
+    end
   catch
     :exit, _reason -> {:error, unavailable()}
+  end
+
+  defp unquoted_system(statement) do
+    statement
+    |> Sql.tokens()
+    |> unquote_names()
+    |> Enum.map_join(&elem(&1, 1))
+  end
+
+  defp unquote_names([{:quoted, ~s("system")}, {:code, "." <> _rest = dot} | rest]),
+    do: unquote_names([{:code, "system" <> dot} | rest])
+
+  defp unquote_names([{:code, code} = database, {:quoted, quoted} = table | rest]) do
+    with true <- Regex.match?(~r/(?<![\w."])system\s*\.\s*\z/i, code),
+         [_all, bare] <- Regex.run(~r/\A"([A-Za-z_][A-Za-z0-9_]*)"\z/, quoted) do
+      [database, {:code, bare} | unquote_names(rest)]
+    else
+      _not_a_system_table -> [database | unquote_names([table | rest])]
+    end
+  end
+
+  defp unquote_names([token | rest]), do: [token | unquote_names(rest)]
+  defp unquote_names([]), do: []
+
+  defp row_counts(name, server, statement) do
+    with true <- asks_for_rows?(statement),
+         {:ok, %Runtime{query_name: query_name}} <- Runtime.fetch(name),
+         refs when refs != [] <-
+           GenServer.call(server, {:named_tables, literals(statement)}, @call_timeout_ms) do
+      Map.new(refs, fn ref -> {ref, count(query_name, ref)} end)
+    else
+      _no_count_asked_for -> %{}
+    end
+  end
+
+  defp asks_for_rows?(statement) do
+    Enum.any?(Sql.tokens(statement), fn
+      {:code, code} -> Regex.match?(~r/(?<![\w.])total_rows(?!\w)/i, code)
+      {_kind, _text} -> false
+    end)
+  end
+
+  defp literals(statement) do
+    for {:string, text} <- Sql.tokens(statement),
+        do: text |> String.slice(1..-2//1) |> String.replace("''", "'")
+  end
+
+  defp count(query_name, {dataset, table}) do
+    sql =
+      "SELECT count(*) AS n FROM #{Identifier.quote_label(dataset)}.#{Identifier.quote_label(table)}"
+
+    case Client.query(query_name, sql, timeout_ms: @statement_timeout_ms) do
+      {:ok, %Job{state: :done}, %DataFrame{} = frame} ->
+        frame |> DataFrame.to_rows() |> hd() |> Map.fetch!("n")
+
+      _failed_or_refused ->
+        nil
+    end
   end
 
   @doc """
@@ -180,15 +266,35 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
     Enum.each(@static ++ @lockdown, &Engine.query!(engine, &1))
 
-    {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil}}
+    {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil, counts: %{}}}
   end
 
   @impl GenServer
-  def handle_call({:answer, statement, database}, _from, state) do
+  def handle_call({:named_tables, literals}, _from, state) do
+    with {:ok, state} <- ensure_fresh(state),
+         {:ok, result} <- Engine.query(state.engine, named_tables_sql(literals)) do
+      {:reply, Enum.map(result.rows, fn [dataset, table] -> {dataset, table} end), state}
+    else
+      _unavailable -> {:reply, [], state}
+    end
+  end
+
+  def handle_call({:answer, statement, database, counts}, _from, state) do
+    state = %{state | counts: counts}
+
     case read(statement, database) do
       {:select, sql} -> classified(sql, state)
       {:catalog, sql, empty} -> state |> run(sql) |> or_empty(empty)
     end
+  end
+
+  defp named_tables_sql(literals) do
+    names = Enum.map_join(["" | literals], ", ", &Identifier.sql_string/1)
+
+    "SELECT database, name FROM system_tables WHERE name IN (#{names}) " <>
+      "AND (database IN (#{names}) OR NOT EXISTS " <>
+      "(SELECT 1 FROM system_databases WHERE name IN (#{names}))) " <>
+      "ORDER BY database, name LIMIT #{@max_counted_tables}"
   end
 
   defp read(statement, database) do
@@ -276,6 +382,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
   defp run(state, sql) do
     with {:ok, state} <- ensure_fresh(state),
+         :ok <- put_counts(state.engine, state.counts),
          {:ok, frame} <- frame(state.engine, sql) do
       {:reply, {:ok, frame}, state}
     else
@@ -294,6 +401,16 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   end
 
   defp or_empty(reply, _empty), do: reply
+
+  defp put_counts(engine, counts) do
+    updates =
+      for {{dataset, table}, rows} when is_integer(rows) <- counts do
+        "UPDATE system_tables SET total_rows = #{rows} WHERE database = #{Identifier.sql_string(dataset)} " <>
+          "AND name = #{Identifier.sql_string(table)}"
+      end
+
+    if updates == [], do: :ok, else: Engine.transaction(engine, updates)
+  end
 
   defp frame(engine, sql) do
     task = Task.async(fn -> Engine.frame(engine, sql) end)
@@ -379,6 +496,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
     values([
       dataset,
+      table,
       table,
       "00000000-0000-0000-0000-000000000000",
       "MergeTree",

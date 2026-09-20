@@ -140,6 +140,7 @@ services:
 | Connection test | Works |
 | Reading the source's columns and sorting key (`DESCRIBE`, `system.tables`) | Works |
 | Search: results table, newest first, paged | Works |
+| Onboarding checklist: whether a source has data (`sum(total_rows)` from `system.tables`) | Works: the table's row count, hot tier included |
 | Search: histogram by severity | Works |
 | Search: the rows a search will scan (`EXPLAIN ESTIMATE`, sent before each search) | Works: the rows and files the plan keeps. An upper bound: hot-tier pruning counts, sealed-tier pruning does not |
 | Source form: checking an expression a user typed | Works: `EXPLAIN ESTIMATE` of a statement that does not bind answers its error |

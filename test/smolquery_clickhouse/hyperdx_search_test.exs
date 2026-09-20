@@ -224,4 +224,22 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
     assert response.status == 200, response.resp_body
     assert %{"rows" => "120", "parts" => "1"} = JSON.decode!(String.trim(response.resp_body))
   end
+
+  test "the onboarding checklist's row count is the table's rows, hot tier included (T-507)",
+       context do
+    sql =
+      "SELECT sum(total_rows) as total_rows FROM {d:Identifier}.{t:Identifier} " <>
+        "WHERE ((table = 'events' AND database = 'analytics')) \nFORMAT JSON"
+
+    query =
+      Map.merge(context.fixture["settings"], %{"param_d" => "system", "param_t" => "tables"})
+
+    response =
+      conn(:post, "/?" <> URI.encode_query(query), sql)
+      |> put_req_header("x-clickhouse-key", @password)
+      |> Router.call(context.name)
+
+    assert response.status == 200, response.resp_body
+    assert [%{"total_rows" => 120}] = JSON.decode!(response.resp_body)["data"]
+  end
 end
