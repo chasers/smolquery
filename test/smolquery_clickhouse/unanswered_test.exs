@@ -98,6 +98,54 @@ defmodule SmolqueryClickHouse.UnansweredTest do
     end
   end
 
+  describe "redaction holds for the error too (review of T-480)" do
+    defp redacted_log(sql, exception) do
+      capture_log(fn ->
+        Unanswered.record(conn(:post, "/"), runtime(:redacted), sql, exception)
+      end)
+    end
+
+    test "a parameter's value in a BAD_ARGUMENTS message is not logged" do
+      log =
+        redacted_log(
+          "SELECT {id:UInt64}",
+          {400, 36, "BAD_ARGUMENTS",
+           ~s|Value "alice@example.com" cannot be parsed as UInt64 for query parameter id|, nil}
+        )
+
+      assert log =~ "code=36"
+      assert log =~ "cannot be parsed as UInt64 for query parameter id"
+      refute log =~ "alice"
+    end
+
+    test "a literal the parser quotes back is not logged, and a keyword still is" do
+      literal =
+        redacted_log(
+          "SELECT 'secret2' 'x'",
+          {400, 62, "SYNTAX_ERROR", ~s|syntax error at or near "'secret2'"|, nil}
+        )
+
+      refute literal =~ "secret2"
+
+      keyword =
+        redacted_log(
+          "SELECT 1 ARRAY JOIN x",
+          {400, 62, "SYNTAX_ERROR", ~s|syntax error at or near "ARRAY"|, nil}
+        )
+
+      assert keyword =~ "ARRAY"
+      assert keyword =~ "syntax error at or near"
+    end
+
+    test "a dollar-quoted string and a comment are redacted with the literals" do
+      assert Unanswered.line(
+               "SELECT $$top secret$$, $t$more$t$ FROM t -- for bob\nWHERE a = 'v' /* and carol */",
+               :redacted
+             ) ==
+               "SELECT $$?$$, $$?$$ FROM t /* ? */ WHERE a = '?' /* ? */"
+    end
+  end
+
   describe "line/2" do
     test "cuts a long statement" do
       line = Unanswered.line("SELECT " <> String.duplicate("x, ", 5_000) <> "1", :verbatim)
@@ -106,9 +154,9 @@ defmodule SmolqueryClickHouse.UnansweredTest do
       assert String.ends_with?(line, " …")
     end
 
-    test "leaves quoted names and comments, which are not a user's values" do
-      assert Unanswered.line(~s|SELECT "a b", `c` -- note\nFROM t WHERE x = 'v'|, :redacted) ==
-               ~s|SELECT "a b", `c` -- note FROM t WHERE x = '?'|
+    test "leaves quoted names, which are not a user's values" do
+      assert Unanswered.line(~s|SELECT "a b", `c`\nFROM t WHERE x = 'v'|, :redacted) ==
+               ~s|SELECT "a b", `c` FROM t WHERE x = '?'|
     end
   end
 end

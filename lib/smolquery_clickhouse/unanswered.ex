@@ -26,8 +26,12 @@ defmodule SmolqueryClickHouse.Unanswered do
   - `:redacted` (the default) replaces every string literal with `'?'`. A
     statement's literals are a user's search terms and values; its shape is
     what the corpus needs. Parameter values are in the URL and are never
-    logged. The engine's error is cut to its first line, since the lines
-    after it quote the statement.
+    logged. A dollar-quoted string and a comment are replaced too. The
+    error is redacted with the statement: it is cut to its first line,
+    since the lines after it quote the statement, and whatever it quotes is
+    replaced unless it is a bare word — a keyword or a name the parser
+    stopped at is what the corpus needs, and a value it could not parse, or
+    a literal it stopped at, is a user's.
   - `:verbatim` keeps them. A literal is sometimes the point — a type name
     in `JSONExtract(x, 'Map(String, String)')` — so an operator reproducing
     a client's failure can ask for it.
@@ -78,6 +82,8 @@ defmodule SmolqueryClickHouse.Unanswered do
     |> Sql.tokens(dialect: :clickhouse)
     |> Enum.map_join(fn
       {:string, _literal} -> "'?'"
+      {:dollar, _literal} -> "$$?$$"
+      {:comment, _text} -> "/* ? */ "
       {_kind, text} -> text
     end)
     |> one_line()
@@ -86,8 +92,19 @@ defmodule SmolqueryClickHouse.Unanswered do
 
   defp reason(message, :verbatim), do: one_line(message)
 
-  defp reason(message, :redacted),
-    do: message |> String.split("\n", parts: 2) |> hd() |> one_line()
+  defp reason(message, :redacted) do
+    message
+    |> String.split("\n", parts: 2)
+    |> hd()
+    |> String.replace(~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/, &quoted/1)
+    |> one_line()
+  end
+
+  defp quoted(<<mark, _rest::binary>> = text) do
+    inner = String.slice(text, 1..-2//1)
+
+    if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_.]*\z/, inner), do: text, else: <<mark, ??, mark>>
+  end
 
   defp one_line(text), do: text |> String.replace(~r/\s+/, " ") |> String.trim()
 
