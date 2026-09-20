@@ -189,9 +189,7 @@ defmodule SmolqueryApi.Errors do
       conn,
       422,
       "INVALID_ARGUMENT",
-      "column #{name} must be nullable: an added column has no value for the rows that " <>
-        "already exist; only a materialized column whose type has a default, not a MAP or a " <>
-        "VARIANT, may be declared non-nullable"
+      Smolquery.Ddl.message({:column_must_be_nullable, name})
     )
   end
 

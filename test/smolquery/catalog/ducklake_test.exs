@@ -795,6 +795,14 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.alter_table(catalog, @table, {:drop_column, "ts"}) == :ok
     end
 
+    test "create_required_statement/1 creates the side table only where it is missing (T-515)" do
+      statement = DuckLake.create_required_statement("lake")
+
+      assert statement =~ "CREATE TABLE IF NOT EXISTS"
+      assert statement =~ "smolquery_required_columns"
+      assert statement =~ "PRIMARY KEY (dataset, table_name, column_id)"
+    end
+
     test "a materialized column declared non-nullable reads back so, by its id, and a plain one still may not be (T-515)",
          %{catalog: catalog} do
       day = Field.new!("day", :date, materialized: "CAST(ts AS DATE)", nullable: false)
