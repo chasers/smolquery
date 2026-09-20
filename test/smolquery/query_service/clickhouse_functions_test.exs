@@ -272,7 +272,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       called =
         engine
         |> rows(
-          "SELECT macro_definition AS body FROM duckdb_functions() WHERE function_type = 'macro' AND NOT internal"
+          "SELECT macro_definition AS body FROM duckdb_functions() WHERE function_type = 'macro' " <>
+            "AND NOT internal AND lower(function_name) NOT IN (#{volatile_names()})"
         )
         |> Enum.flat_map(fn %{"body" => body} ->
           Regex.scan(~r/([A-Za-z_][A-Za-z0-9_]*)\s*\(/, body, capture: :all_but_first)
@@ -303,11 +304,59 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
                "here is a macro calling something unrated."
     end
 
+    test "rand and its kin are macros stable?/1 does not vouch for, and each really is volatile (T-526)",
+         %{engine: engine} do
+      assert ClickHouseFunctions.volatile() == ~w(rand rand32 rand64 randCanonical)
+
+      for name <- ClickHouseFunctions.volatile() do
+        refute ClickHouseFunctions.stable?(name)
+        refute name in ClickHouseFunctions.names()
+        assert [_definition] = ClickHouseFunctions.statements_for("SELECT #{name}()")
+      end
+
+      called =
+        engine
+        |> rows(
+          "SELECT macro_definition AS body FROM duckdb_functions() WHERE function_type = 'macro' " <>
+            "AND lower(function_name) IN (#{volatile_names()})"
+        )
+        |> Enum.map(& &1["body"])
+
+      assert [_rand, _rand32, _rand64, _canonical] = called
+      assert Enum.all?(called, &(&1 =~ "random()"))
+
+      assert [%{"a" => a, "b" => b, "c" => c}] =
+               rows(engine, "SELECT rand() AS a, rand() AS b, randCanonical() AS c")
+
+      assert is_integer(a) and a >= 0 and a < 4_294_967_296
+      assert a != b
+      assert c >= 0.0 and c < 1.0
+    end
+
+    test "cityHash64 takes one to four arguments and is the same for the same input (T-526)", %{
+      engine: engine
+    } do
+      assert [%{"same" => true, "one" => one, "four" => four}] =
+               rows(
+                 engine,
+                 "SELECT cityHash64('a', 1) = cityHash64('a', 1) AS same, cityHash64('a') AS one, " <>
+                   "cityHash64('a', 1, 2, 3) AS four"
+               )
+
+      assert is_integer(one) and is_integer(four)
+      assert ClickHouseFunctions.stable?("cityHash64")
+    end
+
     test "no macro shares its name with a function of the engine's own (review of T-504)" do
       engine = :"clickhouse_functions_bare_#{:erlang.unique_integer([:positive])}"
       start_supervised!({Engine, name: engine}, id: engine)
 
-      names = Enum.map_join(ClickHouseFunctions.names(), ", ", &"'#{String.downcase(&1)}'")
+      names =
+        Enum.map_join(
+          ClickHouseFunctions.names() ++ ClickHouseFunctions.volatile(),
+          ", ",
+          &"'#{String.downcase(&1)}'"
+        )
 
       builtins =
         rows(
@@ -317,6 +366,9 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
 
       assert builtins == []
     end
+
+    defp volatile_names,
+      do: Enum.map_join(ClickHouseFunctions.volatile(), ", ", &"'#{String.downcase(&1)}'")
 
     test "the check would catch a macro over a volatile function", %{engine: engine} do
       assert [%{"stability" => "VOLATILE"} | _more] =

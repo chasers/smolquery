@@ -127,6 +127,8 @@ These return an answer, just not always ClickHouse's.
 | `toStartOfInterval(t, INTERVAL 7 day)` | Buckets from 1970-01-01, a Thursday | The same, by an explicit origin — same |
 | `uniq(x)` | Approximate | Exact, `count(DISTINCT x)` — a superset |
 | `hasToken(s, t)` | Reads the token index; `t` must be one token | Splits `s` on non-alphanumerics and scans — same answer, no index |
+| `rand()`, `rand32()`, `rand64()`, `randCanonical()` | `UInt32`, `UInt32`, `UInt64`, a `Float64` in [0, 1) | The same types, over DuckDB's `random()` (T-526). They are the only functions defined here that are not deterministic, so a statement naming one is never planned as a Top-N probe |
+| `cityHash64(a[, b, c, d])` | CityHash64 of its arguments | DuckDB's `hash`, a `UInt64`: the same for the same input, **not** the number ClickHouse computes. Right for sampling and bucketing, `cityHash64(ts, rand()) % n = 0`; wrong for a value compared with one ClickHouse stored — differs |
 | `sumIf(x, c)` result type | `Int64`/`UInt64` | A `HUGEINT`, which answers as a `Decimal` — differs |
 | `notEmpty(x)` | `UInt8` | `UInt8`; `mapContains` answers a `Bool`, where ClickHouse answers `UInt8` — differs |
 | `countIf` result type | `UInt64` | A `HUGEINT`, which answers as a `Decimal` in a result — differs |

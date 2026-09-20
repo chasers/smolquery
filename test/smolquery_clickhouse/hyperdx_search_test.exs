@@ -309,4 +309,50 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
       end
     end
   end
+
+  describe "rand(), which HyperDX samples with (T-526)" do
+    defp ask(%{name: name}, sql) do
+      response =
+        conn(:post, "/", sql <> " FORMAT JSON")
+        |> put_req_header("x-clickhouse-key", @password)
+        |> Router.call(name)
+
+      assert response.status == 200, response.resp_body
+
+      JSON.decode!(response.resp_body)
+    end
+
+    test "Event Patterns and Event Deltas order a sample by it, over a real table and under a LIMIT",
+         context do
+      {dataset, table} = FullNode.table()
+      sql = "SELECT Body, Timestamp FROM #{dataset}.#{table} ORDER BY rand() DESC LIMIT 10"
+
+      assert %{"rows" => 10, "data" => first} = ask(context, sql)
+      assert %{"rows" => 10, "data" => second} = ask(context, sql)
+
+      assert Enum.all?(first ++ second, &is_binary(&1["Body"]))
+
+      samples = for _run <- 1..4, do: ask(context, sql)["data"]
+      refute match?([_one_order], Enum.uniq([first, second | samples]))
+
+      assert %{"rows" => 120} =
+               ask(context, "SELECT Body FROM #{dataset}.#{table} ORDER BY rand() LIMIT 1000")
+    end
+
+    test "the sidebar thins a large table with cityHash64(ts, rand()) % n, and keeps a share of it",
+         context do
+      {dataset, table} = FullNode.table()
+
+      assert %{"data" => [%{"kept" => kept}]} =
+               ask(
+                 context,
+                 "WITH tableStats AS (SELECT 2 AS sample_factor) SELECT count() AS kept " <>
+                   "FROM #{dataset}.#{table} " <>
+                   "WHERE cityHash64(Timestamp, rand()) % (SELECT sample_factor FROM tableStats) = 0"
+               )
+
+      kept = String.to_integer(kept)
+      assert kept > 20 and kept < 100
+    end
+  end
 end

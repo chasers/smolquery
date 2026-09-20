@@ -33,6 +33,18 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   asks the engine about every body, so a macro over `random()` fails the
   suite rather than giving a last-N query the wrong rows (T-504).
 
+  ## The ones that are not
+
+  ClickHouse's `rand()` cannot be stable, and HyperDX calls it: it orders
+  the rows Event Patterns and Event Deltas sample by it, and thins a large
+  table's sidebar values with `cityHash64(ts, rand()) % n = 0` (T-526). So
+  `rand`, `rand32`, `rand64` and `randCanonical` are macros over `random()`
+  that `stable?/1` does not vouch for. The planner then asks the catalog
+  about the name, as it does for any function it does not know, finds a
+  macro with no stability, and leaves the statement unprobed, which is the
+  right answer for a statement ordered by a random number. They are listed
+  apart (`volatile/0`) so that the rule above still reads as a rule.
+
   A name is matched without regard to case, as the engine resolves it, and
   only before a `(`. A column or a table of the same name defines a macro
   nobody calls, which costs a fraction of a millisecond and changes nothing.
@@ -144,6 +156,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
              "CASE part WHEN 'keys' THEN map_keys(m) WHEN 'values' THEN map_values(m) END"},
             {"lowCardinalityKeys(x)", "x"},
             {"toJSONString(x)", "CAST(to_json(x) AS VARCHAR)"},
+            {"cityHash64(a)",
+             "hash(a), (a, b) AS hash(a, b), (a, b, c) AS hash(a, b, c), (a, b, c, d) AS hash(a, b, c, d)"},
             {"JSONDynamicPathsWithTypes(x)",
              "(SELECT map_from_entries(list((substr(node.fullkey, 3), CASE node.\"type\" WHEN 'VARCHAR' THEN 'String' WHEN 'DOUBLE' THEN 'Float64' WHEN 'BOOLEAN' THEN 'Bool' WHEN 'ARRAY' THEN 'Array(Nullable(String))' ELSE 'Int64' END) ORDER BY node.id)) FROM json_tree(CAST(x AS JSON)) AS node WHERE node.\"type\" NOT IN ('OBJECT', 'NULL') AND node.fullkey <> '$' AND NOT regexp_matches(node.path, '\\[[0-9]+\\]') AND NOT EXISTS (SELECT 1 FROM json_tree(CAST(x AS JSON)) AS holder WHERE holder.id = node.parent AND holder.\"type\" = 'ARRAY'))"},
             {"groupUniqArrayMap(m)",
@@ -174,7 +188,18 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
               ]
             end)
 
-  @definitions Map.new(@macros, fn {signature, body} ->
+  @volatile [
+    {"rand()", "CAST(floor(random() * 4294967296) AS UINTEGER)"},
+    {"rand32()", "CAST(floor(random() * 4294967296) AS UINTEGER)"},
+    {"rand64()", "CAST(floor(random() * 18446744073709551615) AS UBIGINT)"},
+    {"randCanonical()", "random()"}
+  ]
+
+  @stable_names MapSet.new(@macros, fn {signature, _body} ->
+                  signature |> String.split("(", parts: 2) |> hd() |> String.downcase()
+                end)
+
+  @definitions Map.new(@macros ++ @volatile, fn {signature, body} ->
                  name = signature |> String.split("(", parts: 2) |> hd()
 
                  {String.downcase(name), "CREATE OR REPLACE MACRO #{signature} AS #{body}"}
@@ -210,7 +235,18 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   stable (see the moduledoc).
   """
   @spec stable?(String.t()) :: boolean()
-  def stable?(name) when is_binary(name), do: is_map_key(@definitions, String.downcase(name))
+  def stable?(name) when is_binary(name), do: MapSet.member?(@stable_names, String.downcase(name))
+
+  @doc """
+  The names of the macros that are not stable, as ClickHouse spells them:
+  defined like the rest, and never vouched for by `stable?/1`.
+  """
+  @spec volatile() :: [String.t()]
+  def volatile do
+    Enum.map(@volatile, fn {signature, _body} ->
+      signature |> String.split("(", parts: 2) |> hd()
+    end)
+  end
 
   @doc """
   The names defined, as ClickHouse spells them.

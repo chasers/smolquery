@@ -67,6 +67,7 @@ defmodule Smolquery.QueryService.Nullability do
   )
 
   @always ~w(count count_star uniq uniqexact notempty empty indexhint dynamictype
+    rand rand32 rand64 randcanonical cityhash64
     clickhouse_isnull clickhouse_isnotnull toint64orzero toint32orzero touint64orzero
     touint32orzero touint8orzero tofloat64orzero tofloat32orzero tofloat64ordefault)
   @counts ~w(count count_star uniq uniqexact)
