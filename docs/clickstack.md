@@ -175,8 +175,10 @@ services:
   the case it was done for. HyperDX reads the type's prefix and searches a nested key as
   `toString(metadata.context.application)`, which answers, and lists the column's keys for
   the filters sidebar with `JSONDynamicPathsWithTypes` and `groupUniqArrayMap`, which answer
-  too: every leaf path, dotted, with the types seen at it. An array is one leaf; a key that
-  holds `null` everywhere is not listed. This needs a
+  too: every leaf path, dotted, with the types seen at it. An array is one leaf, whatever it
+  holds; a key that holds `null` everywhere is not listed; and a key with a dot in it,
+  `{"g.h": 1}`, lists as `g.h` and reads as the nested path, which is how ClickHouse's
+  `JSON` treats it too. This needs a
   HyperDX that knows the `JSON` type: the recipe is checked against `@hyperdx/app@2.39.1`.
   2.1.0, a year older, has only a stub for it, and words a term search in a function the
   edge does not have (`hasTokenCaseInsensitive`).

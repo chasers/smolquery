@@ -18,6 +18,8 @@ defmodule SmolqueryClickHouse.VariantJsonTest do
   import Plug.Test
 
   alias Smolquery.BufferService
+  alias Smolquery.Engine
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.Schema
   alias Smolquery.Test.FullNode
   alias SmolqueryClickHouse.Router
@@ -81,7 +83,15 @@ defmodule SmolqueryClickHouse.VariantJsonTest do
 
     {dataset, table} = FullNode.table()
 
-    %{name: name, from: "#{dataset}.#{table}", dataset: dataset, table: table}
+    engine = :"variant_json_engine_#{:erlang.unique_integer([:positive])}"
+    start_supervised!({Engine, name: engine, extensions: [:json]}, id: engine)
+
+    Enum.each(
+      ClickHouseFunctions.statements_for("JSONDynamicPathsWithTypes("),
+      &Engine.query!(engine, &1)
+    )
+
+    %{name: name, from: "#{dataset}.#{table}", dataset: dataset, table: table, engine: engine}
   end
 
   defp json(name, sql) do
@@ -243,5 +253,21 @@ defmodule SmolqueryClickHouse.VariantJsonTest do
                "WITH all_paths AS (SELECT DISTINCT JSONDynamicPathsWithTypes(metadata) as paths " <>
                  "FROM #{context.from} WHERE id > 99) SELECT groupUniqArrayMap(paths) as pathMap FROM all_paths"
              )
+  end
+
+  test "a key holding a bracket is listed, an array is one leaf whatever it holds, and a dotted key reads as ClickHouse reads it (review of T-521)",
+       context do
+    {:ok, %{rows: [[paths]]}} =
+      Engine.query(
+        context.engine,
+        ~s|SELECT JSONDynamicPathsWithTypes('{"a[0]": 1, "g.h": 2, "tags": ["x", {"k": 1}], "o": {"n": 1.5}}'::JSON::VARIANT)|
+      )
+
+    assert paths == %{
+             "a[0]" => "Int64",
+             "g.h" => "Int64",
+             "tags" => "Array(Nullable(String))",
+             "o.n" => "Float64"
+           }
   end
 end

@@ -145,9 +145,9 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"lowCardinalityKeys(x)", "x"},
             {"toJSONString(x)", "CAST(to_json(x) AS VARCHAR)"},
             {"JSONDynamicPathsWithTypes(x)",
-             "(SELECT map_from_entries(list((substr(fullkey, 3), CASE \"type\" WHEN 'VARCHAR' THEN 'String' WHEN 'DOUBLE' THEN 'Float64' WHEN 'BOOLEAN' THEN 'Bool' WHEN 'ARRAY' THEN 'Array(Nullable(String))' ELSE 'Int64' END) ORDER BY id)) FROM json_tree(CAST(x AS JSON)) WHERE \"type\" NOT IN ('OBJECT', 'NULL') AND fullkey <> '$' AND NOT contains(fullkey, '['))"},
+             "(SELECT map_from_entries(list((substr(node.fullkey, 3), CASE node.\"type\" WHEN 'VARCHAR' THEN 'String' WHEN 'DOUBLE' THEN 'Float64' WHEN 'BOOLEAN' THEN 'Bool' WHEN 'ARRAY' THEN 'Array(Nullable(String))' ELSE 'Int64' END) ORDER BY node.id)) FROM json_tree(CAST(x AS JSON)) AS node WHERE node.\"type\" NOT IN ('OBJECT', 'NULL') AND node.fullkey <> '$' AND NOT regexp_matches(node.path, '\\[[0-9]+\\]') AND NOT EXISTS (SELECT 1 FROM json_tree(CAST(x AS JSON)) AS holder WHERE holder.id = node.parent AND holder.\"type\" = 'ARRAY'))"},
             {"groupUniqArrayMap(m)",
-             "coalesce(map_from_entries(list_transform(list_distinct(list_transform(flatten(list(map_entries(m)) FILTER (WHERE m IS NOT NULL)), lambda entry: entry.key)), lambda path: (path, list_sort(list_distinct(list_transform(list_filter(flatten(list(map_entries(m)) FILTER (WHERE m IS NOT NULL)), lambda entry: entry.key = path), lambda entry: entry.value)))))), map_from_entries(CAST([] AS STRUCT(k VARCHAR, v VARCHAR[])[])))"},
+             "coalesce((SELECT map_from_entries(list((path, kinds) ORDER BY path)) FROM (SELECT entry.key AS path, list_sort(list(DISTINCT entry.value)) AS kinds FROM (SELECT unnest(flatten(list(map_entries(m)) FILTER (WHERE m IS NOT NULL))) AS entry) GROUP BY entry.key)), map_from_entries(CAST([] AS STRUCT(k VARCHAR, v VARCHAR[])[])))"},
             {"dynamicType(x)",
              "CASE WHEN x IS NULL THEN 'None' ELSE CASE regexp_extract(variant_typeof(x), '^[A-Z]+') " <>
                "WHEN 'VARCHAR' THEN 'String' WHEN 'BOOL' THEN 'Bool' " <>

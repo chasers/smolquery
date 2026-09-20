@@ -293,10 +293,14 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
             "AND coalesce(stability, '') NOT IN ('CONSISTENT', 'CONSISTENT_WITHIN_QUERY')"
         )
 
-      assert unstable == [%{"name" => "json_tree", "kind" => "table", "stability" => nil}],
-             "the catalog rates no table function, so json_tree has no stability to read; it is a " <>
-               "pure function of the document it is given, which is what JSONDynamicPathsWithTypes " <>
-               "leans on (T-521). Any other name here is a macro calling something unrated."
+      assert Enum.sort_by(unstable, & &1["name"]) == [
+               %{"name" => "json_tree", "kind" => "table", "stability" => nil},
+               %{"name" => "unnest", "kind" => "table", "stability" => nil}
+             ],
+             "the catalog rates no table function, so json_tree and unnest have no stability to " <>
+               "read; each is a pure function of what it is given, which is what " <>
+               "JSONDynamicPathsWithTypes and groupUniqArrayMap lean on (T-521). Any other name " <>
+               "here is a macro calling something unrated."
     end
 
     test "no macro shares its name with a function of the engine's own (review of T-504)" do
