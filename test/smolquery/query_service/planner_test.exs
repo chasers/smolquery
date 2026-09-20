@@ -6,6 +6,7 @@ defmodule Smolquery.QueryService.PlannerTest do
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Planner
   alias Smolquery.QueryService.Runtime
@@ -837,6 +838,37 @@ defmodule Smolquery.QueryService.PlannerTest do
 
       assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
 
+      assert ids(plan.hot[@table]) == ids(entries)
+    end
+
+    @tag :tmp_dir
+    test "a WHERE that calls a ClickHouse macro is probed: HyperDX's search keeps its bound (T-504)",
+         ctx do
+      entries = hot_entries(ctx.tmp_dir)
+
+      sql =
+        "SELECT * FROM analytics.events WHERE (ts >= fromUnixTimestamp64Milli(0) AND " <>
+          "ts <= fromUnixTimestamp64Milli(4102444800000)) AND project = 'a' ORDER BY ts DESC LIMIT 5"
+
+      for statement <- ClickHouseFunctions.statements_for(sql),
+          do: Engine.query!(@engine, statement)
+
+      collector = Trace.attach("top-n-#{System.unique_integer([:positive])}", self())
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
+      assert ids(plan.hot[@table]) == at(entries, [10])
+
+      assert %{meta: %{bounded: true}} =
+               collector |> Trace.stop() |> Enum.find(&(&1.name == :top_n))
+    end
+
+    @tag :tmp_dir
+    test "a macro that is not one of ours is still not probed", ctx do
+      entries = hot_entries(ctx.tmp_dir)
+      Engine.query!(@engine, "CREATE OR REPLACE MACRO coin() AS random() < 0.5")
+      sql = "SELECT * FROM analytics.events WHERE coin() ORDER BY ts DESC LIMIT 5"
+
+      assert {:ok, plan} = Planner.plan(hot_runtime(entries), @conn, sql)
       assert ids(plan.hot[@table]) == ids(entries)
     end
 

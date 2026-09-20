@@ -22,12 +22,16 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   query service, not in the ClickHouse edge, for that reason.
   `Runtime.clickhouse_functions` switches them off.
 
-  One cost remains. The Top-N planner (`Smolquery.QueryService.TopN`) will
-  not probe a statement that calls a macro, since it cannot know a macro is
-  stable, so HyperDX's `ORDER BY Timestamp DESC LIMIT 200` over a
-  `fromUnixTimestamp64Milli` filter reads every hot micro-segment's footer
-  where the same statement written with `make_timestamp` reads a few. The
-  answer is the same; the read is not (T-504).
+  ## Every macro is stable
+
+  The Top-N planner (`Smolquery.QueryService.TopN`) probes a statement only
+  when every function it names gives the same answer twice, and the engine's
+  catalog reports no stability for a macro. `stable?/1` answers for these:
+  each body calls only functions the catalog reports `CONSISTENT` or
+  `CONSISTENT_WITHIN_QUERY` (`now64` reads the clock, as `now()` does, which
+  the planner accepts). That is a rule for whoever adds a macro, and a test
+  asks the engine about every body, so a macro over `random()` fails the
+  suite rather than giving a last-N query the wrong rows (T-504).
 
   A name is matched without regard to case, as the engine resolves it, and
   only before a `(`. A column or a table of the same name defines a macro
@@ -186,6 +190,13 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
     |> Enum.sort()
     |> Enum.map(&Map.fetch!(@definitions, &1))
   end
+
+  @doc """
+  Whether `name`, in any case, is one of these macros, all of which are
+  stable (see the moduledoc).
+  """
+  @spec stable?(String.t()) :: boolean()
+  def stable?(name) when is_binary(name), do: is_map_key(@definitions, String.downcase(name))
 
   @doc """
   The names defined, as ClickHouse spells them.

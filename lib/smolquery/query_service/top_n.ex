@@ -72,6 +72,15 @@ defmodule Smolquery.QueryService.TopN do
   are the newest ones. A predicate built to flip on the clock between two
   statements is the one shape this does not cover.
 
+  A macro has no stability the catalog can report, so a macro is refused —
+  except the ones `Smolquery.QueryService.ClickHouseFunctions` defines
+  (T-504). Those are this codebase's own, a client cannot define or replace
+  one, and a test holds each of their bodies to the same rule: every
+  function a body calls is `CONSISTENT` or `CONSISTENT_WITHIN_QUERY`.
+  Without that, every search a ClickHouse client sends — HyperDX filters
+  with `fromUnixTimestamp64Milli` and orders by `Timestamp DESC LIMIT 200`,
+  the very shape the bound exists for — read a footer per hot entry.
+
   The ordering column must be stored as an integer, a float, a string, a
   timestamp, or a date. A DECIMAL's manifest stats arrive as strings (the
   bound encoding has no case for them, the same gap the WHERE pruner has),
@@ -94,6 +103,7 @@ defmodule Smolquery.QueryService.TopN do
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.SingleTable
   alias Smolquery.QueryService.Views
@@ -355,6 +365,7 @@ defmodule Smolquery.QueryService.TopN do
     end)
     |> Enum.map(&String.downcase/1)
     |> Enum.uniq()
+    |> Enum.reject(&ClickHouseFunctions.stable?/1)
   end
 
   defp unstable_count([]), do: "0"

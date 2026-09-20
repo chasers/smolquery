@@ -255,4 +255,53 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert one(engine, "toJSONString({'a': 1, 'b': 'x'})") == ~s|{"a":1,"b":"x"}|
     end
   end
+
+  describe "every macro is stable (T-504)" do
+    test "stable?/1 knows these macros, in any case, and no other name" do
+      assert ClickHouseFunctions.stable?("toStartOfInterval")
+      assert ClickHouseFunctions.stable?("fromunixtimestamp64milli")
+      refute ClickHouseFunctions.stable?("random")
+      refute ClickHouseFunctions.stable?("coin")
+    end
+
+    test "each body calls only functions the engine's catalog reports consistent", %{
+      engine: engine
+    } do
+      defined = MapSet.new(ClickHouseFunctions.names(), &String.downcase/1)
+
+      called =
+        engine
+        |> rows(
+          "SELECT macro_definition AS body FROM duckdb_functions() WHERE function_type = 'macro' AND NOT internal"
+        )
+        |> Enum.flat_map(fn %{"body" => body} ->
+          Regex.scan(~r/([A-Za-z_][A-Za-z0-9_]*)\s*\(/, body, capture: :all_but_first)
+        end)
+        |> Enum.map(fn [name] -> String.downcase(name) end)
+        |> Enum.uniq()
+        |> Enum.reject(&MapSet.member?(defined, &1))
+
+      assert "time_bucket" in called
+
+      names = Enum.map_join(called, ", ", &"'#{&1}'")
+
+      unstable =
+        rows(
+          engine,
+          "SELECT DISTINCT function_name AS name, stability FROM duckdb_functions() " <>
+            "WHERE lower(function_name) IN (#{names}) AND function_type <> 'macro' " <>
+            "AND coalesce(stability, '') NOT IN ('CONSISTENT', 'CONSISTENT_WITHIN_QUERY')"
+        )
+
+      assert unstable == []
+    end
+
+    test "the check would catch a macro over a volatile function", %{engine: engine} do
+      assert [%{"stability" => "VOLATILE"} | _more] =
+               rows(
+                 engine,
+                 "SELECT stability FROM duckdb_functions() WHERE function_name = 'random'"
+               )
+    end
+  end
 end
