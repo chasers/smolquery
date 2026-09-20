@@ -33,7 +33,7 @@ defmodule Smolquery.Segments.Writer do
 
   A column computed from the row (`Smolquery.Schema.Materialized`, PL-61 L4)
   is not read from the body: the `COPY`'s select list
-  (`Smolquery.Schema.computed_select/1`) evaluates its expression over the
+  (`Smolquery.Schema.computed_select/2`) evaluates its expression over the
   body's regular columns, wrapped in `TRY`, so the file carries the value
   and a row whose values the expression cannot take stores `NULL` rather
   than failing the batch. The stats are read off
@@ -235,11 +235,15 @@ defmodule Smolquery.Segments.Writer do
   defp copy_ndjson(engine, paths, staged, schema, compression) do
     count = length(paths)
 
+    spooled = """
+    read_json([#{placeholders(count)}],
+        format = 'newline_delimited',
+        columns = {#{columns_spec(schema)}})
+    """
+
     sql = """
     COPY (
-      SELECT #{Schema.computed_select(schema)} FROM read_json([#{placeholders(count)}],
-        format = 'newline_delimited',
-        columns = {#{columns_spec(schema)}})#{order_clause(schema)}
+      #{Schema.computed_select(schema, String.trim_trailing(spooled))}#{order_clause(schema)}
     )
     TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)}#{field_ids_option(schema)})
     """

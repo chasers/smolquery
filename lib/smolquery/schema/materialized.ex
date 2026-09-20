@@ -41,6 +41,15 @@ defmodule Smolquery.Schema.Materialized do
      `SELECT CAST(<expr> AS <type>) FROM (SELECT NULL::t1 AS c1, ...)`. An
      expression that does not bind there — an unknown function, a function
      that needs the file system, a cast the types refuse — is refused here.
+     Each column has the type a query sees (`Smolquery.Schema.queried_type/1`),
+     a variant `VARIANT`, because that is what every evaluation reads
+     (`Smolquery.Schema.computed_select/2`, T-508). A table with a variant is
+     probed once more over a variant *value*: `attrs->>'host'` binds through
+     an implicit cast to text, which is not JSON, and then fails on every
+     row — under the writer's `TRY` it would store `NULL` silently — so
+     DuckDB's `Malformed JSON` on the sample is refused here. Any other
+     failure on the sample passes: `attrs::BIGINT` rightly fails on an
+     object and is `NULL` for that row alone.
 
   `sources` are the ids of the columns the expression reads, so a drop of one
   of them is refused while the column exists (`Smolquery.Schema.drop_field/2`)
@@ -75,6 +84,8 @@ defmodule Smolquery.Schema.Materialized do
     current_schemas current_query current_user current_role session_user user)
   @zoned_types ["TIMESTAMP WITH TIME ZONE", "TIME WITH TIME ZONE"]
   @probe_extensions [:json]
+  @variant_sample ~s|'{"smolquery probe": "v"}'|
+  @read_as_json "Malformed JSON"
 
   @doc """
   Runs the three gates over `field`'s expression against `schema`, the table
@@ -300,19 +311,7 @@ defmodule Smolquery.Schema.Materialized do
 
   defp bound(engine, canonical, type, regular) do
     {:ok, target} = Schema.duckdb_type(type)
-
-    row =
-      case regular do
-        [] ->
-          "SELECT 1"
-
-        fields ->
-          "SELECT " <>
-            Enum.map_join(fields, ", ", fn %Field{} = field ->
-              {:ok, duckdb} = Schema.duckdb_type(field.type)
-              "NULL::#{duckdb} AS #{Identifier.quote_name!(field.name)}"
-            end)
-      end
+    row = probe_row(regular, &null_value/1)
 
     probe =
       "SELECT typeof((#{canonical})), CAST((#{canonical}) AS #{target}) " <>
@@ -321,13 +320,47 @@ defmodule Smolquery.Schema.Materialized do
     with {:ok, _locked} <- Engine.query(engine, "SET enable_external_access = false"),
          {:ok, %{rows: [[typed, _value] | _rest]}} <- Engine.query(engine, probe),
          :ok <- unzoned_result(typed) do
-      :ok
+      takes_variant(engine, canonical, regular)
     else
       {:error, {:invalid_materialized, _detail} = refusal} -> {:error, refusal}
       {:error, error} -> refuse({:does_not_bind, Exception.message(error)})
       other -> refuse({:does_not_bind, inspect(other)})
     end
   end
+
+  defp takes_variant(engine, canonical, regular) do
+    if Enum.any?(regular, &(&1.type == :variant)) do
+      probe =
+        "SELECT TRY_CAST((#{canonical}) AS VARCHAR) FROM (#{probe_row(regular, &sample_value/1)})"
+
+      with {:error, error} <- Engine.query(engine, probe),
+           message = Exception.message(error),
+           true <- String.contains?(message, @read_as_json) do
+        refuse({:variant_as_json, message})
+      else
+        _takes_it -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp probe_row([], _value), do: "SELECT 1"
+
+  defp probe_row(fields, value) do
+    "SELECT " <>
+      Enum.map_join(fields, ", ", fn %Field{} = field ->
+        "#{value.(field)} AS #{Identifier.quote_name!(field.name)}"
+      end)
+  end
+
+  defp null_value(%Field{type: type}) do
+    {:ok, queried} = Schema.queried_type(type)
+    "NULL::#{queried}"
+  end
+
+  defp sample_value(%Field{type: :variant}), do: @variant_sample <> "::JSON::VARIANT"
+  defp sample_value(%Field{} = field), do: null_value(field)
 
   defp unzoned_result(typed) do
     if String.contains?(typed, "WITH TIME ZONE"), do: refuse({:zoned_type, typed}), else: :ok
@@ -385,6 +418,12 @@ defmodule Smolquery.Schema.Materialized do
     do: "materialized expression names #{name}; a column is named without a qualifier"
 
   def message({:does_not_bind, detail}), do: "materialized expression does not bind: #{detail}"
+
+  def message({:variant_as_json, detail}),
+    do:
+      "materialized expression reads a VARIANT as JSON text: #{detail} — a variant column is read " <>
+        "as VARIANT, as in a query: take a key with attrs['key']::VARCHAR, or cast attrs::JSON " <>
+        "for a JSON function"
 
   def message({:engine_failed, detail}),
     do: "materialized expression could not be checked: #{detail}"

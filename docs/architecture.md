@@ -312,7 +312,7 @@ own commit, because DuckDB's one-database-per-transaction rule keeps the two
 apart; a side row that cannot be written drops the column again.
 
 The value is `expr(row)` always. Every writer renders its `COPY` through
-`Smolquery.Schema.computed_select/1`, which names a regular column and
+`Smolquery.Schema.computed_select/2`, which names a regular column and
 recomputes a materialized one, so the sealer and the compactor store the
 column over their projected inputs as a matter of course (L5), and nothing
 stored can disagree with the expression — which is what the determinism

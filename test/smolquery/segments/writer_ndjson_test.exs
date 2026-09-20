@@ -329,6 +329,41 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert segment.stats["ts"].null_count == 1
     end
 
+    test "a variant key stores the scalar a query answers, and the variant its JSON text untouched (T-508)",
+         %{tmp_dir: dir} do
+      schema =
+        Schema.new!([
+          {"id", :int64},
+          {"attrs", :variant},
+          {"host", :string, materialized: "attrs['host']::VARCHAR"},
+          {"n", :int64, materialized: "attrs['n']::BIGINT"}
+        ])
+
+      path =
+        spool(dir, "variant_key.ndjson", [
+          %{"id" => 1, "attrs" => %{"host" => "web-1", "n" => 5}},
+          %{"id" => 2, "attrs" => %{"host" => nil}},
+          %{"id" => 3}
+        ])
+
+      {:ok, segment} = Writer.write({:ndjson, [path]}, schema, store: store(dir), engine: @engine)
+
+      {:ok, result} =
+        Engine.query(
+          @engine,
+          "SELECT id, typeof(attrs), attrs::VARCHAR, host, n FROM read_parquet($1) ORDER BY id",
+          [segment.path]
+        )
+
+      assert result.rows == [
+               [1, "JSON", ~s({"host":"web-1","n":5}), "web-1", 5],
+               [2, "JSON", ~s({"host":null}), nil, nil],
+               [3, "JSON", nil, nil, nil]
+             ]
+
+      assert segment.stats["host"].min == "web-1"
+    end
+
     test "a body naming the materialized column is readable: the value is ignored, not read",
          %{tmp_dir: dir} do
       path =

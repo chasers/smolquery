@@ -144,6 +144,11 @@ defmodule Smolquery.QueryService.Views do
   stored column plainly, which is what lets DuckDB prune the sealed tier on
   its row-group stats. A `coalesce` is opaque to that pruning, so it is
   rendered only while a file that predates the column is still in the read.
+
+  While it is, the expression reads `from_sql` as a query would
+  (`Smolquery.Schema.queried/2`), a variant as `VARIANT` — the types the
+  write path evaluates it over too, so `attrs['host']::VARCHAR` is the
+  scalar in both (T-508).
   """
   @spec table_view(Smolquery.Catalog.table_ref(), Schema.t(), String.t(), [String.t()]) ::
           [String.t()]
@@ -152,9 +157,15 @@ defmodule Smolquery.QueryService.Views do
     t = Identifier.quote_name!(table)
     columns = Enum.map_join(schema.fields, ", ", &column_expression(&1, recompute))
 
+    from =
+      case recompute do
+        [] -> "(#{from_sql})"
+        _some -> Schema.queried(schema, "(#{from_sql})")
+      end
+
     [
       "CREATE SCHEMA IF NOT EXISTS #{ds}",
-      "CREATE OR REPLACE VIEW #{ds}.#{t} AS SELECT #{columns} FROM (#{from_sql})"
+      "CREATE OR REPLACE VIEW #{ds}.#{t} AS SELECT #{columns} FROM #{from}"
     ]
   end
 

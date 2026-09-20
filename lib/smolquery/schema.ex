@@ -490,6 +490,18 @@ defmodule Smolquery.Schema do
   def view_cast(_type), do: :none
 
   @doc """
+  The DuckDB type a query sees a column of `type` as: the `view_cast/1` where
+  there is one, the stored type otherwise.
+  """
+  @spec queried_type(logical_type()) :: {:ok, String.t()} | {:error, term()}
+  def queried_type(type) do
+    case view_cast(type) do
+      {:cast, queried} -> {:ok, queried}
+      :none -> duckdb_type(type)
+    end
+  end
+
+  @doc """
   The logical type for a DuckDB type name, as `information_schema` reports it.
   """
   @spec logical_from_duckdb(String.t()) ::
@@ -730,9 +742,9 @@ defmodule Smolquery.Schema do
   end
 
   @doc """
-  The `SELECT` list that writes this schema from a relation already carrying
-  its regular columns under their own names: every column in schema order,
-  a regular one by name and a materialized one recomputed from its
+  The `SELECT` that writes this schema from `from`, a relation already
+  carrying its regular columns under their own names: every column in schema
+  order, a regular one by name and a materialized one recomputed from its
   expression (`Smolquery.Schema.Materialized`, PL-61 L5).
 
   Every writer renders through it — the buffer's `COPY` over a spooled body,
@@ -742,22 +754,77 @@ defmodule Smolquery.Schema do
   expression is wrapped in `TRY`: a row the expression cannot take stores
   `NULL`, never fails the file. A definition the catalog has not
   canonicalised evaluates as written.
+
+  The expression reads the row as a query does (`queried/2`), so
+  `attrs['host']::VARCHAR` over a variant stores the scalar a query answers,
+  not the JSON text of it (T-508). The stored column still reaches the file
+  untouched: it rides beside the queried one under a name no identifier can
+  take, and is written back under its own.
   """
-  @spec computed_select(t()) :: String.t()
-  def computed_select(%__MODULE__{fields: fields}) do
-    Enum.map_join(fields, ", ", fn %Field{} = field ->
-      name = Identifier.quote_name!(field.name)
+  @spec computed_select(t(), String.t()) :: String.t()
+  def computed_select(%__MODULE__{fields: fields} = schema, from) do
+    retyped = retyped(schema)
 
-      case field.materialized do
-        nil ->
-          name
+    columns =
+      Enum.map_join(fields, ", ", fn %Field{} = field ->
+        name = Identifier.quote_name!(field.name)
 
-        %{expression: expression, canonical: canonical} ->
-          {:ok, type} = duckdb_type(field.type)
-          "TRY(CAST((#{canonical || expression}) AS #{type})) AS #{name}"
-      end
-    end)
+        cond do
+          field.materialized != nil ->
+            %{expression: expression, canonical: canonical} = field.materialized
+            {:ok, type} = duckdb_type(field.type)
+            "TRY(CAST((#{canonical || expression}) AS #{type})) AS #{name}"
+
+          field in retyped ->
+            "#{stored_name(field)} AS #{name}"
+
+          true ->
+            name
+        end
+      end)
+
+    "SELECT #{columns} FROM #{queried_relation(from, retyped, true)}"
   end
+
+  @doc """
+  `from` as a query sees it: every column with a `view_cast/1` cast to the
+  type it is queried as, the rest as they are. It is the relation a
+  materialized expression is evaluated over, on the write path
+  (`computed_select/2`) and in a view that fills the column for a file that
+  predates it (`Smolquery.QueryService.Views`), so the two agree with each
+  other and with the same expression in a query.
+
+  A schema with no materialized column answers `from` unchanged: nothing
+  would read the cast.
+  """
+  @spec queried(t(), String.t()) :: String.t()
+  def queried(%__MODULE__{} = schema, from), do: queried_relation(from, retyped(schema), false)
+
+  defp retyped(%__MODULE__{fields: fields} = schema) do
+    case materialized_fields(schema) do
+      [] -> []
+      _some -> Enum.filter(fields, &(&1.materialized == nil and view_cast(&1.type) != :none))
+    end
+  end
+
+  defp queried_relation(from, [], _stored), do: from
+
+  defp queried_relation(from, retyped, stored) do
+    casts =
+      Enum.map_join(retyped, ", ", fn %Field{name: name, type: type} ->
+        {:cast, queried} = view_cast(type)
+        "#{Identifier.quote_name!(name)}::#{queried} AS #{Identifier.quote_name!(name)}"
+      end)
+
+    kept =
+      if stored,
+        do: Enum.map_join(retyped, &", #{Identifier.quote_name!(&1.name)} AS #{stored_name(&1)}"),
+        else: ""
+
+    "(SELECT * REPLACE (#{casts})#{kept} FROM #{from})"
+  end
+
+  defp stored_name(%Field{name: name}), do: ~s|"stored:#{name}"|
 
   @doc """
   The `SELECT` list that projects a relation carrying `columns` onto this schema.

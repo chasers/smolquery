@@ -175,7 +175,7 @@ defmodule Smolquery.SchemaTest do
       assert Schema.materialized_fields(schema) |> Enum.map(& &1.name) == ["ts"]
     end
 
-    test "computed_select/1 names a regular column and recomputes a materialized one, in order (PL-61 L5)" do
+    test "computed_select/2 names a regular column and recomputes a materialized one, in order (PL-61 L5)" do
       schema =
         Schema.new!([
           Field.new!("id", :int64),
@@ -190,11 +190,39 @@ defmodule Smolquery.SchemaTest do
           Field.new!("raw", :string, materialized: "CAST(id AS VARCHAR)")
         ])
 
-      assert Schema.computed_select(schema) ==
-               ~s|"id", "ts_int", TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP)) AS "ts", | <>
-                 ~s|TRY(CAST((CAST(id AS VARCHAR)) AS VARCHAR)) AS "raw"|
+      assert Schema.computed_select(schema, "spooled") ==
+               ~s|SELECT "id", "ts_int", TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP)) AS "ts", | <>
+                 ~s|TRY(CAST((CAST(id AS VARCHAR)) AS VARCHAR)) AS "raw" FROM spooled|
 
-      assert Schema.computed_select(Schema.new!([{"id", :int64}])) == ~s|"id"|
+      assert Schema.computed_select(Schema.new!([{"id", :int64}]), "spooled") ==
+               ~s|SELECT "id" FROM spooled|
+    end
+
+    test "computed_select/2 evaluates over the variant a query sees and writes the stored JSON back (T-508)" do
+      schema =
+        Schema.new!([
+          Field.new!("id", :int64),
+          Field.new!("attrs", :variant),
+          Field.new!("host", :string, materialized: "attrs['host']::VARCHAR")
+        ])
+
+      assert Schema.computed_select(schema, "spooled") ==
+               ~s|SELECT "id", "stored:attrs" AS "attrs", | <>
+                 ~s|TRY(CAST((attrs['host']::VARCHAR) AS VARCHAR)) AS "host" | <>
+                 ~s|FROM (SELECT * REPLACE ("attrs"::VARIANT AS "attrs"), "attrs" AS "stored:attrs" FROM spooled)|
+
+      assert Schema.queried(schema, "(SELECT 1)") ==
+               ~s|(SELECT * REPLACE ("attrs"::VARIANT AS "attrs") FROM (SELECT 1))|
+
+      plain = Schema.new!([{"id", :int64}, {"attrs", :variant}])
+
+      assert Schema.computed_select(plain, "spooled") == ~s|SELECT "id", "attrs" FROM spooled|
+      assert Schema.queried(plain, "(SELECT 1)") == "(SELECT 1)"
+    end
+
+    test "queried_type/1 is the view's cast where there is one, the stored type otherwise" do
+      assert Schema.queried_type(:variant) == {:ok, "VARIANT"}
+      assert Schema.queried_type(:int64) == Schema.duckdb_type(:int64)
     end
 
     test "stale_ids/2 names the columns a writer holds under an id the catalog moved (T-439)" do

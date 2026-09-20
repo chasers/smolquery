@@ -110,6 +110,35 @@ defmodule Smolquery.QueryService.ViewsTest do
              ~s|SELECT "id", "ts_int", coalesce("ts", TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP))) AS "ts" FROM|
   end
 
+  test "a materialized column is filled over the variant a query sees, not the stored JSON (T-508)" do
+    schema =
+      Schema.new!([
+        Field.new!("attrs", :variant, id: 1, since: 2),
+        Field.new!("host", :string,
+          id: 2,
+          since: 9,
+          materialized: %Smolquery.Schema.Materialized{
+            expression: "attrs['host']::VARCHAR",
+            canonical: "CAST(attrs['host'] AS VARCHAR)",
+            sources: [1]
+          }
+        )
+      ])
+
+    assert [_schema, plain] = Views.table_view({"analytics", "events"}, schema, "SELECT 1")
+
+    assert plain ==
+             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "attrs"::VARIANT AS "attrs", "host" FROM (SELECT 1)|
+
+    assert [_schema, computed] =
+             Views.table_view({"analytics", "events"}, schema, "SELECT 1", ["host"])
+
+    assert computed ==
+             ~s|CREATE OR REPLACE VIEW "analytics"."events" AS SELECT "attrs"::VARIANT AS "attrs", | <>
+               ~s|coalesce("host", TRY(CAST((CAST(attrs['host'] AS VARCHAR)) AS VARCHAR))) AS "host" | <>
+               ~s|FROM (SELECT * REPLACE ("attrs"::VARIANT AS "attrs") FROM (SELECT 1))|
+  end
+
   test "casts a variant column from its stored JSON to the VARIANT a query sees" do
     schema = Schema.new!([{"id", :int64}, {"doc", :variant}])
 

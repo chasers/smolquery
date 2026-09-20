@@ -147,7 +147,7 @@ defmodule Smolquery.StorageService.Merge do
 
   Both final `COPY`s — the direct one over the projected inputs and the
   staged one over the session temp table — render through
-  `Smolquery.Schema.computed_select/1` (PL-61 L5): a regular column by
+  `Smolquery.Schema.computed_select/2` (PL-61 L5): a regular column by
   name, a materialized one from its expression over the projected inputs. So a claim whose micro-segments
   predate the column seals with the value computed, and a compaction of
   files that carried it recomputes it identically — the definition-time
@@ -408,7 +408,7 @@ defmodule Smolquery.StorageService.Merge do
 
   defp copy_staged(runtime, schema, table, staged) do
     sql = """
-    COPY (SELECT #{Schema.computed_select(schema)} FROM #{table}#{order_by(schema)})
+    COPY (#{Schema.computed_select(schema, table)}#{order_by(schema)})
     TO $1 (#{parquet_options(runtime, schema)})
     """
 
@@ -559,7 +559,7 @@ defmodule Smolquery.StorageService.Merge do
 
   defp copy(runtime, schema, select, urls, staged) do
     sql = """
-    COPY (SELECT #{Schema.computed_select(schema)} FROM (#{select})#{order_by(schema)})
+    COPY (#{Schema.computed_select(schema, "(#{select})")}#{order_by(schema)})
     TO $#{length(urls) + 1} (#{parquet_options(runtime, schema)})
     """
 

@@ -172,6 +172,23 @@ defmodule Smolquery.Schema.MaterializedTest do
                validate("read_text('/etc/hostname')", :string)
     end
 
+    test "a variant is probed as the VARIANT a query sees: a key cast passes, a JSON function over it is refused (T-508)" do
+      schema = Schema.new!([{"id", :int64, id: 1}, {"attrs", :variant, id: 2}])
+      validate = &Materialized.validate(schema, Field.new!("m", &2, materialized: &1))
+
+      assert {:ok, %Materialized{sources: [2]}} = validate.("attrs['host']::VARCHAR", :string)
+      assert {:ok, %Materialized{}} = validate.("attrs['n']::BIGINT", :int64)
+      assert {:ok, %Materialized{}} = validate.("attrs::BIGINT", :int64)
+      assert {:ok, %Materialized{}} = validate.("attrs::JSON->>'host'", :string)
+
+      for expression <- ["attrs->>'host'", "json_extract_string(attrs, '$.host')"] do
+        assert {:error, {:invalid_materialized, {:variant_as_json, message}}} =
+                 validate.(expression, :string)
+
+        assert message =~ "Malformed JSON"
+      end
+    end
+
     test "the expression must cast to the column's type" do
       assert {:error, {:invalid_materialized, {:does_not_bind, message}}} =
                validate("{'a': 1}", :timestamp)
@@ -184,5 +201,6 @@ defmodule Smolquery.Schema.MaterializedTest do
     assert Materialized.message({:inconsistent_function, "now"}) =~ "not deterministic"
     assert Materialized.message({:unknown_column, "x"}) =~ "does not have: x"
     assert Materialized.message({:unsupported_expression, "SUBQUERY"}) =~ "subquery"
+    assert Materialized.message({:variant_as_json, "Malformed JSON"}) =~ "attrs['key']::VARCHAR"
   end
 end

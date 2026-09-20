@@ -15,6 +15,7 @@ defmodule Smolquery.QueryService.VariantColumnIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.BufferService.Client
+  alias Smolquery.Catalog
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService
   alias Smolquery.Schema
@@ -43,10 +44,10 @@ defmodule Smolquery.QueryService.VariantColumnIntegrationTest do
     %{node: node}
   end
 
-  defp ndjson_batch(rows) do
+  defp ndjson_batch(rows, schema \\ schema()) do
     body = Enum.map_join(rows, "\n", &JSON.encode!/1) <> "\n"
 
-    %{schema: schema(), ndjson: body, row_count: length(rows), byte_size: byte_size(body)}
+    %{schema: schema, ndjson: body, row_count: length(rows), byte_size: byte_size(body)}
   end
 
   defp query(node, sql) do
@@ -115,5 +116,85 @@ defmodule Smolquery.QueryService.VariantColumnIntegrationTest do
 
     assert rows(node, "SELECT id FROM analytics.events WHERE variant_typeof(attrs) = 'ARRAY(2)'") ==
              [%{"id" => 3}]
+  end
+
+  test "a column materialized from a variant key stores the scalar a query answers, in the fill and in both tiers (T-508)",
+       %{node: node} do
+    {:ok, _before} =
+      Client.write_batch(node.buffer, @table, ndjson_batch([%{"id" => 1, "attrs" => @doc_one}]))
+
+    assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 1}]
+
+    assert {:query_failed, {:invalid_materialized, {:variant_as_json, _detail}}} =
+             query(
+               node,
+               "ALTER TABLE analytics.events ADD COLUMN host STRING MATERIALIZED attrs->>'host'"
+             )
+
+    for ddl <- [
+          "ADD COLUMN host STRING MATERIALIZED attrs['host']::VARCHAR",
+          "ADD COLUMN n BIGINT MATERIALIZED attrs['n']::BIGINT"
+        ] do
+      assert {:ok, %{state: :done}, nil} =
+               QueryService.Client.query(node.query, "ALTER TABLE analytics.events " <> ddl)
+    end
+
+    agrees =
+      "SELECT id, host, n, host = attrs['host']::VARCHAR AS agrees FROM analytics.events ORDER BY id"
+
+    assert rows(node, agrees) == [%{"id" => 1, "host" => "h1", "n" => 1, "agrees" => true}]
+
+    {:ok, widened} = Catalog.table_schema(node.catalog, @table)
+
+    {:ok, _after} =
+      Client.write_batch(
+        node.buffer,
+        @table,
+        ndjson_batch([%{"id" => 2, "attrs" => %{"host" => "h2", "n" => "two"}}], widened)
+      )
+
+    sealed = [
+      %{"id" => 1, "host" => "h1", "n" => 1, "agrees" => true},
+      %{"id" => 2, "host" => "h2", "n" => nil, "agrees" => true}
+    ]
+
+    assert Eventually.until(fn -> FullNode.sealed_count(node) >= 1 end, 200, 25)
+    assert rows(node, agrees) == sealed
+
+    {:ok, _hot} =
+      Client.write_batch(
+        node.buffer,
+        @table,
+        ndjson_batch([%{"id" => 3, "attrs" => %{"host" => "h3", "n" => 3}}], widened)
+      )
+
+    assert rows(node, agrees) ==
+             sealed ++ [%{"id" => 3, "host" => "h3", "n" => 3, "agrees" => true}]
+
+    assert rows(node, "SELECT id FROM analytics.events WHERE host = 'h2'") == [%{"id" => 2}]
+
+    {job, frame} = query(node, "SELECT id, attrs FROM analytics.events ORDER BY id")
+
+    assert %{
+             "rows" => [
+               %{"attrs" => @doc_one},
+               %{"attrs" => %{"host" => "h2", "n" => "two"}},
+               %{"attrs" => %{"host" => "h3", "n" => 3}}
+             ]
+           } = JobController.page_body(job, frame, 0, 10)
+
+    for ddl <- [
+          "DROP COLUMN host",
+          "ADD COLUMN host STRING MATERIALIZED upper(attrs['host']::VARCHAR)"
+        ] do
+      assert {:ok, %{state: :done}, nil} =
+               QueryService.Client.query(node.query, "ALTER TABLE analytics.events " <> ddl)
+    end
+
+    assert rows(node, "SELECT id, host FROM analytics.events ORDER BY id") == [
+             %{"id" => 1, "host" => "H1"},
+             %{"id" => 2, "host" => "H2"},
+             %{"id" => 3, "host" => "H3"}
+           ]
   end
 end
