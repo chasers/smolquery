@@ -60,8 +60,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   - **The count.** The query service plans `SELECT * FROM db.t` without
     running it (`explain: :plan`), and the plan's sizes give the rows in both
     tiers, hot included, with no scan. `@count_concurrency` run at a time, so
-    the counts do not take every job slot, each under the request's own
-    `max_execution_time`.
+    the counts do not take every job slot, and all of them together under
+    the request's own `max_execution_time`: one deadline across the
+    fan-out, so a statement over 256 tables takes the time one statement
+    may, not 128 times it, and is code 159 when it runs out.
   - **A count that cannot be had** — a full node, a timeout, a table the
     query service cannot plan — refuses the statement, with `retry-after`.
     A `NULL` there would be read as "this source has no data".
@@ -236,8 +238,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   end
 
   defp counted(query_name, refs, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
     refs
-    |> Task.async_stream(&{&1, count(query_name, &1, timeout_ms)},
+    |> Task.async_stream(&{&1, count_before(query_name, &1, deadline)},
       max_concurrency: @count_concurrency,
       timeout: :infinity
     )
@@ -245,6 +249,13 @@ defmodule SmolqueryClickHouse.SystemCatalog do
       {:ok, {ref, {:ok, rows}}}, {:ok, counts} -> {:cont, {:ok, Map.put(counts, ref, rows)}}
       {:ok, {ref, {:error, reason}}}, _counts -> {:halt, {:error, uncounted(ref, reason)}}
     end)
+  end
+
+  defp count_before(query_name, ref, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left > 0 -> count(query_name, ref, left)
+      _spent -> {:error, :deadline}
+    end
   end
 
   defp count(query_name, {dataset, table}, timeout_ms) do
@@ -261,6 +272,12 @@ defmodule SmolqueryClickHouse.SystemCatalog do
         {:error, reason}
     end
   end
+
+  defp uncounted(_ref, :deadline),
+    do:
+      {500, 159, "TIMEOUT_EXCEEDED",
+       "Timeout exceeded: total_rows could not be counted for every table the statement reads " <>
+         "within max_execution_time; name the tables it should be read from", nil}
 
   defp uncounted({dataset, table}, :too_many_jobs),
     do:

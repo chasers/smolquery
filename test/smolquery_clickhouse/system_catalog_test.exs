@@ -419,6 +419,16 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
       assert response.resp_body =~ "SMOLQUERY_CLICKHOUSE_TOTAL_ROWS_MAX_TABLES"
     end
 
+    test "the counts share one deadline, the statement's own, and running out is code 159 (review of T-513)",
+         %{name: name} do
+      sql = "SELECT sum(total_rows) AS n FROM system.tables WHERE name = 'otel_logs'"
+
+      assert {:error, {500, 159, "TIMEOUT_EXCEEDED", message, nil}} =
+               SystemCatalog.answer(name, sql, "default", timeout_ms: 0)
+
+      assert message =~ "name the tables"
+    end
+
     test "the cap is the runtime's, 256 unless set: HyperDX sums every table with no WHERE (T-513)" do
       assert Runtime.new(name: :cap_default, password: "p").total_rows_max_tables == 256
 
