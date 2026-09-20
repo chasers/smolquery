@@ -62,9 +62,35 @@ defmodule SmolqueryClickHouse.ParamsTest do
   end
 
   test "a placeholder in a literal, a quoted name or a comment stays as written" do
-    sql = ~S|SELECT '{a:Int32}', "{a:Int32}", `{a:Int32}` -- {a:Int32}|
+    sql = ~S|SELECT '{a:Int32}', "{a:Int32}" -- {a:Int32}|
 
     assert Params.substitute(sql, %{}) == {:ok, sql}
+  end
+
+  test "a written literal is the engine's: quotes doubled, a backslash a character" do
+    assert Params.substitute("SELECT {p:String}, {q:String}", %{
+             "param_p" => ~S|x\\|,
+             "param_q" => " OR 1=1 --"
+           }) ==
+             {:ok, ~S|SELECT 'x\', ' OR 1=1 --'|}
+
+    assert Params.substitute("SELECT {p:String}", %{"param_p" => ~S|C:\\new|}) ==
+             {:ok, ~S|SELECT 'C:\new'|}
+  end
+
+  test "a negative number is parenthesized, so a minus before it is not a comment" do
+    assert Params.substitute("SELECT x -{n:Int32}, {f:Float64}", %{
+             "param_n" => "-5",
+             "param_f" => "-1e3"
+           }) ==
+             {:ok, "SELECT x -(-5), (-1e3)"}
+  end
+
+  test "a type with a quoted argument is one placeholder" do
+    assert Params.substitute("SELECT {t:DateTime64(3, 'UTC')}", %{
+             "param_t" => "2026-09-19 10:11:12.5"
+           }) ==
+             {:ok, "SELECT CAST('2026-09-19 10:11:12.5' AS TIMESTAMP)"}
   end
 
   test "a struct literal is not a placeholder" do

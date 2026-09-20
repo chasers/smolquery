@@ -41,11 +41,13 @@ defmodule SmolqueryClickHouse.Query do
 
   ## Parameters and quoting
 
-  `{name:Type}` placeholders are filled from the request's `param_<name>`
-  values (`SmolqueryClickHouse.Params`). Backquoted identifiers and
-  ClickHouse's backslash escapes are then written the way the engine reads
-  them (`Statement.standard_quoting/1`), so a statement a ClickHouse client
-  quoted for ClickHouse parses here.
+  Backquoted identifiers and ClickHouse's backslash escapes are written the
+  way the engine reads them (`Statement.standard_quoting/1`), so a statement
+  a ClickHouse client quoted for ClickHouse parses here. `{name:Type}`
+  placeholders are then filled from the request's `param_<name>` values
+  (`SmolqueryClickHouse.Params`), in that order: a literal written from a
+  parameter is never read under ClickHouse's escape rules, or a value
+  ending in a backslash would reopen it.
 
   ## Refusals
 
@@ -97,8 +99,9 @@ defmodule SmolqueryClickHouse.Query do
          :ok <- writable(statement, Keyword.get(opts, :read_only, false)),
          {:ok, format} <- format(clause, conn),
          {:ok, timeout} <- timeout(Map.merge(conn.query_params, settings)),
-         {:ok, statement} <- Params.substitute(statement, conn.query_params) do
-      run(conn, runtime, statement |> Statement.standard_quoting() |> rewrite(), format, timeout)
+         {:ok, statement} <-
+           statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
+      run(conn, runtime, rewrite(statement), format, timeout)
     else
       {:error, exception} -> Errors.send_exception(conn, exception)
     end

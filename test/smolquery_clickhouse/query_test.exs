@@ -206,4 +206,61 @@ defmodule SmolqueryClickHouse.QueryTest do
       assert exception_code(response) == ["456"]
     end
   end
+
+  describe "a parameter's value is a value, whatever it holds (review of T-481)" do
+    defp with_params(name, sql, params) do
+      query = Map.new(params, fn {key, value} -> {"param_" <> key, value} end)
+
+      conn(:post, "/?" <> URI.encode_query(query), sql) |> request(name)
+    end
+
+    test "a trailing backslash cannot open the literal to the next parameter's text", %{
+      name: name
+    } do
+      sql = "SELECT {p:String} AS p, {q:String} AS q FORMAT JSONEachRow"
+
+      response = with_params(name, sql, %{"p" => "x\\\\", "q" => " OR 1=1 --"})
+
+      assert response.status == 200
+      assert JSON.decode!(response.resp_body) == %{"p" => "x\\", "q" => " OR 1=1 --"}
+    end
+
+    test "a value is unescaped once: an escaped backslash before n is not a newline", %{
+      name: name
+    } do
+      response =
+        with_params(name, "SELECT {p:String} AS p FORMAT JSONEachRow", %{"p" => "C:\\\\new"})
+
+      assert JSON.decode!(response.resp_body) == %{"p" => "C:\\new"}
+    end
+
+    test "an Identifier holding a backslash and a quote names one column", %{name: name} do
+      response =
+        with_params(name, "SELECT 1 AS {c:Identifier} FORMAT JSONEachRow", %{
+          "c" => "a\\\" , 2 AS \"b"
+        })
+
+      assert JSON.decode!(response.resp_body) == %{"a\\\" , 2 AS \"b" => 1}
+    end
+
+    test "a negative number after a minus sign is not a comment", %{name: name} do
+      response =
+        with_params(name, "SELECT 10 -{n:Int32} AS v, 1 -{f:Float64} AS w", %{
+          "n" => "-5",
+          "f" => "-0.5"
+        })
+
+      assert response.resp_body == "15\t1.5\n"
+    end
+
+    test "a type with a quoted argument is still a placeholder", %{name: name} do
+      response =
+        with_params(name, "SELECT {t:DateTime64(3, 'UTC')} AS t FORMAT JSONEachRow", %{
+          "t" => "2026-09-19 10:11:12.5"
+        })
+
+      assert response.status == 200, response.resp_body
+      assert response.resp_body =~ "2026-09-19 10:11:12.5"
+    end
+  end
 end

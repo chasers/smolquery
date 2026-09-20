@@ -14,6 +14,18 @@ defmodule SmolqueryClickHouse.Params do
   identifier or a comment stays as written. One parameter may fill many
   placeholders.
 
+  ## A value stays a value
+
+  `substitute/2` takes a statement whose quoting is already the engine's
+  (`Statement.standard_quoting/1`), and what it writes is the engine's too:
+  quotes doubled, a backslash a character. Nothing reads a written literal
+  under ClickHouse's escape rules afterwards. Done the other way round — the
+  literals written first, the quoting normalized after — a value ending in
+  a backslash swallowed its closing quote, and the next parameter's text ran
+  as SQL. A value is unescaped once, from the escaped form it arrives in.
+  A negative number is written in parentheses, since `x -{n:Int32}` with
+  `-5` is otherwise `x --5`, a comment.
+
   ## Types
 
   | type | value | written as |
@@ -42,7 +54,7 @@ defmodule SmolqueryClickHouse.Params do
   alias SmolqueryClickHouse.Statement
   alias SmolqueryPg.Sql
 
-  @placeholder ~r/\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Z][A-Za-z0-9]*(?:\([^{}]*\))?)\s*\}/
+  @placeholder ~r/\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Z][A-Za-z0-9]*(?:\((?:[^{}'()]|'[^']*')*\))?)\s*\}/
 
   @integers ~w(Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64)
   @floats ~w(Float32 Float64)
@@ -56,33 +68,57 @@ defmodule SmolqueryClickHouse.Params do
   @spec substitute(String.t(), %{optional(String.t()) => String.t()}) ::
           {:ok, String.t()} | {:error, Errors.t()}
   def substitute(statement, params) when is_binary(statement) and is_map(params) do
-    tokens = Sql.tokens(statement, dialect: :clickhouse)
+    code = code_ranges(statement)
 
-    with {:ok, literals} <- literals(tokens, params) do
-      {:ok, Enum.map_join(tokens, &fill(&1, literals))}
+    placeholders =
+      @placeholder
+      |> Regex.scan(statement, return: :index)
+      |> Enum.filter(fn [{start, _length} | _groups] -> in_code?(code, start) end)
+
+    with {:ok, written} <- written(placeholders, statement, params) do
+      {:ok, splice(statement, written, 0, [])}
     end
   end
 
-  defp literals(tokens, params) do
-    placeholders =
-      for {:code, code} <- tokens,
-          [match, name, type] <- Regex.scan(@placeholder, code),
-          uniq: true,
-          do: {match, name, type}
+  defp code_ranges(statement) do
+    statement
+    |> Sql.tokens()
+    |> Enum.map_reduce(0, fn {kind, text}, offset ->
+      {{kind, offset, offset + byte_size(text)}, offset + byte_size(text)}
+    end)
+    |> elem(0)
+    |> Enum.filter(fn {kind, _from, _to} -> kind == :code end)
+  end
 
-    Enum.reduce_while(placeholders, {:ok, %{}}, fn {match, name, type}, {:ok, acc} ->
-      case literal(name, type, params) do
-        {:ok, text} -> {:cont, {:ok, Map.put(acc, match, text)}}
+  defp in_code?(ranges, offset),
+    do: Enum.any?(ranges, fn {:code, from, to} -> offset >= from and offset < to end)
+
+  defp written(placeholders, statement, params) do
+    Enum.reduce_while(placeholders, {:ok, []}, fn [{start, length}, name, type], {:ok, acc} ->
+      case literal(part(statement, name), part(statement, type), params) do
+        {:ok, text} -> {:cont, {:ok, [{start, length, text} | acc]}}
         {:error, exception} -> {:halt, {:error, exception}}
       end
     end)
+    |> case do
+      {:ok, written} -> {:ok, Enum.reverse(written)}
+      error -> error
+    end
   end
 
-  defp fill({:code, code}, literals),
-    do:
-      Regex.replace(@placeholder, code, fn match, _name, _type -> Map.fetch!(literals, match) end)
+  defp part(statement, {start, length}), do: binary_part(statement, start, length)
 
-  defp fill({_kind, text}, _literals), do: text
+  defp splice(statement, [], from, acc) do
+    rest = binary_part(statement, from, byte_size(statement) - from)
+
+    IO.iodata_to_binary(Enum.reverse([rest | acc]))
+  end
+
+  defp splice(statement, [{start, length, text} | rest], from, acc) do
+    before = binary_part(statement, from, start - from)
+
+    splice(statement, rest, start + length, [text, before | acc])
+  end
 
   defp literal(name, type, params) do
     case Map.fetch(params, "param_" <> name) do
@@ -110,7 +146,7 @@ defmodule SmolqueryClickHouse.Params do
 
   defp write(type, value, name) when type in @integers do
     case Integer.parse(value) do
-      {integer, ""} -> {:ok, Integer.to_string(integer)}
+      {integer, ""} -> {:ok, signed(Integer.to_string(integer))}
       _invalid -> {:error, bad_value(name, type, value)}
     end
   end
@@ -140,9 +176,12 @@ defmodule SmolqueryClickHouse.Params do
 
   defp number(type, value, name) do
     if Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\z/, value),
-      do: {:ok, value},
+      do: {:ok, signed(value)},
       else: {:error, bad_value(name, type, value)}
   end
+
+  defp signed("-" <> _digits = number), do: "(" <> number <> ")"
+  defp signed(number), do: number
 
   defp unknown(name),
     do:
