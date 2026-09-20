@@ -353,4 +353,15 @@ defmodule Smolquery.DdlTest do
                Ddl.parse("ALTER TABLE a.t DROP COLUMN 42")
     end
   end
+
+  describe "review of T-503" do
+    test "a closed quoted name with a multi-byte character is refused as an identifier, not as unterminated" do
+      assert {:error, {:invalid_identifier, "tablé"}} =
+               Ddl.parse(~s|ALTER TABLE ds."tablé" ADD COLUMN x INT|)
+    end
+
+    test "whitespace after a final semicolon may be any Unicode space, as it was" do
+      assert {:ok, %AlterTable{}} = Ddl.parse("ALTER TABLE a.t DROP COLUMN x; \n")
+    end
+  end
 end

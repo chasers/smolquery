@@ -421,7 +421,7 @@ defmodule Smolquery.Ddl do
     do: scan(Sql.skip_trivia(rest), [{:int, String.to_integer(digits)} | acc])
 
   defp token({:symbol, ";", rest}, _text, acc) do
-    if Sql.skip_trivia(rest) == "",
+    if rest |> Sql.skip_trivia() |> String.trim() == "",
       do: {:ok, Enum.reverse(acc), ""},
       else: {:error, :multiple_statements}
   end

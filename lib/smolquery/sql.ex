@@ -299,10 +299,12 @@ defmodule Smolquery.Sql do
   defp quoted_token(<<?", ?", rest::binary>>, acc), do: quoted_token(rest, [?" | acc])
 
   defp quoted_token(<<?", rest::binary>>, acc),
-    do: {:quoted, acc |> Enum.reverse() |> List.to_string(), rest}
+    do: {:quoted, acc |> Enum.reverse() |> IO.iodata_to_binary(), rest}
 
   defp quoted_token(<<char, rest::binary>>, acc), do: quoted_token(rest, [char | acc])
-  defp quoted_token(<<>>, acc), do: {:quoted, acc |> Enum.reverse() |> List.to_string(), <<>>}
+
+  defp quoted_token(<<>>, acc),
+    do: {:quoted, acc |> Enum.reverse() |> IO.iodata_to_binary(), <<>>}
 
   defp digits(<<digit, rest::binary>>, acc) when digit in ?0..?9,
     do: digits(rest, [digit | acc])

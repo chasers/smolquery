@@ -49,4 +49,11 @@ defmodule Smolquery.SqlTest do
                "SELECT `x`, y"
     end
   end
+
+  describe "next_token/1 (review of T-503)" do
+    test "a quoted name keeps its bytes: a multi-byte character is itself, not mojibake" do
+      assert Sql.next_token(~s|"tablé" rest|) == {:quoted, "tablé", " rest"}
+      assert Sql.next_token(~s|"日本""語"|) == {:quoted, ~s|日本"語|, ""}
+    end
+  end
 end
