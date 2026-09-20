@@ -49,7 +49,12 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
 
     start_supervised!(
       {SmolqueryClickHouse.Supervisor,
-       name: name, password: @password, query_name: query, port: 0, catalog: catalog},
+       name: name,
+       password: @password,
+       query_name: query,
+       port: 0,
+       catalog: catalog,
+       total_rows_max_tables: 32},
       id: name
     )
 
@@ -411,6 +416,14 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
 
       assert response.status == 400
       assert response.resp_body =~ "at most 32 tables"
+      assert response.resp_body =~ "SMOLQUERY_CLICKHOUSE_TOTAL_ROWS_MAX_TABLES"
+    end
+
+    test "the cap is the runtime's, 256 unless set: HyperDX sums every table with no WHERE (T-513)" do
+      assert Runtime.new(name: :cap_default, password: "p").total_rows_max_tables == 256
+
+      assert Runtime.new(name: :cap_set, password: "p", total_rows_max_tables: 1_000).total_rows_max_tables ==
+               1_000
     end
   end
 end

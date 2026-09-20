@@ -100,6 +100,15 @@ if clickhouse_port = System.get_env("SMOLQUERY_CLICKHOUSE_PORT") do
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_CLICKHOUSE_PORT", clickhouse_port)
 end
 
+if clickhouse_total_rows_max_tables = System.get_env("SMOLQUERY_CLICKHOUSE_TOTAL_ROWS_MAX_TABLES") do
+  config :smolquery, SmolqueryClickHouse,
+    total_rows_max_tables:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_CLICKHOUSE_TOTAL_ROWS_MAX_TABLES",
+        clickhouse_total_rows_max_tables
+      )
+end
+
 if clickhouse_unanswered_log = System.get_env("SMOLQUERY_CLICKHOUSE_UNANSWERED_LOG") do
   config :smolquery, SmolqueryClickHouse,
     unanswered_log:

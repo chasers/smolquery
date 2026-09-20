@@ -55,7 +55,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     and the engine runs what is left, so `name != 'x'`, `name LIKE 'otel%'`
     and `database = 'default'` each select what they say. That holds for one
     `SELECT` over `system.tables` alone; any other shape gets no counts. More
-    than `@max_counted_tables` tables is a refusal that says so, never a
+    than the runtime's `total_rows_max_tables` tables is a refusal that says so, never a
     partial sum.
   - **The count.** The query service plans `SELECT * FROM db.t` without
     running it (`explain: :plan`), and the plan's sizes give the rows in both
@@ -125,7 +125,6 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   @call_timeout_ms 30_000
   @statement_timeout_ms 10_000
   @max_rows 10_000
-  @max_counted_tables 32
   @emulated_type "CASE data_type WHEN 'VARCHAR' THEN 'String' WHEN 'UTINYINT' THEN 'UInt8' " <>
                    "WHEN 'UBIGINT' THEN 'UInt64' WHEN 'BIGINT' THEN 'Int64' ELSE data_type END"
   @count_concurrency 2
@@ -320,9 +319,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   def handle_call({:counted_tables, statement}, _from, state) do
     with {:ok, state} <- ensure_fresh(state),
          {:ok, ast, _canonical} <- CatalogEmulation.serialize(state.engine, renamed(statement)),
-         {:ok, probe} <- counted_probe(ast, state.columns),
+         limit = state.runtime.total_rows_max_tables,
+         {:ok, probe} <- counted_probe(ast, state.columns, limit),
          {:ok, result} <- Engine.query(state.engine, probe) do
-      {:reply, within_limit(result.rows), state}
+      {:reply, within_limit(result.rows, limit), state}
     else
       _not_countable -> {:reply, {:ok, []}, state}
     end
@@ -335,7 +335,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     end
   end
 
-  defp counted_probe(%{"statements" => [%{"node" => node} = statement]} = ast, columns) do
+  defp counted_probe(%{"statements" => [%{"node" => node} = statement]} = ast, columns, limit) do
     with %{"type" => "SELECT_NODE", "from_table" => %{"type" => "BASE_TABLE"} = from} <- node,
          "system_tables" <- String.downcase(from["table_name"]),
          true <- node["cte_map"]["map"] in [nil, []] do
@@ -355,22 +355,24 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
       {:ok,
        "SELECT DISTINCT * FROM query(json_deserialize_sql(#{Identifier.sql_string(json)})) " <>
-         "LIMIT #{@max_counted_tables + 1}"}
+         "LIMIT #{limit + 1}"}
     else
       _another_shape -> :error
     end
   end
 
-  defp counted_probe(_ast, _columns), do: :error
+  defp counted_probe(_ast, _columns, _limit), do: :error
 
-  defp within_limit(rows) when length(rows) > @max_counted_tables,
+  defp within_limit(rows, limit) when length(rows) > limit,
     do:
       {:error,
        {400, 36, "BAD_ARGUMENTS",
-        "total_rows is answered for at most #{@max_counted_tables} tables, and this statement reads it " <>
-          "from more; name the tables it should be read from", nil}}
+        "total_rows is answered for at most #{limit} tables, and this statement reads it " <>
+          "from more; name the tables it should be read from, or raise " <>
+          "SMOLQUERY_CLICKHOUSE_TOTAL_ROWS_MAX_TABLES", nil}}
 
-  defp within_limit(rows), do: {:ok, Enum.map(rows, fn [dataset, table] -> {dataset, table} end)}
+  defp within_limit(rows, _limit),
+    do: {:ok, Enum.map(rows, fn [dataset, table] -> {dataset, table} end)}
 
   defp read(statement, database) do
     cond do

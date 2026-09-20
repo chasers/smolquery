@@ -42,6 +42,12 @@ defmodule SmolqueryClickHouse.Runtime do
   (`SmolqueryClickHouse.Unanswered`, T-480): `:redacted`, the default, with
   its string literals replaced; `:verbatim`; or `:off`.
 
+  `total_rows_max_tables` is the most tables one statement may read
+  `system.tables.total_rows` from (T-513, `256`): each is one plan in the
+  query service, two at a time. HyperDX sums it over every table with no
+  `WHERE`, so it has to cover the deployment's table count; a statement
+  over more is refused rather than summed short.
+
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
   query runs through (T-478).
@@ -61,6 +67,7 @@ defmodule SmolqueryClickHouse.Runtime do
     max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil,
     unanswered_log: :redacted,
+    total_rows_max_tables: 256,
     ip: {127, 0, 0, 1},
     port: 8123
   ]
@@ -76,6 +83,7 @@ defmodule SmolqueryClickHouse.Runtime do
           insert_max_in_flight_bytes: pos_integer() | nil,
           ip: :inet.ip_address(),
           unanswered_log: :redacted | :verbatim | :off,
+          total_rows_max_tables: pos_integer(),
           port: :inet.port_number()
         }
 
@@ -122,6 +130,7 @@ defmodule SmolqueryClickHouse.Runtime do
         :ingest_name,
         :query_name,
         :unanswered_log,
+        :total_rows_max_tables,
         :ip,
         :port | @api_defaults
       ])
