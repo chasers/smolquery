@@ -6,11 +6,25 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   A ClickHouse client writes `toStartOfInterval(toDateTime(Timestamp),
   INTERVAL 1 minute)`, and the engine knows `time_bucket`. The names do not
   collide — ClickHouse's are camelCase compounds DuckDB has none of — so a
-  macro per name lets the client's SQL run as written, with no rewrite and
-  no cost to a statement that calls none. The macros live in the query
-  service, not in the ClickHouse edge, because a job engine may run on a
-  node the edge is not on (`Smolquery.QueryService.JobEngine.options/1`);
+  macro per name lets the client's SQL run as written, with no rewrite.
+
+  ## Only the statement that names one pays for it
+
+  Defining all of them costs a fresh engine 26 ms (74 statements, measured
+  2026-09-20), which every query would pay, from every edge. So none is
+  defined at engine start. `statements_for/1` reads the SQL a job is about
+  to run and answers the definitions of the functions it names — three for
+  HyperDX's histogram, none for a statement written in the engine's own
+  dialect, which pays one scan of its text. The runner defines them on the
+  job's engine before it plans (the Top-N probe runs the statement's
+  `WHERE`), and a scatter worker does the same for its partial SQL, so the
+  macros are wherever the statement runs, on whatever node. They live in the
+  query service, not in the ClickHouse edge, for that reason.
   `Runtime.clickhouse_functions` switches them off.
+
+  A name is matched without regard to case, as the engine resolves it, and
+  only before a `(`. A column or a table of the same name defines a macro
+  nobody calls, which costs a fraction of a millisecond and changes nothing.
 
   Only what DuckDB's parser accepts as an ordinary call is here. Syntax it
   refuses — `quantile(0.95)(x)`, `CAST(x, 'Float64')` — is rewritten on the
@@ -132,14 +146,35 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
               ]
             end)
 
+  @definitions Map.new(@macros, fn {signature, body} ->
+                 name = signature |> String.split("(", parts: 2) |> hd()
+
+                 {String.downcase(name), "CREATE OR REPLACE MACRO #{signature} AS #{body}"}
+               end)
+
+  @called Regex.compile!(
+            "(?<![\\w.\"])(" <>
+              Enum.map_join(Map.keys(@definitions), "|", &Regex.escape/1) <> ")\\s*\\(",
+            "i"
+          )
+
   @doc """
   The `CREATE OR REPLACE MACRO` statements, one per function.
   """
   @spec statements() :: [String.t()]
-  def statements do
-    Enum.map(@macros, fn {signature, body} ->
-      "CREATE OR REPLACE MACRO #{signature} AS #{body}"
-    end)
+  def statements, do: @definitions |> Map.values() |> Enum.sort()
+
+  @doc """
+  The definitions of the functions `sql` names, and no others.
+  """
+  @spec statements_for(String.t()) :: [String.t()]
+  def statements_for(sql) when is_binary(sql) do
+    @called
+    |> Regex.scan(sql, capture: :all_but_first)
+    |> Enum.map(fn [name] -> String.downcase(name) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(&Map.fetch!(@definitions, &1))
   end
 
   @doc """

@@ -45,6 +45,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
@@ -90,6 +91,7 @@ defmodule Smolquery.QueryService.PartialWorker do
       {:ok, engine, _source} ->
         try do
           with :ok <- apply_statements(engine.connection, settings(runtime)),
+               :ok <- apply_statements(engine.connection, functions(runtime, request.partial_sql)),
                {:ok, files} <- described(engine.connection, request.files),
                :ok <-
                  apply_statements(
@@ -174,6 +176,9 @@ defmodule Smolquery.QueryService.PartialWorker do
       threads -> limit ++ ["SET threads = #{threads}"]
     end
   end
+
+  defp functions(%Runtime{clickhouse_functions: false}, _sql), do: []
+  defp functions(%Runtime{}, sql), do: ClickHouseFunctions.statements_for(sql)
 
   defp apply_statements(connection, statements) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->

@@ -80,6 +80,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Federation
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.JobEngine
@@ -329,7 +330,8 @@ defmodule Smolquery.QueryService.Runner do
   defp execute(runtime, connection, sql, explain, opts, job_id, timeout_ms) do
     started = System.monotonic_time(:millisecond)
 
-    with {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
+    with :ok <- define_functions(runtime, connection, sql),
+         {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
@@ -495,6 +497,17 @@ defmodule Smolquery.QueryService.Runner do
 
   defp sql_list(values) do
     "[" <> Enum.map_join(values, ", ", &Smolquery.Identifier.sql_string/1) <> "]"
+  end
+
+  defp define_functions(%Runtime{clickhouse_functions: false}, _connection, _sql), do: :ok
+
+  defp define_functions(%Runtime{}, connection, sql) do
+    Enum.reduce_while(ClickHouseFunctions.statements_for(sql), :ok, fn statement, :ok ->
+      case Connection.query(connection, statement, [], :infinity) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp run_statements(connection, plan, statements) do

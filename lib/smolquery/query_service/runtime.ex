@@ -83,12 +83,12 @@ defmodule Smolquery.QueryService.Runtime do
   `%Smolquery.Catalog{}` handle must pass the bootstrap too, or job engines
   see no sealed tier.
 
-  `clickhouse_functions` is whether each job engine defines ClickHouse's
-  function names as macros (`Smolquery.QueryService.ClickHouseFunctions`),
-  so the SQL a ClickHouse client generates runs as written. On by default:
-  the names collide with none of DuckDB's, and a deployment with no
-  ClickHouse client can switch them off to save the definitions at engine
-  start.
+  `clickhouse_functions` is whether a job defines the ClickHouse function
+  names its statement calls, as macros
+  (`Smolquery.QueryService.ClickHouseFunctions`), so the SQL a ClickHouse
+  client generates runs as written. On by default: the names collide with
+  none of DuckDB's, and a statement that calls none pays one scan of its
+  text. Nothing is defined at engine start.
 
   `history_metadata` is where `QueryService.History` durably records terminal
   jobs (PL-8 D8) — by default the same `sqlite:` database the catalog

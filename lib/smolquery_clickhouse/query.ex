@@ -8,8 +8,8 @@ defmodule SmolqueryClickHouse.Query do
 
   The statement runs as the API and the Postgres wire run theirs: the same
   planner, the same two tiers, the same result cap. ClickHouse's dialect is
-  met part of the way. Its function names are macros every job engine
-  defines (`Smolquery.QueryService.ClickHouseFunctions`), and the syntax the
+  met part of the way. Its function names are macros a job defines when its
+  statement names them (`Smolquery.QueryService.ClickHouseFunctions`), and the syntax the
   engine's parser refuses is rewritten first (`SmolqueryClickHouse.Rewrite`).
   What neither covers fails as the engine reports it;
   `docs/clickhouse-sql-gaps.md` lists what that is.

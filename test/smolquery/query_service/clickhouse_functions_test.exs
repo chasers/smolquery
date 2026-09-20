@@ -196,4 +196,50 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert one(engine, "lowCardinalityKeys('x')") == "x"
     end
   end
+
+  describe "statements_for/1" do
+    test "answers the definitions of the functions a statement names, and no others" do
+      sql =
+        "SELECT count(),SeverityText,toStartOfInterval(toDateTime(Timestamp), INTERVAL 1 minute) AS b " <>
+          "FROM t WHERE Timestamp >= fromUnixTimestamp64Milli(1) AND Timestamp <= fromUnixTimestamp64Milli(2)"
+
+      assert [from_unix, to_date_time, to_start] = ClickHouseFunctions.statements_for(sql)
+
+      assert from_unix =~ "MACRO fromUnixTimestamp64Milli(x)"
+      assert to_date_time =~ "MACRO toDateTime(x)"
+      assert to_start =~ "MACRO toStartOfInterval(x, i)"
+    end
+
+    test "a statement in the engine's own dialect defines nothing" do
+      assert ClickHouseFunctions.statements_for(
+               "SELECT count(*), date_trunc('hour', ts) FROM logs GROUP BY 2"
+             ) ==
+               []
+    end
+
+    test "reads a name in any case, as the engine resolves it, and only before a parenthesis" do
+      assert [statement] =
+               ClickHouseFunctions.statements_for("SELECT tofloat64ordefault(tostring(x))") --
+                 ClickHouseFunctions.statements_for("SELECT toString(x)")
+
+      assert statement =~ "toFloat64OrDefault"
+
+      assert ClickHouseFunctions.statements_for("SELECT has, t.match, \"uniq\" FROM t") == []
+      assert ClickHouseFunctions.statements_for("SELECT my_has(x), t.uniq(x)") == []
+    end
+
+    test "every definition it can answer is one of statements/0", %{engine: engine} do
+      all = ClickHouseFunctions.statements()
+
+      for name <- ClickHouseFunctions.names() do
+        assert [statement] = ClickHouseFunctions.statements_for("SELECT #{name}(x)")
+        assert statement in all
+      end
+
+      Enum.each(
+        ClickHouseFunctions.statements_for("SELECT toDate(x), uniq(y)"),
+        &Engine.query!(engine, &1)
+      )
+    end
+  end
 end
