@@ -103,7 +103,15 @@ defmodule Smolquery.BufferService.SupervisorTest do
              Process.whereis(Runtime.registry(name)) not in [nil, registry]
            end)
 
+    assert Eventually.until(fn -> partitions_answer?(name) end)
+
     assert {:ok, _ack} = write(name)
+  end
+
+  defp partitions_answer?(name) do
+    PartitionSupervisor.partitions(Runtime.buffers(name)) > 0
+  rescue
+    ArgumentError -> false
   end
 
   test "a buffer crashing leaves the rest of the subtree alone", context do
