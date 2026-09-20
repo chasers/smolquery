@@ -59,3 +59,12 @@ jobs:
           kubectl --context kind-smolquery -n smolquery describe pods
           kubectl --context kind-smolquery -n smolquery logs -l app=smolquery-buffer \
             --tail=200 --prefix --all-containers
+          # The rollout wait most often times out on smolquery-api (T-505). Its
+          # pods are the ones whose logs say why: the running container's, and
+          # the one before it, since a pod that crashed at boot has restarted.
+          for app in smolquery-api smolquery-storage postgres; do
+            kubectl --context kind-smolquery -n smolquery logs -l app=$app \
+              --tail=200 --prefix --all-containers || true
+            kubectl --context kind-smolquery -n smolquery logs -l app=$app \
+              --tail=200 --prefix --all-containers --previous || true
+          done
