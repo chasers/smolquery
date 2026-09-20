@@ -314,6 +314,16 @@ defmodule Smolquery.QueryService.DecomposerTest do
                  "SELECT count(*) FROM analytics.events WHERE ts >= now() - INTERVAL 1 HOUR"
                )
 
+      for name <- ~w(rand rand32 rand64 randCanonical) do
+        assert {:volatile_function, _rand} =
+                 refused("SELECT count(*) FROM analytics.events WHERE #{name}() > 0.5")
+      end
+
+      assert {:volatile_function, "rand"} =
+               refused(
+                 "SELECT count(*) FROM analytics.events WHERE cityHash64(ts, rand()) % 2 = 0"
+               )
+
       assert {:volatile_function, "random"} =
                refused("SELECT count(*) FROM analytics.events WHERE value > random()")
 

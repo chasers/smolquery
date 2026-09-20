@@ -329,6 +329,16 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
                rows(engine, "SELECT rand() AS a, rand() AS b, randCanonical() AS c")
 
       assert is_integer(a) and a >= 0 and a < 4_294_967_296
+
+      assert [%{"odd" => odd, "high" => high}] =
+               rows(
+                 engine,
+                 "SELECT count(*) FILTER (WHERE rand64() % 2 = 1) AS odd, " <>
+                   "count(*) FILTER (WHERE rand64() > 4294967296) AS high FROM range(2000)"
+               )
+
+      assert odd > 800 and odd < 1200
+      assert high > 1900
       assert a != b
       assert c >= 0.0 and c < 1.0
     end

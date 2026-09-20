@@ -79,6 +79,7 @@ defmodule Smolquery.QueryService.Decomposer do
   """
 
   alias Smolquery.Engine.Connection
+  alias Smolquery.QueryService.ClickHouseFunctions
 
   @mergeable ~w(count_star count sum min max)
   @aggregates ["avg" | @mergeable]
@@ -241,12 +242,14 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp volatile_macros, do: Enum.map(ClickHouseFunctions.volatile(), &String.downcase/1)
+
   defp gate_volatile(node) do
     volatile =
       node
       |> Map.take(["select_list", "where_clause", "group_expressions"])
       |> collect_values("function_name", [])
-      |> Enum.find(&(&1 in @volatile))
+      |> Enum.find(&(&1 in @volatile or &1 in volatile_macros()))
 
     case volatile do
       nil -> :ok

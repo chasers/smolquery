@@ -188,21 +188,24 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
               ]
             end)
 
+  @uint32_draw "CAST(floor(random() * 4294967296) AS UINTEGER)"
+
   @volatile [
-    {"rand()", "CAST(floor(random() * 4294967296) AS UINTEGER)"},
-    {"rand32()", "CAST(floor(random() * 4294967296) AS UINTEGER)"},
-    {"rand64()", "CAST(floor(random() * 18446744073709551615) AS UBIGINT)"},
+    {"rand()", @uint32_draw},
+    {"rand32()", @uint32_draw},
+    {"rand64()", "(CAST(#{@uint32_draw} AS UBIGINT) << 32) | CAST(#{@uint32_draw} AS UBIGINT)"},
     {"randCanonical()", "random()"}
   ]
 
-  @stable_names MapSet.new(@macros, fn {signature, _body} ->
-                  signature |> String.split("(", parts: 2) |> hd() |> String.downcase()
-                end)
+  name_of = fn {signature, _body} -> signature |> String.split("(", parts: 2) |> hd() end
 
-  @definitions Map.new(@macros ++ @volatile, fn {signature, body} ->
-                 name = signature |> String.split("(", parts: 2) |> hd()
+  @names Enum.map(@macros, name_of)
+  @volatile_names Enum.map(@volatile, name_of)
+  @stable_names MapSet.new(@names, &String.downcase/1)
 
-                 {String.downcase(name), "CREATE OR REPLACE MACRO #{signature} AS #{body}"}
+  @definitions Map.new(@macros ++ @volatile, fn {signature, body} = macro ->
+                 {String.downcase(name_of.(macro)),
+                  "CREATE OR REPLACE MACRO #{signature} AS #{body}"}
                end)
 
   @called Regex.compile!(
@@ -242,19 +245,11 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   defined like the rest, and never vouched for by `stable?/1`.
   """
   @spec volatile() :: [String.t()]
-  def volatile do
-    Enum.map(@volatile, fn {signature, _body} ->
-      signature |> String.split("(", parts: 2) |> hd()
-    end)
-  end
+  def volatile, do: @volatile_names
 
   @doc """
   The names defined, as ClickHouse spells them.
   """
   @spec names() :: [String.t()]
-  def names do
-    Enum.map(@macros, fn {signature, _body} ->
-      signature |> String.split("(", parts: 2) |> hd()
-    end)
-  end
+  def names, do: @names
 end
