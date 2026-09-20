@@ -33,16 +33,25 @@ defmodule SmolqueryClickHouse.Runtime do
   node running both the `:api` and `:clickhouse` roles holds two counters,
   each with that limit.
 
+  `catalog` is what the `system` emulation lists tables from
+  (`SmolqueryClickHouse.SystemCatalog`, T-482): a `Smolquery.Catalog` given
+  outright, or the options of a lake the edge reads through its own engine,
+  as the Postgres edge's is.
+
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
   query runs through (T-478).
   """
+
+  alias Smolquery.Catalog
 
   @enforce_keys [:name, :password]
   @derive {Inspect, except: [:password]}
   defstruct [
     :name,
     :password,
+    :catalog,
+    :catalog_opts,
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
     max_ndjson_bytes: 8_000_000,
@@ -54,6 +63,8 @@ defmodule SmolqueryClickHouse.Runtime do
   @type t :: %__MODULE__{
           name: atom(),
           password: String.t(),
+          catalog: Catalog.t(),
+          catalog_opts: keyword() | nil,
           ingest_name: atom(),
           query_name: atom(),
           max_ndjson_bytes: pos_integer(),
@@ -82,8 +93,15 @@ defmodule SmolqueryClickHouse.Runtime do
       |> Keyword.merge(opts)
       |> Keyword.put_new_lazy(:password, fn -> Keyword.get(api, :api_key) end)
 
+    name = Keyword.get(config, :name, SmolqueryClickHouse)
+
+    {catalog, catalog_opts} =
+      Catalog.DuckLake.resolve(Keyword.get(config, :catalog), lake_engine(name))
+
     %__MODULE__{
-      name: Keyword.get(config, :name, SmolqueryClickHouse),
+      name: name,
+      catalog: catalog,
+      catalog_opts: catalog_opts,
       password:
         Smolquery.Runtime.fetch_required!(config, :password,
           service: "the ClickHouse HTTP edge",
@@ -103,6 +121,24 @@ defmodule SmolqueryClickHouse.Runtime do
   """
   @spec supervisor(atom()) :: atom()
   def supervisor(name), do: Module.concat(name, "Supervisor")
+
+  @doc """
+  The `SmolqueryClickHouse.SystemCatalog` server for an instance.
+  """
+  @spec system_catalog(atom()) :: atom()
+  def system_catalog(name), do: Module.concat(name, "SystemCatalog")
+
+  @doc """
+  The DuckDB engine the `system` emulation runs in.
+  """
+  @spec catalog_engine(atom()) :: atom()
+  def catalog_engine(name), do: Module.concat(name, "CatalogEngine")
+
+  @doc """
+  The engine a runtime-owned `Smolquery.Catalog.DuckLake` reads through.
+  """
+  @spec lake_engine(atom()) :: atom()
+  def lake_engine(name), do: Module.concat(name, "Lake")
 
   @doc """
   The `ThousandIsland` server under an instance's Bandit listener.

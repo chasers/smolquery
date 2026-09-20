@@ -64,9 +64,8 @@ defmodule SmolqueryPg.PgCatalog do
   use GenServer
 
   alias Explorer.DataFrame
-  alias Smolquery.Catalog
+  alias Smolquery.CatalogEmulation
   alias Smolquery.Engine
-  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Frame
   alias Smolquery.Identifier
   alias SmolqueryPg.PgCatalog.Rewrite
@@ -173,8 +172,8 @@ defmodule SmolqueryPg.PgCatalog do
   @impl GenServer
   def handle_call({:classify, sql}, _from, state) do
     reply =
-      case serialize(state.engine, Rewrite.pre(sql, %{})) do
-        {:ok, ast, _canonical} -> classify_refs(base_tables(ast))
+      case CatalogEmulation.serialize(state.engine, Rewrite.pre(sql, %{})) do
+        {:ok, ast, _canonical} -> classify_refs(CatalogEmulation.base_tables(ast))
         {:error, _reason} -> false
       end
 
@@ -183,7 +182,8 @@ defmodule SmolqueryPg.PgCatalog do
 
   def handle_call({:query, sql, settings, params}, _from, state) do
     with {:ok, state} <- ensure_fresh(state),
-         {:ok, _ast, canonical} <- serialize(state.engine, Rewrite.pre(sql, settings)),
+         {:ok, _ast, canonical} <-
+           CatalogEmulation.serialize(state.engine, Rewrite.pre(sql, settings)),
          {:ok, frame} <- run(state.engine, Rewrite.post(canonical), params) do
       {:reply, {:ok, columns(frame), rows(frame)}, state}
     else
@@ -251,31 +251,6 @@ defmodule SmolqueryPg.PgCatalog do
 
   defp rows(frame), do: Frame.to_rows(frame)
 
-  defp serialize(engine, sql) do
-    quoted = Identifier.sql_string(sql)
-
-    with {:ok, result} <-
-           Engine.query(
-             engine,
-             "SELECT json_serialize_sql(#{quoted}), " <>
-               "CASE WHEN json_extract_string(json_serialize_sql(#{quoted}), '$.error') = 'false' " <>
-               "THEN json_deserialize_sql(json_serialize_sql(#{quoted})) END"
-           ),
-         [[json, canonical]] <- result.rows,
-         {:ok, %{"error" => false} = ast} <- JSON.decode(json) do
-      {:ok, ast, canonical}
-    else
-      {:ok, %{"error" => true} = ast} ->
-        {:error, {:invalid_query, Map.get(ast, "error_message", "unparseable")}}
-
-      {:error, reason} ->
-        {:error, reason}
-
-      _unexpected ->
-        {:error, :unparseable}
-    end
-  end
-
   defp classify_refs([]), do: true
 
   defp classify_refs(refs) do
@@ -284,13 +259,6 @@ defmodule SmolqueryPg.PgCatalog do
         (schema == "" and String.starts_with?(String.downcase(table), "pg_"))
     end)
   end
-
-  defp base_tables(%{"type" => "BASE_TABLE"} = node), do: [node | child_tables(node)]
-  defp base_tables(node) when is_map(node), do: child_tables(node)
-  defp base_tables(node) when is_list(node), do: Enum.flat_map(node, &base_tables/1)
-  defp base_tables(_leaf), do: []
-
-  defp child_tables(node), do: Enum.flat_map(Map.values(node), &base_tables/1)
 
   defp ensure_fresh(state) do
     now = System.monotonic_time(:millisecond)
@@ -601,7 +569,7 @@ defmodule SmolqueryPg.PgCatalog do
   defp refresh(_engine, nil), do: :ok
 
   defp refresh(engine, catalog) do
-    with {:ok, tables} <- listed_tables(catalog) do
+    with {:ok, tables} <- CatalogEmulation.listed_tables(catalog) do
       rebuild(engine, tables)
     end
   end
@@ -684,28 +652,6 @@ defmodule SmolqueryPg.PgCatalog do
         "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
       "CREATE OR REPLACE VIEW pg_stat_user_tables AS SELECT * FROM pg_stat_all_tables"
     ])
-  end
-
-  defp listed_tables(catalog) do
-    with {:ok, refs} <- Catalog.tables(catalog) do
-      Enum.reduce_while(refs, {:ok, []}, &collect_entry(catalog, &1, &2))
-    end
-  end
-
-  defp collect_entry(catalog, ref, {:ok, entries}) do
-    case table_entry(catalog, ref) do
-      {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-      :skip -> {:cont, {:ok, entries}}
-      {:error, reason} -> {:halt, {:error, reason}}
-    end
-  end
-
-  defp table_entry(catalog, {dataset, table} = ref) do
-    case Catalog.table_schema(catalog, ref) do
-      {:ok, schema} -> {:ok, {dataset, table, schema}}
-      {:error, %CallExited{} = exited} -> {:error, exited}
-      {:error, _dropped_meanwhile} -> :skip
-    end
   end
 
   defp namespace_rows(datasets) do

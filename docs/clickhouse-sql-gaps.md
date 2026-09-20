@@ -44,13 +44,15 @@ anything a user typed.
 
 | ClickHouse | Status | Note |
 |---|---|---|
-| `system.tables`, `system.databases`, `system.columns` | **Missing** | Answers `unknown table`. What `clickhouse-connect`, the JS client and the Grafana plugin read on connect and on schema sync |
-| `system.numbers`, `system.one` | **Missing** | Used for generated series and liveness probes |
-| `system.parts`, `system.settings`, `system.functions` | **Missing** | Admin and UI surfaces |
-| `SHOW TABLES` | **Wrong answer** | Runs, and lists DuckDB's own catalog, which is empty: not smolquery's tables. A client sees a server with no tables rather than an error |
-| `SHOW DATABASES`, `SHOW CREATE TABLE` | **Missing** | |
-| `DESCRIBE TABLE` / `DESC` | **Missing** | The usual column-type probe |
-| `EXISTS TABLE` | **Missing** | |
+| `system.tables`, `system.databases`, `system.columns` | Works (T-482) | Emulated from smolquery's catalog. `engine` is `MergeTree`; `sorting_key` and `primary_key` are the clustering key; `total_rows` is `NULL` |
+| `system.settings`, `system.data_skipping_indices` | Works, empty (T-482) | HyperDX reads both before its first query and fails every query if `system.settings` fails |
+| `system.table_engines`, `system.one` | Works (T-482) | |
+| `system.numbers` | **Missing** | Unbounded; needs a table function, not a table |
+| `system.parts`, `system.functions`, the rest | **Missing** | Code 60 `UNKNOWN_TABLE`, by their ClickHouse name |
+| `SHOW TABLES [FROM db]`, `SHOW DATABASES` | Works (T-483) | |
+| `SHOW CREATE TABLE` | **Missing** | `system.tables.create_table_query` holds a synthesized one |
+| `DESCRIBE TABLE` / `DESC` | Works (T-483) | Seven columns, as ClickHouse answers; a table function argument is not taken |
+| `EXISTS TABLE` | Works (T-483) | |
 
 The Postgres edge solved the same problem for its clients with an emulated
 `pg_catalog` plus macro shims (T-406, T-409, T-412). That is the model to copy.
@@ -132,7 +134,7 @@ These return an answer, just not always ClickHouse's.
 | `curl`, hand-written SQL | Yes | Nothing, if the SQL is DuckDB-flavored |
 | `ch` (Elixir) | Connects and queries | Nothing for plain SQL |
 | Logflare reads | No | `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY`, `match`, `has`, `arrayExists`. Map access (`col['key']`), `{name:Type}` params and a trailing `SETTINGS` already work |
-| `clickhouse-connect`, JS client | Connects | `system.columns` and `DESCRIBE` on metadata calls |
+| `clickhouse-connect`, JS client | Connects, reads metadata | Untested against the real clients |
 | Grafana ClickHouse plugin | No | `system.*` browsing, then the time-function family |
 | BI tools (Metabase, Tableau) | No | Catalog introspection first, then functions |
 
@@ -144,7 +146,7 @@ clients actually send. The same shape applies here (PL-65):
 
 1. **Log unrecognized statements at the edge** to build a real corpus instead of guessing.
 2. **Cheap wins first:** strip a trailing `SETTINGS`, substitute `{name:Type}` parameters, read backticks and backslash escapes. Done (T-481).
-3. **Emulate `system.*`** plus `SHOW` and `DESCRIBE`, the way `pg_catalog` is emulated. `SHOW TABLES` matters most, since today it answers wrongly rather than failing.
+3. **Emulate `system.*`** plus `SHOW` and `DESCRIBE`, the way `pg_catalog` is emulated. Done (T-482, T-483).
 4. **A textual pre-pass** for constructs DuckDB refuses to parse (`ARRAY JOIN`, `LIMIT BY`, `PREWHERE`), and to drop `FINAL` rather than let it bind as an alias.
 5. **Macro shims** for the function families, one family per layer, skipping the names that already resolve.
 6. **Pin the semantic differences with tests**, since those are the ones that fail quietly.

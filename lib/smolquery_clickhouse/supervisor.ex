@@ -22,6 +22,7 @@ defmodule SmolqueryClickHouse.Supervisor do
 
   use Supervisor
 
+  alias Smolquery.Catalog.DuckLake
   alias SmolqueryClickHouse.Runtime
 
   @max_request_line_bytes 1_048_576
@@ -43,17 +44,20 @@ defmodule SmolqueryClickHouse.Supervisor do
   def init(%Runtime{} = runtime) do
     Runtime.put(runtime)
 
-    children = [
-      {SmolqueryApi.Admission,
-       name: runtime.name, limit: SmolqueryApi.Runtime.insert_max_in_flight_bytes(runtime)},
-      {Bandit,
-       plug: {SmolqueryClickHouse.Router, runtime.name},
-       ip: runtime.ip,
-       port: runtime.port,
-       startup_log: false,
-       http_1_options: [max_request_line_length: @max_request_line_bytes],
-       thousand_island_options: [supervisor_options: [name: Runtime.listener(runtime.name)]]}
-    ]
+    children =
+      DuckLake.children(runtime.catalog_opts, Runtime.lake_engine(runtime.name)) ++
+        [
+          {SmolqueryClickHouse.SystemCatalog, runtime},
+          {SmolqueryApi.Admission,
+           name: runtime.name, limit: SmolqueryApi.Runtime.insert_max_in_flight_bytes(runtime)},
+          {Bandit,
+           plug: {SmolqueryClickHouse.Router, runtime.name},
+           ip: runtime.ip,
+           port: runtime.port,
+           startup_log: false,
+           http_1_options: [max_request_line_length: @max_request_line_bytes],
+           thousand_island_options: [supervisor_options: [name: Runtime.listener(runtime.name)]]}
+        ]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

@@ -39,6 +39,13 @@ defmodule SmolqueryClickHouse.Query do
   parameter or in the statement's `SETTINGS` clause, before or after
   `FORMAT`; the clause wins (`Statement.split_settings/1`).
 
+  ## The catalog
+
+  `system.*`, `DESCRIBE`, `SHOW` and `EXISTS` are answered by
+  `SmolqueryClickHouse.SystemCatalog`, in the edge's own engine, before the
+  query service is asked. Such an answer has no job behind it, so its
+  `X-ClickHouse-Query-Id` is the request's `query_id`, or a random one.
+
   ## Names and timestamps
 
   An unaliased `count()` or `count(*)` answers as `count()`, ClickHouse's
@@ -80,6 +87,7 @@ defmodule SmolqueryClickHouse.Query do
   alias SmolqueryClickHouse.Params
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
+  alias SmolqueryClickHouse.SystemCatalog
 
   @version "24.8.1.1"
 
@@ -111,7 +119,7 @@ defmodule SmolqueryClickHouse.Query do
          {:ok, timeout} <- timeout(Map.merge(conn.query_params, settings)),
          {:ok, statement} <-
            statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
-      run(conn, runtime, rewrite(statement), format, timeout)
+      answer(conn, runtime, rewrite(statement), format, timeout)
     else
       {:error, exception} -> Errors.send_exception(conn, exception)
     end
@@ -190,6 +198,27 @@ defmodule SmolqueryClickHouse.Query do
         Regex.replace(pattern, sql, literal)
       end)
     end)
+  end
+
+  defp answer(conn, runtime, statement, format, opts) do
+    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
+      {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
+      :pass -> run(conn, runtime, statement, format, opts)
+      {:error, exception} -> Errors.send_exception(conn, exception)
+    end
+  end
+
+  defp database(conn) do
+    conn.query_params["database"] ||
+      List.first(get_req_header(conn, "x-clickhouse-database")) ||
+      "default"
+  end
+
+  defp catalog_job(conn) do
+    id =
+      conn.query_params["query_id"] || Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    %{id: id, statistics: nil, duration_ms: 0, json_columns: []}
   end
 
   defp run(conn, runtime, statement, format, opts) do
