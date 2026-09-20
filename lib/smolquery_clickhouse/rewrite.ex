@@ -41,8 +41,13 @@ defmodule SmolqueryClickHouse.Rewrite do
     it, as its histogram's does not. The item leaves the list, the list
     leaves the statement when nothing else is in it, and the alias is
     written as its expression, in parentheses, wherever it is read: not
-    where a `SELECT` defines it (`... as service`), not after a `.`, and not
-    before a `(`. Only the statement's leading `WITH` is read, and only a
+    where a `SELECT` defines it, with `as` or without (`ServiceName
+    service`), not after a `.`, and not before a `(`. It is read only in the
+    statement's own scope. Inside a subquery the name is left alone, and an
+    alias a subquery defines for itself (`SELECT ServiceName AS service`) is
+    not substituted anywhere, since outside the subquery that name is its
+    column. A later alias may use an earlier one (`(a + 1) AS b, (b * 2) AS
+    c`). Only the statement's leading `WITH` is read, and only a
     parenthesized expression: a common table expression is left as it is.
   - **`JSONExtract(json, 'Type')`.** The form with a type and no path,
     which HyperDX writes on a row click to find the row by a map or an array
@@ -186,12 +191,20 @@ defmodule SmolqueryClickHouse.Rewrite do
          {items, body} <- with_items(list, [], [], 0),
          {aliases, tables} when aliases != [] <-
            Enum.split_with(items, &match?({:alias, _, _}, &1)) do
-      names = Map.new(aliases, fn {:alias, name, expression} -> {name, expression} end)
+      names = alias_expressions(aliases, redefined(body), %{})
 
-      lead ++ with_clause(with_word, tables) ++ substitute(body, names, nil, [])
+      lead ++ with_clause(with_word, tables) ++ substitute(body, names)
     else
       _no_expression_alias -> pieces
     end
+  end
+
+  defp alias_expressions([], _shadowed, names), do: names
+
+  defp alias_expressions([{:alias, name, expression} | rest], shadowed, names) do
+    if MapSet.member?(shadowed, name),
+      do: alias_expressions(rest, shadowed, names),
+      else: alias_expressions(rest, shadowed, Map.put(names, name, substitute(expression, names)))
   end
 
   defp trivia?({:comment, _text}), do: true
@@ -247,25 +260,85 @@ defmodule SmolqueryClickHouse.Rewrite do
       end)
   end
 
-  defp substitute([], _names, _previous, acc), do: Enum.reverse(acc)
+  defp substitute(pieces, names), do: substitute(pieces, names, %{previous: nil, groups: []}, [])
 
-  defp substitute([piece | rest], names, previous, acc) do
+  defp substitute([], _names, _scope, acc), do: Enum.reverse(acc)
+
+  defp substitute([:open | rest], names, scope, acc) do
+    group = if subquery?(rest), do: :subquery, else: :group
+
+    substitute(rest, names, %{scope | previous: :open, groups: [group | scope.groups]}, [
+      :open | acc
+    ])
+  end
+
+  defp substitute([:close | rest], names, scope, acc),
+    do:
+      substitute(rest, names, %{scope | previous: :close, groups: Enum.drop(scope.groups, 1)}, [
+        :close | acc
+      ])
+
+  defp substitute([piece | rest], names, scope, acc) do
     with {:ok, name} <- alias_text(piece),
          {:ok, expression} <- Map.fetch(names, name),
-         true <- read?(previous, rest) do
-      substitute(rest, names, piece, Enum.reverse([:open | expression] ++ [:close], acc))
+         true <- read?(scope, rest) do
+      substitute(
+        rest,
+        names,
+        %{scope | previous: piece},
+        Enum.reverse([:open | expression] ++ [:close], acc)
+      )
     else
-      _not_a_read -> substitute(rest, names, significant(piece, previous), [piece | acc])
+      _not_a_read ->
+        substitute(rest, names, %{scope | previous: significant(piece, scope.previous)}, [
+          piece | acc
+        ])
     end
   end
 
-  defp read?({:word, _text, "as"}, _rest), do: false
-  defp read?({:other, text}, rest), do: not String.ends_with?(text, ".") and not called?(rest)
-  defp read?(_previous, rest), do: not called?(rest)
+  defp subquery?(rest),
+    do: match?([{:word, _text, lower} | _more] when lower in ["select", "with"], drop_space(rest))
+
+  defp read?(%{groups: groups, previous: previous}, rest),
+    do: :subquery not in groups and names_a_value?(previous) and not called?(rest)
+
+  @before_a_value ~w(select distinct where and or not by on having when then else case in like ilike
+                     between is all any prewhere using)
+
+  defp names_a_value?({:word, _text, lower}), do: lower in @before_a_value
+  defp names_a_value?({:other, text}), do: not String.ends_with?(text, ".")
+  defp names_a_value?(:close), do: false
+  defp names_a_value?({:quoted, _text}), do: false
+  defp names_a_value?({:string, _text}), do: false
+  defp names_a_value?(_open_comma_or_start), do: true
 
   defp called?([:open | _rest]), do: true
   defp called?([{:other, "." <> _member} | _rest]), do: true
   defp called?(_rest), do: false
+
+  defp redefined(body) do
+    body
+    |> Enum.reduce({[], nil, MapSet.new()}, fn
+      :open, {groups, _previous, names} ->
+        {[:group | groups], :open, names}
+
+      :close, {groups, _previous, names} ->
+        {Enum.drop(groups, 1), :close, names}
+
+      piece, {groups, previous, names} ->
+        {groups, significant(piece, previous), define(piece, previous, groups, names)}
+    end)
+    |> elem(2)
+  end
+
+  defp define(piece, {:word, _as, "as"}, [_inside | _groups], names) do
+    case alias_text(piece) do
+      {:ok, name} -> MapSet.put(names, name)
+      :error -> names
+    end
+  end
+
+  defp define(_piece, _previous, _groups, names), do: names
 
   defp significant({:other, text} = piece, previous),
     do: if(String.trim(text) == "", do: previous, else: piece)

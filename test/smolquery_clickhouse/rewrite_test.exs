@@ -202,6 +202,33 @@ defmodule SmolqueryClickHouse.RewriteTest do
                "WITH s AS (SELECT a, b FROM t WHERE b IN (1, 2)) SELECT (a) FROM s"
     end
 
+    test "a subquery that defines the name for itself keeps it, inside and out (review of T-496)" do
+      sql =
+        "WITH (ServiceName) AS service SELECT service, n FROM " <>
+          "(SELECT ServiceName AS service, count() AS n FROM t GROUP BY service) ORDER BY service"
+
+      assert Rewrite.call(sql) ==
+               "SELECT service, n FROM " <>
+                 "(SELECT ServiceName AS service, count() AS n FROM t GROUP BY service) ORDER BY service"
+    end
+
+    test "a name inside a subquery is the subquery's, not the alias (review of T-496)" do
+      assert Rewrite.call("WITH (a) AS x SELECT x FROM t WHERE k IN (SELECT x FROM u)") ==
+               "SELECT (a) FROM t WHERE k IN (SELECT x FROM u)"
+    end
+
+    test "a later alias may use an earlier one (review of T-496)" do
+      assert Rewrite.call("WITH (a + 1) AS b, (b * 2) AS c SELECT c FROM t") ==
+               "SELECT ((a + 1) * 2) FROM t"
+    end
+
+    test "an alias defined without AS is a definition, not a call (review of T-496)" do
+      assert Rewrite.call(
+               "WITH (ServiceName) AS service SELECT ServiceName service, count() n FROM t WHERE service = 'a'"
+             ) ==
+               "SELECT ServiceName service, count() n FROM t WHERE (ServiceName) = 'a'"
+    end
+
     test "an expression in an alias is rewritten like any other" do
       assert Rewrite.call("WITH (CAST(d, 'Float64')) AS n SELECT n FROM t") ==
                "SELECT (CAST(d AS DOUBLE)) FROM t"
