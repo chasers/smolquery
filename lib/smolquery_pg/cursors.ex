@@ -5,12 +5,12 @@ defmodule SmolqueryPg.Cursors do
   Every foreign scan is `DECLARE c1 CURSOR FOR <select>`, repeated
   `FETCH 100 FROM c1`, and `CLOSE c1`, inside a `REPEATABLE READ`
   transaction block. This module parses the three statements (plus `MOVE`,
-  and `CLOSE ALL`) on `SmolqueryPg.Sql`'s statement tokens — binary
+  and `CLOSE ALL`) on `Smolquery.Sql`'s statement tokens — binary
   matching, no regex; `SmolqueryPg.Session` owns the cursors themselves —
   a cursor is the same held outcome a portal is, paged by offset.
   """
 
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
 
   @modifiers ~w(binary insensitive asensitive scroll no)
   @directions ~w(forward next)

@@ -1,13 +1,20 @@
-defmodule SmolqueryPg.Sql do
+defmodule Smolquery.Sql do
   @moduledoc """
   A lexer that tells SQL code from the places SQL hides code-like text
   (PL-58).
 
-  Two jobs need it. `SmolqueryPg.Statements` splits a simple query on the
-  semicolons that are code. `SmolqueryPg.Params` replaces the `$n`
-  placeholders that are code. Both must leave a string, a quoted
+  Every edge that reads a client's SQL before the engine does needs it. The
+  Postgres edge splits a simple query on the semicolons that are code
+  (`SmolqueryPg.Statements`) and replaces the `$n` placeholders that are
+  code (`SmolqueryPg.Params`). The ClickHouse edge splits `FORMAT` and
+  `SETTINGS` clauses off, fills `{name:Type}` placeholders and rewrites
+  quoting (`SmolqueryClickHouse.Statement`, `SmolqueryClickHouse.Params`),
+  under `dialect: :clickhouse`. All of them must leave a string, a quoted
   identifier, a comment, and a dollar-quoted body alone. Nothing here parses
   SQL: the scanner only tracks which of those it is inside.
+
+  It lives in the core, not in an edge, so that one edge does not depend on
+  another and a service may use it too (PL-66).
   """
 
   @type token ::

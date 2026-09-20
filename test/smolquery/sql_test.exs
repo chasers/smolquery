@@ -1,7 +1,7 @@
-defmodule SmolqueryPg.SqlTest do
+defmodule Smolquery.SqlTest do
   use ExUnit.Case, async: true
 
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
 
   test "tokens concatenate back to the input and classify each region" do
     sql = ~s|SELECT 'a;''b' AS "c;d" -- e;\n/* f; /* g */ */ $$h;$$ $1|

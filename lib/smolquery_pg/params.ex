@@ -19,7 +19,7 @@ defmodule SmolqueryPg.Params do
   comparison needs it.
   """
 
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
   alias SmolqueryPg.Types
 
   @epoch ~N[1970-01-01 00:00:00]

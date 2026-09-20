@@ -15,7 +15,7 @@ defmodule SmolqueryClickHouse.Statement do
   """
 
   alias Smolquery.Identifier
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
 
   @type t :: %{
           database: String.t() | nil,
@@ -60,7 +60,7 @@ defmodule SmolqueryClickHouse.Statement do
 
   Answers the statement without the clause, trimmed and without a final
   `;`, and the format's name, or `nil` when the statement names none. Only
-  the end of the statement's code is read (`SmolqueryPg.Sql` tells code from
+  the end of the statement's code is read (`Smolquery.Sql` tells code from
   literals and comments): a `FORMAT` earlier in the statement, or inside a
   string literal or a comment, is not a clause, and a clause that follows a
   string literal is one. `ORDER BY format DESC` ends in a column named

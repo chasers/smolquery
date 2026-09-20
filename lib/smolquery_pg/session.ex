@@ -77,13 +77,13 @@ defmodule SmolqueryPg.Session do
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.Sql
   alias SmolqueryPg.Cursors
   alias SmolqueryPg.Errors
   alias SmolqueryPg.Params
   alias SmolqueryPg.PgCatalog
   alias SmolqueryPg.Protocol
   alias SmolqueryPg.Runtime
-  alias SmolqueryPg.Sql
   alias SmolqueryPg.Statements
   alias SmolqueryPg.Types
 

@@ -9,7 +9,7 @@ defmodule Bench.PgWire do
   No sockets and no query service: this measures the pure functions a
   query passes through before any job runs — the binary message decode
   (`SmolqueryPg.Protocol`), the statement splitter and keyword classifier
-  (`SmolqueryPg.Statements` / `SmolqueryPg.Sql`), and the per-`Bind`
+  (`SmolqueryPg.Statements` / `Smolquery.Sql`), and the per-`Bind`
   parameter work (`SmolqueryPg.Params`). The whole-pipeline bench (this
   script's previous life, `git log bench/pg_wire.exs`) showed the job
   machinery dominates end-to-end latency; this answers the narrower
@@ -28,7 +28,7 @@ defmodule Bench.PgWire do
   alias Smolquery.Test.PgClient
   alias SmolqueryPg.Params
   alias SmolqueryPg.Protocol
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
   alias SmolqueryPg.Statements
 
   @small_sql "SELECT $1::bigint + $2::bigint AS sum"

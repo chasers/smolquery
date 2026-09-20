@@ -39,13 +39,13 @@ defmodule SmolqueryPg.PgCatalog.Rewrite do
   """
 
   alias Smolquery.Identifier
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
 
   @doc """
   The textual pre-pass: `sql` with the constructs DuckDB cannot parse (or
   would bind wrongly) rewritten, `settings` supplying the session values.
   Strings, quoted identifiers, and comments are never touched
-  (`SmolqueryPg.Sql`).
+  (`Smolquery.Sql`).
   """
   @spec pre(String.t(), %{String.t() => String.t()}) :: String.t()
   def pre(sql, settings) do

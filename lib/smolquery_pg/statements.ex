@@ -5,17 +5,17 @@ defmodule SmolqueryPg.Statements do
   The simple query protocol lets a client send `BEGIN; SELECT 1; COMMIT` as
   one message, and every driver's connection setup does. The split ignores
   a semicolon inside a string, a quoted identifier, a comment, or a
-  dollar-quoted body — `SmolqueryPg.Sql` tells those from code.
+  dollar-quoted body — `Smolquery.Sql` tells those from code.
 
   An empty statement (`;;`, or trailing whitespace after the last
   semicolon) is dropped: Postgres treats it as nothing, not as an error.
   """
 
-  alias SmolqueryPg.Sql
+  alias Smolquery.Sql
 
   @doc """
   The leading keyword of a statement, lower case — see
-  `SmolqueryPg.Sql.leading_keyword/1`.
+  `Smolquery.Sql.leading_keyword/1`.
   """
   @spec leading_keyword(String.t()) :: String.t()
   defdelegate leading_keyword(statement), to: Sql

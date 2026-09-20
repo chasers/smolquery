@@ -17,9 +17,10 @@ defmodule Smolquery.Ddl do
   business: `parse/1` answers `:not_ddl` for anything that does not begin
   with `ALTER`, so what the query path pays is one keyword check.
 
-  The edge modules carry a SQL lexer (`SmolqueryPg.Sql`), but the query
-  service may not depend on an edge (`.reach.exs`), so this module scans for
-  itself: words, quoted identifiers, integers, and the four punctuation marks
+  This module scans for itself: it was written when the SQL lexer lived in
+  an edge (`Smolquery.Sql` was `SmolqueryPg.Sql`), which the query service
+  may not depend on (`.reach.exs`). Its scanner knows less than the lexer
+  and needs no more: words, quoted identifiers, integers, and the four punctuation marks
   the grammar needs. The accepted grammar has no comments inside it and no
   string literals — leading whitespace and comments are stripped before the
   scan, as the wire's own lexer strips them — so there is nothing else to scan — except a `MATERIALIZED`

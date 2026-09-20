@@ -37,7 +37,7 @@ per-job engine floor.
   batch decodes in 1.3 µs regardless of SQL size (2.8 GB/s on the big
   query — the SQL rides through `Parse` as one binary, uncopied).
 - **The one soft spot is the lexer on large SQL**: `Statements.split` on
-  a 3.6 KB statement costs 47 µs because `SmolqueryPg.Sql` accumulates
+  a 3.6 KB statement costs 47 µs because `Smolquery.Sql` accumulates
   reversed character lists per token. At 76 MB/s it still parses a
   thousand such statements per scheduler-millisecond-budget, so nothing
   needs to change until something feeds the edge very large SQL at rate;

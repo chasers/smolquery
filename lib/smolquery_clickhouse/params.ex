@@ -10,7 +10,7 @@ defmodule SmolqueryClickHouse.Params do
   bound at all, so each placeholder is replaced in the statement's text by a
   literal written from its value — a quoted identifier, a string literal, or
   a number checked to be one. Only the statement's code is read
-  (`SmolqueryPg.Sql`): a placeholder inside a string literal, a quoted
+  (`Smolquery.Sql`): a placeholder inside a string literal, a quoted
   identifier or a comment stays as written. One parameter may fill many
   placeholders.
 
@@ -50,9 +50,9 @@ defmodule SmolqueryClickHouse.Params do
   """
 
   alias Smolquery.Identifier
+  alias Smolquery.Sql
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Statement
-  alias SmolqueryPg.Sql
 
   @placeholder ~r/\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Z][A-Za-z0-9]*(?:\((?:[^{}'()]|'[^']*')*\))?)\s*\}/
 

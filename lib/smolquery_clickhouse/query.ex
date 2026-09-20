@@ -67,12 +67,12 @@ defmodule SmolqueryClickHouse.Query do
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Job
+  alias Smolquery.Sql
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Format
   alias SmolqueryClickHouse.Params
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
-  alias SmolqueryPg.Sql
 
   @version "24.8.1.1"
 
