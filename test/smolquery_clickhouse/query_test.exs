@@ -445,6 +445,8 @@ defmodule SmolqueryClickHouse.QueryTest do
 
       assert [_n, _s, _l, _d] = meta.(sql)
       assert meta.("SELECT * FROM (" <> sql <> ") WHERE n = 0") == meta.(sql)
+      assert meta.(sql <> " LIMIT 0") == meta.(sql)
+      assert meta.("SELECT * FROM (" <> sql <> ") WHERE 1=0") == meta.(sql)
     end
   end
 
