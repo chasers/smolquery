@@ -761,8 +761,8 @@ defmodule Smolquery.Schema do
   untouched: it rides beside the queried one under a name no identifier can
   take, and is written back under its own.
   """
-  @spec computed_select(t(), String.t()) :: String.t()
-  def computed_select(%__MODULE__{fields: fields} = schema, from) do
+  @spec computed_select(t(), String.t(), :stored | :inserted) :: String.t()
+  def computed_select(%__MODULE__{fields: fields} = schema, from, rows \\ :stored) do
     retyped = retyped_fields(schema)
     stored = Enum.map(retyped, & &1.name)
 
@@ -772,7 +772,7 @@ defmodule Smolquery.Schema do
 
         cond do
           field.materialized != nil ->
-            "#{computed_expression(field)} AS #{name}"
+            "#{computed_expression(field, rows)} AS #{name}"
 
           field.name in stored ->
             "#{stored_name(field)} AS #{name}"
@@ -792,25 +792,66 @@ defmodule Smolquery.Schema do
   expression cast to the column's type under `TRY`, so a row it cannot take
   gives `NULL` rather than failing the file.
 
-  A column declared `nullable: false` gives its type's default there
-  instead (`default_literal/1`), and for a `NULL` the expression answers
-  too — ClickHouse's value for a non-`Nullable` column with nothing to
-  hold (T-515). That is what makes the declaration true of every row: the
-  writers and the view's fill all render through here, so no evaluation
-  can store or answer a `NULL`.
+  A column declared `nullable: false` never holds `NULL`, and what happens
+  where the expression gives nothing depends on which rows are being
+  written (T-515, T-516):
+
+    * `:inserted`, the buffer's write of rows a client just sent: DuckDB's
+      `error/1` is raised, the `COPY` fails, and the buffer's salvage hands
+      the row back to its caller as refused — what a regular
+      `nullable: false` column with no value gets.
+    * `:stored`, a seal, a compaction, or the view's fill: the type's
+      default (`default_literal/1`), ClickHouse's value for a column that
+      is not `Nullable`. Those rows are already in the table — written
+      before the column existed — so there is no insert to refuse, and a
+      rewrite that raised would wedge the table's sealing for good.
   """
-  @spec computed_expression(Field.t()) :: String.t()
-  def computed_expression(%Field{materialized: %{} = definition} = field) do
-    {:ok, type} = duckdb_type(field.type)
-    tried = "TRY(CAST((#{definition.canonical || definition.expression}) AS #{type}))"
+  @spec computed_expression(Field.t(), :stored | :inserted) :: String.t()
+  def computed_expression(%Field{materialized: %{}} = field, rows \\ :stored) do
+    tried = tried_expression(field)
 
     with false <- field.nullable,
          {:ok, default} <- default_literal(field.type) do
-      "coalesce(#{tried}, #{default})"
+      case rows do
+        :stored ->
+          "coalesce(#{tried}, #{default})"
+
+        :inserted ->
+          "coalesce(#{tried}, error(#{Identifier.sql_string(no_value_message(field))}))"
+      end
     else
       _nullable_or_no_default -> tried
     end
   end
+
+  @doc """
+  A materialized column's expression cast to its type under `TRY`: `NULL`
+  where it gives nothing. What `computed_expression/2` wraps, and what a
+  check for the rows an insert must refuse counts
+  (`Smolquery.Segments.Writer.ndjson_problem/4`).
+  """
+  @spec tried_expression(Field.t()) :: String.t()
+  def tried_expression(%Field{materialized: %{} = definition} = field) do
+    {:ok, type} = duckdb_type(field.type)
+
+    "TRY(CAST((#{definition.canonical || definition.expression}) AS #{type}))"
+  end
+
+  @doc """
+  What an insert is told when a `nullable: false` materialized column would
+  have no value for one of its rows.
+  """
+  @spec no_value_message(Field.t()) :: String.t()
+  def no_value_message(%Field{name: name}),
+    do: "column #{name} is NOT NULL and its expression gave no value for the row"
+
+  @doc """
+  The materialized columns declared `nullable: false`: the ones an insert
+  must have a value for.
+  """
+  @spec required_materialized(t()) :: [Field.t()]
+  def required_materialized(%__MODULE__{} = schema),
+    do: schema |> materialized_fields() |> Enum.reject(& &1.nullable)
 
   @doc """
   The value a non-nullable materialized column holds where its expression

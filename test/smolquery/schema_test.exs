@@ -257,6 +257,20 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.computed_expression(nullable) == "TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP))"
 
+      assert Schema.computed_expression(nullable, :inserted) ==
+               Schema.computed_expression(nullable)
+
+      assert Schema.computed_expression(required, :inserted) ==
+               "coalesce(TRY(CAST((epoch_ms(ts_int)) AS TIMESTAMP)), " <>
+                 "error('column ts is NOT NULL and its expression gave no value for the row'))"
+
+      assert Schema.computed_select(schema, "spooled", :inserted) =~
+               "error('column ts is NOT NULL"
+
+      refute Schema.computed_select(schema, "spooled") =~ "error("
+      assert Schema.required_materialized(schema) == [required]
+      assert Schema.tried_expression(required) == Schema.computed_expression(nullable)
+
       assert Schema.computed_select(schema, "spooled") ==
                ~s|SELECT "ts_int", #{Schema.computed_expression(required)} AS "ts", | <>
                  ~s|#{Schema.computed_expression(nullable)} AS "maybe" FROM spooled|

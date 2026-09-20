@@ -156,6 +156,13 @@ defmodule Smolquery.Segments.Writer do
   the bytes: a dead pool member, a call that exited. `readable_ndjson?/3` is
   this without the message; the salvage uses the message to tell a caller why
   a row was refused, and stops on an engine failure rather than blame the rows.
+
+  A row for which a `nullable: false` materialized column's expression gives
+  nothing is refused too (T-516), whatever `opts` say: the buffer's `COPY`
+  raises on it (`Smolquery.Schema.computed_expression/2`, `:inserted`), and
+  the salvage can only hand a row back to its caller if this check names the
+  body, and then the row, that caused it. The expression reads the body as
+  the write does, a variant as `VARIANT` (`Smolquery.Schema.queried/2`).
   """
   @spec ndjson_problem(atom(), Path.t(), Schema.t(), keyword()) ::
           :ok | {:refused, String.t()} | {:error, {:engine_failed, String.t()}}
@@ -169,15 +176,23 @@ defmodule Smolquery.Segments.Writer do
       |> Schema.regular_fields()
       |> Enum.map_join(", ", &"count(#{Identifier.quote_name!(&1.name)})")
 
-    sql = """
-    SELECT #{missing_required(schema, opts)}, #{counts} FROM read_json([$1],
+    body = """
+    read_json([$1],
       format = 'newline_delimited',
       columns = {#{columns_spec(schema)}})
     """
 
+    sql =
+      "SELECT #{missing_required(schema, opts)}, #{uncomputed(schema)}, #{counts} " <>
+        "FROM #{Schema.queried(schema, String.trim_trailing(body))}"
+
     case Engine.query(engine, sql, [path]) do
       {:ok, %{rows: [[missing | _counts] | _rest]}} when is_integer(missing) and missing > 0 ->
         {:refused, "#{missing} row(s) hold NULL in a column that must not be null"}
+
+      {:ok, %{rows: [[_missing, uncomputed | _counts] | _rest]}}
+      when is_binary(uncomputed) ->
+        {:refused, uncomputed}
 
       {:ok, _result} ->
         :ok
@@ -190,6 +205,22 @@ defmodule Smolquery.Segments.Writer do
   # A `COPY` does not refuse a NULL in a column the schema says must not hold
   # one, so a body can be readable and still break the schema. `required: true`
   # counts those rows too, for a caller that promised all or nothing (T-474).
+  defp uncomputed(schema) do
+    case Schema.required_materialized(schema) do
+      [] ->
+        "NULL"
+
+      fields ->
+        whens =
+          Enum.map_join(fields, " ", fn %Field{} = field ->
+            "WHEN #{Schema.tried_expression(field)} IS NULL " <>
+              "THEN #{Identifier.sql_string(Schema.no_value_message(field))}"
+          end)
+
+        "min(CASE #{whens} END)"
+    end
+  end
+
   defp missing_required(schema, opts) do
     required =
       for %Field{nullable: false} = field <- Schema.regular_fields(schema),
@@ -243,7 +274,7 @@ defmodule Smolquery.Segments.Writer do
 
     sql = """
     COPY (
-      #{Schema.computed_select(schema, String.trim_trailing(spooled))}#{order_clause(schema)}
+      #{Schema.computed_select(schema, String.trim_trailing(spooled), :inserted)}#{order_clause(schema)}
     )
     TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)}#{field_ids_option(schema)})
     """

@@ -134,7 +134,7 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
            ]
   end
 
-  test "a NOT NULL materialized column answers its type's default, never NULL, in the fill and in both tiers (T-515)",
+  test "a NOT NULL materialized column: a row from before it takes the type's default, and an insert after it is refused row by row (T-515, T-516)",
        %{node: node} do
     assert rows(node, "SELECT count(*) AS n FROM analytics.events") == [%{"n" => 0}]
 
@@ -148,28 +148,32 @@ defmodule Smolquery.QueryService.MaterializedIntegrationTest do
              )
 
     {:ok, widened} = Catalog.table_schema(node.catalog, @table)
-    assert {:ok, %Field{nullable: false, materialized: %{}}} = Schema.field(widened, "ts")
+    assert {:ok, %Field{nullable: false, materialized: %{}} = ts} = Schema.field(widened, "ts")
+    assert SmolqueryClickHouse.SystemCatalog.column_type(ts) == "DateTime64(6)"
 
-    assert SmolqueryClickHouse.SystemCatalog.column_type(elem(Schema.field(widened, "ts"), 1)) ==
-             "DateTime64(6)"
-
-    filled = [
+    before = [
       %{"id" => 1, "ts" => ~N[2023-11-14 22:13:20.000000]},
       %{"id" => 2, "ts" => ~N[1970-01-01 00:00:00.000000]}
     ]
 
-    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == filled
+    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == before
 
-    {:ok, _two} = write(node, widened, [%{"id" => 3, "ts_int" => 9_999_999_999_999_999}])
+    assert {:ok, _ack,
+            [%{index: 1, errors: [%{message: missing}]}, %{index: 2, errors: [_unfit]}]} =
+             write(node, widened, [
+               %{"id" => 3, "ts_int" => 1_700_000_060_000},
+               %{"id" => 4},
+               %{"id" => 5, "ts_int" => 9_999_999_999_999_999}
+             ])
+
+    assert missing =~ "column ts is NOT NULL and its expression gave no value"
+
+    assert {:invalid, [%{index: 0}]} = write(node, widened, [%{"id" => 6}])
+
     assert Eventually.until(fn -> FullNode.sealed_count(node) >= 1 end, 200, 25)
 
-    sealed = filled ++ [%{"id" => 3, "ts" => ~N[1970-01-01 00:00:00.000000]}]
-    assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") == sealed
-
-    {:ok, _hot} = write(node, widened, [%{"id" => 4}])
-
     assert rows(node, "SELECT id, ts FROM analytics.events ORDER BY id") ==
-             sealed ++ [%{"id" => 4, "ts" => ~N[1970-01-01 00:00:00.000000]}]
+             before ++ [%{"id" => 3, "ts" => ~N[2023-11-14 22:14:20.000000]}]
 
     assert rows(node, "SELECT count(*) AS n FROM analytics.events WHERE ts IS NULL") == [
              %{"n" => 0}
