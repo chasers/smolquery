@@ -512,11 +512,11 @@ defmodule SmolqueryPg.WireTest do
     test "activity inside the block re-arms the clock", %{port: port} do
       {socket, _params} = connect(port)
 
-      PgClient.query(socket, "SET idle_in_transaction_session_timeout = 400")
+      PgClient.query(socket, "SET idle_in_transaction_session_timeout = 1500")
       PgClient.query(socket, "BEGIN")
 
       for _keepalive <- 1..3 do
-        Process.sleep(150)
+        Process.sleep(600)
         assert %{results: [%{rows: [["1"]]}], status: ?T} = PgClient.query(socket, "SELECT 1")
       end
 
