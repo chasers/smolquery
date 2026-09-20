@@ -1,0 +1,159 @@
+# HyperDX (ClickStack) on smolquery
+
+[ClickStack](https://clickhouse.com/docs/clickstack/getting-started/oss) is HyperDX, a
+log and trace UI, on top of ClickHouse. HyperDX can read a smolquery table in
+ClickHouse's place, through the `:clickhouse` edge ([clickhouse.md](clickhouse.md)).
+This page is the recipe, and the list of what works.
+
+> **How this was checked.** Every statement HyperDX sends to open its Search page is a
+> fixture (`test/support/fixtures/clickstack/hyperdx_search.json`), taken from HyperDX's
+> source (`hyperdxio/hyperdx @ c42dda8`, 2026-09-19) and run against real rows in
+> `test/smolquery_clickhouse/hyperdx_search_test.exs`. A live HyperDX has **not** been
+> pointed at smolquery yet: no container runs on the dev box. The first real run will
+> find what the source did not show; T-480 is how those statements get recorded.
+
+## Scope
+
+- **In:** HyperDX reading logs. Its Search page: the results table, the histogram, a
+  search term, and field filters.
+- **Out, for now:** ClickStack's OpenTelemetry collector. It speaks ClickHouse's
+  `Native` format and runs ClickHouse DDL at start, and smolquery answers neither
+  (T-497, T-498, T-499). Rows reach smolquery through its own ingest instead.
+- **Out, later:** traces, sessions and metrics (T-501). Their tables have `Array`
+  columns with dotted names, which smolquery has no type or identifier for.
+
+## 1. Run smolquery where HyperDX can reach it
+
+The edge binds `127.0.0.1:8123`. HyperDX runs in a container, so bind the edge to an
+address the container can reach. It does not terminate TLS; keep it on a private network.
+
+```sh
+SMOLQUERY_ROLES=api,ingest,buffer,storage,query,clickhouse \
+SMOLQUERY_API_KEY=... \
+SMOLQUERY_CLICKHOUSE_IP=0.0.0.0 \
+  bin/smolquery start
+```
+
+The edge's password is the API key, or `SMOLQUERY_CLICKHOUSE_PASSWORD` when set. The
+user name is accepted as given; HyperDX sends `default`.
+
+## 2. Create the logs table
+
+HyperDX's default log source reads these columns. Create them through the API
+([api.md](api.md)); `TIMESTAMP_NS` is what answers as `DateTime64(9)`.
+
+```sh
+auth='authorization: Bearer '$SMOLQUERY_API_KEY
+json='content-type: application/json'
+api=http://127.0.0.1:4000
+
+curl -H "$auth" -H "$json" -d '{"id": "default"}' $api/v1/datasets
+curl -H "$auth" -H "$json" -d '{"id": "otel_logs", "schema": [
+      {"name": "Timestamp", "type": "TIMESTAMP_NS", "nullable": false},
+      {"name": "TraceId", "type": "STRING"},
+      {"name": "SpanId", "type": "STRING"},
+      {"name": "SeverityText", "type": "STRING"},
+      {"name": "SeverityNumber", "type": "INT64"},
+      {"name": "ServiceName", "type": "STRING"},
+      {"name": "Body", "type": "STRING"},
+      {"name": "ResourceAttributes", "type": "MAP(STRING, STRING)"},
+      {"name": "ScopeName", "type": "STRING"},
+      {"name": "LogAttributes", "type": "MAP(STRING, STRING)"}
+    ]}' $api/v1/datasets/default/tables
+curl -X PATCH -H "$auth" -H "$json" -d '{"clustering": ["ServiceName", "Timestamp"]}' \
+     $api/v1/datasets/default/tables/otel_logs
+```
+
+The clustering key is what `system.tables` answers as the table's `sorting_key`, which
+HyperDX reads to order its results.
+
+## 3. Write rows
+
+Any smolquery insert works. NDJSON over the API:
+
+```sh
+printf '%s\n' \
+  '{"Timestamp": "2026-09-19T10:11:29.123456789Z", "ServiceName": "api", "SeverityText": "error", "Body": "payment failed, id=1", "LogAttributes": {"http.status": "500"}}' \
+  | curl -H "$auth" -H 'content-type: application/x-ndjson' --data-binary @- \
+      $api/v1/datasets/default/tables/otel_logs/insert
+```
+
+A producer that already speaks ClickHouse can use the edge's RowBinary insert instead
+([clickhouse.md](clickhouse.md#the-insert)).
+
+## 4. Point HyperDX at it
+
+The HyperDX image needs MongoDB for its own state. `DEFAULT_CONNECTIONS` and
+`DEFAULT_SOURCES` are applied when the team has no connection and no source yet, which
+is the first boot.
+
+```yaml
+services:
+  mongo:
+    image: mongo:5.0.14-focal
+  hyperdx:
+    image: docker.hyperdx.io/hyperdx/hyperdx
+    ports: ["8080:8080"]
+    environment:
+      MONGO_URI: mongodb://mongo:27017/hyperdx
+      FRONTEND_URL: http://localhost:8080
+      DEFAULT_CONNECTIONS: >-
+        [{"name":"smolquery","host":"http://smolquery:8123","username":"default","password":"<SMOLQUERY_API_KEY>"}]
+      DEFAULT_SOURCES: >-
+        [{"name":"Logs","kind":"log","connection":"smolquery",
+          "from":{"databaseName":"default","tableName":"otel_logs"},
+          "timestampValueExpression":"Timestamp",
+          "displayedTimestampValueExpression":"Timestamp",
+          "implicitColumnExpression":"Body",
+          "bodyExpression":"Body",
+          "serviceNameExpression":"ServiceName",
+          "severityTextExpression":"SeverityText",
+          "eventAttributesExpression":"LogAttributes",
+          "resourceAttributesExpression":"ResourceAttributes",
+          "traceIdExpression":"TraceId",
+          "spanIdExpression":"SpanId",
+          "defaultTableSelectExpression":"Timestamp,ServiceName,SeverityText,Body"}]
+```
+
+- **`host`** must be a name, not a private IP literal: HyperDX's connection test refuses
+  `127.0.0.1` and takes `localhost` or a service name. Its test is
+  `GET /?query=SELECT 1`, which the edge answers `1`.
+- **`defaultTableSelectExpression`** is a plain column list on purpose. A select with
+  `x as y` makes HyperDX send ClickHouse's `WITH (expr) AS alias`, which the edge does
+  not take yet (T-496). The source HyperDX auto-creates from its form uses `as`, so
+  configure the source here instead.
+- **No `metadataMaterializedViews`, trace, session or metric source.** HyperDX's stock
+  defaults name rollup tables and three more sources; leave them out.
+
+## What works
+
+| HyperDX | Status |
+|---|---|
+| Connection test | Works |
+| Reading the source's columns and sorting key (`DESCRIBE`, `system.tables`) | Works |
+| Search: results table, newest first, paged | Works |
+| Search: histogram by severity | Works |
+| Search: a term (`error`), a phrase, a negation | Works; a term is a whole token, found whatever its case |
+| Search: `field:value`, `field:"exact"`, `field:*`, a map key (`LogAttributes.http.status:500`), a number or a range | Works |
+| Search: a term with `_` or `%` in it | **Differs.** HyperDX escapes them with a backslash for `LIKE`, and the engine's `LIKE` has no default escape character (T-496) |
+| Filters sidebar (values per field) | **Not yet.** Parametric aggregates, `groupUniqArray(20)(x)` (T-496) |
+| Row click (the side panel) | **Not yet.** `isNull`, `JSONExtract`, `WITH expr AS alias` (T-496) |
+| Charts beyond the histogram: `quantile(0.95)(x)`, formulas | **Not yet** (T-496) |
+| Alerts | **Not yet.** `CSV` output |
+| Traces, service map, sessions, metrics | **Not yet** (T-501) |
+| ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
+
+## What differs from ClickHouse underneath
+
+- Every column but a map answers as `Nullable(...)` unless the schema says `nullable:
+  false`. HyperDX unwraps `Nullable` when it reads a type.
+- A map column is `Map(String, String)`, not `Map(LowCardinality(String), String)`.
+  HyperDX picks its map-key query by that prefix.
+- There are no skip indexes, so HyperDX takes its plain `hasToken(lower(Body), ...)`
+  path. `hasToken` here scans; there is no token index behind it.
+- `system.settings` is empty, so HyperDX sends none of its optimization settings.
+- Timestamps are UTC.
+
+When something fails, the statement and the error are in HyperDX's UI: it prints the
+rendered SQL beside the message. [clickhouse-sql-gaps.md](clickhouse-sql-gaps.md) says
+what the edge does not take.

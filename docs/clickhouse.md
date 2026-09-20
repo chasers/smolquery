@@ -4,7 +4,7 @@ smolquery takes the inserts and runs the queries a ClickHouse HTTP client
 sends, on its own listener, so a producer or a reader that speaks ClickHouse
 over HTTP can point at smolquery instead. The `:clickhouse` role starts the
 edge (`SmolqueryClickHouse`, T-477). The insert is T-476, and queries are
-T-478.
+T-478. [clickstack.md](clickstack.md) is the recipe for pointing HyperDX at it.
 
 ```sh
 curl -sS "http://127.0.0.1:8123/?query=INSERT%20INTO%20logs.events%20FORMAT%20RowBinaryWithNamesAndTypes" \

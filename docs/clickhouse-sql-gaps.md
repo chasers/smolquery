@@ -144,6 +144,7 @@ These return an answer, just not always ClickHouse's.
 | `ch` (Elixir) | Connects and queries | Nothing for plain SQL |
 | Logflare reads | No | `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY`, `match`, `has`, `arrayExists`. Map access (`col['key']`), `{name:Type}` params and a trailing `SETTINGS` already work |
 | `clickhouse-connect`, JS client | Connects, reads metadata | Untested against the real clients |
+| HyperDX (ClickStack) | Search page: yes | The filters sidebar, row click and charts beyond the histogram: parametric aggregates, `isNull`, `WITH (expr) AS alias` (T-496). See [clickstack.md](clickstack.md) |
 | Grafana ClickHouse plugin | No | `system.*` browsing, then the time-function family |
 | BI tools (Metabase, Tableau) | No | Catalog introspection first, then functions |
 
