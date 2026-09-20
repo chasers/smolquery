@@ -177,6 +177,19 @@ smolquery's existing SQLite issue, not HyperDX's: eight concurrent queries throu
 plain API do the same. A Postgres catalog (`CATALOG_DATABASE_URL`) does not have it, and
 is what a HyperDX deployment should use.
 
+## When something fails
+
+A statement the edge cannot answer for a reason that is the dialect's is logged, with
+the client's `user-agent`, and counted in `smolquery_clickhouse_unanswered_total`:
+
+```
+clickhouse edge could not answer: code=62 name=SYNTAX_ERROR user_agent="hyperdx 2.1.0" statement="SELECT Body FROM ... ARRAY JOIN ... WHERE k = '?'" error="syntax error at or near \"ARRAY\""
+```
+
+String literals are replaced by default, since they are a user's search terms.
+`SMOLQUERY_CLICKHOUSE_UNANSWERED_LOG=verbatim` keeps them, which is what to set for a
+first run of HyperDX: those lines are the list of what to build next.
+
 When something fails, the statement and the error are in HyperDX's UI: it prints the
 rendered SQL beside the message. [clickhouse-sql-gaps.md](clickhouse-sql-gaps.md) says
 what the edge does not take.

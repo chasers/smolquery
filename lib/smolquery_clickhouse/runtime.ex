@@ -38,6 +38,10 @@ defmodule SmolqueryClickHouse.Runtime do
   outright, or the options of a lake the edge reads through its own engine,
   as the Postgres edge's is.
 
+  `unanswered_log` is how a statement the edge could not answer is logged
+  (`SmolqueryClickHouse.Unanswered`, T-480): `:redacted`, the default, with
+  its string literals replaced; `:verbatim`; or `:off`.
+
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
   query runs through (T-478).
@@ -56,6 +60,7 @@ defmodule SmolqueryClickHouse.Runtime do
     query_name: Smolquery.QueryService,
     max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil,
+    unanswered_log: :redacted,
     ip: {127, 0, 0, 1},
     port: 8123
   ]
@@ -70,6 +75,7 @@ defmodule SmolqueryClickHouse.Runtime do
           max_ndjson_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil,
           ip: :inet.ip_address(),
+          unanswered_log: :redacted | :verbatim | :off,
           port: :inet.port_number()
         }
 
@@ -111,7 +117,15 @@ defmodule SmolqueryClickHouse.Runtime do
           role: :clickhouse
         )
     }
-    |> struct!(Keyword.take(config, [:ingest_name, :query_name, :ip, :port | @api_defaults]))
+    |> struct!(
+      Keyword.take(config, [
+        :ingest_name,
+        :query_name,
+        :unanswered_log,
+        :ip,
+        :port | @api_defaults
+      ])
+    )
   end
 
   use Smolquery.Runtime

@@ -205,6 +205,7 @@ defmodule Smolquery.Telemetry do
   @events [
     [:smolquery, :api, :stop],
     [:smolquery, :clickhouse, :stop],
+    [:smolquery, :clickhouse, :unanswered],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :flush_trigger],
@@ -235,6 +236,8 @@ defmodule Smolquery.Telemetry do
     "smolquery_api_requests_total" => "HTTP requests answered, by status class.",
     "smolquery_clickhouse_requests_total" =>
       "ClickHouse HTTP edge requests answered, by status class.",
+    "smolquery_clickhouse_unanswered_total" =>
+      "Statements the ClickHouse HTTP edge could not answer for a reason that is the dialect's, by ClickHouse error code.",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -531,6 +534,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :clickhouse, :stop], _measurements, %{conn: conn}, nil) do
     bump({"smolquery_clickhouse_requests_total", [class: status_class(conn.status)]}, 1)
+  end
+
+  def handle_event([:smolquery, :clickhouse, :unanswered], _measurements, %{code: code}, nil) do
+    bump({"smolquery_clickhouse_unanswered_total", [code: Integer.to_string(code)]}, 1)
   end
 
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do

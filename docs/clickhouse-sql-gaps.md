@@ -157,7 +157,7 @@ The Postgres edge is the precedent: eight layers, an emulated catalog, a 250-lin
 dialect rewrite (`SmolqueryPg.PgCatalog.Rewrite`) and a fixture corpus of what
 clients actually send. The same shape applies here (PL-65):
 
-1. **Log unrecognized statements at the edge** to build a real corpus instead of guessing.
+1. **Log unrecognized statements at the edge** to build a real corpus instead of guessing. Done (T-480): `SmolqueryClickHouse.Unanswered`.
 2. **Cheap wins first:** strip a trailing `SETTINGS`, substitute `{name:Type}` parameters, read backticks and backslash escapes. Done (T-481).
 3. **Emulate `system.*`** plus `SHOW` and `DESCRIBE`, the way `pg_catalog` is emulated. Done (T-482, T-483).
 4. **A textual pre-pass** for constructs DuckDB refuses to parse (`ARRAY JOIN`, `LIMIT BY`, `PREWHERE`), and to drop `FINAL` rather than let it bind as an alias.

@@ -100,6 +100,16 @@ if clickhouse_port = System.get_env("SMOLQUERY_CLICKHOUSE_PORT") do
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_CLICKHOUSE_PORT", clickhouse_port)
 end
 
+if clickhouse_unanswered_log = System.get_env("SMOLQUERY_CLICKHOUSE_UNANSWERED_LOG") do
+  config :smolquery, SmolqueryClickHouse,
+    unanswered_log:
+      Smolquery.RuntimeConfig.enum!(
+        "SMOLQUERY_CLICKHOUSE_UNANSWERED_LOG",
+        clickhouse_unanswered_log,
+        [{"redacted", :redacted}, {"verbatim", :verbatim}, {"off", :off}]
+      )
+end
+
 if clickhouse_ip = System.get_env("SMOLQUERY_CLICKHOUSE_IP") do
   config :smolquery, SmolqueryClickHouse,
     ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_CLICKHOUSE_IP", clickhouse_ip)

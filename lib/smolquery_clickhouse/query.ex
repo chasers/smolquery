@@ -68,6 +68,14 @@ defmodule SmolqueryClickHouse.Query do
   parameter is never read under ClickHouse's escape rules, or a value
   ending in a backslash would reopen it.
 
+  ## What could not be answered
+
+  A statement refused for a reason that is the dialect's — a syntax error,
+  an unknown function, table, format or parameter — is logged as the client
+  sent it, with its `user-agent`, and counted
+  (`SmolqueryClickHouse.Unanswered`, T-480). That log is how the dialect work
+  learns what clients send.
+
   ## Refusals
 
   A request with `GET` is read-only, as ClickHouse's is: a statement that is
@@ -95,6 +103,7 @@ defmodule SmolqueryClickHouse.Query do
   alias SmolqueryClickHouse.Runtime
   alias SmolqueryClickHouse.Statement
   alias SmolqueryClickHouse.SystemCatalog
+  alias SmolqueryClickHouse.Unanswered
 
   @version "24.8.1.1"
 
@@ -104,6 +113,8 @@ defmodule SmolqueryClickHouse.Query do
   ]
 
   @max_timeout_ms 4_294_967_295
+
+  @statement :smolquery_clickhouse_statement
 
   @engine_count "count_star()"
   @count "count()"
@@ -118,6 +129,7 @@ defmodule SmolqueryClickHouse.Query do
   """
   @spec call(Plug.Conn.t(), Runtime.t(), String.t(), keyword()) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, sql, opts \\ []) do
+    conn = put_private(conn, @statement, sql)
     {statement, clause, settings} = clauses(sql)
 
     with :ok <- present(statement),
@@ -128,8 +140,14 @@ defmodule SmolqueryClickHouse.Query do
            statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
       answer(conn, runtime, translate(statement), format, timeout)
     else
-      {:error, exception} -> Errors.send_exception(conn, exception)
+      {:error, exception} -> refuse(conn, runtime, exception)
     end
+  end
+
+  defp refuse(conn, runtime, exception) do
+    Unanswered.record(conn, runtime, conn.private[@statement], exception)
+
+    Errors.send_exception(conn, exception)
   end
 
   defp clauses(sql) do
@@ -214,7 +232,7 @@ defmodule SmolqueryClickHouse.Query do
     case SystemCatalog.answer(runtime.name, statement, database(conn)) do
       {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
       :pass -> run(conn, runtime, statement, format, opts)
-      {:error, exception} -> Errors.send_exception(conn, exception)
+      {:error, exception} -> refuse(conn, runtime, exception)
     end
   end
 
@@ -246,10 +264,10 @@ defmodule SmolqueryClickHouse.Query do
         Errors.send_exception(conn, {500, 394, "QUERY_WAS_CANCELLED", "Query was cancelled", nil})
 
       {:ok, %Job{error: error}, _frame} ->
-        Errors.send_exception(conn, describe(error))
+        refuse(conn, runtime, describe(error))
 
       {:error, reason} ->
-        Errors.send_exception(conn, refusal(reason))
+        refuse(conn, runtime, refusal(reason))
     end
   end
 

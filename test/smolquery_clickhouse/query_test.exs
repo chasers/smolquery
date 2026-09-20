@@ -404,6 +404,45 @@ defmodule SmolqueryClickHouse.QueryTest do
     end
   end
 
+  describe "a statement the edge cannot answer (T-480)" do
+    import ExUnit.CaptureLog
+
+    test "is logged as the client sent it, redacted, with its user agent", %{name: name} do
+      log =
+        capture_log(fn ->
+          response =
+            post(
+              name,
+              "SELECT x FROM range(3) r(x) ARRAY JOIN [1] AS y WHERE 'needle' = 'needle' FORMAT JSON",
+              [
+                {"user-agent", "hyperdx 2.1.0"}
+              ]
+            )
+
+          assert response.status == 400
+        end)
+
+      assert log =~ "clickhouse edge could not answer: code=62"
+      assert log =~ ~s|user_agent="hyperdx 2.1.0"|
+      assert log =~ "ARRAY JOIN [1] AS y WHERE '?' = '?' FORMAT JSON"
+      refute log =~ "needle"
+    end
+
+    test "an unknown format and a missing parameter are logged; a statement that answers is not",
+         %{name: name} do
+      log =
+        capture_log(fn ->
+          post(name, "SELECT 1 FORMAT Parquet")
+          post(name, "SELECT {absent:String}")
+          post(name, "SELECT 1")
+        end)
+
+      assert log =~ "code=73"
+      assert log =~ "code=456"
+      assert [_before, _format, _parameter] = String.split(log, "could not answer")
+    end
+  end
+
   test "a TIMESTAMP_NS answers all nine digits, and sent back finds its row (T-496)", %{
     name: name
   } do
