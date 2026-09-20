@@ -458,4 +458,13 @@ defmodule SmolqueryClickHouse.QueryTest do
 
     assert post(name, "SELECT id #{from} WHERE #{where}").resp_body == "7\n"
   end
+
+  test "a statement's SETTINGS clause chooses ISO timestamps, as the URL does (review)", %{
+    name: name
+  } do
+    sql =
+      "SELECT TIMESTAMP '2026-09-19 10:11:29.5' AS ts SETTINGS date_time_output_format = 'iso' FORMAT JSONEachRow"
+
+    assert post(name, sql).resp_body == ~s|{"ts":"2026-09-19T10:11:29.500000Z"}\n|
+  end
 end

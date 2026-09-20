@@ -305,14 +305,11 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   end
 
   defp failure(reason) do
-    message = Exception.message(reason)
+    message = reason |> Exception.message() |> String.replace("system_", "system.")
 
-    case Regex.run(~r/Table with name system_(\w+) does not exist/, message) do
-      [_match, table] ->
-        {404, 60, "UNKNOWN_TABLE", "Table system.#{table} does not exist", nil}
-
-      nil ->
-        {400, 1002, "UNKNOWN_EXCEPTION", String.replace(message, "system_", "system."), nil}
+    case Regex.run(~r/Table with name system\.(\w+) does not exist/, message) do
+      [_match, table] -> {404, 60, "UNKNOWN_TABLE", "Table system.#{table} does not exist", nil}
+      nil -> Errors.engine_failure(message)
     end
   end
 

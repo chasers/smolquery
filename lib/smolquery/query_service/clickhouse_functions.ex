@@ -16,11 +16,18 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   to run and answers the definitions of the functions it names — three for
   HyperDX's histogram, none for a statement written in the engine's own
   dialect, which pays one scan of its text. The runner defines them on the
-  job's engine before it plans (the Top-N probe runs the statement's
-  `WHERE`), and a scatter worker does the same for its partial SQL, so the
+  job's engine before it plans, since planning may run part of the statement,
+  and a scatter worker does the same for its partial SQL, so the
   macros are wherever the statement runs, on whatever node. They live in the
   query service, not in the ClickHouse edge, for that reason.
   `Runtime.clickhouse_functions` switches them off.
+
+  One cost remains. The Top-N planner (`Smolquery.QueryService.TopN`) will
+  not probe a statement that calls a macro, since it cannot know a macro is
+  stable, so HyperDX's `ORDER BY Timestamp DESC LIMIT 200` over a
+  `fromUnixTimestamp64Milli` filter reads every hot micro-segment's footer
+  where the same statement written with `make_timestamp` reads a few. The
+  answer is the same; the read is not (T-504).
 
   A name is matched without regard to case, as the engine resolves it, and
   only before a `(`. A column or a table of the same name defines a macro

@@ -38,7 +38,8 @@ defmodule SmolqueryClickHouse.Query do
   `max_execution_time`, in seconds, bounds the query; without it the query
   service's default applies. A value past what a timer takes, which is how a
   client says "no limit", is held to the longest one, about 49 days. Every
-  other setting is accepted and ignored. A setting arrives as a URL
+  other setting but `date_time_output_format` is accepted and ignored. A
+  setting arrives as a URL
   parameter or in the statement's `SETTINGS` clause, before or after
   `FORMAT`; the clause wins (`Statement.split_settings/1`).
 
@@ -115,6 +116,7 @@ defmodule SmolqueryClickHouse.Query do
   @max_timeout_ms 4_294_967_295
 
   @statement :smolquery_clickhouse_statement
+  @settings :smolquery_clickhouse_settings
 
   @engine_count "count_star()"
   @count "count()"
@@ -129,13 +131,17 @@ defmodule SmolqueryClickHouse.Query do
   """
   @spec call(Plug.Conn.t(), Runtime.t(), String.t(), keyword()) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, sql, opts \\ []) do
-    conn = put_private(conn, @statement, sql)
     {statement, clause, settings} = clauses(sql)
+
+    conn =
+      conn
+      |> put_private(@statement, sql)
+      |> put_private(@settings, Map.merge(conn.query_params, settings))
 
     with :ok <- present(statement),
          :ok <- writable(statement, Keyword.get(opts, :read_only, false)),
          {:ok, format} <- format(clause, conn),
-         {:ok, timeout} <- timeout(Map.merge(conn.query_params, settings)),
+         {:ok, timeout} <- timeout(conn.private[@settings]),
          {:ok, statement} <-
            statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
       answer(conn, runtime, translate(statement), format, timeout)
@@ -305,7 +311,7 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp encoding(conn, job) do
-    case conn.query_params["date_time_output_format"] do
+    case conn.private[@settings]["date_time_output_format"] do
       "iso" -> [elapsed_ms: job.duration_ms || 0, date_time: :iso]
       _simple -> [elapsed_ms: job.duration_ms || 0]
     end
@@ -337,10 +343,11 @@ defmodule SmolqueryClickHouse.Query do
 
   defp scanned(_none), do: {0, 0}
 
-  defp describe({:invalid_query, message}) when is_binary(message), do: engine_failure(message)
+  defp describe({:invalid_query, message}) when is_binary(message),
+    do: Errors.engine_failure(message)
 
   defp describe(error) when is_exception(error),
-    do: error |> Exception.message() |> engine_failure()
+    do: error |> Exception.message() |> Errors.engine_failure()
 
   defp describe({:unknown_table, {dataset, table}}),
     do: {404, 60, "UNKNOWN_TABLE", "Table #{dataset}.#{table} does not exist", nil}
@@ -363,28 +370,6 @@ defmodule SmolqueryClickHouse.Query do
     if Ddl.error?(error),
       do: {400, 1002, "UNKNOWN_EXCEPTION", Ddl.message(error), nil},
       else: {500, 1002, "UNKNOWN_EXCEPTION", "query failed: #{inspect(error)}", nil}
-  end
-
-  defp engine_failure(message) do
-    cond do
-      Regex.match?(~r/Parser Error|syntax error/i, message) ->
-        {400, 62, "SYNTAX_ERROR", message, nil}
-
-      Regex.match?(~r/Catalog Error: Table|Table with name .* does not exist/i, message) ->
-        {404, 60, "UNKNOWN_TABLE", message, nil}
-
-      Regex.match?(~r/Function with name .* does not exist/i, message) ->
-        {404, 46, "UNKNOWN_FUNCTION", message, nil}
-
-      String.contains?(message, "Binder Error") and String.contains?(message, "column") ->
-        {400, 47, "UNKNOWN_IDENTIFIER", message, nil}
-
-      Regex.match?(~r/\A(IO|Internal|Out of Memory) Error|INTERNAL Error/i, message) ->
-        {500, 1002, "UNKNOWN_EXCEPTION", message, nil}
-
-      true ->
-        {400, 1002, "UNKNOWN_EXCEPTION", message, nil}
-    end
   end
 
   defp hot_tier_unavailable,

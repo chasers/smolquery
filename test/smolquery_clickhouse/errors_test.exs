@@ -28,4 +28,36 @@ defmodule SmolqueryClickHouse.ErrorsTest do
 
     assert get_resp_header(response, "retry-after") == ["5"]
   end
+
+  describe "engine_failure/1" do
+    alias SmolqueryClickHouse.Errors
+
+    test "reads the engine's message into ClickHouse's code" do
+      assert {400, 62, "SYNTAX_ERROR", _, nil} =
+               Errors.engine_failure("Parser Error: syntax error at or near \"x\"")
+
+      assert {404, 60, "UNKNOWN_TABLE", _, nil} =
+               Errors.engine_failure("Catalog Error: Table with name t does not exist!")
+
+      assert {404, 46, "UNKNOWN_FUNCTION", _, nil} =
+               Errors.engine_failure("Catalog Error: Scalar Function with name f does not exist!")
+
+      assert {400, 47, "UNKNOWN_IDENTIFIER", _, nil} =
+               Errors.engine_failure("Binder Error: Referenced column \"c\" not found")
+
+      assert {400, 1002, "UNKNOWN_EXCEPTION", _, nil} =
+               Errors.engine_failure("Conversion Error: Could not convert")
+    end
+
+    test "a failure that is the server's is a 500 a client may retry" do
+      for message <- [
+            "IO Error: disk",
+            "HTTP Error: 503",
+            "Connection Error: refused",
+            "Out of Memory Error: x"
+          ] do
+        assert {500, 1002, "UNKNOWN_EXCEPTION", ^message, nil} = Errors.engine_failure(message)
+      end
+    end
+  end
 end

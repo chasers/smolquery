@@ -275,4 +275,19 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
       assert Enum.count(rows) == 10_000
     end
   end
+
+  test "a function the catalog's engine lacks is code 46, and lands in the unanswered log (review)",
+       %{name: name} do
+    import ExUnit.CaptureLog
+
+    log =
+      capture_log(fn ->
+        response = post(name, "SELECT currentDatabase() FROM system.one")
+
+        assert response.status == 404
+        assert get_resp_header(response, "x-clickhouse-exception-code") == ["46"]
+      end)
+
+    assert log =~ "could not answer: code=46"
+  end
 end

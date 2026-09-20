@@ -30,6 +30,43 @@ defmodule SmolqueryClickHouse.Errors do
     |> send_resp(status, "Code: #{code}. DB::Exception: #{message}. (#{name})\n")
   end
 
+  @doc """
+  The refusal an engine's error message answers as.
+
+  The engine reports a failure as text, at parse time and at run time
+  alike, and both the query path and the emulated catalog read it here, so
+  one statement answers one code wherever it ran: 62 for the parser's, 60
+  for an unknown table, 46 for an unknown function, 47 for an unknown
+  column. A failure that is the server's — the disk, memory, a connection
+  the engine could not make — is a 500, which a client may retry; anything
+  else is the statement's, a 400.
+  """
+  @spec engine_failure(String.t()) :: t()
+  def engine_failure(message) when is_binary(message) do
+    cond do
+      Regex.match?(~r/Parser Error|syntax error/i, message) ->
+        {400, 62, "SYNTAX_ERROR", message, nil}
+
+      Regex.match?(~r/Catalog Error: Table|Table with name .* does not exist/i, message) ->
+        {404, 60, "UNKNOWN_TABLE", message, nil}
+
+      Regex.match?(~r/Function with name .* does not exist/i, message) ->
+        {404, 46, "UNKNOWN_FUNCTION", message, nil}
+
+      String.contains?(message, "Binder Error") and String.contains?(message, "column") ->
+        {400, 47, "UNKNOWN_IDENTIFIER", message, nil}
+
+      Regex.match?(
+        ~r/\A(IO|HTTP|Connection|Internal|Out of Memory) Error|INTERNAL Error/i,
+        message
+      ) ->
+        {500, 1002, "UNKNOWN_EXCEPTION", message, nil}
+
+      true ->
+        {400, 1002, "UNKNOWN_EXCEPTION", message, nil}
+    end
+  end
+
   defp retry_after(conn, nil), do: conn
 
   defp retry_after(conn, seconds),

@@ -90,7 +90,7 @@ function a shim would call.
 | Family | ClickHouse names that fail today | DuckDB equivalent |
 |---|---|---|
 | Date/time | `toYYYYMM`, `formatDateTime`, `dateDiff`, `toIntervalSecond`. **Resolve since T-485:** `toStartOfInterval`, the `toStartOf*` family, `toDate`, `toDateTime`, `toDateTime64`, `fromUnixTimestamp*`, `toUnixTimestamp*`, `now64`, `parseDateTime64BestEffort` | `date_trunc`, `time_bucket`, `strftime`, `epoch_ns`, casts |
-| Arrays | `hasAny`, `arrayExists`, `arrayMap`, `arrayFilter`, `arrayJoin`, `groupArray`. **Resolves since T-485:** `has` | `list_contains`, `list_has_any`, `list_filter`, `list_transform`, `unnest`, `list()` |
+| Arrays | `hasAny`, `arrayExists`, `arrayMap`, `arrayFilter`, `arrayJoin`. **Resolve since T-485 and T-496:** `has`, `groupArray`, `groupUniqArray`, `groupUniqArrayArray` | `list_contains`, `list_has_any`, `list_filter`, `list_transform`, `unnest`, `list()` |
 | Aggregate combinators | `-Array`, `-State`, `-Merge`, and `-If` beyond `countIf`, `sumIf`, `avgIf`, `minIf`, `maxIf`, which resolve (T-485) | `sum(x) FILTER (WHERE …)`; `-State`/`-Merge` have no equivalent |
 | Approximate aggregates | `uniqCombined`, `quantiles`, `quantileTDigest`, `topK`. **Resolve since T-485, exactly:** `uniq`, `uniqExact` | `approx_count_distinct`, `count(DISTINCT …)`, `quantile_cont`, `approx_top_k` |
 | Strings/regex | `splitByChar`, `extractAll`, `positionCaseInsensitive`, `multiSearchAny`. **Resolve since T-485:** `match`, `hasToken`, `startsWith`, `endsWith`, `notEmpty`, `empty` | `regexp_matches`, `str_split`, `regexp_extract_all`, `position(… IN …)` |
@@ -98,7 +98,7 @@ function a shim would call.
 | JSON | `JSONExtract*`, `simpleJSONExtract*`, `visitParamExtract*` | `json_extract` family, `VARIANT` |
 | Hashes | `cityHash64`, `sipHash64`, `xxHash64` | `hash`; values will not match ClickHouse's |
 | Dictionaries | `dictGet*` | **No equivalent**; out of scope |
-| Type helpers | `toTypeName`, `assumeNotNull`, `intDiv`, `isNull` (a keyword to the parser). **Resolve since T-485:** `toString`, `toInt64`, `toUInt64`, `toFloat64` and their `-OrZero`/`-OrNull` forms, `toFloat64OrDefault` | casts, `typeof`, `//` |
+| Type helpers | `toTypeName`, `assumeNotNull`, `intDiv`. **Resolve since T-485 and T-496:** `isNull`, `isNotNull`, `toString`, `toInt64`, `toUInt64`, `toFloat64` and their `-OrZero`/`-OrNull` forms, `toFloat64OrDefault` | casts, `typeof`, `//` |
 | Maps and hints | **Resolve since T-485:** `mapContains`, `mapKeys`, `mapValues`, `indexHint` (always true) | `map_contains`, `map_keys`, `map_values` |
 
 ## 4. Types with no home
@@ -147,7 +147,7 @@ These return an answer, just not always ClickHouse's.
 | `ch` (Elixir) | Connects and queries | Nothing for plain SQL |
 | Logflare reads | No | `toStartOfInterval`, `ARRAY JOIN`, `LIMIT BY`, `match`, `has`, `arrayExists`. Map access (`col['key']`), `{name:Type}` params and a trailing `SETTINGS` already work |
 | `clickhouse-connect`, JS client | Connects, reads metadata | Untested against the real clients |
-| HyperDX (ClickStack) | Search page: yes | The filters sidebar, row click and charts beyond the histogram: parametric aggregates, `isNull`, `WITH (expr) AS alias` (T-496). See [clickstack.md](clickstack.md) |
+| HyperDX (ClickStack) | Search, the filters sidebar, charts, an aliased source and a row click answer, through HyperDX's own query code | Traces, sessions and metrics (T-501); the UI itself has not been run. See [clickstack.md](clickstack.md) |
 | Grafana ClickHouse plugin | No | `system.*` browsing, then the time-function family |
 | BI tools (Metabase, Tableau) | No | Catalog introspection first, then functions |
 
