@@ -25,7 +25,7 @@ defmodule SmolqueryClickHouse.FormatTest do
   ]
 
   defp encode(format, columns \\ @columns, rows \\ @rows),
-    do: format |> Format.encode(columns, rows, 12) |> IO.iodata_to_binary()
+    do: format |> Format.encode(columns, rows, elapsed_ms: 12) |> IO.iodata_to_binary()
 
   describe "fetch/1" do
     test "reads ClickHouse's names and their aliases, in any case" do
@@ -163,6 +163,71 @@ defmodule SmolqueryClickHouse.FormatTest do
                "d" => 1.5,
                "b" => true
              }
+    end
+  end
+
+  describe "the JSONCompactEachRow family (T-493)" do
+    test "JSONCompactEachRowWithNamesAndTypes is names, types, then a row per line" do
+      assert encode(:json_compact_each_row_names_types) ==
+               ~s|["id","msg","ts","attrs","doc"]\n| <>
+                 ~s|["Nullable(Int64)","Nullable(String)","Nullable(DateTime64(6))","Map(String, String)","Nullable(String)"]\n| <>
+                 ~s|["1","tab\\there, it's","2026-09-15 12:00:00.123456",{"host":"a"},"{\\"n\\":1}"]\n| <>
+                 ~s|[null,null,null,{},null]\n|
+    end
+
+    test "with no rows the two header lines still answer" do
+      assert encode(:json_compact_each_row_names_types, @columns, [])
+             |> String.split("\n")
+             |> length() == 3
+    end
+
+    test "the shorter two leave the types, or both lines, out" do
+      assert [names, _row, _null, ""] = encode(:json_compact_each_row_names) |> String.split("\n")
+      assert names == ~s|["id","msg","ts","attrs","doc"]|
+
+      assert [row, _null, ""] = encode(:json_compact_each_row) |> String.split("\n")
+      assert String.starts_with?(row, ~s|["1",|)
+    end
+
+    test "their names are fetched as ClickHouse spells them" do
+      assert Format.fetch("JSONCompactEachRowWithNamesAndTypes") ==
+               {:ok, :json_compact_each_row_names_types}
+
+      assert Format.name(:json_compact_each_row_names_types) ==
+               "JSONCompactEachRowWithNamesAndTypes"
+    end
+  end
+
+  test "TabSeparatedRaw writes a value as it is, and NULL as \\N" do
+    assert encode(:tsv_raw) ==
+             "1\ttab\there, it's\t2026-09-15 12:00:00.123456\t{'host':'a'}\t{\"n\":1}\n" <>
+               "\\N\t\\N\t\\N\t{}\t\\N\n"
+
+    assert Format.fetch("TSVRaw") == {:ok, :tsv_raw}
+  end
+
+  describe "date_time: :iso" do
+    defp iso(format) do
+      columns = [{"ts", {:naive_datetime, :microsecond}, false}]
+      rows = [%{"ts" => ~N[2026-09-15 12:00:00.123456]}, %{"ts" => nil}]
+
+      format |> Format.encode(columns, rows, date_time: :iso) |> IO.iodata_to_binary()
+    end
+
+    test "a timestamp is ISO 8601 with a Z in the JSON and tab-separated formats" do
+      assert iso(:json_each_row) == ~s|{"ts":"2026-09-15T12:00:00.123456Z"}\n{"ts":null}\n|
+      assert iso(:json_compact_each_row) == ~s|["2026-09-15T12:00:00.123456Z"]\n[null]\n|
+      assert iso(:tsv) == "2026-09-15T12:00:00.123456Z\n\\N\n"
+    end
+
+    test "RowBinary carries the same number either way" do
+      assert iso(:row_binary_with_names_and_types) ==
+               :row_binary_with_names_and_types
+               |> Format.encode(
+                 [{"ts", {:naive_datetime, :microsecond}, false}],
+                 [%{"ts" => ~N[2026-09-15 12:00:00.123456]}, %{"ts" => nil}]
+               )
+               |> IO.iodata_to_binary()
     end
   end
 end

@@ -7,15 +7,20 @@ defmodule SmolqueryClickHouse.Format do
   | `TabSeparated`, `TSV` (the default) | one line per row, values tab-separated |
   | `TabSeparatedWithNames`, `TSVWithNames` | a line of column names first |
   | `TabSeparatedWithNamesAndTypes`, `TSVWithNamesAndTypes` | then a line of types |
+  | `TabSeparatedRaw`, `TSVRaw` | `TabSeparated` with no escaping |
   | `JSON` | `meta`, `data` as objects, `rows`, `statistics` |
   | `JSONCompact` | the same, with `data` as arrays |
   | `JSONEachRow` | one JSON object per line |
+  | `JSONCompactEachRow` | one JSON array per line |
+  | `JSONCompactEachRowWithNames` | a line of column names first |
+  | `JSONCompactEachRowWithNamesAndTypes` | then a line of types |
   | `RowBinaryWithNamesAndTypes` | a header of names and types, then binary rows |
 
   Names match without regard to case. ClickHouse's own are case-sensitive,
   so a client that spells them as ClickHouse does is always understood.
   `RowBinaryWithNamesAndTypes` is what `ch`, the Elixir client, asks for and
-  decodes.
+  decodes. `JSONCompactEachRowWithNamesAndTypes` is what HyperDX streams its
+  results table from (T-493).
 
   ## Types
 
@@ -42,7 +47,9 @@ defmodule SmolqueryClickHouse.Format do
   with a backslash, and `NULL` is `\\N`. In JSON a 64-bit integer is a
   quoted string (`output_format_json_quote_64bit_integers`), a decimal is a
   bare number, and a non-finite float is `null`. A timestamp is
-  `YYYY-MM-DD hh:mm:ss.ffffff` in both. In RowBinary a `NULL` map value is
+  `YYYY-MM-DD hh:mm:ss.ffffff` in both, or `YYYY-MM-DDThh:mm:ss.ffffffZ`
+  under `date_time: :iso`, which is ClickHouse's
+  `date_time_output_format = 'iso'`. In RowBinary a `NULL` map value is
   written as the empty string, since the map's values are not `Nullable`.
 
   A `NULL` map answers as the empty map in every format, for the same
@@ -60,9 +67,13 @@ defmodule SmolqueryClickHouse.Format do
           :tsv
           | :tsv_names
           | :tsv_names_types
+          | :tsv_raw
           | :json
           | :json_compact
           | :json_each_row
+          | :json_compact_each_row
+          | :json_compact_each_row_names
+          | :json_compact_each_row_names_types
           | :row_binary_with_names_and_types
 
   @typedoc """
@@ -78,9 +89,14 @@ defmodule SmolqueryClickHouse.Format do
     "tsvwithnames" => :tsv_names,
     "tabseparatedwithnamesandtypes" => :tsv_names_types,
     "tsvwithnamesandtypes" => :tsv_names_types,
+    "tabseparatedraw" => :tsv_raw,
+    "tsvraw" => :tsv_raw,
     "json" => :json,
     "jsoncompact" => :json_compact,
     "jsoneachrow" => :json_each_row,
+    "jsoncompacteachrow" => :json_compact_each_row,
+    "jsoncompacteachrowwithnames" => :json_compact_each_row_names,
+    "jsoncompacteachrowwithnamesandtypes" => :json_compact_each_row_names_types,
     "rowbinarywithnamesandtypes" => :row_binary_with_names_and_types
   }
 
@@ -88,9 +104,13 @@ defmodule SmolqueryClickHouse.Format do
     tsv: "TabSeparated",
     tsv_names: "TabSeparatedWithNames",
     tsv_names_types: "TabSeparatedWithNamesAndTypes",
+    tsv_raw: "TabSeparatedRaw",
     json: "JSON",
     json_compact: "JSONCompact",
     json_each_row: "JSONEachRow",
+    json_compact_each_row: "JSONCompactEachRow",
+    json_compact_each_row_names: "JSONCompactEachRowWithNames",
+    json_compact_each_row_names_types: "JSONCompactEachRowWithNamesAndTypes",
     row_binary_with_names_and_types: "RowBinaryWithNamesAndTypes"
   }
 
@@ -113,7 +133,7 @@ defmodule SmolqueryClickHouse.Format do
   The `content-type` of an answer in `format`.
   """
   @spec content_type(t()) :: String.t()
-  def content_type(format) when format in [:tsv, :tsv_names, :tsv_names_types],
+  def content_type(format) when format in [:tsv, :tsv_names, :tsv_names_types, :tsv_raw],
     do: "text/tab-separated-values; charset=UTF-8"
 
   def content_type(:row_binary_with_names_and_types), do: "application/octet-stream"
@@ -143,39 +163,68 @@ defmodule SmolqueryClickHouse.Format do
   @doc """
   `rows` of `columns` in `format`.
 
-  `elapsed_ms` is reported in the `statistics` of the `JSON` formats.
+  `elapsed_ms:` is reported in the `statistics` of the `JSON` formats.
+  `date_time: :iso` writes a timestamp as ISO 8601 with a `Z`, in the text
+  formats; RowBinary carries a timestamp as a number either way.
   """
-  @spec encode(t(), [column()], [map()], non_neg_integer()) :: iodata()
-  def encode(format, columns, rows, elapsed_ms \\ 0)
+  @spec encode(t(), [column()], [map()], elapsed_ms: non_neg_integer(), date_time: :simple | :iso) ::
+          iodata()
+  def encode(format, columns, rows, opts \\ []) do
+    style = Keyword.get(opts, :date_time, :simple)
 
-  def encode(:tsv, columns, rows, _elapsed_ms), do: tsv_rows(columns, rows)
+    body(format, columns, rows, style, Keyword.get(opts, :elapsed_ms, 0))
+  end
 
-  def encode(:tsv_names, columns, rows, _elapsed_ms),
-    do: [tsv_line(Enum.map(columns, &escape(elem(&1, 0)))), tsv_rows(columns, rows)]
+  defp body(:tsv, columns, rows, style, _elapsed_ms),
+    do: tsv_rows(columns, rows, style, &escape/1)
 
-  def encode(:tsv_names_types, columns, rows, _elapsed_ms) do
+  defp body(:tsv_raw, columns, rows, style, _elapsed_ms),
+    do: tsv_rows(columns, rows, style, &Function.identity/1)
+
+  defp body(:tsv_names, columns, rows, style, _elapsed_ms),
+    do: [
+      tsv_line(Enum.map(columns, &escape(elem(&1, 0)))),
+      tsv_rows(columns, rows, style, &escape/1)
+    ]
+
+  defp body(:tsv_names_types, columns, rows, style, _elapsed_ms) do
     [
       tsv_line(Enum.map(columns, &escape(elem(&1, 0)))),
-      tsv_line(Enum.map(columns, fn {_name, dtype, json?} -> type_name(dtype, json?) end)),
-      tsv_rows(columns, rows)
+      tsv_line(type_names(columns)),
+      tsv_rows(columns, rows, style, &escape/1)
     ]
   end
 
-  def encode(:json_each_row, columns, rows, _elapsed_ms),
-    do: Enum.map(rows, &[json_object(columns, &1), "\n"])
+  defp body(:json_each_row, columns, rows, style, _elapsed_ms),
+    do: Enum.map(rows, &[json_object(columns, &1, style), "\n"])
 
-  def encode(:row_binary_with_names_and_types, columns, rows, _elapsed_ms) do
+  defp body(:json_compact_each_row, columns, rows, style, _elapsed_ms),
+    do: Enum.map(rows, &[json_array(columns, &1, style), "\n"])
+
+  defp body(:json_compact_each_row_names, columns, rows, style, elapsed_ms),
+    do: [json_names(columns), body(:json_compact_each_row, columns, rows, style, elapsed_ms)]
+
+  defp body(:json_compact_each_row_names_types, columns, rows, style, elapsed_ms) do
+    [
+      json_names(columns),
+      JSON.encode_to_iodata!(type_names(columns)),
+      "\n",
+      body(:json_compact_each_row, columns, rows, style, elapsed_ms)
+    ]
+  end
+
+  defp body(:row_binary_with_names_and_types, columns, rows, _style, _elapsed_ms) do
     [
       leb128(length(columns)),
       Enum.map(columns, fn {name, _dtype, _json?} -> binary_string(name) end),
-      Enum.map(columns, fn {_name, dtype, json?} -> binary_string(type_name(dtype, json?)) end),
+      Enum.map(type_names(columns), &binary_string/1),
       Enum.map(rows, fn row ->
         Enum.map(columns, fn {name, dtype, json?} -> binary(dtype, json?, row[name]) end)
       end)
     ]
   end
 
-  def encode(format, columns, rows, elapsed_ms) when format in [:json, :json_compact] do
+  defp body(format, columns, rows, style, elapsed_ms) when format in [:json, :json_compact] do
     meta =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
         [
@@ -189,7 +238,9 @@ defmodule SmolqueryClickHouse.Format do
 
     data =
       Enum.map_intersperse(rows, ",", fn row ->
-        if format == :json, do: json_object(columns, row), else: json_array(columns, row)
+        if format == :json,
+          do: json_object(columns, row, style),
+          else: json_array(columns, row, style)
       end)
 
     [
@@ -205,24 +256,45 @@ defmodule SmolqueryClickHouse.Format do
     ]
   end
 
-  defp tsv_rows(columns, rows) do
+  defp type_names(columns),
+    do: Enum.map(columns, fn {_name, dtype, json?} -> type_name(dtype, json?) end)
+
+  defp json_names(columns),
+    do: [
+      JSON.encode_to_iodata!(Enum.map(columns, fn {name, _dtype, _json?} -> utf8(name) end)),
+      "\n"
+    ]
+
+  defp styled(%NaiveDateTime{} = value, :iso), do: NaiveDateTime.to_iso8601(value) <> "Z"
+
+  defp styled(%DateTime{} = value, :iso),
+    do: value |> DateTime.to_naive() |> styled(:iso)
+
+  defp styled(value, _style), do: value
+
+  defp tsv_rows(columns, rows, style, escape) do
     Enum.map(rows, fn row ->
-      tsv_line(Enum.map(columns, fn {name, dtype, json?} -> tsv(dtype, json?, row[name]) end))
+      tsv_line(
+        Enum.map(columns, fn {name, dtype, json?} ->
+          tsv(dtype, json?, styled(row[name], style), escape)
+        end)
+      )
     end)
   end
 
   defp tsv_line(values), do: [Enum.intersperse(values, "\t"), "\n"]
 
-  defp tsv(@map_dtype, false, nil), do: "{}"
-  defp tsv(_dtype, _json?, nil), do: "\\N"
-  defp tsv(_dtype, true, value), do: escape(json_text(value))
-  defp tsv(@map_dtype, false, value) when is_map(value), do: map_text(value)
-  defp tsv(_dtype, false, value) when is_binary(value), do: escape(value)
+  defp tsv(@map_dtype, false, nil, _escape), do: "{}"
+  defp tsv(_dtype, _json?, nil, _escape), do: "\\N"
+  defp tsv(_dtype, true, value, escape), do: escape.(json_text(value))
+  defp tsv(@map_dtype, false, value, _escape) when is_map(value), do: map_text(value)
+  defp tsv(_dtype, false, value, escape) when is_binary(value), do: escape.(value)
 
-  defp tsv(_dtype, false, value) when is_list(value) or (is_map(value) and not is_struct(value)),
-    do: escape(json_text(value))
+  defp tsv(_dtype, false, value, escape)
+       when is_list(value) or (is_map(value) and not is_struct(value)),
+       do: escape.(json_text(value))
 
-  defp tsv(_dtype, false, value), do: escape(text(value))
+  defp tsv(_dtype, false, value, escape), do: escape.(text(value))
 
   defp map_text(map) do
     entries =
@@ -251,19 +323,19 @@ defmodule SmolqueryClickHouse.Format do
   defp escape_byte(?'), do: "\\'"
   defp escape_byte(byte), do: <<byte>>
 
-  defp json_object(columns, row) do
+  defp json_object(columns, row, style) do
     fields =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
-        [json_string(name), ":", json(dtype, json?, row[name])]
+        [json_string(name), ":", json(dtype, json?, styled(row[name], style))]
       end)
 
     ["{", fields, "}"]
   end
 
-  defp json_array(columns, row) do
+  defp json_array(columns, row, style) do
     values =
       Enum.map_intersperse(columns, ",", fn {name, dtype, json?} ->
-        json(dtype, json?, row[name])
+        json(dtype, json?, styled(row[name], style))
       end)
 
     ["[", values, "]"]

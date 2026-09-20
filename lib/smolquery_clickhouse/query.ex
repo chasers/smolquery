@@ -39,6 +39,13 @@ defmodule SmolqueryClickHouse.Query do
   parameter or in the statement's `SETTINGS` clause, before or after
   `FORMAT`; the clause wins (`Statement.split_settings/1`).
 
+  ## Names and timestamps
+
+  An unaliased `count()` or `count(*)` answers as `count()`, ClickHouse's
+  name for it, not the engine's `count_star()`: HyperDX reads its total by
+  that name. With `date_time_output_format=iso` a timestamp answers as ISO
+  8601 with a `Z` in the text formats.
+
   ## Parameters and quoting
 
   Backquoted identifiers and ClickHouse's backslash escapes are written the
@@ -82,6 +89,9 @@ defmodule SmolqueryClickHouse.Query do
   ]
 
   @max_timeout_ms 4_294_967_295
+
+  @engine_count "count_star()"
+  @count "count()"
 
   @read_only_keywords ~w(select with show describe desc explain exists)
 
@@ -156,7 +166,7 @@ defmodule SmolqueryClickHouse.Query do
       :error ->
         {:error,
          {404, 73, "UNKNOWN_FORMAT",
-          "Unknown output format #{name}; use TabSeparated, TabSeparatedWithNames, TabSeparatedWithNamesAndTypes, JSON, JSONCompact, JSONEachRow or RowBinaryWithNamesAndTypes",
+          "Unknown output format #{name}; use the TabSeparated, JSON, JSONCompact, JSONEachRow or JSONCompactEachRow families, or RowBinaryWithNamesAndTypes",
           nil}}
     end
   end
@@ -205,6 +215,7 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp rows(conn, job, frame, format) do
+    frame = clickhouse_names(frame)
     dtypes = DataFrame.dtypes(frame)
 
     columns =
@@ -216,7 +227,22 @@ defmodule SmolqueryClickHouse.Query do
     |> headers(job, length(rows))
     |> put_resp_header("x-clickhouse-format", Format.name(format))
     |> put_resp_header("content-type", Format.content_type(format))
-    |> send_resp(200, Format.encode(format, columns, rows, job.duration_ms || 0))
+    |> send_resp(200, Format.encode(format, columns, rows, encoding(conn, job)))
+  end
+
+  defp clickhouse_names(frame) do
+    names = DataFrame.names(frame)
+
+    if @engine_count in names and @count not in names,
+      do: DataFrame.rename(frame, %{@engine_count => @count}),
+      else: frame
+  end
+
+  defp encoding(conn, job) do
+    case conn.query_params["date_time_output_format"] do
+      "iso" -> [elapsed_ms: job.duration_ms || 0, date_time: :iso]
+      _simple -> [elapsed_ms: job.duration_ms || 0]
+    end
   end
 
   defp headers(conn, job, result_rows) do

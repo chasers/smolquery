@@ -263,4 +263,35 @@ defmodule SmolqueryClickHouse.QueryTest do
       assert response.resp_body =~ "2026-09-19 10:11:12.5"
     end
   end
+
+  describe "what HyperDX reads in an answer (T-493)" do
+    test "count() is named count(), and the results table's format answers", %{name: name} do
+      response = post(name, "SELECT count(), count(*) AS n FORMAT JSON")
+
+      assert %{"meta" => [%{"name" => "count()"}, %{"name" => "n"}], "data" => [row]} =
+               JSON.decode!(response.resp_body)
+
+      assert row == %{"count()" => "1", "n" => "1"}
+
+      response = post(name, "SELECT 1 AS a FORMAT JSONCompactEachRowWithNamesAndTypes")
+
+      assert get_resp_header(response, "x-clickhouse-format") == [
+               "JSONCompactEachRowWithNamesAndTypes"
+             ]
+
+      assert response.resp_body == ~s|["a"]\n["Nullable(Int32)"]\n[1]\n|
+    end
+
+    test "date_time_output_format=iso writes a timestamp as ISO 8601", %{name: name} do
+      response =
+        conn(
+          :post,
+          "/?date_time_output_format=iso",
+          "SELECT TIMESTAMP '2026-09-19 10:11:29.5' AS ts FORMAT JSONEachRow"
+        )
+        |> request(name)
+
+      assert response.resp_body == ~s|{"ts":"2026-09-19T10:11:29.500000Z"}\n|
+    end
+  end
 end
