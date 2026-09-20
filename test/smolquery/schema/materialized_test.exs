@@ -173,7 +173,13 @@ defmodule Smolquery.Schema.MaterializedTest do
     end
 
     test "a variant is probed as the VARIANT a query sees: a key cast passes, a JSON function over it is refused (T-508)" do
-      schema = Schema.new!([{"id", :int64, id: 1}, {"attrs", :variant, id: 2}])
+      schema =
+        Schema.new!([
+          {"id", :int64, id: 1},
+          {"attrs", :variant, id: 2},
+          {"label", :string, id: 3}
+        ])
+
       validate = &Materialized.validate(schema, Field.new!("m", &2, materialized: &1))
 
       assert {:ok, %Materialized{sources: [2]}} = validate.("attrs['host']::VARCHAR", :string)
@@ -181,11 +187,19 @@ defmodule Smolquery.Schema.MaterializedTest do
       assert {:ok, %Materialized{}} = validate.("attrs::BIGINT", :int64)
       assert {:ok, %Materialized{}} = validate.("attrs::JSON->>'host'", :string)
 
-      for expression <- ["attrs->>'host'", "json_extract_string(attrs, '$.host')"] do
-        assert {:error, {:invalid_materialized, {:variant_as_json, message}}} =
-                 validate.(expression, :string)
+      assert {:ok, %Materialized{}} = validate.("json_extract_string(label, '$.host')", :string)
 
-        assert message =~ "Malformed JSON"
+      for {expression, function} <- [
+            {"attrs->>'host'", "->>"},
+            {"json_extract_string(attrs, '$.host')", "json_extract_string"},
+            {"attrs['req']->>'host'", "->>"},
+            {"json_extract_string(attrs['a']['b'], '$')", "json_extract_string"},
+            {"CASE WHEN id > 0 THEN attrs->>'host' END", "->>"},
+            {"coalesce(label, json_extract_string(coalesce(attrs, attrs), '$.k'))",
+             "json_extract_string"}
+          ] do
+        assert {:error, {:invalid_materialized, {:variant_as_json, ^function}}} =
+                 validate.(expression, :string)
       end
     end
 
@@ -201,6 +215,6 @@ defmodule Smolquery.Schema.MaterializedTest do
     assert Materialized.message({:inconsistent_function, "now"}) =~ "not deterministic"
     assert Materialized.message({:unknown_column, "x"}) =~ "does not have: x"
     assert Materialized.message({:unsupported_expression, "SUBQUERY"}) =~ "subquery"
-    assert Materialized.message({:variant_as_json, "Malformed JSON"}) =~ "attrs['key']::VARCHAR"
+    assert Materialized.message({:variant_as_json, "->>"}) =~ "attrs['key']::VARCHAR"
   end
 end
