@@ -48,15 +48,23 @@ defmodule SmolqueryClickHouse.Query do
   `EXPLAIN ESTIMATE <statement>` answers what the statement would read,
   without running it (T-506): ClickHouse's five columns, `database`, `table`,
   `parts`, `rows` and `marks`, in one row. HyperDX sends it before each search
-  to show the rows the search will scan, and reads `rows`. The statement is
-  planned as it would be to run — the same snapshot, the same pruning, the
-  same Top-N bound — and `rows` and `parts` are the rows and files the plan
-  keeps, in both tiers (`Smolquery.QueryService.Statistics`). They are the
-  plan's sizes, as ClickHouse's are its index's: what will be read, not what
-  will match. `database` and `table` are empty and `marks` is `0`: one row
-  stands for the whole statement, and smolquery has no marks. A statement
-  that does not plan or bind answers its error, which is how HyperDX checks
-  an expression a user typed.
+  to show the rows the search will scan, and reads `rows`. `EXPLAIN
+  ESTIMATE` is taken off first, and the statement under it is then filled,
+  quoted and rewritten exactly as it would be to run, so whatever runs can
+  be estimated. It is planned at the same snapshot, and `rows` and `parts`
+  are the rows and files the plan keeps
+  (`Smolquery.QueryService.Statistics`). In the hot tier that is after the
+  planner's pruning and its Top-N bound. In the sealed tier it is every
+  segment at the snapshot: those are pruned inside the engine, from
+  DuckLake's per-file stats, where the planner cannot see, so a search over
+  fifteen minutes of a large sealed table estimates the whole table. It is
+  an upper bound on what will be read, not what will match. When the plan
+  has no sizes to give, `rows` and `parts` are `NULL`, not `0`: a search
+  that reads nothing is a different claim. `database` and `table` are empty
+  and `marks` is `0`: one row stands for the whole statement, and smolquery
+  has no marks. A statement the catalog answers (`system.*`) estimates `0`.
+  A statement that does not plan or bind answers its error, which is how
+  HyperDX checks an expression a user typed.
 
   ## The catalog
 
@@ -148,6 +156,7 @@ defmodule SmolqueryClickHouse.Query do
   @spec call(Plug.Conn.t(), Runtime.t(), String.t(), keyword()) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, sql, opts \\ []) do
     {statement, clause, settings} = clauses(sql)
+    {mode, statement} = estimated(statement)
 
     conn =
       conn
@@ -160,7 +169,7 @@ defmodule SmolqueryClickHouse.Query do
          {:ok, timeout} <- timeout(conn.private[@settings]),
          {:ok, statement} <-
            statement |> Statement.standard_quoting() |> Params.substitute(conn.query_params) do
-      answer(conn, runtime, translate(statement), format, timeout)
+      answer(mode, conn, runtime, translate(statement), format, timeout)
     else
       {:error, exception} -> refuse(conn, runtime, exception)
     end
@@ -250,38 +259,40 @@ defmodule SmolqueryClickHouse.Query do
     end)
   end
 
-  defp answer(conn, runtime, statement, format, opts) do
-    case estimated(statement) do
-      {:ok, inner} -> estimate(conn, runtime, inner, format, opts)
-      :error -> answer_rows(conn, runtime, statement, format, opts)
-    end
-  end
-
   defp estimated(statement) do
     with {:word, "explain", rest} <- Sql.next_token(statement),
          {:word, "estimate", inner} <- Sql.next_token(rest) do
-      {:ok, Sql.skip_trivia(inner)}
+      {:estimate, Sql.skip_trivia(inner)}
     else
-      _another_statement -> :error
+      _another_statement -> {:rows, statement}
     end
   end
 
-  defp estimate(conn, runtime, inner, format, opts) do
-    case Client.query(runtime.query_name, inner, [explain: :plan] ++ opts) do
-      {:ok, %Job{state: :done} = job, _plan} ->
-        rows(conn, job, estimate_frame(job.statistics), format)
-
-      {:ok, %Job{error: error}, _plan} ->
-        refuse(conn, runtime, describe(error))
-
-      {:error, reason} ->
-        refuse(conn, runtime, refusal(reason))
+  defp answer(:rows, conn, runtime, statement, format, opts) do
+    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
+      {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
+      :pass -> run(conn, runtime, statement, format, opts)
+      {:error, exception} -> refuse(conn, runtime, exception)
     end
   end
 
-  defp estimate_frame(statistics) do
-    {files, rows} = planned(statistics)
+  defp answer(:estimate, conn, runtime, statement, format, opts) do
+    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
+      {:ok, _frame} -> rows(conn, catalog_job(conn), estimate_frame({0, 0}), format)
+      :pass -> estimate(conn, runtime, statement, format, opts)
+      {:error, exception} -> refuse(conn, runtime, exception)
+    end
+  end
 
+  defp estimate(conn, runtime, statement, format, opts) do
+    runtime.query_name
+    |> Client.query(statement, [explain: :plan] ++ opts)
+    |> settle(conn, runtime, fn job, _plan ->
+      rows(conn, job, estimate_frame(planned(job.statistics)), format)
+    end)
+  end
+
+  defp estimate_frame({files, rows}) do
     DataFrame.new(
       [database: [""], table: [""], parts: [files], rows: [rows], marks: [0]],
       dtypes: [parts: {:u, 64}, rows: {:u, 64}, marks: {:u, 64}]
@@ -291,15 +302,7 @@ defmodule SmolqueryClickHouse.Query do
   defp planned(%Statistics{} = statistics),
     do: {Statistics.files_scanned(statistics), Statistics.rows_scanned(statistics)}
 
-  defp planned(_none), do: {0, 0}
-
-  defp answer_rows(conn, runtime, statement, format, opts) do
-    case SystemCatalog.answer(runtime.name, statement, database(conn)) do
-      {:ok, frame} -> rows(conn, catalog_job(conn), frame, format)
-      :pass -> run(conn, runtime, statement, format, opts)
-      {:error, exception} -> refuse(conn, runtime, exception)
-    end
-  end
+  defp planned(_no_sizes), do: {nil, nil}
 
   defp database(conn) do
     conn.query_params["database"] ||
@@ -315,26 +318,30 @@ defmodule SmolqueryClickHouse.Query do
   end
 
   defp run(conn, runtime, statement, format, opts) do
-    case Client.query(runtime.query_name, statement, opts) do
-      {:ok, %Job{state: :done} = job, %DataFrame{} = frame} ->
+    runtime.query_name
+    |> Client.query(statement, opts)
+    |> settle(conn, runtime, fn
+      job, %DataFrame{} = frame ->
         rows(conn, job, frame, format)
 
-      {:ok, %Job{state: :done} = job, nil} ->
+      job, nil ->
         conn
         |> headers(job, 0)
         |> put_resp_content_type("text/plain")
         |> send_resp(200, "")
-
-      {:ok, %Job{state: :cancelled}, _frame} ->
-        Errors.send_exception(conn, {500, 394, "QUERY_WAS_CANCELLED", "Query was cancelled", nil})
-
-      {:ok, %Job{error: error}, _frame} ->
-        refuse(conn, runtime, describe(error))
-
-      {:error, reason} ->
-        refuse(conn, runtime, refusal(reason))
-    end
+    end)
   end
+
+  defp settle({:ok, %Job{state: :done} = job, result}, _conn, _runtime, done),
+    do: done.(job, result)
+
+  defp settle({:ok, %Job{state: :cancelled}, _result}, conn, _runtime, _done),
+    do: Errors.send_exception(conn, {500, 394, "QUERY_WAS_CANCELLED", "Query was cancelled", nil})
+
+  defp settle({:ok, %Job{error: error}, _result}, conn, runtime, _done),
+    do: refuse(conn, runtime, describe(error))
+
+  defp settle({:error, reason}, conn, runtime, _done), do: refuse(conn, runtime, refusal(reason))
 
   defp rows(conn, job, frame, format) do
     frame = clickhouse_names(frame)

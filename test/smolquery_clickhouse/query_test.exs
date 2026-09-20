@@ -496,6 +496,27 @@ defmodule SmolqueryClickHouse.QueryTest do
       assert response.resp_body == "\t\t0\t0\t0\n"
     end
 
+    test "the statement under it is rewritten as it would be to run (review of T-506)", %{
+      name: name
+    } do
+      sql =
+        "EXPLAIN ESTIMATE WITH (i + 1) AS `next` SELECT count() FROM range(10) r(i) " <>
+          "WHERE next > {n:Int32} GROUP BY i AS `k` SETTINGS max_threads = 1 FORMAT JSONEachRow"
+
+      response = conn(:post, "/?param_n=3", sql) |> request(name)
+
+      assert response.status == 200, response.resp_body
+      assert %{"marks" => "0"} = JSON.decode!(String.trim(response.resp_body))
+    end
+
+    test "rows and parts are null, not zero, when the plan has no sizes to give (review of T-506)",
+         %{name: name} do
+      response = post(name, "EXPLAIN ESTIMATE SELECT 1 FORMAT JSONEachRow")
+
+      assert %{"rows" => rows, "parts" => parts} = JSON.decode!(String.trim(response.resp_body))
+      assert {rows, parts} in [{nil, nil}, {"0", "0"}]
+    end
+
     test "a statement that does not bind answers its error, which is how HyperDX validates an expression",
          %{name: name} do
       response = post(name, "EXPLAIN ESTIMATE SELECT no_such_function(1)")

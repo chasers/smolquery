@@ -290,4 +290,12 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
 
     assert log =~ "could not answer: code=46"
   end
+
+  test "EXPLAIN ESTIMATE of a catalog statement is the catalog's, and reads nothing (review of T-506)",
+       %{name: name} do
+    response = post(name, "EXPLAIN ESTIMATE SELECT name FROM system.tables FORMAT JSONEachRow")
+
+    assert response.status == 200, response.resp_body
+    assert %{"rows" => "0", "parts" => "0"} = JSON.decode!(String.trim(response.resp_body))
+  end
 end
