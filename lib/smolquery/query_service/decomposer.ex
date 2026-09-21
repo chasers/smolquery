@@ -27,7 +27,7 @@ defmodule Smolquery.QueryService.Decomposer do
 
   Refusal is the common case and costs nothing: the caller falls back to
   the single-engine path. Refused outright: multiple tables or any FROM
-  that is not one base table, CTEs, `SELECT *`, DISTINCT, HAVING, QUALIFY,
+  that is not one base table, CTEs, `SELECT *`, DISTINCT ON, QUALIFY,
   SAMPLE, grouping sets, window functions, subqueries anywhere, `count`
   variants with DISTINCT, aggregates outside the five above and their
   conditional forms,
@@ -54,6 +54,21 @@ defmodule Smolquery.QueryService.Decomposer do
   are this codebase's macros over the filtered form, and are read as that
   form, so `avgIf(x, c)` splits into a filtered sum and a filtered count of
   `x` as `avg` does.
+
+  ## HAVING, and SELECT DISTINCT
+
+  HAVING is a condition on groups, and a shard has only its part of a group,
+  so it cannot run in the partial. It runs over the merged result (T-538):
+  every aggregate and key it names must be a select item, by shape or by
+  alias, and is read as that item's output column; the final query is then
+  filtered from outside, before its ORDER BY and LIMIT. An aggregate that is
+  no select item would need a partial of its own, and refuses. So does a
+  name that is a column of the table and the alias of some other select
+  item, which the engine and this module might read differently.
+
+  `SELECT DISTINCT a, b` with no aggregate is `GROUP BY a, b`: each shard
+  answers its own distinct rows and the final step groups them again.
+  `DISTINCT ON`, and DISTINCT over aggregates, refuse.
 
   ## A bare `count(*)` has no scan to shard
 
@@ -105,20 +120,22 @@ defmodule Smolquery.QueryService.Decomposer do
   @aggregates ["avg" | @mergeable]
   @aggregate_names @aggregates ++ Map.keys(@conditional)
   @prefix "__pq_"
+  @filter_prefix "SELECT 1 WHERE "
   @refused_classes ~w(SUBQUERY WINDOW STAR)
   @volatile ~w(now now64 get_current_timestamp current_date current_localtime
                current_localtimestamp today random uuid uuidv4 uuidv7
                gen_random_uuid setseed nextval currval)
 
   @enforce_keys [:partial_sql, :final_select, :final_group, :final_tail]
-  defstruct [:partial_sql, :final_select, :final_group, :final_tail, params: []]
+  defstruct [:partial_sql, :final_select, :final_group, :final_tail, final_having: "", params: []]
 
   @type t :: %__MODULE__{
           partial_sql: String.t(),
           params: [term()],
           final_select: String.t(),
           final_group: String.t(),
-          final_tail: String.t()
+          final_tail: String.t(),
+          final_having: String.t()
         }
 
   @type output :: {String.t(), String.t()}
@@ -141,6 +158,7 @@ defmodule Smolquery.QueryService.Decomposer do
   def decompose(connection, sql, outputs, table_columns, params \\ []) do
     with :ok <- gate_columns(table_columns),
          {:ok, node} <- select_node(connection, sql),
+         {:ok, node} <- distinct_as_groups(node),
          :ok <- gate_shape(node),
          :ok <- gate_classes(node),
          :ok <- gate_volatile(node),
@@ -149,6 +167,7 @@ defmodule Smolquery.QueryService.Decomposer do
          :ok <- gate_scan(node, keys, items),
          :ok <- gate_outputs(items, outputs),
          {:ok, tail} <- tail(node, outputs),
+         {:ok, having} <- having(connection, node, outputs, table_columns),
          {:ok, partial_sql} <- partial(connection, node, keys, items, params) do
       {:ok,
        %__MODULE__{
@@ -156,6 +175,7 @@ defmodule Smolquery.QueryService.Decomposer do
          params: params,
          final_select: final_select(items, outputs),
          final_group: final_group(keys),
+         final_having: having,
          final_tail: tail
        }}
     end
@@ -165,10 +185,21 @@ defmodule Smolquery.QueryService.Decomposer do
   The final query over `from` — a `read_parquet` across the partial files.
   """
   @spec final_sql(t(), String.t()) :: String.t()
+  def final_sql(%__MODULE__{final_having: ""} = decomposition, from) do
+    [merged_sql(decomposition, from)]
+    |> append(decomposition.final_tail)
+    |> Enum.join(" ")
+  end
+
   def final_sql(%__MODULE__{} = decomposition, from) do
+    ["SELECT * FROM (#{merged_sql(decomposition, from)}) WHERE #{decomposition.final_having}"]
+    |> append(decomposition.final_tail)
+    |> Enum.join(" ")
+  end
+
+  defp merged_sql(decomposition, from) do
     ["SELECT #{decomposition.final_select} FROM #{from}"]
     |> append(decomposition.final_group)
-    |> append(decomposition.final_tail)
     |> Enum.join(" ")
   end
 
@@ -225,9 +256,6 @@ defmodule Smolquery.QueryService.Decomposer do
       node["qualify"] != nil ->
         {:error, :qualify}
 
-      node["having"] != nil ->
-        {:error, :having}
-
       node["aggregate_handling"] not in ["STANDARD_HANDLING", "FORCE_AGGREGATES"] ->
         {:error, {:aggregate_handling, node["aggregate_handling"]}}
 
@@ -253,7 +281,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp gate_classes(node) do
     refused =
       node
-      |> Map.take(["select_list", "where_clause", "group_expressions"])
+      |> Map.take(["select_list", "where_clause", "group_expressions", "having"])
       |> classes()
       |> Enum.find(&(&1 in @refused_classes))
 
@@ -268,7 +296,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp gate_volatile(node) do
     volatile =
       node
-      |> Map.take(["select_list", "where_clause", "group_expressions"])
+      |> Map.take(["select_list", "where_clause", "group_expressions", "having"])
       |> collect_values("function_name", [])
       |> Enum.find(&(&1 in @volatile or &1 in volatile_macros()))
 
@@ -452,6 +480,7 @@ defmodule Smolquery.QueryService.Decomposer do
       )
       |> Map.put("group_sets", group_sets(keys))
       |> Map.put("aggregate_handling", "STANDARD_HANDLING")
+      |> Map.put("having", nil)
       |> Map.put("modifiers", [])
 
     with {:ok, sql} <- deserialize(connection, partial_node) do
@@ -558,6 +587,129 @@ defmodule Smolquery.QueryService.Decomposer do
   defp final_group(keys) do
     "GROUP BY " <>
       Enum.map_join(0..(length(keys) - 1), ", ", fn index -> quoted("#{@prefix}g#{index}") end)
+  end
+
+  defp distinct_as_groups(%{"modifiers" => modifiers} = node) do
+    case Enum.split_with(modifiers, &(&1["type"] == "DISTINCT_MODIFIER")) do
+      {[], _modifiers} ->
+        {:ok, node}
+
+      {[%{"distinct_on_targets" => []}], rest} ->
+        if node["group_expressions"] == [] and not nested_aggregate?(node["select_list"]),
+          do: {:ok, %{node | "modifiers" => rest, "aggregate_handling" => "FORCE_AGGREGATES"}},
+          else: {:error, :distinct_over_aggregates}
+
+      {_distinct_on, _rest} ->
+        {:error, :distinct_on}
+    end
+  end
+
+  defp having(_connection, %{"having" => nil}, _outputs, _columns), do: {:ok, ""}
+
+  defp having(connection, %{"having" => condition} = node, outputs, columns) do
+    names = Enum.map(outputs, fn {name, _type} -> name end)
+    items = node["select_list"] |> Enum.map(&Ast.shape/1) |> Enum.zip(names)
+
+    with {:ok, over_outputs} <- over_outputs(condition, {names, items, columns}),
+         {:ok, sql} <- deserialize(connection, filter(over_outputs)),
+         @filter_prefix <> rendered <- sql do
+      {:ok, rendered}
+    else
+      {:error, reason} -> {:error, reason}
+      _another_rendering -> {:error, :having_not_rendered}
+    end
+  end
+
+  defp filter(condition) do
+    %{
+      "type" => "SELECT_NODE",
+      "modifiers" => [],
+      "cte_map" => %{"map" => []},
+      "select_list" => [
+        %{
+          "class" => "CONSTANT",
+          "type" => "VALUE_CONSTANT",
+          "alias" => "",
+          "value" => %{
+            "type" => %{"id" => "INTEGER", "type_info" => nil},
+            "is_null" => false,
+            "value" => 1
+          }
+        }
+      ],
+      "from_table" => %{"type" => "EMPTY", "alias" => "", "sample" => nil},
+      "where_clause" => condition,
+      "group_expressions" => [],
+      "group_sets" => [],
+      "aggregate_handling" => "STANDARD_HANDLING",
+      "having" => nil,
+      "sample" => nil,
+      "qualify" => nil
+    }
+  end
+
+  defp over_outputs(%{"class" => _class} = expression, {names, items, _columns} = outputs) do
+    case for({shape, name} <- items, shape == Ast.shape(expression), do: name) do
+      [name | _same_item_again] -> output_column(name, names)
+      [] -> over_outputs_within(expression, outputs)
+    end
+  end
+
+  defp over_outputs(node, outputs) when is_map(node) do
+    Enum.reduce_while(node, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case over_outputs(value, outputs) do
+        {:ok, rewritten} -> {:cont, {:ok, Map.put(acc, key, rewritten)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp over_outputs(nodes, outputs) when is_list(nodes) do
+    nodes
+    |> Enum.reduce_while({:ok, []}, fn node, {:ok, acc} ->
+      case over_outputs(node, outputs) do
+        {:ok, rewritten} -> {:cont, {:ok, [rewritten | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, rewritten} -> {:ok, Enum.reverse(rewritten)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp over_outputs(leaf, _outputs), do: {:ok, leaf}
+
+  defp over_outputs_within(
+         %{"class" => "COLUMN_REF", "column_names" => [name]},
+         {names, _items, columns}
+       ) do
+    if name in columns and name in names,
+      do: {:error, {:having_ambiguous, name}},
+      else: output_column(name, names)
+  end
+
+  defp over_outputs_within(%{"class" => "COLUMN_REF", "column_names" => names}, _outputs),
+    do: {:error, {:having_reference, Enum.join(names, ".")}}
+
+  defp over_outputs_within(%{"class" => "FUNCTION", "function_name" => name} = call, outputs) do
+    if name in @aggregate_names or call["filter"] != nil or call["distinct"],
+      do: {:error, {:having_aggregate, name}},
+      else: call |> Map.delete("class") |> over_outputs(outputs) |> reclassed("FUNCTION")
+  end
+
+  defp over_outputs_within(%{"class" => class} = expression, outputs),
+    do: expression |> Map.delete("class") |> over_outputs(outputs) |> reclassed(class)
+
+  defp reclassed({:ok, node}, class), do: {:ok, Map.put(node, "class", class)}
+  defp reclassed({:error, reason}, _class), do: {:error, reason}
+
+  defp output_column(name, names) do
+    case Enum.count(names, &(&1 == name)) do
+      1 -> {:ok, column_ref(name)}
+      0 -> {:error, {:having_reference, name}}
+      _shared -> {:error, {:having_ambiguous, name}}
+    end
   end
 
   defp tail(node, outputs) do

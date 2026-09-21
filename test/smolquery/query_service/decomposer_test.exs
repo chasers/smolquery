@@ -225,6 +225,51 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert {:unsupported_aggregate_shape, "round"} = refused(wrapped, describe(wrapped))
     end
 
+    test "HAVING filters the merged groups, not a shard's part of one (T-538)", %{
+      tmp_dir: tmp_dir
+    } do
+      by_alias =
+        round_trip(
+          "SELECT name, count(*) AS n, sum(value) AS s FROM analytics.events " <>
+            "GROUP BY name HAVING n > 142 AND s > 900 ORDER BY name",
+          tmp_dir
+        )
+
+      refute by_alias.partial_sql =~ "HAVING"
+      assert by_alias.final_having =~ "n > 142"
+
+      round_trip(
+        "SELECT name, count(*) AS n FROM analytics.events GROUP BY name " <>
+          "HAVING count(*) > 142 OR name = 'u-0' ORDER BY n DESC, name LIMIT 2",
+        tmp_dir
+      )
+
+      round_trip(
+        "SELECT bucket, avg(value) AS mean FROM analytics.events GROUP BY bucket " <>
+          "HAVING round(avg(value), 1) BETWEEN 6.0 AND 7.0 ORDER BY bucket",
+        tmp_dir
+      )
+
+      round_trip(
+        "SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket HAVING n > 100000",
+        tmp_dir
+      )
+    end
+
+    test "SELECT DISTINCT is a GROUP BY of what it selects (T-538)", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT DISTINCT name, bucket FROM analytics.events WHERE id < 400 " <>
+            "ORDER BY name, bucket LIMIT 9",
+          tmp_dir
+        )
+
+      refute decomposition.partial_sql =~ "DISTINCT"
+      assert decomposition.final_group =~ "GROUP BY"
+
+      round_trip("SELECT DISTINCT bucket + 1 AS b FROM analytics.events ORDER BY b", tmp_dir)
+    end
+
     test "the WHERE clause runs in the partial", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
@@ -300,16 +345,37 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :cte = refused("WITH x AS (SELECT 1 AS n) SELECT count(*) FROM x")
     end
 
-    test "HAVING" do
-      assert :having =
-               refused(
-                 "SELECT name, count(*) FROM analytics.events GROUP BY name HAVING count(*) > 1"
-               )
+    test "HAVING over an aggregate or a column that is no select item" do
+      hidden = "SELECT name, count(*) FROM analytics.events GROUP BY name HAVING sum(value) > 1"
+      assert {:having_aggregate, "sum"} = refused(hidden, describe(hidden))
+
+      unselected = "SELECT count(*) AS n FROM analytics.events GROUP BY name HAVING name = 'u-1'"
+      assert {:having_reference, "name"} = refused(unselected, describe(unselected))
+
+      subquery =
+        "SELECT name, count(*) AS n FROM analytics.events GROUP BY name " <>
+          "HAVING n > (SELECT 5)"
+
+      assert {:unsupported_expression, "SUBQUERY"} = refused(subquery, describe(subquery))
+
+      shadowed =
+        "SELECT bucket + 1 AS bucket, count(*) AS n FROM analytics.events GROUP BY ALL " <>
+          "HAVING bucket > 1"
+
+      assert {:having_ambiguous, "bucket"} = refused(shadowed, describe(shadowed))
+
+      volatile =
+        "SELECT name, count(*) AS n FROM analytics.events GROUP BY name HAVING n > random()"
+
+      assert {:volatile_function, "random"} = refused(volatile, describe(volatile))
     end
 
-    test "DISTINCT" do
-      assert {:unsupported_modifier, _modifier} =
-               refused("SELECT DISTINCT name FROM analytics.events")
+    test "DISTINCT ON, and DISTINCT over an aggregate" do
+      on = "SELECT DISTINCT ON (name) name, id FROM analytics.events"
+      assert :distinct_on = refused(on, describe(on))
+
+      over = "SELECT DISTINCT count(*) FROM analytics.events GROUP BY name"
+      assert :distinct_over_aggregates = refused(over, describe(over))
     end
 
     test "a bare count(*) is answered from metadata, not a scan (T-448)" do
