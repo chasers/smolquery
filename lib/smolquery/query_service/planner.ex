@@ -263,6 +263,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Identifier
   alias Smolquery.Partitions
   alias Smolquery.QueryService.AnyN
+  alias Smolquery.QueryService.Fold
   alias Smolquery.QueryService.Nullability
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
@@ -300,7 +301,11 @@ defmodule Smolquery.QueryService.Planner do
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
-         conjuncts = Pruner.conjuncts(statement, refs, params),
+         folded =
+           Trace.span(:fold, fn ->
+             Fold.bounds(connection, Pruner.unread_bounds(statement, params), runtime.lockdown)
+           end),
+         conjuncts = Pruner.conjuncts(statement, refs, params, folded),
          top_n = TopN.spec(statement, refs),
          any_n = AnyN.spec(statement, refs),
          page = newest_page(any_n, runtime, tables, pin),

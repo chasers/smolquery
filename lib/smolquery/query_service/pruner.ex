@@ -42,6 +42,16 @@ defmodule Smolquery.QueryService.Pruner do
   WHERE rejects contributes to nothing above it, so with the table read once
   the files that hold only such rows are not needed anywhere.
 
+  ## A bound written any other way
+
+  `toDateTime64('...', 3)`, `fromUnixTimestamp64Milli(n) - INTERVAL 1 HOUR`,
+  `now() - INTERVAL 15 MINUTE`: an expression that names no column has one
+  value, and the engine knows it. `unread_bounds/2` lists the sides this
+  module could not read, the planner has
+  `Smolquery.QueryService.Fold` ask the engine for them once, and
+  `conjuncts/4` reads the answers where its own rules find nothing (T-534).
+  A value that read the clock is a lower bound only; `Fold` says why.
+
   ## ClickHouse's epoch functions
 
   `fromUnixTimestamp`, `fromUnixTimestamp64Milli` and
@@ -86,6 +96,8 @@ defmodule Smolquery.QueryService.Pruner do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Ast
+  alias Smolquery.QueryService.Fold
   alias Smolquery.QueryService.SingleTable
 
   @type op :: :gt | :ge | :lt | :le | :eq
@@ -122,25 +134,50 @@ defmodule Smolquery.QueryService.Pruner do
   """
   @spec conjuncts(map(), [Catalog.table_ref()], [term()]) ::
           %{Catalog.table_ref() => [conjunct()]}
-  def conjuncts(statement, refs, params \\ [])
+  def conjuncts(statement, refs, params \\ [], folded \\ %{})
 
-  def conjuncts(%{"node" => node} = statement, refs, params) when is_map(node) do
+  def conjuncts(%{"node" => node} = statement, refs, params, folded) when is_map(node) do
+    context = %{params: params, folded: folded}
+
     node
     |> selects()
-    |> Enum.flat_map(&select_conjuncts(&1, refs, params))
+    |> Enum.flat_map(&select_conjuncts(&1, refs, context))
     |> read_once(statement)
     |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
   end
 
-  def conjuncts(_statement, _refs, _params), do: %{}
+  def conjuncts(_statement, _refs, _params, _folded), do: %{}
 
-  defp select_conjuncts(node, refs, params) do
+  @doc """
+  The sides of every comparison and BETWEEN in `statement` that are written
+  as an expression this module cannot read by itself, for
+  `Smolquery.QueryService.Fold.bounds/3` to ask the engine about. Their
+  values come back as `conjuncts/4`'s `folded`.
+  """
+  @spec unread_bounds(map(), [term()]) :: [map()]
+  def unread_bounds(statement, params \\ []) do
+    statement
+    |> Ast.collect(fn
+      %{"class" => "COMPARISON", "left" => left, "right" => right} -> [left, right]
+      %{"class" => "BETWEEN", "lower" => lower, "upper" => upper} -> [lower, upper]
+      _another_node -> []
+    end)
+    |> Enum.filter(fn
+      %{"class" => class} = side when class in ["FUNCTION", "OPERATOR", "CAST"] ->
+        literal(side, params) == :error
+
+      _constant_or_column ->
+        false
+    end)
+  end
+
+  defp select_conjuncts(node, refs, context) do
     aliases = aliases(Map.get(node, "from_table"), refs)
 
     node
     |> Map.get("where_clause")
     |> split()
-    |> Enum.flat_map(&parse(&1, aliases, params))
+    |> Enum.flat_map(&parse(&1, aliases, context))
   end
 
   defp selects(%{"type" => "SELECT_NODE", "sample" => nil} = node),
@@ -270,36 +307,62 @@ defmodule Smolquery.QueryService.Pruner do
   defp split(nil), do: []
   defp split(node), do: [node]
 
-  defp parse(%{"class" => "COMPARISON", "type" => type} = node, aliases, params) do
+  defp parse(%{"class" => "COMPARISON", "type" => type} = node, aliases, context) do
     case Map.fetch(@operators, type) do
-      {:ok, op} -> comparison(node, op, aliases, params)
+      {:ok, op} -> comparison(node, op, aliases, context)
       :error -> []
     end
   end
 
-  defp parse(%{"class" => "BETWEEN"} = node, aliases, params) do
-    with {:ok, ref, name} <- column(node["input"], aliases),
-         {:ok, lower} <- literal(node["lower"], params),
-         {:ok, upper} <- literal(node["upper"], params) do
-      [{ref, {name, :ge, lower}}, {ref, {name, :le, upper}}]
+  defp parse(%{"class" => "BETWEEN"} = node, aliases, context) do
+    case column(node["input"], aliases) do
+      {:ok, ref, name} ->
+        bounded(ref, name, :ge, value(node["lower"], context)) ++
+          bounded(ref, name, :le, value(node["upper"], context))
+
+      :error ->
+        []
+    end
+  end
+
+  defp parse(_node, _aliases, _context), do: []
+
+  defp comparison(node, op, aliases, context) do
+    case {column(node["left"], aliases), value(node["right"], context)} do
+      {{:ok, ref, name}, {_kind, _value} = bound} -> bounded(ref, name, op, bound)
+      _not_column_op_bound -> mirrored_comparison(node, op, aliases, context)
+    end
+  end
+
+  defp mirrored_comparison(node, op, aliases, context) do
+    case {value(node["left"], context), column(node["right"], aliases)} do
+      {{_kind, _value} = bound, {:ok, ref, name}} -> bounded(ref, name, @mirrored[op], bound)
+      _unparseable -> []
+    end
+  end
+
+  defp bounded(ref, name, op, {:fixed, value}), do: [{ref, {name, op, value}}]
+
+  defp bounded(ref, name, op, {:clock, value}) when op in [:gt, :ge],
+    do: [{ref, {name, op, value}}]
+
+  defp bounded(_ref, _name, _op, _clock_above_or_unread), do: []
+
+  defp value(node, %{params: params, folded: folded}) do
+    case literal(node, params) do
+      {:ok, value} -> {:fixed, value}
+      :error -> folded_value(node, folded)
+    end
+  end
+
+  defp folded_value(_node, folded) when map_size(folded) == 0, do: :error
+
+  defp folded_value(node, folded) do
+    with {:ok, {kind, raw}} <- Map.fetch(folded, Fold.key(node)),
+         {:ok, value} <- bound(raw) do
+      {kind, value}
     else
-      _unparseable -> []
-    end
-  end
-
-  defp parse(_node, _aliases, _params), do: []
-
-  defp comparison(node, op, aliases, params) do
-    case {column(node["left"], aliases), literal(node["right"], params)} do
-      {{:ok, ref, name}, {:ok, value}} -> [{ref, {name, op, value}}]
-      _not_column_op_literal -> mirrored_comparison(node, op, aliases, params)
-    end
-  end
-
-  defp mirrored_comparison(node, op, aliases, params) do
-    case {literal(node["left"], params), column(node["right"], aliases)} do
-      {{:ok, value}, {:ok, ref, name}} -> [{ref, {name, @mirrored[op], value}}]
-      _unparseable -> []
+      _not_folded_or_not_a_bound -> :error
     end
   end
 

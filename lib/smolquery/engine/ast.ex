@@ -10,6 +10,24 @@ defmodule Smolquery.Engine.Ast do
   """
 
   @doc """
+  `node` without where it was written or what it was called: its
+  `query_location` and `alias` taken off, all the way down.
+
+  Two expressions with the same shape are the same expression. It is how a
+  select item is matched to a group key or an ORDER BY, and how a bound is
+  matched to the value the engine folded it to.
+  """
+  @spec shape(term()) :: term()
+  def shape(node) when is_map(node) do
+    node
+    |> Map.drop(["query_location", "alias"])
+    |> Map.new(fn {key, value} -> {key, shape(value)} end)
+  end
+
+  def shape(node) when is_list(node), do: Enum.map(node, &shape/1)
+  def shape(leaf), do: leaf
+
+  @doc """
   Every value `fun` returns for a node of `tree`, in document order.
 
   `fun` sees each map in the tree once and answers a list — empty for a node

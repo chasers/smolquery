@@ -10,7 +10,8 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
   edge's real translate step and then the planner's two gates:
 
   - `prunes` is how many bounds `Smolquery.QueryService.Pruner` reads off
-    the statement, `0` for none;
+    the statement, with `Smolquery.QueryService.Fold`'s help as the planner
+    gives it, `0` for none;
   - `scatters` is `:ok`, or `Smolquery.QueryService.Decomposer`'s refusal.
 
   A refusal listed here is a known one with a task against it. Flip the row
@@ -25,6 +26,7 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
   alias Smolquery.Identifier
   alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Decomposer
+  alias Smolquery.QueryService.Fold
   alias Smolquery.QueryService.Pruner
   alias SmolqueryClickHouse.Params
   alias SmolqueryClickHouse.Rewrite
@@ -86,11 +88,13 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
        "fromUnixTimestamp64Milli(1789812660000) AND fromUnixTimestamp64Milli(1789812780000)", 2,
      :ok},
     {"SELECT count() FROM analytics.events WHERE Timestamp >= toDateTime64('2026-09-19 10:11:00', 3)",
-     0, :ok},
+     1, :ok},
     {"SELECT count() FROM analytics.events WHERE Timestamp >= toDateTime('2026-09-19 10:11:00')",
-     0, :ok},
+     1, :ok},
     {"SELECT count() FROM analytics.events WHERE Timestamp >= " <>
-       "parseDateTime64BestEffort('2026-09-19T10:11:00Z', 9)", 0, :ok}
+       "parseDateTime64BestEffort('2026-09-19T10:11:00Z', 9)", 1, :ok},
+    {"SELECT count() #{@from} AND Timestamp >= " <>
+       "fromUnixTimestamp64Milli(1789812660000) - INTERVAL 1 HOUR", 3, :ok}
   ]
 
   setup_all do
@@ -124,7 +128,9 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
 
     %{"statements" => [statement]} = result |> Result.one!() |> JSON.decode!()
 
-    statement |> Pruner.conjuncts([@events]) |> Map.get(@events, []) |> length()
+    folded = Fold.bounds(@conn, Pruner.unread_bounds(statement), true)
+
+    statement |> Pruner.conjuncts([@events], [], folded) |> Map.get(@events, []) |> length()
   end
 
   defp scatters(sql) do

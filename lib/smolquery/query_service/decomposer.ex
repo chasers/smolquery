@@ -96,6 +96,7 @@ defmodule Smolquery.QueryService.Decomposer do
   and cast to the type reported there, positionally.
   """
 
+  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.ClickHouseFunctions
 
@@ -332,7 +333,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp resolve_key(expression, _items, _columns), do: {:ok, expression}
 
   defp classified_items(node, keys) do
-    normalized_keys = Enum.map(keys, &normalize/1)
+    normalized_keys = Enum.map(keys, &Ast.shape/1)
 
     node["select_list"]
     |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
@@ -348,7 +349,7 @@ defmodule Smolquery.QueryService.Decomposer do
   end
 
   defp classify_item(item, normalized_keys) do
-    case Enum.find_index(normalized_keys, &(&1 == normalize(item))) do
+    case Enum.find_index(normalized_keys, &(&1 == Ast.shape(item))) do
       nil -> classify_aggregate(item)
       index -> {:ok, {:group, index}}
     end
@@ -436,15 +437,6 @@ defmodule Smolquery.QueryService.Decomposer do
       {:error, :describe_mismatch}
     end
   end
-
-  defp normalize(node) when is_map(node) do
-    node
-    |> Map.drop(["query_location", "alias"])
-    |> Map.new(fn {key, value} -> {key, normalize(value)} end)
-  end
-
-  defp normalize(node) when is_list(node), do: Enum.map(node, &normalize/1)
-  defp normalize(leaf), do: leaf
 
   defp partial(connection, node, keys, items, params) do
     select_list =
@@ -570,7 +562,7 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp tail(node, outputs) do
     names = Enum.map(outputs, fn {name, _type} -> name end)
-    items = node["select_list"] |> Enum.map(&normalize/1) |> Enum.zip(names)
+    items = node["select_list"] |> Enum.map(&Ast.shape/1) |> Enum.zip(names)
 
     node["modifiers"]
     |> Enum.reduce_while({:ok, []}, fn modifier, {:ok, acc} ->
@@ -631,7 +623,7 @@ defmodule Smolquery.QueryService.Decomposer do
         {:error, :order_by_position}
 
       expression ->
-        ordered_by_item(normalize(expression), order, {names, items})
+        ordered_by_item(Ast.shape(expression), order, {names, items})
     end
   end
 

@@ -652,6 +652,36 @@ defmodule Smolquery.QueryService.PlannerTest do
       end
     end
 
+    test "a window written as an expression prunes by the value the engine makes of it (T-534)" do
+      hour = fn from, to ->
+        %{
+          "ts" => %{
+            "min" => %{"type" => "naive_datetime", "value" => from},
+            "max" => %{"type" => "naive_datetime", "value" => to},
+            "null_count" => 0
+          }
+        }
+      end
+
+      runtime =
+        runtime([
+          entry("01A", %{"stats" => hour.("2026-01-01T00:00:00", "2026-01-01T01:00:00")}),
+          entry("01B", %{"stats" => hour.("2026-01-01T05:00:00", "2026-01-01T06:00:00")})
+        ])
+
+      for {bound, kept} <- [
+            {"CAST('2026-01-01 04:00:00' AS TIMESTAMP) + INTERVAL 30 MINUTE", ["01B"]},
+            {"make_timestamp(2026, 1, 1, 4, 30, 0)", ["01B"]},
+            {"now() - INTERVAL 1 HOUR", []},
+            {"random() * INTERVAL 1 HOUR + TIMESTAMP '2026-01-01 04:30:00'", ["01A", "01B"]}
+          ] do
+        sql = "SELECT count(*) FROM analytics.events WHERE ts >= #{bound}"
+
+        assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+        assert ids(plan.hot[@table]) == kept, sql
+      end
+    end
+
     test "stats that leave a chance keep their entry" do
       stats = %{"id" => %{"min" => 1, "max" => 200, "null_count" => 0}}
       runtime = runtime([entry("01A", %{"stats" => stats})])
