@@ -34,7 +34,9 @@ defmodule Smolquery.QueryService.Decomposer do
   expression that is a select item's own (T-536), which is how HyperDX
   orders its histogram (`ORDER BY toStartOfInterval(...)`) and a top-k chart
   its groups (`ORDER BY count() DESC`). The final step orders by the output
-  column that item became, which is the same order. A select
+  column that item became, which is the same order. A constant is not such
+  an expression: `ORDER BY 2` is a position to the engine, and would match
+  a select item that is the literal `2`. A select
   item must be a supported aggregate or match a group expression. Table
   columns prefixed `__pq_` would collide with the generated aliases, so
   they refuse too. Volatile functions — `now()`, `random()`, and their
@@ -587,6 +589,9 @@ defmodule Smolquery.QueryService.Decomposer do
         if name in names,
           do: {:ok, ordered(name, order)},
           else: {:error, {:order_by_unknown_column, name}}
+
+      %{"class" => "CONSTANT"} ->
+        {:error, :order_by_position}
 
       expression ->
         ordered_by_item(normalize(expression), order, {names, items})

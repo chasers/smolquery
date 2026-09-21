@@ -317,6 +317,13 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :order_by_expression = refused(twice, describe(twice))
     end
 
+    test "ORDER BY a constant is a position, not the select item that is the same literal" do
+      sql =
+        "SELECT 2 AS two, name, count(*) FROM analytics.events GROUP BY 2, name ORDER BY 2 LIMIT 3"
+
+      assert :order_by_position = refused(sql, describe(sql))
+    end
+
     test "an ungrouped column" do
       assert :ungrouped_expression = refused("SELECT name, count(*) FROM analytics.events")
     end
