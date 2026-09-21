@@ -162,6 +162,14 @@ defmodule SmolqueryClickHouse.RewriteTest do
     end
   end
 
+  test "now() is the clock with no zone, which a timestamp column compares with (T-542)" do
+    assert Rewrite.call("SELECT count() FROM t WHERE ts >= now() - INTERVAL 15 MINUTE") ==
+             "SELECT count() FROM t WHERE ts >= now64() - INTERVAL 15 MINUTE"
+
+    assert Rewrite.call("SELECT NOW(), 'now()', now FROM t") ==
+             "SELECT now64(), 'now()', now FROM t"
+  end
+
   test "a quantified comparison keeps its ANY, with or without a space (review of T-496)" do
     for sql <- [
           "SELECT 1 WHERE x = ANY(SELECT y FROM u)",

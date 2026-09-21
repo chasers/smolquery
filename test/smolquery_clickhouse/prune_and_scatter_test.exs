@@ -91,7 +91,11 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
     {"SELECT count() FROM analytics.events WHERE Timestamp >= " <>
        "parseDateTime64BestEffort('2026-09-19T10:11:00Z', 9)", 1, :ok},
     {"SELECT count() #{@from} AND Timestamp >= " <>
-       "fromUnixTimestamp64Milli(1789812660000) - INTERVAL 1 HOUR", 3, :ok}
+       "fromUnixTimestamp64Milli(1789812660000) - INTERVAL 1 HOUR", 3, :ok},
+    {"SELECT count() FROM analytics.events WHERE Timestamp >= now() - INTERVAL 15 MINUTE", 1,
+     {:volatile_function, "now64"}},
+    {"SELECT count() FROM analytics.events WHERE Timestamp BETWEEN now() - INTERVAL 1 HOUR AND now()",
+     1, {:volatile_function, "now64"}}
   ]
 
   setup_all do

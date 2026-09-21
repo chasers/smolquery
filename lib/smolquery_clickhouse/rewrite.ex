@@ -64,6 +64,13 @@ defmodule SmolqueryClickHouse.Rewrite do
     `any_value`. An `ANY(` after a comparison operator is the quantifier both
     dialects have, `x = ANY(SELECT ...)`, and is left alone.
 
+  - **`now()`.** ClickHouse's is a `DateTime`, a time with no zone, and a
+    relative window is written `Timestamp >= now() - INTERVAL 15 MINUTE`. The
+    engine's is a `TIMESTAMP WITH TIME ZONE`, which it will not compare with
+    a `TIMESTAMP_NS` column at all (T-542). The call is renamed to `now64`,
+    the macro that answers the clock as a plain timestamp, to the
+    microsecond where ClickHouse's `now()` stops at the second.
+
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
   are whole tokens that are never read as code.
@@ -91,7 +98,8 @@ defmodule SmolqueryClickHouse.Rewrite do
     "isnull" => "clickhouse_isNull",
     "isnotnull" => "clickhouse_isNotNull",
     "any" => "any_value",
-    "md5" => "clickhouse_MD5"
+    "md5" => "clickhouse_MD5",
+    "now" => "now64"
   }
 
   @types %{

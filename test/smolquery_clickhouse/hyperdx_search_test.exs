@@ -322,6 +322,26 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
       JSON.decode!(response.resp_body)
     end
 
+    test "a window relative to now() compares with a DateTime64(9) column (T-542)", context do
+      {dataset, table} = FullNode.table()
+      from = "FROM #{dataset}.#{table}"
+
+      assert %{"data" => [%{"n" => "120"}]} =
+               ask(context, "SELECT count() AS n #{from} WHERE Timestamp <= now()")
+
+      assert %{"data" => [%{"n" => "0"}]} =
+               ask(
+                 context,
+                 "SELECT count() AS n #{from} WHERE Timestamp >= now() + INTERVAL 1 DAY"
+               )
+
+      assert %{"data" => [%{"n" => "120"}]} =
+               ask(
+                 context,
+                 "SELECT count() AS n #{from} WHERE Timestamp BETWEEN now() - INTERVAL 100 YEAR AND now()"
+               )
+    end
+
     test "Event Patterns and Event Deltas order a sample by it, over a real table and under a LIMIT",
          context do
       {dataset, table} = FullNode.table()
