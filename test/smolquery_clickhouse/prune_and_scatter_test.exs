@@ -43,7 +43,7 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
 
   @hyperdx [
     {"rows", 2, :offset},
-    {"histogram", 2, :order_by_expression},
+    {"histogram", 2, :ok},
     {"rows_term", 2, :offset},
     {"count_field_filters", 3, :ok},
     {"map_keys", 0, :cte},
@@ -59,7 +59,7 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
     {"SELECT ServiceName, count() AS c #{@from} GROUP BY ServiceName ORDER BY c DESC LIMIT 10", 2,
      :ok},
     {"SELECT count(), LogAttributes['http.status'] AS s #{@from} GROUP BY s ORDER BY count() DESC LIMIT 10",
-     2, :order_by_expression},
+     2, :ok},
     {"SELECT countIf(SeverityText = 'error') AS errors, #{@bucket} AS b #{@from} GROUP BY b", 2,
      {:ungrouped_expression, "countif"}},
     {"SELECT sumIf(Duration, SeverityText = 'error'), avgIf(Duration, ServiceName = 'api') #{@from}",

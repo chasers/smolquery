@@ -146,6 +146,27 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert decomposition.final_tail =~ "LIMIT 3"
     end
 
+    test "ORDER BY an expression that is a select item orders by the column it became (T-536)",
+         %{tmp_dir: tmp_dir} do
+      by_aggregate =
+        round_trip(
+          "SELECT name, count(*) FROM analytics.events GROUP BY name " <>
+            "ORDER BY count(*) DESC, name LIMIT 3",
+          tmp_dir
+        )
+
+      assert by_aggregate.final_tail =~ ~s|ORDER BY "count_star()" DESC|
+
+      by_key =
+        round_trip(
+          "SELECT count(*) AS n, date_trunc('minute', ts) AS b FROM analytics.events " <>
+            "GROUP BY date_trunc('minute', ts) ORDER BY date_trunc('minute', ts) DESC LIMIT 4",
+          tmp_dir
+        )
+
+      assert by_key.final_tail =~ ~s|ORDER BY "b" DESC|
+    end
+
     test "the WHERE clause runs in the partial", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
@@ -284,10 +305,16 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :offset = refused("SELECT count(*) FROM analytics.events LIMIT 5 OFFSET 5")
     end
 
-    test "ORDER BY on an expression" do
+    test "ORDER BY on an expression that is no select item, or one whose name is another's too" do
       sql = "SELECT name, count(*) FROM analytics.events GROUP BY name ORDER BY sum(value)"
 
       assert :order_by_expression = refused(sql, describe(sql))
+
+      twice =
+        "SELECT count(*) AS n, sum(value) AS n FROM analytics.events GROUP BY name " <>
+          "ORDER BY sum(value)"
+
+      assert :order_by_expression = refused(twice, describe(twice))
     end
 
     test "an ungrouped column" do

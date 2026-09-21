@@ -30,7 +30,11 @@ defmodule Smolquery.QueryService.Decomposer do
   that is not one base table, CTEs, `SELECT *`, DISTINCT, HAVING, QUALIFY,
   SAMPLE, grouping sets, window functions, subqueries anywhere, `count`
   variants with DISTINCT or FILTER, aggregates outside the five above,
-  OFFSET, and ORDER BY on anything but an output column's name. A select
+  OFFSET, and ORDER BY on anything but an output column: its name, or an
+  expression that is a select item's own (T-536), which is how HyperDX
+  orders its histogram (`ORDER BY toStartOfInterval(...)`) and a top-k chart
+  its groups (`ORDER BY count() DESC`). The final step orders by the output
+  column that item became, which is the same order. A select
   item must be a supported aggregate or match a group expression. Table
   columns prefixed `__pq_` would collide with the generated aliases, so
   they refuse too. Volatile functions — `now()`, `random()`, and their
@@ -527,10 +531,11 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp tail(node, outputs) do
     names = Enum.map(outputs, fn {name, _type} -> name end)
+    items = node["select_list"] |> Enum.map(&normalize/1) |> Enum.zip(names)
 
     node["modifiers"]
     |> Enum.reduce_while({:ok, []}, fn modifier, {:ok, acc} ->
-      case render_modifier(modifier, names) do
+      case render_modifier(modifier, {names, items}) do
         {:ok, clause} -> {:cont, {:ok, [clause | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -544,10 +549,10 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
-  defp render_modifier(%{"type" => "ORDER_MODIFIER", "orders" => orders}, names) do
+  defp render_modifier(%{"type" => "ORDER_MODIFIER", "orders" => orders}, outputs) do
     orders
     |> Enum.reduce_while({:ok, []}, fn order, {:ok, acc} ->
-      case render_order(order, names) do
+      case render_order(order, outputs) do
         {:ok, rendered} -> {:cont, {:ok, [rendered | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -562,7 +567,7 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
-  defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => limit}, _names) do
+  defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => limit}, _outputs) do
     case limit do
       %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => count}}
       when is_integer(count) and count >= 0 ->
@@ -576,19 +581,29 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
-  defp render_order(order, names) do
+  defp render_order(order, {names, items}) do
     case order["expression"] do
       %{"class" => "COLUMN_REF", "column_names" => [name]} ->
-        if name in names do
-          {:ok, String.trim("#{quoted(name)} #{direction(order)} #{nulls(order)}")}
-        else
-          {:error, {:order_by_unknown_column, name}}
-        end
+        if name in names,
+          do: {:ok, ordered(name, order)},
+          else: {:error, {:order_by_unknown_column, name}}
 
-      _expression ->
-        {:error, :order_by_expression}
+      expression ->
+        ordered_by_item(normalize(expression), order, {names, items})
     end
   end
+
+  defp ordered_by_item(expression, order, {names, items}) do
+    with [name | _same_item_again] <- for({^expression, name} <- items, do: name),
+         1 <- Enum.count(names, &(&1 == name)) do
+      {:ok, ordered(name, order)}
+    else
+      _no_item_or_an_ambiguous_name -> {:error, :order_by_expression}
+    end
+  end
+
+  defp ordered(name, order),
+    do: String.trim("#{quoted(name)} #{direction(order)} #{nulls(order)}")
 
   defp direction(%{"type" => "ASCENDING"}), do: "ASC"
   defp direction(%{"type" => "DESCENDING"}), do: "DESC"
