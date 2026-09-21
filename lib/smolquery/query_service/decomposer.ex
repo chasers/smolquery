@@ -29,7 +29,8 @@ defmodule Smolquery.QueryService.Decomposer do
   the single-engine path. Refused outright: multiple tables or any FROM
   that is not one base table, CTEs, `SELECT *`, DISTINCT, HAVING, QUALIFY,
   SAMPLE, grouping sets, window functions, subqueries anywhere, `count`
-  variants with DISTINCT or FILTER, aggregates outside the five above,
+  variants with DISTINCT, aggregates outside the five above and their
+  conditional forms,
   OFFSET, and ORDER BY on anything but an output column: its name, or an
   expression that is a select item's own (T-536), which is how HyperDX
   orders its histogram (`ORDER BY toStartOfInterval(...)`) and a top-k chart
@@ -42,6 +43,17 @@ defmodule Smolquery.QueryService.Decomposer do
   they refuse too. Volatile functions — `now()`, `random()`, and their
   kin — refuse as well: each worker would bind them on its own clock or
   seed, and the shards would disagree with the single-engine answer.
+
+  ## A condition on an aggregate
+
+  `agg(x) FILTER (WHERE c)` splits as `agg(x)` does (T-537): the condition
+  decides which rows of a shard the partial sees, and the merge is the
+  same. ClickHouse writes it `countIf(c)`, `sumIf(x, c)`, `avgIf`, `minIf`,
+  `maxIf`, which is how a chart counts its errors beside its total.
+  `countIf` is the engine's own aggregate and merges as a sum. The others
+  are this codebase's macros over the filtered form, and are read as that
+  form, so `avgIf(x, c)` splits into a filtered sum and a filtered count of
+  `x` as `avg` does.
 
   ## A bare `count(*)` has no scan to shard
 
@@ -87,7 +99,8 @@ defmodule Smolquery.QueryService.Decomposer do
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.ClickHouseFunctions
 
-  @mergeable ~w(count_star count sum min max)
+  @mergeable ~w(count_star count countif count_if sum min max)
+  @conditional %{"sumif" => "sum", "avgif" => "avg", "minif" => "min", "maxif" => "max"}
   @aggregates ["avg" | @mergeable]
   @prefix "__pq_"
   @refused_classes ~w(SUBQUERY WINDOW STAR)
@@ -340,14 +353,37 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp classify_aggregate(
+         %{
+           "class" => "FUNCTION",
+           "function_name" => name,
+           "children" => [value, condition],
+           "filter" => nil
+         } = item
+       )
+       when is_map_key(@conditional, name) do
+    classify_aggregate(%{
+      item
+      | "function_name" => Map.fetch!(@conditional, name),
+        "children" => [value],
+        "filter" => condition
+    })
+  end
+
   defp classify_aggregate(%{"class" => "FUNCTION", "function_name" => name} = item)
        when name in @aggregates do
     cond do
-      item["distinct"] -> {:error, {:distinct_aggregate, name}}
-      item["filter"] != nil -> {:error, {:filtered_aggregate, name}}
-      item["order_bys"]["orders"] != [] -> {:error, {:ordered_aggregate, name}}
-      nested_aggregate?(item["children"]) -> {:error, {:nested_aggregate, name}}
-      true -> {:ok, {:aggregate, name, item}}
+      item["distinct"] ->
+        {:error, {:distinct_aggregate, name}}
+
+      item["order_bys"]["orders"] != [] ->
+        {:error, {:ordered_aggregate, name}}
+
+      nested_aggregate?([item["filter"] | item["children"]]) ->
+        {:error, {:nested_aggregate, name}}
+
+      true ->
+        {:ok, {:aggregate, name, item}}
     end
   end
 
@@ -383,7 +419,7 @@ defmodule Smolquery.QueryService.Decomposer do
   # parquet footers and hot-manifest row counts rather than a scan; sharding
   # it only adds the fixed costs (T-448).
   defp gate_scan(%{"where_clause" => nil}, [], items) do
-    if Enum.all?(items, &match?({:aggregate, "count_star", _item}, &1)) do
+    if Enum.all?(items, &match?({:aggregate, "count_star", %{"filter" => nil}}, &1)) do
       {:error, :metadata_only}
     else
       :ok

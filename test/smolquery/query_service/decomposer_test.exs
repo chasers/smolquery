@@ -10,6 +10,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.Engine
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Decomposer
 
   @moduletag :tmp_dir
@@ -167,6 +168,47 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert by_key.final_tail =~ ~s|ORDER BY "b" DESC|
     end
 
+    test "a FILTER on an aggregate runs in the partial, and merges as the aggregate does (T-537)",
+         %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT bucket, count(*) FILTER (WHERE id % 5 = 0) AS fives, " <>
+            "sum(value) FILTER (WHERE name = 'u-1') AS ones, " <>
+            "avg(value) FILTER (WHERE id > 900) AS late, " <>
+            "min(id) FILTER (WHERE id > 10) AS low, max(id) FILTER (WHERE id < 10) AS high, " <>
+            "count(*) AS n FROM analytics.events GROUP BY bucket ORDER BY bucket",
+          tmp_dir
+        )
+
+      assert decomposition.partial_sql =~ "FILTER"
+    end
+
+    test "a group no row of which passes the FILTER answers as the single engine does", %{
+      tmp_dir: tmp_dir
+    } do
+      round_trip(
+        "SELECT bucket, avg(value) FILTER (WHERE id < 0) AS none, " <>
+          "sum(value) FILTER (WHERE id < 0) AS nothing, count(*) FILTER (WHERE id < 0) AS zero " <>
+          "FROM analytics.events GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+    end
+
+    test "ClickHouse's -If combinators split as the FILTER they are (T-537)", %{tmp_dir: tmp_dir} do
+      for macro <- ClickHouseFunctions.statements_for("sumIf(x) avgIf(x) minIf(x) maxIf(x)"),
+          do: Engine.query!(@engine, macro)
+
+      decomposition =
+        round_trip(
+          "SELECT bucket, countIf(id % 5 = 0) AS fives, sumIf(value, name = 'u-1') AS ones, " <>
+            "avgIf(value, id > 900) AS late, minIf(id, id > 10) AS low, maxIf(id, id < 10) AS high " <>
+            "FROM analytics.events GROUP BY bucket ORDER BY bucket",
+          tmp_dir
+        )
+
+      refute decomposition.partial_sql =~ ~r/sumif|avgif|minif|maxif/i
+    end
+
     test "the WHERE clause runs in the partial", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
@@ -271,9 +313,9 @@ defmodule Smolquery.QueryService.DecomposerTest do
                refused("SELECT count(DISTINCT name) FROM analytics.events")
     end
 
-    test "a FILTER clause" do
-      assert {:filtered_aggregate, "count_star"} =
-               refused("SELECT count(*) FILTER (WHERE id > 1) FROM analytics.events")
+    test "an aggregate inside a FILTER" do
+      assert {:nested_aggregate, "count_star"} =
+               refused("SELECT count(*) FILTER (WHERE id > (max(id))) FROM analytics.events")
     end
 
     test "an aggregate that does not merge" do
