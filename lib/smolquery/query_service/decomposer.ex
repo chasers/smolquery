@@ -102,6 +102,7 @@ defmodule Smolquery.QueryService.Decomposer do
   @mergeable ~w(count_star count countif count_if sum min max)
   @conditional %{"sumif" => "sum", "avgif" => "avg", "minif" => "min", "maxif" => "max"}
   @aggregates ["avg" | @mergeable]
+  @aggregate_names @aggregates ++ Map.keys(@conditional)
   @prefix "__pq_"
   @refused_classes ~w(SUBQUERY WINDOW STAR)
   @volatile ~w(now now64 get_current_timestamp current_date current_localtime
@@ -400,7 +401,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp nested_aggregate?(children) do
     children
     |> classes_and_names()
-    |> Enum.any?(fn name -> name in @aggregates end)
+    |> Enum.any?(fn name -> name in @aggregate_names end)
   end
 
   defp classes_and_names(node), do: collect_values(node, "function_name", [])

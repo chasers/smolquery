@@ -209,6 +209,22 @@ defmodule Smolquery.QueryService.DecomposerTest do
       refute decomposition.partial_sql =~ ~r/sumif|avgif|minif|maxif/i
     end
 
+    test "an -If form is an aggregate to GROUP BY ALL, and to the shapes that refuse one (review of T-537)",
+         %{tmp_dir: tmp_dir} do
+      for macro <- ClickHouseFunctions.statements_for("sumIf(x)"),
+          do: Engine.query!(@engine, macro)
+
+      round_trip(
+        "SELECT bucket, sumIf(value, id > 500) AS late FROM analytics.events " <>
+          "GROUP BY ALL ORDER BY bucket",
+        tmp_dir
+      )
+
+      wrapped = "SELECT round(sumIf(value, id > 500)) FROM analytics.events"
+
+      assert {:unsupported_aggregate_shape, "round"} = refused(wrapped, describe(wrapped))
+    end
+
     test "the WHERE clause runs in the partial", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
