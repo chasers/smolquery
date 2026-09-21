@@ -35,13 +35,23 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     `system.settings`, `system.data_skipping_indices`, `system.table_engines`,
     `system.one` and `DESCRIBE system.<table>` answer from the engine alone,
     and still answer when the catalog cannot be read.
-  - **Any other checks the catalog at most once in `@refresh_ttl_ms`, with one
-    read.** `Smolquery.Catalog.schema_version/1` moves when a dataset or a
-    table is created and when a column is added or dropped, and only then are
-    the generated tables rebuilt. The version is read before the rebuild, so
-    a change that lands during one is a rebuild at the next check, never a
-    change missed. The second is counted from when the check finished: a
-    rebuild that takes longer than it is not stale the moment it is done.
+  - **Any other checks the catalog at most once in the runtime's
+    `catalog_check_ms`, with one read.** `Smolquery.Catalog.schema_version/1`
+    moves when a dataset or a table is created and when a column is added or
+    dropped, and only then are the generated tables rebuilt. The version is
+    read before the rebuild, so a change that lands during one is a rebuild
+    at the next check, never a change missed. The interval is counted from
+    when the check finished: a rebuild that takes longer than it is not stale
+    the moment it is done.
+  - **A rebuild is not trusted until a second one agrees with it.** The lake
+    moves its version when a column is committed, and writes what it keeps
+    beside the lake after that: a materialized column's expression, a
+    required column, a clustering key. A rebuild that lands between the two
+    reads a column without them, at a version that will not move again. So
+    the rebuild after a version moves is followed by one more at the next
+    check, and so is a rebuild that left a table out because its schema could
+    not be read (`Smolquery.CatalogEmulation.listing/1`). A schema change
+    costs two rebuilds, not one.
   - **A rebuild costs a catalog read for every dataset and two for every
     table.** Measured on a local lake it is about 18 ms a table, 2.3 s at 128
     tables. Before the version gated it, every statement more than a second
@@ -52,7 +62,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     it, so `sorting_key` can be that stale, 30 s by default.
 
   A check that cannot read the catalog answers a retryable failure and keeps
-  the last rows; it never answers an empty catalog.
+  the last rows; it never answers an empty catalog. The rebuild that
+  `catalog_rebuild_ms` forces is the exception: the version was read and has
+  not moved, so the rows held are still the lake's, and a rebuild that fails
+  then answers from them and is tried again at the next check.
   `[:smolquery, :clickhouse, :catalog_refresh]` times every check, by
   `result`: `:unchanged`, `:rebuilt` or `:error`.
 
@@ -153,7 +166,6 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Runtime
 
-  @refresh_ttl_ms 1_000
   @generated ~w(system_databases system_tables system_columns)
   @call_timeout_ms 30_000
   @statement_timeout_ms 10_000
@@ -367,20 +379,16 @@ defmodule SmolqueryClickHouse.SystemCatalog do
        columns: columns,
        checked_at: nil,
        rebuilt_at: nil,
+       settled?: false,
        version: nil
      }}
   end
 
   @impl GenServer
   def handle_call({:counted_tables, statement}, _from, state) do
-    with {:ok, state} <- ensure_fresh(state),
-         {:ok, ast, _canonical} <- CatalogEmulation.serialize(state.engine, renamed(statement)),
-         limit = state.runtime.total_rows_max_tables,
-         {:ok, probe} <- counted_probe(ast, state.columns, limit),
-         {:ok, result} <- Engine.query(state.engine, probe) do
-      {:reply, within_limit(result.rows, limit), state}
-    else
-      _not_countable -> {:reply, {:ok, []}, state}
+    case ensure_fresh(state) do
+      {:ok, state} -> {:reply, counted_tables(state, statement), state}
+      {:error, _catalog_unavailable} -> {:reply, {:ok, []}, state}
     end
   end
 
@@ -388,6 +396,18 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     case read(statement, database) do
       {:select, sql} -> classified(sql, state, counts)
       {:catalog, sql, empty, source} -> state |> run(sql, counts, source) |> or_empty(empty)
+    end
+  end
+
+  defp counted_tables(state, statement) do
+    limit = state.runtime.total_rows_max_tables
+
+    with {:ok, ast, _canonical} <- CatalogEmulation.serialize(state.engine, renamed(statement)),
+         {:ok, probe} <- counted_probe(ast, state.columns, limit),
+         {:ok, result} <- Engine.query(state.engine, probe) do
+      within_limit(result.rows, limit)
+    else
+      _not_countable -> {:ok, []}
     end
   end
 
@@ -604,7 +624,9 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp ensure_fresh(%{runtime: %Runtime{catalog: nil}} = state), do: {:ok, state}
 
   defp ensure_fresh(state) do
-    if within?(state.checked_at, @refresh_ttl_ms), do: {:ok, state}, else: checked(state)
+    if within?(state.checked_at, state.runtime.catalog_check_ms),
+      do: {:ok, state},
+      else: checked(state)
   end
 
   defp checked(state) do
@@ -628,40 +650,52 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp refreshed({:ok, result, _state}, name), do: {%{}, %{result: result, name: name}}
   defp refreshed(_failed, name), do: {%{}, %{result: :error, name: name}}
 
-  defp rebuilt(%{version: version} = state, version) do
+  defp rebuilt(%{version: version, settled?: true} = state, version) do
     if within?(state.rebuilt_at, state.runtime.catalog_rebuild_ms),
       do: {:ok, :unchanged, state},
-      else: rebuild(state, version)
+      else: state |> rebuild(version) |> or_kept(state)
   end
 
   defp rebuilt(state, version), do: rebuild(state, version)
 
   defp rebuild(state, version) do
-    with :ok <- refresh(state.engine, state.runtime.catalog) do
+    with {:ok, left_out} <- refresh(state.engine, state.runtime.catalog) do
       {:ok, :rebuilt,
-       %{state | version: version, rebuilt_at: System.monotonic_time(:millisecond)}}
+       %{
+         state
+         | version: version,
+           rebuilt_at: System.monotonic_time(:millisecond),
+           settled?: left_out == 0 and state.version == version
+       }}
     end
   end
+
+  defp or_kept({:ok, result, state}, _held), do: {:ok, result, state}
+  defp or_kept({:error, _reason}, held), do: {:ok, :error, held}
 
   defp within?(nil, _ttl_ms), do: false
   defp within?(at, ttl_ms), do: System.monotonic_time(:millisecond) - at <= ttl_ms
 
   defp refresh(engine, catalog) do
-    with {:ok, tables} <- CatalogEmulation.listed_tables(catalog),
-         {:ok, datasets} <- Catalog.list_datasets(catalog) do
-      listed = Enum.map(tables, fn {dataset, _table, _schema} -> dataset end)
-
-      Engine.transaction(
-        engine,
-        [
-          "DELETE FROM system_databases",
-          "DELETE FROM system_tables",
-          "DELETE FROM system_columns"
-        ] ++
-          insert("system_databases", database_rows(Enum.uniq(["system" | datasets] ++ listed))) ++
-          insert("system_tables", Enum.map(tables, &table_row/1)) ++
-          insert("system_columns", Enum.flat_map(tables, &column_rows/1))
-      )
+    with {:ok, tables, left_out} <- CatalogEmulation.listing(catalog),
+         {:ok, datasets} <- Catalog.list_datasets(catalog),
+         listed = Enum.map(tables, fn {dataset, _table, _schema} -> dataset end),
+         :ok <-
+           Engine.transaction(
+             engine,
+             [
+               "DELETE FROM system_databases",
+               "DELETE FROM system_tables",
+               "DELETE FROM system_columns"
+             ] ++
+               insert(
+                 "system_databases",
+                 database_rows(Enum.uniq(["system" | datasets] ++ listed))
+               ) ++
+               insert("system_tables", Enum.map(tables, &table_row/1)) ++
+               insert("system_columns", Enum.flat_map(tables, &column_rows/1))
+           ) do
+      {:ok, left_out}
     end
   end
 

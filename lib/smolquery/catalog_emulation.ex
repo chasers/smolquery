@@ -70,15 +70,30 @@ defmodule Smolquery.CatalogEmulation do
   @spec listed_tables(Catalog.t()) ::
           {:ok, [{String.t(), String.t(), Schema.t()}]} | {:error, term()}
   def listed_tables(catalog) do
+    with {:ok, entries, _left_out} <- listing(catalog), do: {:ok, entries}
+  end
+
+  @doc """
+  `listed_tables/1`, with how many tables it left out.
+
+  A table is left out when its schema could not be read, and a table dropped
+  meanwhile is only one way that happens: a failed statement reads the same.
+  A caller that keeps the listing past its next look at the catalog (T-529)
+  must know the listing may be short, or a table that was there all along
+  stays missing for as long as the listing is kept.
+  """
+  @spec listing(Catalog.t()) ::
+          {:ok, [{String.t(), String.t(), Schema.t()}], non_neg_integer()} | {:error, term()}
+  def listing(catalog) do
     with {:ok, refs} <- Catalog.tables(catalog) do
-      Enum.reduce_while(refs, {:ok, []}, &collect_entry(catalog, &1, &2))
+      Enum.reduce_while(refs, {:ok, [], 0}, &collect_entry(catalog, &1, &2))
     end
   end
 
-  defp collect_entry(catalog, ref, {:ok, entries}) do
+  defp collect_entry(catalog, ref, {:ok, entries, left_out}) do
     case table_entry(catalog, ref) do
-      {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-      :skip -> {:cont, {:ok, entries}}
+      {:ok, entry} -> {:cont, {:ok, [entry | entries], left_out}}
+      :skip -> {:cont, {:ok, entries, left_out + 1}}
       {:error, reason} -> {:halt, {:error, reason}}
     end
   end

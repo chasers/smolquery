@@ -328,26 +328,69 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
       assert_received {:refresh, :error, _measurements}
     end
 
-    test "a schema version that has not moved is one read, and one that has is a rebuild",
+    test "within catalog_check_ms a statement asks the lake nothing",
          %{catalog: catalog, query: query} do
-      name = edge(catalog, query)
+      name = edge(catalog, query, catalog_check_ms: 60_000)
+      refreshes(name)
+
+      assert post(name, "EXISTS default.otel_logs").resp_body == "1\n"
+      assert_received {:refresh, :rebuilt, %{duration_us: _us}}
+
+      assert post(name, "EXISTS default.otel_logs").resp_body == "1\n"
+      refute_received {:refresh, _result, _measurements}
+    end
+
+    test "a version that moved is two rebuilds, and one that has not is one read",
+         %{catalog: catalog, query: query} do
+      name = edge(catalog, query, catalog_check_ms: 0)
       refreshes(name)
 
       assert post(name, "EXISTS default.later").resp_body == "0\n"
-      assert_received {:refresh, :rebuilt, %{duration_us: _us}}
-
+      assert_received {:refresh, :rebuilt, _measurements}
       assert post(name, "EXISTS default.later").resp_body == "0\n"
-      refute_received {:refresh, _result, _measurements}
+      assert_received {:refresh, :rebuilt, _measurements}
 
-      Process.sleep(1_100)
       assert post(name, "EXISTS default.later").resp_body == "0\n"
       assert_received {:refresh, :unchanged, _measurements}
 
       :ok = Catalog.create_table(catalog, {"default", "later"}, Schema.new!([{"id", :int64}]))
-      Process.sleep(1_100)
 
       assert post(name, "EXISTS default.later").resp_body == "1\n"
       assert_received {:refresh, :rebuilt, _measurements}
+      assert post(name, "EXISTS default.later").resp_body == "1\n"
+      assert_received {:refresh, :rebuilt, _measurements}
+      assert post(name, "EXISTS default.later").resp_body == "1\n"
+      assert_received {:refresh, :unchanged, _measurements}
+    end
+
+    test "what the lake writes after the commit that moved its version is read by the second rebuild",
+         %{catalog: catalog, query: query} do
+      sorting_key =
+        "SELECT sorting_key FROM system.tables WHERE name = 'keyed' FORMAT JSONCompact"
+
+      name = edge(catalog, query, catalog_check_ms: 0)
+
+      :ok = Catalog.create_table(catalog, {"default", "keyed"}, Schema.new!([{"id", :int64}]))
+      assert data(post(name, sorting_key)) == [[""]]
+
+      :ok = Catalog.put_clustering(catalog, {"default", "keyed"}, ["id"])
+      assert data(post(name, sorting_key)) == [["id"]]
+    end
+
+    test "a table whose schema could not be read is left out of one rebuild, not of every one after",
+         %{catalog: catalog, query: query} do
+      flaky = :counters.new(1, [])
+
+      once = fn [table] ->
+        table == {"default", "otel_logs"} and :counters.get(flaky, 1) == 0 and
+          :counters.add(flaky, 1, 1) == :ok
+      end
+
+      refused = ExitingCatalog.new(catalog, [table_schema: once], :conflict)
+      name = edge(refused, query, catalog_check_ms: 0)
+
+      assert post(name, "EXISTS default.otel_logs").resp_body == "0\n"
+      assert post(name, "EXISTS default.otel_logs").resp_body == "1\n"
     end
 
     test "a clustering key moves no version, and is seen once catalog_rebuild_ms has passed",
@@ -355,17 +398,53 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
       sorting_key =
         "SELECT sorting_key FROM system.tables WHERE name = 'otel_logs' FORMAT JSONCompact"
 
-      patient = edge(catalog, query)
-      eager = edge(catalog, query, catalog_rebuild_ms: 0)
+      patient = edge(catalog, query, catalog_check_ms: 0)
+      eager = edge(catalog, query, catalog_check_ms: 0, catalog_rebuild_ms: 0)
 
-      assert data(post(patient, sorting_key)) == [["ServiceName, Timestamp"]]
-      assert data(post(eager, sorting_key)) == [["ServiceName, Timestamp"]]
+      for name <- [patient, eager, patient, eager],
+          do: assert(data(post(name, sorting_key)) == [["ServiceName, Timestamp"]])
 
       :ok = Catalog.put_clustering(catalog, {"default", "otel_logs"}, ["Timestamp"])
-      Process.sleep(1_100)
 
       assert data(post(patient, sorting_key)) == [["ServiceName, Timestamp"]]
       assert data(post(eager, sorting_key)) == [["Timestamp"]]
+    end
+
+    test "a forced rebuild that fails answers from the rows it holds, which the version says are good",
+         %{catalog: catalog, query: query} do
+      failing = :counters.new(1, [])
+      now_failing = fn _args -> :counters.get(failing, 1) == 1 end
+
+      name =
+        edge(ExitingCatalog.new(catalog, list_datasets: now_failing), query,
+          catalog_check_ms: 0,
+          catalog_rebuild_ms: 0
+        )
+
+      refreshes(name)
+
+      for _rebuild <- 1..2, do: assert(post(name, "EXISTS default.otel_logs").resp_body == "1\n")
+      assert_received {:refresh, :rebuilt, _measurements}
+      assert_received {:refresh, :rebuilt, _measurements}
+
+      :counters.add(failing, 1, 1)
+
+      assert post(name, "EXISTS default.otel_logs").resp_body == "1\n"
+      assert_received {:refresh, :error, _measurements}
+    end
+
+    test "a statement total_rows cannot be counted for does not rebuild twice",
+         %{catalog: catalog, query: query} do
+      name = edge(catalog, query, catalog_check_ms: 60_000)
+      refreshes(name)
+
+      sql =
+        "SELECT t.total_rows FROM system.tables t JOIN system.columns c ON c.table = t.name " <>
+          "LIMIT 1 FORMAT JSONCompact"
+
+      assert data(post(name, sql)) == [[nil]]
+      assert_received {:refresh, :rebuilt, _measurements}
+      refute_received {:refresh, _result, _measurements}
     end
   end
 

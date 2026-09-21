@@ -4,7 +4,9 @@ defmodule Smolquery.CatalogEmulationTest do
   alias Smolquery.Catalog
   alias Smolquery.CatalogEmulation
   alias Smolquery.Engine
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Schema
+  alias Smolquery.Test.ExitingCatalog
   alias Smolquery.Test.MapCatalog
 
   setup_all do
@@ -57,6 +59,27 @@ defmodule Smolquery.CatalogEmulationTest do
 
       assert {:ok, [{"analytics", "events", %Schema{fields: [%{name: "id"}]}}]} =
                CatalogEmulation.listed_tables(catalog)
+    end
+  end
+
+  describe "listing/1" do
+    test "counts the tables whose schema could not be read, and fails when the catalog could not be asked" do
+      catalog = MapCatalog.new()
+      :ok = Catalog.create_dataset(catalog, "analytics")
+      :ok = Catalog.create_table(catalog, {"analytics", "events"}, Schema.new!([{"id", :int64}]))
+      :ok = Catalog.create_table(catalog, {"analytics", "clicks"}, Schema.new!([{"id", :int64}]))
+
+      clicks = fn [table] -> table == {"analytics", "clicks"} end
+
+      assert {:ok, [{"analytics", "events", _schema}], 1} =
+               CatalogEmulation.listing(
+                 ExitingCatalog.new(catalog, [table_schema: clicks], :conflict)
+               )
+
+      assert {:ok, [_events, _clicks], 0} = CatalogEmulation.listing(catalog)
+
+      assert {:error, %CallExited{}} =
+               CatalogEmulation.listing(ExitingCatalog.new(catalog, table_schema: clicks))
     end
   end
 end

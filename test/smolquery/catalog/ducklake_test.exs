@@ -505,6 +505,21 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.schema_version(catalog) == {:ok, before + 1}
     end
 
+    test "schema_version moves on a new dataset and a dropped column, and not on a clustering key (T-529)",
+         %{catalog: catalog} do
+      {:ok, before} = Catalog.schema_version(catalog)
+
+      :ok = Catalog.create_dataset(catalog, "later")
+      assert Catalog.schema_version(catalog) == {:ok, before + 1}
+
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "late"})
+      assert Catalog.schema_version(catalog) == {:ok, before + 3}
+
+      :ok = Catalog.put_clustering(catalog, @table, ["id"])
+      assert Catalog.schema_version(catalog) == {:ok, before + 3}
+    end
+
     test "a table that never registered anything lists nothing", %{catalog: catalog} do
       {:ok, snapshot} = Catalog.current_snapshot(catalog)
 

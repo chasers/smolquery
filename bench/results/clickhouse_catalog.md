@@ -49,3 +49,16 @@ tables  statement               idle      busy      page
 
 Flat in depth. What is left of a rebuild's cost is paid when the schema
 version moves, and once in `catalog_rebuild_ms`.
+
+## what these rows do not show
+
+A rebuild still costs what the "before" rows say, about 18 ms a table, and one
+statement still pays it in three places no row here crosses:
+
+- when the schema version moves, and once more at the next check after that;
+- once in `catalog_rebuild_ms` (30 s), for what moves no version;
+- at boot.
+
+At 128 tables that is one statement of about 2.3 s, with the rest of its page
+queued behind it. The p50 of five `idle` samples hides the one that was the
+second rebuild after boot. T-531 is the rebuild itself.

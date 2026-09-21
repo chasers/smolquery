@@ -109,6 +109,24 @@ if clickhouse_total_rows_max_tables = System.get_env("SMOLQUERY_CLICKHOUSE_TOTAL
       )
 end
 
+if clickhouse_catalog_check_ms = System.get_env("SMOLQUERY_CLICKHOUSE_CATALOG_CHECK_MS") do
+  config :smolquery, SmolqueryClickHouse,
+    catalog_check_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!(
+        "SMOLQUERY_CLICKHOUSE_CATALOG_CHECK_MS",
+        clickhouse_catalog_check_ms
+      )
+end
+
+if clickhouse_catalog_rebuild_ms = System.get_env("SMOLQUERY_CLICKHOUSE_CATALOG_REBUILD_MS") do
+  config :smolquery, SmolqueryClickHouse,
+    catalog_rebuild_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!(
+        "SMOLQUERY_CLICKHOUSE_CATALOG_REBUILD_MS",
+        clickhouse_catalog_rebuild_ms
+      )
+end
+
 if clickhouse_unanswered_log = System.get_env("SMOLQUERY_CLICKHOUSE_UNANSWERED_LOG") do
   config :smolquery, SmolqueryClickHouse,
     unanswered_log:

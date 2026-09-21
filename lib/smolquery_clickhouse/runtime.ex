@@ -48,10 +48,14 @@ defmodule SmolqueryClickHouse.Runtime do
   `WHERE`, so it has to cover the deployment's table count; a statement
   over more is refused rather than summed short.
 
-  `catalog_rebuild_ms` is how long the `system` tables may go without being
-  rebuilt from the catalog when its schema version has not moved (T-529,
-  `30_000`). A table's columns move the version and are seen within a
-  second; its clustering key does not, and is seen within this.
+  `catalog_check_ms` is how often, at most, a catalog statement reads the
+  lake's schema version to see whether the `system` tables are stale (T-529,
+  `1_000`): a new dataset, table or column is seen within it.
+  `catalog_rebuild_ms` is how long they may go without being rebuilt when the
+  version has not moved (`30_000`). A clustering key moves no version, and
+  is seen within this. Each rebuild reads every table's schema, and every
+  catalog statement waits behind it, so this is a cost to weigh on a lake of
+  many tables, not only a staleness.
 
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
@@ -73,6 +77,7 @@ defmodule SmolqueryClickHouse.Runtime do
     insert_max_in_flight_bytes: nil,
     unanswered_log: :redacted,
     total_rows_max_tables: 256,
+    catalog_check_ms: 1_000,
     catalog_rebuild_ms: 30_000,
     ip: {127, 0, 0, 1},
     port: 8123
@@ -90,6 +95,7 @@ defmodule SmolqueryClickHouse.Runtime do
           ip: :inet.ip_address(),
           unanswered_log: :redacted | :verbatim | :off,
           total_rows_max_tables: pos_integer(),
+          catalog_check_ms: non_neg_integer(),
           catalog_rebuild_ms: non_neg_integer(),
           port: :inet.port_number()
         }
@@ -138,6 +144,7 @@ defmodule SmolqueryClickHouse.Runtime do
         :query_name,
         :unanswered_log,
         :total_rows_max_tables,
+        :catalog_check_ms,
         :catalog_rebuild_ms,
         :ip,
         :port | @api_defaults

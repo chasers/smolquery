@@ -15,6 +15,12 @@ defmodule Smolquery.Test.ExitingCatalog do
 
   A bare function name exits on every call; a predicate over the call's
   arguments (the config excluded) exits when it answers true.
+
+  A third argument is the error answered in place of the exit, for the
+  failure that is not one: a statement the lake refused reads to a caller as
+  `{:error, reason}` with the connection still there (T-529).
+
+      ExitingCatalog.new(catalog, [:table_schema], :conflict)
   """
 
   @behaviour Smolquery.Catalog
@@ -24,9 +30,10 @@ defmodule Smolquery.Test.ExitingCatalog do
 
   @type exiting :: [atom()] | [{atom(), (list() -> boolean())}]
 
-  @spec new(Catalog.t(), exiting()) :: Catalog.t()
-  def new(%Catalog{} = inner, exiting) when is_list(exiting) do
-    %Catalog{impl: __MODULE__, config: %{inner: inner, exiting: exiting}}
+  @spec new(Catalog.t(), exiting(), term()) :: Catalog.t()
+  def new(%Catalog{} = inner, exiting, error \\ %CallExited{reason: :timeout})
+      when is_list(exiting) do
+    %Catalog{impl: __MODULE__, config: %{inner: inner, exiting: exiting, error: error}}
   end
 
   @impl Catalog
@@ -38,9 +45,9 @@ defmodule Smolquery.Test.ExitingCatalog do
     args = Macro.generate_arguments(arity - 1, __MODULE__)
 
     @impl Catalog
-    def unquote(name)(%{inner: inner, exiting: exiting}, unquote_splicing(args)) do
+    def unquote(name)(%{inner: inner, exiting: exiting, error: error}, unquote_splicing(args)) do
       if exits?(exiting, unquote(name), [unquote_splicing(args)]) do
-        {:error, %CallExited{reason: :timeout}}
+        {:error, error}
       else
         inner.impl.unquote(name)(inner.config, unquote_splicing(args))
       end

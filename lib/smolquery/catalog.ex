@@ -360,8 +360,15 @@ defmodule Smolquery.Catalog do
     do: catalog.impl.current_snapshot(catalog.config)
 
   @doc """
-  A number that moves when, and only when, a table's columns change — a
-  create, an add, a drop — and stays put across registrations and swaps.
+  A number that moves when the lake's shape changes — a dataset or a table
+  created, a column added or dropped — and stays put across registrations
+  and swaps.
+
+  It must move on every one of those: a caller holds what it read until the
+  number moves (T-529), so a change that leaves it where it was is a change
+  that caller does not see. It may move more often and never be wrong. What
+  is kept beside the lake and not in it, a clustering key among them, does
+  not move it.
 
   The cheapest read that says whether a schema a caller holds may be stale
   (T-439): a buffer keys its memo of confirmed column ids on it, so a lake
