@@ -33,6 +33,32 @@ defmodule SmolqueryApi.RouterTest do
     end
   end
 
+  describe "latency by route (T-546)" do
+    defp counted(route) do
+      series = ~s(smolquery_api_request_microseconds_bucket{route="#{route}",le="+Inf"} )
+
+      case String.split(Smolquery.Telemetry.render(), series, parts: 2) do
+        [_before, rest] -> rest |> String.split("\n", parts: 2) |> hd() |> String.to_integer()
+        [_absent] -> 0
+      end
+    end
+
+    test "a request through the endpoint is timed under the route its controller serves" do
+      name = start_api()
+      ops = counted(:ops)
+      query = counted(:query)
+      other = counted(:other)
+
+      request(name, conn(:get, "/healthz"))
+      request(name, authorized(conn(:post, "/v1/queries", "{}")))
+      request(name, authorized(conn(:get, "/v1/nothing/here")))
+
+      assert counted(:ops) > ops
+      assert counted(:query) > query
+      assert counted(:other) > other
+    end
+  end
+
   describe "metrics" do
     test "answers Prometheus text to the internal secret" do
       name = start_api()

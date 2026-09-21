@@ -136,4 +136,19 @@ defmodule SmolqueryClickHouse.RouterTest do
 
     assert Smolquery.Telemetry.render() =~ ~s(smolquery_clickhouse_requests_total{class="2xx"})
   end
+
+  test "requests are timed by what they were: a ping, a query, an insert (T-546)", %{name: name} do
+    request(conn(:get, "/ping"), name)
+    conn(:post, "/", "SELECT 1") |> authed() |> request(name)
+    conn(:post, @insert, "") |> authed() |> request(name)
+
+    rendered = Smolquery.Telemetry.render()
+
+    for kind <- ~w(ping query insert) do
+      assert rendered =~
+               ~s(smolquery_clickhouse_request_microseconds_bucket{kind="#{kind}",le="+Inf"})
+
+      assert rendered =~ ~s(smolquery_clickhouse_request_microseconds_total{kind="#{kind}"})
+    end
+  end
 end

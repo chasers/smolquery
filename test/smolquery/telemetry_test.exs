@@ -134,6 +134,100 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_s3_requests_total", failed_delete) == before_failed + 1
   end
 
+  describe "the two HTTP edges' latency (T-546)" do
+    defp stopped(event, private, status, duration_us) do
+      :telemetry.execute(
+        event,
+        %{duration: System.convert_time_unit(duration_us, :microsecond, :native)},
+        %{conn: %Plug.Conn{status: status, private: private}}
+      )
+    end
+
+    test "an API request is timed by route, cumulatively in le, and +Inf is the route's count" do
+      family = "smolquery_api_request_microseconds_bucket"
+      series = fn le -> ~s({route="insert",le="#{le}"}) end
+      bounds = [5_000, 25_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 10_000_000]
+      before = Map.new(bounds ++ ["+Inf"], &{&1, value(family, series.(&1))})
+      before_us = value("smolquery_api_request_microseconds_total", ~s({route="insert"}))
+      before_class = value("smolquery_api_requests_total", ~s({class="2xx"}))
+
+      private = %{phoenix_controller: SmolqueryApi.InsertController, phoenix_action: :create}
+
+      for duration_us <- [3_000, 588_000, 12_000_000],
+          do: stopped([:smolquery, :api, :stop], private, 200, duration_us)
+
+      moved = Map.new(before, fn {le, was} -> {le, value(family, series.(le)) - was} end)
+
+      assert moved == %{
+               5_000 => 1,
+               25_000 => 1,
+               100_000 => 1,
+               250_000 => 1,
+               500_000 => 1,
+               1_000_000 => 2,
+               2_500_000 => 2,
+               10_000_000 => 2,
+               "+Inf" => 3
+             }
+
+      assert value("smolquery_api_request_microseconds_total", ~s({route="insert"})) ==
+               before_us + 12_591_000
+
+      assert value("smolquery_api_requests_total", ~s({class="2xx"})) == before_class + 3
+    end
+
+    test "a route is its controller's, a closed set: a path is never a label" do
+      inf = fn route -> ~s({route="#{route}",le="+Inf"}) end
+      family = "smolquery_api_request_microseconds_bucket"
+
+      for {controller, route} <- [
+            {SmolqueryApi.QueryController, :query},
+            {SmolqueryApi.JobController, :job},
+            {SmolqueryApi.TableController, :catalog},
+            {SmolqueryApi.ConnectionController, :connection},
+            {SmolqueryApi.HealthController, :ops},
+            {SomeoneElses.InsertedLaterController, :other}
+          ] do
+        was = value(family, inf.(route))
+        stopped([:smolquery, :api, :stop], %{phoenix_controller: controller}, 200, 1_000)
+
+        assert value(family, inf.(route)) == was + 1, inspect(controller)
+      end
+
+      was = value(family, inf.(:other))
+      stopped([:smolquery, :api, :stop], %{}, 404, 1_000)
+
+      assert value(family, inf.(:other)) == was + 1
+      refute Telemetry.render() =~ "InsertedLater"
+    end
+
+    test "a ClickHouse edge request is timed by kind, and a kind it does not know is other" do
+      family = "smolquery_clickhouse_request_microseconds_bucket"
+      inf = fn kind -> ~s({kind="#{kind}",le="+Inf"}) end
+      fast = ~s({kind="query",le="250000"})
+      before_fast = value(family, fast)
+      before_us = value("smolquery_clickhouse_request_microseconds_total", ~s({kind="query"}))
+
+      for {kind, label} <- [insert: :insert, query: :query, ping: :ping, surprise: :other] do
+        was = value(family, inf.(label))
+
+        stopped(
+          [:smolquery, :clickhouse, :stop],
+          %{smolquery_clickhouse_kind: kind},
+          200,
+          230_000
+        )
+
+        assert value(family, inf.(label)) == was + 1, inspect(kind)
+      end
+
+      assert value(family, fast) == before_fast + 1
+
+      assert value("smolquery_clickhouse_request_microseconds_total", ~s({kind="query"})) ==
+               before_us + 230_000
+    end
+  end
+
   test "prices the ClickHouse edge's catalog checks apart from its rebuilds (T-529)" do
     unchanged = ~s({result="unchanged"})
     rebuilt = ~s({result="rebuilt"})

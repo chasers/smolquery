@@ -27,7 +27,7 @@ curl -sS "http://127.0.0.1:8123/" \
 - **Health checks.** `GET /` and `GET /ping` answer `Ok.` without a password, as ClickHouse does.
 - **Refused before the body.** A missing or wrong password is a 401 with code 516 `AUTHENTICATION_FAILED`, on every path. An insert is then counted against the in-flight limit before its body is read, as the API's insert is. Over the limit is a 429 with code 202 and `retry-after: 1`.
 - **Paths.** Everything happens on `/`. Any other path but `/ping` is a 404.
-- **Metrics.** Requests are counted in `smolquery_clickhouse_requests_total`, by status class.
+- **Metrics.** Requests are counted in `smolquery_clickhouse_requests_total`, by status class, and timed in `smolquery_clickhouse_request_microseconds_total` and `smolquery_clickhouse_request_microseconds_bucket` by `kind` (`insert`, `query`, `ping`, `other`): cumulative `le` counters at 5 ms to 10 s, whose `le="+Inf"` is the kind's request count (T-546).
 
 ## The insert
 

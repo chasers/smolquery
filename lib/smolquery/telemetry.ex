@@ -24,7 +24,10 @@ defmodule Smolquery.Telemetry do
   `# TYPE histogram`. A mean commit size cannot distinguish a steady 5,292 rows
   from half at 800 and half at 10,000, and the seal path's cost is not linear
   in segment size, so the distribution is the measurement (T-333). A mean
-  request time to the object store hides its tail the same way (T-379). Labels are closed sets (a result atom, a status class), never a
+  request time to the object store hides its tail the same way (T-379), and
+  so does a mean request time on either HTTP edge, where every buffer
+  tunable trades ack latency for batching and an ingest drain fails on the
+  tail (T-546). Labels are closed sets (a result atom, a status class), never a
   table or job id, so cardinality is bounded by this file rather than by
   traffic.
 
@@ -36,8 +39,10 @@ defmodule Smolquery.Telemetry do
 
   ## The event catalog
 
-      [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status
-      [:smolquery, :clickhouse, :stop]    Plug.Telemetry — conn status
+      [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status,
+                                          and the controller the router matched
+      [:smolquery, :clickhouse, :stop]    Plug.Telemetry — measurements.duration, conn status,
+                                          conn.private.smolquery_clickhouse_kind
       [:smolquery, :clickhouse, :catalog_refresh] %{duration_us},
                                           meta %{result: :rebuilt | :unchanged | :error, name: edge}
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
@@ -237,8 +242,18 @@ defmodule Smolquery.Telemetry do
 
   @help %{
     "smolquery_api_requests_total" => "HTTP requests answered, by status class.",
+    "smolquery_api_request_microseconds_bucket" =>
+      "HTTP requests by duration, by route, cumulative in le at 5 ms, 25 ms, 100 ms, 250 ms, " <>
+        "500 ms, 1 s, 2.5 s and 10 s; counters, not a histogram. le=\"+Inf\" is the route's " <>
+        "request count, so _microseconds_total over it is the route's mean (T-546).",
     "smolquery_clickhouse_requests_total" =>
       "ClickHouse HTTP edge requests answered, by status class.",
+    "smolquery_clickhouse_request_microseconds_total" =>
+      "Time spent answering ClickHouse HTTP edge requests, by kind: insert, query, ping or " <>
+        "other (T-546).",
+    "smolquery_clickhouse_request_microseconds_bucket" =>
+      "ClickHouse HTTP edge requests by duration, by kind, cumulative in le at the API's " <>
+        "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count (T-546).",
     "smolquery_clickhouse_unanswered_total" =>
       "Statements the ClickHouse HTTP edge could not answer for a reason that is the dialect's, by ClickHouse error code.",
     "smolquery_clickhouse_catalog_refreshes_total" =>
@@ -260,7 +275,8 @@ defmodule Smolquery.Telemetry do
       "Time the ingest edge spent parsing bytes and awaiting the buffer; divide by inserts.",
     "smolquery_ingest_inserts_total" => "Insert calls the ingest edge answered.",
     "smolquery_api_request_microseconds_total" =>
-      "Time spent answering HTTP requests; divide by requests for the mean.",
+      "Time spent answering HTTP requests, by route: insert, query, job, catalog, connection, " <>
+        "ops or other. Sum it over route and divide by requests for the mean of all (T-546).",
     "smolquery_buffer_admission_refused_rows_total" =>
       "Rows refused by Little's-law admission (PL-9).",
     "smolquery_buffer_backlog_refused_rows_total" =>
@@ -385,6 +401,37 @@ defmodule Smolquery.Telemetry do
   @commit_row_buckets [1_000, 4_000, 16_000, 64_000]
 
   @s3_latency_buckets [10_000, 50_000, 250_000, 1_000_000, 5_000_000]
+
+  # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
+  # Closest together where the buffer's commit windows put an insert's ack:
+  # `flush_idle_interval_ms` and `flush_interval_ms` sit between 250 ms and 1 s.
+  @http_latency_buckets [
+    5_000,
+    25_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    10_000_000
+  ]
+
+  # The API's routes by the controller that serves them: a closed set, so a
+  # path parameter can never become a label. A controller not listed is
+  # `other`, and so is a request no route matched.
+  @api_routes %{
+    "InsertController" => :insert,
+    "QueryController" => :query,
+    "JobController" => :job,
+    "DatasetController" => :catalog,
+    "TableController" => :catalog,
+    "ColumnController" => :catalog,
+    "SegmentController" => :catalog,
+    "ConnectionController" => :connection,
+    "HealthController" => :ops,
+    "MetricsController" => :ops,
+    "DocsController" => :ops
+  }
 
   # The closed set of window-close reasons `TableBuffer` names. An unrecognised
   # one counts as `:unknown` rather than creating a series, so the label can
@@ -534,16 +581,17 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :api, :stop], measurements, %{conn: conn}, nil) do
     bump({"smolquery_api_requests_total", [class: status_class(conn.status)]}, 1)
 
-    # Plug.Telemetry measures in native units; the counter is microseconds so it
-    # divides against the other spans without a unit lookup at read time.
-    bump(
-      {"smolquery_api_request_microseconds_total", []},
-      System.convert_time_unit(Map.get(measurements, :duration, 0), :native, :microsecond)
-    )
+    timed("smolquery_api_request_microseconds", [route: api_route(conn)], measurements)
   end
 
-  def handle_event([:smolquery, :clickhouse, :stop], _measurements, %{conn: conn}, nil) do
+  def handle_event([:smolquery, :clickhouse, :stop], measurements, %{conn: conn}, nil) do
     bump({"smolquery_clickhouse_requests_total", [class: status_class(conn.status)]}, 1)
+
+    timed(
+      "smolquery_clickhouse_request_microseconds",
+      [kind: clickhouse_kind(conn)],
+      measurements
+    )
   end
 
   def handle_event([:smolquery, :clickhouse, :unanswered], _measurements, %{code: code}, nil) do
@@ -810,6 +858,28 @@ defmodule Smolquery.Telemetry do
   end
 
   defp bucket_commit_rows(_measurements, _meta), do: :ok
+
+  # Plug.Telemetry measures in native units; the counters are microseconds so
+  # they divide against the other spans without a unit lookup at read time.
+  defp timed(family, labels, measurements) do
+    duration_us =
+      System.convert_time_unit(Map.get(measurements, :duration, 0), :native, :microsecond)
+
+    bump({family <> "_total", labels}, duration_us)
+    bucket(family <> "_bucket", labels, @http_latency_buckets, duration_us)
+  end
+
+  defp api_route(%{private: %{phoenix_controller: controller}}) when is_atom(controller) do
+    Map.get(@api_routes, controller |> Module.split() |> List.last(), :other)
+  end
+
+  defp api_route(_unrouted), do: :other
+
+  defp clickhouse_kind(%{private: %{smolquery_clickhouse_kind: kind}})
+       when kind in [:insert, :query, :ping],
+       do: kind
+
+  defp clickhouse_kind(_conn), do: :other
 
   defp bucket_s3_latency(op, duration_us) do
     bucket("smolquery_s3_request_microseconds_bucket", [op: op], @s3_latency_buckets, duration_us)

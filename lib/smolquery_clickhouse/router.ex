@@ -51,6 +51,7 @@ defmodule SmolqueryClickHouse.Router do
   @telemetry Plug.Telemetry.init(event_prefix: [:smolquery, :clickhouse])
 
   @max_query_bytes 262_144
+  @kind :smolquery_clickhouse_kind
 
   @unauthenticated {401, 516, "AUTHENTICATION_FAILED",
                     "Authentication failed: password is incorrect, or there is no user with such name",
@@ -82,11 +83,11 @@ defmodule SmolqueryClickHouse.Router do
 
   defp route(%Plug.Conn{method: method, path_info: ["ping"]} = conn, _name)
        when method in ["GET", "HEAD"],
-       do: ok(conn)
+       do: conn |> kind(:ping) |> ok()
 
   defp route(%Plug.Conn{method: method, path_info: [], query_params: params} = conn, _name)
        when method in ["GET", "HEAD"] and not is_map_key(params, "query"),
-       do: ok(conn)
+       do: conn |> kind(:ping) |> ok()
 
   defp route(conn, name) do
     with {:ok, runtime} <- Runtime.fetch(name),
@@ -124,6 +125,8 @@ defmodule SmolqueryClickHouse.Router do
   end
 
   defp insert(conn, runtime) do
+    conn = kind(conn, :insert)
+
     case Admission.admit_body(conn, runtime.name, runtime.max_ndjson_bytes) do
       {:ok, conn} -> Insert.call(conn, runtime)
       {:error, :admission_full} -> Errors.send_exception(conn, @admission_full)
@@ -147,7 +150,9 @@ defmodule SmolqueryClickHouse.Router do
   defp query(conn, _runtime, sql, _opts) when byte_size(sql) > @max_query_bytes,
     do: Errors.send_exception(conn, @query_too_large)
 
-  defp query(conn, runtime, sql, opts), do: Query.call(conn, runtime, sql, opts)
+  defp query(conn, runtime, sql, opts), do: conn |> kind(:query) |> Query.call(runtime, sql, opts)
+
+  defp kind(conn, kind), do: put_private(conn, @kind, kind)
 
   defp join(nil, body), do: body
   defp join(query, ""), do: query
