@@ -20,6 +20,18 @@ defmodule Smolquery.QueryService.Pruner do
   reads a single table, because guessing which of two tables `id` means
   could prune the wrong one's segments.
 
+  ## A table read twice
+
+  The planner builds one view for a table, and every reference to the table
+  in the statement reads it. A conjunct is one reference's: in
+  `events a JOIN events b ... WHERE a.id > 5`, `b` needs the files `a` does
+  not, and so does a subquery that counts the table the outer `WHERE`
+  filters. So a table prunes only when the statement names it exactly once
+  (T-533). The count is of every table reference with that name, whatever
+  its schema and wherever it is, since an unqualified name beside a
+  qualified one may be the same table, and counting one too many only keeps
+  files.
+
   The sealed tier gets no treatment here: DuckLake collects min-max stats at
   registration and prunes on them natively — verified in the Milestone 2
   spike (PL-2), which is why this module's job ends at the hot tier.
@@ -28,6 +40,7 @@ defmodule Smolquery.QueryService.Pruner do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
+  alias Smolquery.Engine.Ast
 
   @type op :: :gt | :ge | :lt | :le | :eq
   @type conjunct :: {String.t(), op(), term()}
@@ -57,13 +70,15 @@ defmodule Smolquery.QueryService.Pruner do
           %{Catalog.table_ref() => [conjunct()]}
   def conjuncts(statement, refs, params \\ [])
 
-  def conjuncts(%{"node" => %{"type" => "SELECT_NODE"} = node}, refs, params) do
+  def conjuncts(%{"node" => %{"type" => "SELECT_NODE"} = node} = statement, refs, params) do
     aliases = aliases(Map.get(node, "from_table"), refs)
+    read_once = read_once(statement)
 
     node
     |> Map.get("where_clause")
     |> split()
     |> Enum.flat_map(&parse(&1, aliases, params))
+    |> Enum.filter(fn {{_dataset, table}, _conjunct} -> MapSet.member?(read_once, table) end)
     |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
   end
 
@@ -95,6 +110,20 @@ defmodule Smolquery.QueryService.Pruner do
     not Enum.any?(conjuncts, fn {column, op, value} ->
       excludes?(stats, {resolve.(column), op, value})
     end)
+  end
+
+  defp read_once(statement) do
+    statement
+    |> Ast.collect(fn
+      %{"type" => "BASE_TABLE", "table_name" => table} -> [table]
+      _another_node -> []
+    end)
+    |> Enum.frequencies()
+    |> Enum.flat_map(fn
+      {table, 1} -> [table]
+      {_table, _more} -> []
+    end)
+    |> MapSet.new()
   end
 
   defp column_resolver(ids, file_ids) when is_map(ids) and is_map(file_ids) do

@@ -479,6 +479,19 @@ defmodule Smolquery.QueryService.PlannerTest do
       refute view =~ "01A.parquet"
     end
 
+    test "a self-join keeps the entries its other side reads, whatever one side's WHERE rules out (T-533)" do
+      stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
+      runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])
+
+      sql =
+        "SELECT * FROM analytics.events a JOIN analytics.events b ON a.id = b.id + 100 " <>
+          "WHERE a.id > 100"
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+
+      assert [%{"id" => "01A"}, %{"id" => "01B"}] = plan.hot[@table]
+    end
+
     test "hot_members is the membership before pruning, so a later WHERE prunes from the whole set (T-418)" do
       stats = %{"id" => %{"min" => 1, "max" => 10, "null_count" => 0}}
       runtime = runtime([entry("01A", %{"stats" => stats}), entry("01B")])

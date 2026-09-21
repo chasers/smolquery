@@ -35,6 +35,27 @@ defmodule Smolquery.QueryService.PrunerTest do
                %{@events => [{"id", :gt, 5}, {"id", :le, 100}]}
     end
 
+    test "a table the statement reads twice is pruned by neither reference's WHERE (T-533)" do
+      for sql <- [
+            "SELECT * FROM analytics.events a JOIN analytics.events b ON a.id = b.id + 1 WHERE a.id > 5",
+            "SELECT * FROM analytics.events WHERE id > 5 AND id IN (SELECT max(id) FROM analytics.events)",
+            "SELECT (SELECT count(*) FROM analytics.events) AS total, id FROM analytics.events WHERE id > 5",
+            "WITH all_events AS (SELECT * FROM analytics.events) " <>
+              "SELECT * FROM analytics.events e JOIN all_events USING (id) WHERE e.id > 5",
+            "SELECT * FROM analytics.events WHERE id > 5 UNION ALL SELECT * FROM events"
+          ] do
+        assert conjuncts(sql) == %{}, sql
+      end
+    end
+
+    test "a second table read once beside one read twice still prunes (T-533)" do
+      sql =
+        "SELECT * FROM analytics.events a JOIN analytics.events b ON a.id = b.id " <>
+          "JOIN analytics.users u ON u.id = a.id WHERE a.id > 5 AND u.id > 7"
+
+      assert conjuncts(sql, [@events, @users]) == %{@users => [{"id", :gt, 7}]}
+    end
+
     test "BETWEEN becomes its two bounds" do
       assert conjuncts("SELECT * FROM analytics.events WHERE id BETWEEN 5 AND 9") ==
                %{@events => [{"id", :ge, 5}, {"id", :le, 9}]}
