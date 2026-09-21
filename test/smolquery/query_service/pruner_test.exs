@@ -151,6 +151,26 @@ defmodule Smolquery.QueryService.PrunerTest do
                %{}
     end
 
+    test "an epoch function under a schema or a catalog is another function, and bounds nothing (review of T-532)" do
+      for name <- ["main.fromUnixTimestamp64Milli", "fed.main.fromUnixTimestamp64Milli"] do
+        sql = "SELECT * FROM analytics.events WHERE ts >= #{name}(5)"
+
+        assert conjuncts(sql) == %{}, sql
+      end
+    end
+
+    test "what makes a reference opaque at the top makes it opaque in a CTE (review of T-532)" do
+      for sql <- [
+            "WITH s AS (SELECT * FROM analytics.events AS e(ts, id) WHERE e.id > 5) SELECT count(*) FROM s",
+            "WITH s AS (SELECT * FROM analytics.events TABLESAMPLE reservoir(100 ROWS) REPEATABLE (42) WHERE id > 5) SELECT count(*) FROM s",
+            "WITH s AS (SELECT * FROM analytics.events WHERE id > 5 USING SAMPLE 10% (bernoulli, 42)) SELECT count(*) FROM s",
+            "SELECT count(*) FROM (SELECT * FROM analytics.events WHERE id > 5) e USING SAMPLE 10% (bernoulli, 42)",
+            "WITH s AS (SELECT * FROM analytics.events WHERE id > 5) SELECT * FROM s UNION ALL SELECT * FROM query_table('analytics.events')"
+          ] do
+        assert conjuncts(sql) == %{}, sql
+      end
+    end
+
     test "BETWEEN becomes its two bounds" do
       assert conjuncts("SELECT * FROM analytics.events WHERE id BETWEEN 5 AND 9") ==
                %{@events => [{"id", :ge, 5}, {"id", :le, 9}]}

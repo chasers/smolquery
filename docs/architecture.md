@@ -1062,8 +1062,12 @@ Properties worth knowing:
   before a column was added reads back with NULLs there. A sealed segment does
   the same.
 - **Manifest-level pruning drops hot files before DuckDB pays an HTTP footer
-  read for each** (~0.7 ms/file). The pruning applies top-level WHERE
-  conjuncts against flush-time min-max stats. It is conservative in every
+  read for each** (~0.7 ms/file). The pruning applies WHERE conjuncts
+  against flush-time min-max stats: the statement's own, and those of a CTE
+  body, a subquery that is a whole FROM, and each side of a set operation
+  (T-532), which is where a ClickHouse client such as HyperDX writes its
+  window. A bound may be a constant, a TIMESTAMP or DATE cast, or
+  `fromUnixTimestamp64Milli(n)` and its kin. It is conservative in every
   uncertain case, and a table the statement reads twice is one: every
   reference reads the table's one view, so one reference's WHERE prunes
   nothing (T-533). The sealed tier prunes itself: DuckLake keeps stats at

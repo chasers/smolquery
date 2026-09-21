@@ -36,7 +36,9 @@ defmodule Smolquery.QueryService.Pruner do
 
   A subquery in an expression (`EXISTS`, `IN`, a scalar) is not read, nor is
   one that shares its FROM with another source: either may be correlated,
-  and an unqualified `id` in it may be the outer table's. A row a nested
+  and an unqualified `id` in it may be the outer table's. Nothing under a
+  SELECT that samples is read either, since what it samples is what its
+  subqueries answer. A row a nested
   WHERE rejects contributes to nothing above it, so with the table read once
   the files that hold only such rows are not needed anywhere.
 
@@ -47,8 +49,10 @@ defmodule Smolquery.QueryService.Pruner do
   `Smolquery.QueryService.ClickHouseFunctions` makes of it, which is how
   every ClickHouse client writes a time range. They are this codebase's own
   macros, which a client cannot replace, and a test holds each bound here to
-  what the engine answers for the same call. `fromUnixTimestamp64Nano` is
-  left alone: a bound here is a microsecond one.
+  what the engine answers for the same call. That holds for the bare name
+  only: `fed.main.fromUnixTimestamp(5)` is whatever that catalog says it is,
+  and bounds nothing. `fromUnixTimestamp64Nano` is left alone: a bound here
+  is a microsecond one.
 
   ## A table read twice
 
@@ -340,7 +344,13 @@ defmodule Smolquery.QueryService.Pruner do
   end
 
   defp literal(
-         %{"class" => "FUNCTION", "function_name" => name, "children" => [argument]},
+         %{
+           "class" => "FUNCTION",
+           "catalog" => "",
+           "schema" => "",
+           "function_name" => name,
+           "children" => [argument]
+         },
          params
        )
        when is_map_key(@epoch_functions, name) do
