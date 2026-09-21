@@ -32,7 +32,7 @@ defmodule Smolquery.QueryService.FoldTest do
   defp folded(sql, lockdown \\ false) do
     ast = statement(sql)
 
-    {ast, Fold.bounds(@conn, Pruner.unread_bounds(ast), lockdown)}
+    {ast, Fold.bounds(@conn, Pruner.unread_bounds(ast, [@events]), lockdown)}
   end
 
   defp conjuncts(sql) do
@@ -65,7 +65,20 @@ defmodule Smolquery.QueryService.FoldTest do
             "SELECT * FROM analytics.events WHERE ts >= fromUnixTimestamp64Milli(1789812660000)",
             "SELECT * FROM analytics.events WHERE id BETWEEN 5 AND 9"
           ] do
-        assert Pruner.unread_bounds(statement(sql)) == [], sql
+        assert Pruner.unread_bounds(statement(sql), [@events]) == [], sql
+      end
+    end
+
+    test "only a side the pruner could use is sent: a WHERE conjunct against a column (review of T-534)" do
+      for sql <- [
+            "SELECT name, count(*) FROM analytics.events GROUP BY name HAVING count(*) > 5 + 1",
+            "SELECT id > 40 + 2 FROM analytics.events",
+            "SELECT * FROM analytics.events WHERE ts NOT BETWEEN now() - INTERVAL 1 HOUR AND now()",
+            "SELECT * FROM analytics.events WHERE 40 + 2 > 5 + 1",
+            "SELECT * FROM analytics.events WHERE id > 40 + 2 OR id < 5 + 1",
+            "SELECT * FROM analytics.users u WHERE EXISTS (SELECT 1 FROM analytics.events WHERE id > 40 + 2)"
+          ] do
+        assert Pruner.unread_bounds(statement(sql), [@events]) == [], sql
       end
     end
 
@@ -81,15 +94,27 @@ defmodule Smolquery.QueryService.FoldTest do
       end
     end
 
-    test "a volatile function, or a macro that is not ours, folds nothing at all" do
+    test "a side that is volatile, a macro not ours, or cannot be evaluated loses itself and nothing else" do
       Engine.query!(@engine, "CREATE OR REPLACE MACRO theirs(x) AS x + 1")
 
-      for bound <- ["random() * 100", "theirs(5)", "40 + 2 + theirs(1)"] do
+      for bound <- [
+            "random() * 100",
+            "theirs(5)",
+            "40 + 2 + theirs(1)",
+            "CAST('abc' AS INTEGER) + 1",
+            "1 // 0 + CAST('x' AS INTEGER)"
+          ] do
         sql = "SELECT * FROM analytics.events WHERE id > 40 + 2 AND id < #{bound}"
 
-        assert {_ast, none} = folded(sql)
-        assert none == %{}, sql
+        assert conjuncts(sql) == %{@events => [{"id", :gt, 42}]}, sql
       end
+    end
+
+    test "an expression with names inside it, a struct, is rendered as it was written" do
+      sql =
+        "SELECT * FROM analytics.events WHERE id > 40 + 2 AND id < struct_extract({'a': 7}, 'a') + 1"
+
+      assert conjuncts(sql) == %{@events => [{"id", :gt, 42}, {"id", :lt, 8}]}
     end
 
     test "a bound that reads the clock is a lower bound and never an upper one" do
@@ -105,6 +130,93 @@ defmodule Smolquery.QueryService.FoldTest do
         "SELECT * FROM analytics.events WHERE ts BETWEEN now64() - INTERVAL 1 HOUR AND now64()"
 
       assert %{@events => [{"ts", :ge, %NaiveDateTime{}}]} = conjuncts(between)
+    end
+
+    test "a fixed bound beside a clock one still bounds from above (review of T-534)" do
+      sql =
+        "SELECT * FROM analytics.events WHERE ts >= now() - INTERVAL 1 HOUR " <>
+          "AND ts <= toDateTime64('2030-01-01 00:00:00', 3)"
+
+      assert %{
+               @events => [
+                 {"ts", :ge, %NaiveDateTime{}},
+                 {"ts", :le, ~N[2030-01-01 00:00:00.000000]}
+               ]
+             } = conjuncts(sql)
+    end
+
+    test "a clock expression that does not rise with the clock is not folded (review of T-534)" do
+      for bound <- [
+            "TIMESTAMP '2026-09-19 10:00:00' - (now() - TIMESTAMPTZ '2026-09-19 10:00:00+00')",
+            "TIMESTAMPTZ '2030-01-01 00:00:00+00' - (now() - now())",
+            "to_timestamp(-epoch(now()))",
+            "now() - (now() - TIMESTAMPTZ '2020-01-01 00:00:00+00')"
+          ] do
+        assert conjuncts("SELECT * FROM analytics.events WHERE ts >= #{bound}") == %{}, bound
+      end
+
+      for bound <- [
+            "now()",
+            "now() - INTERVAL 15 MINUTE",
+            "INTERVAL 1 MINUTE + now()",
+            "CAST(now() AS TIMESTAMP) - INTERVAL 1 DAY",
+            "date_trunc('hour', now())",
+            "toDateTime(now64(3) - INTERVAL 1 HOUR)"
+          ] do
+        assert %{@events => [{"ts", :ge, _since}]} =
+                 conjuncts("SELECT * FROM analytics.events WHERE ts >= #{bound}"),
+               bound
+      end
+    end
+
+    test "a TIMESTAMP_NS bound arrives cut to the microsecond, and bounds from above a microsecond up (review of T-534)" do
+      bound = "parseDateTime64BestEffort('2026-09-19T10:11:00.1234567Z', 9)"
+
+      assert conjuncts("SELECT * FROM analytics.events WHERE ts < #{bound}") ==
+               %{@events => [{"ts", :lt, ~N[2026-09-19 10:11:00.123457]}]}
+
+      assert conjuncts("SELECT * FROM analytics.events WHERE ts >= #{bound}") ==
+               %{@events => [{"ts", :ge, ~N[2026-09-19 10:11:00.123456]}]}
+
+      assert conjuncts("SELECT * FROM analytics.events WHERE ts = #{bound}") == %{}
+
+      file = %{
+        "id" => "01A",
+        "stats" => %{
+          "ts" => %{
+            "min" => %{"type" => "naive_datetime", "value" => "2026-09-19T10:11:00.123456"},
+            "max" => %{"type" => "naive_datetime", "value" => "2026-09-19T10:11:00.123457"},
+            "null_count" => 0
+          }
+        }
+      }
+
+      %{@events => above} = conjuncts("SELECT * FROM analytics.events WHERE ts < #{bound}")
+
+      assert Pruner.keep?(file, above)
+    end
+
+    test "a TIMESTAMPTZ is this module's bound only when the engine's zone is UTC (review of T-534)" do
+      sql =
+        "SELECT * FROM analytics.events WHERE ts >= TIMESTAMPTZ '2026-09-19 10:00:00-07' + INTERVAL 1 HOUR"
+
+      assert conjuncts(sql) == %{@events => [{"ts", :ge, ~N[2026-09-19 18:00:00.000000]}]}
+
+      Engine.query!(@engine, "SET TimeZone = 'America/Phoenix'")
+
+      try do
+        assert conjuncts(sql) == %{}
+
+        assert conjuncts("SELECT * FROM analytics.events WHERE ts >= now() - INTERVAL 1 HOUR") ==
+                 %{}
+
+        assert conjuncts(
+                 "SELECT * FROM analytics.events WHERE ts >= toDateTime64('2026-09-19 10:00:00', 3)"
+               ) ==
+                 %{@events => [{"ts", :ge, ~N[2026-09-19 10:00:00.000000]}]}
+      after
+        Engine.query!(@engine, "SET TimeZone = 'UTC'")
+      end
     end
 
     test "every ClickHouse macro that reads the clock is known to read it" do

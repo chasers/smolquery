@@ -128,7 +128,7 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
 
     %{"statements" => [statement]} = result |> Result.one!() |> JSON.decode!()
 
-    folded = Fold.bounds(@conn, Pruner.unread_bounds(statement), true)
+    folded = Fold.bounds(@conn, Pruner.unread_bounds(statement, [@events]), true)
 
     statement |> Pruner.conjuncts([@events], [], folded) |> Map.get(@events, []) |> length()
   end

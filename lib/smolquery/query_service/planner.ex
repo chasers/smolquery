@@ -303,7 +303,11 @@ defmodule Smolquery.QueryService.Planner do
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          folded =
            Trace.span(:fold, fn ->
-             Fold.bounds(connection, Pruner.unread_bounds(statement, params), runtime.lockdown)
+             Fold.bounds(
+               connection,
+               Pruner.unread_bounds(statement, refs, params),
+               runtime.lockdown
+             )
            end),
          conjuncts = Pruner.conjuncts(statement, refs, params, folded),
          top_n = TopN.spec(statement, refs),

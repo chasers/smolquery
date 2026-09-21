@@ -102,13 +102,12 @@ defmodule Smolquery.QueryService.TopN do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
-  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
-  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.SingleTable
+  alias Smolquery.QueryService.Stability
   alias Smolquery.QueryService.Views
   alias Smolquery.Schema
 
@@ -136,7 +135,6 @@ defmodule Smolquery.QueryService.TopN do
   @min_entries 8
   @excluded_classes ["SUBQUERY", "WINDOW"]
   @bounded_types [:int64, :float64, :string, :timestamp, :date]
-  @stable ["CONSISTENT", "CONSISTENT_WITHIN_QUERY"]
   @no_autoload [
     "SET autoinstall_known_extensions = false",
     "SET autoload_known_extensions = false"
@@ -350,7 +348,10 @@ defmodule Smolquery.QueryService.TopN do
 
     sql =
       "SELECT json_deserialize_sql(#{Identifier.sql_string(json)}), " <>
-        unstable_count(function_names(statement))
+        (statement
+         |> Stability.function_names()
+         |> Stability.checked()
+         |> Stability.unstable_count_sql())
 
     case Connection.query(connection, sql) do
       {:ok, %Result{rows: [[probe, 0]]}} when is_binary(probe) -> {:ok, probe}
@@ -358,26 +359,6 @@ defmodule Smolquery.QueryService.TopN do
       {:ok, result} -> {:error, {:probe_not_rendered, result}}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp function_names(statement) do
-    statement
-    |> Ast.collect(fn
-      %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name]
-      _other -> []
-    end)
-    |> Enum.map(&String.downcase/1)
-    |> Enum.uniq()
-    |> Enum.reject(&ClickHouseFunctions.stable?/1)
-  end
-
-  defp unstable_count([]), do: "0"
-
-  defp unstable_count(names) do
-    "(SELECT count(*) FROM duckdb_functions() WHERE lower(function_name) IN (" <>
-      Enum.map_join(names, ", ", &Identifier.sql_string/1) <>
-      ") AND coalesce(stability, '') NOT IN (" <>
-      Enum.map_join(@stable, ", ", &Identifier.sql_string/1) <> "))"
   end
 
   defp measure(

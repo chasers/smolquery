@@ -46,11 +46,13 @@ defmodule Smolquery.QueryService.Pruner do
 
   `toDateTime64('...', 3)`, `fromUnixTimestamp64Milli(n) - INTERVAL 1 HOUR`,
   `now() - INTERVAL 15 MINUTE`: an expression that names no column has one
-  value, and the engine knows it. `unread_bounds/2` lists the sides this
-  module could not read, the planner has
+  value, and the engine knows it. `unread_bounds/3` lists the sides this
+  module could use and could not read, the planner has
   `Smolquery.QueryService.Fold` ask the engine for them once, and
   `conjuncts/4` reads the answers where its own rules find nothing (T-534).
-  A value that read the clock is a lower bound only; `Fold` says why.
+  A value that read the clock is a lower bound only, and one cut short to
+  the microsecond has it added back before it bounds from above; `Fold`
+  says why.
 
   ## ClickHouse's epoch functions
 
@@ -97,7 +99,6 @@ defmodule Smolquery.QueryService.Pruner do
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
   alias Smolquery.Engine.Ast
-  alias Smolquery.QueryService.Fold
   alias Smolquery.QueryService.SingleTable
 
   @type op :: :gt | :ge | :lt | :le | :eq
@@ -132,7 +133,7 @@ defmodule Smolquery.QueryService.Pruner do
   is a number, a string, a date, or a timestamp; any other bound value leaves
   its conjunct unread, which keeps every entry.
   """
-  @spec conjuncts(map(), [Catalog.table_ref()], [term()]) ::
+  @spec conjuncts(map(), [Catalog.table_ref()], [term()], %{term() => {atom(), term()}}) ::
           %{Catalog.table_ref() => [conjunct()]}
   def conjuncts(statement, refs, params \\ [], folded \\ %{})
 
@@ -149,27 +150,50 @@ defmodule Smolquery.QueryService.Pruner do
   def conjuncts(_statement, _refs, _params, _folded), do: %{}
 
   @doc """
-  The sides of every comparison and BETWEEN in `statement` that are written
-  as an expression this module cannot read by itself, for
+  The bounds `conjuncts/4` could use and cannot read by itself, for
   `Smolquery.QueryService.Fold.bounds/3` to ask the engine about. Their
   values come back as `conjuncts/4`'s `folded`.
-  """
-  @spec unread_bounds(map(), [term()]) :: [map()]
-  def unread_bounds(statement, params \\ []) do
-    statement
-    |> Ast.collect(fn
-      %{"class" => "COMPARISON", "left" => left, "right" => right} -> [left, right]
-      %{"class" => "BETWEEN", "lower" => lower, "upper" => upper} -> [lower, upper]
-      _another_node -> []
-    end)
-    |> Enum.filter(fn
-      %{"class" => class} = side when class in ["FUNCTION", "OPERATOR", "CAST"] ->
-        literal(side, params) == :error
 
-      _constant_or_column ->
-        false
-    end)
+  Only what a value would be used for: the other side of a WHERE conjunct
+  whose column resolves to a table, in a SELECT this module reads. A
+  `HAVING count(*) > 5 + 1` is a comparison with an expression in it, and
+  nothing here would ever read its value.
+  """
+  @spec unread_bounds(map(), [Catalog.table_ref()], [term()]) :: [map()]
+  def unread_bounds(statement, refs, params \\ [])
+
+  def unread_bounds(%{"node" => node}, refs, params) when is_map(node) do
+    for select <- selects(node),
+        aliases = aliases(Map.get(select, "from_table"), refs),
+        conjunct <- split(Map.get(select, "where_clause")),
+        side <- sides(conjunct, aliases),
+        match?(%{"class" => class} when class in ["FUNCTION", "OPERATOR", "CAST"], side),
+        literal(side, params) == :error,
+        do: side
   end
+
+  def unread_bounds(_statement, _refs, _params), do: []
+
+  defp sides(
+         %{"class" => "COMPARISON", "type" => type, "left" => left, "right" => right},
+         aliases
+       )
+       when is_map_key(@operators, type) do
+    case {column(left, aliases), column(right, aliases)} do
+      {{:ok, _ref, _name}, :error} -> [right]
+      {:error, {:ok, _ref, _name}} -> [left]
+      _both_or_neither -> []
+    end
+  end
+
+  defp sides(%{"class" => "BETWEEN", "type" => "COMPARE_BETWEEN"} = node, aliases) do
+    case column(node["input"], aliases) do
+      {:ok, _ref, _name} -> [node["lower"], node["upper"]]
+      :error -> []
+    end
+  end
+
+  defp sides(_another_conjunct, _aliases), do: []
 
   defp select_conjuncts(node, refs, context) do
     aliases = aliases(Map.get(node, "from_table"), refs)
@@ -343,8 +367,11 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp bounded(ref, name, op, {:fixed, value}), do: [{ref, {name, op, value}}]
 
-  defp bounded(ref, name, op, {:clock, value}) when op in [:gt, :ge],
+  defp bounded(ref, name, op, {kind, value}) when kind in [:clock, :floored] and op in [:gt, :ge],
     do: [{ref, {name, op, value}}]
+
+  defp bounded(ref, name, op, {:floored, %NaiveDateTime{} = value}) when op in [:lt, :le],
+    do: [{ref, {name, op, NaiveDateTime.add(value, 1, :microsecond)}}]
 
   defp bounded(_ref, _name, _op, _clock_above_or_unread), do: []
 
@@ -358,7 +385,7 @@ defmodule Smolquery.QueryService.Pruner do
   defp folded_value(_node, folded) when map_size(folded) == 0, do: :error
 
   defp folded_value(node, folded) do
-    with {:ok, {kind, raw}} <- Map.fetch(folded, Fold.key(node)),
+    with {:ok, {kind, raw}} <- Map.fetch(folded, Ast.shape(node)),
          {:ok, value} <- bound(raw) do
       {kind, value}
     else

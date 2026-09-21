@@ -16,39 +16,67 @@ defmodule Smolquery.QueryService.Fold do
   A clause in Elixir for each shape is a second implementation of the engine
   that has to be held to the first by a test, shape by shape. The planner
   holds a connection with the job's macros already defined, so the engine is
-  asked instead. `Pruner.unread_bounds/2` hands over the sides of every
-  comparison and BETWEEN it could not read; `bounds/3` keeps those that name
-  no column, renders them into one `SELECT`, and answers their values keyed
-  by expression. The pruner reads that map where its own rules find nothing.
+  asked instead. `Pruner.unread_bounds/3` hands over the sides it could use
+  and could not read; `bounds/3` keeps those that name no column, asks the
+  engine for them in one `SELECT`, and answers their values keyed by
+  `Smolquery.Engine.Ast.shape/1`. The pruner reads that map where its own
+  rules find nothing.
 
   ## What is folded
 
   An expression built of constants, casts, operators and function calls
   only: no column, parameter, subquery, window, star or lambda anywhere in
   it, so it reads no table and no row. The shapes the pruner reads by itself
-  never arrive, so a statement whose bounds are all of those — every
-  statement HyperDX generates — costs no round trip here. At most
+  never arrive, so a statement whose bounds are all of those — every search
+  and chart HyperDX generates — costs no round trip here. At most
   `@max_expressions` are folded; a statement with more keeps its first.
 
-  ## What the engine is trusted with
+  ## Each expression stands alone
 
-  The rule is `Smolquery.QueryService.TopN`'s. Every function the
-  expressions name must be `CONSISTENT` or `CONSISTENT_WITHIN_QUERY` by the
-  engine's own catalog, or one of `ClickHouseFunctions`' macros, trusted by
-  bare name; one that is not folds nothing at all. Under `lockdown` the fold
-  runs with extension autoload and autoinstall off, as the Top-N probe does
-  and for its reason: it runs before the runner locks the engine down.
+  The rule for what the engine is trusted with is
+  `Smolquery.QueryService.Stability`'s, the Top-N probe's too, and it is
+  applied to each expression by the functions that expression names. A
+  sampling filter beside a window (`AND rand() < 0.1`) loses its own side
+  and nothing else. They are evaluated together, and one by one if that
+  fails, so a side that cannot be evaluated (`CAST('abc' AS INTEGER)`) is
+  one side with no value.
 
-  ## A bound that reads the clock
+  Under `lockdown` the fold runs with extension autoload and autoinstall
+  off, as the Top-N probe does and for its reason: it runs before the runner
+  locks the engine down.
 
-  `now()` here is read milliseconds before the statement reads it. For a
-  lower bound that is sound: `ts >= now() - INTERVAL 15 MINUTE` folded early
-  keeps a little more. For an upper bound it is not: a file of rows stamped
-  ahead of this node's clock can sit just past the folded `now()` and inside
-  the statement's. So a fold that names a clock function is marked
-  `:clock`, and the pruner takes it as a lower bound only.
+  ## What a value is good for
 
-  Every miss is an empty map: nothing folded, never an error.
+  A value comes back tagged:
+
+  - `:fixed` bounds either way.
+  - `:clock` named something stable within a query only, the clock above
+    all. `now()` is read here milliseconds before the statement reads it.
+    Early is sound for a lower bound that rises with the clock, where it
+    keeps a little more, and for nothing else: above, a file of rows stamped
+    ahead of this node's clock can sit between the two readings; and
+    `X - (now() - Y)` falls as the clock rises, so early is late. So such an
+    expression is folded only in a shape that rises with the clock — the
+    call itself, under casts, `+` or `-` a clock-free amount, `date_trunc`,
+    `toDateTime`, `toDateTime64` — and the pruner takes it as a lower bound
+    only.
+  - `:floored` is a `TIMESTAMP_NS`, which arrives cut to the microsecond. A
+    lower bound cut short keeps a little more. The pruner adds the
+    microsecond back before it uses one as an upper bound.
+
+  A `TIMESTAMP WITH TIME ZONE` is compared with a plain timestamp column in
+  the engine's `TimeZone`, and arrives here as its UTC instant. The two are
+  the same bound only when that zone is UTC, so in any other zone such a
+  value is dropped.
+
+  ## An expression that does not return
+
+  The fold gives up after `@timeout_ms`, and the expression keeps running on
+  the connection, as any abandoned call does. It is the statement's own
+  expression, which the statement would have evaluated anyway: what comes
+  next on the connection waits behind it, and the job's timeout ends both.
+
+  Every miss is a value not folded, never an error.
   """
 
   require Logger
@@ -57,17 +85,16 @@ defmodule Smolquery.QueryService.Fold do
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
-  alias Smolquery.QueryService.ClickHouseFunctions
+  alias Smolquery.QueryService.Stability
 
-  @typedoc "An expression with its position and alias taken off, as a map key."
-  @type key :: map()
-  @type folded :: %{key() => {:fixed | :clock, term()}}
+  @type folded :: %{term() => {:fixed | :clock | :floored, term()}}
 
   @max_expressions 16
   @timeout_ms 5_000
   @foldable_classes ~w(CONSTANT CAST OPERATOR FUNCTION)
-  @stable ["CONSISTENT", "CONSISTENT_WITHIN_QUERY"]
   @clock_macros ~w(now64)
+  @rising_over_first ~w(todatetime todatetime64)
+  @utc ~w(UTC Etc/UTC)
   @no_autoload [
     "SET autoinstall_known_extensions = false",
     "SET autoload_known_extensions = false"
@@ -81,21 +108,15 @@ defmodule Smolquery.QueryService.Fold do
   def clock_macros, do: @clock_macros
 
   @doc """
-  An expression as `bounds/3` keys it.
-  """
-  @spec key(map()) :: key()
-  def key(node), do: Ast.shape(node)
-
-  @doc """
-  The folded value of each of `expressions` that names no column.
+  The folded value of each of `expressions` that names no column, keyed by
+  its `Smolquery.Engine.Ast.shape/1`.
   """
   @spec bounds(GenServer.server(), [map()], boolean()) :: folded()
   def bounds(connection, expressions, lockdown) do
     foldable =
       expressions
       |> Enum.filter(&column_free?/1)
-      |> Enum.map(&Ast.shape/1)
-      |> Enum.uniq()
+      |> Enum.uniq_by(&Ast.shape/1)
       |> Enum.take(@max_expressions)
 
     if foldable == [], do: %{}, else: folded(connection, foldable, lockdown)
@@ -112,28 +133,25 @@ defmodule Smolquery.QueryService.Fold do
   end
 
   defp folded(connection, expressions, lockdown) do
-    names = function_names(expressions)
-
     with :ok <- restrain(connection, lockdown),
-         {:ok, sql, clock} <- rendered(connection, expressions, names),
-         {:ok, %Result{rows: [values]}} <- Connection.query(connection, sql, [], @timeout_ms) do
-      kind = if clock > 0 or Enum.any?(names, &(&1 in @clock_macros)), do: :clock, else: :fixed
-
-      expressions |> Enum.zip(Enum.map(values, &{kind, &1})) |> Map.new()
+         {:ok, catalog} <- catalog(connection, expressions) do
+      expressions
+      |> Enum.zip(catalog.selects)
+      |> Enum.flat_map(&trusted(&1, catalog))
+      |> evaluated(connection)
+      |> Enum.flat_map(&tagged(&1, catalog.zone))
+      |> Map.new()
     else
-      :unstable ->
-        %{}
-
-      other ->
-        Logger.debug(fn -> "bounds not folded, pruning by literals only: #{inspect(other)}" end)
-
-        %{}
+      other -> unfolded(other)
     end
   catch
-    :exit, reason ->
-      Logger.debug(fn -> "bounds not folded, pruning by literals only: #{inspect(reason)}" end)
+    :exit, reason -> unfolded(reason)
+  end
 
-      %{}
+  defp unfolded(reason) do
+    Logger.debug(fn -> "bounds not folded, pruning by literals only: #{inspect(reason)}" end)
+
+    %{}
   end
 
   defp restrain(_connection, false), do: :ok
@@ -147,48 +165,28 @@ defmodule Smolquery.QueryService.Fold do
     end)
   end
 
-  defp rendered(connection, expressions, names) do
-    json = expressions |> select() |> JSON.encode!()
-    checked = Enum.reject(names, &ClickHouseFunctions.stable?/1)
+  defp catalog(connection, expressions) do
+    names = expressions |> Stability.function_names() |> Stability.checked()
+    rendered = Enum.map_join(expressions, ", ", &"json_deserialize_sql(#{json(&1)})")
 
     sql =
-      "SELECT json_deserialize_sql(#{Identifier.sql_string(json)}), " <>
-        counted(checked, "coalesce(stability, '') NOT IN (#{list(@stable)})") <>
-        ", " <> counted(checked, "stability = 'CONSISTENT_WITHIN_QUERY'")
+      "SELECT [#{rendered}], #{Stability.unstable_names_sql(names)}, " <>
+        "#{Stability.within_query_names_sql(names)}, current_setting('TimeZone')"
 
     case Connection.query(connection, sql, [], @timeout_ms) do
-      {:ok, %Result{rows: [[select, 0, clock]]}} when is_binary(select) -> {:ok, select, clock}
-      {:ok, %Result{rows: [[_select, _unstable, _clock]]}} -> :unstable
-      {:ok, result} -> {:error, {:fold_not_rendered, result}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Result{rows: [[selects, unstable, within_query, zone]]}} when is_list(selects) ->
+        {:ok,
+         %{selects: selects, unstable: unstable, clock: within_query ++ @clock_macros, zone: zone}}
+
+      {:ok, result} ->
+        {:error, {:fold_not_rendered, result}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp function_names(expressions) do
-    expressions
-    |> Ast.collect(fn
-      %{"class" => "FUNCTION", "function_name" => name} when is_binary(name) -> [name]
-      _another_node -> []
-    end)
-    |> Enum.map(&String.downcase/1)
-    |> Enum.uniq()
-  end
-
-  defp counted([], _condition), do: "0"
-
-  defp counted(names, condition) do
-    "(SELECT count(*) FROM duckdb_functions() WHERE lower(function_name) IN (#{list(names)}) " <>
-      "AND #{condition})"
-  end
-
-  defp list(values), do: Enum.map_join(values, ", ", &Identifier.sql_string/1)
-
-  defp select(expressions) do
-    items =
-      Enum.with_index(expressions, fn expression, index ->
-        Map.put(expression, "alias", "f#{index}")
-      end)
-
+  defp json(expression) do
     %{
       "error" => false,
       "statements" => [
@@ -198,7 +196,7 @@ defmodule Smolquery.QueryService.Fold do
             "type" => "SELECT_NODE",
             "modifiers" => [],
             "cte_map" => %{"map" => []},
-            "select_list" => items,
+            "select_list" => [Map.put(expression, "alias", "v")],
             "from_table" => %{"type" => "EMPTY", "alias" => "", "sample" => nil},
             "where_clause" => nil,
             "group_expressions" => [],
@@ -211,5 +209,90 @@ defmodule Smolquery.QueryService.Fold do
         }
       ]
     }
+    |> JSON.encode!()
+    |> Identifier.sql_string()
   end
+
+  defp trusted({expression, select}, catalog) do
+    names = Stability.function_names(expression)
+
+    cond do
+      Enum.any?(names, &(&1 in catalog.unstable)) -> []
+      not Enum.any?(names, &(&1 in catalog.clock)) -> [{expression, select, :fixed}]
+      rising?(expression, catalog.clock) -> [{expression, select, :clock}]
+      true -> []
+    end
+  end
+
+  defp rising?(%{"class" => "CAST", "child" => child}, clock), do: rising?(child, clock)
+
+  defp rising?(%{"class" => "FUNCTION", "function_name" => name, "children" => children}, clock) do
+    case {String.downcase(name), children} do
+      {"+", [left, right]} ->
+        rises_over?(left, right, clock) or rises_over?(right, left, clock)
+
+      {"-", [left, right]} ->
+        rises_over?(left, right, clock)
+
+      {"date_trunc", [unit, value]} ->
+        rises_over?(value, unit, clock)
+
+      {wrapper, [value | rest]} when wrapper in @rising_over_first ->
+        rises_over?(value, rest, clock)
+
+      {call, arguments} ->
+        call in clock and clock_free?(arguments, clock)
+    end
+  end
+
+  defp rising?(_another_shape, _clock), do: false
+
+  defp rises_over?(rising, fixed, clock), do: rising?(rising, clock) and clock_free?(fixed, clock)
+
+  defp clock_free?(tree, clock),
+    do: not Enum.any?(Stability.function_names(tree), &(&1 in clock))
+
+  defp evaluated([], _connection), do: []
+
+  defp evaluated(trusted, connection) do
+    case values(connection, trusted) do
+      {:ok, values} -> values
+      :error -> Enum.flat_map(trusted, &(connection |> values([&1]) |> elem_or([])))
+    end
+  end
+
+  defp elem_or({:ok, values}, _default), do: values
+  defp elem_or(:error, default), do: default
+
+  defp values(connection, trusted) do
+    from =
+      trusted
+      |> Enum.with_index()
+      |> Enum.map_join(", ", fn {{_expression, select, _kind}, index} ->
+        "(SELECT v AS v#{index}, typeof(v) AS t#{index} FROM (#{select}))"
+      end)
+
+    case Connection.query(connection, "SELECT * FROM #{from}", [], @timeout_ms) do
+      {:ok, %Result{rows: [row]}} ->
+        {:ok,
+         trusted
+         |> Enum.zip(Enum.chunk_every(row, 2))
+         |> Enum.map(fn {{expression, _select, kind}, [value, type]} ->
+           {expression, kind, value, type}
+         end)}
+
+      _failed_or_another_shape ->
+        :error
+    end
+  end
+
+  defp tagged({_expression, _kind, _value, "TIMESTAMP WITH TIME ZONE"}, zone)
+       when zone not in @utc,
+       do: []
+
+  defp tagged({expression, :fixed, value, "TIMESTAMP_NS"}, _zone),
+    do: [{Ast.shape(expression), {:floored, value}}]
+
+  defp tagged({expression, kind, value, _type}, _zone),
+    do: [{Ast.shape(expression), {kind, value}}]
 end
