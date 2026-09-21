@@ -29,6 +29,15 @@ defmodule Smolquery.QueryService.ClientTest do
   end
 
   describe "query/3 (sync)" do
+    test "a job's engine is in UTC, as every engine is (T-543)" do
+      name = start_service()
+
+      assert {:ok, %{state: :done}, frame} =
+               Client.query(name, "SELECT current_setting('TimeZone') AS zone")
+
+      assert DataFrame.to_columns(frame) == %{"zone" => ["UTC"]}
+    end
+
     test "runs a query and returns the finished job with its frame" do
       name = start_service()
 

@@ -53,6 +53,21 @@ defmodule Smolquery.Engine.Connection do
 
   Isolation lives here because `Smolquery.QueryService.Runner` creates
   connections directly rather than through `Smolquery.Engine`.
+
+  ## Every session is in UTC
+
+  DuckDB's `TimeZone` defaults to the host's. It decides how a
+  `TIMESTAMP WITH TIME ZONE` compares with a plain `TIMESTAMP`, what
+  `CAST(now() AS TIMESTAMP)` answers, and so what `now64()` means on the
+  ClickHouse edge. A table's timestamps are stored as UTC with no zone, and
+  the planner prunes files by them: `Smolquery.QueryService.Pruner` turns a
+  `DateTime` bound as `$n` into its UTC instant and compares that with a
+  file's bounds (T-426). On an engine in another zone the engine and the
+  pruner disagree by the offset, and the files in the gap are pruned while
+  their rows match (T-543). A deployment's containers are in UTC and never
+  saw it; a developer's machine is not. So every connection sets
+  `TimeZone = 'UTC'` first, here for the same reason spill isolation is
+  here: it must hold for a job's connection too.
   """
 
   use GenServer
@@ -67,6 +82,7 @@ defmodule Smolquery.Engine.Connection do
   @default_spill_root ".tmp"
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
+  @session [TimeZone: "UTC"]
 
   @type option ::
           {:database, GenServer.server()}
@@ -86,7 +102,8 @@ defmodule Smolquery.Engine.Connection do
     * `:database` (required) — the `Adbc.Database` process to connect to
     * `:name` — process name to register under
     * `:extensions` — DuckDB extensions to `INSTALL` and `LOAD`
-    * `:settings` — `SET key = value` pairs applied to the session
+    * `:settings` — `SET key = value` pairs applied to the session, after
+      `TimeZone = 'UTC'`, which every session gets (see below)
     * `:statements` — SQL run after extensions and settings, in order
     * `:max_rows` — most rows `query/4` will convert to Elixir terms before
       refusing with `Smolquery.Engine.ResultTooLarge`. `:infinity` disables the
@@ -240,7 +257,7 @@ defmodule Smolquery.Engine.Connection do
   def init(opts) do
     database = Keyword.fetch!(opts, :database)
     extensions = Keyword.get(opts, :extensions, [])
-    settings = spill_settings(opts) ++ Keyword.get(opts, :settings, [])
+    settings = @session ++ spill_settings(opts) ++ Keyword.get(opts, :settings, [])
     statements = Keyword.get(opts, :statements, [])
     max_rows = Keyword.get(opts, :max_rows, :infinity)
 

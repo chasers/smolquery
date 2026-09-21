@@ -31,6 +31,28 @@ defmodule Smolquery.Engine.ConnectionTest do
                Connection.start_link(database: @database, settings: [not_a_real_setting: 1])
     end
 
+    test "is in UTC whatever the host's zone, unless a setting says otherwise (T-543)" do
+      {:ok, conn} = Connection.start_link(database: @database)
+
+      assert {:ok, zone} = Connection.query(conn, "SELECT current_setting('TimeZone')")
+      assert Result.one!(zone) == "UTC"
+
+      assert {:ok, compared} =
+               Connection.query(
+                 conn,
+                 "SELECT TIMESTAMP '2026-09-19 10:00:00' = TIMESTAMPTZ '2026-09-19 10:00:00+00', " <>
+                   "CAST(TIMESTAMPTZ '2026-09-19 03:00:00-07' AS TIMESTAMP)"
+               )
+
+      assert compared.rows == [[true, ~N[2026-09-19 10:00:00.000000]]]
+
+      {:ok, elsewhere} =
+        Connection.start_link(database: @database, settings: [TimeZone: "America/Phoenix"])
+
+      assert {:ok, zone} = Connection.query(elsewhere, "SELECT current_setting('TimeZone')")
+      assert Result.one!(zone) == "America/Phoenix"
+    end
+
     test "applies settings before returning" do
       {:ok, conn} = Connection.start_link(database: @database, settings: [threads: 3])
 
