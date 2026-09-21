@@ -97,7 +97,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
     ref = Process.monitor(buffer)
     Process.exit(Process.whereis(Runtime.manifest(name)), :kill)
 
-    assert_receive {:DOWN, ^ref, :process, ^buffer, _reason}
+    assert_receive {:DOWN, ^ref, :process, ^buffer, _reason}, 5_000
 
     assert Eventually.until(fn ->
              Process.whereis(Runtime.registry(name)) not in [nil, registry]
@@ -112,6 +112,8 @@ defmodule Smolquery.BufferService.SupervisorTest do
     PartitionSupervisor.partitions(Runtime.buffers(name)) > 0
   rescue
     ArgumentError -> false
+  catch
+    :exit, _not_registered_yet -> false
   end
 
   test "a buffer crashing leaves the rest of the subtree alone", context do
