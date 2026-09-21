@@ -16,7 +16,9 @@ defmodule Bench.Query do
       membership filter, pruning, and view SQL, as the hot tier grows.
     * **Hot-tier scan vs micro-segment count, and what pruning saves** — each
       micro-segment is an HTTP footer read before it is data; pruning exists
-      to skip exactly that, so both are measured on the same fixture.
+      to skip exactly that, so both are measured on the same fixture. The
+      "range in a CTE" rows are the same range as HyperDX's filters sidebar
+      writes it (T-532): a WHERE inside a CTE with a LIMIT.
 
   The sealed tier is deliberately thin here: `bench/planner.exs` already
   priced scanning DuckLake and settled that the sealed side plans itself.
@@ -240,21 +242,30 @@ defmodule Bench.Query do
     selective =
       "SELECT count(*) AS n FROM analytics.events WHERE id BETWEEN #{base + 1} AND #{base + rows}"
 
+    sampled =
+      "WITH sampled AS (SELECT name AS value FROM analytics.events " <>
+        "WHERE id BETWEEN #{base + 1} AND #{base + rows} LIMIT 100000) " <>
+        "SELECT list(DISTINCT value) FROM sampled"
+
     {:ok, full} = Planner.plan(runtime, parser, "SELECT count(*) AS n FROM analytics.events")
     {:ok, pruned} = Planner.plan(runtime, parser, selective)
+    {:ok, in_cte} = Planner.plan(runtime, parser, sampled)
 
     survivors = fn plan -> plan.hot |> Map.fetch!(table()) |> length() end
 
     IO.puts("  #{label("entries planned, no predicate", 32)} #{pad(survivors.(full), 8)}")
     IO.puts("  #{label("entries planned, id range", 32)} #{pad(survivors.(pruned), 8)}")
+    IO.puts("  #{label("entries planned, range in a CTE", 32)} #{pad(survivors.(in_cte), 8)}")
 
     scan_full =
       timed(fn -> Client.query(query, "SELECT count(*) FROM analytics.events") end, reps)
 
     scan_pruned = timed(fn -> Client.query(query, selective) end, reps)
+    scan_in_cte = timed(fn -> Client.query(query, sampled) end, reps)
 
     IO.puts("  #{label("scan ms, no predicate", 32)} #{pad(ms(scan_full.median), 8)}")
     IO.puts("  #{label("scan ms, id range", 32)} #{pad(ms(scan_pruned.median), 8)}")
+    IO.puts("  #{label("scan ms, range in a CTE", 32)} #{pad(ms(scan_in_cte.median), 8)}")
   end
 end
 

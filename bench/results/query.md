@@ -67,3 +67,28 @@ The pruner reduced 256 hot files to the 1 whose stats admit the range, and
 the scan halved — the saving is per-file cost × files dropped, exactly the
 footer reads the pruner exists to skip. The remaining 143 ms is the engine
 (50 ms) plus the sealed side of the view and the one surviving file.
+
+## Pruning a range written inside a CTE (T-532)
+
+A partial run of the pruning section alone, on another machine, so not
+comparable with the tables above: 2026-09-21, aarch64 Linux, 16 cores,
+`ENTRIES=1024 REPS=5 mix run bench/query.exs`. "Before" is `main@ba126d0`.
+
+The "range in a CTE" rows are the id range of one micro-segment written as
+HyperDX's filters sidebar writes its window: a `WHERE` inside a CTE with a
+`LIMIT`, aggregated outside it.
+
+```
+                                    before     after
+  entries planned, no predicate       1024      1024
+  entries planned, id range              1         1
+  entries planned, range in a CTE     1024         1
+  scan ms, no predicate              766.5     730.6
+  scan ms, id range                  168.6     173.0
+  scan ms, range in a CTE            797.6     159.1
+```
+
+Before, a predicate inside a CTE pruned nothing, so the statement cost what
+a scan with no predicate costs, whatever its window. Here the files are read
+over loopback; a query node reads them from the buffer nodes over the
+network, a footer request each, so the gap in a deployment is wider.

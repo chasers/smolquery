@@ -614,6 +614,44 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert ids(plan.hot[@table]) == ["01A", "01B"]
     end
 
+    test "HyperDX's sidebar and histogram statements read only the hot entries their window can hold (T-532)" do
+      hour = fn from, to ->
+        %{
+          "ts" => %{
+            "min" => %{"type" => "naive_datetime", "value" => from},
+            "max" => %{"type" => "naive_datetime", "value" => to},
+            "null_count" => 0
+          }
+        }
+      end
+
+      runtime =
+        runtime([
+          entry("01A", %{"stats" => hour.("2026-01-01T00:00:00", "2026-01-01T01:00:00")}),
+          entry("01B", %{"stats" => hour.("2026-01-01T05:00:00", "2026-01-01T06:00:00")}),
+          entry("01C", %{"stats" => hour.("2026-01-01T09:00:00", "2026-01-01T10:00:00")})
+        ])
+
+      from = DateTime.to_unix(~U[2026-01-01 05:30:00Z], :millisecond)
+      to = DateTime.to_unix(~U[2026-01-01 05:45:00Z], :millisecond)
+
+      window =
+        "ts >= fromUnixTimestamp64Milli(#{from}) AND ts <= fromUnixTimestamp64Milli(#{to})"
+
+      sidebar =
+        "WITH sampledData AS (SELECT name AS param0 FROM analytics.events WHERE #{window} " <>
+          "LIMIT 100000) SELECT groupUniqArray(param0, 10000) AS param0 FROM sampledData"
+
+      histogram =
+        "SELECT toStartOfInterval(ts, INTERVAL 1 minute) AS bucket, count(*) " <>
+          "FROM analytics.events WHERE #{window} GROUP BY bucket"
+
+      for sql <- [sidebar, histogram] do
+        assert {:ok, plan} = Planner.plan(runtime, @conn, sql)
+        assert ids(plan.hot[@table]) == ["01B"], sql
+      end
+    end
+
     test "stats that leave a chance keep their entry" do
       stats = %{"id" => %{"min" => 1, "max" => 200, "null_count" => 0}}
       runtime = runtime([entry("01A", %{"stats" => stats})])

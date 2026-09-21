@@ -5,6 +5,7 @@ defmodule Smolquery.QueryService.PrunerTest do
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
+  alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Pruner
 
   @engine __MODULE__.Parser
@@ -83,6 +84,73 @@ defmodule Smolquery.QueryService.PrunerTest do
       assert conjuncts(sql, [@events, @users]) == %{@users => [{"id", :gt, 7}]}
     end
 
+    test "a WHERE in a CTE, a FROM subquery or a branch of a set operation is read, as HyperDX's sidebar writes it (T-532)" do
+      bound = %{@events => [{"id", :gt, 5}]}
+
+      assert conjuncts(
+               "WITH sampled AS (SELECT name AS p FROM analytics.events WHERE id > 5 LIMIT 100) " <>
+                 "SELECT list(DISTINCT p) FROM sampled"
+             ) == bound
+
+      assert conjuncts(
+               "WITH a AS (WITH b AS (SELECT * FROM analytics.events WHERE id > 5) SELECT * FROM b) " <>
+                 "SELECT count(*) FROM a x JOIN a y USING (id)"
+             ) == bound
+
+      assert conjuncts("SELECT count(*) FROM (SELECT * FROM analytics.events WHERE id > 5) e") ==
+               bound
+
+      assert conjuncts(
+               "SELECT id FROM analytics.events WHERE id > 5 UNION ALL SELECT id FROM analytics.users WHERE id > 7",
+               [@events, @users]
+             ) == %{@events => [{"id", :gt, 5}], @users => [{"id", :gt, 7}]}
+    end
+
+    test "a WHERE that could name an outer column is not read: an expression subquery, a subquery beside another source (T-532)" do
+      for sql <- [
+            "SELECT * FROM analytics.users u WHERE EXISTS (SELECT 1 FROM analytics.events WHERE id > 5)",
+            "SELECT * FROM analytics.users u, (SELECT * FROM analytics.events WHERE id > u.id) e",
+            "SELECT (SELECT max(id) FROM analytics.events WHERE id > 5) FROM analytics.users"
+          ] do
+        assert conjuncts(sql, [@events, @users]) == %{}, sql
+      end
+    end
+
+    test "a ClickHouse epoch function over an integer is the timestamp the engine makes of it (T-532)" do
+      for {function, n} <- [
+            {"fromUnixTimestamp", 1_789_954_478},
+            {"fromUnixTimestamp64Milli", 1_789_954_478_123},
+            {"fromUnixTimestamp64Micro", 1_789_954_478_123_456}
+          ] do
+        {:ok, macro} =
+          Enum.fetch(
+            ClickHouseFunctions.statements_for("#{function}(1)"),
+            0
+          )
+
+        {:ok, _created} = Connection.query(@conn, macro)
+        {:ok, result} = Connection.query(@conn, "SELECT #{function}(#{n})")
+        engine = Result.one!(result)
+
+        for argument <- ["#{n}", "CAST(#{n} AS BIGINT)"] do
+          sql = "SELECT * FROM analytics.events WHERE ts >= #{function}(#{argument})"
+
+          assert conjuncts(sql) == %{@events => [{"ts", :ge, engine}]}, sql
+        end
+      end
+    end
+
+    test "an epoch function over anything but one integer in range bounds nothing (T-532)" do
+      for argument <- ["1.5", "id", "now()", "99999999999999999999", "1, 2"] do
+        sql = "SELECT * FROM analytics.events WHERE ts >= fromUnixTimestamp64Milli(#{argument})"
+
+        assert conjuncts(sql) == %{}, sql
+      end
+
+      assert conjuncts("SELECT * FROM analytics.events WHERE ts >= fromUnixTimestamp64Nano(5)") ==
+               %{}
+    end
+
     test "BETWEEN becomes its two bounds" do
       assert conjuncts("SELECT * FROM analytics.events WHERE id BETWEEN 5 AND 9") ==
                %{@events => [{"id", :ge, 5}, {"id", :le, 9}]}
@@ -140,10 +208,15 @@ defmodule Smolquery.QueryService.PrunerTest do
       assert conjuncts("SELECT * FROM analytics.events") == %{}
     end
 
-    test "a set operation prunes nothing" do
+    test "a side of a set operation prunes its own table, and not one both sides read (T-532)" do
       sql = "SELECT id FROM analytics.events WHERE id > 5 UNION ALL SELECT 1"
 
-      assert conjuncts(sql) == %{}
+      assert conjuncts(sql) == %{@events => [{"id", :gt, 5}]}
+
+      both =
+        "SELECT id FROM analytics.events WHERE id > 5 UNION ALL SELECT id FROM analytics.events WHERE id < 2"
+
+      assert conjuncts(both) == %{}
     end
   end
 

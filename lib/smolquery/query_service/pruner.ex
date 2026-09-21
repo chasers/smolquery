@@ -11,14 +11,44 @@ defmodule Smolquery.QueryService.Pruner do
 
   ## What it reads
 
-  Conjuncts come from the top level of the query's WHERE clause — the
-  AND-chain only, since a row can satisfy an OR through its other branch.
-  A conjunct is `column <op> literal` (either side), or BETWEEN, where the
-  literal is a plain constant or a TIMESTAMP/DATE cast of one — PL-1 names
-  timestamp ranges as the pruning that matters. Columns resolve through the
-  FROM clause's aliases; an unqualified column resolves only when the query
-  reads a single table, because guessing which of two tables `id` means
-  could prune the wrong one's segments.
+  Conjuncts come from the top level of a WHERE clause — the AND-chain only,
+  since a row can satisfy an OR through its other branch. A conjunct is
+  `column <op> literal` (either side), or BETWEEN, where the literal is a
+  plain constant, a TIMESTAMP/DATE cast of one, or a ClickHouse epoch
+  function over an integer — PL-1 names timestamp ranges as the pruning that
+  matters. Columns resolve through the FROM clause's aliases; an unqualified
+  column resolves only when the SELECT reads a single table, because
+  guessing which of two tables `id` means could prune the wrong one's
+  segments.
+
+  ## Which WHERE clauses
+
+  The statement's own, and that of every SELECT it is built from where no
+  column of another SELECT is in scope (T-532): the body of a CTE, a
+  subquery that is a SELECT's whole FROM, and each side of a set operation,
+  to any depth. HyperDX fills its filters sidebar with
+
+      WITH sampledData AS (SELECT cluster AS param0 FROM t WHERE ts >= ... LIMIT n)
+      SELECT groupUniqArray(10000)(param0) FROM sampledData
+
+  and read at the top level only, that statement opened every hot
+  micro-segment the buffers held to aggregate one column of a window.
+
+  A subquery in an expression (`EXISTS`, `IN`, a scalar) is not read, nor is
+  one that shares its FROM with another source: either may be correlated,
+  and an unqualified `id` in it may be the outer table's. A row a nested
+  WHERE rejects contributes to nothing above it, so with the table read once
+  the files that hold only such rows are not needed anywhere.
+
+  ## ClickHouse's epoch functions
+
+  `fromUnixTimestamp`, `fromUnixTimestamp64Milli` and
+  `fromUnixTimestamp64Micro` over one integer are the timestamp
+  `Smolquery.QueryService.ClickHouseFunctions` makes of it, which is how
+  every ClickHouse client writes a time range. They are this codebase's own
+  macros, which a client cannot replace, and a test holds each bound here to
+  what the engine answers for the same call. `fromUnixTimestamp64Nano` is
+  left alone: a bound here is a microsecond one.
 
   ## A table read twice
 
@@ -67,12 +97,20 @@ defmodule Smolquery.QueryService.Pruner do
 
   @mirrored %{gt: :lt, ge: :le, lt: :gt, le: :ge, eq: :eq}
 
+  @epoch ~N[1970-01-01 00:00:00]
+  @max_epoch_microseconds 253_402_300_799_999_999
+  @epoch_functions %{
+    "fromunixtimestamp" => 1_000_000,
+    "fromunixtimestamp64milli" => 1_000,
+    "fromunixtimestamp64micro" => 1
+  }
+
   @doc """
   The prunable conjuncts of a serialized statement, keyed by table.
 
   Tables appear only when at least one conjunct resolved to them; a query this
-  module cannot read (set operations, OR-rooted WHERE, subquery-derived
-  tables) yields an empty map, which prunes nothing.
+  module cannot read (an OR-rooted WHERE, a table read twice, a subquery that
+  may be correlated) yields an empty map, which prunes nothing.
 
   A `$n` placeholder resolves to the n-th of `params` (T-410) when that value
   is a number, a string, a date, or a timestamp; any other bound value leaves
@@ -82,22 +120,45 @@ defmodule Smolquery.QueryService.Pruner do
           %{Catalog.table_ref() => [conjunct()]}
   def conjuncts(statement, refs, params \\ [])
 
-  def conjuncts(
-        %{"node" => %{"type" => "SELECT_NODE", "sample" => nil} = node} = statement,
-        refs,
-        params
-      ) do
+  def conjuncts(%{"node" => node} = statement, refs, params) when is_map(node) do
+    node
+    |> selects()
+    |> Enum.flat_map(&select_conjuncts(&1, refs, params))
+    |> read_once(statement)
+    |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
+  end
+
+  def conjuncts(_statement, _refs, _params), do: %{}
+
+  defp select_conjuncts(node, refs, params) do
     aliases = aliases(Map.get(node, "from_table"), refs)
 
     node
     |> Map.get("where_clause")
     |> split()
     |> Enum.flat_map(&parse(&1, aliases, params))
-    |> read_once(statement)
-    |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
   end
 
-  def conjuncts(_statement, _refs, _params), do: %{}
+  defp selects(%{"type" => "SELECT_NODE", "sample" => nil} = node),
+    do: [node | Enum.flat_map(uncorrelated(node), &selects/1)]
+
+  defp selects(%{"type" => "SET_OPERATION_NODE"} = node),
+    do: Enum.flat_map(uncorrelated(node), &selects/1)
+
+  defp selects(_another_node), do: []
+
+  defp uncorrelated(node),
+    do: [node["left"], node["right"], whole_from(node["from_table"]) | cte_bodies(node)]
+
+  defp cte_bodies(node) do
+    node
+    |> get_in(["cte_map", "map"])
+    |> List.wrap()
+    |> Enum.map(&get_in(&1, ["value", "query", "node"]))
+  end
+
+  defp whole_from(%{"type" => "SUBQUERY", "subquery" => %{"node" => node}}), do: node
+  defp whole_from(_another_source), do: nil
 
   @doc """
   Whether `entry`'s stats leave any chance a row matches every conjunct.
@@ -278,9 +339,34 @@ defmodule Smolquery.QueryService.Pruner do
     end
   end
 
+  defp literal(
+         %{"class" => "FUNCTION", "function_name" => name, "children" => [argument]},
+         params
+       )
+       when is_map_key(@epoch_functions, name) do
+    with {:ok, n} <- integer(argument, params),
+         microseconds = n * Map.fetch!(@epoch_functions, name),
+         true <- abs(microseconds) <= @max_epoch_microseconds do
+      {:ok, NaiveDateTime.add(@epoch, microseconds, :microsecond)}
+    else
+      _not_an_integer_in_range -> :error
+    end
+  end
+
   defp literal(_node, _params), do: :error
 
-  @epoch ~N[1970-01-01 00:00:00]
+  defp integer(%{"class" => "CAST", "cast_type" => %{"id" => id}, "child" => child}, params)
+       when id in ["INTEGER", "BIGINT", "UBIGINT", "HUGEINT"],
+       do: integer(child, params)
+
+  defp integer(%{"class" => class} = node, params) when class in ["CONSTANT", "PARAMETER"] do
+    case literal(node, params) do
+      {:ok, n} when is_integer(n) -> {:ok, n}
+      _another_value -> :error
+    end
+  end
+
+  defp integer(_node, _params), do: :error
 
   defp bound(value) when is_number(value) or is_binary(value), do: {:ok, value}
   defp bound(%NaiveDateTime{} = value), do: {:ok, value}
