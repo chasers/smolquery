@@ -55,6 +55,35 @@ defmodule Smolquery.QueryService.Decomposer do
   form, so `avgIf(x, c)` splits into a filtered sum and a filtered count of
   `x` as `avg` does.
 
+  ## Aggregates that merge through a value
+
+  Some aggregates have no number to add up, and merge exactly all the same
+  (T-539), because what a shard answers is a value the final step can choose
+  among, or a list it can join:
+
+  - `any(x)`: any shard's answer is an answer.
+  - `argMax(v, k)`, `argMin`: the partial carries `v` and the `k` it was
+    taken at; the final takes the arg of the args. The engine skips a row
+    whose `v` is NULL, so the partial's `k` is taken over rows with a `v`
+    too, or a shard's largest `k` could belong to a row the engine ignored.
+  - `groupArray`, `list`: partial lists, flattened. `groupUniqArray`,
+    `list(DISTINCT x)`: the same, de-duplicated. `list(DISTINCT x)` keeps a
+    NULL and `list_distinct` drops one, so the final puts it back when any
+    partial held one. `groupUniqArrayArray` is flattened once more. An `n`
+    slices the final list, as it sliced the single engine's.
+  - `uniq`, `uniqExact`, `count(DISTINCT x)`: partial lists of distinct
+    values, and the count of their distinct union. Exact, and not the sum of
+    the shards' counts, which would count a value once per shard.
+
+  Every one but `any` ships values, and as many as the data holds distinct.
+  A decomposition that does says so (`value_lists`), and
+  `Smolquery.QueryService.Scatter` refuses it over a plan with more rows
+  than the runtime's `value_list_max_rows`.
+
+  Which element a list holds first, which of two tied rows an `argMax`
+  answers and which value `any` picks are the engine's to choose on one
+  engine and on many.
+
   ## HAVING, and SELECT DISTINCT
 
   HAVING is a condition on groups, and a shard has only its part of a group,
@@ -123,7 +152,22 @@ defmodule Smolquery.QueryService.Decomposer do
   @mergeable ~w(count_star count countif count_if sum min max)
   @conditional %{"sumif" => "sum", "avgif" => "avg", "minif" => "min", "maxif" => "max"}
   @aggregates ["avg" | @mergeable]
-  @aggregate_names @aggregates ++ Map.keys(@conditional)
+  @by_value %{
+    "any_value" => :any,
+    "arg_max" => {:arg, "max"},
+    "argmax" => {:arg, "max"},
+    "max_by" => {:arg, "max"},
+    "arg_min" => {:arg, "min"},
+    "argmin" => {:arg, "min"},
+    "min_by" => {:arg, "min"},
+    "list" => :list,
+    "grouparray" => :list,
+    "groupuniqarray" => :distinct_list,
+    "groupuniqarrayarray" => :flat_distinct_list,
+    "uniq" => :count_distinct,
+    "uniqexact" => :count_distinct
+  }
+  @aggregate_names @aggregates ++ Map.keys(@conditional) ++ Map.keys(@by_value)
   @prefix "__pq_"
   @filter_prefix "SELECT 1 WHERE "
   @refused_classes ~w(SUBQUERY WINDOW STAR)
@@ -132,7 +176,15 @@ defmodule Smolquery.QueryService.Decomposer do
                gen_random_uuid setseed nextval currval)
 
   @enforce_keys [:partial_sql, :final_select, :final_group, :final_tail]
-  defstruct [:partial_sql, :final_select, :final_group, :final_tail, final_having: "", params: []]
+  defstruct [
+    :partial_sql,
+    :final_select,
+    :final_group,
+    :final_tail,
+    final_having: "",
+    value_lists: false,
+    params: []
+  ]
 
   @type t :: %__MODULE__{
           partial_sql: String.t(),
@@ -140,7 +192,8 @@ defmodule Smolquery.QueryService.Decomposer do
           final_select: String.t(),
           final_group: String.t(),
           final_tail: String.t(),
-          final_having: String.t()
+          final_having: String.t(),
+          value_lists: boolean()
         }
 
   @type output :: {String.t(), String.t()}
@@ -181,7 +234,8 @@ defmodule Smolquery.QueryService.Decomposer do
          final_select: final_select(items, outputs),
          final_group: final_group(keys),
          final_having: having,
-         final_tail: tail
+         final_tail: tail,
+         value_lists: Enum.any?(items, &match?({:by_value, kind, _item} when kind != :any, &1))
        }}
     end
   end
@@ -405,6 +459,20 @@ defmodule Smolquery.QueryService.Decomposer do
     })
   end
 
+  defp classify_aggregate(
+         %{"class" => "FUNCTION", "function_name" => "count", "distinct" => true} = item
+       ),
+       do: by_value(:count_distinct, "count", %{item | "distinct" => false})
+
+  defp classify_aggregate(
+         %{"class" => "FUNCTION", "function_name" => "list", "distinct" => true} = item
+       ),
+       do: by_value(:distinct_list, "list", %{item | "distinct" => false})
+
+  defp classify_aggregate(%{"class" => "FUNCTION", "function_name" => name} = item)
+       when is_map_key(@by_value, name),
+       do: by_value(Map.fetch!(@by_value, name), name, item)
+
   defp classify_aggregate(%{"class" => "FUNCTION", "function_name" => name} = item)
        when name in @aggregates do
     cond do
@@ -432,6 +500,38 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp classify_aggregate(_item), do: {:error, :ungrouped_expression}
 
+  defp by_value(kind, name, item) do
+    cond do
+      item["distinct"] ->
+        {:error, {:distinct_aggregate, name}}
+
+      item["order_bys"]["orders"] != [] ->
+        {:error, {:ordered_aggregate, name}}
+
+      item["filter"] != nil and kind != :any ->
+        {:error, {:filtered_aggregate, name}}
+
+      nested_aggregate?([item["filter"] | item["children"]]) ->
+        {:error, {:nested_aggregate, name}}
+
+      not arguments?(kind, item["children"]) ->
+        {:error, {:unsupported_aggregate_shape, name}}
+
+      true ->
+        {:ok, {:by_value, kind, item}}
+    end
+  end
+
+  defp arguments?({:arg, _extreme}, [_value, _key]), do: true
+  defp arguments?(kind, [_value]) when kind in [:any, :count_distinct], do: true
+  defp arguments?(kind, [_value]) when is_atom(kind), do: true
+
+  defp arguments?(kind, [_value, %{"class" => "CONSTANT", "value" => %{"value" => n}}])
+       when kind in [:list, :distinct_list, :flat_distinct_list] and is_integer(n) and n > 0,
+       do: true
+
+  defp arguments?(_kind, _children), do: false
+
   defp nested_aggregate?(children) do
     children
     |> classes_and_names()
@@ -441,7 +541,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp classes_and_names(node), do: collect_values(node, "function_name", [])
 
   defp ensure_aggregated(items, keys) do
-    aggregates = Enum.count(items, &match?({:aggregate, _name, _item}, &1))
+    aggregates = Enum.count(items, &(elem(&1, 0) in [:aggregate, :by_value]))
 
     if aggregates == 0 and keys == [] do
       {:error, :nothing_to_merge}
@@ -529,6 +629,44 @@ defmodule Smolquery.QueryService.Decomposer do
   defp partial_aggregates({:aggregate, _name, item}, position),
     do: [Map.put(item, "alias", "#{@prefix}a#{position}")]
 
+  defp partial_aggregates({:by_value, :any, item}, position),
+    do: [Map.put(item, "alias", "#{@prefix}a#{position}")]
+
+  defp partial_aggregates(
+         {:by_value, {:arg, extreme}, %{"children" => [value, key]} = item},
+         position
+       ) do
+    [
+      Map.put(item, "alias", "#{@prefix}a#{position}_v"),
+      item
+      |> called(extreme, [key])
+      |> Map.put("filter", not_null(value))
+      |> Map.put("alias", "#{@prefix}a#{position}_k")
+    ]
+  end
+
+  defp partial_aggregates({:by_value, kind, %{"children" => [value | _limit]} = item}, position) do
+    [
+      item
+      |> called("list", [value])
+      |> Map.put("distinct", kind in [:distinct_list, :count_distinct])
+      |> Map.put("filter", if(kind == :count_distinct, do: not_null(value)))
+      |> Map.put("alias", "#{@prefix}a#{position}")
+    ]
+  end
+
+  defp called(item, name, children),
+    do: %{item | "function_name" => name, "children" => children, "distinct" => false}
+
+  defp not_null(value) do
+    %{
+      "class" => "OPERATOR",
+      "type" => "OPERATOR_IS_NOT_NULL",
+      "alias" => "",
+      "children" => [Map.put(value, "alias", "")]
+    }
+  end
+
   defp group_sets([]), do: []
   defp group_sets(keys), do: [Enum.to_list(0..(length(keys) - 1))]
 
@@ -582,6 +720,40 @@ defmodule Smolquery.QueryService.Decomposer do
   defp merged({:aggregate, name, _item}, position, type) when name in @mergeable do
     "CAST(#{merge_function(name)}(#{quoted("#{@prefix}a#{position}")}) AS #{type})"
   end
+
+  defp merged({:by_value, :any, _item}, position, type),
+    do: "CAST(any_value(#{quoted("#{@prefix}a#{position}")}) AS #{type})"
+
+  defp merged({:by_value, {:arg, extreme}, _item}, position, type) do
+    "CAST(arg_#{extreme}(#{quoted("#{@prefix}a#{position}_v")}, " <>
+      "#{quoted("#{@prefix}a#{position}_k")}) AS #{type})"
+  end
+
+  defp merged({:by_value, :count_distinct, _item}, position, type),
+    do: "CAST(len(list_distinct(#{flat(position)})) AS #{type})"
+
+  defp merged({:by_value, :list, item}, position, type),
+    do: "CAST(#{sliced(flat(position), item)} AS #{type})"
+
+  defp merged({:by_value, :flat_distinct_list, item}, position, type),
+    do: "CAST(#{sliced("list_distinct(flatten(#{flat(position)}))", item)} AS #{type})"
+
+  defp merged({:by_value, :distinct_list, item}, position, type) do
+    part = quoted("#{@prefix}a#{position}")
+
+    distinct =
+      "list_concat(list_distinct(#{flat(position)}), " <>
+        "CASE WHEN bool_or(len(#{part}) > list_count(#{part})) THEN [NULL] ELSE [] END)"
+
+    "CAST(#{sliced(distinct, item)} AS #{type})"
+  end
+
+  defp flat(position), do: "flatten(list(#{quoted("#{@prefix}a#{position}")}))"
+
+  defp sliced(list, %{"children" => [_value, %{"value" => %{"value" => n}}]}),
+    do: "list_slice(#{list}, 1, #{n})"
+
+  defp sliced(list, _item), do: list
 
   defp merge_function("min"), do: "min"
   defp merge_function("max"), do: "max"

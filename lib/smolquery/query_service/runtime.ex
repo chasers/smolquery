@@ -147,7 +147,11 @@ defmodule Smolquery.QueryService.Runtime do
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
   a job's own `distributed:` option overrides it either way. `min_files` is
-  the smallest shardable file count worth the fixed costs. `local_workers`
+  the smallest shardable file count worth the fixed costs.
+  `value_list_max_rows` is the most rows a plan may read and still scatter
+  an aggregate that ships values and not numbers, a `uniqExact` or a
+  `quantile` (PL-68): the partials are as large as the data is distinct, and
+  the plan's row count is the bound known before it runs. `local_workers`
   is how many instances run on this node when clustering is off; with
   clustering on, the workers are the group's member nodes. Each worker
   engine takes `worker_memory_limit` (default: `job_memory_limit`, whole)
@@ -204,6 +208,7 @@ defmodule Smolquery.QueryService.Runtime do
     distributed: %{
       enabled: true,
       min_files: 8,
+      value_list_max_rows: 50_000_000,
       local_workers: 4,
       worker_memory_limit: nil,
       worker_threads: nil
@@ -241,6 +246,7 @@ defmodule Smolquery.QueryService.Runtime do
           distributed: %{
             enabled: boolean(),
             min_files: pos_integer(),
+            value_list_max_rows: pos_integer(),
             local_workers: pos_integer(),
             worker_memory_limit: String.t() | nil,
             worker_threads: pos_integer() | nil
@@ -332,6 +338,7 @@ defmodule Smolquery.QueryService.Runtime do
     %{
       enabled: Keyword.get(opts, :enabled, true),
       min_files: Keyword.get(opts, :min_files, 8),
+      value_list_max_rows: Keyword.get(opts, :value_list_max_rows, 50_000_000),
       local_workers: Keyword.get(opts, :local_workers, 4),
       worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
       worker_threads: Keyword.get(opts, :worker_threads)

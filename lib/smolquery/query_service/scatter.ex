@@ -62,6 +62,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.QueryService.Decomposer
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.VariantResults
   alias Smolquery.QueryService.Views
   alias Smolquery.QueryService.WorkerTransport
@@ -128,6 +129,7 @@ defmodule Smolquery.QueryService.Scatter do
          {:ok, schema} <- planned_schema(plan, ref),
          {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
+         :ok <- value_lists(runtime, plan, decomposition),
          {:ok, units} <- units(runtime, plan, ref),
          {:ok, shards} <- shards(runtime, units) do
       run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
@@ -168,6 +170,18 @@ defmodule Smolquery.QueryService.Scatter do
       {:error, reason} -> {:refused, reason}
     end
   end
+
+  defp value_lists(_runtime, _plan, %Decomposer{value_lists: false}), do: :ok
+
+  defp value_lists(runtime, %Plan{statistics: %Statistics{} = statistics}, _decomposition) do
+    rows = Statistics.rows_scanned(statistics)
+
+    if rows <= runtime.distributed.value_list_max_rows,
+      do: :ok,
+      else: {:refused, {:value_lists_over, rows}}
+  end
+
+  defp value_lists(_runtime, _unsized_plan, _decomposition), do: {:refused, :value_lists_unsized}
 
   defp units(runtime, plan, ref) do
     with {:ok, sealed} <- Catalog.segment_files(runtime.catalog, ref, plan.snapshot) do

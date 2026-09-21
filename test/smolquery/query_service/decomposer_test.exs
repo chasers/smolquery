@@ -17,7 +17,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
   @engine __MODULE__.Engine
   @conn Engine.connection_name(@engine)
-  @columns ~w(id name bucket ts value big)
+  @columns ~w(id name bucket ts value big tag)
 
   setup_all do
     start_supervised!({Engine, name: @engine, extensions: []})
@@ -37,7 +37,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
              CAST(n % 3 AS INTEGER) AS bucket,
              TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (n) SECOND AS ts,
              CAST(n % 97 AS DOUBLE) / 7 AS value,
-             9007199254740993 + n AS big
+             9007199254740993 + n AS big,
+             CASE WHEN n % 4 = 0 THEN NULL ELSE 't-' || (n % 5) END AS tag
       FROM range(1000) t(n)
       WHERE #{predicate}
       """
@@ -95,6 +96,9 @@ defmodule Smolquery.QueryService.DecomposerTest do
       |> Enum.each(fn {left, right} -> assert_value(left, right) end)
     end)
   end
+
+  defp assert_value(left, right) when is_list(left) and is_list(right),
+    do: assert(Enum.sort(left) == Enum.sort(right))
 
   defp assert_value(left, right) when is_float(left) and is_float(right) do
     assert abs(left - right) <= 1.0e-9 * max(1.0, max(abs(left), abs(right)))
@@ -270,6 +274,78 @@ defmodule Smolquery.QueryService.DecomposerTest do
       round_trip("SELECT DISTINCT bucket + 1 AS b FROM analytics.events ORDER BY b", tmp_dir)
     end
 
+    test "count(DISTINCT x) is the distinct union of the shards' values, not the sum of their counts (T-539)",
+         %{tmp_dir: tmp_dir} do
+      for macro <- ClickHouseFunctions.statements_for("uniq(x) uniqExact(x)"),
+          do: Engine.query!(@engine, macro)
+
+      decomposition =
+        round_trip(
+          "SELECT bucket, count(DISTINCT name) AS names, uniq(tag) AS tags, " <>
+            "uniqExact(id % 10) AS digits, count(*) AS n FROM analytics.events " <>
+            "GROUP BY bucket ORDER BY bucket",
+          tmp_dir
+        )
+
+      assert decomposition.value_lists
+      refute decomposition.partial_sql =~ ~r/uniq/i
+
+      round_trip("SELECT count(DISTINCT tag) FROM analytics.events WHERE id < 0", tmp_dir)
+    end
+
+    test "argMax and argMin carry the key they were taken at, over rows with a value (T-539)",
+         %{tmp_dir: tmp_dir} do
+      round_trip(
+        "SELECT bucket, argMax(name, value + id / 1000.0) AS top, " <>
+          "argMin(tag, id) AS first_tag, arg_max(tag, id) AS last_tag " <>
+          "FROM analytics.events GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+
+      round_trip("SELECT arg_max(tag, id) FROM analytics.events WHERE id % 4 = 0", tmp_dir)
+    end
+
+    test "lists flatten, a distinct list keeps its NULL, and an n slices the final list (T-539)",
+         %{tmp_dir: tmp_dir} do
+      for macro <-
+            ClickHouseFunctions.statements_for(
+              "groupArray(x) groupUniqArray(x) groupUniqArrayArray(x)"
+            ),
+          do: Engine.query!(@engine, macro)
+
+      round_trip(
+        "SELECT bucket, groupUniqArray(tag) AS tags, list(DISTINCT name) AS names, " <>
+          "groupUniqArray(name, 100) AS capped, groupUniqArrayArray([name, tag]) AS both " <>
+          "FROM analytics.events GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+
+      round_trip(
+        "SELECT bucket, groupArray(tag) AS every FROM analytics.events WHERE id < 40 " <>
+          "GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+
+      sql = "SELECT groupUniqArray(name, 3) AS few FROM analytics.events"
+      {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
+
+      assert decomposition.final_select =~ "list_slice("
+      assert decomposition.value_lists
+    end
+
+    test "any answers a value some shard holds, and ships no list (T-539)", %{tmp_dir: tmp_dir} do
+      sql = "SELECT bucket, any_value(name) AS one FROM analytics.events GROUP BY bucket"
+      {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
+
+      refute decomposition.value_lists
+
+      round_trip(
+        "SELECT bucket, any_value(bucket * 2) AS twice FROM analytics.events " <>
+          "GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+    end
+
     test "the WHERE clause runs in the partial", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
@@ -417,9 +493,26 @@ defmodule Smolquery.QueryService.DecomposerTest do
       round_trip("SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket", tmp_dir)
     end
 
+    test "a value aggregate in a shape this does not split" do
+      for macro <- ClickHouseFunctions.statements_for("groupArray(x)"),
+          do: Engine.query!(@engine, macro)
+
+      for {sql, reason} <- [
+            {"SELECT list(name ORDER BY id) FROM analytics.events", {:ordered_aggregate, "list"}},
+            {"SELECT count(DISTINCT name) FILTER (WHERE id > 5) FROM analytics.events",
+             {:filtered_aggregate, "count"}},
+            {"SELECT arg_max(name, id) FILTER (WHERE id > 5) FROM analytics.events",
+             {:filtered_aggregate, "arg_max"}},
+            {"SELECT groupArray(name, 1 + 1) FROM analytics.events",
+             {:unsupported_aggregate_shape, "grouparray"}}
+          ] do
+        assert reason == refused(sql, describe(sql)), sql
+      end
+    end
+
     test "a DISTINCT aggregate" do
-      assert {:distinct_aggregate, "count"} =
-               refused("SELECT count(DISTINCT name) FROM analytics.events")
+      assert {:distinct_aggregate, "sum"} =
+               refused("SELECT sum(DISTINCT value) FROM analytics.events")
     end
 
     test "an aggregate inside a FILTER" do

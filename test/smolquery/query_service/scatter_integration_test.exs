@@ -93,8 +93,14 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     start_supervised!(
       {QueryService.Supervisor,
-       [name: distributed, distributed: [enabled: true, min_files: 4, local_workers: 3]] ++
-         shared},
+       [
+         name: distributed,
+         distributed:
+           Keyword.merge(
+             [enabled: true, min_files: 4, local_workers: 3],
+             Map.get(context, :distributed, [])
+           )
+       ] ++ shared},
       id: distributed
     )
 
@@ -245,6 +251,32 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       "SELECT name, count(*) AS n, sum(id) AS s FROM analytics.events " <>
         "GROUP BY name ORDER BY s DESC, name LIMIT 2"
     )
+
+    assert_received {:scatter, _measurements, _meta}
+  end
+
+  test "aggregates that merge through a value scatter and answer exactly (T-539)", %{
+    control: control,
+    distributed: distributed
+  } do
+    both(
+      control,
+      distributed,
+      "SELECT name, count(DISTINCT id % 3) AS kinds, arg_max(id, id) AS newest, " <>
+        "arg_min(id, id) AS oldest FROM analytics.events GROUP BY name ORDER BY name"
+    )
+
+    assert_received {:scatter, _measurements, _meta}
+  end
+
+  @tag distributed: [value_list_max_rows: 1]
+  test "an aggregate that ships values runs on one engine over a plan with more rows than value_list_max_rows",
+       %{control: control, distributed: distributed} do
+    both(control, distributed, "SELECT count(DISTINCT id % 3) AS kinds FROM analytics.events")
+
+    refute_received {:scatter, _measurements, _meta}
+
+    both(control, distributed, "SELECT count(id) AS n FROM analytics.events")
 
     assert_received {:scatter, _measurements, _meta}
   end
