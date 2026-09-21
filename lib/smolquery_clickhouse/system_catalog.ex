@@ -22,10 +22,39 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   | `system.table_engines` | `MergeTree` |
   | `system.one` | one row, `dummy = 0` |
 
-  The three generated tables are rebuilt from `Smolquery.Catalog` when a
-  statement arrives and the last build is older than `@refresh_ttl_ms`. A
-  rebuild that cannot read the catalog answers a retryable failure and
-  keeps the last rows; it never answers an empty catalog.
+  The first three are generated from `Smolquery.Catalog`; the rest never
+  change.
+
+  ## What a statement costs
+
+  HyperDX sends eleven catalog statements for one page, several over tables
+  with no rows at all, and every one of them runs through this server in
+  turn. So what one costs is what each behind it waits for (T-529):
+
+  - **A statement that reads no generated table reads nothing of the lake.**
+    `system.settings`, `system.data_skipping_indices`, `system.table_engines`,
+    `system.one` and `DESCRIBE system.<table>` answer from the engine alone,
+    and still answer when the catalog cannot be read.
+  - **Any other checks the catalog at most once in `@refresh_ttl_ms`, with one
+    read.** `Smolquery.Catalog.schema_version/1` moves when a dataset or a
+    table is created and when a column is added or dropped, and only then are
+    the generated tables rebuilt. The version is read before the rebuild, so
+    a change that lands during one is a rebuild at the next check, never a
+    change missed. The second is counted from when the check finished: a
+    rebuild that takes longer than it is not stale the moment it is done.
+  - **A rebuild costs a catalog read for every dataset and two for every
+    table.** Measured on a local lake it is about 18 ms a table, 2.3 s at 128
+    tables. Before the version gated it, every statement more than a second
+    after the last paid that, `system.settings` included, and at 128 tables
+    every statement did.
+  - **What moves no version is seen within the runtime's
+    `catalog_rebuild_ms`.** A clustering key is kept beside the lake, not in
+    it, so `sorting_key` can be that stale, 30 s by default.
+
+  A check that cannot read the catalog answers a retryable failure and keeps
+  the last rows; it never answers an empty catalog.
+  `[:smolquery, :clickhouse, :catalog_refresh]` times every check, by
+  `result`: `:unchanged`, `:rebuilt` or `:error`.
 
   ## Which statements are the catalog's
 
@@ -120,10 +149,12 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   alias Smolquery.QueryService.Statistics
   alias Smolquery.Schema.Field
   alias Smolquery.Sql
+  alias Smolquery.Telemetry
   alias SmolqueryClickHouse.Errors
   alias SmolqueryClickHouse.Runtime
 
   @refresh_ttl_ms 1_000
+  @generated ~w(system_databases system_tables system_columns)
   @call_timeout_ms 30_000
   @statement_timeout_ms 10_000
   @max_rows 10_000
@@ -329,7 +360,15 @@ defmodule SmolqueryClickHouse.SystemCatalog do
 
     {:ok, %{"statements" => [%{"node" => %{"select_list" => columns}}]}, _sql} = serialized
 
-    {:ok, %{runtime: runtime, engine: engine, refreshed_at: nil, columns: columns}}
+    {:ok,
+     %{
+       runtime: runtime,
+       engine: engine,
+       columns: columns,
+       checked_at: nil,
+       rebuilt_at: nil,
+       version: nil
+     }}
   end
 
   @impl GenServer
@@ -348,7 +387,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   def handle_call({:answer, statement, database, counts}, _from, state) do
     case read(statement, database) do
       {:select, sql} -> classified(sql, state, counts)
-      {:catalog, sql, empty} -> state |> run(sql, counts) |> or_empty(empty)
+      {:catalog, sql, empty, source} -> state |> run(sql, counts, source) |> or_empty(empty)
     end
   end
 
@@ -402,17 +441,17 @@ defmodule SmolqueryClickHouse.SystemCatalog do
         {:catalog,
          "SELECT CAST(count(*) > 0 AS UTINYINT) AS result FROM system_tables " <>
            "WHERE database = #{Identifier.sql_string(db)} AND name = #{Identifier.sql_string(table)}",
-         nil}
+         nil, :lake}
 
       names = Regex.run(@show_tables, statement, capture: :all_but_first) ->
         db = names |> List.first("") |> unquoted(database)
 
         {:catalog,
          "SELECT name FROM system_tables WHERE database = #{Identifier.sql_string(db)} ORDER BY name",
-         nil}
+         nil, :lake}
 
       Regex.match?(@show_databases, statement) ->
-        {:catalog, "SELECT name FROM system_databases ORDER BY name", nil}
+        {:catalog, "SELECT name FROM system_databases ORDER BY name", nil, :lake}
 
       true ->
         {:select, renamed(statement)}
@@ -427,7 +466,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
        "'' AS default_type, '' AS default_expression, '' AS comment, " <>
        "'' AS codec_expression, '' AS ttl_expression FROM duckdb_columns() " <>
        "WHERE table_name = #{Identifier.sql_string("system_" <> table)} ORDER BY column_index",
-     {:unknown_table, "system", table}}
+     {:unknown_table, "system", table}, :static}
   end
 
   defp described({db, table}) do
@@ -435,7 +474,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
      "SELECT name, type, default_kind AS default_type, default_expression, comment, " <>
        "compression_codec AS codec_expression, '' AS ttl_expression FROM system_columns " <>
        "WHERE database = #{Identifier.sql_string(db)} AND \"table\" = #{Identifier.sql_string(table)} " <>
-       "ORDER BY position", {:unknown_table, db, table}}
+       "ORDER BY position", {:unknown_table, db, table}, :lake}
   end
 
   defp qualified(["", table], database), do: {database, unquoted(table, table)}
@@ -459,8 +498,10 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp classified(sql, state, counts) do
     case CatalogEmulation.serialize(state.engine, sql) do
       {:ok, ast, _canonical} ->
-        if system_only?(CatalogEmulation.base_tables(ast)) and not unbounded?(ast, sql),
-          do: run(state, "SELECT * FROM (#{sql}) LIMIT #{@max_rows}", counts),
+        refs = CatalogEmulation.base_tables(ast)
+
+        if system_only?(refs) and not unbounded?(ast, sql),
+          do: run(state, "SELECT * FROM (#{sql}) LIMIT #{@max_rows}", counts, source(refs)),
           else: {:reply, :pass, state}
 
       {:error, _unparseable} ->
@@ -487,8 +528,14 @@ defmodule SmolqueryClickHouse.SystemCatalog do
     end)
   end
 
-  defp run(state, sql, counts) do
-    with {:ok, state} <- ensure_fresh(state),
+  defp source(refs) do
+    if Enum.any?(refs, &(String.downcase(&1["table_name"]) in @generated)),
+      do: :lake,
+      else: :static
+  end
+
+  defp run(state, sql, counts, source) do
+    with {:ok, state} <- fresh(state, source),
          :ok <- put_counts(state.engine, counts),
          {:ok, frame} <- counted_frame(state.engine, sql, counts) do
       {:reply, {:ok, frame}, state}
@@ -551,20 +598,53 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp unavailable,
     do: {503, 1002, "UNKNOWN_EXCEPTION", "the catalog could not be read; retry", 1}
 
-  defp ensure_fresh(%{refreshed_at: refreshed_at} = state) do
-    now = System.monotonic_time(:millisecond)
+  defp fresh(state, :static), do: {:ok, state}
+  defp fresh(state, :lake), do: ensure_fresh(state)
 
-    if is_nil(refreshed_at) or now - refreshed_at > @refresh_ttl_ms do
-      case refresh(state.engine, state.runtime.catalog) do
-        :ok -> {:ok, %{state | refreshed_at: now}}
-        {:error, _reason} -> {:error, :catalog_unavailable}
-      end
-    else
-      {:ok, state}
+  defp ensure_fresh(%{runtime: %Runtime{catalog: nil}} = state), do: {:ok, state}
+
+  defp ensure_fresh(state) do
+    if within?(state.checked_at, @refresh_ttl_ms), do: {:ok, state}, else: checked(state)
+  end
+
+  defp checked(state) do
+    event = [:smolquery, :clickhouse, :catalog_refresh]
+
+    case Telemetry.span(event, &refreshed(&1, state.runtime.name), fn -> revalidated(state) end) do
+      {:ok, _result, state} -> {:ok, state}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp refresh(_engine, nil), do: :ok
+  defp revalidated(state) do
+    with {:ok, version} <- Catalog.schema_version(state.runtime.catalog),
+         {:ok, result, state} <- rebuilt(state, version) do
+      {:ok, result, %{state | checked_at: System.monotonic_time(:millisecond)}}
+    else
+      {:error, _reason} -> {:error, :catalog_unavailable}
+    end
+  end
+
+  defp refreshed({:ok, result, _state}, name), do: {%{}, %{result: result, name: name}}
+  defp refreshed(_failed, name), do: {%{}, %{result: :error, name: name}}
+
+  defp rebuilt(%{version: version} = state, version) do
+    if within?(state.rebuilt_at, state.runtime.catalog_rebuild_ms),
+      do: {:ok, :unchanged, state},
+      else: rebuild(state, version)
+  end
+
+  defp rebuilt(state, version), do: rebuild(state, version)
+
+  defp rebuild(state, version) do
+    with :ok <- refresh(state.engine, state.runtime.catalog) do
+      {:ok, :rebuilt,
+       %{state | version: version, rebuilt_at: System.monotonic_time(:millisecond)}}
+    end
+  end
+
+  defp within?(nil, _ttl_ms), do: false
+  defp within?(at, ttl_ms), do: System.monotonic_time(:millisecond) - at <= ttl_ms
 
   defp refresh(engine, catalog) do
     with {:ok, tables} <- CatalogEmulation.listed_tables(catalog),

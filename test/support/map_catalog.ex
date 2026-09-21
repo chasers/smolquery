@@ -79,7 +79,17 @@ defmodule Smolquery.Test.MapCatalog do
 
   @impl Catalog
   def create_dataset(agent, dataset) do
-    Agent.update(agent, &%{&1 | datasets: MapSet.put(&1.datasets, dataset)})
+    Agent.update(agent, fn state ->
+      if MapSet.member?(state.datasets, dataset) do
+        state
+      else
+        %{
+          state
+          | datasets: MapSet.put(state.datasets, dataset),
+            schema_version: state.schema_version + 1
+        }
+      end
+    end)
   end
 
   @impl Catalog
@@ -258,7 +268,12 @@ defmodule Smolquery.Test.MapCatalog do
     with {:ok, schema} <- fetch_table(state, table_ref),
          {:ok, schema} <- Schema.drop_field(schema, column) do
       {:ok,
-       %{state | tables: Map.put(state.tables, table_ref, schema), snapshot: state.snapshot + 1}}
+       %{
+         state
+         | tables: Map.put(state.tables, table_ref, schema),
+           snapshot: state.snapshot + 1,
+           schema_version: state.schema_version + 1
+       }}
     else
       {:error, reason} -> {{:error, reason}, state}
     end

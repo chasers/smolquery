@@ -48,6 +48,11 @@ defmodule SmolqueryClickHouse.Runtime do
   `WHERE`, so it has to cover the deployment's table count; a statement
   over more is refused rather than summed short.
 
+  `catalog_rebuild_ms` is how long the `system` tables may go without being
+  rebuilt from the catalog when its schema version has not moved (T-529,
+  `30_000`). A table's columns move the version and are seen within a
+  second; its clustering key does not, and is seen within this.
+
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
   query runs through (T-478).
@@ -68,6 +73,7 @@ defmodule SmolqueryClickHouse.Runtime do
     insert_max_in_flight_bytes: nil,
     unanswered_log: :redacted,
     total_rows_max_tables: 256,
+    catalog_rebuild_ms: 30_000,
     ip: {127, 0, 0, 1},
     port: 8123
   ]
@@ -84,6 +90,7 @@ defmodule SmolqueryClickHouse.Runtime do
           ip: :inet.ip_address(),
           unanswered_log: :redacted | :verbatim | :off,
           total_rows_max_tables: pos_integer(),
+          catalog_rebuild_ms: non_neg_integer(),
           port: :inet.port_number()
         }
 
@@ -131,6 +138,7 @@ defmodule SmolqueryClickHouse.Runtime do
         :query_name,
         :unanswered_log,
         :total_rows_max_tables,
+        :catalog_rebuild_ms,
         :ip,
         :port | @api_defaults
       ])

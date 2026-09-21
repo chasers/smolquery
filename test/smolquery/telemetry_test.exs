@@ -134,6 +134,28 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_s3_requests_total", failed_delete) == before_failed + 1
   end
 
+  test "prices the ClickHouse edge's catalog checks apart from its rebuilds (T-529)" do
+    unchanged = ~s({result="unchanged"})
+    rebuilt = ~s({result="rebuilt"})
+    before_checks = value("smolquery_clickhouse_catalog_refreshes_total", unchanged)
+    before_rebuilds = value("smolquery_clickhouse_catalog_refreshes_total", rebuilt)
+    before_us = value("smolquery_clickhouse_catalog_refresh_microseconds_total", rebuilt)
+
+    for {result, duration_us} <- [unchanged: 900, unchanged: 1_100, rebuilt: 2_300_000] do
+      :telemetry.execute(
+        [:smolquery, :clickhouse, :catalog_refresh],
+        %{duration_us: duration_us},
+        %{result: result, name: SmolqueryClickHouse}
+      )
+    end
+
+    assert value("smolquery_clickhouse_catalog_refreshes_total", unchanged) == before_checks + 2
+    assert value("smolquery_clickhouse_catalog_refreshes_total", rebuilt) == before_rebuilds + 1
+
+    assert value("smolquery_clickhouse_catalog_refresh_microseconds_total", rebuilt) ==
+             before_us + 2_300_000
+  end
+
   test "tracks whether the manifest index is in steady state or growing (T-320)" do
     added = ~s({change="added"})
     reaped = ~s({change="reaped"})

@@ -10,6 +10,7 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
   alias Smolquery.QueryService
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Test.ExitingCatalog
   alias Smolquery.Test.FixedCatalog
   alias Smolquery.Test.MapCatalog
   alias SmolqueryClickHouse.Router
@@ -60,7 +61,7 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
 
     on_exit(fn -> Runtime.delete(name) end)
 
-    %{name: name, catalog: catalog}
+    %{name: name, catalog: catalog, query: query}
   end
 
   defp post(name, sql, query \\ %{}) do
@@ -266,6 +267,105 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
 
     test "the word system in a literal asks nothing of the catalog", %{name: name} do
       assert post(name, "SELECT 'system.tables' AS s").resp_body == "system.tables\n"
+    end
+  end
+
+  describe "what a catalog statement costs (T-529)" do
+    defp edge(catalog, query, opts \\ []) do
+      name = :"ch_system_cost_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {SmolqueryClickHouse.Supervisor,
+         [name: name, password: @password, query_name: query, port: 0, catalog: catalog] ++ opts},
+        id: name
+      )
+
+      on_exit(fn -> Runtime.delete(name) end)
+
+      name
+    end
+
+    defp refreshes(name) do
+      test = self()
+      handler = "catalog-refresh-#{name}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :clickhouse, :catalog_refresh],
+        fn _event, measurements, meta, nil ->
+          if meta.name == name, do: send(test, {:refresh, meta.result, measurements})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "a statement over tables the lake does not fill answers without reading the lake",
+         %{catalog: catalog, query: query} do
+      unreadable = ExitingCatalog.new(catalog, [:schema_version, :list_datasets, :list_tables])
+      name = edge(unreadable, query)
+      refreshes(name)
+
+      assert data(post(name, "SELECT name, value FROM system.settings FORMAT JSONCompact")) == []
+
+      assert data(
+               post(
+                 name,
+                 "SELECT count() > 0 FROM system.table_engines WHERE name = 'MergeTree' FORMAT JSONCompact"
+               )
+             ) == [[true]]
+
+      assert data(post(name, "SELECT name FROM system.data_skipping_indices FORMAT JSONCompact")) ==
+               []
+
+      assert post(name, "SELECT dummy FROM system.one").resp_body == "0\n"
+      assert post(name, "DESCRIBE system.settings").resp_body =~ "name\tString"
+
+      refute_received {:refresh, _result, _measurements}
+
+      assert post(name, "EXISTS default.otel_logs").status == 503
+      assert_received {:refresh, :error, _measurements}
+    end
+
+    test "a schema version that has not moved is one read, and one that has is a rebuild",
+         %{catalog: catalog, query: query} do
+      name = edge(catalog, query)
+      refreshes(name)
+
+      assert post(name, "EXISTS default.later").resp_body == "0\n"
+      assert_received {:refresh, :rebuilt, %{duration_us: _us}}
+
+      assert post(name, "EXISTS default.later").resp_body == "0\n"
+      refute_received {:refresh, _result, _measurements}
+
+      Process.sleep(1_100)
+      assert post(name, "EXISTS default.later").resp_body == "0\n"
+      assert_received {:refresh, :unchanged, _measurements}
+
+      :ok = Catalog.create_table(catalog, {"default", "later"}, Schema.new!([{"id", :int64}]))
+      Process.sleep(1_100)
+
+      assert post(name, "EXISTS default.later").resp_body == "1\n"
+      assert_received {:refresh, :rebuilt, _measurements}
+    end
+
+    test "a clustering key moves no version, and is seen once catalog_rebuild_ms has passed",
+         %{catalog: catalog, query: query} do
+      sorting_key =
+        "SELECT sorting_key FROM system.tables WHERE name = 'otel_logs' FORMAT JSONCompact"
+
+      patient = edge(catalog, query)
+      eager = edge(catalog, query, catalog_rebuild_ms: 0)
+
+      assert data(post(patient, sorting_key)) == [["ServiceName, Timestamp"]]
+      assert data(post(eager, sorting_key)) == [["ServiceName, Timestamp"]]
+
+      :ok = Catalog.put_clustering(catalog, {"default", "otel_logs"}, ["Timestamp"])
+      Process.sleep(1_100)
+
+      assert data(post(patient, sorting_key)) == [["ServiceName, Timestamp"]]
+      assert data(post(eager, sorting_key)) == [["Timestamp"]]
     end
   end
 

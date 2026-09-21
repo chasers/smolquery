@@ -38,6 +38,8 @@ defmodule Smolquery.Telemetry do
 
       [:smolquery, :api, :stop]           Plug.Telemetry — measurements.duration, conn status
       [:smolquery, :clickhouse, :stop]    Plug.Telemetry — conn status
+      [:smolquery, :clickhouse, :catalog_refresh] %{duration_us},
+                                          meta %{result: :rebuilt | :unchanged | :error, name: edge}
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
@@ -206,6 +208,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :api, :stop],
     [:smolquery, :clickhouse, :stop],
     [:smolquery, :clickhouse, :unanswered],
+    [:smolquery, :clickhouse, :catalog_refresh],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :flush_trigger],
@@ -238,6 +241,13 @@ defmodule Smolquery.Telemetry do
       "ClickHouse HTTP edge requests answered, by status class.",
     "smolquery_clickhouse_unanswered_total" =>
       "Statements the ClickHouse HTTP edge could not answer for a reason that is the dialect's, by ClickHouse error code.",
+    "smolquery_clickhouse_catalog_refreshes_total" =>
+      "Times the ClickHouse edge checked its system tables against the catalog, by result: " <>
+        "unchanged is one schema-version read, rebuilt reads every table's schema.",
+    "smolquery_clickhouse_catalog_refresh_microseconds_total" =>
+      "Time the ClickHouse edge spent checking and rebuilding its system tables, by result. " <>
+        "Every catalog statement waits behind it, so a rising rebuilt mean is a rising " <>
+        "floor under each of them.",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -538,6 +548,17 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :clickhouse, :unanswered], _measurements, %{code: code}, nil) do
     bump({"smolquery_clickhouse_unanswered_total", [code: Integer.to_string(code)]}, 1)
+  end
+
+  def handle_event([:smolquery, :clickhouse, :catalog_refresh], measurements, meta, nil) do
+    labels = [result: Map.get(meta, :result, :unknown)]
+
+    bump({"smolquery_clickhouse_catalog_refreshes_total", labels}, 1)
+
+    bump(
+      {"smolquery_clickhouse_catalog_refresh_microseconds_total", labels},
+      Map.get(measurements, :duration_us, 0)
+    )
   end
 
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do
