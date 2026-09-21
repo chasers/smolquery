@@ -27,10 +27,22 @@ defmodule Smolquery.QueryService.Pruner do
   `events a JOIN events b ... WHERE a.id > 5`, `b` needs the files `a` does
   not, and so does a subquery that counts the table the outer `WHERE`
   filters. So a table prunes only when the statement names it exactly once
-  (T-533). The count is of every table reference with that name, whatever
-  its schema and wherever it is, since an unqualified name beside a
-  qualified one may be the same table, and counting one too many only keeps
-  files.
+  (T-533). The count is `Smolquery.QueryService.SingleTable.table_reads/1`'s:
+  of every table reference with that name, whatever its schema and wherever
+  it is, since an unqualified name beside a qualified one may be the same
+  table, and counting one too many only keeps files. A statement with a
+  table function in it prunes nothing: `query_table('analytics.events')`
+  reads the view without naming the table.
+
+  ## A reference that is not the table as it is
+
+  `events AS e(ts, id)` renames the table's columns by position, so `e.id`
+  is whichever column came second, and its bounds are not those of the
+  column the catalog calls `id`. `events TABLESAMPLE ... REPEATABLE (42)`
+  draws its sample before the WHERE, from whichever files the view lists, so
+  a file pruned is a different sample for the same seed. Either makes the
+  reference opaque, as `SingleTable.source/2` has it: nothing resolves
+  through it. A SELECT that samples (`USING SAMPLE`) is not read at all.
 
   The sealed tier gets no treatment here: DuckLake collects min-max stats at
   registration and prunes on them natively — verified in the Milestone 2
@@ -40,7 +52,7 @@ defmodule Smolquery.QueryService.Pruner do
   alias Smolquery.BufferService.HotClient
   alias Smolquery.BufferService.HotManifest.Entry
   alias Smolquery.Catalog
-  alias Smolquery.Engine.Ast
+  alias Smolquery.QueryService.SingleTable
 
   @type op :: :gt | :ge | :lt | :le | :eq
   @type conjunct :: {String.t(), op(), term()}
@@ -70,15 +82,18 @@ defmodule Smolquery.QueryService.Pruner do
           %{Catalog.table_ref() => [conjunct()]}
   def conjuncts(statement, refs, params \\ [])
 
-  def conjuncts(%{"node" => %{"type" => "SELECT_NODE"} = node} = statement, refs, params) do
+  def conjuncts(
+        %{"node" => %{"type" => "SELECT_NODE", "sample" => nil} = node} = statement,
+        refs,
+        params
+      ) do
     aliases = aliases(Map.get(node, "from_table"), refs)
-    read_once = read_once(statement)
 
     node
     |> Map.get("where_clause")
     |> split()
     |> Enum.flat_map(&parse(&1, aliases, params))
-    |> Enum.filter(fn {{_dataset, table}, _conjunct} -> MapSet.member?(read_once, table) end)
+    |> read_once(statement)
     |> Enum.group_by(fn {ref, _conjunct} -> ref end, fn {_ref, conjunct} -> conjunct end)
   end
 
@@ -112,18 +127,13 @@ defmodule Smolquery.QueryService.Pruner do
     end)
   end
 
-  defp read_once(statement) do
-    statement
-    |> Ast.collect(fn
-      %{"type" => "BASE_TABLE", "table_name" => table} -> [table]
-      _another_node -> []
-    end)
-    |> Enum.frequencies()
-    |> Enum.flat_map(fn
-      {table, 1} -> [table]
-      {_table, _more} -> []
-    end)
-    |> MapSet.new()
+  defp read_once([], _statement), do: []
+
+  defp read_once(found, statement) do
+    case SingleTable.table_reads(statement) do
+      :unknowable -> []
+      reads -> Enum.filter(found, fn {{_dataset, table}, _conjunct} -> reads[table] == 1 end)
+    end
   end
 
   defp column_resolver(ids, file_ids) when is_map(ids) and is_map(file_ids) do
@@ -166,6 +176,11 @@ defmodule Smolquery.QueryService.Pruner do
   end
 
   defp sources(from), do: from |> sources([]) |> Enum.reverse()
+
+  defp sources(%{"type" => "BASE_TABLE", "column_name_alias" => [_renamed | _more]}, acc),
+    do: [:opaque | acc]
+
+  defp sources(%{"type" => "BASE_TABLE", "sample" => %{}}, acc), do: [:opaque | acc]
 
   defp sources(%{"type" => "BASE_TABLE"} = node, acc) do
     name =

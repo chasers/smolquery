@@ -1064,7 +1064,9 @@ Properties worth knowing:
 - **Manifest-level pruning drops hot files before DuckDB pays an HTTP footer
   read for each** (~0.7 ms/file). The pruning applies top-level WHERE
   conjuncts against flush-time min-max stats. It is conservative in every
-  uncertain case. The sealed tier prunes itself: DuckLake keeps stats at
+  uncertain case, and a table the statement reads twice is one: every
+  reference reads the table's one view, so one reference's WHERE prunes
+  nothing (T-533). The sealed tier prunes itself: DuckLake keeps stats at
   registration.
 - **A last-N query reads the newest hot files, not all of them** (T-400). An
   `ORDER BY col DESC LIMIT n` is not a WHERE conjunct, and DuckDB applies it

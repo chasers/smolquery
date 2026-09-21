@@ -48,6 +48,33 @@ defmodule Smolquery.QueryService.PrunerTest do
       end
     end
 
+    test "a table function may read any table, so a statement with one prunes nothing (review of T-533)" do
+      sql =
+        "SELECT * FROM analytics.events WHERE id > 5 " <>
+          "UNION ALL SELECT * FROM query_table('analytics.events')"
+
+      assert conjuncts(sql) == %{}
+
+      assert conjuncts("SELECT * FROM analytics.events, range(3) r WHERE id > 5") == %{}
+    end
+
+    test "a reference that renames its columns, or samples, resolves nothing (review of T-533)" do
+      for sql <- [
+            "SELECT * FROM analytics.events AS e(ts, id) WHERE e.id > 5",
+            "SELECT * FROM analytics.events AS e(ts, id) WHERE id > 5",
+            "SELECT * FROM analytics.events TABLESAMPLE reservoir(100 ROWS) REPEATABLE (42) WHERE id > 5",
+            "SELECT * FROM analytics.events WHERE id > 5 USING SAMPLE 10% (bernoulli, 42)"
+          ] do
+        assert conjuncts(sql) == %{}, sql
+      end
+
+      beside =
+        "SELECT * FROM analytics.events AS e(ts, id) JOIN analytics.users u ON u.id = e.id " <>
+          "WHERE e.id > 5 AND u.id > 7"
+
+      assert conjuncts(beside, [@events, @users]) == %{@users => [{"id", :gt, 7}]}
+    end
+
     test "a second table read once beside one read twice still prunes (T-533)" do
       sql =
         "SELECT * FROM analytics.events a JOIN analytics.events b ON a.id = b.id " <>

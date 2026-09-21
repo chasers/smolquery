@@ -68,15 +68,41 @@ defmodule Smolquery.QueryService.SingleTable do
   """
   @spec single_reference?(map(), [String.t()]) :: boolean()
   def single_reference?(statement, excluded) do
-    tags =
-      Ast.collect(statement, fn node ->
-        List.flatten([
-          if(node["type"] == "BASE_TABLE", do: [:table], else: []),
-          if(node["class"] in excluded, do: [:excluded], else: [])
-        ])
-      end)
+    tags = reference_tags(statement, excluded)
 
-    Enum.count(tags, &(&1 == :table)) == 1 and :excluded not in tags
+    match?([_only], for({:table, name} <- tags, do: name)) and :excluded not in tags and
+      :table_function not in tags
+  end
+
+  @doc """
+  How many times the statement names each table, by table name and whatever
+  the schema, or `:unknowable`.
+
+  What "this statement reads the table once" means, for every reader that
+  relies on it (T-533): the planner builds one view for a table, so whatever
+  is decided from one reference holds for the statement only when there is
+  no other. An unqualified name beside a qualified one may be the same
+  table, so names are counted without their schema. A table function makes
+  the count unknowable: `query_table('analytics.events')` reads a table its
+  node does not name.
+  """
+  @spec table_reads(map()) :: %{String.t() => pos_integer()} | :unknowable
+  def table_reads(statement) do
+    tags = reference_tags(statement, [])
+
+    if :table_function in tags,
+      do: :unknowable,
+      else: Enum.frequencies(for {:table, name} <- tags, do: name)
+  end
+
+  defp reference_tags(statement, excluded) do
+    Ast.collect(statement, fn node ->
+      List.flatten([
+        if(node["type"] == "BASE_TABLE", do: [{:table, node["table_name"]}], else: []),
+        if(node["type"] == "TABLE_FUNCTION", do: [:table_function], else: []),
+        if(node["class"] in excluded, do: [:excluded], else: [])
+      ])
+    end)
   end
 
   @doc """
