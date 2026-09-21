@@ -171,6 +171,12 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
+  defp value_lists(runtime, _plan, %Decomposer{rows: %{limit: limit}}) do
+    if limit <= runtime.distributed.row_partial_max_rows,
+      do: :ok,
+      else: {:refused, {:row_partial_over, limit}}
+  end
+
   defp value_lists(_runtime, _plan, %Decomposer{value_lists: false}), do: :ok
 
   defp value_lists(runtime, %Plan{statistics: %Statistics{} = statistics}, _decomposition) do

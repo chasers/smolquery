@@ -281,6 +281,41 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert_received {:scatter, _measurements, _meta}
   end
 
+  test "a sample under a LIMIT scatters as rows, and the outer statement answers exactly (T-540)",
+       %{control: control, distributed: distributed} do
+    both(
+      control,
+      distributed,
+      "WITH sampled AS (SELECT name AS param0 FROM analytics.events WHERE id >= 0 LIMIT 100000) " <>
+        "SELECT count(*) AS n, count(DISTINCT param0) AS names, min(param0) AS first FROM sampled"
+    )
+
+    assert_received {:scatter, _measurements, _meta}
+
+    both(
+      control,
+      distributed,
+      "SELECT name, count(*) AS n FROM (SELECT name FROM analytics.events LIMIT 100000) e " <>
+        "GROUP BY name ORDER BY name"
+    )
+
+    assert_received {:scatter, _measurements, _meta}
+  end
+
+  @tag distributed: [row_partial_max_rows: 10]
+  test "a sample whose LIMIT is over row_partial_max_rows runs on one engine", %{
+    control: control,
+    distributed: distributed
+  } do
+    both(
+      control,
+      distributed,
+      "SELECT count(*) AS n FROM (SELECT name FROM analytics.events LIMIT 100000)"
+    )
+
+    refute_received {:scatter, _measurements, _meta}
+  end
+
   test "a filtered aggregate scatters and answers exactly", %{
     control: control,
     distributed: distributed

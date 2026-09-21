@@ -48,8 +48,8 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
     {"histogram", 2, :ok},
     {"rows_term", 2, :offset},
     {"count_field_filters", 3, :ok},
-    {"map_keys", 0, :cte},
-    {"key_values", 2, :cte},
+    {"map_keys", 0, :ok},
+    {"key_values", 2, :ok},
     {"rows_underscore_term", 2, :offset}
   ]
 
@@ -79,8 +79,8 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
     {"SELECT quantileIf(0.5)(Duration, SeverityText = 'error'), median(Duration) #{@from}", 2,
      :ok},
     {"WITH sampledData AS (SELECT ServiceName AS param0 #{@from} LIMIT 100000) " <>
-       "SELECT groupUniqArray(10000)(param0) AS param0 FROM sampledData", 2, :cte},
-    {"SELECT count() FROM (SELECT ServiceName #{@from} LIMIT 100000)", 2, :from_not_a_base_table},
+       "SELECT groupUniqArray(10000)(param0) AS param0 FROM sampledData", 2, :ok},
+    {"SELECT count() FROM (SELECT ServiceName #{@from} LIMIT 100000)", 2, :ok},
     {"SELECT count() FROM analytics.events WHERE Timestamp BETWEEN " <>
        "fromUnixTimestamp64Milli(1789812660000) AND fromUnixTimestamp64Milli(1789812780000)", 2,
      :ok},

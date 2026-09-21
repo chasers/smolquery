@@ -55,6 +55,34 @@ defmodule Smolquery.QueryService.Decomposer do
   form, so `avgIf(x, c)` splits into a filtered sum and a filtered count of
   `x` as `avg` does.
 
+  ## Rows sampled under a LIMIT
+
+  A ClickHouse client samples before it aggregates. HyperDX fills its
+  filters sidebar, and lists a map's keys, with
+
+      WITH sampledData AS (SELECT col FROM t WHERE window LIMIT n)
+      SELECT groupUniqArray(20)(col) FROM sampledData
+
+  which is no aggregate over a table, so none of the above applies, and it
+  was the slowest statement on the page (T-532). It splits another way
+  (T-540): the partial is the inner SELECT, rows and not aggregates, each
+  shard answering its own `LIMIT n`; the final is the outer statement as
+  written, over `LIMIT n` of the shards' rows. A LIMIT with no ORDER BY
+  promises any `n` rows, and any `n` of the union are that; when the window
+  holds fewer than `n` they are every row, and the answer is the single
+  engine's. Written as a CTE or as a subquery in FROM, it is one shape.
+
+  The inner SELECT reads one plain table and has a constant LIMIT as its
+  only modifier: an ORDER BY would make the sample a top-n, which this does
+  not merge, and no LIMIT would ship the table. It has no aggregate, window,
+  subquery or volatile function. Its columns must survive parquet exactly,
+  so a HUGEINT, a UNION, a VARIANT or an ENUM refuses, as do two columns of
+  one name. The outer statement is unconstrained but for a subquery, which
+  could read the table again, a SAMPLE, and a `$n` parameter, which the
+  final step does not bind. A shard ships at most `n` rows, so
+  `Smolquery.QueryService.Scatter` refuses an `n` over the runtime's
+  `row_partial_max_rows`.
+
   ## Aggregates that merge through a value
 
   Some aggregates have no number to add up, and merge exactly all the same
@@ -187,6 +215,7 @@ defmodule Smolquery.QueryService.Decomposer do
   @aggregate_names @aggregates ++ Map.keys(@conditional) ++ Map.keys(@by_value) ++ ["quantileif"]
   @prefix "__pq_"
   @filter_prefix "SELECT 1 WHERE "
+  @rows_name "__pq_rows"
   @refused_classes ~w(SUBQUERY WINDOW STAR)
   @volatile ~w(now now64 get_current_timestamp current_date current_localtime
                current_localtimestamp today random uuid uuidv4 uuidv7
@@ -200,6 +229,7 @@ defmodule Smolquery.QueryService.Decomposer do
     :final_tail,
     final_having: "",
     value_lists: false,
+    rows: nil,
     params: []
   ]
 
@@ -210,7 +240,8 @@ defmodule Smolquery.QueryService.Decomposer do
           final_group: String.t(),
           final_tail: String.t(),
           final_having: String.t(),
-          value_lists: boolean()
+          value_lists: boolean(),
+          rows: nil | %{name: String.t(), limit: pos_integer(), outer_sql: String.t()}
         }
 
   @type output :: {String.t(), String.t()}
@@ -232,8 +263,16 @@ defmodule Smolquery.QueryService.Decomposer do
           {:ok, t()} | {:error, term()}
   def decompose(connection, sql, outputs, table_columns, params \\ []) do
     with :ok <- gate_columns(table_columns),
-         {:ok, node} <- select_node(connection, sql),
-         {:ok, node} <- distinct_as_groups(node),
+         {:ok, node} <- select_node(connection, sql) do
+      case sampled(node) do
+        {:ok, name, inner} -> rows(connection, node, name, inner, params)
+        :error -> aggregates(connection, node, outputs, table_columns, params)
+      end
+    end
+  end
+
+  defp aggregates(connection, node, outputs, table_columns, params) do
+    with {:ok, node} <- distinct_as_groups(node),
          :ok <- gate_shape(node),
          :ok <- gate_classes(node),
          :ok <- gate_volatile(node),
@@ -262,6 +301,9 @@ defmodule Smolquery.QueryService.Decomposer do
   The final query over `from` — a `read_parquet` across the partial files.
   """
   @spec final_sql(t(), String.t()) :: String.t()
+  def final_sql(%__MODULE__{rows: %{name: name, limit: limit, outer_sql: outer}}, from),
+    do: "WITH #{quoted(name)} AS (SELECT * FROM #{from} LIMIT #{limit}) #{outer}"
+
   def final_sql(%__MODULE__{final_having: ""} = decomposition, from) do
     [merged_sql(decomposition, from)]
     |> append(decomposition.final_tail)
@@ -282,6 +324,148 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp append(parts, ""), do: parts
   defp append(parts, clause), do: parts ++ [clause]
+
+  defp sampled(%{"cte_map" => %{"map" => [%{"key" => name, "value" => cte}]}} = node) do
+    with %{"type" => "BASE_TABLE", "schema_name" => "", "table_name" => ^name} <-
+           node["from_table"],
+         %{"query" => %{"node" => %{"type" => "SELECT_NODE"} = inner}} <- cte do
+      {:ok, name, inner}
+    else
+      _another_shape -> :error
+    end
+  end
+
+  defp sampled(%{"cte_map" => %{"map" => []}, "from_table" => %{"type" => "SUBQUERY"} = from}) do
+    case from do
+      %{"subquery" => %{"node" => %{"type" => "SELECT_NODE"} = inner}, "alias" => alias} ->
+        {:ok, if(alias == "", do: @rows_name, else: alias), inner}
+
+      _a_set_operation ->
+        :error
+    end
+  end
+
+  defp sampled(_node), do: :error
+
+  defp rows(connection, node, name, inner, params) do
+    with :ok <- gate_sample(inner),
+         :ok <- gate_outer(node),
+         {:ok, limit} <- sample_limit(inner),
+         {:ok, partial_sql} <- deserialize(connection, inner),
+         :ok <- gate_row_columns(connection, partial_sql, params),
+         {:ok, outer_sql} <- deserialize(connection, over(node, name, inner["from_table"])) do
+      {:ok,
+       %__MODULE__{
+         partial_sql: partial_sql,
+         params: params,
+         final_select: "",
+         final_group: "",
+         final_tail: "",
+         rows: %{name: name, limit: limit, outer_sql: outer_sql}
+       }}
+    end
+  end
+
+  defp gate_sample(inner) do
+    with :ok <- gate_sample_source(inner),
+         :ok <- gate_sample_grouping(inner) do
+      gate_sample_expressions(inner)
+    end
+  end
+
+  defp gate_sample_source(inner) do
+    cond do
+      inner["cte_map"]["map"] != [] -> {:error, :cte}
+      not plain_table?(inner["from_table"]) -> {:error, :from_not_a_base_table}
+      inner["sample"] != nil -> {:error, :sample}
+      true -> :ok
+    end
+  end
+
+  defp gate_sample_grouping(inner) do
+    grouped? =
+      inner["group_expressions"] != [] or inner["having"] != nil or
+        inner["aggregate_handling"] != "STANDARD_HANDLING" or
+        nested_aggregate?(inner["select_list"])
+
+    cond do
+      inner["qualify"] != nil -> {:error, :qualify}
+      grouped? -> {:error, :sampled_groups}
+      true -> :ok
+    end
+  end
+
+  defp gate_sample_expressions(inner) do
+    refused =
+      inner
+      |> Map.take(["select_list", "where_clause"])
+      |> classes()
+      |> Enum.find(&(&1 in ["SUBQUERY", "WINDOW"]))
+
+    case refused do
+      nil -> gate_volatile(inner)
+      class -> {:error, {:unsupported_expression, class}}
+    end
+  end
+
+  defp plain_table?(%{"type" => "BASE_TABLE", "sample" => nil, "column_name_alias" => []}),
+    do: true
+
+  defp plain_table?(_another_source), do: false
+
+  defp gate_outer(node) do
+    outer = Map.drop(node, ["cte_map", "from_table"])
+
+    cond do
+      "SUBQUERY" in classes(outer) -> {:error, {:unsupported_expression, "SUBQUERY"}}
+      "PARAMETER" in classes(outer) -> {:error, :parameter_over_sampled_rows}
+      node["sample"] != nil -> {:error, :sample}
+      true -> :ok
+    end
+  end
+
+  defp sample_limit(%{"modifiers" => [%{"type" => "LIMIT_MODIFIER", "offset" => nil} = modifier]}) do
+    case modifier["limit"] do
+      %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => limit}}
+      when is_integer(limit) and limit > 0 ->
+        {:ok, limit}
+
+      _expression ->
+        {:error, :unsupported_limit}
+    end
+  end
+
+  defp sample_limit(%{"modifiers" => []}), do: {:error, :unbounded_rows}
+  defp sample_limit(_ordered_or_distinct), do: {:error, :sampled_order}
+
+  defp gate_row_columns(connection, partial_sql, params) do
+    with {:ok, columns} <- Connection.describe(connection, partial_sql, params, :infinity) do
+      names = Enum.map(columns, fn {name, _type} -> name end)
+
+      cond do
+        names != Enum.uniq(names) ->
+          {:error, :duplicate_row_columns}
+
+        Enum.any?(columns, fn {_name, type} -> type =~ ~r/HUGEINT|UNION|VARIANT|ENUM/ end) ->
+          {:error, :inexact_row_column}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp over(node, name, table) do
+    source = %{
+      table
+      | "schema_name" => "",
+        "catalog_name" => "",
+        "table_name" => name,
+        "alias" => ""
+    }
+
+    %{node | "cte_map" => %{"map" => []}, "from_table" => source}
+  end
 
   defp gate_columns(table_columns) do
     if Enum.any?(table_columns, &String.starts_with?(&1, @prefix)) do

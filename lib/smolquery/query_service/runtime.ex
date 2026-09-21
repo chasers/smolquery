@@ -151,7 +151,10 @@ defmodule Smolquery.QueryService.Runtime do
   `value_list_max_rows` is the most rows a plan may read and still scatter
   an aggregate that ships values and not numbers, a `uniqExact` or a
   `quantile` (PL-68): the partials are as large as the data is distinct, and
-  the plan's row count is the bound known before it runs. `local_workers`
+  the plan's row count is the bound known before it runs.
+  `row_partial_max_rows` is the largest `LIMIT n` a sampled subquery may
+  have and still scatter (T-540): every shard ships up to `n` rows.
+  `local_workers`
   is how many instances run on this node when clustering is off; with
   clustering on, the workers are the group's member nodes. Each worker
   engine takes `worker_memory_limit` (default: `job_memory_limit`, whole)
@@ -209,6 +212,7 @@ defmodule Smolquery.QueryService.Runtime do
       enabled: true,
       min_files: 8,
       value_list_max_rows: 50_000_000,
+      row_partial_max_rows: 10_000_000,
       local_workers: 4,
       worker_memory_limit: nil,
       worker_threads: nil
@@ -247,6 +251,7 @@ defmodule Smolquery.QueryService.Runtime do
             enabled: boolean(),
             min_files: pos_integer(),
             value_list_max_rows: pos_integer(),
+            row_partial_max_rows: pos_integer(),
             local_workers: pos_integer(),
             worker_memory_limit: String.t() | nil,
             worker_threads: pos_integer() | nil
@@ -339,6 +344,7 @@ defmodule Smolquery.QueryService.Runtime do
       enabled: Keyword.get(opts, :enabled, true),
       min_files: Keyword.get(opts, :min_files, 8),
       value_list_max_rows: Keyword.get(opts, :value_list_max_rows, 50_000_000),
+      row_partial_max_rows: Keyword.get(opts, :row_partial_max_rows, 10_000_000),
       local_workers: Keyword.get(opts, :local_workers, 4),
       worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
       worker_threads: Keyword.get(opts, :worker_threads)

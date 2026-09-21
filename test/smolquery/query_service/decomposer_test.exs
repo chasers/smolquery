@@ -399,6 +399,59 @@ defmodule Smolquery.QueryService.DecomposerTest do
       )
     end
 
+    test "a sample under a LIMIT is rows from every shard, and the outer statement over LIMIT n of them (T-540)",
+         %{tmp_dir: tmp_dir} do
+      for macro <- ClickHouseFunctions.statements_for("groupUniqArray(x)"),
+          do: Engine.query!(@engine, macro)
+
+      as_cte =
+        round_trip(
+          "WITH sampled AS (SELECT name AS param0, tag AS param1 FROM analytics.events " <>
+            "WHERE id >= 100 AND id < 900 LIMIT 100000) " <>
+            "SELECT groupUniqArray(param0, 20) AS param0, groupUniqArray(param1, 20) AS param1 " <>
+            "FROM sampled",
+          tmp_dir
+        )
+
+      assert as_cte.rows.limit == 100_000
+      assert as_cte.partial_sql =~ "LIMIT 100000"
+      refute as_cte.partial_sql =~ ~r/groupuniqarray/i
+
+      round_trip(
+        "SELECT bucket, count(*) AS n, max(value) AS top FROM " <>
+          "(SELECT bucket, value FROM analytics.events WHERE id < 500 LIMIT 5000) e " <>
+          "GROUP BY bucket HAVING count(*) > 1 ORDER BY bucket",
+        tmp_dir
+      )
+
+      round_trip(
+        "SELECT count(*) FROM (SELECT * FROM analytics.events WHERE id < 0 LIMIT 10)",
+        tmp_dir
+      )
+    end
+
+    test "a sample smaller than the window is n rows of it, whichever they are (T-540)", %{
+      tmp_dir: tmp_dir
+    } do
+      sql =
+        "SELECT count(*) AS n, min(id) >= 100 AS inside FROM (SELECT id FROM analytics.events WHERE id >= 100 LIMIT 7)"
+
+      {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
+
+      parquet = Path.join(tmp_dir, "rows.parquet")
+
+      Engine.query!(
+        @engine,
+        "COPY (SELECT * FROM (#{decomposition.partial_sql}) UNION ALL " <>
+          "SELECT * FROM (#{decomposition.partial_sql})) TO " <>
+          "#{Smolquery.Identifier.sql_string(parquet)} (FORMAT parquet)"
+      )
+
+      from = "read_parquet([#{Smolquery.Identifier.sql_string(parquet)}])"
+
+      assert Engine.query!(@engine, Decomposer.final_sql(decomposition, from)).rows == [[7, true]]
+    end
+
     test "any answers a value some shard holds, and ships no list (T-539)", %{tmp_dir: tmp_dir} do
       sql = "SELECT bucket, any_value(name) AS one FROM analytics.events GROUP BY bucket"
       {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
@@ -484,7 +537,10 @@ defmodule Smolquery.QueryService.DecomposerTest do
     end
 
     test "CTEs" do
-      assert :cte = refused("WITH x AS (SELECT 1 AS n) SELECT count(*) FROM x")
+      assert :cte =
+               refused("WITH x AS (SELECT 1 AS n) SELECT count(*) FROM analytics.events, x")
+
+      assert :from_not_a_base_table = refused("WITH x AS (SELECT 1 AS n) SELECT count(*) FROM x")
     end
 
     test "HAVING over an aggregate or a column that is no select item" do
@@ -557,6 +613,36 @@ defmodule Smolquery.QueryService.DecomposerTest do
       round_trip("SELECT count(name) AS n FROM analytics.events", tmp_dir)
       round_trip("SELECT count(*) AS n FROM analytics.events WHERE id > 10", tmp_dir)
       round_trip("SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket", tmp_dir)
+    end
+
+    test "a sampled subquery in a shape this does not split (T-540)" do
+      for {sql, reason} <- [
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events)", :unbounded_rows},
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events ORDER BY id LIMIT 5)",
+             :sampled_order},
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events LIMIT 5 OFFSET 2)",
+             :sampled_order},
+            {"SELECT count(*) FROM (SELECT DISTINCT id FROM analytics.events LIMIT 5)",
+             :sampled_order},
+            {"SELECT sum(n) FROM (SELECT count(*) AS n FROM analytics.events GROUP BY name LIMIT 5)",
+             :sampled_groups},
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events WHERE random() < 0.5 LIMIT 5)",
+             {:volatile_function, "random"}},
+            {"SELECT count(*) FROM (SELECT id, name AS id FROM analytics.events LIMIT 5)",
+             :duplicate_row_columns},
+            {"SELECT count(*) FROM (SELECT big + CAST(1 AS HUGEINT) AS wide FROM analytics.events LIMIT 5)",
+             :inexact_row_column},
+            {"SELECT count(*), (SELECT max(id) FROM analytics.events) FROM " <>
+               "(SELECT id FROM analytics.events LIMIT 5)",
+             {:unsupported_expression, "SUBQUERY"}},
+            {"WITH a AS (SELECT id FROM analytics.events LIMIT 5), b AS (SELECT 1) " <>
+               "SELECT count(*) FROM a", :cte},
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events LIMIT 5) x " <>
+               "JOIN (SELECT id FROM analytics.events LIMIT 5) y USING (id)",
+             :from_not_a_base_table}
+          ] do
+        assert reason == refused(sql, describe(sql)), sql
+      end
     end
 
     test "a value aggregate in a shape this does not split" do
