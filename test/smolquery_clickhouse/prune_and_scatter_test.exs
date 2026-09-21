@@ -75,8 +75,9 @@ defmodule SmolqueryClickHouse.PruneAndScatterTest do
     {"SELECT uniq(ServiceName), #{@bucket} AS b #{@from} GROUP BY b", 2, :ok},
     {"SELECT uniqExact(ServiceName) #{@from}", 2, :ok},
     {"SELECT count(DISTINCT ServiceName) #{@from}", 2, :ok},
-    {"SELECT quantile(0.95)(Duration), #{@bucket} AS b #{@from} GROUP BY b", 2,
-     {:ungrouped_expression, "quantile_cont"}},
+    {"SELECT quantile(0.95)(Duration), #{@bucket} AS b #{@from} GROUP BY b", 2, :ok},
+    {"SELECT quantileIf(0.5)(Duration, SeverityText = 'error'), median(Duration) #{@from}", 2,
+     :ok},
     {"WITH sampledData AS (SELECT ServiceName AS param0 #{@from} LIMIT 100000) " <>
        "SELECT groupUniqArray(10000)(param0) AS param0 FROM sampledData", 2, :cte},
     {"SELECT count() FROM (SELECT ServiceName #{@from} LIMIT 100000)", 2, :from_not_a_base_table},

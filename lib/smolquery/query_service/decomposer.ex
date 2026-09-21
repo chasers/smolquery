@@ -79,6 +79,11 @@ defmodule Smolquery.QueryService.Decomposer do
     values, and the count of their distinct union. Exact, and not the sum of
     the shards' counts, which would count a value once per shard.
 
+  - `quantile`, `quantileExact`, `median`, `quantileIf` (T-541): a quantile
+    of quantiles is not a quantile, so the partial is every value the shard
+    holds, and the final is the engine's own quantile over them all. Exact,
+    and the one split here whose partial is as large as its input.
+
   A value reaches the final step through parquet, which has no HUGEINT, no
   UNION, no VARIANT and no ENUM: a HUGEINT list degrades to DOUBLE, an ENUM
   key compares as text. A partial column of such a type refuses, as a
@@ -174,9 +179,12 @@ defmodule Smolquery.QueryService.Decomposer do
     "groupuniqarray" => :distinct_list,
     "groupuniqarrayarray" => :flat_distinct_list,
     "uniq" => :count_distinct,
-    "uniqexact" => :count_distinct
+    "uniqexact" => :count_distinct,
+    "quantile_cont" => {:quantile, "quantile_cont"},
+    "quantile_disc" => {:quantile, "quantile_disc"},
+    "median" => {:quantile, "median"}
   }
-  @aggregate_names @aggregates ++ Map.keys(@conditional) ++ Map.keys(@by_value)
+  @aggregate_names @aggregates ++ Map.keys(@conditional) ++ Map.keys(@by_value) ++ ["quantileif"]
   @prefix "__pq_"
   @filter_prefix "SELECT 1 WHERE "
   @refused_classes ~w(SUBQUERY WINDOW STAR)
@@ -233,6 +241,7 @@ defmodule Smolquery.QueryService.Decomposer do
          {:ok, items} <- classified_items(node, keys),
          :ok <- gate_scan(node, keys, items),
          :ok <- gate_outputs(items, outputs),
+         {:ok, items} <- rendered_quantiles(connection, items),
          {:ok, tail} <- tail(node, outputs),
          {:ok, having} <- having(connection, node, outputs, table_columns),
          {:ok, partial_sql} <- partial(connection, node, keys, items, params) do
@@ -478,6 +487,22 @@ defmodule Smolquery.QueryService.Decomposer do
        ),
        do: by_value(:distinct_list, "list", %{item | "distinct" => false})
 
+  defp classify_aggregate(
+         %{
+           "class" => "FUNCTION",
+           "function_name" => "quantileif",
+           "children" => [value, condition, quantile],
+           "filter" => nil
+         } = item
+       ) do
+    classify_aggregate(%{
+      item
+      | "function_name" => "quantile_cont",
+        "children" => [value, quantile],
+        "filter" => condition
+    })
+  end
+
   defp classify_aggregate(%{"class" => "FUNCTION", "function_name" => name} = item)
        when is_map_key(@by_value, name),
        do: by_value(Map.fetch!(@by_value, name), name, item)
@@ -517,7 +542,7 @@ defmodule Smolquery.QueryService.Decomposer do
       item["order_bys"]["orders"] != [] ->
         {:error, {:ordered_aggregate, name}}
 
-      item["filter"] != nil and kind != :any ->
+      item["filter"] != nil and not filterable?(kind) ->
         {:error, {:filtered_aggregate, name}}
 
       nested_aggregate?([item["filter"] | item["children"]]) ->
@@ -531,6 +556,14 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp filterable?(:any), do: true
+  defp filterable?({:quantile, _function}), do: true
+  defp filterable?(_kind), do: false
+
+  defp arguments?({:quantile, "median"}, [_value]), do: true
+  defp arguments?({:quantile, "median"}, _children), do: false
+  defp arguments?({:quantile, _function}, [_value, quantile]), do: constant?(quantile)
+  defp arguments?({:quantile, _function}, _children), do: false
   defp arguments?({:arg, _extreme}, [_value, _key]), do: true
   defp arguments?(kind, [_value]) when kind in [:any, :count_distinct], do: true
   defp arguments?(kind, [_value]) when is_atom(kind), do: true
@@ -540,6 +573,68 @@ defmodule Smolquery.QueryService.Decomposer do
        do: true
 
   defp arguments?(_kind, _children), do: false
+
+  defp constant?(node) do
+    node
+    |> Ast.collect(fn
+      %{"class" => class} when class in ["CONSTANT", "CAST"] -> []
+      %{"class" => "FUNCTION", "function_name" => "list_value"} -> []
+      %{"class" => class} -> [class]
+      _not_an_expression -> []
+    end)
+    |> Enum.empty?()
+  end
+
+  defp rendered_quantiles(connection, items) do
+    items
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn
+      {{:by_value, {:quantile, function}, item}, position}, {:ok, acc} ->
+        case rendered(connection, quantile_of_parts(function, item, position)) do
+          {:ok, sql} -> {:cont, {:ok, [{:by_value, {:quantile_sql, sql}, item} | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      {item, _position}, {:ok, acc} ->
+        {:cont, {:ok, [item | acc]}}
+    end)
+    |> case do
+      {:ok, rendered} -> {:ok, Enum.reverse(rendered)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp quantile_of_parts(function, %{"children" => [_value | quantile]} = item, position) do
+    parts = called(item, "list", [column_ref("#{@prefix}a#{position}")])
+    values = called(item, "flatten", [Map.put(parts, "filter", nil)])
+
+    item
+    |> called("list_aggregate", [Map.put(values, "filter", nil), text(function) | quantile])
+    |> Map.put("filter", nil)
+  end
+
+  defp text(value) do
+    %{
+      "class" => "CONSTANT",
+      "type" => "VALUE_CONSTANT",
+      "alias" => "",
+      "value" => %{
+        "type" => %{"id" => "VARCHAR", "type_info" => nil},
+        "is_null" => false,
+        "value" => value
+      }
+    }
+  end
+
+  defp rendered(connection, expression) do
+    select = %{filter(nil) | "select_list" => [Map.put(expression, "alias", "")]}
+
+    case deserialize(connection, select) do
+      {:ok, "SELECT " <> sql} -> {:ok, sql}
+      {:ok, _another_rendering} -> {:error, :quantile_not_rendered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp nested_aggregate?(children) do
     children
@@ -662,6 +757,18 @@ defmodule Smolquery.QueryService.Decomposer do
     ]
   end
 
+  defp partial_aggregates(
+         {:by_value, {:quantile_sql, _final}, %{"children" => [value | _quantile]} = item},
+         position
+       ) do
+    [
+      item
+      |> called("list", [value])
+      |> Map.put("filter", both(item["filter"], not_null(value)))
+      |> Map.put("alias", "#{@prefix}a#{position}")
+    ]
+  end
+
   defp partial_aggregates({:by_value, kind, %{"children" => [value | limit]} = item}, position) do
     values =
       item
@@ -702,6 +809,17 @@ defmodule Smolquery.QueryService.Decomposer do
         "children" => children,
         "distinct" => false,
         "alias" => ""
+    }
+  end
+
+  defp both(nil, condition), do: condition
+
+  defp both(filter, condition) do
+    %{
+      "class" => "CONJUNCTION",
+      "type" => "CONJUNCTION_AND",
+      "alias" => "",
+      "children" => [filter, condition]
     }
   end
 
@@ -775,6 +893,9 @@ defmodule Smolquery.QueryService.Decomposer do
     "CAST(arg_#{extreme}(#{quoted("#{@prefix}a#{position}_v")}, " <>
       "#{quoted("#{@prefix}a#{position}_k")}) AS #{type})"
   end
+
+  defp merged({:by_value, {:quantile_sql, final}, _item}, _position, type),
+    do: "CAST(#{final} AS #{type})"
 
   defp merged({:by_value, :count_distinct, _item}, position, type),
     do: "CAST(len(list_distinct(#{flat(position)})) AS #{type})"

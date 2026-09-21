@@ -373,6 +373,32 @@ defmodule Smolquery.QueryService.DecomposerTest do
       )
     end
 
+    test "a quantile is the engine's own over every value the shards hold (T-541)", %{
+      tmp_dir: tmp_dir
+    } do
+      for macro <- ClickHouseFunctions.statements_for("quantileIf(x)"),
+          do: Engine.query!(@engine, macro)
+
+      decomposition =
+        round_trip(
+          "SELECT bucket, quantile_cont(value, 0.95) AS p95, quantile_disc(id, 0.5) AS mid, " <>
+            "median(value) AS med, quantile_cont(value, [0.25, 0.75]) AS quartiles, " <>
+            "quantileIf(value, id > 500, 0.9) AS late, " <>
+            "quantile_cont(value, 0.5) FILTER (WHERE name = 'u-1') AS ones, " <>
+            "quantile_cont(length(tag), 0.5) AS tagged, count(*) AS n " <>
+            "FROM analytics.events GROUP BY bucket ORDER BY bucket",
+          tmp_dir
+        )
+
+      assert decomposition.value_lists
+      refute decomposition.partial_sql =~ ~r/quantile|median/i
+
+      round_trip(
+        "SELECT quantile_cont(value, 0.5) AS none FROM analytics.events WHERE id < 0",
+        tmp_dir
+      )
+    end
+
     test "any answers a value some shard holds, and ships no list (T-539)", %{tmp_dir: tmp_dir} do
       sql = "SELECT bucket, any_value(name) AS one FROM analytics.events GROUP BY bucket"
       {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
@@ -543,6 +569,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
              {:filtered_aggregate, "count"}},
             {"SELECT arg_max(name, id) FILTER (WHERE id > 5) FROM analytics.events",
              {:filtered_aggregate, "arg_max"}},
+            {"SELECT quantile_cont(value, 1 - 0.5) FROM analytics.events",
+             {:unsupported_aggregate_shape, "quantile_cont"}},
             {"SELECT count(DISTINCT big + CAST(1 AS HUGEINT)) FROM analytics.events",
              {:inexact_partial_column, "HUGEINT[]"}},
             {"SELECT groupArray(name, 1 + 1) FROM analytics.events",
@@ -563,8 +591,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
     end
 
     test "an aggregate that does not merge" do
-      assert {:ungrouped_expression, "median"} =
-               refused("SELECT median(value) FROM analytics.events")
+      assert {:ungrouped_expression, "stddev_samp"} =
+               refused("SELECT stddev_samp(value) FROM analytics.events")
     end
 
     test "arithmetic over an aggregate" do
