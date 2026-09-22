@@ -78,6 +78,19 @@ defmodule Smolquery.QueryService.ClientTest do
       assert {:ok, %{non_null_columns: :unknown}, nil} = Client.query(name, sql, explain: :plan)
     end
 
+    test "result_max_rows: replaces the runtime's result budget for one job (T-564)" do
+      name = start_service(result_max_rows: 5)
+      sql = "SELECT range AS n FROM range(10)"
+
+      assert {:ok, %{state: :error, error: {:result_too_large, 5}}, nil} = Client.query(name, sql)
+
+      assert {:ok, %{state: :done, row_count: 10}, _frame} =
+               Client.query(name, sql, result_max_rows: 10)
+
+      assert {:ok, %{state: :error, error: {:result_too_large, 3}}, nil} =
+               Client.query(name, sql, result_max_rows: 3)
+    end
+
     test "read_engine_threads sets the job engine's DuckDB threads (T-279)" do
       name = start_service(read_engine_threads: 2)
 

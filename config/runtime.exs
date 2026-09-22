@@ -169,6 +169,34 @@ if victoriametrics_lookback_ms = System.get_env("SMOLQUERY_VICTORIAMETRICS_LOOKB
       )
 end
 
+if victoriametrics_max_series = System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_SERIES") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_series:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_SERIES",
+        victoriametrics_max_series
+      )
+end
+
+if victoriametrics_max_samples = System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_samples:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES",
+        victoriametrics_max_samples
+      )
+end
+
+if victoriametrics_max_points =
+     System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_points_per_series:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES",
+        victoriametrics_max_points
+      )
+end
+
 if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
   config :smolquery, Smolquery.MetricsServer,
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)

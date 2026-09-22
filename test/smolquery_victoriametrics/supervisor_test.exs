@@ -48,6 +48,23 @@ defmodule SmolqueryVictoriaMetrics.SupervisorTest do
     assert %{"status" => "error", "errorType" => "unavailable"} = response.body
   end
 
+  test "answers a query over a real listener" do
+    {_name, base} = start_edge()
+
+    response =
+      Req.get!(base <> "/api/v1/query?query=42&time=1695000000",
+        headers: [{"authorization", "Bearer " <> @password}],
+        retry: false
+      )
+
+    assert response.status == 200
+
+    assert %{
+             "status" => "success",
+             "data" => %{"resultType" => "scalar", "result" => [1_695_000_000, "42"]}
+           } = response.body
+  end
+
   test "takes basic auth with any user name" do
     {_name, base} = start_edge()
 

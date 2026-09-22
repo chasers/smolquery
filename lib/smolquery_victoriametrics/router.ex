@@ -7,6 +7,14 @@ defmodule SmolqueryVictoriaMetrics.Router do
       POST /api/v1/write                                  SmolqueryVictoriaMetrics.Write
       POST /prometheus/api/v1/write                       the same
       POST /insert/<account>/prometheus/api/v1/write      the same; the account is ignored
+      GET|POST /api/v1/query                              SmolqueryVictoriaMetrics.Query, instant
+      GET|POST /api/v1/query_range                        SmolqueryVictoriaMetrics.Query, range
+
+  The two query routes also answer under `/prometheus` and under
+  `/select/<account>/prometheus`, the prefixes Grafana's datasources use for
+  a VictoriaMetrics behind a proxy or a cluster's `vmselect`; the account
+  is ignored. As in a cluster, `/insert/...` only writes and `/select/...`
+  only reads.
 
   `/api/v1/write` is a single-node VictoriaMetrics' remote-write path, and
   the other two are the prefixes vmagent is pointed at for a VictoriaMetrics
@@ -26,7 +34,9 @@ defmodule SmolqueryVictoriaMetrics.Router do
   Every request emits `[:smolquery, :victoriametrics, :start | :stop]`
   through `Plug.Telemetry`, which `Smolquery.Telemetry` counts into
   `smolquery_victoriametrics_requests_total` and times by the `kind` this
-  router puts in `conn.private`: `write`, `health`, or `other`.
+  router puts in `conn.private`: `write`, `query`, `health`, or `other`.
+  Queries are not held to ingest admission: they read, and the query
+  service bounds its own jobs.
   """
 
   @behaviour Plug
@@ -36,6 +46,7 @@ defmodule SmolqueryVictoriaMetrics.Router do
   alias SmolqueryApi.Admission
   alias SmolqueryVictoriaMetrics.Auth
   alias SmolqueryVictoriaMetrics.Errors
+  alias SmolqueryVictoriaMetrics.Query
   alias SmolqueryVictoriaMetrics.Runtime
   alias SmolqueryVictoriaMetrics.Write
 
@@ -75,17 +86,39 @@ defmodule SmolqueryVictoriaMetrics.Router do
   end
 
   defp authorized(conn, runtime) do
-    case endpoint(conn.method, api_path(conn.path_info)) do
+    case destination(conn.method, conn.path_info) do
       :write -> write(conn, runtime)
+      {:query, kind} -> conn |> kind(:query) |> Query.call(runtime, kind)
       :unknown -> not_found(conn)
     end
   end
 
-  defp api_path(["prometheus" | path]), do: path
-  defp api_path(["insert", _account, "prometheus" | path]), do: path
-  defp api_path(path), do: path
+  defp destination(method, ["prometheus" | path]), do: endpoint(method, path)
+
+  defp destination(method, ["insert", _account, "prometheus" | path]) do
+    case endpoint(method, path) do
+      :write -> :write
+      _query_or_unknown -> :unknown
+    end
+  end
+
+  defp destination(method, ["select", _account, "prometheus" | path]) do
+    case endpoint(method, path) do
+      {:query, kind} -> {:query, kind}
+      _write_or_unknown -> :unknown
+    end
+  end
+
+  defp destination(method, path), do: endpoint(method, path)
 
   defp endpoint("POST", ["api", "v1", "write"]), do: :write
+
+  defp endpoint(method, ["api", "v1", "query"]) when method in ["GET", "POST"],
+    do: {:query, :instant}
+
+  defp endpoint(method, ["api", "v1", "query_range"]) when method in ["GET", "POST"],
+    do: {:query, :range}
+
   defp endpoint(_method, _path), do: :unknown
 
   defp write(conn, runtime) do

@@ -48,6 +48,7 @@ defmodule Smolquery.QueryService.Client do
           | {:hot_before_ms, pos_integer()}
           | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
           | {:params, [term()]}
+          | {:result_max_rows, pos_integer()}
 
   @submit_option_keys [
     :timeout_ms,
@@ -58,7 +59,8 @@ defmodule Smolquery.QueryService.Client do
     :snapshot,
     :hot_before_ms,
     :hot_ids,
-    :params
+    :params,
+    :result_max_rows
   ]
 
   @doc """
@@ -89,6 +91,11 @@ defmodule Smolquery.QueryService.Client do
   or an `Adbc.Column` for a blob — as engine parameters, never as SQL
   text; the pruner and the Top-N bound read them where the `WHERE` names
   a `$n`, and an `explain:` job binds them to its `EXPLAIN`.
+  `result_max_rows:` replaces the runtime's result budget for this job
+  only (T-564): a caller whose own SQL ends in a `LIMIT`, and which holds
+  its own ceiling on what it reads, as the VictoriaMetrics edge's samples
+  query does, sets the budget to that ceiling instead of the page-sized
+  default the API's results are held to.
 
   Returns the finished job and its result frame. The job may have finished
   badly — `job.state` is `:error` or `:cancelled` and the frame `nil` — which

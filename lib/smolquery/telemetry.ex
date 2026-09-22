@@ -49,6 +49,7 @@ defmodule Smolquery.Telemetry do
                                           conn.private.smolquery_victoriametrics_kind
       [:smolquery, :victoriametrics, :samples] %{count}, meta %{result: "written" | "nan" |
                                           "histogram" | "exemplar" | "refused"}
+      [:smolquery, :victoriametrics, :query] %{series, samples, duration_us}
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
@@ -243,6 +244,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :clickhouse, :catalog_refresh],
     [:smolquery, :victoriametrics, :stop],
     [:smolquery, :victoriametrics, :samples],
+    [:smolquery, :victoriametrics, :query],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :flush_trigger],
@@ -300,13 +302,19 @@ defmodule Smolquery.Telemetry do
     "smolquery_victoriametrics_requests_total" =>
       "VictoriaMetrics edge requests answered, by status class.",
     "smolquery_victoriametrics_request_microseconds_total" =>
-      "Time spent answering VictoriaMetrics edge requests, by kind: write, health or other.",
+      "Time spent answering VictoriaMetrics edge requests, by kind: write, query, health or other.",
     "smolquery_victoriametrics_request_microseconds_bucket" =>
       "VictoriaMetrics edge requests by duration, by kind, cumulative in le at the API's " <>
         "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count.",
     "smolquery_victoriametrics_samples_total" =>
       "Remote-write samples by result: written, or dropped as nan, histogram or exemplar, " <>
         "or refused with the block that carried them (PL-70).",
+    "smolquery_victoriametrics_query_series_total" =>
+      "Series the VictoriaMetrics edge's queries matched and read into the node (PL-70); " <>
+        "per query against SMOLQUERY_VICTORIAMETRICS_MAX_SERIES.",
+    "smolquery_victoriametrics_query_samples_total" =>
+      "Raw samples the VictoriaMetrics edge's queries read into the node to compute rollups " <>
+        "(PL-70); per query against SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES.",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -742,6 +750,15 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_victoriametrics_samples_total", [result: result]}, count)
   end
 
+  def handle_event([:smolquery, :victoriametrics, :query], measurements, _meta, nil) do
+    bump({"smolquery_victoriametrics_query_series_total", []}, Map.get(measurements, :series, 0))
+
+    bump(
+      {"smolquery_victoriametrics_query_samples_total", []},
+      Map.get(measurements, :samples, 0)
+    )
+  end
+
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do
     bump({"smolquery_ingest_rows_accepted_total", []}, Map.get(measurements, :accepted, 0))
     bump({"smolquery_ingest_rows_rejected_total", []}, Map.get(measurements, :rejected, 0))
@@ -1062,7 +1079,7 @@ defmodule Smolquery.Telemetry do
   defp clickhouse_kind(_conn), do: :other
 
   defp victoriametrics_kind(%{private: %{smolquery_victoriametrics_kind: kind}})
-       when kind in [:write, :health],
+       when kind in [:write, :query, :health],
        do: kind
 
   defp victoriametrics_kind(_conn), do: :other

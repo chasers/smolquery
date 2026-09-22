@@ -15,7 +15,10 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         ip: {127, 0, 0, 1},
         port: 8428,
         table: "metrics.samples",
-        lookback_ms: 300_000
+        lookback_ms: 300_000,
+        max_series: 10_000,
+        max_samples: 20_000_000,
+        max_points_per_series: 30_000
 
   `password` is what every client must present, as a `Bearer` token or HTTP
   basic auth (`SmolqueryVictoriaMetrics.Auth`). It defaults to the API key
@@ -37,6 +40,14 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   `lookback_ms` is how far back an instant selector looks for a sample
   (`SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS`, `300_000`): the lookback of
   MetricsQL's `default_rollup`, used as `max(step, lookback_ms)`.
+
+  `max_series`, `max_samples` and `max_points_per_series` are the ceilings on
+  one query (`SMOLQUERY_VICTORIAMETRICS_MAX_SERIES`, `_MAX_SAMPLES`,
+  `_MAX_POINTS_PER_SERIES`; `10_000`, `20_000_000`, `30_000`): the series one
+  selector may match, the raw samples one selector may read into the BEAM,
+  and the points of one query's step grid, which is VictoriaMetrics'
+  `-search.maxPointsPerTimeseries`. A query past any of them is refused
+  rather than run (`SmolqueryVictoriaMetrics.Query`).
 
   `max_ndjson_bytes` and `insert_max_in_flight_bytes` default to the API's
   (`SMOLQUERY_INSERT_MAX_NDJSON_BYTES`, `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES`):
@@ -69,6 +80,9 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     max_ndjson_bytes: 8_000_000,
     insert_max_in_flight_bytes: nil,
     lookback_ms: 300_000,
+    max_series: 10_000,
+    max_samples: 20_000_000,
+    max_points_per_series: 30_000,
     ip: {127, 0, 0, 1},
     port: 8428
   ]
@@ -84,6 +98,9 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           max_ndjson_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil,
           lookback_ms: pos_integer(),
+          max_series: pos_integer(),
+          max_samples: pos_integer(),
+          max_points_per_series: pos_integer(),
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -128,7 +145,16 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         )
     }
     |> struct!(
-      Keyword.take(config, [:ingest_name, :query_name, :lookback_ms, :ip, :port | @api_defaults])
+      Keyword.take(config, [
+        :ingest_name,
+        :query_name,
+        :lookback_ms,
+        :max_series,
+        :max_samples,
+        :max_points_per_series,
+        :ip,
+        :port | @api_defaults
+      ])
     )
     |> table(Keyword.get(config, :table))
   end

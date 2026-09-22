@@ -25,9 +25,20 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
     assert runtime.port == 0
     assert runtime.table == {"metrics", "samples"}
     assert runtime.lookback_ms == 300_000
+    assert runtime.max_series == 10_000
+    assert runtime.max_samples == 20_000_000
+    assert runtime.max_points_per_series == 30_000
     assert runtime.ingest_name == Smolquery.IngestService
     assert runtime.query_name == Smolquery.QueryService
     assert runtime.catalog_opts == []
+  end
+
+  test "takes the query ceilings" do
+    runtime =
+      Runtime.new(password: "given", max_series: 5, max_samples: 50, max_points_per_series: 500)
+
+    assert {runtime.max_series, runtime.max_samples, runtime.max_points_per_series} ==
+             {5, 50, 500}
   end
 
   test "the password defaults to the API key" do

@@ -238,7 +238,7 @@ defmodule Smolquery.TelemetryTest do
 
       before_class = value("smolquery_victoriametrics_requests_total", ~s({class="2xx"}))
 
-      for {kind, label} <- [write: :write, health: :health, query: :other, nil: :other] do
+      for {kind, label} <- [write: :write, health: :health, query: :query, nil: :other] do
         was = value(family, inf.(label))
 
         stopped(
@@ -293,6 +293,24 @@ defmodule Smolquery.TelemetryTest do
     rendered = Telemetry.render()
     refute rendered =~ ~s(result="surprise")
     assert rendered =~ "# HELP smolquery_victoriametrics_samples_total Remote-write samples"
+  end
+
+  test "counts the series and samples the VictoriaMetrics edge's queries read (T-564)" do
+    before_series = value("smolquery_victoriametrics_query_series_total", "")
+    before_samples = value("smolquery_victoriametrics_query_samples_total", "")
+
+    :telemetry.execute(
+      [:smolquery, :victoriametrics, :query],
+      %{series: 3, samples: 1_200, duration_us: 900},
+      %{}
+    )
+
+    assert value("smolquery_victoriametrics_query_series_total", "") == before_series + 3
+    assert value("smolquery_victoriametrics_query_samples_total", "") == before_samples + 1_200
+
+    rendered = Telemetry.render()
+    assert rendered =~ "# HELP smolquery_victoriametrics_query_series_total Series"
+    assert rendered =~ "# HELP smolquery_victoriametrics_query_samples_total Raw samples"
   end
 
   test "prices the ClickHouse edge's catalog checks apart from its rebuilds (T-529)" do

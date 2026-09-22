@@ -90,7 +90,9 @@ defmodule SmolqueryVictoriaMetrics.RouterTest do
           conn(:get, "/api/v1/write"),
           conn(:post, "/api/v2/write", ""),
           conn(:post, "/insert/0/api/v1/write", ""),
-          conn(:get, "/api/v1/query")
+          conn(:put, "/api/v1/query", ""),
+          conn(:get, "/insert/0/prometheus/api/v1/query"),
+          conn(:post, "/select/0/prometheus/api/v1/write", "")
         ] do
       response = conn |> authed() |> request(name)
       path = conn.request_path
@@ -98,6 +100,21 @@ defmodule SmolqueryVictoriaMetrics.RouterTest do
       assert response.status == 404, "#{conn.method} #{path}"
       assert JSON.decode!(response.resp_body)["error"] =~ path
       assert_receive {:stopped, ^path, nil}
+    end
+  end
+
+  test "every query path reaches the query, kind query", %{name: name} do
+    for prefix <- ["", "/prometheus", "/select/0/prometheus"],
+        route <- ["/api/v1/query", "/api/v1/query_range"],
+        method <- [:get, :post] do
+      path = prefix <> route
+
+      response =
+        conn(method, path <> "?query=42&time=1&start=1&end=2&step=1") |> authed() |> request(name)
+
+      assert response.status == 200, "#{method} #{path}"
+      assert %{"status" => "success"} = JSON.decode!(response.resp_body)
+      assert_receive {:stopped, ^path, :query}
     end
   end
 

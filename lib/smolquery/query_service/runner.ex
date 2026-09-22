@@ -154,7 +154,10 @@ defmodule Smolquery.QueryService.Runner do
     Process.send_after(self(), :deadline, timeout_ms)
 
     state = %{
-      runtime: override_distributed(runtime, Keyword.get(opts, :distributed)),
+      runtime:
+        runtime
+        |> override_distributed(Keyword.get(opts, :distributed))
+        |> override_result_max_rows(Keyword.get(opts, :result_max_rows)),
       timeout_ms: timeout_ms,
       job: job,
       explain: mode(opts),
@@ -170,6 +173,12 @@ defmodule Smolquery.QueryService.Runner do
 
     {:ok, state, {:continue, :run}}
   end
+
+  defp override_result_max_rows(runtime, nil), do: runtime
+
+  defp override_result_max_rows(%Runtime{} = runtime, max_rows)
+       when is_integer(max_rows) and max_rows > 0,
+       do: %{runtime | result_max_rows: max_rows}
 
   defp override_distributed(runtime, nil), do: runtime
 
