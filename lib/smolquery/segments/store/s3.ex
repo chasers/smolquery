@@ -440,7 +440,7 @@ defmodule Smolquery.Segments.Store.S3 do
 
   defp describe(response, op, bytes) do
     {%{bytes: offered(response, bytes)},
-     %{op: op, status: status(response), result: result(response)}}
+     %{op: op, status: status(response), result: Smolquery.Telemetry.outcome(response)}}
   end
 
   defp offered({:ok, _response}, bytes), do: bytes
@@ -448,9 +448,6 @@ defmodule Smolquery.Segments.Store.S3 do
 
   defp status({:ok, %{status: status}}), do: status
   defp status(_transport_failure), do: nil
-
-  defp result({:ok, _response}), do: :ok
-  defp result(_transport_failure), do: :error
 
   defp request(%__MODULE__{} = config) do
     Req.new()

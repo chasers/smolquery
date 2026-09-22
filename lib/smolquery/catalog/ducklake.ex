@@ -1431,7 +1431,10 @@ defmodule Smolquery.Catalog.DuckLake do
   defp query(config, sql, params \\ [], timeout \\ 30_000),
     do: statement(:query, fn -> Engine.try_query(config.engine, sql, params, timeout) end)
 
-  defp transaction(config, statements, timeout \\ 30_000),
+  defp transaction(config, statements),
+    do: statement(:transaction, fn -> Engine.try_transaction(config.engine, statements) end)
+
+  defp transaction(config, statements, timeout),
     do:
       statement(:transaction, fn -> Engine.try_transaction(config.engine, statements, timeout) end)
 

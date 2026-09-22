@@ -35,6 +35,14 @@ defmodule Smolquery.CatalogTest do
       assert_received {:op, _measurements, %{op: :table_schema, result: :error}}
     end
 
+    test "a schema_version answered by current_snapshot is still counted as schema_version", %{
+      catalog: catalog
+    } do
+      assert {:ok, _version} = Catalog.schema_version(catalog)
+      assert_received {:op, _measurements, %{op: :schema_version, result: :ok}}
+      refute_received {:op, _measurements, %{op: :current_snapshot}}
+    end
+
     test "an optional callback the implementation lacks emits nothing", %{catalog: catalog} do
       assert Catalog.list_connections(catalog) == {:error, :connections_unsupported}
       refute_received {:op, _measurements, %{op: :list_connections}}

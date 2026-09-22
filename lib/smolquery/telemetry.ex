@@ -405,15 +405,16 @@ defmodule Smolquery.Telemetry do
     "smolquery_catalog_op_microseconds_total" =>
       "Time catalog operations took, by op and result; divide by ops for the mean (T-549).",
     "smolquery_catalog_op_microseconds_bucket" =>
-      "Catalog operations by duration, by op, cumulative in le at 1 ms, 5 ms, 25 ms, 100 ms, " <>
-        "250 ms, 1 s and 5 s; counters, not a histogram (T-549).",
+      "Catalog operations by duration, by op and result, cumulative in le at 1 ms, 5 ms, " <>
+        "25 ms, 100 ms, 250 ms, 1 s, 5 s and 30 s; counters, not a histogram (T-549).",
     "smolquery_catalog_statements_total" =>
       "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
         "result; over ops, what one op costs in statements (T-549).",
     "smolquery_catalog_statement_microseconds_total" =>
       "Time catalog statements took, by kind and result; divide by statements for the mean.",
     "smolquery_catalog_statement_microseconds_bucket" =>
-      "Catalog statements by duration, by kind, cumulative in le at the op bucket's bounds; " <>
+      "Catalog statements by duration, by kind and result, cumulative in le at the op " <>
+        "bucket's bounds; " <>
         "the closest in-app proxy for one DuckDB transaction against the metadata database.",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
@@ -441,8 +442,22 @@ defmodule Smolquery.Telemetry do
 
   # Bounds for the catalog's `_microseconds_bucket`s, ascending: a local
   # metadata read is milliseconds, one through a Postgres catalog in another
-  # zone was measured at 230-440 ms (T-548), and a statement times out at 5 s.
-  @catalog_latency_buckets [1_000, 5_000, 25_000, 100_000, 250_000, 1_000_000, 5_000_000]
+  # zone measured 230-440 ms (T-548), and a statement that hangs comes back
+  # at the engine's 30 s default timeout, so the top bound tells that apart.
+  @catalog_latency_buckets [
+    1_000,
+    5_000,
+    25_000,
+    100_000,
+    250_000,
+    1_000_000,
+    5_000_000,
+    30_000_000
+  ]
+
+  # The catalog ops are the behaviour's callbacks: a closed set, so a
+  # label can only be one of them.
+  @catalog_ops Smolquery.Catalog.behaviour_info(:callbacks) |> Keyword.keys() |> Enum.uniq()
 
   # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
   # Closest together where the buffer's commit windows put an insert's ack:
@@ -866,15 +881,11 @@ defmodule Smolquery.Telemetry do
   end
 
   def handle_event([:smolquery, :catalog, :op], measurements, meta, nil) do
-    op = Map.get(meta, :op, :unknown)
-
-    catalog_timed("smolquery_catalog_op", [op: op], measurements, meta)
+    catalog_timed("smolquery_catalog_op", [op: catalog_op(meta)], measurements, meta)
   end
 
   def handle_event([:smolquery, :catalog, :statement], measurements, meta, nil) do
-    kind = Map.get(meta, :kind, :unknown)
-
-    catalog_timed("smolquery_catalog_statement", [kind: kind], measurements, meta)
+    catalog_timed("smolquery_catalog_statement", [kind: catalog_kind(meta)], measurements, meta)
   end
 
   def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
@@ -954,7 +965,7 @@ defmodule Smolquery.Telemetry do
 
     bump({stem <> "s_total", labels}, 1)
     bump({stem <> "_microseconds_total", labels}, duration_us)
-    bucket(stem <> "_microseconds_bucket", by, @catalog_latency_buckets, duration_us)
+    bucket(stem <> "_microseconds_bucket", labels, @catalog_latency_buckets, duration_us)
   end
 
   defp bucket_s3_latency(op, duration_us) do
@@ -973,6 +984,12 @@ defmodule Smolquery.Telemetry do
 
   defp s3_op(%{op: op}) when op in [:put, :head, :list, :delete], do: op
   defp s3_op(_meta), do: :unknown
+
+  defp catalog_op(%{op: op}) when op in @catalog_ops, do: op
+  defp catalog_op(_meta), do: :unknown
+
+  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction], do: kind
+  defp catalog_kind(_meta), do: :unknown
 
   defp s3_class(%{status: status}) when is_integer(status), do: status_class(status)
   defp s3_class(_meta), do: "error"

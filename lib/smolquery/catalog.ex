@@ -390,7 +390,7 @@ defmodule Smolquery.Catalog do
   def schema_version(%__MODULE__{} = catalog) do
     if function_exported?(catalog.impl, :schema_version, 1),
       do: call(catalog, :schema_version, []),
-      else: current_snapshot(catalog)
+      else: measured(:schema_version, fn -> catalog.impl.current_snapshot(catalog.config) end)
   end
 
   @doc """
@@ -632,11 +632,14 @@ defmodule Smolquery.Catalog do
   def delete_connection(%__MODULE__{} = catalog, name),
     do: dispatch(catalog, :delete_connection, [name])
 
-  defp call(catalog, function, args) do
+  defp call(catalog, function, args),
+    do: measured(function, fn -> apply(catalog.impl, function, [catalog.config | args]) end)
+
+  defp measured(op, fun) do
     Smolquery.Telemetry.span(
       [:smolquery, :catalog, :op],
-      &{%{}, %{op: function, result: Smolquery.Telemetry.outcome(&1)}},
-      fn -> apply(catalog.impl, function, [catalog.config | args]) end
+      &{%{}, %{op: op, result: Smolquery.Telemetry.outcome(&1)}},
+      fun
     )
   end
 

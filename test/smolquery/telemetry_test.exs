@@ -610,10 +610,10 @@ defmodule Smolquery.TelemetryTest do
 
   test "counts catalog ops and statements by result, with latency buckets (T-549)" do
     op = ~s({op="current_snapshot",result="ok"})
-    op_fast = ~s({op="current_snapshot",le="1000"})
-    op_slow = ~s({op="current_snapshot",le="1000000"})
+    op_fast = ~s({op="current_snapshot",result="ok",le="1000"})
+    op_slow = ~s({op="current_snapshot",result="ok",le="1000000"})
     statement = ~s({kind="query",result="error"})
-    statement_inf = ~s({kind="query",le="+Inf"})
+    statement_inf = ~s({kind="query",result="error",le="+Inf"})
     before_ops = value("smolquery_catalog_ops_total", op)
     before_op_us = value("smolquery_catalog_op_microseconds_total", op)
     before_op_fast = value("smolquery_catalog_op_microseconds_bucket", op_fast)
