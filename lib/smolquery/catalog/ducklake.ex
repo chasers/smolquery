@@ -104,6 +104,9 @@ defmodule Smolquery.Catalog.DuckLake do
   or `Smolquery.Engine.try_transaction/3`, so a call that times out on a busy
   connection, or finds the connection gone, comes back as
   `{:error, %Smolquery.Engine.CallExited{}}` like any other failure (T-464).
+  Each is also one `[:smolquery, :catalog, :statement]` event, by kind and
+  result (T-549): over the `[:smolquery, :catalog, :op]` events, how many
+  statements one catalog operation costs, and how long each takes.
   Every `Smolquery.Catalog` callback already promises `{:error, term()}`, and
   the callers that matter are sweeps: the compactor, retention and GC each
   visit every table in one long-lived process, and an exit from one table's
@@ -449,7 +452,7 @@ defmodule Smolquery.Catalog.DuckLake do
         if nullable, do: [defined], else: [defined, required]
       end)
 
-    Engine.try_transaction(config.engine, statements)
+    transaction(config, statements)
   end
 
   @impl Catalog
@@ -718,8 +721,8 @@ defmodule Smolquery.Catalog.DuckLake do
   defp swap(config, ref, add, drop) do
     with {:ok, name} <- table_name(config, ref),
          :ok <-
-           Engine.try_transaction(
-             config.engine,
+           transaction(
+             config,
              [delete_statement(name, drop), add_statement(config, ref, add)],
              config.swap_timeout_ms
            ) do
@@ -857,7 +860,7 @@ defmodule Smolquery.Catalog.DuckLake do
          :ok <- maybe_ensure_retention_table(config, options) do
       case option_statements(config, dataset, table, options) do
         [] -> :ok
-        statements -> Engine.try_transaction(config.engine, statements)
+        statements -> transaction(config, statements)
       end
     end
   end
@@ -1012,7 +1015,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp transact(config, statements) do
     with_commit_retries(fn ->
-      case Engine.try_transaction(config.engine, statements) do
+      case transaction(config, statements) do
         :ok -> {:ok, :committed}
         {:error, _error} = failure -> failure
       end
@@ -1186,7 +1189,7 @@ defmodule Smolquery.Catalog.DuckLake do
     now = System.system_time(:millisecond)
     created_at = connection.created_at || now
 
-    Engine.try_transaction(config.engine, [
+    transaction(config, [
       delete_connection_sql(config, connection.name),
       "INSERT INTO #{connections_table(config.catalog)} " <>
         "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at) " <>
@@ -1426,7 +1429,19 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp query(config, sql, params \\ [], timeout \\ 30_000),
-    do: Engine.try_query(config.engine, sql, params, timeout)
+    do: statement(:query, fn -> Engine.try_query(config.engine, sql, params, timeout) end)
+
+  defp transaction(config, statements, timeout \\ 30_000),
+    do:
+      statement(:transaction, fn -> Engine.try_transaction(config.engine, statements, timeout) end)
+
+  defp statement(kind, run) do
+    Smolquery.Telemetry.span(
+      [:smolquery, :catalog, :statement],
+      &{%{}, %{kind: kind, result: Smolquery.Telemetry.outcome(&1)}},
+      run
+    )
+  end
 
   defp engine_extensions do
     :smolquery

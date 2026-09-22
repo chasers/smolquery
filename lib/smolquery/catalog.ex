@@ -30,6 +30,15 @@ defmodule Smolquery.Catalog do
   produced, and a query at snapshot `S` includes a micro-segment only if it is
   unsealed or was sealed after `S`.
 
+  ## Every call is measured
+
+  Each function here that reaches the implementation emits one
+  `[:smolquery, :catalog, :op]` event, `op` the callback and `result` `:ok`
+  or `:error` (T-549). `Smolquery.Telemetry` renders them as
+  `smolquery_catalog_ops_total{op,result}` and its latency siblings, so a
+  deployment can see which reads a query pays for before it plans, and what
+  each costs against a metadata database in another zone.
+
   ## Usage
 
       catalog = Smolquery.Catalog.DuckLake.new(engine: MyLake)
@@ -196,27 +205,27 @@ defmodule Smolquery.Catalog do
   """
   @spec create_dataset(t(), String.t()) :: :ok | {:error, term()}
   def create_dataset(%__MODULE__{} = catalog, dataset),
-    do: catalog.impl.create_dataset(catalog.config, dataset)
+    do: call(catalog, :create_dataset, [dataset])
 
   @doc """
   Every dataset in the catalog.
   """
   @spec list_datasets(t()) :: {:ok, [String.t()]} | {:error, term()}
-  def list_datasets(%__MODULE__{} = catalog), do: catalog.impl.list_datasets(catalog.config)
+  def list_datasets(%__MODULE__{} = catalog), do: call(catalog, :list_datasets, [])
 
   @doc """
   Creates a table from a `Smolquery.Schema`, if it does not already exist.
   """
   @spec create_table(t(), table_ref(), Schema.t()) :: :ok | {:error, term()}
   def create_table(%__MODULE__{} = catalog, table, schema),
-    do: catalog.impl.create_table(catalog.config, table, schema)
+    do: call(catalog, :create_table, [table, schema])
 
   @doc """
   Every table in `dataset`.
   """
   @spec list_tables(t(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def list_tables(%__MODULE__{} = catalog, dataset),
-    do: catalog.impl.list_tables(catalog.config, dataset)
+    do: call(catalog, :list_tables, [dataset])
 
   @doc """
   Every table in the catalog, qualified — the flattened form of
@@ -245,7 +254,7 @@ defmodule Smolquery.Catalog do
   """
   @spec table_schema(t(), table_ref()) :: {:ok, Schema.t()} | {:error, term()}
   def table_schema(%__MODULE__{} = catalog, table),
-    do: catalog.impl.table_schema(catalog.config, table)
+    do: call(catalog, :table_schema, [table])
 
   @doc """
   Registers written segments against a table, returning the committed snapshot.
@@ -264,7 +273,7 @@ defmodule Smolquery.Catalog do
   """
   @spec register_segments(t(), table_ref(), [Segment.t()]) :: {:ok, snapshot()} | {:error, term()}
   def register_segments(%__MODULE__{} = catalog, table, segments),
-    do: catalog.impl.register_segments(catalog.config, table, segments)
+    do: call(catalog, :register_segments, [table, segments])
 
   @doc """
   The paths of a table's segments, as of `snapshot` (or `:current`).
@@ -272,7 +281,7 @@ defmodule Smolquery.Catalog do
   @spec segments(t(), table_ref(), snapshot() | :current) ::
           {:ok, [String.t()]} | {:error, term()}
   def segments(%__MODULE__{} = catalog, table, snapshot \\ :current),
-    do: catalog.impl.segments(catalog.config, table, snapshot)
+    do: call(catalog, :segments, [table, snapshot])
 
   @doc """
   Every path ever registered against the table at a snapshot at or before
@@ -289,7 +298,7 @@ defmodule Smolquery.Catalog do
   @spec registered_through(t(), table_ref(), snapshot()) ::
           {:ok, [String.t()]} | {:error, term()}
   def registered_through(%__MODULE__{} = catalog, table, snapshot),
-    do: catalog.impl.registered_through(catalog.config, table, snapshot)
+    do: call(catalog, :registered_through, [table, snapshot])
 
   @doc """
   The count, total rows, and total bytes of a table's segments at `snapshot`.
@@ -303,7 +312,7 @@ defmodule Smolquery.Catalog do
   @spec segment_stats(t(), table_ref(), snapshot()) ::
           {:ok, segment_stats()} | {:error, term()}
   def segment_stats(%__MODULE__{} = catalog, table, snapshot),
-    do: catalog.impl.segment_stats(catalog.config, table, snapshot)
+    do: call(catalog, :segment_stats, [table, snapshot])
 
   @doc """
   Each segment's path, rows, and bytes at `snapshot` — `segment_stats/3` per
@@ -319,7 +328,7 @@ defmodule Smolquery.Catalog do
   @spec segment_files(t(), table_ref(), snapshot() | :current) ::
           {:ok, [segment_file()]} | {:error, term()}
   def segment_files(%__MODULE__{} = catalog, table, snapshot),
-    do: catalog.impl.segment_files(catalog.config, table, snapshot)
+    do: call(catalog, :segment_files, [table, snapshot])
 
   @doc """
   Removes segments from a table's current snapshot, returning the new snapshot.
@@ -329,7 +338,7 @@ defmodule Smolquery.Catalog do
   """
   @spec drop_segments(t(), table_ref(), [String.t()]) :: {:ok, snapshot()} | {:error, term()}
   def drop_segments(%__MODULE__{} = catalog, table, paths),
-    do: catalog.impl.drop_segments(catalog.config, table, paths)
+    do: call(catalog, :drop_segments, [table, paths])
 
   @doc """
   Registers `segments` and drops `paths` in one commit, returning its snapshot.
@@ -350,14 +359,14 @@ defmodule Smolquery.Catalog do
   @spec replace_segments(t(), table_ref(), [Segment.t()], [String.t()]) ::
           {:ok, snapshot()} | {:error, term()}
   def replace_segments(%__MODULE__{} = catalog, table, segments, paths),
-    do: catalog.impl.replace_segments(catalog.config, table, segments, paths)
+    do: call(catalog, :replace_segments, [table, segments, paths])
 
   @doc """
   The catalog's current snapshot.
   """
   @spec current_snapshot(t()) :: {:ok, snapshot()} | {:error, term()}
   def current_snapshot(%__MODULE__{} = catalog),
-    do: catalog.impl.current_snapshot(catalog.config)
+    do: call(catalog, :current_snapshot, [])
 
   @doc """
   A number that moves when the lake's shape changes — a dataset or a table
@@ -380,7 +389,7 @@ defmodule Smolquery.Catalog do
   @spec schema_version(t()) :: {:ok, non_neg_integer()} | {:error, term()}
   def schema_version(%__MODULE__{} = catalog) do
     if function_exported?(catalog.impl, :schema_version, 1),
-      do: catalog.impl.schema_version(catalog.config),
+      do: call(catalog, :schema_version, []),
       else: current_snapshot(catalog)
   end
 
@@ -412,7 +421,7 @@ defmodule Smolquery.Catalog do
   """
   @spec known_segments(t()) :: {:ok, [String.t()]} | {:error, term()}
   def known_segments(%__MODULE__{} = catalog),
-    do: catalog.impl.known_segments(catalog.config)
+    do: call(catalog, :known_segments, [])
 
   @doc """
   Sets (or with `nil` clears) a table's retention policy.
@@ -428,14 +437,14 @@ defmodule Smolquery.Catalog do
   """
   @spec put_retention(t(), table_ref(), retention() | nil) :: :ok | {:error, term()}
   def put_retention(%__MODULE__{} = catalog, table, policy),
-    do: catalog.impl.put_retention(catalog.config, table, policy)
+    do: call(catalog, :put_retention, [table, policy])
 
   @doc """
   A table's retention policy, or `nil` when it keeps rows forever.
   """
   @spec retention(t(), table_ref()) :: {:ok, retention() | nil} | {:error, term()}
   def retention(%__MODULE__{} = catalog, table),
-    do: catalog.impl.retention(catalog.config, table)
+    do: call(catalog, :retention, [table])
 
   @doc """
   Sets a table's clustering key — the columns future writes sort by.
@@ -446,14 +455,14 @@ defmodule Smolquery.Catalog do
   """
   @spec put_clustering(t(), table_ref(), clustering()) :: :ok | {:error, term()}
   def put_clustering(%__MODULE__{} = catalog, table, columns) when is_list(columns),
-    do: catalog.impl.put_clustering(catalog.config, table, columns)
+    do: call(catalog, :put_clustering, [table, columns])
 
   @doc """
   A table's clustering key, or `[]` when writes are unsorted.
   """
   @spec clustering(t(), table_ref()) :: {:ok, clustering()} | {:error, term()}
   def clustering(%__MODULE__{} = catalog, table),
-    do: catalog.impl.clustering(catalog.config, table)
+    do: call(catalog, :clustering, [table])
 
   @doc """
   Raises a table's write-partition count.
@@ -466,7 +475,7 @@ defmodule Smolquery.Catalog do
   @spec put_partitions(t(), table_ref(), partitions()) :: :ok | {:error, term()}
   def put_partitions(%__MODULE__{} = catalog, table, count)
       when is_integer(count) and count > 0,
-      do: catalog.impl.put_partitions(catalog.config, table, count)
+      do: call(catalog, :put_partitions, [table, count])
 
   @doc """
   A table's write-partition count, or `nil` when the deployment's
@@ -474,7 +483,7 @@ defmodule Smolquery.Catalog do
   """
   @spec partitions(t(), table_ref()) :: {:ok, partitions() | nil} | {:error, term()}
   def partitions(%__MODULE__{} = catalog, table),
-    do: catalog.impl.partitions(catalog.config, table)
+    do: call(catalog, :partitions, [table])
 
   @doc """
   Applies a table's mutable settings — retention, clustering, and/or
@@ -491,7 +500,7 @@ defmodule Smolquery.Catalog do
   @spec put_table_options(t(), table_ref(), table_options()) :: :ok | {:error, term()}
   def put_table_options(%__MODULE__{} = catalog, table, options) when is_map(options) do
     if function_exported?(catalog.impl, :put_table_options, 3) do
-      catalog.impl.put_table_options(catalog.config, table, options)
+      call(catalog, :put_table_options, [table, options])
     else
       with :ok <- sequential_put(catalog, table, options, :retention),
            :ok <- sequential_put(catalog, table, options, :clustering) do
@@ -569,7 +578,7 @@ defmodule Smolquery.Catalog do
 
   defp altered(catalog, table, change) do
     if function_exported?(catalog.impl, :alter_table, 3),
-      do: catalog.impl.alter_table(catalog.config, table, change),
+      do: call(catalog, :alter_table, [table, change]),
       else: {:error, :alter_table_unsupported}
   end
 
@@ -623,9 +632,17 @@ defmodule Smolquery.Catalog do
   def delete_connection(%__MODULE__{} = catalog, name),
     do: dispatch(catalog, :delete_connection, [name])
 
+  defp call(catalog, function, args) do
+    Smolquery.Telemetry.span(
+      [:smolquery, :catalog, :op],
+      &{%{}, %{op: function, result: Smolquery.Telemetry.outcome(&1)}},
+      fn -> apply(catalog.impl, function, [catalog.config | args]) end
+    )
+  end
+
   defp dispatch(catalog, function, args) do
     if function_exported?(catalog.impl, function, length(args) + 1) do
-      apply(catalog.impl, function, [catalog.config | args])
+      call(catalog, function, args)
     else
       {:error, :connections_unsupported}
     end
@@ -643,5 +660,5 @@ defmodule Smolquery.Catalog do
   """
   @spec expire_snapshots(t(), pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def expire_snapshots(%__MODULE__{} = catalog, older_than_ms),
-    do: catalog.impl.expire_snapshots(catalog.config, older_than_ms)
+    do: call(catalog, :expire_snapshots, [older_than_ms])
 end

@@ -12,6 +12,35 @@ defmodule Smolquery.CatalogTest do
     %{catalog: StubCatalog.new(self())}
   end
 
+  describe "every call is one [:smolquery, :catalog, :op] event (T-549)" do
+    setup do
+      parent = self()
+      handler = "catalog-op-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :catalog, :op],
+        fn _event, measurements, meta, _config -> send(parent, {:op, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "names the op and folds the answer to a result", %{catalog: catalog} do
+      assert {:ok, _snapshot} = Catalog.current_snapshot(catalog)
+      assert_received {:op, %{duration_us: _us}, %{op: :current_snapshot, result: :ok}}
+
+      assert {:error, _reason} = Catalog.table_schema(MapCatalog.new(), {"ds", "missing"})
+      assert_received {:op, _measurements, %{op: :table_schema, result: :error}}
+    end
+
+    test "an optional callback the implementation lacks emits nothing", %{catalog: catalog} do
+      assert Catalog.list_connections(catalog) == {:error, :connections_unsupported}
+      refute_received {:op, _measurements, %{op: :list_connections}}
+    end
+  end
+
   describe "alter_table/3: the checks every implementation shares" do
     test "refuses a partition ref before touching the catalog", %{catalog: catalog} do
       assert Catalog.alter_table(catalog, {"ds", "t__p1"}, {:drop_column, "id"}) ==

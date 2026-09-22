@@ -143,6 +143,10 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold | :failed}
                                           — one per job or shard engine acquired (PL-50)
+      [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
+                                          — one per Smolquery.Catalog call; op is the callback (T-549)
+      [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction, result}
+                                          — one per statement the DuckLake catalog sent its engine
       [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
                                           — one per query the distributed path answered (PL-49)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
@@ -202,6 +206,16 @@ defmodule Smolquery.Telemetry do
     end
   end
 
+  @doc """
+  `:ok` for `:ok` or `{:ok, _}`, `:error` for anything else — a span's
+  `{:raised, kind, reason}` included — the `result` a span's describe puts
+  in its metadata.
+  """
+  @spec outcome(term()) :: :ok | :error
+  def outcome(:ok), do: :ok
+  def outcome({:ok, _value}), do: :ok
+  def outcome(_error_or_raised), do: :error
+
   defp emit(event, started, {measurements, meta}) when is_map(measurements) and is_map(meta) do
     duration_us = System.monotonic_time(:microsecond) - started
     clock = %{start_us: started, duration_us: duration_us}
@@ -238,6 +252,8 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :scatter],
     [:smolquery, :query, :engine],
     [:smolquery, :query, :engine_probe],
+    [:smolquery, :catalog, :op],
+    [:smolquery, :catalog, :statement],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -384,6 +400,21 @@ defmodule Smolquery.Telemetry do
       "Warm engines the pool probed, by outcome: ok, or stale and replaced (T-548).",
     "smolquery_query_engine_probe_microseconds_total" =>
       "Time the pool spent probing warm engines, by outcome; divide by probes for the mean.",
+    "smolquery_catalog_ops_total" =>
+      "Catalog operations asked of the lake, by op and result (T-549).",
+    "smolquery_catalog_op_microseconds_total" =>
+      "Time catalog operations took, by op and result; divide by ops for the mean (T-549).",
+    "smolquery_catalog_op_microseconds_bucket" =>
+      "Catalog operations by duration, by op, cumulative in le at 1 ms, 5 ms, 25 ms, 100 ms, " <>
+        "250 ms, 1 s and 5 s; counters, not a histogram (T-549).",
+    "smolquery_catalog_statements_total" =>
+      "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
+        "result; over ops, what one op costs in statements (T-549).",
+    "smolquery_catalog_statement_microseconds_total" =>
+      "Time catalog statements took, by kind and result; divide by statements for the mean.",
+    "smolquery_catalog_statement_microseconds_bucket" =>
+      "Catalog statements by duration, by kind, cumulative in le at the op bucket's bounds; " <>
+        "the closest in-app proxy for one DuckDB transaction against the metadata database.",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
     "smolquery_query_scatter_shards_total" =>
@@ -407,6 +438,11 @@ defmodule Smolquery.Telemetry do
   @commit_row_buckets [1_000, 4_000, 16_000, 64_000]
 
   @s3_latency_buckets [10_000, 50_000, 250_000, 1_000_000, 5_000_000]
+
+  # Bounds for the catalog's `_microseconds_bucket`s, ascending: a local
+  # metadata read is milliseconds, one through a Postgres catalog in another
+  # zone was measured at 230-440 ms (T-548), and a statement times out at 5 s.
+  @catalog_latency_buckets [1_000, 5_000, 25_000, 100_000, 250_000, 1_000_000, 5_000_000]
 
   # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
   # Closest together where the buffer's commit windows put an insert's ack:
@@ -829,6 +865,18 @@ defmodule Smolquery.Telemetry do
     )
   end
 
+  def handle_event([:smolquery, :catalog, :op], measurements, meta, nil) do
+    op = Map.get(meta, :op, :unknown)
+
+    catalog_timed("smolquery_catalog_op", [op: op], measurements, meta)
+  end
+
+  def handle_event([:smolquery, :catalog, :statement], measurements, meta, nil) do
+    kind = Map.get(meta, :kind, :unknown)
+
+    catalog_timed("smolquery_catalog_statement", [kind: kind], measurements, meta)
+  end
+
   def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
     bump({"smolquery_query_scattered_total", []}, 1)
     bump({"smolquery_query_scatter_shards_total", []}, Map.get(measurements, :shards, 0))
@@ -899,6 +947,15 @@ defmodule Smolquery.Telemetry do
        do: kind
 
   defp clickhouse_kind(_conn), do: :other
+
+  defp catalog_timed(stem, by, measurements, meta) do
+    duration_us = Map.get(measurements, :duration_us, 0)
+    labels = by ++ [result: result(meta)]
+
+    bump({stem <> "s_total", labels}, 1)
+    bump({stem <> "_microseconds_total", labels}, duration_us)
+    bucket(stem <> "_microseconds_bucket", by, @catalog_latency_buckets, duration_us)
+  end
 
   defp bucket_s3_latency(op, duration_us) do
     bucket("smolquery_s3_request_microseconds_bucket", [op: op], @s3_latency_buckets, duration_us)

@@ -608,6 +608,52 @@ defmodule Smolquery.TelemetryTest do
              before_ok_us + 250_000
   end
 
+  test "counts catalog ops and statements by result, with latency buckets (T-549)" do
+    op = ~s({op="current_snapshot",result="ok"})
+    op_fast = ~s({op="current_snapshot",le="1000"})
+    op_slow = ~s({op="current_snapshot",le="1000000"})
+    statement = ~s({kind="query",result="error"})
+    statement_inf = ~s({kind="query",le="+Inf"})
+    before_ops = value("smolquery_catalog_ops_total", op)
+    before_op_us = value("smolquery_catalog_op_microseconds_total", op)
+    before_op_fast = value("smolquery_catalog_op_microseconds_bucket", op_fast)
+    before_op_slow = value("smolquery_catalog_op_microseconds_bucket", op_slow)
+    before_statements = value("smolquery_catalog_statements_total", statement)
+    before_statement_us = value("smolquery_catalog_statement_microseconds_total", statement)
+    before_statement_inf = value("smolquery_catalog_statement_microseconds_bucket", statement_inf)
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :op],
+      %{duration_us: 300_000},
+      %{op: :current_snapshot, result: :ok}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :statement],
+      %{duration_us: 5_000_000},
+      %{kind: :query, result: :error}
+    )
+
+    assert value("smolquery_catalog_ops_total", op) == before_ops + 1
+    assert value("smolquery_catalog_op_microseconds_total", op) == before_op_us + 300_000
+    assert value("smolquery_catalog_op_microseconds_bucket", op_fast) == before_op_fast
+    assert value("smolquery_catalog_op_microseconds_bucket", op_slow) == before_op_slow + 1
+    assert value("smolquery_catalog_statements_total", statement) == before_statements + 1
+
+    assert value("smolquery_catalog_statement_microseconds_total", statement) ==
+             before_statement_us + 5_000_000
+
+    assert value("smolquery_catalog_statement_microseconds_bucket", statement_inf) ==
+             before_statement_inf + 1
+  end
+
+  test "outcome/1 folds a call's answer to ok or error" do
+    assert Telemetry.outcome(:ok) == :ok
+    assert Telemetry.outcome({:ok, 7}) == :ok
+    assert Telemetry.outcome({:error, :gone}) == :error
+    assert Telemetry.outcome({:raised, :exit, :timeout}) == :error
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

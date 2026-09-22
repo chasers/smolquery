@@ -48,6 +48,30 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     %{catalog: catalog, segments_dir: segments_dir}
   end
 
+  test "every statement is one [:smolquery, :catalog, :statement] event (T-549)", %{
+    catalog: catalog
+  } do
+    parent = self()
+    handler = "ducklake-statement-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :catalog, :statement],
+      fn _event, measurements, meta, _config ->
+        send(parent, {:statement, measurements, meta})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, _snapshot} = Catalog.current_snapshot(catalog)
+    assert_received {:statement, %{duration_us: _us}, %{kind: :query, result: :ok}}
+
+    assert :ok = Catalog.put_clustering(catalog, @table, ["id"])
+    assert_received {:statement, _measurements, %{kind: :transaction, result: :ok}}
+  end
+
   defp schema do
     Schema.new!([
       {"id", :int64, nullable: false},

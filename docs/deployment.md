@@ -368,6 +368,26 @@ whose roles include `web`:
 A web pod without them **refuses to boot**. That boot failure stops the
 pod's other roles too. Push the secrets before you roll the image.
 
+## Reading the catalog's cost (T-549)
+
+Every query opens with reads of the lake's metadata — the current snapshot, the table's schema, its files and their stats — and each of those is a DuckLake transaction against the metadata database, through DuckDB's postgres extension when the database is Postgres. On the sandbox one such read measured 230 to 440 ms (T-548), and the statement was not why: the table is small and the instance idle. The cost is round trips, and two sets of counters say where they go.
+
+**In the app**, on `/metrics`:
+
+- `smolquery_catalog_ops_total{op,result}`, `smolquery_catalog_op_microseconds_total{op,result}` and `smolquery_catalog_op_microseconds_bucket{op,le}` — one per `Smolquery.Catalog` call. `op` is the callback, so `current_snapshot`, `table_schema`, `registered_through`, `segment_files` and `segment_stats` are what a query pays before it plans; `register_segments` and `replace_segments` are what a seal and a compaction pay.
+- `smolquery_catalog_statements_total{kind,result}`, `smolquery_catalog_statement_microseconds_total{kind,result}` and `smolquery_catalog_statement_microseconds_bucket{kind,le}` — one per statement or transaction the DuckLake catalog sent its engine. Statements over ops is how many statements one op costs; the statement latency is the closest in-app proxy for one DuckDB transaction against the metadata database.
+
+**On Postgres**, which is the only place DuckDB's own round trips are visible: enable `pg_stat_statements` on the catalog instance (`shared_preload_libraries` in the parameter group, then `CREATE EXTENSION pg_stat_statements` once) and read calls and mean time by normalised statement. The transaction begins, the postgres extension's `pg_catalog` discovery and DuckLake's own metadata reads each show up as their own rows:
+
+```sql
+SELECT calls, round(mean_exec_time::numeric, 2) AS mean_ms, left(query, 100) AS statement
+  FROM pg_stat_statements
+ ORDER BY calls DESC
+ LIMIT 40;
+```
+
+Calls per second there over `smolquery_catalog_statements_total` per second here is the round trips one app statement costs. RDS Performance Insights shows the same by SQL without a parameter-group change. For a one-off on an engine, `SET pg_debug_show_queries = true` prints every statement the extension sends.
+
 ## Sizing write partitions
 
 **Size the partition count for seal drain, not for ingest spread.** Sealing
