@@ -52,6 +52,15 @@ defmodule Smolquery.QueryService.StabilityTest do
     assert one(Stability.within_query_names_sql(names)) == ["now"]
   end
 
+  test "the catalog says which names are anything but a scalar function" do
+    names = ["lower", "round", "+", "bool_or", "stddev_samp", "theirs"]
+
+    assert Enum.sort(one(Stability.not_scalar_names_sql(names))) ==
+             ["bool_or", "stddev_samp", "theirs"]
+
+    assert one(Stability.not_scalar_names_sql([])) == []
+  end
+
   test "no names is nothing to ask" do
     assert Stability.unstable_count_sql([]) == "0"
     assert one(Stability.unstable_names_sql([])) == []

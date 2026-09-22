@@ -70,6 +70,15 @@ defmodule Smolquery.QueryService.Stability do
   def within_query_names_sql(names),
     do: names_sql(names, "stability = 'CONSISTENT_WITHIN_QUERY'")
 
+  @doc """
+  A scalar SQL expression: the list of `names` the catalog has as anything
+  but a scalar function, an aggregate above all. `names` are `checked/1`'s:
+  which ClickHouse macro aggregates is
+  `Smolquery.QueryService.ClickHouseFunctions.aggregate?/1`'s to say.
+  """
+  @spec not_scalar_names_sql([String.t()]) :: String.t()
+  def not_scalar_names_sql(names), do: names_sql(names, "function_type != 'scalar'")
+
   defp names_sql([], _condition), do: "CAST([] AS VARCHAR[])"
 
   defp names_sql(names, condition) do

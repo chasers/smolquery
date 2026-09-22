@@ -388,4 +388,17 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
                )
     end
   end
+
+  test "aggregate?/1 knows the macros that aggregate, which the engine's catalog calls macros like the rest" do
+    for name <- ~w(sumIf avgIf minIf maxIf quantileIf groupArray groupArrayIf groupUniqArray
+                   groupUniqArrayIf groupUniqArrayArray groupUniqArrayMap uniq uniqExact UNIQ) do
+      assert ClickHouseFunctions.aggregate?(name), name
+    end
+
+    for name <-
+          ~w(getSubcolumn JSONDynamicPathsWithTypes toStartOfInterval fromUnixTimestamp64Milli
+                   toDateTime lower count) do
+      refute ClickHouseFunctions.aggregate?(name), name
+    end
+  end
 end

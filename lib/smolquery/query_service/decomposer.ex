@@ -62,7 +62,11 @@ defmodule Smolquery.QueryService.Decomposer do
   every aggregate and key it names must be a select item, by shape or by
   alias, and is read as that item's output column; the final query is then
   filtered from outside, before its ORDER BY and LIMIT. An aggregate that is
-  no select item would need a partial of its own, and refuses. So does a
+  no select item would need a partial of its own, and refuses: whether a
+  function is one is the engine's catalog's to say, and
+  `ClickHouseFunctions.aggregate?/1`'s for a macro, so `bool_or` refuses
+  here and not at the merge, after every shard has run. A `$n` refuses too,
+  since the final step binds none. So does a
   name that is a column of the table and the alias of some other select
   item, which the engine and this module might read differently.
 
@@ -114,6 +118,7 @@ defmodule Smolquery.QueryService.Decomposer do
   alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.ClickHouseFunctions
+  alias Smolquery.QueryService.Stability
 
   @mergeable ~w(count_star count countif count_if sum min max)
   @conditional %{"sumif" => "sum", "avgif" => "avg", "minif" => "min", "maxif" => "max"}
@@ -610,13 +615,44 @@ defmodule Smolquery.QueryService.Decomposer do
     names = Enum.map(outputs, fn {name, _type} -> name end)
     items = node["select_list"] |> Enum.map(&Ast.shape/1) |> Enum.zip(names)
 
-    with {:ok, over_outputs} <- over_outputs(condition, {names, items, columns}),
+    with :ok <- gate_having_parameters(condition),
+         {:ok, over_outputs} <- over_outputs(condition, {names, items, columns}),
+         :ok <- gate_scalars(connection, over_outputs, :having_aggregate),
          {:ok, sql} <- deserialize(connection, filter(over_outputs)),
          @filter_prefix <> rendered <- sql do
       {:ok, rendered}
     else
       {:error, reason} -> {:error, reason}
       _another_rendering -> {:error, :having_not_rendered}
+    end
+  end
+
+  defp gate_having_parameters(condition) do
+    if "PARAMETER" in classes(condition), do: {:error, :parameter_in_having}, else: :ok
+  end
+
+  defp gate_scalars(connection, tree, reason) do
+    names = Stability.function_names(tree)
+
+    case Enum.find(names, &ClickHouseFunctions.aggregate?/1) do
+      nil -> gate_catalog_scalars(connection, Stability.checked(names), reason)
+      macro -> {:error, {reason, macro}}
+    end
+  end
+
+  defp gate_catalog_scalars(_connection, [], _reason), do: :ok
+
+  defp gate_catalog_scalars(connection, names, reason) do
+    case Connection.query(
+           connection,
+           "SELECT #{Stability.not_scalar_names_sql(names)}",
+           [],
+           :infinity
+         ) do
+      {:ok, %{rows: [[[]]]}} -> :ok
+      {:ok, %{rows: [[[name | _more]]]}} -> {:error, {reason, name}}
+      {:ok, _another_shape} -> {:error, {reason, :unknown}}
+      {:error, error} -> {:error, error}
     end
   end
 

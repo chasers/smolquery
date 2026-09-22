@@ -202,6 +202,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   @names Enum.map(@macros, name_of)
   @volatile_names Enum.map(@volatile, name_of)
   @stable_names MapSet.new(@names, &String.downcase/1)
+  @aggregate_names ~w(sumif avgif minif maxif quantileif grouparray grouparrayif groupuniqarray
+                      groupuniqarrayif groupuniqarrayarray groupuniqarraymap uniq uniqexact)
 
   @definitions Map.new(@macros ++ @volatile, fn {signature, body} = macro ->
                  {String.downcase(name_of.(macro)),
@@ -246,6 +248,15 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   """
   @spec volatile() :: [String.t()]
   def volatile, do: @volatile_names
+
+  @doc """
+  Whether `name`, in any case, is one of these macros and an aggregate: its
+  body aggregates the rows it is called over. The engine's catalog calls
+  every macro a macro, so a reader that must know an aggregate when it sees
+  one (`Smolquery.QueryService.Decomposer`) asks here.
+  """
+  @spec aggregate?(String.t()) :: boolean()
+  def aggregate?(name) when is_binary(name), do: String.downcase(name) in @aggregate_names
 
   @doc """
   The names defined, as ClickHouse spells them.

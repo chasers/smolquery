@@ -364,6 +364,33 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
       assert {:having_ambiguous, "bucket"} = refused(shadowed, describe(shadowed))
 
+      unknown =
+        "SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket HAVING bool_or(bucket > 1)"
+
+      assert {:having_aggregate, "bool_or"} = refused(unknown, describe(unknown))
+
+      for macro <- ClickHouseFunctions.statements_for("uniqExact(x)"),
+          do: Engine.query!(@engine, macro)
+
+      macro =
+        "SELECT bucket, count(*) AS n FROM analytics.events GROUP BY bucket HAVING uniqExact(bucket) > 0"
+
+      assert {:having_aggregate, "uniqexact"} = refused(macro, describe(macro))
+
+      bound =
+        "SELECT name, count(*) AS n FROM analytics.events GROUP BY name HAVING count(*) > $1"
+
+      assert {:error, :parameter_in_having} =
+               Decomposer.decompose(
+                 @conn,
+                 bound,
+                 [{"name", "VARCHAR"}, {"n", "BIGINT"}],
+                 @columns,
+                 [
+                   5
+                 ]
+               )
+
       volatile =
         "SELECT name, count(*) AS n FROM analytics.events GROUP BY name HAVING n > random()"
 
