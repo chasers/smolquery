@@ -47,7 +47,9 @@ defmodule Smolquery.QueryService.EnginePoolTest do
     :telemetry.attach(
       handler,
       [:smolquery, :query, event],
-      fn _event, measurements, meta, _config -> send(parent, {event, measurements, meta}) end,
+      fn _event, measurements, meta, _config ->
+        send(parent, {event, measurements, Map.put(meta, :emitter, self())})
+      end,
       nil
     )
 
@@ -136,8 +138,9 @@ defmodule Smolquery.QueryService.EnginePoolTest do
     assert Eventually.until(fn -> EnginePool.size(name) == 1 end)
     assert_receive {:engine_probe, %{duration_us: _us}, %{outcome: :ok}}
 
+    me = self()
     assert {:ok, engine, :warm} = JobEngine.acquire(runtime)
-    refute_received {:engine_probe, _measurements, _meta}
+    refute_received {:engine_probe, _measurements, %{emitter: ^me}}
 
     JobEngine.stop(engine)
   end

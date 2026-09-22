@@ -64,7 +64,10 @@ defmodule Smolquery.QueryService.JobEngine do
   A bootstrapped, private engine for `runtime`, linked to the caller — warm
   from the pool when one is ready, cold otherwise. The warm path does no
   I/O: the pool vouched for the engine already, and only an engine that
-  died between the pool's unlink and this link falls back to a cold start.
+  died between the pool's unlink and this link falls back to a cold start —
+  checked before the link, so a caller that does not trap exits (a shard
+  worker) never links a dead pid, and caught at the link for the instant
+  between.
   """
   @spec acquire(Runtime.t()) :: {:ok, t(), source()} | {:error, term()}
   def acquire(%Runtime{} = runtime) do
@@ -133,15 +136,26 @@ defmodule Smolquery.QueryService.JobEngine do
   end
 
   @doc """
+  Unlinks the caller from both engine processes — the pool's half of the
+  hand-over, and the first step of `stop/1`.
+  """
+  @spec unlink(t()) :: :ok
+  def unlink(%{database: database, connection: connection}) do
+    Process.unlink(connection)
+    Process.unlink(database)
+
+    :ok
+  end
+
+  @doc """
   Unlinks and kills both engine processes; DuckDB's in-flight work dies with
   its connection.
   """
   @spec stop(t() | nil) :: :ok
   def stop(nil), do: :ok
 
-  def stop(%{database: database, connection: connection}) do
-    Process.unlink(connection)
-    Process.unlink(database)
+  def stop(%{database: database, connection: connection} = engine) do
+    unlink(engine)
     Process.exit(connection, :kill)
     Process.exit(database, :kill)
 
@@ -153,8 +167,7 @@ defmodule Smolquery.QueryService.JobEngine do
   defp warm(%Runtime{} = runtime) do
     case EnginePool.checkout(runtime.name) do
       {:ok, engine} ->
-        link(engine)
-        alive(engine)
+        adopt(engine)
 
       :empty ->
         :cold
@@ -163,14 +176,21 @@ defmodule Smolquery.QueryService.JobEngine do
     :exit, _pool_unavailable -> :cold
   end
 
-  defp alive(%{database: database, connection: connection} = engine) do
+  defp adopt(%{database: database, connection: connection} = engine) do
     if Process.alive?(database) and Process.alive?(connection) do
+      link(engine)
+
       {:ok, engine}
     else
       stop(engine)
 
       :cold
     end
+  catch
+    :error, :noproc ->
+      stop(engine)
+
+      :cold
   end
 
   defp cold(runtime) do

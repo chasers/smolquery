@@ -23,15 +23,17 @@ defmodule Smolquery.QueryService.EnginePool do
   ## Vouching (T-548)
 
   The pool owns the engine and the clock, so the pool runs the probe
-  (`JobEngine.probe/2`) — once when a build finishes, and again for every
-  warm engine on each recycle tick — and hands over an engine it has
-  already vouched for. The checkout itself does no I/O. A build whose probe
-  fails is not pooled; a warm engine whose probe fails is stopped and
-  replaced. The probes run in tasks, so a checkout never waits on one, and
-  an engine checked out while its probe is in flight is the job's from that
-  moment: the probe's verdict is dropped when it lands. A connection that
-  goes stale between two ticks fails the job that draws it, exactly as one
-  that dies mid-job does.
+  (`JobEngine.probe/2`) — once when a build finishes, and for one warm
+  engine on each recycle tick, round-robin, so every engine is probed once
+  per `warm_engines` ticks and at most one probe is in flight — and hands
+  over an engine it has already vouched for. The checkout itself does no
+  I/O, and it prefers an engine with no probe in flight, so a job's first
+  statement does not queue behind one. A build whose probe fails is not
+  pooled; a warm engine whose probe fails, or whose probe task crashes, is
+  stopped and replaced. An engine checked out while its probe is in flight
+  is the job's from that moment: the probe's verdict is dropped when it
+  lands. A connection that goes stale between two of its probes fails the
+  job that draws it, exactly as one that dies mid-job does.
 
   The pool is a `rest_for_one` child after the runners: its crash restarts
   nothing else, and a restart simply rebuilds.
@@ -82,11 +84,11 @@ defmodule Smolquery.QueryService.EnginePool do
   @impl GenServer
   def handle_call(:checkout, _from, %{warm: []} = state), do: {:reply, :empty, state}
 
-  def handle_call(:checkout, _from, %{warm: [{engine, _built_at} | rest]} = state) do
-    Process.unlink(engine.connection)
-    Process.unlink(engine.database)
+  def handle_call(:checkout, _from, state) do
+    {engine, _built_at} = entry = Enum.find(state.warm, hd(state.warm), &unprobed?(&1, state))
+    JobEngine.unlink(engine)
 
-    {:reply, {:ok, engine}, %{state | warm: rest}, {:continue, :fill}}
+    {:reply, {:ok, engine}, %{state | warm: List.delete(state.warm, entry)}, {:continue, :fill}}
   end
 
   def handle_call(:size, _from, state), do: {:reply, length(state.warm), state}
@@ -112,14 +114,11 @@ defmodule Smolquery.QueryService.EnginePool do
 
   def handle_info({ref, outcome}, %{probing: probing} = state) when is_map_key(probing, ref) do
     Process.demonitor(ref, [:flush])
-    state = %{state | probing: Map.delete(probing, ref)}
+    {engine, state} = pop_probe(state, ref)
 
     case outcome do
-      {:ok, _engine} ->
-        {:noreply, state}
-
-      {:stale, engine, reason} ->
-        {:noreply, drop_stale(state, engine, reason), {:continue, :fill}}
+      :ok -> {:noreply, state}
+      {:stale, reason} -> {:noreply, drop_stale(state, engine, reason), {:continue, :fill}}
     end
   end
 
@@ -131,9 +130,12 @@ defmodule Smolquery.QueryService.EnginePool do
     {:noreply, %{state | building: Map.delete(building, ref)}}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{probing: probing} = state)
-      when is_map_key(probing, ref),
-      do: {:noreply, %{state | probing: Map.delete(probing, ref)}}
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{probing: probing} = state)
+      when is_map_key(probing, ref) do
+    {engine, state} = pop_probe(state, ref)
+
+    {:noreply, drop_stale(state, engine, {:probe_crashed, reason}), {:continue, :fill}}
+  end
 
   def handle_info({:EXIT, pid, _reason}, state) do
     case Enum.split_with(state.warm, fn {engine, _built_at} ->
@@ -158,7 +160,7 @@ defmodule Smolquery.QueryService.EnginePool do
     {stale, fresh} = Enum.split_with(state.warm, fn {_engine, built_at} -> built_at < oldest end)
     Enum.each(stale, fn {engine, _built_at} -> JobEngine.stop(engine) end)
 
-    {:noreply, probe_all(%{state | warm: fresh}), {:continue, :fill}}
+    {:noreply, probe_next(%{state | warm: fresh}), {:continue, :fill}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -182,8 +184,7 @@ defmodule Smolquery.QueryService.EnginePool do
   defp build(runtime) do
     with {:ok, engine} <- JobEngine.start(JobEngine.options(runtime)),
          :ok <- vouch(runtime, engine) do
-      Process.unlink(engine.connection)
-      Process.unlink(engine.database)
+      JobEngine.unlink(engine)
 
       {:ok, engine}
     end
@@ -201,21 +202,25 @@ defmodule Smolquery.QueryService.EnginePool do
     end
   end
 
-  defp probe_all(state) do
-    runtime = state.runtime
+  defp probe_next(%{warm: []} = state), do: state
 
-    Enum.reduce(state.warm, state, fn {engine, _built_at}, acc ->
-      task = Task.async(fn -> probe(runtime, engine) end)
+  defp probe_next(%{warm: [{engine, _built_at} = head | rest]} = state) do
+    if unprobed?(head, state) do
+      runtime = state.runtime
+      task = Task.async(fn -> JobEngine.probe(runtime, engine) end)
 
-      %{acc | probing: Map.put(acc.probing, task.ref, true)}
-    end)
+      %{state | warm: rest ++ [head], probing: Map.put(state.probing, task.ref, engine)}
+    else
+      state
+    end
   end
 
-  defp probe(runtime, engine) do
-    case JobEngine.probe(runtime, engine) do
-      :ok -> {:ok, engine}
-      {:stale, reason} -> {:stale, engine, reason}
-    end
+  defp unprobed?({engine, _built_at}, state), do: engine not in Map.values(state.probing)
+
+  defp pop_probe(state, ref) do
+    {engine, probing} = Map.pop!(state.probing, ref)
+
+    {engine, %{state | probing: probing}}
   end
 
   defp drop_stale(state, engine, reason) do
