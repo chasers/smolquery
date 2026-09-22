@@ -54,9 +54,12 @@ defmodule SmolqueryVictoriaMetrics.Query do
   ## Telemetry
 
   Each answered query emits `[:smolquery, :victoriametrics, :query]` with
-  `%{series: n, samples: n, duration_us: n}`: what it read into the node,
-  which `Smolquery.Telemetry` counts so the ceilings can be sized from
-  production numbers.
+  `%{series: n, samples: n, duration_us: n, fetch_us: n}`: what it read into
+  the node, which `Smolquery.Telemetry` counts so the ceilings can be sized
+  from production numbers, and how long it took. `fetch_us` is the time
+  spent in `SmolqueryVictoriaMetrics.Samples` reading raw samples by SQL,
+  summed over the query's selectors; the rest of `duration_us` is parsing,
+  the rollup sweep and evaluation in the node.
   """
 
   import Plug.Conn
@@ -78,6 +81,7 @@ defmodule SmolqueryVictoriaMetrics.Query do
   @spec call(Plug.Conn.t(), Runtime.t(), :instant | :range) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, kind) do
     started = System.monotonic_time(:microsecond)
+    fetch_us = :counters.new(1, [:write_concurrency])
 
     with {:ok, params, conn} <- params(conn),
          {:ok, query} <- query(params),
@@ -88,10 +92,10 @@ defmodule SmolqueryVictoriaMetrics.Query do
         Map.merge(grid, %{
           lookback_ms: runtime.lookback_ms,
           max_points: runtime.max_points_per_series,
-          fetch: &Samples.select(runtime, &1, &2, timeout_opts(timeout))
+          fetch: timed(fetch_us, &Samples.select(runtime, &1, &2, timeout_opts(timeout)))
         })
 
-      kind |> evaluate(expr, context, started) |> answer(conn)
+      kind |> evaluate(expr, context, started) |> answer(conn, fetch_us)
     else
       {:error, reason} -> refuse(conn, reason)
     end
@@ -154,6 +158,15 @@ defmodule SmolqueryVictoriaMetrics.Query do
     end
   end
 
+  defp timed(counter, fetch) do
+    fn selector, range ->
+      started = System.monotonic_time(:microsecond)
+      result = fetch.(selector, range)
+      :counters.add(counter, 1, System.monotonic_time(:microsecond) - started)
+      result
+    end
+  end
+
   defp timeout_opts(nil), do: []
   defp timeout_opts(ms), do: [timeout_ms: ms]
 
@@ -204,12 +217,17 @@ defmodule SmolqueryVictoriaMetrics.Query do
     end
   end
 
-  defp answer({:ok, render, stats, started}, conn) do
+  defp answer({:ok, render, stats, started}, conn, fetch_us) do
     duration_us = System.monotonic_time(:microsecond) - started
 
     :telemetry.execute(
       [:smolquery, :victoriametrics, :query],
-      %{series: stats.series, samples: stats.samples, duration_us: duration_us},
+      %{
+        series: stats.series,
+        samples: stats.samples,
+        duration_us: duration_us,
+        fetch_us: :counters.get(fetch_us, 1)
+      },
       %{}
     )
 
@@ -218,7 +236,7 @@ defmodule SmolqueryVictoriaMetrics.Query do
     |> send_resp(200, render.(%{series: stats.series, duration_ms: div(duration_us, 1000)}))
   end
 
-  defp answer({:error, reason}, conn), do: refuse(conn, reason)
+  defp answer({:error, reason}, conn, _fetch_us), do: refuse(conn, reason)
 
   defp refuse(conn, reason), do: Errors.send_error(conn, failure(reason))
 

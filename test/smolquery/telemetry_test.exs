@@ -319,6 +319,28 @@ defmodule Smolquery.TelemetryTest do
     assert rendered =~ "# HELP smolquery_victoriametrics_query_samples_total Raw samples"
   end
 
+  test "splits the VictoriaMetrics edge's query time into fetch and evaluate (T-567)" do
+    fetch = ~s({phase="fetch"})
+    evaluate = ~s({phase="evaluate"})
+    before_fetch = value("smolquery_victoriametrics_query_microseconds_total", fetch)
+    before_evaluate = value("smolquery_victoriametrics_query_microseconds_total", evaluate)
+
+    :telemetry.execute(
+      [:smolquery, :victoriametrics, :query],
+      %{series: 1, samples: 10, duration_us: 900, fetch_us: 700},
+      %{}
+    )
+
+    assert value("smolquery_victoriametrics_query_microseconds_total", fetch) ==
+             before_fetch + 700
+
+    assert value("smolquery_victoriametrics_query_microseconds_total", evaluate) ==
+             before_evaluate + 200
+
+    assert Telemetry.render() =~
+             "# HELP smolquery_victoriametrics_query_microseconds_total Time the VictoriaMetrics"
+  end
+
   test "prices the ClickHouse edge's catalog checks apart from its rebuilds (T-529)" do
     unchanged = ~s({result="unchanged"})
     rebuilt = ~s({result="rebuilt"})

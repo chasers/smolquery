@@ -5,9 +5,11 @@ defmodule SmolqueryVictoriaMetrics.Errors do
       {"status":"error","errorType":"bad_data","error":"..."}
 
   One form for every refusal on this edge, from authentication to a refused
-  write, with `retry-after` when resending later can succeed. vmagent reads
-  only the status: it retries a 429 or a 5xx and keeps the block, and drops
-  the block on any other 4xx. Grafana shows `error`.
+  write, with `retry-after` when resending later can succeed. A client reads
+  only the status. Prometheus and the OpenTelemetry collector retry a 429 or
+  a 5xx and drop the block on any other 4xx. vmagent v1.152.0 drops it on a
+  400, 409 or 415, after re-sending a zstd block once as snappy, and retries
+  every other status, 401 and 413 included. Grafana shows `error`.
   """
 
   import Plug.Conn

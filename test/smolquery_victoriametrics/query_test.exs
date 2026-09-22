@@ -98,8 +98,8 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
                }
              }
 
-      assert_receive {:query, %{series: 2, samples: samples, duration_us: us}}
-      assert samples > 0 and us > 0
+      assert_receive {:query, %{series: 2, samples: samples, duration_us: us, fetch_us: fetch}}
+      assert samples > 0 and fetch > 0 and us >= fetch
     end
 
     test "offset, back and forward", %{stack: stack} do

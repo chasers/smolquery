@@ -30,9 +30,11 @@ defmodule SmolqueryVictoriaMetrics.Write do
   ## Answers
 
   VictoriaMetrics' own: a 204 with no body once the rows are durable. A 4xx
-  other than 429 tells vmagent to drop the block, so it is kept for a block
-  that no retry can fix, and every refusal the client can outwait is a 429
-  or a 5xx:
+  other than 429 tells Prometheus and the collector to drop the block, so it
+  is kept for a block that no retry can fix, and every refusal the client
+  can outwait is a 429 or a 5xx. vmagent drops a block only on a 400, 409 or
+  415 and retries the rest (`SmolqueryVictoriaMetrics.Errors`), so a 413 is
+  one it sends again until its block fits:
 
     * 400 — the body does not decompress or decode, a series has no
       `__name__`, or a timestamp is past what a `TIMESTAMP` holds;

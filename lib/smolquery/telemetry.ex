@@ -49,7 +49,7 @@ defmodule Smolquery.Telemetry do
                                           conn.private.smolquery_victoriametrics_kind
       [:smolquery, :victoriametrics, :samples] %{count}, meta %{result: "written" | "nan" |
                                           "histogram" | "exemplar" | "refused"}
-      [:smolquery, :victoriametrics, :query] %{series, samples, duration_us}
+      [:smolquery, :victoriametrics, :query] %{series, samples, duration_us, fetch_us}
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
@@ -302,7 +302,7 @@ defmodule Smolquery.Telemetry do
     "smolquery_victoriametrics_requests_total" =>
       "VictoriaMetrics edge requests answered, by status class.",
     "smolquery_victoriametrics_request_microseconds_total" =>
-      "Time spent answering VictoriaMetrics edge requests, by kind: write, query, health or other.",
+      "Time spent answering VictoriaMetrics edge requests, by kind: write, query, labels, health or other.",
     "smolquery_victoriametrics_request_microseconds_bucket" =>
       "VictoriaMetrics edge requests by duration, by kind, cumulative in le at the API's " <>
         "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count.",
@@ -315,6 +315,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_victoriametrics_query_samples_total" =>
       "Raw samples the VictoriaMetrics edge's queries read into the node to compute rollups " <>
         "(PL-70); per query against SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES.",
+    "smolquery_victoriametrics_query_microseconds_total" =>
+      "Time the VictoriaMetrics edge's answered queries spent, by phase: fetch, reading raw " <>
+        "samples by SQL, and evaluate, the rollup sweep and evaluation in the node (T-567).",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -757,6 +760,11 @@ defmodule Smolquery.Telemetry do
       {"smolquery_victoriametrics_query_samples_total", []},
       Map.get(measurements, :samples, 0)
     )
+
+    fetch_us = Map.get(measurements, :fetch_us, 0)
+    evaluate_us = max(Map.get(measurements, :duration_us, 0) - fetch_us, 0)
+    bump({"smolquery_victoriametrics_query_microseconds_total", [phase: "fetch"]}, fetch_us)
+    bump({"smolquery_victoriametrics_query_microseconds_total", [phase: "evaluate"]}, evaluate_us)
   end
 
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do

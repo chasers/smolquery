@@ -3,7 +3,7 @@
 This document explains how smolquery works in detail. The
 [README](../README.md) gives the one-screen version.
 
-smolquery is one Elixir app. It holds four services plus two edges. Role config
+smolquery is one Elixir app. It holds four services plus three edges. Role config
 enables each per node. The storage of record is immutable Parquet plus a
 DuckLake catalog. DuckDB is a disposable read engine over that storage.
 
@@ -1241,7 +1241,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 | `web` | `SmolqueryWeb` — the LiveView UI |
 | `pg` | `SmolqueryPg` — the Postgres wire listener, a `ThousandIsland` server that runs `SELECT` through the node's query service ([postgres-wire.md](postgres-wire.md)) |
 | `clickhouse` | `SmolqueryClickHouse` — the ClickHouse HTTP listener, a Bandit server that writes `RowBinary` through the node's ingest service and runs queries through its query service ([clickhouse.md](clickhouse.md)) |
-| `victoriametrics` | `SmolqueryVictoriaMetrics` — the VictoriaMetrics listener, a Bandit server that writes Prometheus remote write from vmagent or Prometheus through the node's ingest service, one row per sample (PL-70) |
+| `victoriametrics` | `SmolqueryVictoriaMetrics` — the VictoriaMetrics listener, a Bandit server that writes Prometheus remote write from vmagent or Prometheus through the node's ingest service, one row per sample, and answers Grafana's MetricsQL and label queries through its query service ([victoriametrics.md](victoriametrics.md)) |
 
 Unknown role names fail the boot. They do not silently start nothing. See
 `Smolquery.Roles`.
@@ -1411,4 +1411,6 @@ without the credential.
   application-config key.
 - [HTTP API](api.md) — the `/v1` surface.
 - [Postgres wire protocol](postgres-wire.md) — the `:pg` edge.
+- [ClickHouse HTTP interface](clickhouse.md) — the `:clickhouse` edge.
+- [VictoriaMetrics and Prometheus](victoriametrics.md) — the `:victoriametrics` edge: vmagent's remote write in, Grafana's MetricsQL out.
 - [Benchmarks](benchmarks.md) — the measurements behind these decisions.
