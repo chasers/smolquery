@@ -428,6 +428,15 @@ defmodule Smolquery.QueryService.DecomposerTest do
         "SELECT count(*) FROM (SELECT * FROM analytics.events WHERE id < 0 LIMIT 10)",
         tmp_dir
       )
+
+      aliased =
+        round_trip(
+          "WITH s AS (SELECT name, id FROM analytics.events WHERE id < 500 LIMIT 100000) " <>
+            "SELECT count(DISTINCT x.name) AS names FROM s AS x",
+          tmp_dir
+        )
+
+      assert aliased.rows.outer_sql =~ ~r/FROM s AS x/
     end
 
     test "a sample smaller than the window is n rows of it, whichever they are (T-540)", %{
@@ -639,7 +648,19 @@ defmodule Smolquery.QueryService.DecomposerTest do
                "SELECT count(*) FROM a", :cte},
             {"SELECT count(*) FROM (SELECT id FROM analytics.events LIMIT 5) x " <>
                "JOIN (SELECT id FROM analytics.events LIMIT 5) y USING (id)",
-             :from_not_a_base_table}
+             :from_not_a_base_table},
+            {"SELECT v FROM (SELECT stddev_samp(value) AS v FROM analytics.events LIMIT 1)",
+             {:sampled_groups, "stddev_samp"}},
+            {"SELECT count(*) FROM (SELECT bool_or(id > 5) AS v FROM analytics.events LIMIT 1)",
+             {:sampled_groups, "bool_or"}},
+            {"WITH s(y, x) AS (SELECT id AS x, name AS y FROM analytics.events LIMIT 5) " <>
+               "SELECT count(DISTINCT x) FROM s", :renamed_sampled_columns},
+            {"SELECT count(DISTINCT z) FROM (SELECT id FROM analytics.events LIMIT 5) AS q(z)",
+             :renamed_sampled_columns},
+            {"WITH s AS (SELECT id FROM analytics.events LIMIT 5) " <>
+               "SELECT count(*) FROM s TABLESAMPLE 10%", :sample},
+            {"SELECT count(*) FROM (SELECT id FROM analytics.events LIMIT 5) USING SAMPLE 10%",
+             :sample}
           ] do
         assert reason == refused(sql, describe(sql)), sql
       end

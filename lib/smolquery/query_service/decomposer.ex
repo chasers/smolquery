@@ -75,11 +75,17 @@ defmodule Smolquery.QueryService.Decomposer do
   The inner SELECT reads one plain table and has a constant LIMIT as its
   only modifier: an ORDER BY would make the sample a top-n, which this does
   not merge, and no LIMIT would ship the table. It has no aggregate, window,
-  subquery or volatile function. Its columns must survive parquet exactly,
-  so a HUGEINT, a UNION, a VARIANT or an ENUM refuses, as do two columns of
-  one name. The outer statement is unconstrained but for a subquery, which
-  could read the table again, a SAMPLE, and a `$n` parameter, which the
-  final step does not bind. A shard ships at most `n` rows, so
+  subquery or volatile function; whether a function aggregates is the
+  engine's catalog's to say, so a `stddev` in it refuses and does not ship
+  one row per shard. Its columns must survive parquet exactly, so a
+  HUGEINT, a UNION, a VARIANT or an ENUM refuses, as do two columns of one
+  name, and they must keep their names: `WITH s(a, b) AS (...)` and
+  `FROM (...) AS s(a, b)` rename them for the outer statement, which reads
+  the parquet under the inner's own names, so both refuse. The outer
+  statement reads the sample as the client wrote the reference, alias and
+  all; it is unconstrained but for a subquery, which could read the table
+  again, a SAMPLE on it or on the reference, and a `$n` parameter, which
+  the final step does not bind. A shard ships at most `n` rows, so
   `Smolquery.QueryService.Scatter` refuses an `n` over the runtime's
   `row_partial_max_rows`.
 
@@ -265,7 +271,7 @@ defmodule Smolquery.QueryService.Decomposer do
     with :ok <- gate_columns(table_columns),
          {:ok, node} <- select_node(connection, sql) do
       case sampled(node) do
-        {:ok, name, inner} -> rows(connection, node, name, inner, params)
+        {:ok, sample} -> rows(connection, node, sample, params)
         :error -> aggregates(connection, node, outputs, table_columns, params)
       end
     end
@@ -326,10 +332,10 @@ defmodule Smolquery.QueryService.Decomposer do
   defp append(parts, clause), do: parts ++ [clause]
 
   defp sampled(%{"cte_map" => %{"map" => [%{"key" => name, "value" => cte}]}} = node) do
-    with %{"type" => "BASE_TABLE", "schema_name" => "", "table_name" => ^name} <-
+    with %{"type" => "BASE_TABLE", "schema_name" => "", "table_name" => ^name} = from <-
            node["from_table"],
          %{"query" => %{"node" => %{"type" => "SELECT_NODE"} = inner}} <- cte do
-      {:ok, name, inner}
+      {:ok, %{name: name, inner: inner, reference: from, renamed: cte["aliases"] != []}}
     else
       _another_shape -> :error
     end
@@ -338,7 +344,10 @@ defmodule Smolquery.QueryService.Decomposer do
   defp sampled(%{"cte_map" => %{"map" => []}, "from_table" => %{"type" => "SUBQUERY"} = from}) do
     case from do
       %{"subquery" => %{"node" => %{"type" => "SELECT_NODE"} = inner}, "alias" => alias} ->
-        {:ok, if(alias == "", do: @rows_name, else: alias), inner}
+        name = if alias == "", do: @rows_name, else: alias
+        renamed = from["column_name_alias"] != []
+
+        {:ok, %{name: name, inner: inner, reference: from, renamed: renamed}}
 
       _a_set_operation ->
         :error
@@ -347,13 +356,13 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp sampled(_node), do: :error
 
-  defp rows(connection, node, name, inner, params) do
-    with :ok <- gate_sample(inner),
-         :ok <- gate_outer(node),
+  defp rows(connection, node, %{name: name, inner: inner} = sample, params) do
+    with :ok <- gate_sample(connection, inner),
+         :ok <- gate_outer(node, sample),
          {:ok, limit} <- sample_limit(inner),
          {:ok, partial_sql} <- deserialize(connection, inner),
          :ok <- gate_row_columns(connection, partial_sql, params),
-         {:ok, outer_sql} <- deserialize(connection, over(node, name, inner["from_table"])) do
+         {:ok, outer_sql} <- deserialize(connection, over(node, sample)) do
       {:ok,
        %__MODULE__{
          partial_sql: partial_sql,
@@ -366,10 +375,11 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
-  defp gate_sample(inner) do
+  defp gate_sample(connection, inner) do
     with :ok <- gate_sample_source(inner),
-         :ok <- gate_sample_grouping(inner) do
-      gate_sample_expressions(inner)
+         :ok <- gate_sample_grouping(inner),
+         :ok <- gate_sample_expressions(inner) do
+      gate_scalars(connection, Map.take(inner, ["select_list", "where_clause"]), :sampled_groups)
     end
   end
 
@@ -413,13 +423,14 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp plain_table?(_another_source), do: false
 
-  defp gate_outer(node) do
+  defp gate_outer(node, %{reference: reference, renamed: renamed}) do
     outer = Map.drop(node, ["cte_map", "from_table"])
 
     cond do
+      renamed -> {:error, :renamed_sampled_columns}
       "SUBQUERY" in classes(outer) -> {:error, {:unsupported_expression, "SUBQUERY"}}
       "PARAMETER" in classes(outer) -> {:error, :parameter_over_sampled_rows}
-      node["sample"] != nil -> {:error, :sample}
+      node["sample"] != nil or reference["sample"] != nil -> {:error, :sample}
       true -> :ok
     end
   end
@@ -455,13 +466,13 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
-  defp over(node, name, table) do
+  defp over(node, %{name: name, inner: inner, reference: reference}) do
     source = %{
-      table
+      inner["from_table"]
       | "schema_name" => "",
         "catalog_name" => "",
         "table_name" => name,
-        "alias" => ""
+        "alias" => reference["alias"]
     }
 
     %{node | "cte_map" => %{"map" => []}, "from_table" => source}
