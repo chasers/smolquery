@@ -147,6 +147,10 @@ defmodule Smolquery.Telemetry do
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
       [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction, result}
                                           — one per statement the DuckLake catalog sent its engine
+      [:smolquery, :pg, :op]              %{duration_us}, meta %{op: :setup | :fetch | :ensure | :advance,
+                                          result: :ok | :not_found | :conflict | :error}
+                                          — one per ring configuration store call over Postgrex:
+                                          the Elixir-side control for the catalog's cost (T-552)
       [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
                                           — one per query the distributed path answered (PL-49)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
@@ -254,6 +258,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
+    [:smolquery, :pg, :op],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -416,6 +421,16 @@ defmodule Smolquery.Telemetry do
       "Catalog statements by duration, by kind and result, cumulative in le at the op " <>
         "bucket's bounds; " <>
         "the closest in-app proxy for one DuckDB transaction against the metadata database.",
+    "smolquery_pg_ops_total" =>
+      "Ring configuration store calls Elixir made to the catalog database over Postgrex, " <>
+        "by op and result: ok, not_found, conflict or error (T-552).",
+    "smolquery_pg_op_microseconds_total" =>
+      "Time those calls took, by op and result; divide by ops for the mean. The catalog " <>
+        "statement mean over this one is what the same database costs through DuckDB (T-552).",
+    "smolquery_pg_op_microseconds_bucket" =>
+      "Ring configuration store calls by duration, by op and result, cumulative in le at " <>
+        "250 us, 500 us, 1 ms, 5 ms, 25 ms, 100 ms, 250 ms, 1 s and 15 s; counters, not a " <>
+        "histogram (T-552).",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
     "smolquery_query_scatter_shards_total" =>
@@ -458,6 +473,14 @@ defmodule Smolquery.Telemetry do
   # The catalog ops are the behaviour's callbacks: a closed set, so a
   # label can only be one of them.
   @catalog_ops Smolquery.Catalog.behaviour_info(:callbacks) |> Keyword.keys() |> Enum.uniq()
+
+  # Bounds for the ring configuration store's `_microseconds_bucket`, ascending:
+  # a Postgrex read of the catalog database measured 0.3 ms on the sandbox
+  # (T-552), and Postgrex gives up at 15 s.
+  @pg_latency_buckets [250, 500, 1_000, 5_000, 25_000, 100_000, 250_000, 1_000_000, 15_000_000]
+
+  # The ring configuration store's ops, less `start_link`: a closed set.
+  @pg_ops [:setup, :fetch, :ensure, :advance]
 
   # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
   # Closest together where the buffer's commit windows put an insert's ack:
@@ -881,11 +904,27 @@ defmodule Smolquery.Telemetry do
   end
 
   def handle_event([:smolquery, :catalog, :op], measurements, meta, nil) do
-    catalog_timed("smolquery_catalog_op", [op: catalog_op(meta)], measurements, meta)
+    op_timed(
+      "smolquery_catalog_op",
+      [op: catalog_op(meta)],
+      @catalog_latency_buckets,
+      measurements,
+      meta
+    )
   end
 
   def handle_event([:smolquery, :catalog, :statement], measurements, meta, nil) do
-    catalog_timed("smolquery_catalog_statement", [kind: catalog_kind(meta)], measurements, meta)
+    op_timed(
+      "smolquery_catalog_statement",
+      [kind: catalog_kind(meta)],
+      @catalog_latency_buckets,
+      measurements,
+      meta
+    )
+  end
+
+  def handle_event([:smolquery, :pg, :op], measurements, meta, nil) do
+    op_timed("smolquery_pg_op", [op: pg_op(meta)], @pg_latency_buckets, measurements, meta)
   end
 
   def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
@@ -959,13 +998,13 @@ defmodule Smolquery.Telemetry do
 
   defp clickhouse_kind(_conn), do: :other
 
-  defp catalog_timed(stem, by, measurements, meta) do
+  defp op_timed(stem, by, bounds, measurements, meta) do
     duration_us = Map.get(measurements, :duration_us, 0)
     labels = by ++ [result: result(meta)]
 
     bump({stem <> "s_total", labels}, 1)
     bump({stem <> "_microseconds_total", labels}, duration_us)
-    bucket(stem <> "_microseconds_bucket", labels, @catalog_latency_buckets, duration_us)
+    bucket(stem <> "_microseconds_bucket", labels, bounds, duration_us)
   end
 
   defp bucket_s3_latency(op, duration_us) do
@@ -990,6 +1029,9 @@ defmodule Smolquery.Telemetry do
 
   defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction], do: kind
   defp catalog_kind(_meta), do: :unknown
+
+  defp pg_op(%{op: op}) when op in @pg_ops, do: op
+  defp pg_op(_meta), do: :unknown
 
   defp s3_class(%{status: status}) when is_integer(status), do: status_class(status)
   defp s3_class(_meta), do: "error"

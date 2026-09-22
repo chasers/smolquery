@@ -388,6 +388,18 @@ SELECT calls, round(mean_exec_time::numeric, 2) AS mean_ms, left(query, 100) AS 
 
 Calls per second there over `smolquery_catalog_statements_total` per second here is the round trips one app statement costs. RDS Performance Insights shows the same by SQL without a parameter-group change. For a one-off on an engine, `SET pg_debug_show_queries = true` prints every statement the extension sends.
 
+**The control** (T-552): the ring configuration store is the one place Elixir reaches the same database directly, over Postgrex, and its `RingEpoch` and `ExpectedNodes` pollers read it about once a second per buffer node. `smolquery_pg_ops_total{op,result}`, `smolquery_pg_op_microseconds_total{op,result}` and `smolquery_pg_op_microseconds_bucket{op,result,le}` count those, one per `setup`, `fetch`, `ensure` or `advance`. A read that measured 0.3 ms this way measured 11.6 ms as `Catalog.schema_version/1` through DuckDB, on the same pod against the same instance. The ratio is one expression, continuously:
+
+```promql
+(sum(rate(smolquery_catalog_statement_microseconds_total[5m]))
+   / sum(rate(smolquery_catalog_statements_total[5m])))
+/
+(sum(rate(smolquery_pg_op_microseconds_total[5m]))
+   / sum(rate(smolquery_pg_ops_total[5m])))
+```
+
+It moves when the extension, the DuckDB version or the instance changes. Two limits: the store runs on buffer nodes while the catalog ops that matter run on query and storage nodes, so it is a sound latency baseline for the same database and VPC but not a same-pod control; and `advance` writes while the catalog ops it is set against read, so `op="fetch"` is the row to compare.
+
 ## Sizing write partitions
 
 **Size the partition count for seal drain, not for ingest spread.** Sealing

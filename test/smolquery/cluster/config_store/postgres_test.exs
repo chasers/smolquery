@@ -33,6 +33,34 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
     %{conn: conn, scope: unique_scope()}
   end
 
+  test "every call is one [:smolquery, :pg, :op] event, answers labelled as answers (T-552)",
+       ctx do
+    parent = self()
+    handler = "pg-op-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :pg, :op],
+      fn _event, measurements, meta, _config -> send(parent, {:pg, measurements, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert Postgres.fetch(ctx.conn, ctx.scope) == :not_found
+    assert_received {:pg, %{duration_us: _us}, %{op: :fetch, result: :not_found}}
+
+    assert {:ok, _config} = Postgres.ensure(ctx.conn, ctx.scope, [@node_a])
+    assert_received {:pg, _measurements, %{op: :ensure, result: :ok}}
+    refute_received {:pg, _measurements, %{op: :fetch}}
+
+    assert Postgres.advance(ctx.conn, ctx.scope, 7, [@node_b]) == {:error, :conflict}
+    assert_received {:pg, _measurements, %{op: :advance, result: :conflict}}
+
+    assert :ok = Postgres.setup(ctx.conn)
+    assert_received {:pg, _measurements, %{op: :setup, result: :ok}}
+  end
+
   test "ensure creates at epoch 0 and a racing ensure returns the winner", ctx do
     assert {:ok, config} = Postgres.ensure(ctx.conn, ctx.scope, [@node_a])
     assert config.epoch == 0

@@ -654,6 +654,31 @@ defmodule Smolquery.TelemetryTest do
     assert Telemetry.outcome({:raised, :exit, :timeout}) == :error
   end
 
+  test "counts ring configuration store calls by op and result, with latency buckets (T-552)" do
+    fetch = ~s({op="fetch",result="ok"})
+    fetch_sub_ms = ~s({op="fetch",result="ok",le="500"})
+    fetch_1ms = ~s({op="fetch",result="ok",le="1000"})
+    conflict = ~s({op="advance",result="conflict"})
+    before_fetches = value("smolquery_pg_ops_total", fetch)
+    before_fetch_us = value("smolquery_pg_op_microseconds_total", fetch)
+    before_sub_ms = value("smolquery_pg_op_microseconds_bucket", fetch_sub_ms)
+    before_1ms = value("smolquery_pg_op_microseconds_bucket", fetch_1ms)
+    before_conflicts = value("smolquery_pg_ops_total", conflict)
+
+    :telemetry.execute([:smolquery, :pg, :op], %{duration_us: 320}, %{op: :fetch, result: :ok})
+
+    :telemetry.execute([:smolquery, :pg, :op], %{duration_us: 900}, %{
+      op: :advance,
+      result: :conflict
+    })
+
+    assert value("smolquery_pg_ops_total", fetch) == before_fetches + 1
+    assert value("smolquery_pg_op_microseconds_total", fetch) == before_fetch_us + 320
+    assert value("smolquery_pg_op_microseconds_bucket", fetch_sub_ms) == before_sub_ms + 1
+    assert value("smolquery_pg_op_microseconds_bucket", fetch_1ms) == before_1ms + 1
+    assert value("smolquery_pg_ops_total", conflict) == before_conflicts + 1
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

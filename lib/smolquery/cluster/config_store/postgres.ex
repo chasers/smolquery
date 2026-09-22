@@ -18,11 +18,25 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
   written exclusively by these nodes, bounded by fleet size — not user input.
   A freshly booted node must be able to decode peers it has not connected to
   yet, which rules out `String.to_existing_atom/1`.
+
+  ## Every call is measured (T-552)
+
+  This is the one place the system reaches the catalog database from Elixir,
+  over Postgrex, so it is the control for what the same database costs
+  through DuckDB's postgres extension (`[:smolquery, :catalog, :statement]`,
+  T-549). Each callback emits one `[:smolquery, :pg, :op]` event: `op` the
+  callback, `result` `:ok`, `:not_found`, `:conflict` or `:error` — a
+  missing scope and a lost compare-and-swap are answers, not failures, and
+  are labelled as such. `ensure/3`'s read of the row it inserted is inside
+  its own span, not a second `fetch`.
   """
 
   @behaviour Smolquery.Cluster.ConfigStore
 
+  alias Smolquery.Telemetry
+
   @table "smolquery_ring_config"
+  @event [:smolquery, :pg, :op]
 
   @impl Smolquery.Cluster.ConfigStore
   def start_link(opts) do
@@ -41,14 +55,55 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
     )
     """
 
-    case Postgrex.query(conn, ddl, []) do
-      {:ok, _result} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    measured(:setup, fn ->
+      case Postgrex.query(conn, ddl, []) do
+        {:ok, _result} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end)
   end
 
   @impl Smolquery.Cluster.ConfigStore
-  def fetch(conn, scope) do
+  def fetch(conn, scope), do: measured(:fetch, fn -> select(conn, scope) end)
+
+  @impl Smolquery.Cluster.ConfigStore
+  def ensure(conn, scope, members) do
+    sql = """
+    INSERT INTO #{@table} (scope, epoch, members)
+    VALUES ($1, 0, $2)
+    ON CONFLICT (scope) DO NOTHING
+    """
+
+    measured(:ensure, fn ->
+      with {:ok, _result} <- Postgrex.query(conn, sql, [scope, encode(members)]) do
+        inserted(select(conn, scope))
+      end
+    end)
+  end
+
+  @impl Smolquery.Cluster.ConfigStore
+  def advance(conn, scope, expected_epoch, members) do
+    sql = """
+    UPDATE #{@table}
+       SET epoch = epoch + 1, prev_members = members, members = $3,
+           changed_at = now()
+     WHERE scope = $1 AND epoch = $2
+    RETURNING epoch, members, prev_members, 0::bigint
+    """
+
+    measured(:advance, fn ->
+      case Postgrex.query(conn, sql, [scope, expected_epoch, encode(members)]) do
+        {:ok, %Postgrex.Result{rows: [row]}} -> {:ok, decode(row)}
+        {:ok, %Postgrex.Result{rows: []}} -> {:error, :conflict}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
+  defp inserted(:not_found), do: {:error, :not_found}
+  defp inserted(answer), do: answer
+
+  defp select(conn, scope) do
     sql = """
     SELECT epoch, members, prev_members,
            (extract(epoch FROM (now() - changed_at)) * 1000)::bigint
@@ -62,43 +117,11 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
     end
   end
 
-  @impl Smolquery.Cluster.ConfigStore
-  def ensure(conn, scope, members) do
-    sql = """
-    INSERT INTO #{@table} (scope, epoch, members)
-    VALUES ($1, 0, $2)
-    ON CONFLICT (scope) DO NOTHING
-    """
+  defp measured(op, fun), do: Telemetry.span(@event, &{%{}, %{op: op, result: answer(&1)}}, fun)
 
-    case Postgrex.query(conn, sql, [scope, encode(members)]) do
-      {:ok, _result} ->
-        case fetch(conn, scope) do
-          {:ok, config} -> {:ok, config}
-          :not_found -> {:error, :not_found}
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  @impl Smolquery.Cluster.ConfigStore
-  def advance(conn, scope, expected_epoch, members) do
-    sql = """
-    UPDATE #{@table}
-       SET epoch = epoch + 1, prev_members = members, members = $3,
-           changed_at = now()
-     WHERE scope = $1 AND epoch = $2
-    RETURNING epoch, members, prev_members, 0::bigint
-    """
-
-    case Postgrex.query(conn, sql, [scope, expected_epoch, encode(members)]) do
-      {:ok, %Postgrex.Result{rows: [row]}} -> {:ok, decode(row)}
-      {:ok, %Postgrex.Result{rows: []}} -> {:error, :conflict}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  defp answer(:not_found), do: :not_found
+  defp answer({:error, :conflict}), do: :conflict
+  defp answer(other), do: Telemetry.outcome(other)
 
   defp encode(members) do
     members |> Enum.sort() |> Enum.map_join(",", &Atom.to_string/1)
