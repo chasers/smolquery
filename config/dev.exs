@@ -8,6 +8,8 @@ config :smolquery, SmolqueryPg, port: 15_432
 
 config :smolquery, SmolqueryClickHouse, port: 18_123
 
+config :smolquery, SmolqueryVictoriaMetrics, port: 18_428
+
 config :smolquery, SmolqueryWeb,
   username: "smolquery",
   password: "smolquery"

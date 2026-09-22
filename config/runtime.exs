@@ -142,6 +142,33 @@ if clickhouse_ip = System.get_env("SMOLQUERY_CLICKHOUSE_IP") do
     ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_CLICKHOUSE_IP", clickhouse_ip)
 end
 
+if victoriametrics_password = System.get_env("SMOLQUERY_VICTORIAMETRICS_PASSWORD") do
+  config :smolquery, SmolqueryVictoriaMetrics, password: victoriametrics_password
+end
+
+if victoriametrics_port = System.get_env("SMOLQUERY_VICTORIAMETRICS_PORT") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    port: Smolquery.RuntimeConfig.port!("SMOLQUERY_VICTORIAMETRICS_PORT", victoriametrics_port)
+end
+
+if victoriametrics_ip = System.get_env("SMOLQUERY_VICTORIAMETRICS_IP") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    ip: Smolquery.RuntimeConfig.ip!("SMOLQUERY_VICTORIAMETRICS_IP", victoriametrics_ip)
+end
+
+if victoriametrics_table = System.get_env("SMOLQUERY_VICTORIAMETRICS_TABLE") do
+  config :smolquery, SmolqueryVictoriaMetrics, table: victoriametrics_table
+end
+
+if victoriametrics_lookback_ms = System.get_env("SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    lookback_ms:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS",
+        victoriametrics_lookback_ms
+      )
+end
+
 if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
   config :smolquery, Smolquery.MetricsServer,
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)

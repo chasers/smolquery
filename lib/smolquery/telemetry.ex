@@ -45,6 +45,10 @@ defmodule Smolquery.Telemetry do
                                           conn.private.smolquery_clickhouse_kind
       [:smolquery, :clickhouse, :catalog_refresh] %{duration_us},
                                           meta %{result: :rebuilt | :unchanged | :error, name: edge}
+      [:smolquery, :victoriametrics, :stop] Plug.Telemetry — measurements.duration, conn status,
+                                          conn.private.smolquery_victoriametrics_kind
+      [:smolquery, :victoriametrics, :samples] %{count}, meta %{result: "written" | "nan" |
+                                          "histogram" | "exemplar" | "refused"}
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
@@ -237,6 +241,8 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :clickhouse, :stop],
     [:smolquery, :clickhouse, :unanswered],
     [:smolquery, :clickhouse, :catalog_refresh],
+    [:smolquery, :victoriametrics, :stop],
+    [:smolquery, :victoriametrics, :samples],
     [:smolquery, :ingest, :insert],
     [:smolquery, :buffer, :commit],
     [:smolquery, :buffer, :flush_trigger],
@@ -291,6 +297,16 @@ defmodule Smolquery.Telemetry do
       "Time the ClickHouse edge spent checking and rebuilding its system tables, by result. " <>
         "Every catalog statement waits behind it, so a rising rebuilt mean is a rising " <>
         "floor under each of them.",
+    "smolquery_victoriametrics_requests_total" =>
+      "VictoriaMetrics edge requests answered, by status class.",
+    "smolquery_victoriametrics_request_microseconds_total" =>
+      "Time spent answering VictoriaMetrics edge requests, by kind: write, health or other.",
+    "smolquery_victoriametrics_request_microseconds_bucket" =>
+      "VictoriaMetrics edge requests by duration, by kind, cumulative in le at the API's " <>
+        "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count.",
+    "smolquery_victoriametrics_samples_total" =>
+      "Remote-write samples by result: written, or dropped as nan, histogram or exemplar, " <>
+        "or refused with the block that carried them (PL-70).",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",
@@ -497,7 +513,7 @@ defmodule Smolquery.Telemetry do
                     |> Keyword.keys()
                     |> List.delete(:start_link)
 
-  # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
+  # Bounds for the HTTP edges' `_request_microseconds_bucket`, ascending.
   # Closest together where the buffer's commit windows put an insert's ack:
   # `flush_idle_interval_ms` and `flush_interval_ms` sit between 250 ms and 1 s.
   @http_latency_buckets [
@@ -532,6 +548,8 @@ defmodule Smolquery.Telemetry do
   # one counts as `:unknown` rather than creating a series, so the label can
   # never be widened by anything but this list.
   @flush_reasons ~w(rows bytes interval idle schema flush drain shutdown)a
+
+  @victoriametrics_sample_results ~w(written nan histogram exemplar refused)
 
   @info %{
     "smolquery_buffer_shape_info" =>
@@ -702,6 +720,26 @@ defmodule Smolquery.Telemetry do
       {"smolquery_clickhouse_catalog_refresh_microseconds_total", labels},
       Map.get(measurements, :duration_us, 0)
     )
+  end
+
+  def handle_event([:smolquery, :victoriametrics, :stop], measurements, %{conn: conn}, nil) do
+    bump({"smolquery_victoriametrics_requests_total", [class: status_class(conn.status)]}, 1)
+
+    timed(
+      "smolquery_victoriametrics_request_microseconds",
+      [kind: victoriametrics_kind(conn)],
+      measurements
+    )
+  end
+
+  def handle_event(
+        [:smolquery, :victoriametrics, :samples],
+        %{count: count},
+        %{result: result},
+        nil
+      )
+      when result in @victoriametrics_sample_results and is_integer(count) do
+    bump({"smolquery_victoriametrics_samples_total", [result: result]}, count)
   end
 
   def handle_event([:smolquery, :ingest, :insert], measurements, _meta, nil) do
@@ -1022,6 +1060,12 @@ defmodule Smolquery.Telemetry do
        do: kind
 
   defp clickhouse_kind(_conn), do: :other
+
+  defp victoriametrics_kind(%{private: %{smolquery_victoriametrics_kind: kind}})
+       when kind in [:write, :health],
+       do: kind
+
+  defp victoriametrics_kind(_conn), do: :other
 
   defp op_timed(stem, by, bounds, measurements, meta) do
     duration_us = Map.get(measurements, :duration_us, 0)

@@ -54,6 +54,18 @@ defmodule SmolqueryApi.Auth do
     end
   end
 
+  @doc """
+  Whether a presented credential is `expected`, compared in constant time.
+
+  `:error` is a request that presented none, refused like a wrong one. The
+  protocol edges read the credential in their own forms
+  (`SmolqueryClickHouse.Auth`, `SmolqueryVictoriaMetrics.Auth`) and compare
+  it here.
+  """
+  @spec matches?({:ok, String.t()} | :error, String.t()) :: boolean()
+  def matches?({:ok, presented}, expected), do: Plug.Crypto.secure_compare(presented, expected)
+  def matches?(:error, _expected), do: false
+
   defp authenticated?(conn) do
     with ["Bearer " <> key] <- get_req_header(conn, "authorization"),
          {:ok, runtime} <- Runtime.fetch(conn.private.smolquery_api) do

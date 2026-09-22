@@ -134,7 +134,7 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_s3_requests_total", failed_delete) == before_failed + 1
   end
 
-  describe "the two HTTP edges' latency (T-546)" do
+  describe "the HTTP edges' latency (T-546)" do
     defp stopped(event, private, status, duration_us) do
       :telemetry.execute(
         event,
@@ -226,6 +226,73 @@ defmodule Smolquery.TelemetryTest do
       assert value("smolquery_clickhouse_request_microseconds_total", ~s({kind="query"})) ==
                before_us + 230_000
     end
+
+    test "a VictoriaMetrics edge request is counted by class and timed by kind" do
+      family = "smolquery_victoriametrics_request_microseconds_bucket"
+      inf = fn kind -> ~s({kind="#{kind}",le="+Inf"}) end
+      fast = ~s({kind="write",le="250000"})
+      before_fast = value(family, fast)
+
+      before_us =
+        value("smolquery_victoriametrics_request_microseconds_total", ~s({kind="write"}))
+
+      before_class = value("smolquery_victoriametrics_requests_total", ~s({class="2xx"}))
+
+      for {kind, label} <- [write: :write, health: :health, query: :other, nil: :other] do
+        was = value(family, inf.(label))
+
+        stopped(
+          [:smolquery, :victoriametrics, :stop],
+          %{smolquery_victoriametrics_kind: kind},
+          204,
+          230_000
+        )
+
+        assert value(family, inf.(label)) == was + 1, inspect(kind)
+      end
+
+      assert value(family, fast) == before_fast + 1
+
+      assert value("smolquery_victoriametrics_request_microseconds_total", ~s({kind="write"})) ==
+               before_us + 230_000
+
+      assert value("smolquery_victoriametrics_requests_total", ~s({class="2xx"})) ==
+               before_class + 4
+
+      rendered = Telemetry.render()
+
+      for name <- [
+            "smolquery_victoriametrics_requests_total",
+            "smolquery_victoriametrics_request_microseconds_total",
+            "smolquery_victoriametrics_request_microseconds_bucket"
+          ] do
+        assert rendered =~ ~r/^# HELP #{name} .*VictoriaMetrics edge requests/m
+        assert rendered =~ "# TYPE #{name} counter"
+      end
+    end
+  end
+
+  test "counts remote-write samples by result, a closed set" do
+    results = ~w(written nan histogram exemplar refused)
+
+    before =
+      Map.new(
+        results,
+        &{&1, value("smolquery_victoriametrics_samples_total", ~s({result="#{&1}"}))}
+      )
+
+    for result <- results ++ ["surprise"] do
+      :telemetry.execute([:smolquery, :victoriametrics, :samples], %{count: 7}, %{result: result})
+    end
+
+    for result <- results do
+      assert value("smolquery_victoriametrics_samples_total", ~s({result="#{result}"})) ==
+               before[result] + 7
+    end
+
+    rendered = Telemetry.render()
+    refute rendered =~ ~s(result="surprise")
+    assert rendered =~ "# HELP smolquery_victoriametrics_samples_total Remote-write samples"
   end
 
   test "prices the ClickHouse edge's catalog checks apart from its rebuilds (T-529)" do

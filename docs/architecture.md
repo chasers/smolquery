@@ -1218,9 +1218,9 @@ is a ~500k-group group-by.
 
 ## Roles
 
-One release holds four services plus four edges: the HTTP front door, the
-web UI (user interface), the Postgres wire listener, and the ClickHouse HTTP
-listener. A node starts only
+One release holds four services plus five edges: the HTTP front door, the
+web UI (user interface), the Postgres wire listener, the ClickHouse HTTP
+listener, and the VictoriaMetrics listener. A node starts only
 the subtrees its roles name.
 `SMOLQUERY_ROLES` is a comma-separated list, or `all`:
 
@@ -1241,6 +1241,7 @@ SMOLQUERY_ROLES=web,query          # the UI and the jobs it runs
 | `web` | `SmolqueryWeb` — the LiveView UI |
 | `pg` | `SmolqueryPg` — the Postgres wire listener, a `ThousandIsland` server that runs `SELECT` through the node's query service ([postgres-wire.md](postgres-wire.md)) |
 | `clickhouse` | `SmolqueryClickHouse` — the ClickHouse HTTP listener, a Bandit server that writes `RowBinary` through the node's ingest service and runs queries through its query service ([clickhouse.md](clickhouse.md)) |
+| `victoriametrics` | `SmolqueryVictoriaMetrics` — the VictoriaMetrics listener, a Bandit server that writes Prometheus remote write from vmagent or Prometheus through the node's ingest service, one row per sample (PL-70) |
 
 Unknown role names fail the boot. They do not silently start nothing. See
 `Smolquery.Roles`.

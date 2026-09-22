@@ -46,6 +46,7 @@ defmodule Smolquery.Application do
   defp subtree(:web), do: [SmolqueryWeb.Supervisor]
   defp subtree(:pg), do: [SmolqueryPg.Supervisor]
   defp subtree(:clickhouse), do: [SmolqueryClickHouse.Supervisor]
+  defp subtree(:victoriametrics), do: [SmolqueryVictoriaMetrics.Supervisor]
   defp subtree(:query), do: [Smolquery.QueryService.Supervisor]
   defp subtree(:buffer), do: [Smolquery.BufferService.Supervisor]
   defp subtree(:storage), do: [Smolquery.StorageService.Supervisor]

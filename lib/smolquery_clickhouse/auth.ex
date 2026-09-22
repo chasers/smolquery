@@ -22,12 +22,8 @@ defmodule SmolqueryClickHouse.Auth do
   Whether `conn` presents `password`.
   """
   @spec authenticated?(Plug.Conn.t(), String.t()) :: boolean()
-  def authenticated?(conn, password) do
-    case presented(conn) do
-      {:ok, candidate} -> Plug.Crypto.secure_compare(candidate, password)
-      :error -> false
-    end
-  end
+  def authenticated?(conn, password),
+    do: conn |> presented() |> SmolqueryApi.Auth.matches?(password)
 
   defp presented(conn) do
     with :error <- key_header(conn),
