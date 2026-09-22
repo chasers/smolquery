@@ -1079,7 +1079,7 @@ defmodule Smolquery.Telemetry do
   defp clickhouse_kind(_conn), do: :other
 
   defp victoriametrics_kind(%{private: %{smolquery_victoriametrics_kind: kind}})
-       when kind in [:write, :query, :health],
+       when kind in [:write, :query, :labels, :health],
        do: kind
 
   defp victoriametrics_kind(_conn), do: :other

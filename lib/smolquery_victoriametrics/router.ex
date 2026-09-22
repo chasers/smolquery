@@ -9,8 +9,14 @@ defmodule SmolqueryVictoriaMetrics.Router do
       POST /insert/<account>/prometheus/api/v1/write      the same; the account is ignored
       GET|POST /api/v1/query                              SmolqueryVictoriaMetrics.Query, instant
       GET|POST /api/v1/query_range                        SmolqueryVictoriaMetrics.Query, range
+      GET|POST /api/v1/labels                             SmolqueryVictoriaMetrics.Metadata
+      GET|POST /api/v1/label/<name>/values                SmolqueryVictoriaMetrics.Metadata
+      GET|POST /api/v1/series                             SmolqueryVictoriaMetrics.Metadata
+      GET|POST /api/v1/status/buildinfo, /api/v1/metadata,
+               /api/v1/rules, /api/v1/alerts,
+               /api/v1/notifiers, /api/v1/query_exemplars SmolqueryVictoriaMetrics.Status
 
-  The two query routes also answer under `/prometheus` and under
+  Every read route also answers under `/prometheus` and under
   `/select/<account>/prometheus`, the prefixes Grafana's datasources use for
   a VictoriaMetrics behind a proxy or a cluster's `vmselect`; the account
   is ignored. As in a cluster, `/insert/...` only writes and `/select/...`
@@ -34,7 +40,9 @@ defmodule SmolqueryVictoriaMetrics.Router do
   Every request emits `[:smolquery, :victoriametrics, :start | :stop]`
   through `Plug.Telemetry`, which `Smolquery.Telemetry` counts into
   `smolquery_victoriametrics_requests_total` and times by the `kind` this
-  router puts in `conn.private`: `write`, `query`, `health`, or `other`.
+  router puts in `conn.private`: `write`, `query`, `labels` for the three
+  metadata routes that scan the table, `health`, or `other`, which the
+  fixed answers of `SmolqueryVictoriaMetrics.Status` are.
   Queries are not held to ingest admission: they read, and the query
   service bounds its own jobs.
   """
@@ -46,8 +54,10 @@ defmodule SmolqueryVictoriaMetrics.Router do
   alias SmolqueryApi.Admission
   alias SmolqueryVictoriaMetrics.Auth
   alias SmolqueryVictoriaMetrics.Errors
+  alias SmolqueryVictoriaMetrics.Metadata
   alias SmolqueryVictoriaMetrics.Query
   alias SmolqueryVictoriaMetrics.Runtime
+  alias SmolqueryVictoriaMetrics.Status
   alias SmolqueryVictoriaMetrics.Write
 
   @telemetry Plug.Telemetry.init(event_prefix: [:smolquery, :victoriametrics])
@@ -89,6 +99,8 @@ defmodule SmolqueryVictoriaMetrics.Router do
     case destination(conn.method, conn.path_info) do
       :write -> write(conn, runtime)
       {:query, kind} -> conn |> kind(:query) |> Query.call(runtime, kind)
+      {:metadata, route} -> conn |> kind(:labels) |> Metadata.call(runtime, route)
+      {:status, route} -> conn |> kind(:other) |> Status.call(route)
       :unknown -> not_found(conn)
     end
   end
@@ -104,8 +116,8 @@ defmodule SmolqueryVictoriaMetrics.Router do
 
   defp destination(method, ["select", _account, "prometheus" | path]) do
     case endpoint(method, path) do
-      {:query, kind} -> {:query, kind}
-      _write_or_unknown -> :unknown
+      :write -> :unknown
+      read_or_unknown -> read_or_unknown
     end
   end
 
@@ -119,7 +131,19 @@ defmodule SmolqueryVictoriaMetrics.Router do
   defp endpoint(method, ["api", "v1", "query_range"]) when method in ["GET", "POST"],
     do: {:query, :range}
 
+  defp endpoint(method, ["api", "v1" | path]) when method in ["GET", "POST"], do: read(path)
   defp endpoint(_method, _path), do: :unknown
+
+  defp read(["labels"]), do: {:metadata, :labels}
+  defp read(["label", name, "values"]), do: {:metadata, {:label_values, name}}
+  defp read(["series"]), do: {:metadata, :series}
+
+  defp read(path) do
+    case Status.route(path) do
+      nil -> :unknown
+      route -> {:status, route}
+    end
+  end
 
   defp write(conn, runtime) do
     conn = kind(conn, :write)

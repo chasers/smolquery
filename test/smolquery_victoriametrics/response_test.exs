@@ -4,6 +4,8 @@ defmodule SmolqueryVictoriaMetrics.ResponseTest do
   alias SmolqueryVictoriaMetrics.Eval.Series
   alias SmolqueryVictoriaMetrics.Response
 
+  doctest Response
+
   @inf 1.797_693_134_862_315_7e308
   @stats %{series: 2, duration_ms: 7}
 
@@ -92,5 +94,20 @@ defmodule SmolqueryVictoriaMetrics.ResponseTest do
              decode(Response.scalar({1_000, 42.0}, @stats))
 
     assert %{"data" => %{"result" => [1, "NaN"]}} = decode(Response.scalar({1_000, nil}, @stats))
+  end
+
+  test "data/1 wraps encoded data as a success, status first" do
+    assert IO.iodata_to_binary(Response.data(~s(["a","b"]))) ==
+             ~s({"status":"success","data":["a","b"]})
+  end
+
+  test "metric/1 writes __name__ first, then labels in name order, escaped" do
+    assert IO.iodata_to_binary(Response.metric(%{"z" => "1", "a" => ~s(q"t)})) ==
+             ~s({"a":"q\\"t","z":"1"})
+
+    assert IO.iodata_to_binary(Response.metric(%{"b" => "2", "__name__" => "m"})) ==
+             ~s({"__name__":"m","b":"2"})
+
+    assert IO.iodata_to_binary(Response.metric(%{})) == "{}"
   end
 end

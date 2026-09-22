@@ -245,7 +245,14 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   defp frame_rows(nil), do: []
   defp frame_rows(frame), do: Frame.to_rows(frame)
 
-  defp run(runtime, sql, params, opts) do
+  @doc """
+  Runs `sql` with `params` through the runtime's query service: the result
+  frame, `nil` when the table does not exist yet, or why the job failed.
+  `opts` are `Smolquery.QueryService.Client.query/3`'s.
+  """
+  @spec run(Runtime.t(), String.t(), [term()], keyword()) ::
+          {:ok, DataFrame.t() | nil} | {:error, reason()}
+  def run(%Runtime{} = runtime, sql, params, opts) do
     case Client.query(runtime.query_name, sql, [params: params] ++ opts) do
       {:ok, %Job{state: :done}, frame} ->
         {:ok, frame}
@@ -268,10 +275,19 @@ defmodule SmolqueryVictoriaMetrics.Samples do
     end
   end
 
-  defp table(%Runtime{table: {dataset, table}}),
+  @doc """
+  The edge's table as the SQL names it, each part quoted.
+  """
+  @spec table(Runtime.t()) :: String.t()
+  def table(%Runtime{table: {dataset, table}}),
     do: Identifier.quote_name!(dataset) <> "." <> Identifier.quote_name!(table)
 
-  defp time(ms) do
+  @doc """
+  A millisecond time as the `ts` bound the SQL binds, or
+  `{:error, {:invalid_time, ms}}` past what a timestamp holds.
+  """
+  @spec time(integer()) :: {:ok, NaiveDateTime.t()} | {:error, {:invalid_time, integer()}}
+  def time(ms) do
     case Write.timestamp(ms) do
       {:ok, timestamp} -> {:ok, timestamp}
       :error -> {:error, {:invalid_time, ms}}

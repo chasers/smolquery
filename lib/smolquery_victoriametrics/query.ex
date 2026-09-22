@@ -61,7 +61,6 @@ defmodule SmolqueryVictoriaMetrics.Query do
 
   import Plug.Conn
 
-  alias SmolqueryApi.Body
   alias SmolqueryVictoriaMetrics.Errors
   alias SmolqueryVictoriaMetrics.Eval
   alias SmolqueryVictoriaMetrics.MetricsQL
@@ -72,7 +71,6 @@ defmodule SmolqueryVictoriaMetrics.Query do
 
   @default_step_ms 300_000
   @min_points_for_alignment 50
-  @max_body_bytes 1_048_576
 
   @doc """
   Answers an instant query (`:instant`) or a range query (`:range`).
@@ -100,27 +98,8 @@ defmodule SmolqueryVictoriaMetrics.Query do
   end
 
   defp params(conn) do
-    conn = fetch_query_params(conn)
-
-    case form(conn) do
-      {:ok, form, conn} -> {:ok, Map.merge(conn.query_params, form), conn}
-      {:error, :too_large} -> {:error, {:bad_data, "the request body is too large"}}
-    end
+    with {:ok, pairs, conn} <- Params.read(conn), do: {:ok, Params.values(pairs), conn}
   end
-
-  defp form(%Plug.Conn{method: "POST"} = conn) do
-    if form?(get_req_header(conn, "content-type")) do
-      with {:ok, body, conn} <- Body.read(conn, @max_body_bytes),
-           do: {:ok, URI.decode_query(body), conn}
-    else
-      {:ok, %{}, conn}
-    end
-  end
-
-  defp form(conn), do: {:ok, %{}, conn}
-
-  defp form?([type | _rest]), do: String.starts_with?(type, "application/x-www-form-urlencoded")
-  defp form?([]), do: false
 
   defp query(%{"query" => query}) when query != "", do: {:ok, query}
   defp query(_params), do: {:error, {:bad_data, "missing `query` arg"}}

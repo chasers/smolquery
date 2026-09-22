@@ -238,7 +238,13 @@ defmodule Smolquery.TelemetryTest do
 
       before_class = value("smolquery_victoriametrics_requests_total", ~s({class="2xx"}))
 
-      for {kind, label} <- [write: :write, health: :health, query: :query, nil: :other] do
+      for {kind, label} <- [
+            write: :write,
+            health: :health,
+            query: :query,
+            labels: :labels,
+            nil: :other
+          ] do
         was = value(family, inf.(label))
 
         stopped(
@@ -257,7 +263,7 @@ defmodule Smolquery.TelemetryTest do
                before_us + 230_000
 
       assert value("smolquery_victoriametrics_requests_total", ~s({class="2xx"})) ==
-               before_class + 4
+               before_class + 5
 
       rendered = Telemetry.render()
 

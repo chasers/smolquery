@@ -70,6 +70,16 @@ defmodule SmolqueryVictoriaMetrics.Response do
   @spec scalar({integer(), float() | nil}, stats()) :: iodata()
   def scalar({t, v}, stats), do: success("scalar", point(t, v), stats)
 
+  @doc """
+  A success whose `data` is `data`, already encoded, as the metadata routes
+  answer: `{"status":"success","data":...}`.
+
+      iex> SmolqueryVictoriaMetrics.Response.data("[]") |> IO.iodata_to_binary()
+      ~s({"status":"success","data":[]})
+  """
+  @spec data(iodata()) :: iodata()
+  def data(data), do: ["{\"status\":\"success\",\"data\":", data, "}"]
+
   defp success(type, result, stats) do
     [
       "{\"status\":\"success\",\"isPartial\":false,\"data\":{\"resultType\":\"",
@@ -84,7 +94,16 @@ defmodule SmolqueryVictoriaMetrics.Response do
     ]
   end
 
-  defp metric(labels) do
+  @doc """
+  A series' labels as the API's `metric` object: `__name__` first when
+  present, then the rest in name order.
+
+      iex> labels = %{"job" => "a", "__name__" => "up", "code" => "200"}
+      iex> labels |> SmolqueryVictoriaMetrics.Response.metric() |> IO.iodata_to_binary()
+      ~s({"__name__":"up","code":"200","job":"a"})
+  """
+  @spec metric(%{String.t() => String.t()}) :: iodata()
+  def metric(labels) do
     {name, rest} = Map.pop(labels, "__name__")
     pairs = Enum.sort(rest)
     pairs = if name, do: [{"__name__", name} | pairs], else: pairs

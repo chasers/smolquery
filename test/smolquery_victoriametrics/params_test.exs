@@ -1,7 +1,12 @@
 defmodule SmolqueryVictoriaMetrics.ParamsTest do
   use ExUnit.Case, async: true
 
+  import Plug.Conn, only: [put_req_header: 3]
+  import Plug.Test, only: [conn: 3]
+
   alias SmolqueryVictoriaMetrics.Params
+
+  doctest Params
 
   describe "time/3, as VictoriaMetrics' GetTime reads it" do
     test "Unix seconds, whole or with a fraction, kept to the millisecond" do
@@ -68,6 +73,58 @@ defmodule SmolqueryVictoriaMetrics.ParamsTest do
 
       assert {:error, "cannot parse step=\"soon\""} =
                Params.duration(%{"step" => "soon"}, "step", nil)
+    end
+  end
+
+  describe "read/1, as Go's ParseForm gathers r.Form" do
+    test "the URL's pairs in order, repeats kept" do
+      conn = conn(:get, "/x?match[]=a&match=b&match%5B%5D=c&limit=1", nil)
+
+      assert {:ok, pairs, _conn} = Params.read(conn)
+      assert pairs == [{"match[]", "a"}, {"match", "b"}, {"match[]", "c"}, {"limit", "1"}]
+    end
+
+    test "a form-encoded POST body's pairs come first" do
+      conn =
+        conn(:post, "/x?limit=1&match[]=url", "match%5B%5D=up&limit=2")
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+
+      assert {:ok, pairs, _conn} = Params.read(conn)
+      assert pairs == [{"match[]", "up"}, {"limit", "2"}, {"limit", "1"}, {"match[]", "url"}]
+      assert Params.values(pairs) == %{"match[]" => "up", "limit" => "2"}
+      assert Params.all(pairs, ["match[]"]) == ["up", "url"]
+    end
+
+    test "a POST body of another type is not read" do
+      conn =
+        conn(:post, "/x?a=1", "a=2")
+        |> put_req_header("content-type", "application/json")
+
+      assert {:ok, [{"a", "1"}], _conn} = Params.read(conn)
+    end
+
+    test "a body past 1 MiB is bad data" do
+      conn =
+        conn(:post, "/x", String.duplicate("a", 1_048_577))
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+
+      assert Params.read(conn) == {:error, {:bad_data, "the request body is too large"}}
+    end
+  end
+
+  describe "int/2, as GetInt reads it" do
+    test "missing or empty is 0, an integer is read with its sign" do
+      assert Params.int(%{}, "limit") == {:ok, 0}
+      assert Params.int(%{"limit" => ""}, "limit") == {:ok, 0}
+      assert Params.int(%{"limit" => "10"}, "limit") == {:ok, 10}
+      assert Params.int(%{"limit" => "-3"}, "limit") == {:ok, -3}
+    end
+
+    test "anything else is refused" do
+      for text <- ["ten", "1.5", "10x"] do
+        assert Params.int(%{"limit" => text}, "limit") ==
+                 {:error, "cannot parse integer \"limit\"=#{inspect(text)}"}
+      end
     end
   end
 end

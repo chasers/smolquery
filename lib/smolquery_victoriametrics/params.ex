@@ -14,12 +14,91 @@ defmodule SmolqueryVictoriaMetrics.Params do
   A duration is seconds as a number (`15`, `0.5`) or a duration
   (`15s`, `1m30s`, `1h`), and must lie in `1ms` to 100 years. Grafana may
   send `undefined`, which is taken as missing.
+
+  The arguments themselves come from the URL and, for a form-encoded
+  `POST`, from the body, as Go's `Request.ParseForm` gathers them for
+  `FormValue`: `read/1` keeps every pair, the body's first, so `values/1`
+  lets the body win and `all/2` answers a repeated key such as `match[]`
+  with every value it was given (T-566).
   """
 
+  import Plug.Conn
+
+  alias SmolqueryApi.Body
   alias SmolqueryVictoriaMetrics.MetricsQL
 
   @max_duration_ms 100 * 365 * 24 * 3600 * 1000
   @max_time_ms div(9_223_372_036_854_775_807, 1_000_000)
+  @max_body_bytes 1_048_576
+
+  @typedoc "A request's arguments in the order Go's `r.Form` holds them: the body's, then the URL's."
+  @type pairs :: [{String.t(), String.t()}]
+
+  @doc """
+  Every argument of `conn`: a form-encoded `POST` body's pairs, then the
+  URL's, each in the order sent. A body past 1 MiB is refused.
+  """
+  @spec read(Plug.Conn.t()) :: {:ok, pairs(), Plug.Conn.t()} | {:error, {:bad_data, String.t()}}
+  def read(conn) do
+    url = conn.query_string |> URI.query_decoder() |> Enum.to_list()
+
+    case form(conn) do
+      {:ok, form, conn} -> {:ok, form ++ url, conn}
+      {:error, :too_large} -> {:error, {:bad_data, "the request body is too large"}}
+    end
+  end
+
+  defp form(%Plug.Conn{method: "POST"} = conn) do
+    if form?(get_req_header(conn, "content-type")) do
+      with {:ok, body, conn} <- Body.read(conn, @max_body_bytes),
+           do: {:ok, body |> URI.query_decoder() |> Enum.to_list(), conn}
+    else
+      {:ok, [], conn}
+    end
+  end
+
+  defp form(conn), do: {:ok, [], conn}
+
+  defp form?([type | _rest]), do: String.starts_with?(type, "application/x-www-form-urlencoded")
+  defp form?([]), do: false
+
+  @doc """
+  One value per key, the first given, as Go's `FormValue` reads it: the
+  body's over the URL's.
+
+      iex> SmolqueryVictoriaMetrics.Params.values([{"a", "body"}, {"a", "url"}, {"b", "1"}])
+      %{"a" => "body", "b" => "1"}
+  """
+  @spec values(pairs()) :: %{String.t() => String.t()}
+  def values(pairs) do
+    Enum.reduce(pairs, %{}, fn {key, value}, acc -> Map.put_new(acc, key, value) end)
+  end
+
+  @doc """
+  Every value of each of `keys`, key by key, each in the order given.
+
+      iex> pairs = [{"match[]", "a"}, {"match", "b"}, {"match[]", "c"}]
+      iex> SmolqueryVictoriaMetrics.Params.all(pairs, ["match[]", "match"])
+      ["a", "c", "b"]
+  """
+  @spec all(pairs(), [String.t()]) :: [String.t()]
+  def all(pairs, keys) do
+    Enum.flat_map(keys, fn key -> for {^key, value} <- pairs, do: value end)
+  end
+
+  @doc """
+  The integer `key` in `params`, `0` when missing, as `GetInt` reads it.
+  """
+  @spec int(%{String.t() => String.t()}, String.t()) :: {:ok, integer()} | {:error, String.t()}
+  def int(params, key) do
+    with text when text != "" <- Map.get(params, key, ""),
+         {n, ""} <- Integer.parse(text) do
+      {:ok, n}
+    else
+      "" -> {:ok, 0}
+      _unreadable -> {:error, "cannot parse integer #{inspect(key)}=#{inspect(params[key])}"}
+    end
+  end
 
   @doc """
   The time `key` in `params`, in milliseconds, or `default_ms` rounded down

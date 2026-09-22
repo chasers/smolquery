@@ -12,7 +12,16 @@ defmodule SmolqueryVictoriaMetrics.RouterTest do
 
   setup do
     name = :"vm_router_#{:erlang.unique_integer([:positive])}"
-    Runtime.put(Runtime.new(name: name, password: @password, max_ndjson_bytes: 1_000))
+
+    Runtime.put(
+      Runtime.new(
+        name: name,
+        password: @password,
+        max_ndjson_bytes: 1_000,
+        query_name: :vm_router_test_no_query_service
+      )
+    )
+
     on_exit(fn -> Runtime.delete(name) end)
 
     handler = "vm-router-test-#{name}"
@@ -115,6 +124,74 @@ defmodule SmolqueryVictoriaMetrics.RouterTest do
       assert response.status == 200, "#{method} #{path}"
       assert %{"status" => "success"} = JSON.decode!(response.resp_body)
       assert_receive {:stopped, ^path, :query}
+    end
+  end
+
+  @metadata ["/api/v1/labels", "/api/v1/label/job/values", "/api/v1/series?match[]=up"]
+  @status [
+    "/api/v1/status/buildinfo",
+    "/api/v1/metadata",
+    "/api/v1/rules",
+    "/api/v1/alerts",
+    "/api/v1/notifiers",
+    "/api/v1/query_exemplars"
+  ]
+
+  test "every metadata path reaches the metadata routes, kind labels", %{name: name} do
+    for prefix <- ["", "/prometheus", "/select/0/prometheus"],
+        route <- @metadata,
+        method <- [:get, :post] do
+      conn = conn(method, prefix <> route) |> authed()
+      path = conn.request_path
+
+      response = request(conn, name)
+
+      assert response.status == 503, "#{method} #{path}"
+      assert %{"errorType" => "unavailable"} = JSON.decode!(response.resp_body)
+      assert_receive {:stopped, ^path, :labels}
+    end
+  end
+
+  test "every status path answers VictoriaMetrics' fixed body, kind other", %{name: name} do
+    for prefix <- ["", "/prometheus", "/select/0/prometheus"],
+        path <- Enum.map(@status, &(prefix <> &1)),
+        method <- [:get, :post] do
+      response = conn(method, path) |> authed() |> request(name)
+
+      assert response.status == 200, "#{method} #{path}"
+      assert %{"status" => "success", "data" => _data} = JSON.decode!(response.resp_body)
+      assert_receive {:stopped, ^path, :other}
+    end
+  end
+
+  test "every new path is behind the password", %{name: name} do
+    for prefix <- ["", "/prometheus", "/select/0/prometheus"],
+        route <- @metadata ++ @status,
+        method <- [:get, :post] do
+      response = request(conn(method, prefix <> route), name)
+
+      assert response.status == 401, "#{method} #{prefix <> route}"
+    end
+  end
+
+  test "an invalid label name is 400 before anything is read", %{name: name} do
+    response = conn(:get, "/api/v1/label/job-name/values") |> authed() |> request(name)
+
+    assert response.status == 400
+    assert %{"errorType" => "bad_data"} = JSON.decode!(response.resp_body)
+  end
+
+  test "reads are not answered under /insert, nor tsdb status anywhere", %{name: name} do
+    for path <- [
+          "/insert/0/prometheus/api/v1/labels",
+          "/insert/0/prometheus/api/v1/status/buildinfo",
+          "/api/v1/status/tsdb",
+          "/api/v1/label/job",
+          "/api/v1/label/a/b/values"
+        ] do
+      response = conn(:get, path) |> authed() |> request(name)
+
+      assert response.status == 404, path
     end
   end
 
