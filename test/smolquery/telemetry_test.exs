@@ -659,24 +659,50 @@ defmodule Smolquery.TelemetryTest do
     fetch_sub_ms = ~s({op="fetch",result="ok",le="500"})
     fetch_1ms = ~s({op="fetch",result="ok",le="1000"})
     conflict = ~s({op="advance",result="conflict"})
-    before_fetches = value("smolquery_pg_ops_total", fetch)
-    before_fetch_us = value("smolquery_pg_op_microseconds_total", fetch)
-    before_sub_ms = value("smolquery_pg_op_microseconds_bucket", fetch_sub_ms)
-    before_1ms = value("smolquery_pg_op_microseconds_bucket", fetch_1ms)
-    before_conflicts = value("smolquery_pg_ops_total", conflict)
+    before_fetches = value("smolquery_config_store_ops_total", fetch)
+    before_fetch_us = value("smolquery_config_store_op_microseconds_total", fetch)
+    before_sub_ms = value("smolquery_config_store_op_microseconds_bucket", fetch_sub_ms)
+    before_1ms = value("smolquery_config_store_op_microseconds_bucket", fetch_1ms)
+    before_conflicts = value("smolquery_config_store_ops_total", conflict)
 
-    :telemetry.execute([:smolquery, :pg, :op], %{duration_us: 320}, %{op: :fetch, result: :ok})
+    :telemetry.execute([:smolquery, :config_store, :op], %{duration_us: 320}, %{
+      op: :fetch,
+      result: :ok
+    })
 
-    :telemetry.execute([:smolquery, :pg, :op], %{duration_us: 900}, %{
+    :telemetry.execute([:smolquery, :config_store, :op], %{duration_us: 900}, %{
       op: :advance,
       result: :conflict
     })
 
-    assert value("smolquery_pg_ops_total", fetch) == before_fetches + 1
-    assert value("smolquery_pg_op_microseconds_total", fetch) == before_fetch_us + 320
-    assert value("smolquery_pg_op_microseconds_bucket", fetch_sub_ms) == before_sub_ms + 1
-    assert value("smolquery_pg_op_microseconds_bucket", fetch_1ms) == before_1ms + 1
-    assert value("smolquery_pg_ops_total", conflict) == before_conflicts + 1
+    assert value("smolquery_config_store_ops_total", fetch) == before_fetches + 1
+    assert value("smolquery_config_store_op_microseconds_total", fetch) == before_fetch_us + 320
+
+    assert value("smolquery_config_store_op_microseconds_bucket", fetch_sub_ms) ==
+             before_sub_ms + 1
+
+    assert value("smolquery_config_store_op_microseconds_bucket", fetch_1ms) == before_1ms + 1
+    assert value("smolquery_config_store_ops_total", conflict) == before_conflicts + 1
+  end
+
+  test "counts failed Postgrex pool checkouts by reason (T-552)" do
+    before_queue =
+      value("smolquery_catalog_database_checkout_errors_total", ~s({reason="queue_timeout"}))
+
+    before_other = value("smolquery_catalog_database_checkout_errors_total", ~s({reason="other"}))
+
+    :telemetry.execute([:db_connection, :connection_error], %{count: 1}, %{
+      error: %DBConnection.ConnectionError{message: "queue", reason: :queue_timeout},
+      opts: []
+    })
+
+    :telemetry.execute([:db_connection, :connection_error], %{count: 1}, %{error: :unshaped})
+
+    assert value("smolquery_catalog_database_checkout_errors_total", ~s({reason="queue_timeout"})) ==
+             before_queue + 1
+
+    assert value("smolquery_catalog_database_checkout_errors_total", ~s({reason="other"})) ==
+             before_other + 1
   end
 
   test "counts terminal query jobs by state" do

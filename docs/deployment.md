@@ -374,8 +374,8 @@ Every query opens with reads of the lake's metadata — the current snapshot, th
 
 **In the app**, on `/metrics`:
 
-- `smolquery_catalog_ops_total{op,result}`, `smolquery_catalog_op_microseconds_total{op,result}` and `smolquery_catalog_op_microseconds_bucket{op,le}` — one per `Smolquery.Catalog` call. `op` is the callback, so `current_snapshot`, `table_schema`, `registered_through`, `segment_files` and `segment_stats` are what a query pays before it plans, and a distributed query reads `segment_files` once more per shard, so that op does not divide by queries; `register_segments` and `replace_segments` are what a seal and a compaction pay.
-- `smolquery_catalog_statements_total{kind,result}`, `smolquery_catalog_statement_microseconds_total{kind,result}` and `smolquery_catalog_statement_microseconds_bucket{kind,le}` — one per statement or transaction the DuckLake catalog sent its engine. Statements over ops is how many statements one op costs; the statement latency is the closest in-app proxy for one DuckDB transaction against the metadata database.
+- `smolquery_catalog_ops_total{op,result}`, `smolquery_catalog_op_microseconds_total{op,result}` and `smolquery_catalog_op_microseconds_bucket{op,result,le}` — one per `Smolquery.Catalog` call. `op` is the callback, so `current_snapshot`, `table_schema`, `registered_through`, `segment_files` and `segment_stats` are what a query pays before it plans, and a distributed query reads `segment_files` once more per shard, so that op does not divide by queries; `register_segments` and `replace_segments` are what a seal and a compaction pay.
+- `smolquery_catalog_statements_total{kind,result}`, `smolquery_catalog_statement_microseconds_total{kind,result}` and `smolquery_catalog_statement_microseconds_bucket{kind,result,le}` — one per statement or transaction the DuckLake catalog sent its engine. Statements over ops is how many statements one op costs; the statement latency is the closest in-app proxy for one DuckDB transaction against the metadata database.
 
 **On Postgres**, which is the only place DuckDB's own round trips are visible: enable `pg_stat_statements` on the catalog instance (`shared_preload_libraries` in the parameter group, then `CREATE EXTENSION pg_stat_statements` once) and read calls and mean time by normalised statement. The transaction begins, the postgres extension's `pg_catalog` discovery and DuckLake's own metadata reads each show up as their own rows:
 
@@ -388,17 +388,17 @@ SELECT calls, round(mean_exec_time::numeric, 2) AS mean_ms, left(query, 100) AS 
 
 Calls per second there over `smolquery_catalog_statements_total` per second here is the round trips one app statement costs. RDS Performance Insights shows the same by SQL without a parameter-group change. For a one-off on an engine, `SET pg_debug_show_queries = true` prints every statement the extension sends.
 
-**The control** (T-552): the ring configuration store is the one place Elixir reaches the same database directly, over Postgrex, and its `RingEpoch` and `ExpectedNodes` pollers read it about once a second per buffer node. `smolquery_pg_ops_total{op,result}`, `smolquery_pg_op_microseconds_total{op,result}` and `smolquery_pg_op_microseconds_bucket{op,result,le}` count those, one per `setup`, `fetch`, `ensure` or `advance`. A read that measured 0.3 ms this way measured 11.6 ms as `Catalog.schema_version/1` through DuckDB, on the same pod against the same instance. The ratio is one expression, continuously:
+**The control** (T-552): the ring configuration store is the one place Elixir reaches the same database directly, over Postgrex, and its `RingEpoch` and `ExpectedNodes` pollers read it about once a second per buffer node. `smolquery_config_store_ops_total{op,result}`, `smolquery_config_store_op_microseconds_total{op,result}` and `smolquery_config_store_op_microseconds_bucket{op,result,le}` count those, one per `setup`, `fetch`, `ensure` or `advance`. Postgrex emits no per-query telemetry, so that span is the only clock on the statement; DBConnection's one event, a failed pool checkout, is `smolquery_catalog_database_checkout_errors_total{reason}`, and it counts every Postgrex pool on the node, the node-discovery connections of `libcluster_postgres` included, which are otherwise unmeasured (a `NOTIFY` per heartbeat and a `LISTEN`). A read that measured 0.3 ms this way measured 11.6 ms as `Catalog.schema_version/1` through DuckDB, on the same pod against the same instance. The ratio is one expression, continuously:
 
 ```promql
-(sum(rate(smolquery_catalog_statement_microseconds_total[5m]))
-   / sum(rate(smolquery_catalog_statements_total[5m])))
+(sum(rate(smolquery_catalog_statement_microseconds_total{kind="query",result="ok"}[5m]))
+   / sum(rate(smolquery_catalog_statements_total{kind="query",result="ok"}[5m])))
 /
-(sum(rate(smolquery_pg_op_microseconds_total[5m]))
-   / sum(rate(smolquery_pg_ops_total[5m])))
+(sum(rate(smolquery_config_store_op_microseconds_total{op="fetch",result="ok"}[5m]))
+   / sum(rate(smolquery_config_store_ops_total{op="fetch",result="ok"}[5m])))
 ```
 
-It moves when the extension, the DuckDB version or the instance changes. Two limits: the store runs on buffer nodes while the catalog ops that matter run on query and storage nodes, so it is a sound latency baseline for the same database and VPC but not a same-pod control; and `advance` writes while the catalog ops it is set against read, so `op="fetch"` is the row to compare.
+It moves when the extension, the DuckDB version or the instance changes. Two limits: the store runs on buffer nodes while the catalog ops that matter run on query and storage nodes, so it is a sound latency baseline for the same database and VPC but not a same-pod control; and the expression already keeps to reads that answered: `advance` writes, `ensure` is two round trips, and a call that timed out is not a measurement of the database.
 
 ## Sizing write partitions
 

@@ -147,10 +147,15 @@ defmodule Smolquery.Telemetry do
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
       [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction, result}
                                           — one per statement the DuckLake catalog sent its engine
-      [:smolquery, :pg, :op]              %{duration_us}, meta %{op: :setup | :fetch | :ensure | :advance,
+      [:smolquery, :config_store, :op]    %{duration_us}, meta %{op: :setup | :fetch | :ensure | :advance,
                                           result: :ok | :not_found | :conflict | :error}
                                           — one per ring configuration store call over Postgrex:
-                                          the Elixir-side control for the catalog's cost (T-552)
+                                          the Elixir-side control for the catalog's cost (T-552).
+                                          Postgrex emits nothing per query; this span is the
+                                          statement's only clock
+      [:db_connection, :connection_error] %{count}, meta %{error: %DBConnection.ConnectionError{}}
+                                          — DBConnection's own event, one per failed pool
+                                          checkout on this node, whichever Postgrex pool
       [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
                                           — one per query the distributed path answered (PL-49)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
@@ -258,7 +263,8 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
-    [:smolquery, :pg, :op],
+    [:smolquery, :config_store, :op],
+    [:db_connection, :connection_error],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -411,7 +417,8 @@ defmodule Smolquery.Telemetry do
       "Time catalog operations took, by op and result; divide by ops for the mean (T-549).",
     "smolquery_catalog_op_microseconds_bucket" =>
       "Catalog operations by duration, by op and result, cumulative in le at 1 ms, 5 ms, " <>
-        "25 ms, 100 ms, 250 ms, 1 s, 5 s and 30 s; counters, not a histogram (T-549).",
+        "25 ms, 100 ms, 250 ms, 1 s, 5 s, 30 s and 60 s; the last bound sits above the engine's " <>
+        "30 s timeout so a statement that timed out lands in it; counters, not a histogram (T-549).",
     "smolquery_catalog_statements_total" =>
       "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
         "result; over ops, what one op costs in statements (T-549).",
@@ -421,16 +428,21 @@ defmodule Smolquery.Telemetry do
       "Catalog statements by duration, by kind and result, cumulative in le at the op " <>
         "bucket's bounds; " <>
         "the closest in-app proxy for one DuckDB transaction against the metadata database.",
-    "smolquery_pg_ops_total" =>
+    "smolquery_config_store_ops_total" =>
       "Ring configuration store calls Elixir made to the catalog database over Postgrex, " <>
         "by op and result: ok, not_found, conflict or error (T-552).",
-    "smolquery_pg_op_microseconds_total" =>
+    "smolquery_config_store_op_microseconds_total" =>
       "Time those calls took, by op and result; divide by ops for the mean. The catalog " <>
         "statement mean over this one is what the same database costs through DuckDB (T-552).",
-    "smolquery_pg_op_microseconds_bucket" =>
+    "smolquery_config_store_op_microseconds_bucket" =>
       "Ring configuration store calls by duration, by op and result, cumulative in le at " <>
-        "250 us, 500 us, 1 ms, 5 ms, 25 ms, 100 ms, 250 ms, 1 s and 15 s; counters, not a " <>
+        "250 us, 500 us, 1 ms, 5 ms, 25 ms, 100 ms, 250 ms, 1 s and 30 s; the last bound sits " <>
+        "above Postgrex's 15 s timeout so a call that timed out lands in it; counters, not a " <>
         "histogram (T-552).",
+    "smolquery_catalog_database_checkout_errors_total" =>
+      "Postgrex pool checkouts against the catalog database that failed, by reason: " <>
+        "queue_timeout when every connection was busy, error when the pool was disconnected " <>
+        "(T-552). Every Postgrex pool on the node counts here, the node-discovery one included.",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
     "smolquery_query_scatter_shards_total" =>
@@ -455,10 +467,6 @@ defmodule Smolquery.Telemetry do
 
   @s3_latency_buckets [10_000, 50_000, 250_000, 1_000_000, 5_000_000]
 
-  # Bounds for the catalog's `_microseconds_bucket`s, ascending: a local
-  # metadata read is milliseconds, one through a Postgres catalog in another
-  # zone measured 230-440 ms (T-548), and a statement that hangs comes back
-  # at the engine's 30 s default timeout, so the top bound tells that apart.
   @catalog_latency_buckets [
     1_000,
     5_000,
@@ -467,20 +475,27 @@ defmodule Smolquery.Telemetry do
     250_000,
     1_000_000,
     5_000_000,
+    30_000_000,
+    60_000_000
+  ]
+
+  @catalog_ops Smolquery.Catalog.behaviour_info(:callbacks) |> Keyword.keys() |> Enum.uniq()
+
+  @config_store_latency_buckets [
+    250,
+    500,
+    1_000,
+    5_000,
+    25_000,
+    100_000,
+    250_000,
+    1_000_000,
     30_000_000
   ]
 
-  # The catalog ops are the behaviour's callbacks: a closed set, so a
-  # label can only be one of them.
-  @catalog_ops Smolquery.Catalog.behaviour_info(:callbacks) |> Keyword.keys() |> Enum.uniq()
-
-  # Bounds for the ring configuration store's `_microseconds_bucket`, ascending:
-  # a Postgrex read of the catalog database measured 0.3 ms on the sandbox
-  # (T-552), and Postgrex gives up at 15 s.
-  @pg_latency_buckets [250, 500, 1_000, 5_000, 25_000, 100_000, 250_000, 1_000_000, 15_000_000]
-
-  # The ring configuration store's ops, less `start_link`: a closed set.
-  @pg_ops [:setup, :fetch, :ensure, :advance]
+  @config_store_ops Smolquery.Cluster.ConfigStore.behaviour_info(:callbacks)
+                    |> Keyword.keys()
+                    |> List.delete(:start_link)
 
   # Bounds for the two HTTP edges' `_request_microseconds_bucket`, ascending.
   # Closest together where the buffer's commit windows put an insert's ack:
@@ -923,8 +938,18 @@ defmodule Smolquery.Telemetry do
     )
   end
 
-  def handle_event([:smolquery, :pg, :op], measurements, meta, nil) do
-    op_timed("smolquery_pg_op", [op: pg_op(meta)], @pg_latency_buckets, measurements, meta)
+  def handle_event([:smolquery, :config_store, :op], measurements, meta, nil) do
+    op_timed(
+      "smolquery_config_store_op",
+      [op: config_store_op(meta)],
+      @config_store_latency_buckets,
+      measurements,
+      meta
+    )
+  end
+
+  def handle_event([:db_connection, :connection_error], _measurements, meta, nil) do
+    bump({"smolquery_catalog_database_checkout_errors_total", [reason: checkout_reason(meta)]}, 1)
   end
 
   def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
@@ -1030,8 +1055,13 @@ defmodule Smolquery.Telemetry do
   defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction], do: kind
   defp catalog_kind(_meta), do: :unknown
 
-  defp pg_op(%{op: op}) when op in @pg_ops, do: op
-  defp pg_op(_meta), do: :unknown
+  defp config_store_op(%{op: op}) when op in @config_store_ops, do: op
+  defp config_store_op(_meta), do: :unknown
+
+  defp checkout_reason(%{error: %{reason: reason}}) when reason in [:queue_timeout, :error],
+    do: reason
+
+  defp checkout_reason(_meta), do: :other
 
   defp s3_class(%{status: status}) when is_integer(status), do: status_class(status)
   defp s3_class(_meta), do: "error"

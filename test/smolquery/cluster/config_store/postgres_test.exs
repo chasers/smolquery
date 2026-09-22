@@ -33,14 +33,14 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
     %{conn: conn, scope: unique_scope()}
   end
 
-  test "every call is one [:smolquery, :pg, :op] event, answers labelled as answers (T-552)",
+  test "every call is one [:smolquery, :config_store, :op] event, answers labelled as answers (T-552)",
        ctx do
     parent = self()
     handler = "pg-op-#{System.unique_integer([:positive])}"
 
     :telemetry.attach(
       handler,
-      [:smolquery, :pg, :op],
+      [:smolquery, :config_store, :op],
       fn _event, measurements, meta, _config -> send(parent, {:pg, measurements, meta}) end,
       nil
     )

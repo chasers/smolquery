@@ -21,10 +21,14 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
 
   ## Every call is measured (T-552)
 
-  This is the one place the system reaches the catalog database from Elixir,
-  over Postgrex, so it is the control for what the same database costs
-  through DuckDB's postgres extension (`[:smolquery, :catalog, :statement]`,
-  T-549). Each callback emits one `[:smolquery, :pg, :op]` event: `op` the
+  This is where the system reaches the catalog database from Elixir over
+  Postgrex on a schedule — `libcluster_postgres` holds two more connections
+  to it for node discovery, a `NOTIFY` per heartbeat and a `LISTEN`, and
+  those are not measured — so it is the control for what the same database
+  costs through DuckDB's postgres extension (`[:smolquery, :catalog,
+  :statement]`, T-549). Postgrex itself emits no per-query telemetry; this
+  span is the statement's only clock. Each callback emits one
+  `[:smolquery, :config_store, :op]` event: `op` the
   callback, `result` `:ok`, `:not_found`, `:conflict` or `:error` — a
   missing scope and a lost compare-and-swap are answers, not failures, and
   are labelled as such. `ensure/3`'s read of the row it inserted is inside
@@ -36,7 +40,7 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
   alias Smolquery.Telemetry
 
   @table "smolquery_ring_config"
-  @event [:smolquery, :pg, :op]
+  @event [:smolquery, :config_store, :op]
 
   @impl Smolquery.Cluster.ConfigStore
   def start_link(opts) do
