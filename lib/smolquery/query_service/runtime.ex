@@ -113,11 +113,11 @@ defmodule Smolquery.QueryService.Runtime do
   `Smolquery.QueryService.EnginePool` keeps bootstrapped ahead of demand —
   `2` by default, `0` to start every engine cold on the request path. A
   warm engine is recycled after `warm_engine_max_age_ms` (5 minutes) and
-  probed with `warm_probe` at checkout — one DuckLake metadata read when
-  the catalog configuration names a lake, `SELECT 1` otherwise — so a
-  stale catalog connection falls back to a cold start rather than failing
-  the job. Each warm engine holds one catalog connection and its DuckDB
-  baseline memory while it waits.
+  probed with `warm_probe` by the pool — one DuckLake metadata read when
+  the catalog configuration names a lake, `SELECT 1` otherwise — when its
+  build finishes and on every recycle tick, so a stale catalog connection
+  is replaced off the request path (T-548). Each warm engine holds one
+  catalog connection and its DuckDB baseline memory while it waits.
 
   `top_n_probe_rows` (T-400) is the hot-row budget of the Top-N bound's
   second probe round: an `ORDER BY col LIMIT n` query over one table probes

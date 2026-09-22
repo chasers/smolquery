@@ -237,6 +237,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :job],
     [:smolquery, :query, :scatter],
     [:smolquery, :query, :engine],
+    [:smolquery, :query, :engine_probe],
     [:smolquery, :lifecycle, :broadcast]
   ]
 
@@ -379,6 +380,10 @@ defmodule Smolquery.Telemetry do
     "smolquery_query_engine_microseconds_total" =>
       "Time spent acquiring job engines, by source; divide by engines of the same source for " <>
         "the mean (T-548).",
+    "smolquery_query_engine_probes_total" =>
+      "Warm engines the pool probed, by outcome: ok, or stale and replaced (T-548).",
+    "smolquery_query_engine_probe_microseconds_total" =>
+      "Time the pool spent probing warm engines, by outcome; divide by probes for the mean.",
     "smolquery_query_scattered_total" =>
       "Queries answered by the distributed scatter/gather path (PL-49).",
     "smolquery_query_scatter_shards_total" =>
@@ -809,6 +814,17 @@ defmodule Smolquery.Telemetry do
 
     bump(
       {"smolquery_query_engine_microseconds_total", labels},
+      Map.get(measurements, :duration_us, 0)
+    )
+  end
+
+  def handle_event([:smolquery, :query, :engine_probe], measurements, meta, nil) do
+    labels = [outcome: Map.get(meta, :outcome, :unknown)]
+
+    bump({"smolquery_query_engine_probes_total", labels}, 1)
+
+    bump(
+      {"smolquery_query_engine_probe_microseconds_total", labels},
       Map.get(measurements, :duration_us, 0)
     )
   end

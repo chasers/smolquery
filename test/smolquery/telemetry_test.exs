@@ -590,6 +590,24 @@ defmodule Smolquery.TelemetryTest do
              before_cold_us + 650_000
   end
 
+  test "counts the pool's warm engine probes by outcome" do
+    before_stale = value("smolquery_query_engine_probes_total", ~s({outcome="stale"}))
+    before_ok_us = value("smolquery_query_engine_probe_microseconds_total", ~s({outcome="ok"}))
+
+    :telemetry.execute([:smolquery, :query, :engine_probe], %{duration_us: 250_000}, %{
+      outcome: :ok
+    })
+
+    :telemetry.execute([:smolquery, :query, :engine_probe], %{duration_us: 5_000_000}, %{
+      outcome: :stale
+    })
+
+    assert value("smolquery_query_engine_probes_total", ~s({outcome="stale"})) == before_stale + 1
+
+    assert value("smolquery_query_engine_probe_microseconds_total", ~s({outcome="ok"})) ==
+             before_ok_us + 250_000
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

@@ -20,10 +20,17 @@ defmodule Smolquery.QueryService.JobEngine do
   and an `ATTACH` to a Postgres catalog in another availability zone — and
   every job used to pay it on the request path. `acquire/1` asks the
   instance's `Smolquery.QueryService.EnginePool` for an engine it already
-  built, probes it with one cheap statement, and only starts a cold one when
-  the pool is empty, disabled, or the probe fails. Either way the caller ends
+  built and vouched for, and only starts a cold one when the pool is empty,
+  disabled, or the engine died on the way over. Either way the caller ends
   up with a private, linked engine it alone owns; the pool never blocks a
   job. `[:smolquery, :query, :engine]` says which path served it.
+
+  The vouching is `probe/2`: one statement, `runtime.warm_probe`, that a
+  stale catalog connection fails. It used to run at checkout, and with a
+  lake in the catalog it is a DuckLake metadata read through the attached
+  Postgres — 230 to 440 ms on the sandbox, the floor under every query
+  (T-548). The pool runs it instead, on build and on its recycle tick, off
+  the request path; `[:smolquery, :query, :engine_probe]` reports each one.
   """
 
   alias Smolquery.DuckDB
@@ -55,7 +62,9 @@ defmodule Smolquery.QueryService.JobEngine do
 
   @doc """
   A bootstrapped, private engine for `runtime`, linked to the caller — warm
-  from the pool when one is ready, cold otherwise.
+  from the pool when one is ready, cold otherwise. The warm path does no
+  I/O: the pool vouched for the engine already, and only an engine that
+  died between the pool's unlink and this link falls back to a cold start.
   """
   @spec acquire(Runtime.t()) :: {:ok, t(), source()} | {:error, term()}
   def acquire(%Runtime{} = runtime) do
@@ -69,6 +78,26 @@ defmodule Smolquery.QueryService.JobEngine do
 
   defp acquired({:ok, _engine, source}), do: {%{}, %{source: source}}
   defp acquired(_failed_or_raised), do: {%{}, %{source: :failed}}
+
+  @doc """
+  Runs `runtime.warm_probe` on `engine` — `:ok` when the engine answered,
+  `{:stale, reason}` when it errored, timed out, or died under the
+  statement. The caller decides the engine's fate; this only reports.
+  """
+  @spec probe(Runtime.t(), t()) :: :ok | {:stale, term()}
+  def probe(%Runtime{} = runtime, engine) do
+    Telemetry.span([:smolquery, :query, :engine_probe], &probed/1, fn ->
+      case Connection.query(engine.connection, runtime.warm_probe, [], @probe_timeout_ms) do
+        {:ok, _result} -> :ok
+        {:error, reason} -> {:stale, reason}
+      end
+    end)
+  catch
+    :exit, reason -> {:stale, {:exit, reason}}
+  end
+
+  defp probed(:ok), do: {%{}, %{outcome: :ok}}
+  defp probed(_stale_or_raised), do: {%{}, %{outcome: :stale}}
 
   @doc """
   Starts a database and a connection bootstrapped with `opts`
@@ -125,7 +154,7 @@ defmodule Smolquery.QueryService.JobEngine do
     case EnginePool.checkout(runtime.name) do
       {:ok, engine} ->
         link(engine)
-        probe(runtime, engine)
+        alive(engine)
 
       :empty ->
         :cold
@@ -134,21 +163,14 @@ defmodule Smolquery.QueryService.JobEngine do
     :exit, _pool_unavailable -> :cold
   end
 
-  defp probe(%Runtime{} = runtime, engine) do
-    case Connection.query(engine.connection, runtime.warm_probe, [], @probe_timeout_ms) do
-      {:ok, _result} ->
-        {:ok, engine}
-
-      {:error, _stale} ->
-        stop(engine)
-
-        :cold
-    end
-  catch
-    :exit, _reason ->
+  defp alive(%{database: database, connection: connection} = engine) do
+    if Process.alive?(database) and Process.alive?(connection) do
+      {:ok, engine}
+    else
       stop(engine)
 
       :cold
+    end
   end
 
   defp cold(runtime) do

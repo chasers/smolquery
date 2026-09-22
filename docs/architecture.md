@@ -998,7 +998,12 @@ loads and an `ATTACH` to a catalog in another availability zone — so
 `Smolquery.QueryService.EnginePool` keeps `warm_engines` of them built
 ahead of demand (PL-50). A job takes one warm and owns it from then on;
 the pool starts a replacement in the background and never blocks a job.
-`[:smolquery, :query, :engine]` reports which path served each job.
+The pool also vouches for its engines — one probe statement when a build
+finishes and one per engine on each recycle tick — so the checkout does no
+I/O; with a lake in the catalog that probe is a DuckLake metadata read that
+used to cost every query 230 to 440 ms at checkout (T-548).
+`[:smolquery, :query, :engine]` reports which path served each job, and
+`[:smolquery, :query, :engine_probe]` each probe's outcome.
 
 ```mermaid
 sequenceDiagram

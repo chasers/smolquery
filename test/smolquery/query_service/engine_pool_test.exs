@@ -4,8 +4,12 @@ defmodule Smolquery.QueryService.EnginePoolTest do
   hands ownership over at checkout and refills, drops an engine that dies
   while warm, and never blocks a job — an empty pool says so, and
   `JobEngine.acquire/1` starts cold. The telemetry event is how a
-  deployment sees the warm/cold split, so the tests assert it too.
+  deployment sees the warm/cold split, so the tests assert it too. The
+  pool vouches for its engines itself (T-548): the probe runs on build and
+  on the recycle tick, never at checkout, and a stale engine is replaced.
   """
+
+  import ExUnit.CaptureLog
 
   use ExUnit.Case, async: false
 
@@ -36,14 +40,14 @@ defmodule Smolquery.QueryService.EnginePoolTest do
     name
   end
 
-  defp attach_telemetry do
+  defp attach_telemetry(event \\ :engine) do
     parent = self()
     handler = "engine-pool-test-#{System.unique_integer([:positive])}"
 
     :telemetry.attach(
       handler,
-      [:smolquery, :query, :engine],
-      fn _event, measurements, meta, _config -> send(parent, {:engine, measurements, meta}) end,
+      [:smolquery, :query, event],
+      fn _event, measurements, meta, _config -> send(parent, {event, measurements, meta}) end,
       nil
     )
 
@@ -122,5 +126,50 @@ defmodule Smolquery.QueryService.EnginePoolTest do
     assert_received {:engine, _measurements, %{source: :warm}}
 
     assert Eventually.until(fn -> EnginePool.size(name) == 1 end)
+  end
+
+  test "the pool probes an engine when its build finishes, and a checkout runs no probe" do
+    attach_telemetry(:engine_probe)
+    name = start_service!(warm_engines: 1)
+    {:ok, runtime} = Runtime.fetch(name)
+
+    assert Eventually.until(fn -> EnginePool.size(name) == 1 end)
+    assert_receive {:engine_probe, %{duration_us: _us}, %{outcome: :ok}}
+
+    assert {:ok, engine, :warm} = JobEngine.acquire(runtime)
+    refute_received {:engine_probe, _measurements, _meta}
+
+    JobEngine.stop(engine)
+  end
+
+  @tag :tmp_dir
+  test "a warm engine that fails the tick's probe is stopped and replaced", %{tmp_dir: tmp_dir} do
+    flag = Path.join(tmp_dir, "flag.csv")
+    File.write!(flag, "n\n1\n")
+    attach_telemetry(:engine_probe)
+
+    name =
+      start_service!(
+        warm_engines: 1,
+        warm_probe: "SELECT n FROM read_csv(#{Smolquery.Identifier.sql_string(flag)})"
+      )
+
+    assert Eventually.until(fn -> EnginePool.size(name) == 1 end)
+    assert_receive {:engine_probe, _measurements, %{outcome: :ok}}
+
+    File.rm!(flag)
+
+    log =
+      capture_log(fn ->
+        send(Runtime.engine_pool(name), :recycle)
+
+        assert_receive {:engine_probe, _measurements, %{outcome: :stale}}, 5_000
+        assert Eventually.until(fn -> EnginePool.size(name) == 0 end)
+      end)
+
+    assert log =~ "warm engine went stale"
+
+    File.write!(flag, "n\n1\n")
+    assert Eventually.until(fn -> EnginePool.size(name) == 1 end, 300)
   end
 end
