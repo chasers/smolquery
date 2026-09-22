@@ -536,6 +536,13 @@ if count = System.get_env("SMOLQUERY_WARM_ENGINES") do
     warm_engines: Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_WARM_ENGINES", count)
 end
 
+# `SMOLQUERY_WARM_PROBE` (T-548) is the statement that vouches for a warm
+# engine; unset, it is one DuckLake metadata read when the catalog names a
+# lake and `SELECT 1` otherwise.
+if probe = System.get_env("SMOLQUERY_WARM_PROBE") do
+  config :smolquery, Smolquery.QueryService, warm_probe: probe
+end
+
 # `SMOLQUERY_TOP_N_PROBE_ROWS` (T-400) is the hot-row budget of the Top-N
 # bound's second probe round; `0` turns the bound off.
 if rows = System.get_env("SMOLQUERY_TOP_N_PROBE_ROWS") do

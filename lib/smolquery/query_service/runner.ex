@@ -217,7 +217,7 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp start_query(state) do
-    case Trace.span(:engine_start, fn -> JobEngine.acquire(state.runtime) end) do
+    case Trace.span(:engine_start, &engine_started/1, fn -> JobEngine.acquire(state.runtime) end) do
       {:ok, engine, _source} ->
         runtime = state.runtime
         sql = state.job.sql
@@ -238,6 +238,9 @@ defmodule Smolquery.QueryService.Runner do
         settle(state, Job.failed(state.job, {:engine_failed, reason}))
     end
   end
+
+  defp engine_started({:ok, _engine, source}), do: %{source: source}
+  defp engine_started(_failed_or_raised), do: %{source: :failed}
 
   @impl GenServer
   def handle_call(:await, from, state) do

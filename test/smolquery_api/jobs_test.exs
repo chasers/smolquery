@@ -148,6 +148,11 @@ defmodule SmolqueryApi.JobControllerTest do
 
       names = Enum.map(spans, & &1["name"])
       assert "engine_start" in names
+
+      assert %{"meta" => %{"source" => source}} =
+               Enum.find(spans, &(&1["name"] == "engine_start"))
+
+      assert source in ["warm", "cold"]
       assert "serialize" in names
       assert "execute" in names
 

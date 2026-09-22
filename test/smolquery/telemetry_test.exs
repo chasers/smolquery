@@ -573,6 +573,23 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_compaction_backoffs_total") == before_backoffs + 1
   end
 
+  test "counts job engines and their acquire time by source" do
+    before_warm = value("smolquery_query_engines_total", ~s({source="warm"}))
+    before_warm_us = value("smolquery_query_engine_microseconds_total", ~s({source="warm"}))
+    before_cold_us = value("smolquery_query_engine_microseconds_total", ~s({source="cold"}))
+
+    :telemetry.execute([:smolquery, :query, :engine], %{duration_us: 300_000}, %{source: :warm})
+    :telemetry.execute([:smolquery, :query, :engine], %{duration_us: 650_000}, %{source: :cold})
+
+    assert value("smolquery_query_engines_total", ~s({source="warm"})) == before_warm + 1
+
+    assert value("smolquery_query_engine_microseconds_total", ~s({source="warm"})) ==
+             before_warm_us + 300_000
+
+    assert value("smolquery_query_engine_microseconds_total", ~s({source="cold"})) ==
+             before_cold_us + 650_000
+  end
+
   test "counts terminal query jobs by state" do
     before_done = value("smolquery_query_jobs_total", ~s({state="done"}))
 

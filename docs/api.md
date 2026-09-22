@@ -160,7 +160,7 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
 
 ```json
 {"trace": {"spans": [
-  {"name": "engine_start",   "startUs": 0,     "durationUs": 41210, "meta": {}},
+  {"name": "engine_start",   "startUs": 0,     "durationUs": 41210, "meta": {"source": "warm"}},
   {"name": "serialize",      "startUs": 41400, "durationUs": 803,   "meta": {}},
   {"name": "snapshot",       "startUs": 42250, "durationUs": 1100,  "meta": {}},
   {"name": "resolve",        "startUs": 43380, "durationUs": 2900,  "meta": {}},
@@ -174,7 +174,7 @@ History does not persist `explain`, the same as `statistics`. The text is gone o
 ]}}
 ```
 
-A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `prune` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read. A probe that was skipped or raised reports the same three keys with `bounded` false. `members` is the membership rule — which micro-segments the snapshot has not sealed yet, or exactly the ids a pinned caller named — and `prune` is the WHERE pruner, on every query.
+A query the Top-N bound applies to (T-400) — one SELECT over one table with `ORDER BY col LIMIT n` — also emits a `top_n` span between `prune` and `build`. Its meta says what the probe found: `{"bounded": true, "rounds": 1, "candidates": 2}` — whether a bound was applied, how many probe rounds ran, and how many hot entries the last round read. A probe that was skipped or raised reports the same three keys with `bounded` false. `engine_start`'s meta says where the job's engine came from — `{"source": "warm"}` from the pool, `"cold"` when it was started on the request path, `"failed"` when neither worked (T-548). `members` is the membership rule — which micro-segments the snapshot has not sealed yet, or exactly the ids a pinned caller named — and `prune` is the WHERE pruner, on every query.
 
 A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 
