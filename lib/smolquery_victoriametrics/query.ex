@@ -28,8 +28,13 @@ defmodule SmolqueryVictoriaMetrics.Query do
   evaluated by `SmolqueryVictoriaMetrics.Eval`, reading samples through
   `SmolqueryVictoriaMetrics.Samples`. An instant query of a bare range
   vector, `m[5m]`, answers that window's raw samples as a matrix, as
-  VictoriaMetrics does. A scalar answers `resultType` `scalar` from
-  `/api/v1/query` and a one-series matrix from `/api/v1/query_range`.
+  VictoriaMetrics does, and of any other window, `q[5m]` or `q[5m:1m]`,
+  the range query of `q` over that window at the subquery's step, also a
+  matrix (`IsRollup`). An expression that is always a scalar (`1+1`,
+  `time()`, `scalar(x)`) answers `resultType` `scalar` from
+  `/api/v1/query`, which Grafana's connection test, `query=1%2B1`, expects;
+  VictoriaMetrics itself answers a one-point vector there. From
+  `/api/v1/query_range` a scalar is a one-series matrix with no labels.
 
   ## Refusals
 
@@ -37,9 +42,10 @@ defmodule SmolqueryVictoriaMetrics.Query do
 
     * 400 `bad_data` — `query` missing, or a time or duration that does not
       read;
-    * 422 `execution` — an expression that does not parse, a construct not
-      evaluated yet, a selector with no non-empty matcher, and a query past
-      `max_series`, `max_samples` or `max_points_per_series`;
+    * 422 `execution` — an expression that does not parse, a function not
+      ported, an argument of the wrong kind, a selector with no non-empty
+      matcher, duplicate series, and a query past `max_series`,
+      `max_samples` or `max_points_per_series`;
     * 503 `timeout` — a job past its `timeout`;
     * 503 `unavailable`, with `retry-after` — the query service is not
       running here or is at its job limit, or a buffer node holding unsealed
@@ -61,7 +67,6 @@ defmodule SmolqueryVictoriaMetrics.Query do
   alias SmolqueryVictoriaMetrics.MetricsQL
   alias SmolqueryVictoriaMetrics.Params
   alias SmolqueryVictoriaMetrics.Response
-  alias SmolqueryVictoriaMetrics.Rollup
   alias SmolqueryVictoriaMetrics.Runtime
   alias SmolqueryVictoriaMetrics.Samples
 
@@ -174,32 +179,50 @@ defmodule SmolqueryVictoriaMetrics.Query do
   defp timeout_opts(ms), do: [timeout_ms: ms]
 
   defp evaluate(:instant, expr, context, started) do
-    if Eval.raw?(expr) do
-      with {:ok, series, stats} <- Eval.raw(expr, context.start_ms, context) do
-        {:ok, &Response.matrix(series, &1), stats, started}
-      end
-    else
-      with {:ok, result, stats} <- Eval.run(expr, context) do
-        {:ok, instant(result, context.start_ms), stats, started}
-      end
+    cond do
+      Eval.raw?(expr) ->
+        with {:ok, series, stats} <- Eval.raw(expr, context.start_ms, context) do
+          {:ok, &Response.matrix(series, &1), stats, started}
+        end
+
+      match?({:ok, _child, _grid}, Eval.instant_range(expr, context.start_ms, context.step_ms)) ->
+        {:ok, child, {start, finish, step}} =
+          Eval.instant_range(expr, context.start_ms, context.step_ms)
+
+        {start, finish} = align(start, finish, step, false)
+
+        evaluate(
+          :range,
+          child,
+          %{context | start_ms: start, end_ms: finish, step_ms: step},
+          started
+        )
+
+      true ->
+        with {:ok, series, stats} <- Eval.run(expr, context) do
+          {:ok, instant(expr, series, context.start_ms), stats, started}
+        end
     end
   end
 
   defp evaluate(:range, expr, context, started) do
-    with {:ok, result, stats} <- Eval.run(expr, context) do
-      {:ok, &Response.matrix(range(result, context), &1), stats, started}
+    with {:ok, series, stats} <- Eval.run(expr, context) do
+      {:ok, &Response.matrix(series, &1), stats, started}
     end
   end
 
-  defp instant(series, _time) when is_list(series), do: &Response.vector(series, &1)
-  defp instant(scalar, time), do: &Response.scalar({time, scalar}, &1)
+  defp instant(expr, series, time) do
+    if Eval.scalar?(expr) do
+      value =
+        case series do
+          [%Eval.Series{values: [{_t, value} | _rest]} | _more] -> value
+          [] -> nil
+        end
 
-  defp range(series, _context) when is_list(series), do: series
-
-  defp range(scalar, context) do
-    {:ok, grid} = Rollup.grid(context.start_ms, context.end_ms, context.step_ms, nil)
-
-    [%Eval.Series{labels: %{}, values: Enum.map(grid, &{&1, scalar})}]
+      &Response.scalar({time, value}, &1)
+    else
+      &Response.vector(series, &1)
+    end
   end
 
   defp answer({:ok, render, stats, started}, conn) do
@@ -234,7 +257,14 @@ defmodule SmolqueryVictoriaMetrics.Query do
     do: execution("#{what} is not supported by this edge yet")
 
   def failure({kind, message})
-      when kind in [:empty_selector, :duplicate_series, :invalid_at, :arity, :invalid_grid],
+      when kind in [
+             :empty_selector,
+             :duplicate_series,
+             :invalid_at,
+             :arity,
+             :invalid_grid,
+             :invalid_argument
+           ],
       do: execution(message)
 
   def failure({:too_many_points, message}),

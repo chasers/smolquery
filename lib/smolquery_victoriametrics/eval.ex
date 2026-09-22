@@ -1,29 +1,44 @@
 defmodule SmolqueryVictoriaMetrics.Eval do
   @moduledoc """
-  Evaluates a parsed MetricsQL expression over a step grid (PL-70, T-564),
-  as VictoriaMetrics v1.152.0's `app/vmselect/promql/eval.go` does.
+  Evaluates a parsed MetricsQL expression over a step grid (PL-70, T-564,
+  T-565), as VictoriaMetrics v1.152.0's `app/vmselect/promql/eval.go` does.
 
   The grid is `start, start + step, ...` up to `end`; an instant query is a
-  grid of one point. What an expression evaluates to is a scalar, a number
-  or `nil` for NaN, or a list of `SmolqueryVictoriaMetrics.Eval.Series`,
-  each with a value, possibly `nil`, at every point of the grid.
+  grid of one point. Everything evaluates to a list of
+  `SmolqueryVictoriaMetrics.Eval.Series`, each with a value, possibly `nil`,
+  at every point of the grid. A number, `time()` or `scalar(x)` is one
+  series with no labels, as VictoriaMetrics evaluates a scalar; `scalar?/1`
+  says whether an expression always is one, which an instant query answers
+  as `resultType: "scalar"`.
 
-  ## What evaluates, in this layer
+  Before evaluating, the expression is prepared as VictoriaMetrics prepares
+  it (`SmolqueryVictoriaMetrics.Eval.Constants`): constants are folded and
+  `0.5 < q` is turned into `q > 0.5`.
 
-    * a number or a duration, alone: a scalar (a duration is its seconds);
-    * a selector `m{...}`: `default_rollup` over it;
-    * a selector with a window, an `offset` or an `@`: `m[5m]`,
-      `m offset 1h`, `m offset -5m`, `m @ 1700000000`, `m @ end()`;
-    * a call of one of `SmolqueryVictoriaMetrics.Rollup.functions/0` whose
-      series argument is one of those selectors, with its scalar arguments
-      (`quantile_over_time(0.9, m[5m])`, `count_gt_over_time(m[5m], 10)`)
-      and `keep_metric_names`;
-    * parentheses around one of these.
+  ## What evaluates
 
-  Anything else — an aggregate, a transform, a binary operator, a subquery,
-  a union, a rollup over anything but a selector — answers
-  `{:error, {:unsupported, what}}` naming it; the evaluator above the
-  rollups is the next layer of PL-70, and it adds clauses here.
+    * numbers, durations (their seconds) and strings;
+    * a selector, `default_rollup` over it, and a rollup function over a
+      selector, both run by `SmolqueryVictoriaMetrics.Rollup` over the raw
+      samples `fetch` reads;
+    * a rollup function over anything else, a subquery `q[5m:1m]`, `q[5m:]`
+      at the query's step, or `q[5m]` and `q offset 1h` on any expression
+      that is not a selector (`evalRollupFuncWithSubquery`): `q` is
+      evaluated on its own grid from `start - window - step - 5m` to
+      `end + step` at the subquery step, both ends aligned to that step, at
+      most 100,000 points, and the rollup then runs over its points with a
+      value, as over raw samples;
+    * `offset d` on any of these evaluates on the grid moved back by `d`
+      and answers at the grid's own points; `@ t` evaluates at `t` alone
+      and answers that value at every point; `t` is any expression with one
+      series, `start()` and `end()` included;
+    * aggregates (`SmolqueryVictoriaMetrics.Eval.Aggregate`), binary
+      operators (`SmolqueryVictoriaMetrics.Eval.Binary`), transforms
+      (`SmolqueryVictoriaMetrics.Eval.Transform`) and unions `(a, b)`.
+
+  Rollup functions `SmolqueryVictoriaMetrics.Rollup` does not compute,
+  aggregate and transform functions not ported, answer
+  `{:error, {:unsupported, what}}` naming them.
 
   ## A rollup over a selector
 
@@ -36,32 +51,34 @@ defmodule SmolqueryVictoriaMetrics.Eval do
       written is `max(step, lookback_ms)`: a sample is current for
       `lookback_ms` after it was taken, as `SmolqueryVictoriaMetrics.Runtime`
       configures;
-    * `offset d` evaluates on the grid moved back by `d` and answers at the
-      grid's own points; `@ t` evaluates at `t` alone and answers that value
-      at every point;
     * the samples are read once per selector, for
       `[start - offset - max(window, step) - lookback_ms, end - offset]`,
       which holds every window and the sample before the first one;
-    * the rollup then runs once per series. A rollup drops `__name__`
-      unless it is one that keeps it (`Rollup.keeps_metric_name?/1`) or the
-      call says `keep_metric_names`; `absent_over_time` answers one series,
-      labelled by the selector's `=` matchers, `1` where no series had a
-      sample.
+    * a rollup drops `__name__` unless it is one that keeps it
+      (`Rollup.keeps_metric_name?/1`) or the call says `keep_metric_names`;
+      `absent_over_time` answers one series, labelled by the selector's `=`
+      matchers, `1` where no series had a sample.
 
   ## The answer
 
-  As `promql.Exec`: series with no value at any point are dropped, two
-  series left with the same labels are an error
-  (`duplicate output timeseries`), and the rest are sorted by name, then
-  labels.
+  As `promql.Exec`: series with no value at any point are dropped, the rest
+  are sorted by name, then labels, unless the expression orders them itself
+  (`sort`, `topk`, `or`, ...), and two series left with the same labels are
+  an error (`duplicate output timeseries`).
   """
 
+  alias SmolqueryVictoriaMetrics.Eval.Aggregate
+  alias SmolqueryVictoriaMetrics.Eval.Args
+  alias SmolqueryVictoriaMetrics.Eval.Binary
+  alias SmolqueryVictoriaMetrics.Eval.Constants
+  alias SmolqueryVictoriaMetrics.Eval.Series
+  alias SmolqueryVictoriaMetrics.Eval.Transform
+  alias SmolqueryVictoriaMetrics.Eval.Value
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.AggrFuncExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.BinaryOpExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.Duration
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.FuncExpr
-  alias SmolqueryVictoriaMetrics.MetricsQL.Ast.LabelFilter
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.MetricExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.Number
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.ParensExpr
@@ -72,25 +89,11 @@ defmodule SmolqueryVictoriaMetrics.Eval do
   alias SmolqueryVictoriaMetrics.Rollup
   alias SmolqueryVictoriaMetrics.Samples
 
-  @inf 1.797_693_134_862_315_7e308
+  @subquery_max_points 100_000
+  @silence_ms 300_000
 
-  defmodule Series do
-    @moduledoc """
-    One series of an evaluated expression: its labels, `__name__` among them
-    when it is kept, and a value, or `nil` for none, at each point of the
-    grid, as `{timestamp_ms, value}`.
-    """
-    @enforce_keys [:labels, :values]
-    defstruct [:labels, :values]
-
-    @type t :: %__MODULE__{
-            labels: %{String.t() => String.t()},
-            values: [{integer(), float() | nil}]
-          }
-  end
-
-  @typedoc "What an expression evaluates to: a scalar, or series."
-  @type result :: float() | nil | [Series.t()]
+  @typedoc "What an expression evaluates to."
+  @type result :: [Series.t()]
 
   @typedoc """
   Reads a selector's series with their samples over `{from_ms, to_ms}`, as
@@ -105,12 +108,13 @@ defmodule SmolqueryVictoriaMetrics.Eval do
   read a selector.
   """
   @type context :: %{
-          start_ms: integer(),
-          end_ms: integer(),
-          step_ms: pos_integer(),
-          lookback_ms: pos_integer(),
-          max_points: pos_integer(),
-          fetch: fetch()
+          required(:start_ms) => integer(),
+          required(:end_ms) => integer(),
+          required(:step_ms) => pos_integer(),
+          required(:lookback_ms) => pos_integer(),
+          required(:max_points) => pos_integer(),
+          required(:fetch) => fetch(),
+          optional(:timestamps) => [integer()]
         }
 
   @typedoc "What evaluating read: the series and the raw samples fetched."
@@ -121,20 +125,30 @@ defmodule SmolqueryVictoriaMetrics.Eval do
           | {:too_many_points, String.t()}
           | {:duplicate_series, String.t()}
           | {:invalid_at, String.t()}
+          | Args.reason()
           | term()
 
   @doc """
   Evaluates `expr` over the grid of `context` and prepares the answer: no
-  empty series, no duplicates, sorted.
+  empty series, no duplicates, sorted unless the expression orders them.
   """
   @spec run(Ast.expr(), context()) :: {:ok, result(), stats()} | {:error, reason()}
   def run(expr, context) do
-    with {:ok, _grid} <- grid(context),
-         {:ok, result, stats} <- eval(expr, context),
-         {:ok, result} <- answer(result) do
-      {:ok, result, stats}
+    expr = Constants.prepare(expr)
+
+    with {:ok, timestamps} <- grid(context),
+         {:ok, series, stats} <- eval(expr, Map.put(context, :timestamps, timestamps)),
+         {:ok, series} <- answer(series, Constants.may_sort?(expr)) do
+      {:ok, series, stats}
     end
   end
+
+  @doc """
+  Whether `expr` always evaluates to a scalar: a number, a duration,
+  `time()`, `scalar(x)` and the like, or an operator between two of them.
+  """
+  @spec scalar?(Ast.expr()) :: boolean()
+  def scalar?(expr), do: expr |> Constants.prepare() |> Constants.scalar?()
 
   @doc """
   The raw samples of `selector[window] offset d` in `(t - d - window, t - d]`,
@@ -156,7 +170,7 @@ defmodule SmolqueryVictoriaMetrics.Eval do
             points != [],
             do: %Series{labels: labels, values: points}
 
-      {:ok, sorted(series), stats(fetched)}
+      {:ok, Series.sort(series), stats(fetched)}
     end
   end
 
@@ -176,123 +190,278 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   def raw?(_expr), do: false
 
+  @doc """
+  What an instant query of a window on anything but a bare selector
+  answers, `q[5m]`, `q[5m:1m]`, `m[5m:1m]` (VictoriaMetrics' `IsRollup`):
+  `q` over the range query `[t - offset - window, t - offset]` at the
+  subquery's step, or the request's. `:none` for any other expression.
+  """
+  @spec instant_range(Ast.expr(), integer(), pos_integer()) ::
+          {:ok, Ast.expr(), {integer(), integer(), pos_integer()}} | :none
+  def instant_range(%RollupExpr{window: %Duration{}, at: nil} = rollup, time_ms, step_ms) do
+    if raw?(rollup) do
+      :none
+    else
+      step = with 0 <- resolve(rollup.step, step_ms), do: step_ms
+      finish = time_ms - resolve(rollup.offset, step)
+      {:ok, rollup.expr, {finish - resolve(rollup.window, step), finish, step}}
+    end
+  end
+
+  def instant_range(_expr, _time_ms, _step_ms), do: :none
+
+  @doc """
+  A series' labels as PromQL writes a selector: `name{k="v", ...}`.
+  """
+  @spec describe(%{String.t() => String.t()}) :: String.t()
+  def describe(labels), do: Series.describe(labels)
+
   defp grid(context),
     do: Rollup.grid(context.start_ms, context.end_ms, context.step_ms, context.max_points)
 
-  defp eval(%Number{value: value}, _context), do: {:ok, number(value), empty()}
+  defp with_grid(context, start, finish, step, max_points \\ nil) do
+    {:ok, timestamps} = Rollup.grid(start, finish, step, nil)
 
-  defp eval(%Duration{ms: ms, steps: steps}, context),
-    do: {:ok, Durations.resolve(ms, steps, context.step_ms) / 1000, empty()}
+    %{
+      context
+      | start_ms: start,
+        end_ms: finish,
+        step_ms: step,
+        max_points: max_points || context.max_points
+    }
+    |> Map.put(:timestamps, timestamps)
+  end
 
-  defp eval(%ParensExpr{exprs: [expr]}, context), do: eval(expr, context)
+  defp eval(%Number{value: value}, context),
+    do: {:ok, [Series.constant(context.timestamps, Value.from_number(value))], empty()}
 
-  defp eval(%ParensExpr{}, _context),
-    do: unsupported("a union of several expressions, `(a, b)`")
+  defp eval(%Duration{ms: ms, steps: steps}, context) do
+    seconds = Durations.resolve(ms, steps, context.step_ms) / 1000
+    {:ok, [Series.constant(context.timestamps, seconds)], empty()}
+  end
+
+  defp eval(%StringLiteral{value: text}, context),
+    do: {:ok, [Series.string(context.timestamps, text)], empty()}
 
   defp eval(%MetricExpr{} = selector, context),
-    do: rollup("default_rollup", [], selector, %RollupExpr{expr: selector}, false, context)
+    do: rollup("default_rollup", [], %RollupExpr{expr: selector}, false, context)
 
-  defp eval(%RollupExpr{expr: %MetricExpr{} = selector, step: nil, inherit_step: false} = r, ctx),
-    do: rollup("default_rollup", [], selector, r, false, ctx)
-
-  defp eval(%RollupExpr{}, _context), do: unsupported("subqueries, `q[window:step]`")
+  defp eval(%RollupExpr{} = rollup, context),
+    do: rollup("default_rollup", [], rollup, false, context)
 
   defp eval(%FuncExpr{name: name} = call, context) do
     case Functions.kind(name) do
-      :rollup -> call(call, context)
-      _transform -> unsupported("transform function #{String.downcase(name)}()")
+      :rollup -> rollup_call(call, context)
+      _transform -> transform_call(call, context)
     end
   end
 
-  defp eval(%AggrFuncExpr{name: name}, _context),
-    do: unsupported("aggregate function #{name}()")
+  defp eval(%AggrFuncExpr{name: name} = node, context) do
+    if name in Aggregate.functions() do
+      with {:ok, args, stats} <- eval_all(node.args, context),
+           {:ok, series} <- Aggregate.apply(node, args, context.timestamps),
+           do: {:ok, series, stats}
+    else
+      {:error, {:unsupported, "aggregate function #{name}()"}}
+    end
+  end
 
-  defp eval(%BinaryOpExpr{op: op}, _context), do: unsupported("binary operator `#{op}`")
+  defp eval(%BinaryOpExpr{} = node, context) do
+    with {:ok, [left, right], stats} <- eval_all([node.left, node.right], context),
+         {:ok, series} <- Binary.apply(node, left, right),
+         do: {:ok, series, stats}
+  end
 
-  defp eval(%StringLiteral{}, _context), do: unsupported("a string literal as a result")
+  defp eval(%ParensExpr{exprs: exprs}, context) do
+    with {:ok, args, stats} <- eval_all(exprs, context),
+         do: {:ok, Transform.union(args, context.timestamps), stats}
+  end
 
-  defp call(%FuncExpr{name: name, args: args, keep_metric_names: keep}, context) do
+  defp eval_all(exprs, context) do
+    with {:ok, results} <- Args.collect(exprs, &eval_one(&1, context)) do
+      stats = results |> Enum.map(&elem(&1, 1)) |> Enum.reduce(empty(), &merge/2)
+      {:ok, Enum.map(results, &elem(&1, 0)), stats}
+    end
+  end
+
+  defp eval_one(expr, context) do
+    with {:ok, series, stats} <- eval(expr, context), do: {:ok, {series, stats}}
+  end
+
+  defp transform_call(%FuncExpr{name: name} = call, context) do
+    if String.downcase(name) in Transform.functions() do
+      grid = Map.take(context, [:timestamps, :start_ms, :end_ms, :step_ms])
+
+      with {:ok, args, stats} <- eval_all(call.args, context),
+           {:ok, series} <- Transform.apply(call, args, grid),
+           do: {:ok, series, stats}
+    else
+      {:error, {:unsupported, "transform function #{String.downcase(name)}()"}}
+    end
+  end
+
+  defp rollup_call(%FuncExpr{name: name, args: args, keep_metric_names: keep}, context) do
+    name = String.downcase(name)
     index = Rollup.series_arg_index(name)
 
-    with :ok <- supported(name),
-         {:ok, selector, rollup} <- series_arg(name, Enum.at(args, index)),
-         {:ok, scalars} <- scalars(name, List.delete_at(args, index), context) do
-      rollup(String.downcase(name), scalars, selector, rollup, keep, context)
+    cond do
+      not Rollup.supported?(name) ->
+        {:error, {:unsupported, "rollup function #{name}()"}}
+
+      Enum.at(args, index) == nil ->
+        {:error, {:arity, "#{name}() is missing its series argument"}}
+
+      true ->
+        with {:ok, scalars, stats} <- rollup_scalars(List.delete_at(args, index), context),
+             {:ok, series, more} <-
+               rollup(name, scalars, rollup_arg(Enum.at(args, index)), keep, context),
+             do: {:ok, series, merge(stats, more)}
     end
   end
 
-  defp supported(name) do
-    if Rollup.supported?(name),
-      do: :ok,
-      else: unsupported("rollup function #{String.downcase(name)}()")
+  defp rollup_scalars(exprs, context) do
+    with {:ok, args, stats} <- eval_all(exprs, context),
+         {:ok, scalars} <- args |> Enum.with_index() |> Args.collect(&first_scalar/1),
+         do: {:ok, scalars, stats}
   end
 
-  defp series_arg(_name, %MetricExpr{} = selector),
-    do: {:ok, selector, %RollupExpr{expr: selector}}
-
-  defp series_arg(
-         _name,
-         %RollupExpr{expr: %MetricExpr{} = selector, step: nil, inherit_step: false} = rollup
-       ),
-       do: {:ok, selector, rollup}
-
-  defp series_arg(name, nil), do: {:error, {:arity, "#{name}() is missing its series argument"}}
-
-  defp series_arg(name, _expr),
-    do: unsupported("#{String.downcase(name)}() over anything but a series selector (a subquery)")
-
-  defp scalars(name, exprs, context) do
-    exprs
-    |> Enum.reduce_while({:ok, []}, fn expr, {:ok, acc} ->
-      case eval(expr, context) do
-        {:ok, value, _stats} when is_float(value) or is_nil(value) ->
-          {:cont, {:ok, [value | acc]}}
-
-        {:ok, _series, _stats} ->
-          {:halt, unsupported("a series as a parameter of #{String.downcase(name)}()")}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-    |> in_order()
+  defp first_scalar({arg, index}) do
+    with {:ok, values} <- Args.scalar(arg, index), do: {:ok, List.first(values)}
   end
 
-  defp in_order({:ok, reversed}), do: {:ok, Enum.reverse(reversed)}
-  defp in_order(error), do: error
+  defp rollup_arg(%RollupExpr{step: nil, inherit_step: false} = rollup), do: rollup
 
-  defp rollup(name, scalars, selector, %RollupExpr{} = rollup, keep, context) do
+  defp rollup_arg(%RollupExpr{expr: %MetricExpr{} = selector} = rollup) do
+    inner = %FuncExpr{name: "default_rollup", args: [%RollupExpr{expr: selector}]}
+    %{rollup | expr: inner}
+  end
+
+  defp rollup_arg(%RollupExpr{} = rollup), do: rollup
+  defp rollup_arg(expr), do: %RollupExpr{expr: expr}
+
+  defp rollup(name, scalars, %RollupExpr{at: nil} = rollup, keep, context),
+    do: rollup_without_at(name, scalars, rollup, keep, context)
+
+  defp rollup(name, scalars, %RollupExpr{at: at} = rollup, keep, context) do
+    with {:ok, at_series, stats} <- eval(at, context),
+         {:ok, time} <- at_time(at_series),
+         at_context = with_grid(context, time, time, context.step_ms),
+         {:ok, series, more} <- rollup_without_at(name, scalars, rollup, keep, at_context) do
+      spread =
+        Enum.map(series, fn %Series{values: [{_t, value} | _rest]} = one ->
+          %{one | values: Enum.map(context.timestamps, &{&1, value})}
+        end)
+
+      {:ok, spread, merge(stats, more)}
+    end
+  end
+
+  defp at_time([series]) do
+    case series |> Series.values() |> Enum.find(&(&1 != nil)) do
+      nil -> {:error, {:invalid_at, "`@` modifier must return a non-NaN value"}}
+      seconds -> {:ok, trunc(seconds * 1000)}
+    end
+  end
+
+  defp at_time(series),
+    do:
+      {:error,
+       {:invalid_at,
+        "`@` modifier must return a single series; it returns #{length(series)} series instead"}}
+
+  defp rollup_without_at(name, scalars, rollup, keep, context) do
     step = context.step_ms
-    window = window(name, resolve(rollup.window, step), context)
     offset = resolve(rollup.offset, step)
+    shifted = with_grid(context, context.start_ms - offset, context.end_ms - offset, step)
 
-    with {:ok, {start, finish}} <- at(rollup.at, context),
-         {:ok, fetched} <-
-           context.fetch.(
-             selector,
-             {start - offset - max(window, step) - context.lookback_ms, finish - offset}
-           ),
-         {:ok, series} <-
-           each_series(fetched, fn samples ->
-             Rollup.apply(name, scalars, samples, %{
-               start_ms: start - offset,
-               end_ms: finish - offset,
-               step_ms: step,
-               window_ms: window
-             })
-           end) do
+    result =
+      case rollup.expr do
+        %MetricExpr{} = selector ->
+          selector_rollup(name, scalars, selector, rollup, keep, shifted)
+
+        _inner ->
+          subquery_rollup(name, scalars, rollup, keep, shifted)
+      end
+
+    with {:ok, series, stats} <- result do
       series =
         series
-        |> Enum.map(fn {labels, points} ->
-          %Series{
-            labels: labels(labels, name, keep),
-            values: points |> shift(offset) |> spread(rollup.at, context)
-          }
-        end)
-        |> absent(name, selector, context)
+        |> absent_over_time(name, rollup.expr, shifted)
+        |> shift(offset)
 
+      {:ok, series, stats}
+    end
+  end
+
+  defp selector_rollup(name, scalars, selector, rollup, keep, context) do
+    step = context.step_ms
+    window = window(name, resolve(rollup.window, step), context)
+    range = {context.start_ms - max(window, step) - context.lookback_ms, context.end_ms}
+
+    with {:ok, fetched} <- context.fetch.(selector, range),
+         {:ok, series} <- each_rollup(fetched, name, scalars, window, keep, context) do
       {:ok, series, stats(fetched)}
     end
+  end
+
+  defp subquery_rollup(name, scalars, rollup, keep, context) do
+    step = with 0 <- resolve(rollup.step, context.step_ms), do: context.step_ms
+    window = resolve(rollup.window, context.step_ms)
+    start = context.start_ms - (window + step + @silence_ms)
+    finish = context.end_ms + step
+
+    with {:ok, _points} <- subquery_grid(start, finish, step),
+         {start, finish} = align(start, finish, step),
+         inner_context = with_grid(context, start, finish, step, @subquery_max_points),
+         {:ok, inner, stats} <- eval(rollup.expr, inner_context),
+         samples = Enum.map(inner, &present_samples/1),
+         {:ok, series} <- each_rollup(samples, name, scalars, window, keep, context) do
+      {:ok, series, stats}
+    end
+  end
+
+  defp present_samples(%Series{labels: labels, values: points}) do
+    present = Enum.reject(points, &(elem(&1, 1) == nil))
+
+    %{
+      labels: labels,
+      timestamps: Enum.map(present, &elem(&1, 0)),
+      values: Enum.map(present, &elem(&1, 1))
+    }
+  end
+
+  defp subquery_grid(start, finish, step) do
+    case Rollup.grid(start, finish, step, @subquery_max_points) do
+      {:ok, grid} ->
+        {:ok, grid}
+
+      {:error, {:too_many_points, message}} ->
+        {:error, {:invalid_grid, message <> " for a subquery"}}
+
+      error ->
+        error
+    end
+  end
+
+  defp align(start, finish, step) do
+    start = start - rem(start, step)
+    adjust = rem(finish, step)
+    {start, if(adjust > 0, do: finish + step - adjust, else: finish)}
+  end
+
+  defp each_rollup(samples, name, scalars, window, keep, context) do
+    config = %{
+      start_ms: context.start_ms,
+      end_ms: context.end_ms,
+      step_ms: context.step_ms,
+      window_ms: window
+    }
+
+    Args.collect(samples, fn %{labels: labels} = one ->
+      with {:ok, points} <-
+             Rollup.apply(name, scalars, Map.take(one, [:timestamps, :values]), config),
+           do: {:ok, %Series{labels: labels(labels, name, keep), values: points}}
+    end)
   end
 
   defp window("default_rollup", 0, context), do: max(context.step_ms, context.lookback_ms)
@@ -301,101 +470,40 @@ defmodule SmolqueryVictoriaMetrics.Eval do
   defp resolve(nil, _step), do: 0
   defp resolve(%Duration{ms: ms, steps: steps}, step), do: Durations.resolve(ms, steps, step)
 
-  defp at(nil, context), do: {:ok, {context.start_ms, context.end_ms}}
-
-  defp at(%FuncExpr{name: name, args: []}, context) do
-    case String.downcase(name) do
-      "start" -> {:ok, {context.start_ms, context.start_ms}}
-      "end" -> {:ok, {context.end_ms, context.end_ms}}
-      _other -> at_value(%FuncExpr{name: name, args: []}, context)
-    end
-  end
-
-  defp at(expr, context), do: at_value(expr, context)
-
-  defp at_value(expr, context) do
-    case eval(expr, context) do
-      {:ok, seconds, _stats} when is_float(seconds) ->
-        time = trunc(seconds * 1000)
-        {:ok, {time, time}}
-
-      {:ok, nil, _stats} ->
-        {:error, {:invalid_at, "`@` modifier must return a non-NaN value"}}
-
-      {:ok, _series, _stats} ->
-        unsupported("`@` with a series")
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp each_series(fetched, fun) do
-    Enum.reduce_while(fetched, {:ok, []}, fn %{labels: labels} = samples, {:ok, acc} ->
-      case fun.(samples) do
-        {:ok, points} -> {:cont, {:ok, [{labels, points} | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> then(fn
-      {:ok, series} -> {:ok, Enum.reverse(series)}
-      error -> error
-    end)
-  end
-
   defp labels(labels, name, keep) do
     if keep or Rollup.keeps_metric_name?(name),
       do: labels,
-      else: Map.delete(labels, "__name__")
+      else: Series.drop_name(labels)
   end
 
-  defp shift(points, 0), do: points
-  defp shift(points, offset), do: Enum.map(points, fn {t, v} -> {t + offset, v} end)
+  defp absent_over_time(series, "absent_over_time", expr, context) do
+    absent = Transform.absent(expr, [], context.timestamps)
 
-  defp spread(points, nil, _context), do: points
+    case series do
+      [] ->
+        [absent]
 
-  defp spread([{_t, value}], _at, context) do
-    {:ok, grid} = grid(%{context | max_points: nil})
-    Enum.map(grid, &{&1, value})
+      _some ->
+        columns = series |> Enum.map(&Series.values/1) |> Enum.zip_with(& &1)
+        [Series.put_values(absent, Enum.map(columns, &absent_point/1))]
+    end
   end
 
-  defp absent(series, "absent_over_time", selector, context) do
-    {:ok, grid} = grid(%{context | max_points: nil})
+  defp absent_over_time(series, _name, _expr, _context), do: series
 
-    values =
-      series
-      |> Enum.map(& &1.values)
-      |> Enum.zip_with(& &1)
-      |> case do
-        [] -> Enum.map(grid, &{&1, 1.0})
-        columns -> Enum.zip_with(grid, columns, &absent_point/2)
-      end
+  defp absent_point(column), do: if(Enum.member?(column, nil), do: nil, else: 1.0)
 
-    [%Series{labels: absent_labels(selector), values: values}]
+  defp shift(series, 0), do: series
+
+  defp shift(series, offset) do
+    Enum.map(series, fn one ->
+      %{one | values: Enum.map(one.values, fn {t, v} -> {t + offset, v} end)}
+    end)
   end
 
-  defp absent(series, _name, _selector, _context), do: series
-
-  defp absent_point(t, column) do
-    if Enum.any?(column, fn {_t, v} -> v == nil end), do: {t, nil}, else: {t, 1.0}
-  end
-
-  defp absent_labels(%MetricExpr{filter_sets: [filters]}) do
-    for %LabelFilter{name: name, op: :eq, value: value} <- filters,
-        name != "__name__",
-        into: %{},
-        do: {name, value}
-  end
-
-  defp absent_labels(_selector), do: %{}
-
-  defp answer(scalar) when not is_list(scalar), do: {:ok, scalar}
-
-  defp answer(series) do
-    series =
-      Enum.reject(series, fn %Series{values: values} ->
-        Enum.all?(values, &(elem(&1, 1) == nil))
-      end)
+  defp answer(series, may_sort) do
+    series = Series.drop_empty(series)
+    series = if may_sort, do: Series.sort(series), else: series
 
     duplicate =
       series
@@ -404,27 +512,11 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
     case duplicate do
       nil ->
-        {:ok, sorted(series)}
+        {:ok, series}
 
       {labels, _count} ->
-        {:error, {:duplicate_series, "duplicate output timeseries: " <> describe(labels)}}
+        {:error, {:duplicate_series, "duplicate output timeseries: " <> Series.describe(labels)}}
     end
-  end
-
-  defp sorted(series) do
-    Enum.sort_by(series, fn %Series{labels: labels} ->
-      {Map.get(labels, "__name__", ""), labels |> Map.delete("__name__") |> Enum.sort()}
-    end)
-  end
-
-  @doc """
-  A series' labels as PromQL writes a selector: `name{k="v", ...}`.
-  """
-  @spec describe(%{String.t() => String.t()}) :: String.t()
-  def describe(labels) do
-    {name, rest} = Map.pop(labels, "__name__", "")
-    pairs = rest |> Enum.sort() |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
-    "#{name}{#{pairs}}"
   end
 
   defp stats(fetched) do
@@ -436,10 +528,5 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   defp empty, do: %{series: 0, samples: 0}
 
-  defp number(:inf), do: @inf
-  defp number(:neg_inf), do: -@inf
-  defp number(:nan), do: nil
-  defp number(value), do: value * 1.0
-
-  defp unsupported(what), do: {:error, {:unsupported, what}}
+  defp merge(a, b), do: %{series: a.series + b.series, samples: a.samples + b.samples}
 end

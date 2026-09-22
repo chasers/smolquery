@@ -51,6 +51,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.ParensExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.RollupExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.StringLiteral
+  alias SmolqueryVictoriaMetrics.MetricsQL.Builtins
   alias SmolqueryVictoriaMetrics.MetricsQL.Durations
   alias SmolqueryVictoriaMetrics.MetricsQL.Functions
   alias SmolqueryVictoriaMetrics.MetricsQL.Lexer
@@ -369,11 +370,17 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
   defp ident_role(_token), do: :none
 
   defp call([{:ident, text, _position} | rest]) do
+    name = Literal.unescape_ident(text)
+
     with {:ok, args, rest} <- arg_list(rest) do
       {keep, rest} = keep_metric_names(rest)
 
-      {:ok, %FuncExpr{name: Literal.unescape_ident(text), args: args, keep_metric_names: keep},
-       rest}
+      case Builtins.expand(name, args) do
+        {:ok, %FuncExpr{} = expanded} -> {:ok, %{expanded | keep_metric_names: keep}, rest}
+        {:ok, expanded} -> {:ok, expanded, rest}
+        {:error, reason} -> {:error, reason}
+        :none -> {:ok, %FuncExpr{name: name, args: args, keep_metric_names: keep}, rest}
+      end
     end
   end
 

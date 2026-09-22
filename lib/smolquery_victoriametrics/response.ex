@@ -30,8 +30,7 @@ defmodule SmolqueryVictoriaMetrics.Response do
   """
 
   alias SmolqueryVictoriaMetrics.Eval.Series
-
-  @inf 1.797_693_134_862_315_7e308
+  alias SmolqueryVictoriaMetrics.Eval.Value
 
   @typedoc "The request's counters: series fetched, and the time taken."
   @type stats :: %{series: non_neg_integer(), duration_ms: non_neg_integer()}
@@ -125,58 +124,5 @@ defmodule SmolqueryVictoriaMetrics.Response do
   `NaN` for `nil`, and `+Inf` / `-Inf` at the largest double.
   """
   @spec value(float() | nil) :: String.t()
-  def value(nil), do: "NaN"
-  def value(v) when v >= @inf, do: "+Inf"
-  def value(v) when v <= -@inf, do: "-Inf"
-
-  def value(v) do
-    shortest = :erlang.float_to_binary(v * 1.0, [:short])
-
-    {sign, unsigned} =
-      case shortest do
-        "-" <> rest -> {"-", rest}
-        rest -> {"", rest}
-      end
-
-    sign <> plain(unsigned)
-  end
-
-  defp plain(text) do
-    {mantissa, exponent} =
-      case String.split(text, "e") do
-        [mantissa] -> {mantissa, 0}
-        [mantissa, exponent] -> {mantissa, String.to_integer(exponent)}
-      end
-
-    [whole, fraction] = String.split(mantissa, ".")
-    fraction = if fraction == "0", do: "", else: fraction
-    digits = whole <> fraction
-    point = byte_size(whole) + exponent
-
-    {integer, decimals} =
-      cond do
-        point <= 0 ->
-          {"0", String.duplicate("0", -point) <> digits}
-
-        point >= byte_size(digits) ->
-          {digits <> String.duplicate("0", point - byte_size(digits)), ""}
-
-        true ->
-          String.split_at(digits, point)
-      end
-
-    integer = trim_leading_zeros(integer)
-
-    case String.trim_trailing(decimals, "0") do
-      "" -> integer
-      decimals -> integer <> "." <> decimals
-    end
-  end
-
-  defp trim_leading_zeros(integer) do
-    case String.trim_leading(integer, "0") do
-      "" -> "0"
-      trimmed -> trimmed
-    end
-  end
+  def value(v), do: Value.format(v)
 end

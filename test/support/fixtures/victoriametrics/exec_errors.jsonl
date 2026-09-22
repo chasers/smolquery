@@ -1,0 +1,224 @@
+{"query":"","stage":"parse","error":"syntax"}
+{"query":"    ","stage":"parse","error":"syntax"}
+{"query":"1-","stage":"parse","error":"syntax"}
+{"query":"nonexisting()","stage":"parse","error":"unknown_function"}
+{"query":"range_stddev()","stage":"parse","error":"arity"}
+{"query":"range_stdvar()","stage":"parse","error":"arity"}
+{"query":"range_quantile()","stage":"parse","error":"arity"}
+{"query":"range_quantile(1, 2, 3)","stage":"parse","error":"arity"}
+{"query":"range_median()","stage":"parse","error":"arity"}
+{"query":"abs()","stage":"parse","error":"arity"}
+{"query":"abs(1,2)","stage":"parse","error":"arity"}
+{"query":"absent(1, 2)","stage":"parse","error":"arity"}
+{"query":"clamp()","stage":"parse","error":"arity"}
+{"query":"clamp_max()","stage":"parse","error":"arity"}
+{"query":"clamp_min(1,2,3)","stage":"parse","error":"arity"}
+{"query":"hour(1,2)","stage":"parse","error":"arity"}
+{"query":"label_join()","stage":"parse","error":"arity"}
+{"query":"label_replace(1)","stage":"parse","error":"arity"}
+{"query":"label_transform(1)","stage":"parse","error":"arity"}
+{"query":"label_set()","stage":"parse","error":"arity"}
+{"query":"label_set(1, \"foo\")","stage":"eval","error":"invalid_argument"}
+{"query":"label_map()","stage":"parse","error":"arity"}
+{"query":"label_map(1)","stage":"parse","error":"arity"}
+{"query":"label_del()","stage":"parse","error":"arity"}
+{"query":"label_keep()","stage":"parse","error":"arity"}
+{"query":"label_match()","stage":"parse","error":"arity"}
+{"query":"label_mismatch()","stage":"parse","error":"arity"}
+{"query":"label_graphite_group()","stage":"parse","error":"arity"}
+{"query":"round()","stage":"parse","error":"arity"}
+{"query":"round(1,2,3)","stage":"parse","error":"arity"}
+{"query":"sgn()","stage":"parse","error":"arity"}
+{"query":"scalar()","stage":"parse","error":"arity"}
+{"query":"sort(1,2)","stage":"parse","error":"arity"}
+{"query":"sort_desc()","stage":"parse","error":"arity"}
+{"query":"sort_by_label()","stage":"parse","error":"arity"}
+{"query":"sort_by_label_desc()","stage":"parse","error":"arity"}
+{"query":"sort_by_label_numeric()","stage":"parse","error":"arity"}
+{"query":"sort_by_label_numeric_desc()","stage":"parse","error":"arity"}
+{"query":"timestamp()","stage":"parse","error":"arity"}
+{"query":"timestamp_with_name()","stage":"parse","error":"arity"}
+{"query":"vector()","stage":"parse","error":"arity"}
+{"query":"histogram_quantile()","stage":"parse","error":"arity"}
+{"query":"histogram_quantiles()","stage":"parse","error":"arity"}
+{"query":"sum()","stage":"parse","error":"arity"}
+{"query":"count_values()","stage":"parse","error":"arity"}
+{"query":"quantile()","stage":"parse","error":"arity"}
+{"query":"any()","stage":"parse","error":"arity"}
+{"query":"group()","stage":"parse","error":"arity"}
+{"query":"topk()","stage":"parse","error":"arity"}
+{"query":"topk_min()","stage":"parse","error":"arity"}
+{"query":"topk_max()","stage":"parse","error":"arity"}
+{"query":"topk_avg()","stage":"parse","error":"arity"}
+{"query":"topk_median()","stage":"parse","error":"arity"}
+{"query":"topk_last()","stage":"parse","error":"arity"}
+{"query":"limitk()","stage":"parse","error":"arity"}
+{"query":"bottomk()","stage":"parse","error":"arity"}
+{"query":"bottomk_min()","stage":"parse","error":"arity"}
+{"query":"bottomk_max()","stage":"parse","error":"arity"}
+{"query":"bottomk_avg()","stage":"parse","error":"arity"}
+{"query":"bottomk_median()","stage":"parse","error":"arity"}
+{"query":"bottomk_last()","stage":"parse","error":"arity"}
+{"query":"time(123)","stage":"parse","error":"arity"}
+{"query":"start(1)","stage":"parse","error":"arity"}
+{"query":"end(1)","stage":"parse","error":"arity"}
+{"query":"step(1)","stage":"parse","error":"arity"}
+{"query":"running_sum(1, 2)","stage":"parse","error":"arity"}
+{"query":"range_mad()","stage":"parse","error":"arity"}
+{"query":"range_sum(1, 2)","stage":"parse","error":"arity"}
+{"query":"range_trim_outliers()","stage":"parse","error":"arity"}
+{"query":"range_trim_spikes()","stage":"parse","error":"arity"}
+{"query":"range_trim_zscore()","stage":"parse","error":"arity"}
+{"query":"range_zscore()","stage":"parse","error":"arity"}
+{"query":"range_first(1,  2)","stage":"parse","error":"arity"}
+{"query":"range_last(1, 2)","stage":"parse","error":"arity"}
+{"query":"range_linear_regression(1, 2)","stage":"parse","error":"arity"}
+{"query":"smooth_exponential()","stage":"parse","error":"arity"}
+{"query":"smooth_exponential(1)","stage":"parse","error":"arity"}
+{"query":"remove_resets()","stage":"parse","error":"arity"}
+{"query":"sin()","stage":"parse","error":"arity"}
+{"query":"sinh()","stage":"parse","error":"arity"}
+{"query":"cos()","stage":"parse","error":"arity"}
+{"query":"cosh()","stage":"parse","error":"arity"}
+{"query":"asin()","stage":"parse","error":"arity"}
+{"query":"asinh()","stage":"parse","error":"arity"}
+{"query":"acos()","stage":"parse","error":"arity"}
+{"query":"acosh()","stage":"parse","error":"arity"}
+{"query":"rand(123, 456)","stage":"parse","error":"arity"}
+{"query":"rand_normal(123, 456)","stage":"parse","error":"arity"}
+{"query":"rand_exponential(122, 456)","stage":"parse","error":"arity"}
+{"query":"pi(123)","stage":"parse","error":"arity"}
+{"query":"now(123)","stage":"parse","error":"arity"}
+{"query":"label_copy()","stage":"parse","error":"arity"}
+{"query":"label_move()","stage":"parse","error":"arity"}
+{"query":"median_over_time()","stage":"parse","error":"arity"}
+{"query":"median()","stage":"parse","error":"arity"}
+{"query":"keep_last_value()","stage":"parse","error":"arity"}
+{"query":"keep_next_value()","stage":"parse","error":"arity"}
+{"query":"interpolate()","stage":"parse","error":"arity"}
+{"query":"distinct_over_time()","stage":"parse","error":"arity"}
+{"query":"distinct()","stage":"parse","error":"arity"}
+{"query":"alias()","stage":"parse","error":"arity"}
+{"query":"alias(1)","stage":"parse","error":"arity"}
+{"query":"alias(1, \"foo\", \"bar\")","stage":"parse","error":"arity"}
+{"query":"lifetime()","stage":"parse","error":"arity"}
+{"query":"lag()","stage":"parse","error":"arity"}
+{"query":"aggr_over_time()","stage":"parse","error":"arity"}
+{"query":"aggr_over_time(foo)","stage":"parse","error":"arity"}
+{"query":"aggr_over_time(\"foo\", bar, 1)","stage":"parse","error":"arity"}
+{"query":"sum(aggr_over_time())","stage":"parse","error":"arity"}
+{"query":"sum(aggr_over_time(foo))","stage":"parse","error":"arity"}
+{"query":"count(aggr_over_time(\"foo\", bar, 1))","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_lower()","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_lower(1)","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_lower(0.99, foo, 1)","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_upper()","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_upper(1)","stage":"parse","error":"arity"}
+{"query":"hoeffding_bound_upper(0.99, foo, 1)","stage":"parse","error":"arity"}
+{"query":"mad()","stage":"parse","error":"arity"}
+{"query":"outliers_mad()","stage":"parse","error":"arity"}
+{"query":"outliers_mad(1)","stage":"parse","error":"arity"}
+{"query":"outliersk()","stage":"parse","error":"arity"}
+{"query":"outliersk(1)","stage":"parse","error":"arity"}
+{"query":"mode_over_time()","stage":"parse","error":"arity"}
+{"query":"rate_over_sum()","stage":"parse","error":"arity"}
+{"query":"zscore_over_time()","stage":"parse","error":"arity"}
+{"query":"mode()","stage":"parse","error":"arity"}
+{"query":"share()","stage":"parse","error":"arity"}
+{"query":"zscore()","stage":"parse","error":"arity"}
+{"query":"prometheus_buckets()","stage":"parse","error":"arity"}
+{"query":"buckets_limit()","stage":"parse","error":"arity"}
+{"query":"buckets_limit(1)","stage":"parse","error":"arity"}
+{"query":"duration_over_time()","stage":"parse","error":"arity"}
+{"query":"share_le_over_time()","stage":"parse","error":"arity"}
+{"query":"share_gt_over_time()","stage":"parse","error":"arity"}
+{"query":"count_le_over_time()","stage":"parse","error":"arity"}
+{"query":"count_gt_over_time()","stage":"parse","error":"arity"}
+{"query":"count_eq_over_time()","stage":"parse","error":"arity"}
+{"query":"count_ne_over_time()","stage":"parse","error":"arity"}
+{"query":"timezone_offset()","stage":"parse","error":"arity"}
+{"query":"bitmap_and()","stage":"parse","error":"arity"}
+{"query":"bitmap_or()","stage":"parse","error":"arity"}
+{"query":"bitmap_xor()","stage":"parse","error":"arity"}
+{"query":"quantiles()","stage":"parse","error":"arity"}
+{"query":"limit_offset()","stage":"parse","error":"arity"}
+{"query":"increase()","stage":"parse","error":"arity"}
+{"query":"increase_prometheus()","stage":"parse","error":"arity"}
+{"query":"changes()","stage":"parse","error":"arity"}
+{"query":"changes_prometheus()","stage":"parse","error":"arity"}
+{"query":"delta()","stage":"parse","error":"arity"}
+{"query":"delta_prometheus()","stage":"parse","error":"arity"}
+{"query":"rollup_candlestick()","stage":"parse","error":"arity"}
+{"query":"rollup()","stage":"parse","error":"arity"}
+{"query":"drop_empty_series()","stage":"parse","error":"arity"}
+{"query":"drop_common_labels()","stage":"parse","error":"arity"}
+{"query":"labels_equal()","stage":"parse","error":"arity"}
+{"query":"median_over_time({}, 2)","stage":"parse","error":"arity"}
+{"query":"smooth_exponential(1, 1 or label_set(2, \"x\", \"y\"))","stage":"eval","error":"invalid_argument"}
+{"query":"count_values(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"count_values(1 or label_set(2, \"xx\", \"yy\"), 2)","stage":"eval","error":"invalid_argument"}
+{"query":"quantile(1 or label_set(2, \"xx\", \"foo\"), 1)","stage":"eval","error":"invalid_argument"}
+{"query":"clamp_max(1, 1 or label_set(2, \"xx\", \"foo\"))","stage":"eval","error":"invalid_argument"}
+{"query":"clamp_min(1, 1 or label_set(2, \"xx\", \"foo\"))","stage":"eval","error":"invalid_argument"}
+{"query":"topk(label_set(2, \"xx\", \"foo\") or 1, 12)","stage":"eval","error":"invalid_argument"}
+{"query":"topk_avg(label_set(2, \"xx\", \"foo\") or 1, 12)","stage":"eval","error":"invalid_argument"}
+{"query":"limitk(label_set(2, \"xx\", \"foo\") or 1, 12)","stage":"eval","error":"invalid_argument"}
+{"query":"limit_offet((alias(1,\"foo\"),alias(2,\"bar\")), 2, 10)","stage":"parse","error":"unknown_function"}
+{"query":"limit_offet(1, (alias(1,\"foo\"),alias(2,\"bar\")), 10)","stage":"parse","error":"unknown_function"}
+{"query":"round(1, 1 or label_set(2, \"xx\", \"foo\"))","stage":"eval","error":"invalid_argument"}
+{"query":"histogram_quantile(1 or label_set(2, \"xx\", \"foo\"), 1)","stage":"eval","error":"invalid_argument"}
+{"query":"histogram_quantiles(\"foo\", 1 or label_set(2, \"xxx\", \"foo\"), 2)","stage":"eval","error":"invalid_argument"}
+{"query":"sort_by_label_numeric(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_set(1, 2, 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_set(1, \"foo\", (label_set(1, \"foo\", bar\") or label_set(2, \"xxx\", \"yy\")))","stage":"parse","error":"syntax"}
+{"query":"label_set(1, \"foo\", 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_del(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_copy(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_move(1, 2, 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_move(1, \"foo\", 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_keep(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_join(1, 2, 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_join(1, \"foo\", 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_join(1, \"foo\", \"bar\", 2)","stage":"eval","error":"invalid_argument"}
+{"query":"label_replace(1, 2, 3, 4, 5)","stage":"eval","error":"invalid_argument"}
+{"query":"label_replace(1, \"foo\", 3, 4, 5)","stage":"eval","error":"invalid_argument"}
+{"query":"label_replace(1, \"foo\", \"bar\", 4, 5)","stage":"eval","error":"invalid_argument"}
+{"query":"label_replace(1, \"foo\", \"bar\", \"baz\", 5)","stage":"eval","error":"invalid_argument"}
+{"query":"label_replace(1, \"foo\", \"bar\", \"baz\", \"invalid(regexp\")","stage":"eval","error":"invalid_argument"}
+{"query":"label_transform(1, 2, 3, 4)","stage":"eval","error":"invalid_argument"}
+{"query":"label_transform(1, \"foo\", 3, 4)","stage":"eval","error":"invalid_argument"}
+{"query":"label_transform(1, \"foo\", \"bar\", 4)","stage":"eval","error":"invalid_argument"}
+{"query":"label_transform(1, \"foo\", \"invalid(regexp\", \"baz","stage":"parse","error":"syntax"}
+{"query":"label_match(1, 2, 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_mismatch(1, 2, 3)","stage":"eval","error":"invalid_argument"}
+{"query":"label_uppercase()","stage":"parse","error":"arity"}
+{"query":"label_lowercase()","stage":"parse","error":"arity"}
+{"query":"alias(1, 2)","stage":"eval","error":"invalid_argument"}
+{"query":"aggr_over_time(1, 2)","stage":"eval","error":"unsupported","skip":"rollup function aggr_over_time()"}
+{"query":"aggr_over_time((\"foo\", \"bar\"), 3)","stage":"eval","error":"unsupported","skip":"rollup function aggr_over_time()"}
+{"query":"outliersk((label_set(1, \"foo\", \"bar\"), label_set(2, \"x\", \"y\")), 123)","stage":"eval","error":"invalid_argument"}
+{"query":"(label_set(1, \"foo\", \"bar\") or label_set(2, \"foo\", \"baz\"))\n\t\t+ on(xx)\n\t\t(label_set(1, \"foo\", \"bar\") or label_set(2, \"foo\", \"baz\"))","stage":"eval","error":"duplicate_series"}
+{"query":"1 + group_left() (label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\"))","stage":"parse","error":"syntax"}
+{"query":"1 + on() group_left() (label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\"))","stage":"parse","error":"syntax"}
+{"query":"1 + on(a) group_left(b) (label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\"))","stage":"parse","error":"syntax"}
+{"query":"label_set(1, \"foo\", \"bar\") + on(foo) group_left() (label_set(1, \"foo\", \"bar\", \"a\", \"b\"), label_set(1, \"foo\", \"bar\", \"a\", \"c\"))","stage":"eval","error":"duplicate_series"}
+{"query":"(label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\")) + group_right 1","stage":"parse","error":"syntax"}
+{"query":"(label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\")) + on() group_right 1","stage":"parse","error":"syntax"}
+{"query":"(label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\")) + on(a) group_right(b,c) 1","stage":"parse","error":"syntax"}
+{"query":"(label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\")) + on() 1","stage":"parse","error":"syntax"}
+{"query":"(label_set(1, \"foo\", \"bar\", \"a\", \"b\"), label_set(1, \"foo\", \"bar\", \"a\", \"c\")) + on(foo) group_right() label_set(1, \"foo\", \"bar\")","stage":"eval","error":"duplicate_series"}
+{"query":"1 + on() (label_set(1, \"foo\", bar\"), label_set(2, \"foo\", \"baz\"))","stage":"parse","error":"syntax"}
+{"query":"(\n\t\tlabel_set(time(), \"__name__\", \"foo\", \"a\", \"x\"),\n\t\tlabel_set(time()+200, \"__name__\", \"bar\", \"a\", \"x\"),\n\t) > bool 1300","stage":"eval","error":"duplicate_series"}
+{"query":"(\n\t\tlabel_set(time(), \"__name__\", \"foo\", \"a\", \"x\"),\n\t\tlabel_set(time()+200, \"__name__\", \"bar\", \"a\", \"x\"),\n\t) + 10","stage":"eval","error":"duplicate_series"}
+{"query":"sum(1) foo (bar)","stage":"parse","error":"syntax"}
+{"query":"sum foo () (bar)","stage":"parse","error":"syntax"}
+{"query":"sum(foo) by (1)","stage":"parse","error":"syntax"}
+{"query":"ttf()","stage":"parse","error":"arity"}
+{"query":"ttf(1, 2)","stage":"parse","error":"arity"}
+{"query":"ru()","stage":"parse","error":"arity"}
+{"query":"ru(1)","stage":"parse","error":"arity"}
+{"query":"ru(1,3,3)","stage":"parse","error":"arity"}
+{"query":"rollup_rate(time()[5m], \"\")","stage":"eval","error":"unsupported","skip":"rollup function rollup_rate()"}
+{"query":"rollup_rate(time()[5m], \"foo\")","stage":"eval","error":"unsupported","skip":"rollup function rollup_rate()"}
+{"query":"rollup_rate(time()[5m], \"foo\", \"bar\")","stage":"parse","error":"arity"}
+{"query":"rollup_candlestick(time(), \"foo\")","stage":"eval","error":"unsupported","skip":"rollup function rollup_candlestick()"}

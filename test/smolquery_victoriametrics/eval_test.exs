@@ -143,13 +143,105 @@ defmodule SmolqueryVictoriaMetrics.EvalTest do
   end
 
   describe "scalars" do
-    test "a number, a duration, infinities and NaN" do
-      grid = %{start_ms: 0, end_ms: 0, step_ms: 15_000}
-      assert run("42", grid, []) == {:ok, 42.0, %{series: 0, samples: 0}}
-      assert run("(42)", grid, []) == {:ok, 42.0, %{series: 0, samples: 0}}
-      assert run("5m", grid, []) == {:ok, 300.0, %{series: 0, samples: 0}}
-      assert run("Inf", grid, []) == {:ok, @inf, %{series: 0, samples: 0}}
-      assert run("NaN", grid, []) == {:ok, nil, %{series: 0, samples: 0}}
+    test "a number, a duration and infinities are one series with no labels; NaN is none" do
+      grid = %{start_ms: 0, end_ms: 15_000, step_ms: 15_000}
+
+      scalar = fn v ->
+        {:ok, [%Series{labels: %{}, values: [{0, v}, {15_000, v}]}], %{series: 0, samples: 0}}
+      end
+
+      assert run("42", grid, []) == scalar.(42.0)
+      assert run("(42)", grid, []) == scalar.(42.0)
+      assert run("5m", grid, []) == scalar.(300.0)
+      assert run("Inf", grid, []) == scalar.(@inf)
+      assert run("-1 + 2 * 3", grid, []) == scalar.(5.0)
+      assert run("NaN", grid, []) == {:ok, [], %{series: 0, samples: 0}}
+    end
+
+    test "scalar?/1 is true of what always evaluates to a scalar" do
+      for query <- ["1+1", "time()", "scalar(up)", "-1", "5m", "pi() * 2", "step()"] do
+        {:ok, expr} = MetricsQL.parse(query)
+        assert Eval.scalar?(expr), query
+      end
+
+      for query <- ["up", "vector(1)", "sum(up)", "up + 1", ~s|"text"|] do
+        {:ok, expr} = MetricsQL.parse(query)
+        refute Eval.scalar?(expr), query
+      end
+    end
+  end
+
+  describe "the evaluator above the rollups" do
+    test "an aggregate over a rollup, grouped by a label" do
+      a = counter(%{"__name__" => "m", "job" => "x", "i" => "1"}, 15_000, 20, 6)
+      b = counter(%{"__name__" => "m", "job" => "x", "i" => "2"}, 15_000, 20, 3)
+      grid = %{start_ms: 60_000, end_ms: 60_000, step_ms: 60_000}
+
+      assert {:ok, [%Series{labels: %{"job" => "x"}, values: [{60_000, sum}]}], %{series: 2}} =
+               run("sum by (job) (rate(m[1m]))", grid, [a, b])
+
+      assert_in_delta sum, 0.6, 1.0e-12
+    end
+
+    test "a comparison filters points and keeps the name; bool answers 0 or 1" do
+      grid = %{start_ms: 0, end_ms: 30_000, step_ms: 15_000}
+
+      assert {:ok, [%Series{labels: %{"__name__" => "up"}, values: values}], _stats} =
+               run("up == 0", grid, [@up])
+
+      assert values == [{0, nil}, {15_000, nil}, {30_000, 0.0}]
+
+      assert {:ok, [%Series{labels: %{"job" => "a"}, values: bools}], _stats} =
+               run("up == bool 0", grid, [@up])
+
+      assert bools == [{0, 0.0}, {15_000, 0.0}, {30_000, 1.0}]
+    end
+
+    test "a rollup over a subquery evaluates the inner query on its own aligned grid" do
+      series = counter(%{"__name__" => "m"}, 15_000, 80, 6)
+      grid = %{start_ms: 600_000, end_ms: 600_000, step_ms: 60_000}
+
+      assert {:ok, [%Series{labels: %{}, values: [{600_000, value}]}], _stats} =
+               run("max_over_time(rate(m[1m])[10m:1m])", grid, [series])
+
+      assert_in_delta value, 0.4, 1.0e-12
+      assert_received {:fetch, _selector, {-720_000, 660_000}}
+    end
+
+    test "a window on an expression is a subquery at the step, and offset applies to it" do
+      grid = %{start_ms: 1_000_000, end_ms: 1_000_000, step_ms: 200_000}
+
+      assert {:ok, [%Series{values: [{1_000_000, 800.0}]}], _stats} =
+               run("time() offset 200s", grid, [])
+
+      assert {:ok, [%Series{values: [{1_000_000, 2.0}]}], _stats} =
+               run("count_over_time(time()[400s])", grid, [])
+    end
+
+    test "@ takes any expression with one series" do
+      series = counter(%{"__name__" => "m"}, 15_000, 20, 6)
+      grid = %{start_ms: 0, end_ms: 15_000, step_ms: 15_000}
+
+      assert {:ok, [%Series{values: [{0, 24.0}, {15_000, 24.0}]}], _stats} =
+               run("m @ (30 + 30)", grid, [series])
+
+      assert {:error, {:invalid_at, "`@` modifier must return a non-NaN value"}} =
+               run("m @ NaN", grid, [series])
+    end
+
+    test "instant_range/3 turns an instant window on anything but a selector into a range query" do
+      {:ok, expr} = MetricsQL.parse("rate(m[1m])[5m:30s]")
+
+      assert {:ok, %{name: "rate"}, {400_000, 700_000, 30_000}} =
+               Eval.instant_range(expr, 700_000, 15_000)
+
+      {:ok, expr} = MetricsQL.parse("m[5m:] offset 1m")
+      assert {:ok, %{}, {340_000, 640_000, 15_000}} = Eval.instant_range(expr, 700_000, 15_000)
+
+      for query <- ["m[5m]", "rate(m[5m])", "m"] do
+        {:ok, expr} = MetricsQL.parse(query)
+        assert Eval.instant_range(expr, 700_000, 15_000) == :none, query
+      end
     end
   end
 
@@ -190,17 +282,13 @@ defmodule SmolqueryVictoriaMetrics.EvalTest do
     end
   end
 
-  describe "what is not evaluated yet" do
+  describe "what is not ported" do
     for {query, what} <- [
-          {"sum(up)", "aggregate function sum()"},
-          {"abs(up)", "transform function abs()"},
-          {"up + 1", "binary operator `+`"},
-          {"rate(up[5m:1m])", "rate() over anything but a series selector (a subquery)"},
-          {"up[5m:1m]", "subqueries, `q[window:step]`"},
           {"holt_winters(up[5m], 0.5, 0.5)", "rollup function holt_winters()"},
-          {"(up, down)", "a union of several expressions, `(a, b)`"},
-          {~s|"text"|, "a string literal as a result"},
-          {"quantile_over_time(up, up[5m])", "a series as a parameter of quantile_over_time()"}
+          {"sum(holt_winters(up[5m], 0.5, 0.5))", "rollup function holt_winters()"},
+          {"histogram(up)", "aggregate function histogram()"},
+          {"rand()", "transform function rand()"},
+          {~s|timezone_offset("UTC")|, "transform function timezone_offset()"}
         ] do
       test query do
         assert run(unquote(query), %{start_ms: 0, end_ms: 0, step_ms: 1_000}, [@up]) ==
