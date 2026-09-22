@@ -45,3 +45,46 @@ Each run was stopped after about six seconds, and the first request of each
 was kept. A recapture will differ in timestamps and values, and possibly in
 which metrics vmagent exposes; the tests assert on shape and on metric names
 vmagent has long exposed (`vm_app_version`, `process_cpu_cores_available`).
+
+# MetricsQL parser corpus
+
+`metricsql_corpus.jsonl` is every case of `parser_test.go` in
+`github.com/VictoriaMetrics/metricsql` v0.87.4, the version VictoriaMetrics
+v1.152.0 builds with (its `go.mod`), in file order: 838 cases, one JSON object
+per line, read by `test/smolquery_victoriametrics/metricsql_test.exs` for
+PL-70 / T-563.
+
+| field | meaning |
+|---|---|
+| `section` | the comment above the case in `parser_test.go` |
+| `input` | the query |
+| `output` | the query parses, and this is how it prints |
+| `error` | the query is refused with `{:error, {kind, _}}`, `kind` one of `syntax`, `unsupported`, `unknown_function`, `arity` |
+| `vm` | present where the answer here differs from VictoriaMetrics': what `parser_test.go` expects instead |
+| `note` | why it differs |
+
+The notes:
+
+- `folding`: VictoriaMetrics evaluates constant subexpressions while parsing
+  (`1 + 2` prints `3`, `-1` prints `-1`); here the tree keeps them
+  (`1 + 2`, `0 - 1`) and the evaluator folds them.
+- `or_branch`: VictoriaMetrics prints `{__name__="a",b="1" or __name__="a"}` as
+  `a{b="1"}`, which drops the second branch; here every name is printed so the
+  text parses back to the same selector.
+- `with`: `WITH` templates are not supported yet; the query is refused with
+  `{:unsupported, "WITH templates"}`.
+- `arity`: VictoriaMetrics accepts `sum()` or `rate(a, b, c, d)` when parsing
+  and refuses it when evaluating; here the argument count is checked when
+  parsing.
+
+Cases VictoriaMetrics refuses carry no `vm` or `note`: every one of them is
+refused here too.
+
+## Regenerating
+
+The inputs and VictoriaMetrics' expectations come from the `same(...)`,
+`another(...)` and `f(...)` calls of
+`https://raw.githubusercontent.com/VictoriaMetrics/metricsql/v0.87.4/parser_test.go`,
+with Go string literals unquoted; `output` and `error` are this parser's
+answers, reviewed case by case against `vm`. A new metricsql version means
+re-extracting, re-running and reviewing every line whose answer changed.

@@ -1,0 +1,838 @@
+{"section":"metricExpr","input":"{}","output":"{}"}
+{"section":"metricExpr","input":"{}[5m]","output":"{}[5m]"}
+{"section":"metricExpr","input":"{}[5m:]","output":"{}[5m:]"}
+{"section":"metricExpr","input":"{}[:]","output":"{}[:]"}
+{"section":"metricExpr","input":"{}[: ]","output":"{}[:]"}
+{"section":"metricExpr","input":"{}[:3s]","output":"{}[:3s]"}
+{"section":"metricExpr","input":"{}[: 3s ]","output":"{}[:3s]"}
+{"section":"metricExpr","input":"{}[5m:3s]","output":"{}[5m:3s]"}
+{"section":"metricExpr","input":"{}[ 5m : 3s ]","output":"{}[5m:3s]"}
+{"section":"metricExpr","input":"{} offset 5m","output":"{} offset 5m"}
+{"section":"metricExpr","input":"{} offset -5m","output":"{} offset -5m"}
+{"section":"metricExpr","input":"{}[5m] offset 10y","output":"{}[5m] offset 10y"}
+{"section":"metricExpr","input":"{}[5.3m:3.4s] offset 10y","output":"{}[5.3m:3.4s] offset 10y"}
+{"section":"metricExpr","input":"{}[:3.4s] offset 10y","output":"{}[:3.4s] offset 10y"}
+{"section":"metricExpr","input":"{}[:3.4s] offset -10y","output":"{}[:3.4s] offset -10y"}
+{"section":"metricExpr","input":"{Foo=\"bAR\"}","output":"{Foo=\"bAR\"}"}
+{"section":"metricExpr","input":"{foo=\"bar\"}","output":"{foo=\"bar\"}"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}","output":"{foo=\"bar\"}"}
+{"section":"metricExpr","input":"{\"foo\"=\"bAR\"}","output":"{foo=\"bAR\"}"}
+{"section":"metricExpr","input":"{\"3foo\"=\"bar\"}","output":"{\\3foo=\"bar\"}"}
+{"section":"metricExpr","input":"{\"'3foo'\"=\"bar\"}","output":"{\\'3foo\\'=\"bar\"}"}
+{"section":"metricExpr","input":"{'温度{房间=\"水电费\\xF3\"}'=\"1\"}[5m] offset 10m","output":"{温度\\{房间\\=\\\"水电费ó\\\"\\}=\"1\"}[5m] offset 10m"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m]","output":"{foo=\"bar\"}[5m]"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m]","output":"{foo=\"bar\"}[5m]"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m:]","output":"{foo=\"bar\"}[5m:]"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m:]","output":"{foo=\"bar\"}[5m:]"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m:3s]","output":"{foo=\"bar\"}[5m:3s]"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m:3s]","output":"{foo=\"bar\"}[5m:3s]"}
+{"section":"metricExpr","input":"{foo=\"bar\"} offset 13.4ms","output":"{foo=\"bar\"} offset 13.4ms"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"} offset 13.4ms","output":"{foo=\"bar\"} offset 13.4ms"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5w4h-3.4m13.4ms]","output":"{foo=\"bar\"}[5w4h-3.4m13.4ms]"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5w4h-3.4m13.4ms]","output":"{foo=\"bar\"}[5w4h-3.4m13.4ms]"}
+{"section":"metricExpr","input":"{foo=\"bar\"} offset 10y","output":"{foo=\"bar\"} offset 10y"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"} offset 10y","output":"{foo=\"bar\"} offset 10y"}
+{"section":"metricExpr","input":"{foo=\"bar\"} offset -10y","output":"{foo=\"bar\"} offset -10y"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"} offset -10y","output":"{foo=\"bar\"} offset -10y"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m] offset 10y","output":"{foo=\"bar\"}[5m] offset 10y"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m] offset 10y","output":"{foo=\"bar\"}[5m] offset 10y"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m:3s] offset 10y","output":"{foo=\"bar\"}[5m:3s] offset 10y"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m:3s] offset 10y","output":"{foo=\"bar\"}[5m:3s] offset 10y"}
+{"section":"metricExpr","input":"{foo=\"bar\"}[5m] oFFSEt 10y","output":"{foo=\"bar\"}[5m] offset 10y"}
+{"section":"metricExpr","input":"{\"foo\"=\"bar\"}[5m] oFFSEt 10y","output":"{foo=\"bar\"}[5m] offset 10y"}
+{"section":"metricExpr","input":"{__name__=\"metric\", a=\"1\"}","output":"metric{a=\"1\"}"}
+{"section":"metricExpr","input":"{\"metric\", a=\"1\"}","output":"metric{a=\"1\"}"}
+{"section":"metricExpr","input":"{\"metric\", \"a\"=\"1\"}","output":"metric{a=\"1\"}"}
+{"section":"metricExpr","input":"METRIC","output":"METRIC"}
+{"section":"metricExpr","input":"metric","output":"metric"}
+{"section":"metricExpr","input":"metric{\"metric\"}","output":"metric"}
+{"section":"metricExpr","input":"metric{__name__=\"metric\"}","output":"metric"}
+{"section":"metricExpr","input":"{\"metric\"}","output":"metric"}
+{"section":"metricExpr","input":"{a=\"1\",__name__=\"metric\"}","output":"metric{a=\"1\"}"}
+{"section":"metricExpr","input":"metric{}","output":"metric"}
+{"section":"metricExpr","input":"m_e:tri44:_c123","output":"m_e:tri44:_c123"}
+{"section":"metricExpr","input":"{\"m_e:tri44:_c123\"}","output":"m_e:tri44:_c123"}
+{"section":"metricExpr","input":"-metric","output":"0 - metric"}
+{"section":"metricExpr","input":"-{\"metric\"}","output":"0 - metric"}
+{"section":"metricExpr","input":"metric offset 10h","output":"metric offset 10h"}
+{"section":"metricExpr","input":"{\"metric\"} offset 10h","output":"metric offset 10h"}
+{"section":"metricExpr","input":"metric[5m]","output":"metric[5m]"}
+{"section":"metricExpr","input":"{\"metric\"}[5m]","output":"metric[5m]"}
+{"section":"metricExpr","input":"metric[5m:3s]","output":"metric[5m:3s]"}
+{"section":"metricExpr","input":"{\"metric\"}[5m:3s]","output":"metric[5m:3s]"}
+{"section":"metricExpr","input":"metric[5m] offset 10h","output":"metric[5m] offset 10h"}
+{"section":"metricExpr","input":"{\"metric\"}[5m] offset 10h","output":"metric[5m] offset 10h"}
+{"section":"metricExpr","input":"metric[5m:3s] offset 10h","output":"metric[5m:3s] offset 10h"}
+{"section":"metricExpr","input":"{\"metric\"}[5m:3s] offset 10h","output":"metric[5m:3s] offset 10h"}
+{"section":"metricExpr","input":"metric[5i:3i] offset 10i","output":"metric[5i:3i] offset 10i"}
+{"section":"metricExpr","input":"{\"metric\"}[5i:3i]","output":"metric[5i:3i]"}
+{"section":"metricExpr","input":"metric{foo=\"bar\"}","output":"metric{foo=\"bar\"}"}
+{"section":"metricExpr","input":"{\"metric\",foo=\"bar\"}","output":"metric{foo=\"bar\"}"}
+{"section":"metricExpr","input":"{\"metric\",\"foo\"=\"bar\"}","output":"metric{foo=\"bar\"}"}
+{"section":"metricExpr","input":"metric{foo=\"bar\"} offset 10h","output":"metric{foo=\"bar\"} offset 10h"}
+{"section":"metricExpr","input":"{\"metric\",foo=\"bar\"} offset 10h","output":"metric{foo=\"bar\"} offset 10h"}
+{"section":"metricExpr","input":"{\"metric\",\"foo\"=\"bar\"} offset 10h","output":"metric{foo=\"bar\"} offset 10h"}
+{"section":"metricExpr","input":"metric{foo!=\"bar\"}[2d]","output":"metric{foo!=\"bar\"}[2d]"}
+{"section":"metricExpr","input":"{\"metric\",foo!=\"bar\"}[2d]","output":"metric{foo!=\"bar\"}[2d]"}
+{"section":"metricExpr","input":"{\"metric\",\"foo\"!=\"bar\"}[2d]","output":"metric{foo!=\"bar\"}[2d]"}
+{"section":"metricExpr","input":"metric{foo=\"bar\"}[2d] offset 10h","output":"metric{foo=\"bar\"}[2d] offset 10h"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3h] offset 10h","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3h] offset 10h"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3h] offset 10","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3h] offset 10"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3] offset 10h","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[2d:3] offset 10h"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[2:3h] offset 10h","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[2:3h] offset 10h"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[2.34:5.6] offset 3600.5","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[2.34:5.6] offset 3600.5"}
+{"section":"metricExpr","input":"metric{foo=\"bar\",b=\"sdfsdf\"}[234:56] offset -3600","output":"metric{foo=\"bar\",b=\"sdfsdf\"}[234:56] offset -3600"}
+{"section":"metricExpr","input":"  metric  {  foo  = \"bar\"  }  [  2d ]   offset   10h  ","output":"metric{foo=\"bar\"}[2d] offset 10h"}
+{"section":"metricExpr","input":"  {  \"metric\",  foo  = \"bar\"  }  [  2d ]   offset   10h  ","output":"metric{foo=\"bar\"}[2d] offset 10h"}
+{"section":"metricExpr with 'or'","input":"metric{foo=\"bar\" or baz=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"metric{\"foo\"=\"bar\" or \"baz\"=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"metric{\"foo\"=\"bar\" or baz=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"metric{foo=\"bar\" or \"baz\"=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"{\"metric\", foo=\"bar\" or \"baz\"=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"metric{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}","output":"metric{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"{\"metric\", \"foo\"=\"bar\",\"x\"=\"y\" or \"baz\"=\"a\",\"z\"=\"q\" or \"a\"=\"b\"}","output":"metric{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"{\"metric\", foo=\"bar\",\"x\"=\"y\" or baz=\"a\",\"z\"=\"q\" or a=\"b\"}","output":"metric{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}","output":"{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"{\"foo\"=\"bar\",\"x\"=\"y\" or \"baz\"=\"a\",\"z\"=\"q\" or \"a\"=\"b\"}","output":"{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"{\"foo\"=\"bar\",x=\"y\" or \"baz\"=\"a\",z=\"q\" or a=\"b\"}","output":"{foo=\"bar\",x=\"y\" or baz=\"a\",z=\"q\" or a=\"b\"}"}
+{"section":"metricExpr with 'or'","input":"metric{foo=\"bar\" OR baz=\"a\"}","output":"metric{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"{foo=\"bar\" OR baz=\"a\"}","output":"{foo=\"bar\" or baz=\"a\"}"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"a\",bar=\"baz\" or __name__=\"a\"}","output":"{__name__=\"a\",bar=\"baz\" or __name__=\"a\"}","vm":"a{bar=\"baz\"}","note":"or_branch"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"a\",bar=\"baz\" or __name__=\"a\" or __name__=\"a\"}","output":"{__name__=\"a\",bar=\"baz\" or __name__=\"a\"}","vm":"a{bar=\"baz\"}","note":"or_branch"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"a\",bar=\"baz\" or __name__=\"a\",bar=\"abc\"}","output":"a{bar=\"baz\" or bar=\"abc\"}"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"a\" or __name__=\"a\",bar=\"abc\",x!=\"y\"}","output":"{__name__=\"a\" or __name__=\"a\",bar=\"abc\",x!=\"y\"}","vm":"a{bar=\"abc\",x!=\"y\"}","note":"or_branch"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"metric\",a=\"1\" or __name__=\"metric\",b=\"2\"}","output":"metric{a=\"1\" or b=\"2\"}"}
+{"section":"metricExpr with 'or'","input":"{\"foo\",a=\"1\" or \"bar\",b=\"2\"}","output":"{__name__=\"foo\",a=\"1\" or __name__=\"bar\",b=\"2\"}"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"foo\",a=\"1\" or __name__=\"bar\",b=\"2\"}","output":"{__name__=\"foo\",a=\"1\" or __name__=\"bar\",b=\"2\"}"}
+{"section":"metricExpr with 'or'","input":"{__name__=\"foo\",a=\"1\" or __name__=~\"bar\",b=\"2\"}","output":"{__name__=\"foo\",a=\"1\" or __name__=~\"bar\",b=\"2\"}"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo @ 123.45","output":"foo @ 123.45"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo\\@ @ 123.45","output":"foo\\@ @ 123.45"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"{foo=~\"bar\"} @ end()","output":"{foo=~\"bar\"} @ end()"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo{bar=\"baz\"} @ start()","output":"foo{bar=\"baz\"} @ start()"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo{bar=\"baz\"}[5m] @ 12345","output":"foo{bar=\"baz\"}[5m] @ 12345"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo{bar=\"baz\"}[5m:4s] offset 5m @ (end() - 3.5m)","output":"foo{bar=\"baz\"}[5m:4s] offset 5m @ (end() - 3.5m)"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo{bar=\"baz\"}[5m:4s] @ (end() - 3.5m) offset 2.4h","output":"foo{bar=\"baz\"}[5m:4s] offset 2.4h @ (end() - 3.5m)"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"foo @ start() + (bar offset 3m @ end()) / baz OFFSET -5m","output":"(foo @ start()) + ((bar offset 3m @ end()) / (baz offset -5m))"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"sum(foo) @ start() + rate(bar @ (end() - 5m))","output":"(sum(foo) @ start()) + rate(bar @ (end() - 5m))"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"time() @ (start())","output":"time() @ start()"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"time() @ (start()+(1+1))","output":"time() @ (start() + (1 + 1))","vm":"time() @ (start() + 2)","note":"folding"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"time() @ (end() - 10m)","output":"time() @ (end() - 10m)"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"a + b offset 5m @ 1235","output":"a + (b offset 5m @ 1235)"}
+{"section":"See https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier","input":"a + b @ 1235 offset 5m","output":"a + (b offset 5m @ 1235)"}
+{"section":"metric name matching keywords","input":"rate","output":"rate"}
+{"section":"metric name matching keywords","input":"RATE","output":"RATE"}
+{"section":"metric name matching keywords","input":"by","output":"by"}
+{"section":"metric name matching keywords","input":"BY","output":"BY"}
+{"section":"metric name matching keywords","input":"bool","output":"bool"}
+{"section":"metric name matching keywords","input":"BOOL","output":"BOOL"}
+{"section":"metric name matching keywords","input":"unless","output":"unless"}
+{"section":"metric name matching keywords","input":"UNLESS","output":"UNLESS"}
+{"section":"metric name matching keywords","input":"Ignoring","output":"Ignoring"}
+{"section":"metric name matching keywords","input":"with","output":"with"}
+{"section":"metric name matching keywords","input":"WITH","output":"WITH"}
+{"section":"metric name matching keywords","input":"With","output":"With"}
+{"section":"metric name matching keywords","input":"with / by","output":"with / by"}
+{"section":"metric name matching keywords","input":"offset","output":"offset"}
+{"section":"metric name matching keywords","input":"keep_metric_names","output":"keep_metric_names"}
+{"section":"metric name matching keywords","input":"alias","output":"alias"}
+{"section":"metric name matching keywords","input":"alias{foo=\"bar\"}","output":"alias{foo=\"bar\"}"}
+{"section":"metric name matching keywords","input":"aLIas{alias=\"aa\"}","output":"aLIas{alias=\"aa\"}"}
+{"section":"metric name matching keywords","input":"or","output":"or"}
+{"section":"metric name matching keywords","input":"al\\ias","output":"alias"}
+{"section":"identifiers with with escape chars","input":"foo\\ bar","output":"foo\\ bar"}
+{"section":"identifiers with with escape chars","input":"foo\\-bar\\{{baz\\+bar=\"aa\"}","output":"foo\\-bar\\{{baz\\+bar=\"aa\"}"}
+{"section":"identifiers with with escape chars","input":"\\x2E\\x2ef\\oo{b\\xEF\\ar=\"aa\"}","output":"\\..foo{bïar=\"aa\"}"}
+{"section":"identifiers with with escape chars","input":"温度{房间=\"水电费\"}[5m] offset 10m","output":"温度{房间=\"水电费\"}[5m] offset 10m"}
+{"section":"identifiers with with escape chars","input":"\\温\\度{\\房\\间=\"水电费\"}[5m] offset 10m","output":"温度{房间=\"水电费\"}[5m] offset 10m"}
+{"section":"identifiers with with escape chars","input":"sum(fo\\|o) by(b\\|a,x)","output":"sum(fo\\|o) by(b\\|a,x)"}
+{"section":"identifiers with with escape chars","input":"sum(x) by (b\\x7Ca)","output":"sum(x) by(b\\|a)"}
+{"section":"Duplicate filters","input":"foo{a=\"b\",a=\"c\",b=\"d\"}","output":"foo{a=\"b\",a=\"c\",b=\"d\"}"}
+{"section":"Duplicate filters","input":"{a=\"b\",a=\"c\",b=\"d\"}","output":"{a=\"b\",a=\"c\",b=\"d\"}"}
+{"section":"Metric filters ending with comma","input":"m{foo=\"bar\",}","output":"m{foo=\"bar\"}"}
+{"section":"String concat in tag value","input":"m{foo=\"bar\" + \"baz\"}","output":"m{foo=\"barbaz\"}"}
+{"section":"Valid regexp","input":"foo{bar=~\"x\"}","output":"foo{bar=~\"x\"}"}
+{"section":"Valid regexp","input":"foo{bar=~\"^x\"}","output":"foo{bar=~\"^x\"}"}
+{"section":"Valid regexp","input":"foo{bar=~\"^x$\"}","output":"foo{bar=~\"^x$\"}"}
+{"section":"Valid regexp","input":"foo{bar=~\"^(a[bc]|d)$\"}","output":"foo{bar=~\"^(a[bc]|d)$\"}"}
+{"section":"Valid regexp","input":"foo{bar!~\"x\"}","output":"foo{bar!~\"x\"}"}
+{"section":"Valid regexp","input":"foo{bar!~\"^x\"}","output":"foo{bar!~\"^x\"}"}
+{"section":"Valid regexp","input":"foo{bar!~\"^x$\"}","output":"foo{bar!~\"^x$\"}"}
+{"section":"Valid regexp","input":"foo{bar!~\"^(a[bc]|d)$\"}","output":"foo{bar!~\"^(a[bc]|d)$\"}"}
+{"section":"stringExpr","input":"\"\"","output":"\"\""}
+{"section":"stringExpr","input":"\"\\n\\t\\r 12:{}[]()44\"","output":"\"\\n\\t\\r 12:{}[]()44\""}
+{"section":"stringExpr","input":"''","output":"\"\""}
+{"section":"stringExpr","input":"``","output":"\"\""}
+{"section":"stringExpr","input":"   `foo\"b'ar`  ","output":"\"foo\\\"b'ar\""}
+{"section":"stringExpr","input":"  'foo\\'bar\"BAZ'  ","output":"\"foo'bar\\\"BAZ\""}
+{"section":"string concat","input":"\"foo\"+'bar'","output":"\"foobar\""}
+{"section":"string concat","input":"(\"foo\" + \"bar\")","output":"\"foobar\""}
+{"section":"string concat","input":"((\"foo\")+\"bar\")+\"baz\"","output":"((\"foo\") + \"bar\") + \"baz\"","vm":"\"foobarbaz\"","note":"folding"}
+{"section":"numberExpr","input":"1","output":"1"}
+{"section":"numberExpr","input":"123.","output":"123."}
+{"section":"numberExpr","input":"1_234","output":"1_234"}
+{"section":"numberExpr","input":"1_2_34.56_78_9","output":"1_2_34.56_78_9"}
+{"section":"numberExpr","input":"-123.","output":"0 - 123.","vm":"-123","note":"folding"}
+{"section":"numberExpr","input":"foo - 123.","output":"foo - 123."}
+{"section":"numberExpr","input":"12.e+4","output":"12.e+4"}
+{"section":"numberExpr","input":"12Ki","output":"12Ki"}
+{"section":"numberExpr","input":"12Kib","output":"12Kib"}
+{"section":"numberExpr","input":"12Mi","output":"12Mi"}
+{"section":"numberExpr","input":"12Mb","output":"12Mb"}
+{"section":"numberExpr","input":"12MB","output":"12MB"}
+{"section":"numberExpr","input":"(rate(foo)[5m] * 8) > 45Mi","output":"(rate(foo)[5m] * 8) > 45Mi"}
+{"section":"numberExpr","input":"(rate(foo)[5m] * 8) > 45mi","output":"(rate(foo)[5m] * 8) > 45mi"}
+{"section":"numberExpr","input":"(rate(foo)[5m] * 8) > 45mI","output":"(rate(foo)[5m] * 8) > 45mI"}
+{"section":"numberExpr","input":"(rate(foo)[5m] * 8) > 45Mib","output":"(rate(foo)[5m] * 8) > 45Mib"}
+{"section":"numberExpr","input":"1.23Gb","output":"1.23Gb"}
+{"section":"numberExpr","input":"foo - 23M","output":"foo - 23M"}
+{"section":"numberExpr","input":"-1.23Gb","output":"0 - 1.23Gb","vm":"-1.23e+09","note":"folding"}
+{"section":"numberExpr","input":"1.23","output":"1.23"}
+{"section":"numberExpr","input":"0.23","output":"0.23"}
+{"section":"numberExpr","input":"1.2e+45","output":"1.2e+45"}
+{"section":"numberExpr","input":"1.2e-45","output":"1.2e-45"}
+{"section":"numberExpr","input":"-1","output":"0 - 1","vm":"-1","note":"folding"}
+{"section":"numberExpr","input":"-1.23","output":"0 - 1.23","vm":"-1.23","note":"folding"}
+{"section":"numberExpr","input":"-0.23","output":"0 - 0.23","vm":"-0.23","note":"folding"}
+{"section":"numberExpr","input":"-1.2e+45","output":"0 - 1.2e+45","vm":"-1.2e+45","note":"folding"}
+{"section":"numberExpr","input":"-1.2e-45","output":"0 - 1.2e-45","vm":"-1.2e-45","note":"folding"}
+{"section":"numberExpr","input":"-1.2e-45","output":"0 - 1.2e-45","vm":"-1.2e-45","note":"folding"}
+{"section":"numberExpr","input":"12.5E34","output":"12.5E34"}
+{"section":"numberExpr","input":"-.2","output":"0 - .2","vm":"-0.2","note":"folding"}
+{"section":"numberExpr","input":"-.2E-2","output":"0 - .2E-2","vm":"-0.002","note":"folding"}
+{"section":"numberExpr","input":"NaN","output":"NaN"}
+{"section":"numberExpr","input":"nan","output":"nan"}
+{"section":"numberExpr","input":"NAN","output":"NAN"}
+{"section":"numberExpr","input":"nAN","output":"nAN"}
+{"section":"numberExpr","input":"Inf","output":"Inf"}
+{"section":"numberExpr","input":"INF","output":"INF"}
+{"section":"numberExpr","input":"inf","output":"inf"}
+{"section":"numberExpr","input":"+Inf","output":"Inf"}
+{"section":"numberExpr","input":"-Inf","output":"0 - Inf","vm":"-Inf","note":"folding"}
+{"section":"numberExpr","input":"-inF","output":"0 - inF","vm":"-Inf","note":"folding"}
+{"section":"numberExpr","input":"0x12","output":"0x12"}
+{"section":"numberExpr","input":"0x3b","output":"0x3b"}
+{"section":"numberExpr","input":"-0x3b","output":"0 - 0x3b","vm":"-59","note":"folding"}
+{"section":"numberExpr","input":"+0X3B","output":"0X3B"}
+{"section":"numberExpr","input":"0b1011","output":"0b1011"}
+{"section":"numberExpr","input":"073","output":"073"}
+{"section":"numberExpr","input":"-0o12","output":"0 - 0o12","vm":"-10","note":"folding"}
+{"section":"durationExpr","input":"1h","output":"1h"}
+{"section":"durationExpr","input":"-1h","output":"0 - 1h"}
+{"section":"durationExpr","input":"0.34h4m5s","output":"0.34h4m5s"}
+{"section":"durationExpr","input":"0.34H4m5S","output":"0.34H4m5S"}
+{"section":"durationExpr","input":"-0.34h4m5s","output":"0 - 0.34h4m5s"}
+{"section":"durationExpr","input":"sum_over_time(m[1h]) / 1h","output":"sum_over_time(m[1h]) / 1h"}
+{"section":"durationExpr","input":"sum_over_time(m[3600]) / 3600","output":"sum_over_time(m[3600]) / 3600"}
+{"section":"binaryOpExpr","input":"nan == nan","output":"nan == nan","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"nan ==bool nan","output":"nan ==bool nan","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"nan !=bool nan","output":"nan !=bool nan","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"nan !=bool 2","output":"nan !=bool 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"2 !=bool nan","output":"2 !=bool nan","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"nan >bool nan","output":"nan >bool nan","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"nan <bool nan","output":"nan <bool nan","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"1 ==bool nan","output":"1 ==bool nan","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"NaN !=bool 1","output":"NaN !=bool 1","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"inf >=bool 2","output":"inf >=bool 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"-1 >bool -inf","output":"(0 - 1) >bool (0 - inf)","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"-1 <bool -inf","output":"(0 - 1) <bool (0 - inf)","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"nan + 2 *3 * inf","output":"nan + ((2 * 3) * inf)","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"INF - Inf","output":"INF - Inf","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"Inf + inf","output":"Inf + inf","vm":"+Inf","note":"folding"}
+{"section":"binaryOpExpr","input":"1/0","output":"1 / 0","vm":"+Inf","note":"folding"}
+{"section":"binaryOpExpr","input":"0/0","output":"0 / 0","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"-m","output":"0 - m"}
+{"section":"binaryOpExpr","input":"m + ignoring() n[5m]","output":"m + ignoring() n[5m]"}
+{"section":"binaryOpExpr","input":"M + IGNORING () N[5m]","output":"M + ignoring() N[5m]"}
+{"section":"binaryOpExpr","input":"m + on(foo) n[5m]","output":"m + on(foo) n[5m]"}
+{"section":"binaryOpExpr","input":"m + ON (Foo) n[5m]","output":"m + on(Foo) n[5m]"}
+{"section":"binaryOpExpr","input":"m + ignoring(a,b) n[5m]","output":"m + ignoring(a,b) n[5m]"}
+{"section":"binaryOpExpr","input":"1 or 2","output":"1 or 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"1 or NaN","output":"1 or NaN","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"NaN or 1","output":"NaN or 1","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"(1 > 0) or 2","output":"(1 > 0) or 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"(1 < 0) or 2","output":"(1 < 0) or 2","vm":"2","note":"folding"}
+{"section":"binaryOpExpr","input":"(1 < 0) or (2 < 0)","output":"(1 < 0) or (2 < 0)","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"NaN or NaN","output":"NaN or NaN","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"1 and 2","output":"1 and 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"1 and (1 > 0)","output":"1 and (1 > 0)","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"1 and (1 < 0)","output":"1 and (1 < 0)","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"1 and NaN","output":"1 and NaN","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"1 unless 2","output":"1 unless 2","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"1 default 2","output":"1 default 2","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"1 default NaN","output":"1 default NaN","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"NaN default 2","output":"NaN default 2","vm":"2","note":"folding"}
+{"section":"binaryOpExpr","input":"1 > 2","output":"1 > 2","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"1 > bool 2","output":"1 >bool 2","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"3 >= 2","output":"3 >= 2","vm":"3","note":"folding"}
+{"section":"binaryOpExpr","input":"3 <= bool 2","output":"3 <=bool 2","vm":"0","note":"folding"}
+{"section":"binaryOpExpr","input":"1 + -2 - 3","output":"(1 + (0 - 2)) - 3","vm":"-4","note":"folding"}
+{"section":"binaryOpExpr","input":"1 / 0 + 2","output":"(1 / 0) + 2","vm":"+Inf","note":"folding"}
+{"section":"binaryOpExpr","input":"2 + -1 / 0","output":"2 + (0 - (1 / 0))","vm":"-Inf","note":"folding"}
+{"section":"binaryOpExpr","input":"(-1) ^ 0.5","output":"(0 - 1) ^ 0.5","vm":"NaN","note":"folding"}
+{"section":"binaryOpExpr","input":"-1 ^ 0.5","output":"0 - (1 ^ 0.5)","vm":"-1","note":"folding"}
+{"section":"binaryOpExpr","input":"512.5 - (1 + 3) * (2 ^ 2) ^ 3","output":"512.5 - ((1 + 3) * ((2 ^ 2) ^ 3))","vm":"256.5","note":"folding"}
+{"section":"binaryOpExpr","input":"1 == bool 1 != bool 24 < bool 4 > bool -1","output":"(((1 ==bool 1) !=bool 24) <bool 4) >bool (0 - 1)","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"1 == bOOl 1 != BOOL 24 < Bool 4 > booL -1","output":"(((1 ==bool 1) !=bool 24) <bool 4) >bool (0 - 1)","vm":"1","note":"folding"}
+{"section":"binaryOpExpr","input":"m1+on(foo)group_left m2","output":"m1 + on(foo) group_left() m2"}
+{"section":"binaryOpExpr","input":"M1+ON(FOO)GROUP_left M2","output":"M1 + on(FOO) group_left() M2"}
+{"section":"binaryOpExpr","input":"m1 + on(foo) group_right() m2","output":"m1 + on(foo) group_right() m2"}
+{"section":"binaryOpExpr","input":"m1 + on(foo,bar) group_right(x,y) m2","output":"m1 + on(foo,bar) group_right(x,y) m2"}
+{"section":"binaryOpExpr","input":"m1 + on (foo, bar,) group_right (x, y,) m2","output":"m1 + on(foo,bar) group_right(x,y) m2"}
+{"section":"binaryOpExpr","input":"m1 ==bool on(foo,bar) group_right(x,y) m2","output":"m1 ==bool on(foo,bar) group_right(x,y) m2"}
+{"section":"binaryOpExpr","input":"a + on() group_left(*) b","output":"a + on() group_left(*) b"}
+{"section":"binaryOpExpr","input":"a + on() group_right(*) b","output":"a + on() group_right(*) b"}
+{"section":"binaryOpExpr","input":"a + on() group_left(*) prefix \"foo\" b","output":"a + on() group_left(*) prefix \"foo\" b"}
+{"section":"binaryOpExpr","input":"a + group_left","output":"a + (group_left)"}
+{"section":"binaryOpExpr","input":"a + group_left / b","output":"a + (group_left / b)"}
+{"section":"binaryOpExpr","input":"a + on(x) (group_left)","output":"a + on(x) (group_left)"}
+{"section":"binaryOpExpr","input":"a + on(x) group_left() (prefix)","output":"a + on(x) group_left() (prefix)"}
+{"section":"binaryOpExpr","input":"a + oN() gROUp_rigHt(*) PREfix \"bar\" b","output":"a + on() group_right(*) prefix \"bar\" b"}
+{"section":"binaryOpExpr","input":"a + on(a) group_left(x,y) prefix \"foo\" b","output":"a + on(a) group_left(x,y) prefix \"foo\" b"}
+{"section":"binaryOpExpr","input":"a + on(a,b) group_right(z) prefix \"bar\" b","output":"a + on(a,b) group_right(z) prefix \"bar\" b"}
+{"section":"fill modifiers","input":"m * on(job) fill_right(0) n","output":"m * on(job) fill_right(0) n"}
+{"section":"fill modifiers","input":"m * on(job) fill_left(0) n","output":"m * on(job) fill_left(0) n"}
+{"section":"fill modifiers","input":"m * on(job) fill_left(0) fill_right(1) n","output":"m * on(job) fill_left(0) fill_right(1) n"}
+{"section":"fill modifiers","input":"m * on(job) fill(0) n","output":"m * on(job) fill(0) n"}
+{"section":"fill modifiers","input":"m * on(job) FILL_RIGHT(0) n","output":"m * on(job) fill_right(0) n"}
+{"section":"fill modifiers","input":"m * on(job) FILL(0) n","output":"m * on(job) fill(0) n"}
+{"section":"fill modifiers","input":"m * on(job) fill_right(-1) n","output":"m * on(job) fill_right(-1) n"}
+{"section":"fill modifiers","input":"m * on(job) fill_left(inf) n","output":"m * on(job) fill_left(inf) n"}
+{"section":"fill modifiers","input":"m * on(job) fill(NaN) n","output":"m * on(job) fill(NaN) n"}
+{"section":"fill modifiers","input":"m * on(job) group_left() fill_right(0) n","output":"m * on(job) group_left() fill_right(0) n"}
+{"section":"fill modifiers","input":"m * fill_right(0) n","output":"m * fill_right(0) n"}
+{"section":"fill modifiers","input":"a + fill_right","output":"a + (fill_right)"}
+{"section":"fill modifiers","input":"a + fill_left","output":"a + (fill_left)"}
+{"section":"fill modifiers","input":"a + fill","output":"a + (fill)"}
+{"section":"fill modifiers","input":"m + fill(-1) n + fill(2) w ","output":"(m + fill(-1) n) + fill(2) w"}
+{"section":"fill modifiers","input":"5 - 1 + 3 * 2 ^ 2 ^ 3 - 2  OR Metric {Bar= \"Baz\", aaa!=\"bb\",cc=~\"dd\" ,zz !~\"ff\" } ","output":"(((5 - 1) + (3 * (2 ^ (2 ^ 3)))) - 2) or Metric{Bar=\"Baz\",aaa!=\"bb\",cc=~\"dd\",zz!~\"ff\"}","vm":"770 or Metric{Bar=\"Baz\",aaa!=\"bb\",cc=~\"dd\",zz!~\"ff\"}","note":"folding"}
+{"section":"fill modifiers","input":"\"foo\" + bar{x=\"y\"}","output":"\"foo\" + bar{x=\"y\"}"}
+{"section":"fill modifiers","input":"(\"foo\"[3s] + bar{x=\"y\"})[5m:3s] offset 10s","output":"(\"foo\"[3s] + bar{x=\"y\"})[5m:3s] offset 10s"}
+{"section":"fill modifiers","input":"(\"foo\"[3s] + bar{x=\"y\"})[5i:3i] offset 10i","output":"(\"foo\"[3s] + bar{x=\"y\"})[5i:3i] offset 10i"}
+{"section":"fill modifiers","input":"bar + \"foo\" offset 3s","output":"bar + (\"foo\" offset 3s)"}
+{"section":"fill modifiers","input":"bar + \"foo\" offset 3i","output":"bar + (\"foo\" offset 3i)"}
+{"section":"fill modifiers","input":"1+2 if 2>3","output":"(1 + 2) if (2 > 3)","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"1+4 if 2<3","output":"(1 + 4) if (2 < 3)","vm":"5","note":"folding"}
+{"section":"fill modifiers","input":"2+6 default 3 if 2>3","output":"(2 + 6) default (3 if (2 > 3))","vm":"8","note":"folding"}
+{"section":"fill modifiers","input":"2+6 if 2>3 default NaN","output":"((2 + 6) if (2 > 3)) default NaN","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"42 if 3>2 if 2+2<5","output":"(42 if (3 > 2)) if ((2 + 2) < 5)","vm":"42","note":"folding"}
+{"section":"fill modifiers","input":"42 if 3>2 if 2+2>=5","output":"(42 if (3 > 2)) if ((2 + 2) >= 5)","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"1+2 ifnot 2>3","output":"(1 + 2) ifnot (2 > 3)","vm":"3","note":"folding"}
+{"section":"fill modifiers","input":"1+4 ifnot 2<3","output":"(1 + 4) ifnot (2 < 3)","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"2+6 default 3 ifnot 2>3","output":"(2 + 6) default (3 ifnot (2 > 3))","vm":"8","note":"folding"}
+{"section":"fill modifiers","input":"2+6 ifnot 2>3 default NaN","output":"((2 + 6) ifnot (2 > 3)) default NaN","vm":"8","note":"folding"}
+{"section":"fill modifiers","input":"42 if 3>2 ifnot 2+2<5","output":"(42 if (3 > 2)) ifnot ((2 + 2) < 5)","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"42 if 3>2 ifnot 2+2>=5","output":"(42 if (3 > 2)) ifnot ((2 + 2) >= 5)","vm":"42","note":"folding"}
+{"section":"fill modifiers","input":"\"foo\" + \"bar\"","output":"\"foobar\""}
+{"section":"fill modifiers","input":"\"foo\"==\"bar\"","output":"\"foo\" == \"bar\"","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"\"foo\"==\"foo\"","output":"\"foo\" == \"foo\"","vm":"1","note":"folding"}
+{"section":"fill modifiers","input":"\"foo\"!=\"bar\"","output":"\"foo\" != \"bar\"","vm":"1","note":"folding"}
+{"section":"fill modifiers","input":"\"foo\"+\"bar\"+\"baz\"","output":"\"foobarbaz\""}
+{"section":"fill modifiers","input":"\"a\">\"b\"","output":"\"a\" > \"b\"","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"\"a\">bool\"b\"","output":"\"a\" >bool \"b\"","vm":"0","note":"folding"}
+{"section":"fill modifiers","input":"\"a\"<\"b\"","output":"\"a\" < \"b\"","vm":"1","note":"folding"}
+{"section":"fill modifiers","input":"\"a\">=\"b\"","output":"\"a\" >= \"b\"","vm":"NaN","note":"folding"}
+{"section":"fill modifiers","input":"\"a\">=bool\"b\"","output":"\"a\" >=bool \"b\"","vm":"0","note":"folding"}
+{"section":"fill modifiers","input":"\"a\"<=\"b\"","output":"\"a\" <= \"b\"","vm":"1","note":"folding"}
+{"section":"fill modifiers","input":"\"a\" - \"b\"","output":"\"a\" - \"b\""}
+{"section":"fill modifiers","input":"x / a keep_metric_names","output":"(x / a) keep_metric_names"}
+{"section":"fill modifiers","input":"(a + b) keep_metric_names","output":"(a + b) keep_metric_names"}
+{"section":"fill modifiers","input":"((a) + (b)) keep_metric_names","output":"(a + b) keep_metric_names"}
+{"section":"fill modifiers","input":"a + on(x) group_left(y) b offset 5m @ 1235 keep_metric_names","output":"(a + on(x) group_left(y) (b offset 5m @ 1235)) keep_metric_names"}
+{"section":"fill modifiers","input":"(a + on(x) group_left(y) b offset 5m keep_metric_names) @ 1235","output":"((a + on(x) group_left(y) (b offset 5m)) keep_metric_names) @ 1235"}
+{"section":"fill modifiers","input":"(a + on(x) group_left(y) b keep_metric_names) offset 5m @ 1235","output":"((a + on(x) group_left(y) b) keep_metric_names) offset 5m @ 1235"}
+{"section":"fill modifiers","input":"(a + on (x) group_left (y) b keep_metric_names) @ 1235 offset 5m","output":"((a + on(x) group_left(y) b) keep_metric_names) offset 5m @ 1235"}
+{"section":"fill modifiers","input":"rate(x) keep_metric_names + (abs(y) keep_metric_names) keep_metric_names","output":"(rate(x) keep_metric_names + (abs(y) keep_metric_names)) keep_metric_names"}
+{"section":"fill modifiers","input":"a + (rate(b) keep_metric_names)","output":"a + (rate(b) keep_metric_names)"}
+{"section":"binaryOp with reserved names","input":"a + (on)","output":"a + (on)"}
+{"section":"binaryOp with reserved names","input":"a + (on + c)","output":"a + (on + c)"}
+{"section":"binaryOp with reserved names","input":"a + (GROUP_LEFT)","output":"a + (GROUP_LEFT)"}
+{"section":"binaryOp with reserved names","input":"a + (bool)","output":"a + (bool)"}
+{"section":"binaryOp with reserved names","input":"a + (sum(1, 2))","output":"a + sum(1, 2)"}
+{"section":"binaryOp with reserved names","input":"without + (ignoring{x=\"y\"})","output":"without + (ignoring{x=\"y\"})"}
+{"section":"binaryOp with reserved names","input":"a + (GROUP_LEFT) / b","output":"a + (GROUP_LEFT / b)"}
+{"section":"binaryOp with reserved names","input":"by + without","output":"by + without"}
+{"section":"binaryOp with reserved names","input":"group_left / (on)","output":"group_left / (on)"}
+{"section":"binaryOp with reserved names","input":"group_left / (sum(1, 2))","output":"group_left / sum(1, 2)"}
+{"section":"parensExpr","input":"(-foo + ((bar) / (baz))) + ((23))","output":"((0 - foo) + (bar / baz)) + 23"}
+{"section":"parensExpr","input":"(FOO + ((Bar) / (baZ))) + ((23))","output":"(FOO + (Bar / baZ)) + 23"}
+{"section":"parensExpr","input":"(foo, bar)","output":"(foo, bar)"}
+{"section":"parensExpr","input":"((foo, bar),(baz))","output":"((foo, bar), baz)"}
+{"section":"parensExpr","input":"(foo, (bar, baz), ((x, y), (z, y), xx))","output":"(foo, (bar, baz), ((x, y), (z, y), xx))"}
+{"section":"parensExpr","input":"1+(foo, bar,)","output":"1 + (foo, bar)"}
+{"section":"parensExpr","input":"((avg(bar,baz)), (1+(2)+(3,4)+()))","output":"(avg(bar, baz), ((1 + 2) + (3, 4)) + ())","vm":"(avg(bar, baz), (3 + (3, 4)) + ())","note":"folding"}
+{"section":"parensExpr","input":"()","output":"()"}
+{"section":"funcExpr","input":"sum()","error":"arity","vm":"sum()","note":"arity"}
+{"section":"funcExpr","input":"sum(x,)","output":"sum(x)"}
+{"section":"funcExpr","input":"-sum()-AVG_over_time()","error":"arity","vm":"(0 - sum()) - AVG_over_time()","note":"arity"}
+{"section":"funcExpr","input":"SUM()","error":"arity","vm":"sum()","note":"arity"}
+{"section":"funcExpr","input":"+SUM()","error":"arity","vm":"sum()","note":"arity"}
+{"section":"funcExpr","input":"++SUM()","error":"arity","vm":"sum()","note":"arity"}
+{"section":"funcExpr","input":"--SUM()","error":"arity","vm":"0 - (0 - sum())","note":"arity"}
+{"section":"funcExpr","input":"rate(http_server_request)","output":"rate(http_server_request)"}
+{"section":"funcExpr","input":"rate(http_server_request)[4s:5m] offset 10m","output":"rate(http_server_request)[4s:5m] offset 10m"}
+{"section":"funcExpr","input":"rate(http_server_request)[4i:5i] offset 10i","output":"rate(http_server_request)[4i:5i] offset 10i"}
+{"section":"funcExpr","input":"SUM(HttpServerRequest)","output":"sum(HttpServerRequest)"}
+{"section":"funcExpr","input":"outliersk(job, foo)","output":"outliersk(job, foo)"}
+{"section":"funcExpr","input":"outliersk(Job, Foo)","output":"outliersk(Job, Foo)"}
+{"section":"funcExpr","input":" SUM (bar) + rate  (  avg  (  ),sum(1 + (  2.5)) ,M[5m ]  , \"ff\"  )","error":"arity","vm":"sum(bar) + rate(avg(), sum(3.5), M[5m], \"ff\")","note":"arity"}
+{"section":"funcExpr","input":"rate(foo[5m]) keep_metric_names","output":"rate(foo[5m]) keep_metric_names"}
+{"section":"funcExpr","input":"log2(foo) KEEP_metric_names + 1 / increase(bar[5m]) keep_metric_names offset 1h @ 435","output":"log2(foo) keep_metric_names + (1 / (increase(bar[5m]) keep_metric_names offset 1h @ 435))"}
+{"section":"embedded funcName","input":"rate(rate(m))","output":"rate(rate(m))"}
+{"section":"embedded funcName","input":"rate(rate(m[5m]))","output":"rate(rate(m[5m]))"}
+{"section":"embedded funcName","input":"rate(rate(m[5m])[1h:])","output":"rate(rate(m[5m])[1h:])"}
+{"section":"embedded funcName","input":"rate(rate(m[5m])[1h:3s])","output":"rate(rate(m[5m])[1h:3s])"}
+{"section":"funcName with escape chars","input":"r\\a\\te(m[5m])","output":"rate(m[5m])"}
+{"section":"aggrFuncExpr","input":"sum(http_server_request) by()","output":"sum(http_server_request) by()"}
+{"section":"aggrFuncExpr","input":"sum(http_server_request) by(job)","output":"sum(http_server_request) by(job)"}
+{"section":"aggrFuncExpr","input":"sum(http_server_request) without(job,foo)","output":"sum(http_server_request) without(job,foo)"}
+{"section":"aggrFuncExpr","input":"sum(x,y,) without (a,b,)","output":"sum(x, y) without(a,b)"}
+{"section":"aggrFuncExpr","input":"sum by () (xx)","output":"sum(xx) by()"}
+{"section":"aggrFuncExpr","input":"sum by (s) (xx)[5s]","output":"(sum(xx) by(s))[5s]"}
+{"section":"aggrFuncExpr","input":"SUM BY (ZZ, aa) (XX)","output":"sum(XX) by(ZZ,aa)"}
+{"section":"aggrFuncExpr","input":"sum without (a, b) (xx,2+2)","output":"sum(xx, 2 + 2) without(a,b)","vm":"sum(xx, 4) without(a,b)","note":"folding"}
+{"section":"aggrFuncExpr","input":"Sum WIthout (a, B) (XX,2+2)","output":"sum(XX, 2 + 2) without(a,B)","vm":"sum(XX, 4) without(a,B)","note":"folding"}
+{"section":"aggrFuncExpr","input":"sum(a) or sum(b)","output":"sum(a) or sum(b)"}
+{"section":"aggrFuncExpr","input":"sum(a) by() or sum(b) without(x,y)","output":"sum(a) by() or sum(b) without(x,y)"}
+{"section":"aggrFuncExpr","input":"sum(a) + sum(b)","output":"sum(a) + sum(b)"}
+{"section":"aggrFuncExpr","input":"sum(x) * (1 + sum(a))","output":"sum(x) * (1 + sum(a))"}
+{"section":"aggrFuncExpr","input":"avg(x) limit 10","output":"avg(x) limit 10"}
+{"section":"aggrFuncExpr","input":"avg(x) without(z,b) limit 1","output":"avg(x) without(z,b) limit 1"}
+{"section":"aggrFuncExpr","input":"avg by(x) (z) limit 20","output":"avg(z) by(x) limit 20"}
+{"section":"utf-8 quoted label names","input":"sum({\"metric name\",\"label\"=\"value\"}) by (\"cluster!one\",instance)","output":"sum(metric\\ name{label=\"value\"}) by(cluster\\!one,instance)"}
+{"section":"All the above","input":"Sum(timestamp(M) * M{X=\"\"}[5m] Offset 7m - 123, 35) BY (X, y) * LAG(\"Test\")","output":"sum((timestamp(M) * (M{X=\"\"}[5m] offset 7m)) - 123, 35) by(X,y) * LAG(\"Test\")"}
+{"section":"All the above","input":"# comment\n\t\tSum(Timestamp(M) * M{X=\"\"}[5m] Offset 7m - 123, 35) BY (X, y) # yet another comment\n\t\t* LAG(\"Test\")","output":"sum((Timestamp(M) * (M{X=\"\"}[5m] offset 7m)) - 123, 35) by(X,y) * LAG(\"Test\")"}
+{"section":"withExpr","input":"with () x","error":"unsupported","vm":"x","note":"with"}
+{"section":"withExpr","input":"with (x=1,) x","error":"unsupported","vm":"1","note":"with"}
+{"section":"withExpr","input":"with (x = m offset 5h) x + x","error":"unsupported","vm":"(m offset 5h) + (m offset 5h)","note":"with"}
+{"section":"withExpr","input":"with (x = m offset 5i) x + x","error":"unsupported","vm":"(m offset 5i) + (m offset 5i)","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) 1","error":"unsupported","vm":"1","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) \"x\"","error":"unsupported","vm":"\"x\"","note":"with"}
+{"section":"withExpr","input":"with (f=\"x\") f","error":"unsupported","vm":"\"x\"","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) x{x=\"y\"}","error":"unsupported","vm":"x{x=\"y\"}","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) 1+1","error":"unsupported","vm":"2","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) time()","error":"unsupported","vm":"time()","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) sum(x)","error":"unsupported","vm":"sum(x)","note":"with"}
+{"section":"withExpr","input":"with (foo = bar{x=\"x\"}) baz{foo=\"bar\"}","error":"unsupported","vm":"baz{foo=\"bar\"}","note":"with"}
+{"section":"withExpr","input":"with (foo = bar) baz","error":"unsupported","vm":"baz","note":"with"}
+{"section":"withExpr","input":"with (foo = bar) foo + foo{a=\"b\"}","error":"unsupported","vm":"bar + bar{a=\"b\"}","note":"with"}
+{"section":"withExpr","input":"with (foo = bar, bar=baz + f()) test","error":"unsupported","vm":"test","note":"with"}
+{"section":"withExpr","input":"with (ct={job=\"test\"}) a{ct} + ct() + ceil({ct=\"x\"})","error":"unsupported","vm":"(a{job=\"test\"} + {job=\"test\"}) + ceil({ct=\"x\"})","note":"with"}
+{"section":"withExpr","input":"with (ct={job=\"test\", i=\"bar\"}) ct + {ct, x=\"d\"} + foo{ct, ct} + count(1)","error":"unsupported","vm":"(({job=\"test\",i=\"bar\"} + {job=\"test\",i=\"bar\",x=\"d\"}) + foo{job=\"test\",i=\"bar\"}) + count(1)","note":"with"}
+{"section":"withExpr","input":"with (foo = bar) {__name__=~\"foo\"}","error":"unsupported","vm":"{__name__=~\"foo\"}","note":"with"}
+{"section":"withExpr","input":"with (foo = bar) foo{__name__=\"foo\"}","error":"unsupported","vm":"bar","note":"with"}
+{"section":"withExpr","input":"with (foo = bar) {__name__=\"foo\", x=\"y\"}","error":"unsupported","vm":"bar{x=\"y\"}","note":"with"}
+{"section":"withExpr","input":"with (foo(bar) = {__name__!=\"bar\"}) foo(x)","error":"unsupported","vm":"{__name__!=\"bar\"}","note":"with"}
+{"section":"withExpr","input":"with (foo(bar) = bar{__name__=\"bar\"}) foo(x)","error":"unsupported","vm":"x","note":"with"}
+{"section":"withExpr","input":"with (foo\\-bar(baz) = baz + baz) foo\\-bar((x,y))","error":"unsupported","vm":"(x, y) + (x, y)","note":"with"}
+{"section":"withExpr","input":"with (foo\\-bar(baz) = baz + baz) foo\\-bar(x*y)","error":"unsupported","vm":"(x * y) + (x * y)","note":"with"}
+{"section":"withExpr","input":"with (foo\\-bar(baz) = baz + baz) foo\\-bar(x\\*y)","error":"unsupported","vm":"x\\*y + x\\*y","note":"with"}
+{"section":"withExpr","input":"with (foo\\-bar(b\\ az) = b\\ az + b\\ az) foo\\-bar(x\\*y)","error":"unsupported","vm":"x\\*y + x\\*y","note":"with"}
+{"section":"withExpr and durations","input":"with (w=5m) w + m[w] offset w","error":"unsupported","vm":"5m + (m[5m] offset 5m)","note":"with"}
+{"section":"withExpr and durations","input":"with (f() = 5m + rate(m{x=\"a\"}[5m:1h] offset 1h)) f()","error":"unsupported","vm":"5m + rate(m{x=\"a\"}[5m:1h] offset 1h)","note":"with"}
+{"section":"withExpr and durations","input":"with (f(w1, w2) = w1 + rate(m{x=\"a\"}[w1:w2] offset w2)) f(5m, 1h)","error":"unsupported","vm":"5m + rate(m{x=\"a\"}[5m:1h] offset 1h)","note":"with"}
+{"section":"withExpr and durations","input":"with (f(w) = m[w], f2(x) = f(x) / x) f2(5m)","error":"unsupported","vm":"m[5m] / 5m","note":"with"}
+{"section":"withExpr and durations","input":"with (f(w) = m[w:w], f2(x) = f(x) / x) f2(5i)","error":"unsupported","vm":"m[5i:5i] / 5i","note":"with"}
+{"section":"withExpr and durations","input":"with (f(w,w1) = m[w:w1], f2(x) = f(x, 23.34) / x) f2(123.456)","error":"unsupported","vm":"m[123.456:23.34] / 123.456","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\"}) x{c=\"d\" or q=\"w\",r=\"t\"}","error":"unsupported","vm":"{a=\"b\",c=\"d\" or a=\"b\",q=\"w\",r=\"t\"}","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\"}) foo{x,bar=\"baz\" or c=\"d\",x}","error":"unsupported","vm":"foo{a=\"b\",bar=\"baz\" or c=\"d\",a=\"b\"}","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\"}) foo{x,bar=\"baz\",x or c=\"d\"}","error":"unsupported","vm":"foo{a=\"b\",bar=\"baz\" or c=\"d\"}","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\"}) foo{bar=\"baz\",x or c=\"d\"}","error":"unsupported","vm":"foo{bar=\"baz\",a=\"b\" or c=\"d\"}","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\",c=\"d\"}) {bar=\"baz\",x or x,c=\"d\",x}","error":"unsupported","vm":"{bar=\"baz\",a=\"b\",c=\"d\" or a=\"b\",c=\"d\"}","note":"with"}
+{"section":"withExpr and 'or' filters","input":"with (x={a=\"b\" or c=\"d\"}) x / x{e=\"f\"}","error":"unsupported","vm":"{a=\"b\" or c=\"d\"} / {a=\"b\",e=\"f\" or c=\"d\",e=\"f\"}","note":"with"}
+{"section":"withExpr and group_left()/group_right() prefix","input":"with (f(x)=a + on() group_left(a,b) prefix x b) f(\"bar\")","error":"unsupported","vm":"a + on() group_left(a,b) prefix \"bar\" b","note":"with"}
+{"section":"withExpr and group_left()/group_right() prefix","input":"with (f(x)=a + on() group_left(a,b) prefix x+\"foo\" b) f(\"bar\")","error":"unsupported","vm":"a + on() group_left(a,b) prefix \"barfoo\" b","note":"with"}
+{"section":"withExpr and group_left()/group_right() prefix","input":"with (f(x)=a + on() group_left(a,b) prefix \"foo\"+x b) f(\"bar\")","error":"unsupported","vm":"a + on() group_left(a,b) prefix \"foobar\" b","note":"with"}
+{"section":"withExpr and group_left()/group_right() prefix","input":"with (f(x)=a + on() group_left(a,b) prefix \"foo\"+x+\"baz\" b) f(\"bar\")","error":"unsupported","vm":"a + on() group_left(a,b) prefix \"foobarbaz\" b","note":"with"}
+{"section":"override ttf with something new","input":"with (ttf = a) ttf + b","error":"unsupported","vm":"a + b","note":"with"}
+{"section":"override ttf with ru","input":"with (ttf = ru(m, n)) ttf","error":"unsupported","vm":"(clamp_min(n - clamp_min(m, 0), 0) / clamp_min(n, 0)) * 100","note":"with"}
+{"section":"Verify withExpr recursion and forward reference","input":"with (x = x+y, y = x+x) y ^ 2","error":"unsupported","vm":"((x + y) + (x + y)) ^ 2","note":"with"}
+{"section":"Verify withExpr recursion and forward reference","input":"with (f1(x)=ceil(x), ceil(x)=f1(x)^2) f1(foobar)","error":"unsupported","vm":"ceil(foobar)","note":"with"}
+{"section":"Verify withExpr recursion and forward reference","input":"with (f1(x)=ceil(x), ceil(x)=f1(x)^2) ceil(foobar)","error":"unsupported","vm":"ceil(foobar) ^ 2","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x() = y+1) x","error":"unsupported","vm":"y + 1","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x(foo) = foo+1) x(a)","error":"unsupported","vm":"a + 1","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x(a, b) = a + b) x(foo, bar)","error":"unsupported","vm":"foo + bar","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x(a, b) = a + b) x(foo, x(1, 2))","error":"unsupported","vm":"foo + 3","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x(a) = sum(a) by (b)) x(xx) / x(y)","error":"unsupported","vm":"sum(xx) by(b) / sum(y) by(b)","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(a,f,x)=clamp(x,f,a)) f(f(x,y,z),1,2)","error":"unsupported","vm":"clamp(2, 1, clamp(z, y, x))","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=1+sum(x)) f(foo{bar=\"baz\"})","error":"unsupported","vm":"1 + sum(foo{bar=\"baz\"})","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (a=foo, y=bar, f(a)= a+a+y) f(x)","error":"unsupported","vm":"(x + x) + bar","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(a, b) = m{a, b}) f({a=\"x\", b=\"y\"}, {c=\"d\"})","error":"unsupported","vm":"m{a=\"x\",b=\"y\",c=\"d\"}","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (xx={a=\"x\"}, f(a, b) = m{a, b}) f({xx, b=\"y\"}, {c=\"d\"})","error":"unsupported","vm":"m{a=\"x\",b=\"y\",c=\"d\"}","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x() = {b=\"c\"}) foo{x}","error":"unsupported","vm":"foo{b=\"c\"}","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x{foo=\"bar\"} offset 5m) f(m offset 10m)","error":"unsupported","vm":"(m{foo=\"bar\"} offset 10m) offset 5m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x{foo=\"bar\",bas=\"a\"}[5m]) f(m[10m] offset 3s)","error":"unsupported","vm":"(m{foo=\"bar\",bas=\"a\"}[10m] offset 3s)[5m]","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x{foo=\"bar\"}[5m] offset 10m) f(m{x=\"y\"})","error":"unsupported","vm":"m{x=\"y\",foo=\"bar\"}[5m] offset 10m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x{foo=\"bar\"}[5m] offset 10m) f({x=\"y\", foo=\"bar\", foo=\"bar\"})","error":"unsupported","vm":"{x=\"y\",foo=\"bar\"}[5m] offset 10m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(m, x)=m{x}[5m] offset 10m) f(foo, {})","error":"unsupported","vm":"foo[5m] offset 10m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(m, x)=m{x, bar=\"baz\"}[5m] offset 10m) f(foo, {})","error":"unsupported","vm":"foo{bar=\"baz\"}[5m] offset 10m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x[5m] offset 3s) f(foo[3m]+bar)","error":"unsupported","vm":"(foo[3m] + bar)[5m] offset 3s","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x)=x[5m:3s] oFFsEt 1.5m) f(sum(s) by (a,b))","error":"unsupported","vm":"(sum(s) by(a,b))[5m:3s] offset 1.5m","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x=\"a\", y=x) y+\"bc\"","error":"unsupported","vm":"\"abc\"","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (x=\"a\", y=\"b\"+x) \"we\"+y+\"z\"+count()","error":"unsupported","vm":"\"webaz\" + count()","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(x) = m{foo=x+\"y\", bar=\"y\"+x, baz=x} + x) f(\"qwe\")","error":"unsupported","vm":"m{foo=\"qwey\",bar=\"yqwe\",baz=\"qwe\"} + \"qwe\"","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f(a)=a) f","error":"unsupported","vm":"f","note":"with"}
+{"section":"Verify withExpr funcs","input":"with (f\\q(a)=a) f\\q","error":"unsupported","vm":"fq","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = x, y = sum(m) by (f)) y","error":"unsupported","vm":"sum(m) by(f)","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = x, y = sum(m) by (f) limit 20) y","error":"unsupported","vm":"sum(m) by(f) limit 20","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = sum(m) by (x)) f(foo)","error":"unsupported","vm":"sum(m) by(foo)","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = sum(m) by (x) limit 42) f(foo)","error":"unsupported","vm":"sum(m) by(foo) limit 42","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = sum(m) by (x)) f((foo, bar, foo))","error":"unsupported","vm":"sum(m) by(foo,bar)","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = sum(m) without (x,y)) f((a, b))","error":"unsupported","vm":"sum(m) without(a,b,y)","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x) = sum(m) without (y,x)) f((a, y))","error":"unsupported","vm":"sum(m) without(y,a)","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x,y) = a + on (x,y) group_left (y,bar) b) f(foo,())","error":"unsupported","vm":"a + on(foo) group_left(bar) b","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x,y) = a + on (x,y) group_left (y,bar) b) f((foo),())","error":"unsupported","vm":"a + on(foo) group_left(bar) b","note":"with"}
+{"section":"Verify withExpr for aggr func modifiers","input":"with (f(x,y) = a + on (x,y) group_left (y,bar) b) f((foo,xx),())","error":"unsupported","vm":"a + on(foo,xx) group_left(bar) b","note":"with"}
+{"section":"withExpr for group_left() / group_right() prefix","input":"with (f(x) = a+on() group_left() prefix x b) f(\"foo\")","error":"unsupported","vm":"a + on() group_left() prefix \"foo\" b","note":"with"}
+{"section":"withExpr for group_left() / group_right() prefix","input":"with (f(x) = a+on() group_left() prefix x+\"bar\" b) f(\"foo\")","error":"unsupported","vm":"a + on() group_left() prefix \"foobar\" b","note":"with"}
+{"section":"withExpr for group_left() / group_right() prefix","input":"with (f(x) = a+on() group_left() prefix \"bar\"+x b) f(\"foo\")","error":"unsupported","vm":"a + on() group_left() prefix \"barfoo\" b","note":"with"}
+{"section":"withExpr for group_left() / group_right() prefix","input":"with (f(x,y) = a+on() group_left() prefix y+x b) f(\"foo\",\"bar\")","error":"unsupported","vm":"a + on() group_left() prefix \"barfoo\" b","note":"with"}
+{"section":"Verify nested with exprs","input":"with (f(x) = (with(x=y) x) + x) f(z)","error":"unsupported","vm":"y + z","note":"with"}
+{"section":"Verify nested with exprs","input":"with (x=foo) clamp_min(a, with (y=x) y)","error":"unsupported","vm":"clamp_min(a, foo)","note":"with"}
+{"section":"Verify nested with exprs","input":"with (x=foo) a * x + (with (y=x) y) / y","error":"unsupported","vm":"(a * foo) + (foo / y)","note":"with"}
+{"section":"Verify nested with exprs","input":"with (x = with (y = foo) y + x) x/x","error":"unsupported","vm":"(foo + x) / (foo + x)","note":"with"}
+{"section":"Verify nested with exprs","input":"with (\n\t\tx = {foo=\"bar\"},\n\t\tq = m{x, y=\"1\"},\n\t\tf(x) =\n\t\t\twith (\n\t\t\t\tz(y) = x + y * q\n\t\t\t)\n\t\t\tz(foo) / changes(x)\n\t)\n\tf(a)","error":"unsupported","vm":"(a + (foo * m{foo=\"bar\",y=\"1\"})) / changes(a)","note":"with"}
+{"section":"complex withExpr","input":"WITH (\n\t\ttreshold = (0.9),\n\t\tcommonFilters = {job=\"cacher\", instance=~\"1.2.3.4\"},\n\t\thits = rate(cache{type=\"hit\", commonFilters}[5m]),\n\t\tmiss = rate(cache{type=\"miss\", commonFilters}[5m]),\n\t\tsumByInstance(arg) = sum(arg) by (instance),\n\t\thitRatio = sumByInstance(hits) / sumByInstance(hits + miss)\n\t)\n\thitRatio < treshold","error":"unsupported","vm":"(sum(rate(cache{type=\"hit\",job=\"cacher\",instance=~\"1.2.3.4\"}[5m])) by(instance) / sum(rate(cache{type=\"hit\",job=\"cacher\",instance=~\"1.2.3.4\"}[5m]) + rate(cache{type=\"miss\",job=\"cacher\",instance=~\"1.2.3.4\"}[5m])) by(instance)) < 0.9","note":"with"}
+{"section":"complex withExpr","input":"WITH (\n\t\tx2(x) = x^2,\n\t\tf(x, y) = x2(x) + x*y + x2(y)\n\t)\n\tf(a, 3)\n\t","error":"unsupported","vm":"((a ^ 2) + (a * 3)) + 9","note":"with"}
+{"section":"complex withExpr","input":"WITH (\n\t\tx2(x) = x^2,\n\t\tf(x, y) = x2(x) + x*y + x2(y)\n\t)\n\tf(2, 3)\n\t","error":"unsupported","vm":"19","note":"with"}
+{"section":"complex withExpr","input":"WITH (\n\t\tcommonFilters = {instance=\"foo\"},\n\t\ttimeToFuckup(currv, maxv) = (maxv - currv) / rate(currv)\n\t)\n\ttimeToFuckup(diskUsage{commonFilters}, maxDiskSize{commonFilters})","error":"unsupported","vm":"(maxDiskSize{instance=\"foo\"} - diskUsage{instance=\"foo\"}) / rate(diskUsage{instance=\"foo\"})","note":"with"}
+{"section":"complex withExpr","input":"WITH (\n\t       commonFilters = {job=\"foo\", instance=\"bar\"},\n\t       sumRate(m, cf) = sum(rate(m{cf})) by (job, instance),\n\t       hitRate(hits, misses) = sumRate(hits, commonFilters) / (sumRate(hits, commonFilters) + sumRate(misses, commonFilters))\n\t   )\n\t   hitRate(cacheHits, cacheMisses)","error":"unsupported","vm":"sum(rate(cacheHits{job=\"foo\",instance=\"bar\"})) by(job,instance) / (sum(rate(cacheHits{job=\"foo\",instance=\"bar\"})) by(job,instance) + sum(rate(cacheMisses{job=\"foo\",instance=\"bar\"})) by(job,instance))","note":"with"}
+{"section":"complex withExpr","input":"with(y=123,z=5) union(with(y=3,f(x)=x*y) f(2) + f(3), with(x=5,y=2) x*y*z)","error":"unsupported","vm":"union(15, 50)","note":"with"}
+{"section":"complex withExpr","input":"with(sum=123,now=5) union(with(sum=3,f(x)=x*sum) f(2) + f(3), with(x=5,sum=2) x*sum*now)","error":"unsupported","vm":"union(15, 50)","note":"with"}
+{"section":"complex withExpr","input":"WITH(now = sum(rate(my_metric_total)), before = sum(rate(my_metric_total) offset 1h)) now/before*100","error":"unsupported","vm":"(sum(rate(my_metric_total)) / sum(rate(my_metric_total) offset 1h)) * 100","note":"with"}
+{"section":"complex withExpr","input":"with (sum = x) sum","error":"unsupported","vm":"x","note":"with"}
+{"section":"complex withExpr","input":"with (clamp_min=x) clamp_min","error":"unsupported","vm":"x","note":"with"}
+{"section":"complex withExpr","input":"with (now=now(), sum=sum()) now","error":"unsupported","vm":"now()","note":"with"}
+{"section":"complex withExpr","input":"with (now=now(), sum=sum()) now()","error":"unsupported","vm":"now()","note":"with"}
+{"section":"complex withExpr","input":"with (now(a)=now()+a) now(1)","error":"unsupported","vm":"now() + 1","note":"with"}
+{"section":"complex withExpr","input":"with (rate(a,b)=a+b) rate(1,2)","error":"unsupported","vm":"3","note":"with"}
+{"section":"complex withExpr","input":"with (now=now(), sum=sum()) x","error":"unsupported","vm":"x","note":"with"}
+{"section":"complex withExpr","input":"with (rate(a) = b) c","error":"unsupported","vm":"c","note":"with"}
+{"section":"complex withExpr","input":"rate(x) + with (rate(a,b)=a*b) rate(2,b)","error":"unsupported","vm":"rate(x) + (2 * b)","note":"with"}
+{"section":"complex withExpr","input":"with (sum(a,b)=a+b) sum(c,d)","error":"unsupported","vm":"c + d","note":"with"}
+{"section":"$__interval and $__rate_interval must be replaced with 1i","input":"rate(m[$__interval] offset $__interval) * $__interval","output":"rate(m offset 1i) * 1i"}
+{"section":"$__interval and $__rate_interval must be replaced with 1i","input":"increase(m[$__rate_interval] offset -$__rate_interval) + -$__rate_interval","output":"increase(m offset -1i) + (0 - 1i)"}
+{"section":"$__interval and $__rate_interval must be replaced with 1i","input":"rate(m[$__rate_interval:5m])","output":"rate(m[:5m])"}
+{"section":"$__interval and $__rate_interval must be replaced with 1i","input":"rate(m[$__interval:5m])","output":"rate(m[:5m])"}
+{"section":"an empty string","input":"","error":"syntax"}
+{"section":"an empty string","input":"  \t\b\r\n  ","error":"syntax"}
+{"section":"invalid metricExpr","input":"{}[5M:]","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo[-55]","error":"syntax"}
+{"section":"invalid metricExpr","input":"m[-5m]","error":"syntax"}
+{"section":"invalid metricExpr","input":"{","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{bar","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{bar=","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{bar=\"baz\"","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{bar=\"baz\",  ","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{123=\"23\"}","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{foo}","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{,}","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{,foo=\"bar\"}","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{foo=}","error":"syntax"}
+{"section":"invalid metricExpr","input":"foo{foo=\"ba}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"{\"foo\", \"a\"=\"1\", \"bar\"}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"{\"foo\", __name__=\"bar\"}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"foo{$","error":"syntax"}
+{"section":"Test if two metric names are set","input":"foo{a $","error":"syntax"}
+{"section":"Test if two metric names are set","input":"foo{a=\"b\",$","error":"syntax"}
+{"section":"Test if two metric names are set","input":"foo{a=\"b\"}$","error":"syntax"}
+{"section":"Test if two metric names are set","input":"[","error":"syntax"}
+{"section":"Test if two metric names are set","input":"[]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"f[5m]$","error":"syntax"}
+{"section":"Test if two metric names are set","input":"[5m]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"[5m] offset 4h","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m] offset $","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m] offset 5h $","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[-5m]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m:","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m:-","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m:-1","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m:-1]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[5m:-1s]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[-5m:1s]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[-5m:-1s]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[:","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[:-","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[:-1]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[:-1m]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[-5]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[[5m]]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[foo]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[\"ff\"]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[10m","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[123","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[\"ff","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m[(f","error":"syntax"}
+{"section":"Test if two metric names are set","input":"fd}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"]","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m $","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m{,}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m{x=y}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m{x=y/5}","error":"syntax"}
+{"section":"Test if two metric names are set","input":"m{x=y+5}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{or","error":"syntax"}
+{"section":"invalid 'or' filters","input":"a{or","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{or x}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{or x=\"y\"}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x or}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x or,","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x or,}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x=\"y\" or","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x=\"y\" or}","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x=\"y\" or z","error":"syntax"}
+{"section":"invalid 'or' filters","input":"{x=\"y\" or z=\"x\"","error":"syntax"}
+{"section":"keep_metric_names cannot be used with metric expression","input":"m keep_metric_names","error":"syntax"}
+{"section":"Invalid @ modifier","input":"@","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @ ! ","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @ @","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @ offset 5m","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @ [5m]","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo offset @ 5m","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo @ 123 offset 5m @ 456","error":"syntax"}
+{"section":"Invalid @ modifier","input":"foo offset 5m @","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar=~\"x[\"}","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar=~\"x(\"}","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar=~\"x)\"}","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar!~\"x[\"}","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar!~\"x(\"}","error":"syntax"}
+{"section":"Invalid regexp","input":"foo{bar!~\"x)\"}","error":"syntax"}
+{"section":"invalid stringExpr","input":"'","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"","error":"syntax"}
+{"section":"invalid stringExpr","input":"`","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"foo","error":"syntax"}
+{"section":"invalid stringExpr","input":"'foo","error":"syntax"}
+{"section":"invalid stringExpr","input":"`foo","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"foo\\\"bar","error":"syntax"}
+{"section":"invalid stringExpr","input":"'foo\\'bar","error":"syntax"}
+{"section":"invalid stringExpr","input":"`foo\\`bar","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"\" $","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"foo\" +","error":"syntax"}
+{"section":"invalid stringExpr","input":"n{\"foo\" + m","error":"syntax"}
+{"section":"invalid stringExpr","input":"\"foo\" keep_metric_names","error":"syntax"}
+{"section":"invalid stringExpr","input":"keep_metric_names \"foo\"","error":"syntax"}
+{"section":"invalid numberExpr","input":"1.2e","error":"syntax"}
+{"section":"invalid numberExpr","input":"23e-","error":"syntax"}
+{"section":"invalid numberExpr","input":"23E+","error":"syntax"}
+{"section":"invalid numberExpr","input":".","error":"syntax"}
+{"section":"invalid numberExpr","input":"-1.2e","error":"syntax"}
+{"section":"invalid numberExpr","input":"-23e-","error":"syntax"}
+{"section":"invalid numberExpr","input":"-23E+","error":"syntax"}
+{"section":"invalid numberExpr","input":"-.","error":"syntax"}
+{"section":"invalid numberExpr","input":"-1$$","error":"syntax"}
+{"section":"invalid numberExpr","input":"-$$","error":"syntax"}
+{"section":"invalid numberExpr","input":"+$$","error":"syntax"}
+{"section":"invalid numberExpr","input":"23 $$","error":"syntax"}
+{"section":"invalid numberExpr","input":"1 keep_metric_names","error":"syntax"}
+{"section":"invalid numberExpr","input":"keep_metric_names 1","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"+","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"1 +","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"3 unless","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"23 + on (foo)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on (,) m","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"3 * ignoring","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (foo","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (foo,","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (foo,)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (,foo)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * on (,)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m == bool (bar) baz","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m == bool () baz","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * by (baz) n","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + bool group_left m2","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (,","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (,foo","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (foo,)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (,foo)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_left (foo)","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m + on () group_right (foo) (m","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m or ignoring () group_left () n","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"1 + bool 2","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m % bool n","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"m * bool baz","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"M * BOoL BaZ","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"foo unless ignoring (bar) group_left xxx","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"foo or bool bar","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"foo == bool $$","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"\"foo\" + bar","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"(foo + ","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + on(*) b","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + ignoring(*) b","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + prefix \"b\" c","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + on() prefix \"b\" c","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + ignoring(foo) prefix \"b\" c","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + on() group_left(*,x) b","error":"syntax"}
+{"section":"invalid binaryOpExpr","input":"a + on() group_right(x,*) b","error":"syntax"}
+{"section":"invalid parensExpr","input":"(","error":"syntax"}
+{"section":"invalid parensExpr","input":"($","error":"syntax"}
+{"section":"invalid parensExpr","input":"(+","error":"syntax"}
+{"section":"invalid parensExpr","input":"(1","error":"syntax"}
+{"section":"invalid parensExpr","input":"(m+","error":"syntax"}
+{"section":"invalid parensExpr","input":"1)","error":"syntax"}
+{"section":"invalid parensExpr","input":"(,)","error":"syntax"}
+{"section":"invalid parensExpr","input":"(1)$","error":"syntax"}
+{"section":"invalid parensExpr","input":"(foo) keep_metric_names","error":"syntax"}
+{"section":"invalid funcExpr","input":"f $","error":"syntax"}
+{"section":"invalid funcExpr","input":"f($)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f[","error":"syntax"}
+{"section":"invalid funcExpr","input":"f()$","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(foo","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(f,","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(,","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(,)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(,foo)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(,foo","error":"syntax"}
+{"section":"invalid funcExpr","input":"f(foo,$","error":"syntax"}
+{"section":"invalid funcExpr","input":"f() by (a)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f without (x) (y)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f() foo (a)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f bar (x) (b)","error":"syntax"}
+{"section":"invalid funcExpr","input":"f bar (x)","error":"syntax"}
+{"section":"invalid funcExpr","input":"keep_metric_names f()","error":"syntax"}
+{"section":"invalid funcExpr","input":"f() abc","error":"syntax"}
+{"section":"unknown function","input":"f()","error":"unknown_function"}
+{"section":"unknown function","input":"f(x,)","error":"unknown_function"}
+{"section":"unknown function","input":"f(http_server_request)","error":"unknown_function"}
+{"section":"unknown function","input":"f(job, foo)","error":"unknown_function"}
+{"section":"unknown function","input":"sum(a, b+f())","error":"unknown_function"}
+{"section":"unknown function","input":"by(2)","error":"unknown_function"}
+{"section":"unknown function","input":"BY(2)","error":"unknown_function"}
+{"section":"unknown function","input":"or(2)","error":"unknown_function"}
+{"section":"unknown function","input":"OR(2)","error":"unknown_function"}
+{"section":"unknown function","input":"bool(2)","error":"unknown_function"}
+{"section":"unknown function","input":"BOOL(2)","error":"unknown_function"}
+{"section":"unknown function","input":"\"foo\" + bar()","error":"unknown_function"}
+{"section":"unknown function","input":"a + (bool(1, 2))","error":"unknown_function"}
+{"section":"unknown function","input":"group_left / (on(1, 2))","error":"unknown_function"}
+{"section":"unknown function","input":"group_left / (f(1, 2))","error":"unknown_function"}
+{"section":"invalid aggrFuncExpr","input":"sum(","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum $","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum [","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum($)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum()$","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) ba","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) ba()","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) by","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) without x","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) aaa","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(foo) aaa x","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by $","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by ($","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (a","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (a $","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (a ]","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (a)$","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (,","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (a,$","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (,)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (,a","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() by (,a)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() on (b)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() bool","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() group_left","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum() group_right(x)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum ba","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum ba ()","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (,","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (,)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (,a","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (,a)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) (","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) [","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) {","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) (b","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) (b,","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (a) (,)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"avg by (a) (,b)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum by (x) (y) by (z)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(m) by (1)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(m) keep_metric_names","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(m) by(*)","error":"syntax"}
+{"section":"invalid aggrFuncExpr","input":"sum(m) without(*)","error":"syntax"}
+{"section":"invalid withExpr","input":"with $","error":"syntax"}
+{"section":"invalid withExpr","input":"with a","error":"syntax"}
+{"section":"invalid withExpr","input":"with a=b c","error":"syntax"}
+{"section":"invalid withExpr","input":"with (","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=b)$","error":"syntax"}
+{"section":"invalid withExpr","input":"with ($","error":"syntax"}
+{"section":"invalid withExpr","input":"with (foo","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (foo $","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x y","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x =","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x = $","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x= y","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x= y $","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x= y)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=(","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=[)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=() x)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with(x)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with ($$)","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x $$","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x = $$)","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x = foo) bar{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x = {foo=\"bar\"}[5m]) bar{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x = {foo=\"bar\"} offset 5m) bar{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x = a, x = b) c","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x(a, a) = b) c","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m{f=\"x\"}) foo{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f()","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (a=b c=d) e","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x)=x^2) m{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x)=ff()) m{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m) a{x} + b","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m) b + a{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m) f(b, a{x})","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m) sum(a{x})","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x=m) (a{x})","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(a)=a) f(1, 2)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x)=x{foo=\"bar\"}) f(1)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x)=x{foo=\"bar\"}) f(m + n)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f = with","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (,)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (1) 2","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(1)=2) 3","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(,)=x) x","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (x(a) = {b=\"c\"}) foo{x}","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = m{foo=xx}) f(\"qwe\")","error":"unsupported"}
+{"section":"invalid withExpr","input":"a + with(f(x)=x) f(1,2)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = sum(m) by (x)) f({foo=\"bar\"})","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = sum(m) by (x)) f((xx(), {foo=\"bar\"}))","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = m + on (x) n) f(xx())","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = m + on (a) group_right (x) n) f(xx())","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f(x) = m keep_metric_names)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (now)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (sum)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (now=now()) now(1)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (f())","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (sum(a,b)=a+b) sum(x)","error":"unsupported"}
+{"section":"invalid withExpr","input":"with (rate()=foobar) rate(x)","error":"unsupported"}
+{"section":"invalid withExpr","input":"{foo}","error":"syntax"}
+{"section":"invalid withExpr","input":"with (x={y}) x","error":"unsupported"}
+{"section":"with template with {lf1 or lf2} isn't supported","input":"with (f(x) = m{x}) f({a=\"b\" or c=\"d\"})","error":"unsupported"}
+{"section":"with template with {lf1 or lf2} isn't supported","input":"with (f(x) = m{x or y=\"z\"}) f({a=\"b\" or c=\"d\"})","error":"unsupported"}
+{"section":"with template with {lf1 or lf2} isn't supported","input":"with (f(__name__) = {__name__}) f({a=\"b\" or c=\"d\"})","error":"unsupported"}
+{"section":"Invalid number of args at ct()","input":"with (ct={job=\"test\", i=\"bar\"}) ct + {ct, x=\"d\"} + foo{ct, ct} + ct(1)","error":"unsupported"}
+{"section":"unknown function ff()","input":"with (f(a,f,x)=ff(x,f,a)) f(f(x,y,z),1,2)","error":"unsupported"}
+{"section":"Unknown function f()","input":"with (x=\"a\", y=\"b\"+x) \"we\"+y+\"z\"+f()","error":"unsupported"}
+{"section":"Unknown function f()","input":"with (x=foo) f(a, with (y=x) y)","error":"unsupported"}
+{"section":"Unknown function f()","input":"with (ct={job=\"test\"}) a{ct} + ct() + f({ct=\"x\"})","error":"unsupported"}
+{"section":"invalid withExpr with 'or' filter","input":"with (x={a=\"b\" or c=\"d\"}) {x}","error":"unsupported"}
+{"section":"invalid withExpr with 'or' filter","input":"with (x={a=\"b\" or c=\"d\"}) x{d=\"e\" or z=\"c\"}","error":"unsupported"}
+{"section":"invalid withExpr with 'or' filter","input":"with (x={a=\"b\" or c=\"d\"}) {x,d=\"e\"}","error":"unsupported"}
+{"section":"invalid withExpr with 'or' filter","input":"with (x={a=\"b\" or c=\"d\"}) {x,d=\"e\" or z=\"c\"}","error":"unsupported"}
+{"section":"invalid fill modifier","input":"m + fill on(job) n","error":"syntax"}
+{"section":"invalid fill modifier","input":"m == fill(0) bool n","error":"syntax"}
+{"section":"invalid fill modifier","input":"m + fill(0) on(job)  n","error":"syntax"}
+{"section":"invalid fill modifier","input":"m + on(job) fill(0) group_left() n","error":"syntax"}
+{"section":"invalid fill modifier","input":"m and fill(0) n","error":"syntax"}
+{"section":"invalid fill modifier","input":"m + bool group_left m2 fill(0)","error":"syntax"}
