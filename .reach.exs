@@ -7,7 +7,8 @@
     storage_service: "Smolquery.StorageService.*",
     query_service: "Smolquery.QueryService.*",
     pg: "SmolqueryPg.*",
-    clickhouse: "SmolqueryClickHouse.*"
+    clickhouse: "SmolqueryClickHouse.*",
+    victoriametrics: "SmolqueryVictoriaMetrics.*"
   ],
   deps: [
     forbidden: [
@@ -30,7 +31,11 @@
       {:buffer_service, :clickhouse},
       {:storage_service, :clickhouse},
       {:query_service, :clickhouse},
-      {:ingest_service, :clickhouse}
+      {:ingest_service, :clickhouse},
+      {:buffer_service, :victoriametrics},
+      {:storage_service, :victoriametrics},
+      {:query_service, :victoriametrics},
+      {:ingest_service, :victoriametrics}
     ]
   ],
   calls: [

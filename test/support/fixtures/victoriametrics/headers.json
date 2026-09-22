@@ -1,0 +1,24 @@
+{
+  "write_zstd.bin": {
+    "method": "POST",
+    "path": "/api/v1/write",
+    "headers": {
+      "Content-Type": "application/x-protobuf",
+      "Content-Encoding": "zstd",
+      "X-VictoriaMetrics-Remote-Write-Version": "1",
+      "User-Agent": "vmagent",
+      "Content-Length": "12044"
+    }
+  },
+  "write_snappy.bin": {
+    "method": "POST",
+    "path": "/api/v1/write",
+    "headers": {
+      "Content-Type": "application/x-protobuf",
+      "Content-Encoding": "snappy",
+      "X-Prometheus-Remote-Write-Version": "0.1.0",
+      "User-Agent": "vmagent",
+      "Content-Length": "17738"
+    }
+  }
+}

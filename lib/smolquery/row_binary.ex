@@ -70,6 +70,7 @@ defmodule Smolquery.RowBinary do
 
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Varint
 
   @type format :: :row_binary | :with_names | :with_names_and_types
 
@@ -444,18 +445,13 @@ defmodule Smolquery.RowBinary do
 
   defp hex(bytes), do: Base.encode16(bytes, case: :lower)
 
-  defp varint(body), do: varint(body, 0, 0)
-
-  defp varint(<<0::1, byte::7, rest::binary>>, shift, acc),
-    do: {:ok, acc ||| byte <<< shift, rest}
-
-  defp varint(<<1::1, byte::7, rest::binary>>, shift, acc) when shift < 63,
-    do: varint(rest, shift + 7, acc ||| byte <<< shift)
-
-  defp varint(<<_byte, _rest::binary>>, _shift, _acc),
-    do: {:malformed, "a length runs past 10 bytes"}
-
-  defp varint(<<>>, _shift, _acc), do: truncated()
+  defp varint(body) do
+    case Varint.decode(body) do
+      {:ok, _value, _rest} = varint -> varint
+      {:error, :too_long} -> {:malformed, "a length runs past 10 bytes"}
+      {:error, :truncated} -> truncated()
+    end
+  end
 
   defp string(body) do
     with {:ok, size, rest} <- varint(body) do
