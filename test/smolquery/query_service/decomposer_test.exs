@@ -333,6 +333,46 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert decomposition.value_lists
     end
 
+    test "a list over no rows is NULL on one engine and on many (review of T-539)", %{
+      tmp_dir: tmp_dir
+    } do
+      for macro <-
+            ClickHouseFunctions.statements_for(
+              "groupArray(x) groupUniqArray(x) groupUniqArrayArray(x)"
+            ),
+          do: Engine.query!(@engine, macro)
+
+      round_trip(
+        "SELECT groupArray(name) AS every, groupUniqArray(name) AS each, " <>
+          "list(DISTINCT tag) AS tags, groupUniqArrayArray([name, tag]) AS both, " <>
+          "groupArray(name, 3) AS few, count(DISTINCT name) AS names " <>
+          "FROM analytics.events WHERE id < 0",
+        tmp_dir
+      )
+    end
+
+    test "a shard ships n of a sliced list and the distinct elements of a flattened one, not every row (review of T-539)",
+         %{tmp_dir: tmp_dir} do
+      for macro <- ClickHouseFunctions.statements_for("groupArray(x) groupUniqArrayArray(x)"),
+          do: Engine.query!(@engine, macro)
+
+      sql =
+        "SELECT bucket, groupArray(name, 2) AS two, groupUniqArrayArray([name, tag]) AS both " <>
+          "FROM analytics.events GROUP BY bucket"
+
+      {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
+
+      assert decomposition.partial_sql =~ ~s|list_slice(list("name"), 1, 2)|
+      assert decomposition.partial_sql =~ "list_distinct(flatten(list("
+      refute decomposition.partial_sql =~ ":="
+
+      round_trip(
+        "SELECT bucket, groupArray(name, 2) AS two, groupUniqArrayArray([name, tag]) AS both " <>
+          "FROM analytics.events WHERE id < 3 GROUP BY bucket ORDER BY bucket",
+        tmp_dir
+      )
+    end
+
     test "any answers a value some shard holds, and ships no list (T-539)", %{tmp_dir: tmp_dir} do
       sql = "SELECT bucket, any_value(name) AS one FROM analytics.events GROUP BY bucket"
       {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
@@ -503,6 +543,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
              {:filtered_aggregate, "count"}},
             {"SELECT arg_max(name, id) FILTER (WHERE id > 5) FROM analytics.events",
              {:filtered_aggregate, "arg_max"}},
+            {"SELECT count(DISTINCT big + CAST(1 AS HUGEINT)) FROM analytics.events",
+             {:inexact_partial_column, "HUGEINT[]"}},
             {"SELECT groupArray(name, 1 + 1) FROM analytics.events",
              {:unsupported_aggregate_shape, "grouparray"}}
           ] do

@@ -28,9 +28,9 @@ defmodule Smolquery.QueryService.Decomposer do
   Refusal is the common case and costs nothing: the caller falls back to
   the single-engine path. Refused outright: multiple tables or any FROM
   that is not one base table, CTEs, `SELECT *`, DISTINCT ON, QUALIFY,
-  SAMPLE, grouping sets, window functions, subqueries anywhere, `count`
-  variants with DISTINCT, aggregates outside the five above and their
-  conditional forms,
+  SAMPLE, grouping sets, window functions, subqueries anywhere, a DISTINCT
+  aggregate other than `count` and `list`, an aggregate outside the five
+  above, their conditional forms and the ones that merge through a value,
   OFFSET, and ORDER BY on anything but an output column: its name, or an
   expression that is a select item's own (T-536), which is how HyperDX
   orders its histogram (`ORDER BY toStartOfInterval(...)`) and a top-k chart
@@ -69,11 +69,20 @@ defmodule Smolquery.QueryService.Decomposer do
   - `groupArray`, `list`: partial lists, flattened. `groupUniqArray`,
     `list(DISTINCT x)`: the same, de-duplicated. `list(DISTINCT x)` keeps a
     NULL and `list_distinct` drops one, so the final puts it back when any
-    partial held one. `groupUniqArrayArray` is flattened once more. An `n`
-    slices the final list, as it sliced the single engine's.
+    partial held one. `groupUniqArrayArray` flattens and de-duplicates in
+    the partial, as its macro does, so a shard ships its distinct elements
+    and not every row's array. An `n` slices the partial and the final list
+    both: `n` of each shard's are enough for `n` of the union. A list over
+    no rows is NULL, not an empty list, so the final answers NULL when no
+    partial holds one.
   - `uniq`, `uniqExact`, `count(DISTINCT x)`: partial lists of distinct
     values, and the count of their distinct union. Exact, and not the sum of
     the shards' counts, which would count a value once per shard.
+
+  A value reaches the final step through parquet, which has no HUGEINT, no
+  UNION, no VARIANT and no ENUM: a HUGEINT list degrades to DOUBLE, an ENUM
+  key compares as text. A partial column of such a type refuses, as a
+  HUGEINT group key always has.
 
   Every one but `any` ships values, and as many as the data holds distinct.
   A decomposition that does says so (`value_lists`), and
@@ -594,20 +603,28 @@ defmodule Smolquery.QueryService.Decomposer do
   end
 
   defp exact(connection, partial_sql, params) do
-    with {:ok, columns} <- Connection.describe(connection, partial_sql, params, :infinity) do
-      cond do
-        Enum.any?(columns, fn {name, type} ->
-          type == "HUGEINT" and not String.starts_with?(name, "#{@prefix}a")
-        end) ->
-          {:error, :hugeint_group_key}
+    with {:ok, columns} <- Connection.describe(connection, partial_sql, params, :infinity),
+         :ok <- exact_columns(columns) do
+      if Enum.any?(columns, &match?({_name, "HUGEINT"}, &1)),
+        do: {:ok, "SELECT #{exact_select(columns)} FROM (#{partial_sql})"},
+        else: {:ok, partial_sql}
+    end
+  end
 
-        Enum.any?(columns, fn {_name, type} -> type == "HUGEINT" end) ->
-          {:ok, "SELECT #{exact_select(columns)} FROM (#{partial_sql})"}
+  defp exact_columns(columns) do
+    Enum.reduce_while(columns, :ok, fn {name, type}, :ok ->
+      cond do
+        type == "HUGEINT" and not String.starts_with?(name, "#{@prefix}a") ->
+          {:halt, {:error, :hugeint_group_key}}
+
+        String.starts_with?(name, "#{@prefix}a") and type != "HUGEINT" and
+            type =~ ~r/HUGEINT|UNION|VARIANT|ENUM/ ->
+          {:halt, {:error, {:inexact_partial_column, type}}}
 
         true ->
-          {:ok, partial_sql}
+          {:cont, :ok}
       end
-    end
+    end)
   end
 
   defp exact_select(columns) do
@@ -645,18 +662,48 @@ defmodule Smolquery.QueryService.Decomposer do
     ]
   end
 
-  defp partial_aggregates({:by_value, kind, %{"children" => [value | _limit]} = item}, position) do
-    [
+  defp partial_aggregates({:by_value, kind, %{"children" => [value | limit]} = item}, position) do
+    values =
       item
       |> called("list", [value])
       |> Map.put("distinct", kind in [:distinct_list, :count_distinct])
       |> Map.put("filter", if(kind == :count_distinct, do: not_null(value)))
-      |> Map.put("alias", "#{@prefix}a#{position}")
-    ]
+
+    [values |> distinct_flat(kind, item) |> sliced_to(limit, item) |> aliased(position)]
   end
 
-  defp called(item, name, children),
-    do: %{item | "function_name" => name, "children" => children, "distinct" => false}
+  defp distinct_flat(values, :flat_distinct_list, item),
+    do: called(item, "list_distinct", [called(item, "flatten", [values])])
+
+  defp distinct_flat(values, _kind, _item), do: values
+
+  defp sliced_to(values, [], _item), do: values
+  defp sliced_to(values, [n], item), do: called(item, "list_slice", [values, whole(1), n])
+
+  defp aliased(node, position), do: Map.put(node, "alias", "#{@prefix}a#{position}")
+
+  defp whole(value) do
+    %{
+      "class" => "CONSTANT",
+      "type" => "VALUE_CONSTANT",
+      "alias" => "",
+      "value" => %{
+        "type" => %{"id" => "INTEGER", "type_info" => nil},
+        "is_null" => false,
+        "value" => value
+      }
+    }
+  end
+
+  defp called(item, name, children) do
+    %{
+      item
+      | "function_name" => name,
+        "children" => children,
+        "distinct" => false,
+        "alias" => ""
+    }
+  end
 
   defp not_null(value) do
     %{
@@ -733,10 +780,13 @@ defmodule Smolquery.QueryService.Decomposer do
     do: "CAST(len(list_distinct(#{flat(position)})) AS #{type})"
 
   defp merged({:by_value, :list, item}, position, type),
-    do: "CAST(#{sliced(flat(position), item)} AS #{type})"
+    do: "CAST(#{position |> flat() |> sliced(item) |> unless_empty(position)} AS #{type})"
 
-  defp merged({:by_value, :flat_distinct_list, item}, position, type),
-    do: "CAST(#{sliced("list_distinct(flatten(#{flat(position)}))", item)} AS #{type})"
+  defp merged({:by_value, :flat_distinct_list, item}, position, type) do
+    distinct = "list_distinct(#{flat(position)})"
+
+    "CAST(#{distinct |> sliced(item) |> unless_empty(position)} AS #{type})"
+  end
 
   defp merged({:by_value, :distinct_list, item}, position, type) do
     part = quoted("#{@prefix}a#{position}")
@@ -745,8 +795,11 @@ defmodule Smolquery.QueryService.Decomposer do
       "list_concat(list_distinct(#{flat(position)}), " <>
         "CASE WHEN bool_or(len(#{part}) > list_count(#{part})) THEN [NULL] ELSE [] END)"
 
-    "CAST(#{sliced(distinct, item)} AS #{type})"
+    "CAST(#{distinct |> sliced(item) |> unless_empty(position)} AS #{type})"
   end
+
+  defp unless_empty(list, position),
+    do: "CASE WHEN count(#{quoted("#{@prefix}a#{position}")}) = 0 THEN NULL ELSE #{list} END"
 
   defp flat(position), do: "flatten(list(#{quoted("#{@prefix}a#{position}")}))"
 
