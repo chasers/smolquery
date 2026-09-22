@@ -6,6 +6,25 @@ defmodule Smolquery.QueryService.RuntimeTest do
   alias Smolquery.Test.StubCatalog
 
   describe "new/1" do
+    test "warm_probe is the lake's current snapshot when the catalog names a lake, SELECT 1 otherwise" do
+      lake =
+        Runtime.new(
+          name: __MODULE__.Lake,
+          catalog: [
+            metadata: "sqlite:/nowhere/catalog.sqlite",
+            data_path: "/nowhere/data",
+            catalog: "lake"
+          ]
+        )
+
+      assert lake.warm_probe == "SELECT id FROM ducklake_current_snapshot('lake')"
+
+      assert Runtime.new(name: __MODULE__.NoLake, catalog: StubCatalog.new(self())).warm_probe ==
+               "SELECT 1"
+
+      assert Runtime.new(name: __MODULE__.Named, warm_probe: "SELECT 2").warm_probe == "SELECT 2"
+    end
+
     test "opts override application config" do
       runtime = Runtime.new(name: __MODULE__.Overridden, max_concurrent_jobs: 3)
 

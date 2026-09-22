@@ -332,8 +332,7 @@ defmodule Smolquery.QueryService.Runtime do
     if Keyword.has_key?(merged, :metadata) and Keyword.has_key?(merged, :data_path) do
       lake = Keyword.get(merged, :catalog, Catalog.DuckLake.default_catalog())
 
-      "SELECT snapshot_id FROM ducklake_snapshots(#{Smolquery.Identifier.sql_string(lake)}) " <>
-        "ORDER BY snapshot_id DESC LIMIT 1"
+      "SELECT id FROM ducklake_current_snapshot(#{Smolquery.Identifier.sql_string(lake)})"
     else
       "SELECT 1"
     end

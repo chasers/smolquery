@@ -537,7 +537,7 @@ if count = System.get_env("SMOLQUERY_WARM_ENGINES") do
 end
 
 # `SMOLQUERY_WARM_PROBE` (T-548) is the statement that vouches for a warm
-# engine; unset, it is one DuckLake metadata read when the catalog names a
+# engine; unset, it is the lake's current snapshot when the catalog names a
 # lake and `SELECT 1` otherwise.
 if probe = System.get_env("SMOLQUERY_WARM_PROBE") do
   config :smolquery, Smolquery.QueryService, warm_probe: probe
