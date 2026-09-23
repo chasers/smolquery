@@ -56,6 +56,9 @@ defmodule SmolqueryVictoriaMetrics.Eval do
     * the samples are read once per selector, for
       `[start - offset - max(window, step) - lookback_ms, end - offset]`,
       which holds every window and the sample before the first one;
+    * a scalar argument (`count_gt_over_time(m[5m], time())`) is read at
+      each point of the grid, as VictoriaMetrics reads `tvs[rfa.idx]`;
+      under `@ t` the grid is one point, so the argument's first value;
     * a rollup drops `__name__` unless it is one that keeps it
       (`Rollup.keeps_metric_name?/1`) or the call says `keep_metric_names`;
       `absent_over_time` answers one series, labelled by the selector's `=`
@@ -93,6 +96,7 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   @subquery_max_points 100_000
   @silence_ms 300_000
+  @max_at_seconds 9.0e15
 
   @typedoc "What an expression evaluates to."
   @type result :: [Series.t()]
@@ -325,13 +329,11 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   defp rollup_scalars(exprs, context) do
     with {:ok, args, stats} <- eval_all(exprs, context),
-         {:ok, scalars} <- args |> Enum.with_index() |> Args.collect(&first_scalar/1),
+         {:ok, scalars} <- args |> Enum.with_index() |> Args.collect(&per_point_scalar/1),
          do: {:ok, scalars, stats}
   end
 
-  defp first_scalar({arg, index}) do
-    with {:ok, values} <- Args.scalar(arg, index), do: {:ok, List.first(values)}
-  end
+  defp per_point_scalar({arg, index}), do: Args.scalar(arg, index)
 
   defp rollup_arg(%RollupExpr{step: nil, inherit_step: false} = rollup), do: rollup
 
@@ -362,8 +364,16 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   defp at_time([series]) do
     case series |> Series.values() |> Enum.find(&(&1 != nil)) do
-      nil -> {:error, {:invalid_at, "`@` modifier must return a non-NaN value"}}
-      seconds -> {:ok, trunc(seconds * 1000)}
+      nil ->
+        {:error, {:invalid_at, "`@` modifier must return a non-NaN value"}}
+
+      seconds when abs(seconds) <= @max_at_seconds ->
+        {:ok, trunc(seconds * 1000)}
+
+      seconds ->
+        {:error,
+         {:invalid_at,
+          "`@` modifier must return a time a timestamp holds; got #{Value.format(seconds)}"}}
     end
   end
 

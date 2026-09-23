@@ -187,6 +187,26 @@ if victoriametrics_max_samples = System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_S
       )
 end
 
+if victoriametrics_max_per_query =
+     System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_samples_per_query:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY",
+        victoriametrics_max_per_query
+      )
+end
+
+if victoriametrics_max_duration =
+     System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_query_duration_ms:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS",
+        victoriametrics_max_duration
+      )
+end
+
 if victoriametrics_max_points =
      System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES") do
   config :smolquery, SmolqueryVictoriaMetrics,

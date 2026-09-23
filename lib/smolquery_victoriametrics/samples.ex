@@ -3,22 +3,50 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   The SQL that reads a MetricsQL selector's series and raw samples from the
   edge's table, through the query service (PL-70, T-564).
 
-  Rollups run in Elixir over raw samples (PL-70 D3), so a selector is read
-  twice, over the same time range and under the same predicate:
+  Rollups run in Elixir over raw samples (PL-70 D3), so a selector's series
+  and samples are read by one grouped query:
 
-      SELECT series, name, labels FROM metrics.samples
-      WHERE <predicate> GROUP BY series, name, labels LIMIT max_series + 1
+      SELECT series, any_value(name) AS name, any_value(labels) AS labels,
+             list(epoch_ms(ts) ORDER BY ts, value) AS timestamps,
+             list(value ORDER BY ts, value) AS samples,
+             CAST(sum(count(*)) OVER () AS BIGINT) AS total
+      FROM metrics.samples WHERE <predicate>
+      GROUP BY series LIMIT max_series + 1
 
-      SELECT series, epoch_ms(ts) AS ts, value FROM metrics.samples
-      WHERE <predicate> ORDER BY series, ts LIMIT max_samples + 1
+  One row per series, its samples already in time order (two samples at
+  one timestamp in value order, so the answer does not depend on the scan).
+  The job's result budget is raised to `max_series + 1` rows
+  (`result_max_rows:`), since the query service's default is sized for a
+  page of API results. One row past `max_series` refuses the query with
+  `{:too_many_series, max}`, and `total`, every matching sample counted
+  before the `LIMIT`, past `max_samples` with `{:too_many_samples, max}`;
+  both are read off the frame before a list is copied into the process.
+  The job is released as soon as its frame is taken
+  (`Smolquery.QueryService.Client.release/2`), so the query service does
+  not hold the frame for its result TTL.
 
-  The first names each series once; the second carries only the `series`
-  fingerprint beside each sample, and its rows arrive in series and time
-  order, so they are grouped in one pass and never sorted again here. One
-  row past a ceiling refuses the query with `{:too_many_series, max}` or
-  `{:too_many_samples, max}`. The samples query raises its job's result
-  budget to its own ceiling (`result_max_rows:`), since the query service's
-  default is sized for a page of API results.
+  One job, not two: the series query and the samples query this replaced
+  cost two jobs of fixed planning each, and the series query, an aggregate
+  over a hot tier of eight files or more, was scattered over the query
+  service's workers. `list(... ORDER BY ...)` is an ordered aggregate, which
+  the decomposer does not scatter. The `MAP` column is no longer a group
+  key either. One series among 1,000 over 50 / 200 hot micro-segments: 591
+  / 792 ms before, 181 / 301 ms after (T-576).
+
+  ## What it costs in memory
+
+  The lists cross into the process with `Explorer.Series.to_list/1` on
+  each list column, the cheapest of the paths measured on 2,000,000
+  samples: about 48 bytes a sample held (a list cell and a boxed float for
+  a value, a list cell for a timestamp) and about 51 at the peak, against
+  64 held and 163 at the peak for the flat frame's `to_columns` and
+  regrouping. At the default `max_samples` of 5,000,000 a selector holds
+  about 250 MB while its rollup runs, and a query past
+  `max_samples_per_query` (`SmolqueryVictoriaMetrics.Runtime`) is refused
+  before its selectors hold more than that between them.
+
+  `series_query/3` stays for `/api/v1/series`, which reads names and labels
+  only.
 
   ## The predicate, and why it prunes
 
@@ -75,6 +103,7 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   """
 
   alias Explorer.DataFrame
+  alias Explorer.Series, as: ExplorerSeries
   alias Smolquery.Engine.Frame
   alias Smolquery.Identifier
   alias Smolquery.QueryService.Client
@@ -127,7 +156,8 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   end
 
   @doc """
-  The series query for `expr` over `range`, and its parameters.
+  The series query for `expr` over `range`, and its parameters: each
+  matching series once, for `/api/v1/series`.
   """
   @spec series_query(Runtime.t(), MetricExpr.t(), {integer(), integer()}) ::
           {:ok, String.t(), [term()]} | {:error, reason()}
@@ -140,15 +170,21 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   end
 
   @doc """
-  The samples query for `expr` over `range`, and its parameters.
+  The grouped query for `expr` over `range`, and its parameters: one row
+  per matching series with its samples as two lists in time order, and the
+  samples of every matching series counted beside each row.
   """
-  @spec samples_query(Runtime.t(), MetricExpr.t(), {integer(), integer()}) ::
+  @spec select_query(Runtime.t(), MetricExpr.t(), {integer(), integer()}) ::
           {:ok, String.t(), [term()]} | {:error, reason()}
-  def samples_query(%Runtime{} = runtime, %MetricExpr{} = expr, {from_ms, to_ms}) do
+  def select_query(%Runtime{} = runtime, %MetricExpr{} = expr, {from_ms, to_ms}) do
     with {:ok, predicate, params} <- where(expr, from_ms, to_ms) do
       {:ok,
-       "SELECT series, epoch_ms(ts) AS ts, value FROM #{table(runtime)} " <>
-         "WHERE #{predicate} ORDER BY series, ts LIMIT #{runtime.max_samples + 1}", params}
+       "SELECT series, any_value(name) AS name, any_value(labels) AS labels, " <>
+         "list(epoch_ms(ts) ORDER BY ts, value) AS timestamps, " <>
+         "list(value ORDER BY ts, value) AS samples, " <>
+         "CAST(sum(count(*)) OVER () AS BIGINT) AS total " <>
+         "FROM #{table(runtime)} WHERE #{predicate} GROUP BY series " <>
+         "LIMIT #{runtime.max_series + 1}", params}
     end
   end
 
@@ -163,7 +199,7 @@ defmodule SmolqueryVictoriaMetrics.Samples do
     max = runtime.max_series
 
     with {:ok, sql, params} <- series_query(runtime, expr, range),
-         {:ok, frame} <- run(runtime, sql, params, opts) do
+         {:ok, frame} <- run(runtime, sql, params, Keyword.put(opts, :result_max_rows, max + 1)) do
       rows = frame_rows(frame)
 
       if length(rows) > max,
@@ -177,69 +213,57 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   end
 
   @doc """
-  The samples of every series `expr` matches in `[from_ms, to_ms]`, keyed by
-  their `series` fingerprint, each as its timestamps and values in time
-  order; `{:error, {:too_many_samples, max}}` past the runtime's
-  `max_samples`.
-  """
-  @spec fetch(Runtime.t(), MetricExpr.t(), {integer(), integer()}, keyword()) ::
-          {:ok, %{integer() => {[integer()], [float()]}}} | {:error, reason()}
-  def fetch(%Runtime{} = runtime, %MetricExpr{} = expr, range, opts \\ []) do
-    max = runtime.max_samples
+  The series `expr` matches in `[from_ms, to_ms]` with their samples, in
+  fingerprint order, from one grouped query (`select_query/3`).
 
-    with {:ok, sql, params} <- samples_query(runtime, expr, range),
-         {:ok, frame} <- run(runtime, sql, params, Keyword.put(opts, :result_max_rows, max + 1)) do
-      cond do
-        frame == nil -> {:ok, %{}}
-        DataFrame.n_rows(frame) > max -> {:error, {:too_many_samples, max}}
-        true -> {:ok, group(DataFrame.to_columns(frame))}
-      end
-    end
-  end
-
-  @doc """
-  The series `expr` matches in `[from_ms, to_ms]` with their samples:
-  `series/4` then `fetch/4`, joined on the fingerprint, in fingerprint
-  order. A series whose samples arrived between the two queries is left out.
+  `{:error, {:too_many_series, max}}` past the runtime's `max_series`, and
+  `{:error, {:too_many_samples, max}}` past `max_samples`: the runtime's,
+  or the `max_samples:` option when given, which a caller holding a budget
+  across several selectors lowers. Both are checked on the frame before a
+  sample is copied into the process. The other `opts` are
+  `Smolquery.QueryService.Client.query/3`'s.
   """
   @spec select(Runtime.t(), MetricExpr.t(), {integer(), integer()}, keyword()) ::
           {:ok, [series()]} | {:error, reason()}
   def select(%Runtime{} = runtime, %MetricExpr{} = expr, range, opts \\ []) do
-    with {:ok, infos} <- series(runtime, expr, range, opts),
-         {:ok, samples} <- fetch_known(runtime, expr, range, opts, infos) do
-      {:ok, joined(infos, samples)}
+    {max_samples, opts} = Keyword.pop(opts, :max_samples, runtime.max_samples)
+    max_series = runtime.max_series
+
+    with {:ok, sql, params} <- select_query(runtime, expr, range),
+         {:ok, frame} <-
+           run(runtime, sql, params, Keyword.put(opts, :result_max_rows, max_series + 1)) do
+      cond do
+        frame == nil -> {:ok, []}
+        DataFrame.n_rows(frame) > max_series -> {:error, {:too_many_series, max_series}}
+        total(frame) > max_samples -> {:error, {:too_many_samples, max_samples}}
+        true -> {:ok, grouped(frame)}
+      end
     end
   end
 
-  defp joined(infos, samples) do
-    for {id, {timestamps, values}} <- Enum.sort(samples),
-        %{name: name, labels: labels} <- List.wrap(Map.get(infos, id)) do
-      %{labels: Map.put(labels, "__name__", name), timestamps: timestamps, values: values}
+  defp total(frame) do
+    case DataFrame.n_rows(frame) do
+      0 -> 0
+      _rows -> ExplorerSeries.first(frame["total"])
     end
   end
 
-  defp fetch_known(_runtime, _expr, _range, _opts, infos) when map_size(infos) == 0,
-    do: {:ok, %{}}
+  defp grouped(frame) do
+    infos = frame |> DataFrame.select(["series", "name", "labels"]) |> Frame.to_rows()
+    timestamps = ExplorerSeries.to_list(frame["timestamps"])
+    values = ExplorerSeries.to_list(frame["samples"])
 
-  defp fetch_known(runtime, expr, range, opts, _infos), do: fetch(runtime, expr, range, opts)
-
-  defp group(%{"series" => ids, "ts" => timestamps, "value" => values}),
-    do: group(ids, timestamps, values, nil, [], [], %{})
-
-  defp group([], [], [], nil, _ts, _vs, acc), do: acc
-
-  defp group([], [], [], current, ts, vs, acc),
-    do: Map.put(acc, current, {Enum.reverse(ts), Enum.reverse(vs)})
-
-  defp group([id | ids], [t | timestamps], [v | values], id, ts, vs, acc),
-    do: group(ids, timestamps, values, id, [t | ts], [v | vs], acc)
-
-  defp group([id | ids], [t | timestamps], [v | values], nil, _ts, _vs, acc),
-    do: group(ids, timestamps, values, id, [t], [v], acc)
-
-  defp group([id | ids], [t | timestamps], [v | values], current, ts, vs, acc) do
-    acc = Map.put(acc, current, {Enum.reverse(ts), Enum.reverse(vs)})
-    group(ids, timestamps, values, id, [t], [v], acc)
+    [infos, timestamps, values]
+    |> Enum.zip_with(fn [info, ts, vs] ->
+      {info["series"],
+       %{
+         labels: Map.put(info["labels"] || %{}, "__name__", info["name"]),
+         timestamps: ts,
+         values: vs
+       }}
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
   end
 
   defp frame_rows(nil), do: []
@@ -248,32 +272,35 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   @doc """
   Runs `sql` with `params` through the runtime's query service: the result
   frame, `nil` when the table does not exist yet, or why the job failed.
-  `opts` are `Smolquery.QueryService.Client.query/3`'s.
+  `opts` are `Smolquery.QueryService.Client.query/3`'s. The job is released
+  once it has answered: the frame returned is the caller's alone.
   """
   @spec run(Runtime.t(), String.t(), [term()], keyword()) ::
           {:ok, DataFrame.t() | nil} | {:error, reason()}
   def run(%Runtime{} = runtime, sql, params, opts) do
-    case Client.query(runtime.query_name, sql, [params: params] ++ opts) do
-      {:ok, %Job{state: :done}, frame} ->
-        {:ok, frame}
-
-      {:ok, %Job{state: :cancelled, error: :timeout}, _frame} ->
-        {:error, :timeout}
-
-      {:ok, %Job{state: :cancelled}, _frame} ->
-        {:error, :cancelled}
-
-      {:ok, %Job{error: {missing, _name}}, _frame}
-      when missing in [:unknown_table, :unknown_dataset] ->
-        {:ok, nil}
-
-      {:ok, %Job{error: error}, _frame} ->
-        {:error, {:job, error}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    runtime.query_name
+    |> Client.query(sql, [params: params] ++ opts)
+    |> released(runtime.query_name)
+    |> outcome()
   end
+
+  defp released({:ok, %Job{id: id}, _frame} = result, name) do
+    :ok = Client.release(name, id)
+    result
+  end
+
+  defp released(result, _name), do: result
+
+  defp outcome({:ok, %Job{state: :done}, frame}), do: {:ok, frame}
+  defp outcome({:ok, %Job{state: :cancelled, error: :timeout}, _frame}), do: {:error, :timeout}
+  defp outcome({:ok, %Job{state: :cancelled}, _frame}), do: {:error, :cancelled}
+
+  defp outcome({:ok, %Job{error: {missing, _name}}, _frame})
+       when missing in [:unknown_table, :unknown_dataset],
+       do: {:ok, nil}
+
+  defp outcome({:ok, %Job{error: error}, _frame}), do: {:error, {:job, error}}
+  defp outcome({:error, reason}), do: {:error, reason}
 
   @doc """
   The edge's table as the SQL names it, each part quoted.

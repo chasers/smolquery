@@ -17,8 +17,10 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         table: "metrics.samples",
         lookback_ms: 300_000,
         max_series: 10_000,
-        max_samples: 20_000_000,
+        max_samples: 5_000_000,
+        max_samples_per_query: 10_000_000,
         max_points_per_series: 30_000,
+        max_query_duration_ms: 30_000,
         max_decoded_bytes: 33_554_432,
         max_query_bytes: 16_384
 
@@ -43,13 +45,24 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   (`SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS`, `300_000`): the lookback of
   MetricsQL's `default_rollup`, used as `max(step, lookback_ms)`.
 
-  `max_series`, `max_samples` and `max_points_per_series` are the ceilings on
-  one query (`SMOLQUERY_VICTORIAMETRICS_MAX_SERIES`, `_MAX_SAMPLES`,
-  `_MAX_POINTS_PER_SERIES`; `10_000`, `20_000_000`, `30_000`): the series one
-  selector may match, the raw samples one selector may read into the BEAM,
+  `max_series`, `max_samples`, `max_samples_per_query` and
+  `max_points_per_series` are the ceilings on one query
+  (`SMOLQUERY_VICTORIAMETRICS_MAX_SERIES`, `_MAX_SAMPLES`,
+  `_MAX_SAMPLES_PER_QUERY`, `_MAX_POINTS_PER_SERIES`; `10_000`,
+  `5_000_000`, `10_000_000`, `30_000`): the series one selector may match,
+  the raw samples one selector may read into the BEAM, the raw samples all
+  of a query's selectors may read between them (`a / b + c` reads three),
   and the points of one query's step grid, which is VictoriaMetrics'
   `-search.maxPointsPerTimeseries`. A query past any of them is refused
-  rather than run (`SmolqueryVictoriaMetrics.Query`).
+  rather than run (`SmolqueryVictoriaMetrics.Query`). A sample read costs
+  about 50 bytes in the process that evaluates the query
+  (`SmolqueryVictoriaMetrics.Samples`), so the defaults hold one query to
+  about 500 MB.
+
+  `max_query_duration_ms` is the longest a query may run
+  (`SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS`, `30_000`),
+  VictoriaMetrics' `-search.maxQueryDuration`: a request's `timeout` is held
+  to it, and one past it answers 503 `timeout`.
 
   `max_query_bytes` is the longest MetricsQL text a request may carry, in
   `query` or in each `match[]` (`SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES`,
@@ -97,8 +110,10 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     insert_max_in_flight_bytes: nil,
     lookback_ms: 300_000,
     max_series: 10_000,
-    max_samples: 20_000_000,
+    max_samples: 5_000_000,
+    max_samples_per_query: 10_000_000,
     max_points_per_series: 30_000,
+    max_query_duration_ms: 30_000,
     ip: {127, 0, 0, 1},
     port: 8428
   ]
@@ -118,7 +133,9 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           lookback_ms: pos_integer(),
           max_series: pos_integer(),
           max_samples: pos_integer(),
+          max_samples_per_query: pos_integer(),
           max_points_per_series: pos_integer(),
+          max_query_duration_ms: pos_integer(),
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -169,7 +186,9 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         :lookback_ms,
         :max_series,
         :max_samples,
+        :max_samples_per_query,
         :max_points_per_series,
+        :max_query_duration_ms,
         :max_decoded_bytes,
         :max_query_bytes,
         :ip,

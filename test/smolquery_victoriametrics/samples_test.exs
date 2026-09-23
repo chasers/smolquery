@@ -2,6 +2,8 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.QueryService.Client
+  alias Smolquery.QueryService.Runtime, as: QueryRuntime
+  alias Smolquery.Test.Eventually
   alias Smolquery.Test.VictoriaMetricsStack
   alias SmolqueryVictoriaMetrics.MetricsQL
   alias SmolqueryVictoriaMetrics.Samples
@@ -147,17 +149,16 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
              ]
     end
 
-    test "fetch/4 groups the samples by series, in time order", %{stack: stack} do
-      assert {:ok, samples} =
-               Samples.fetch(stack.runtime, selector(~s|up{job="b"}|), {@from, @from + @hour})
+    test "select/4 reads each series with its samples in time order", %{stack: stack} do
+      assert {:ok, [%{labels: labels, timestamps: timestamps, values: values}]} =
+               Samples.select(stack.runtime, selector(~s|up{job="b"}|), {@from, @from + @hour})
 
-      assert Map.values(samples) == [
-               {[@from + 60_000, @from + 75_000, @from + 90_000, @from + 105_000],
-                [0.0, 1.0, 2.0, 3.0]}
-             ]
+      assert labels == %{"__name__" => "up", "job" => "b"}
+      assert timestamps == [@from + 60_000, @from + 75_000, @from + 90_000, @from + 105_000]
+      assert values == [0.0, 1.0, 2.0, 3.0]
     end
 
-    test "select/4 joins them, __name__ among the labels", %{stack: stack} do
+    test "select/4 answers in fingerprint order, __name__ among the labels", %{stack: stack} do
       assert {:ok, [%{labels: labels, timestamps: timestamps, values: values}]} =
                Samples.select(
                  stack.runtime,
@@ -168,10 +169,25 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
       assert labels == %{"__name__" => "down", "job" => "a"}
       assert [_first, _second, _third, _fourth] = timestamps
       assert values == [0.0, 1.0, 2.0, 3.0]
+
+      {:ok, both} = Samples.select(stack.runtime, selector("up"), {@from, @from + @hour})
+      {:ok, infos} = Samples.series(stack.runtime, selector("up"), {@from, @from + @hour})
+
+      assert Enum.map(both, & &1.labels["job"]) ==
+               infos |> Enum.sort() |> Enum.map(fn {_id, info} -> info.labels["job"] end)
+    end
+
+    test "two samples at one timestamp arrive in value order", %{stack: stack} do
+      :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "tie"}, [{@from, 9.0}]}])
+      :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "tie"}, [{@from, 2.0}]}])
+      :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "tie"}, [{@from, 5.0}]}])
+
+      assert {:ok, [%{timestamps: [@from, @from, @from], values: [2.0, 5.0, 9.0]}]} =
+               Samples.select(stack.runtime, selector("tie"), {@from, @from + @hour})
     end
 
     test "a query for one metric over one hour opens only that metric's hour", %{stack: stack} do
-      for build <- [&Samples.series_query/3, &Samples.samples_query/3] do
+      for build <- [&Samples.series_query/3, &Samples.select_query/3] do
         {:ok, sql, params} =
           build.(stack.runtime, selector(~s|up{job="a"}|), {@from, @from + @hour})
 
@@ -182,6 +198,32 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
         assert job.statistics.hot.files_total == 4
         assert job.statistics.hot.files_scanned == 2
       end
+    end
+
+    test "the grouped query is one job that is not scattered", context do
+      stack = VictoriaMetricsStack.start(context)
+
+      for block <- 0..9 do
+        :ok =
+          VictoriaMetricsStack.write(stack, [
+            {%{"__name__" => "up", "job" => "a"}, [{@from + block * 1_000, block * 1.0}]}
+          ])
+      end
+
+      {:ok, sql, params} = Samples.select_query(stack.runtime, selector("up"), {@from, @to})
+
+      assert {:ok, %{state: :done} = job, _frame} =
+               Client.query(stack.query, sql, params: params, distributed: true)
+
+      assert job.statistics.hot.files_scanned == 10
+      assert job.scatter == nil
+
+      {:ok, sql, params} = Samples.series_query(stack.runtime, selector("up"), {@from, @to})
+
+      assert {:ok, %{state: :done, scatter: %{shards: shards}}, _frame} =
+               Client.query(stack.query, sql, params: params, distributed: true)
+
+      assert shards > 1
     end
 
     test "the ceilings refuse one row past them", context do
@@ -200,19 +242,58 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
       assert Samples.series(stack.runtime, selector("up"), range) ==
                {:error, {:too_many_series, 1}}
 
+      assert Samples.select(stack.runtime, selector("up"), range) ==
+               {:error, {:too_many_series, 1}}
+
       assert {:ok, _one} = Samples.series(stack.runtime, selector(~s|up{job="a"}|), range)
 
-      assert Samples.fetch(stack.runtime, selector("up"), range) ==
-               {:error, {:too_many_samples, 7}}
+      assert {:ok, [%{values: seven}]} =
+               Samples.select(stack.runtime, selector(~s|up{job="b"}|), range)
 
-      assert {:ok, _seven} = Samples.fetch(stack.runtime, selector(~s|up{job="b"}|), range)
+      assert seven == List.duplicate(1.0, 7)
+
+      assert Samples.select(stack.runtime, selector(~s|up{job="b"}|), range, max_samples: 6) ==
+               {:error, {:too_many_samples, 6}}
+    end
+
+    test "max_series is the budget of its jobs, not the query service's page", context do
+      stack =
+        VictoriaMetricsStack.start(context, max_series: 3, query_opts: [result_max_rows: 1])
+
+      :ok =
+        VictoriaMetricsStack.write(
+          stack,
+          for(job <- ~w(a b c d), do: {%{"__name__" => "up", "job" => job}, [{@from, 1.0}]})
+        )
+
+      range = {@from, @from + @hour}
+
+      assert Samples.series(stack.runtime, selector("up"), range) ==
+               {:error, {:too_many_series, 3}}
+
+      assert {:ok, three} = Samples.series(stack.runtime, selector(~s|up{job!="d"}|), range)
+      assert map_size(three) == 3
+    end
+
+    test "a job is released once its frame is taken, not at its result TTL", context do
+      stack = VictoriaMetricsStack.start(context, query_opts: [result_ttl_ms: 600_000])
+      registry = QueryRuntime.registry(stack.query)
+
+      :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "up"}, [{@from, 1.0}]}])
+      {:ok, sql, params} = Samples.select_query(stack.runtime, selector("up"), {@from, @to})
+
+      assert {:ok, frame} = Samples.run(stack.runtime, sql, params, [])
+      assert Explorer.DataFrame.n_rows(frame) == 1
+      assert Eventually.until(fn -> Registry.count(registry) == 0 end)
+
+      {:ok, _job, _frame} = Client.query(stack.query, sql, params: params)
+      assert Registry.count(registry) == 1
     end
 
     test "a table that does not exist yet selects nothing", context do
       stack = VictoriaMetricsStack.start(context, table: "empty.samples")
 
       assert Samples.select(stack.runtime, selector("up"), {@from, @to}) == {:ok, []}
-      assert Samples.fetch(stack.runtime, selector("up"), {@from, @to}) == {:ok, %{}}
     end
   end
 end

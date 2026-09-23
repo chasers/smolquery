@@ -8,6 +8,8 @@ defmodule Smolquery.QueryService.ClientTest do
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
 
+  doctest Client, only: [server_failure_message?: 1]
+
   @slow "SELECT max(a.range * b.range) FROM range(100000) a, range(100000) b"
 
   defp start_service(opts \\ []) do
@@ -221,6 +223,64 @@ defmodule Smolquery.QueryService.ClientTest do
 
       assert Client.cancel(name, job.id) == :ok
       assert Client.cancel(name, "01UNKNOWN") == :ok
+    end
+  end
+
+  describe "release/2" do
+    test "drops a finished job's frame now, not at its result TTL" do
+      name = start_service(result_ttl_ms: 600_000)
+
+      {:ok, job, frame} = Client.query(name, "SELECT 42 AS answer")
+      assert {:ok, %{state: :done}, ^frame} = Client.fetch(name, job.id)
+
+      assert Client.release(name, job.id) == :ok
+      assert Client.fetch(name, job.id) == {:error, :not_found}
+      assert DataFrame.to_columns(frame) == %{"answer" => [42]}
+    end
+
+    test "cancels a running job, and releasing an unknown one is ok" do
+      name = start_service(max_concurrent_jobs: 1)
+
+      {:ok, job} = Client.submit(name, @slow)
+
+      assert Client.release(name, job.id) == :ok
+      assert Client.fetch(name, job.id) == {:error, :not_found}
+      assert {:ok, _job} = Client.submit(name, "SELECT 1")
+      assert Client.release(name, "01UNKNOWN") == :ok
+    end
+  end
+
+  describe "service_failure?/1" do
+    test "an engine, a worker or the hot tier failing is the service's" do
+      for error <- [
+            {:engine_failed, :eaddrinuse},
+            {:engine_exit, :killed},
+            {:query_crashed, :boom},
+            {:worker_unreachable, :nodedown},
+            {:statement_failed, "ATTACH ...", :locked},
+            {:statement_failed, :locked},
+            {:hot_tier_unavailable, :econnrefused},
+            {:hot_tier_unavailable, {"m", "t"}, :econnrefused},
+            {:pinned_hot_retired, {"m", "t"}, ["a"]},
+            {:pinned_hot_expired, 10, 5},
+            {:invalid_query, "IO Error: Could not read file"},
+            %Adbc.Error{message: "Out of Memory Error: failed to allocate block"},
+            %Adbc.Error{message: "INTERNAL Error: Attempted to access index 3"}
+          ] do
+        assert Client.service_failure?(error), inspect(error)
+      end
+    end
+
+    test "a statement the engine refused is the statement's" do
+      for error <- [
+            {:invalid_query, "Parser Error: syntax error at or near \"(\""},
+            {:invalid_query, "Binder Error: column x not found"},
+            %Adbc.Error{message: "Invalid Input Error: invalid perl operator: (?="},
+            {:result_too_large, 10},
+            :cancelled
+          ] do
+        refute Client.service_failure?(error), inspect(error)
+      end
     end
   end
 

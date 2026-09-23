@@ -146,6 +146,14 @@ defmodule Smolquery.QueryService.Runner do
   @spec cancel(GenServer.server()) :: :ok
   def cancel(server), do: GenServer.call(server, :cancel)
 
+  @doc """
+  Ends the job now: a finished job's result is dropped and the runner stops,
+  as its result TTL would stop it later; a running job is cancelled first.
+  A DDL job still running is left to settle, as `cancel/1` leaves it.
+  """
+  @spec release(GenServer.server()) :: :ok
+  def release(server), do: GenServer.call(server, :release)
+
   @impl GenServer
   def init({runtime, job, opts}) do
     Process.flag(:trap_exit, true)
@@ -269,6 +277,20 @@ defmodule Smolquery.QueryService.Runner do
       {:reply, :ok, state}
     else
       {:reply, :ok, state |> halt() |> settle(Job.cancelled(state.job, :cancelled))}
+    end
+  end
+
+  def handle_call(:release, _from, state) do
+    cond do
+      Job.terminal?(state.job) ->
+        {:stop, :normal, :ok, %{state | result: nil}}
+
+      state.ddl ->
+        {:reply, :ok, state}
+
+      true ->
+        state = state |> halt() |> settle(Job.cancelled(state.job, :cancelled))
+        {:stop, :normal, :ok, state}
     end
   end
 

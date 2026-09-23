@@ -632,4 +632,50 @@ defmodule SmolqueryVictoriaMetrics.RollupTest do
 
     assert points == [{2, @inf}]
   end
+
+  describe "±Inf is sticky, as a float64 infinity is in VictoriaMetrics" do
+    @one %{start_ms: 2, end_ms: 2, step_ms: 1, window_ms: 5}
+
+    test "avg, sum, sum2, range and rate over an infinity" do
+      assert rows("avg_over_time", [@inf, 5], [1, 2], @one) == [{2, @inf}]
+      assert rows("avg_over_time", [-@inf, 5], [1, 2], @one) == [{2, -@inf}]
+      assert rows("sum_over_time", [@inf, -@inf], [1, 2], @one) == [{2, nil}]
+      assert rows("sum2_over_time", [@inf, 1], [1, 2], @one) == [{2, @inf}]
+      assert rows("range_over_time", [-@inf, @inf], [1, 2], @one) == [{2, @inf}]
+      assert rows("delta", [@inf, @inf], [1, 2], @one) == [{2, nil}]
+      assert rows("idelta", [5, @inf], [1, 2], @one) == [{2, @inf}]
+    end
+
+    test "quantile interpolates an infinity as one" do
+      assert Rollup.quantile(0.5, [@inf, 5.0]) == @inf
+      assert Rollup.quantile(0.5, [-@inf, @inf]) == nil
+    end
+
+    test "stdvar, stddev and deriv over an infinity are NaN" do
+      assert rows("stdvar_over_time", [@inf, 5], [1, 2], @one) == [{2, nil}]
+      assert rows("stddev_over_time", [@inf, 5], [1, 2], @one) == [{2, nil}]
+      assert rows("deriv", [@inf, 5], [1, 2], @one) == [{2, nil}]
+      assert rows("stdvar_over_time", [1, 3], [1, 2], @one) == [{2, 1.0}]
+    end
+
+    test "geomean over an infinity is the infinity" do
+      assert rows("geomean_over_time", [@inf, 4], [1, 2], @one) == [{2, @inf}]
+    end
+  end
+
+  describe "scalar arguments are read at each point" do
+    test "a list of one value per point is read at that point's index" do
+      samples = %{timestamps: [0, 10, 20, 30], values: [1.0, 5.0, 9.0, 13.0]}
+      config = %{start_ms: 10, end_ms: 30, step_ms: 10, window_ms: 30, may_adjust_window: false}
+
+      assert Rollup.apply("count_gt_over_time", [[0.0, 6.0, 12.0]], samples, config) ==
+               {:ok, [{10, 2.0}, {20, 1.0}, {30, 1.0}]}
+
+      assert Rollup.apply("count_gt_over_time", [4.0], samples, config) ==
+               {:ok, [{10, 1.0}, {20, 2.0}, {30, 3.0}]}
+
+      assert Rollup.apply("quantile_over_time", [[0.0, 1.0, nil]], samples, config) ==
+               {:ok, [{10, 1.0}, {20, 9.0}, {30, nil}]}
+    end
+  end
 end

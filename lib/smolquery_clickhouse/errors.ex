@@ -11,6 +11,8 @@ defmodule SmolqueryClickHouse.Errors do
 
   import Plug.Conn
 
+  alias Smolquery.QueryService.Client
+
   @typedoc """
   HTTP status, ClickHouse error code, the code's name, the message, and the
   `retry-after` seconds or `nil`.
@@ -56,10 +58,7 @@ defmodule SmolqueryClickHouse.Errors do
       String.contains?(message, "Binder Error") and String.contains?(message, "column") ->
         {400, 47, "UNKNOWN_IDENTIFIER", message, nil}
 
-      Regex.match?(
-        ~r/\A(IO|HTTP|Connection|Internal|Out of Memory) Error|INTERNAL Error/i,
-        message
-      ) ->
+      Client.server_failure_message?(message) ->
         {500, 1002, "UNKNOWN_EXCEPTION", message, nil}
 
       true ->

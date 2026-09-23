@@ -42,10 +42,23 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
 
   Where VictoriaMetrics answers NaN, a value here is `nil`. Samples never
   hold NaN (the write path drops it), so no function needs to skip one.
-  `±Inf` is stored as `±1.7976931348623157e308` (PL-70 D6), and a result is
-  held to that bound too: a division by zero, a quantile past `1` and a sum
-  past the largest double answer it, which the response writes as `+Inf` or
-  `-Inf`. Any other intermediate that overflows a double answers `nil`.
+  `±Inf` is stored as `±1.7976931348623157e308` (PL-70 D6), and the
+  arithmetic here is `SmolqueryVictoriaMetrics.Eval.Value`'s, which reads a
+  value at that bound as the infinity: `avg_over_time` of `+Inf` and `5` is
+  `+Inf`, `sum_over_time` of `+Inf` and `-Inf` is `nil`, as NaN is in
+  VictoriaMetrics, and a division by zero, a quantile past `1` and a sum
+  past the largest double answer the infinity, which the response writes
+  as `+Inf` or `-Inf`. `stdvar_over_time`, `stddev_over_time` and `deriv`
+  over a window holding an infinity are `nil`, as their NaN is in Go. Any
+  other intermediate that overflows a double answers `nil`.
+
+  ## Scalar arguments
+
+  A function's scalar arguments (`count_gt_over_time(m, 10)`'s `10`,
+  `quantile_over_time(0.9, m)`'s `0.9`) are read at each point of the grid,
+  as VictoriaMetrics reads `tvs[rfa.idx]`: `count_gt_over_time(m[5m],
+  time())` compares each window with its own time. An argument given as one
+  value is that value at every point.
 
   ## Cost
 
@@ -70,8 +83,7 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   """
 
   alias __MODULE__.Window
-
-  @inf 1.797_693_134_862_315_7e308
+  alias SmolqueryVictoriaMetrics.Eval.Value
 
   @functions ~w(
     absent_over_time avg_over_time changes count_eq_over_time count_gt_over_time
@@ -192,9 +204,10 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   @doc """
   Computes the rollup `name` over `samples` at every point of the grid in
   `config`, with `args` the call's scalar arguments in order (`[0.9]` for
-  `quantile_over_time(0.9, m)`, `[10.0]` for `count_gt_over_time(m, 10)`).
+  `quantile_over_time(0.9, m)`, `[10.0]` for `count_gt_over_time(m, 10)`),
+  each one value, or a list of one value per point of the grid.
   """
-  @spec apply(String.t(), [value()], samples(), config()) ::
+  @spec apply(String.t(), [value() | [value()]], samples(), config()) ::
           {:ok, [{integer(), value()}]} | {:error, reason()}
   def apply(name, args, %{timestamps: timestamps, values: values}, config) do
     name = String.downcase(name)
@@ -210,7 +223,9 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
         |> Map.put(:default_rollup, name == "default_rollup")
 
       values = prepare(name, values, timestamps, config)
-      {:ok, sweep(fun, grid, List.to_tuple(timestamps), List.to_tuple(values), config)}
+      args = Enum.map(args, &per_point/1)
+      series = {List.to_tuple(timestamps), List.to_tuple(values)}
+      {:ok, sweep({fun, args}, grid, series, config)}
     end
   end
 
@@ -220,7 +235,8 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   """
   @spec evaluate(String.t(), [value()], Window.t()) :: {:ok, value()} | {:error, reason()}
   def evaluate(name, args, %Window{} = window) do
-    with {:ok, fun} <- function(String.downcase(name), args), do: {:ok, call(fun, window)}
+    with {:ok, fun} <- function(String.downcase(name), args),
+         do: {:ok, call(fun, window, Enum.map(args, &at(per_point(&1), 0)))}
   end
 
   @doc """
@@ -236,7 +252,7 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   def remove_counter_resets(values, timestamps, staleness_ms) do
     resets(values, timestamps, staleness_ms, &Kernel.+/2)
   rescue
-    ArithmeticError -> resets(values, timestamps, staleness_ms, &add/2)
+    ArithmeticError -> resets(values, timestamps, staleness_ms, &Value.add/2)
   end
 
   defp resets([first | values], [first_ts | timestamps], staleness, plus),
@@ -278,7 +294,7 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
 
   defp prepare(_name, values, _timestamps, _config), do: values
 
-  defp sweep(fun, grid, timestamps, values, config) do
+  defp sweep({fun, args}, grid, {timestamps, values}, config) do
     count = tuple_size(timestamps)
     max_prev = max_prev_interval(timestamps, count, config)
     window = window(config, max_prev)
@@ -286,16 +302,26 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
     series = {timestamps, values, count}
 
     {points, _edges} =
-      Enum.map_reduce(grid, {0, 0}, fn t_end, {first, last} ->
+      Enum.map_reduce(grid, {0, 0, 0}, fn t_end, {first, last, index} ->
         t_start = t_end - window
         first = seek(timestamps, first, count, t_start)
         last = seek(timestamps, max(first, last), count, t_end)
         arg = window_at(series, {first, last}, {t_start, t_end}, window, limits)
-        {{t_end, call(fun, arg)}, {first, last}}
+        {{t_end, call(fun, arg, args_at(args, index))}, {first, last, index + 1}}
       end)
 
     points
   end
+
+  defp per_point(values) when is_list(values), do: List.to_tuple(values)
+  defp per_point(value), do: {:constant, value}
+
+  defp args_at([], _index), do: []
+  defp args_at(args, index), do: Enum.map(args, &at(&1, index))
+
+  defp at({:constant, value}, _index), do: value
+  defp at(values, index) when index < tuple_size(values), do: elem(values, index)
+  defp at(_values, _index), do: nil
 
   defp window_at({timestamps, values, count}, {first, last}, {t_start, t_end}, window, limits) do
     {prev_value, prev_timestamp} =
@@ -394,27 +420,33 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   def inflate(interval) when interval <= 32_000, do: interval + div(interval, 4)
   def inflate(interval), do: interval + div(interval, 8)
 
-  defp call(fun, %Window{} = window) do
-    fun.(window)
+  defp call(fun, %Window{} = window, args) do
+    fun.(window, args)
   rescue
     ArithmeticError -> nil
   end
 
   defp function(name, args) when is_map_key(@filters, name) do
+    op = Map.fetch!(@filters, name)
+
     case args do
-      [limit] -> {:ok, &count_filter(&1, Map.fetch!(@filters, name), limit)}
+      [_limit] -> {:ok, fn window, [limit] -> count_filter(window, op, limit) end}
       _other -> arity(name, 2, args)
     end
   end
 
   defp function("quantile_over_time", args) do
     case args do
-      [phi] -> {:ok, &quantile(phi, Window.values(&1))}
+      [_phi] -> {:ok, fn window, [phi] -> quantile(phi, Window.values(window)) end}
       _other -> arity("quantile_over_time", 2, args)
     end
   end
 
-  defp function(name, []) when name in @functions, do: {:ok, one_arg(name)}
+  defp function(name, []) when name in @functions do
+    one = one_arg(name)
+    {:ok, fn window, _args -> one.(window) end}
+  end
+
   defp function(name, args) when name in @functions, do: arity(name, 1, args)
 
   defp function(name, _args), do: {:error, {:unsupported, "rollup function #{name}()"}}
@@ -473,7 +505,9 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp absent(_window), do: nil
 
   defp avg(%Window{first: same, last: same}), do: nil
-  defp avg(window), do: sum(Window.values(window)) / (window.last - window.first)
+
+  defp avg(window),
+    do: Value.divide(Value.sum(Window.values(window)), :erlang.float(window.last - window.first))
 
   defp minimum(%Window{first: same, last: same}), do: nil
   defp minimum(window), do: Enum.min(Window.values(window))
@@ -482,29 +516,26 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp maximum(window), do: Enum.max(Window.values(window))
 
   defp range(%Window{first: same, last: same}), do: nil
-  defp range(window), do: sub(maximum(window), minimum(window))
+  defp range(window), do: Value.sub(maximum(window), minimum(window))
 
   defp sum_over_time(%Window{first: same, last: same}), do: nil
-  defp sum_over_time(window), do: sum(Window.values(window))
+  defp sum_over_time(window), do: Value.sum(Window.values(window))
 
   defp sum2(%Window{first: same, last: same}), do: nil
-  defp sum2(window), do: window |> Window.values() |> Enum.map(&mul(&1, &1)) |> sum()
+  defp sum2(window), do: window |> Window.values() |> Enum.map(&Value.mul(&1, &1)) |> Value.sum()
 
   defp rate_over_sum(%Window{first: same, last: same}), do: nil
 
   defp rate_over_sum(window),
-    do: divide(sum(Window.values(window)), window.window / 1000)
+    do: Value.divide(Value.sum(Window.values(window)), window.window / 1000)
 
   defp geomean(%Window{first: same, last: same}), do: nil
 
   defp geomean(window) do
     values = Window.values(window)
-    product = Enum.reduce(values, 1.0, &mul/2)
-    power(product, 1 / length(values))
+    product = Enum.reduce(values, 1.0, &Value.mul/2)
+    Value.pow(product, 1 / length(values))
   end
-
-  defp power(base, exponent) when base < 0 and exponent != trunc(exponent), do: nil
-  defp power(base, exponent), do: :math.pow(base, exponent)
 
   defp distinct(%Window{first: same, last: same}), do: nil
 
@@ -557,28 +588,11 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp compare(:gt, value, limit), do: value > limit
   defp compare(:le, value, limit), do: value <= limit
 
-  defp stddev(window) do
-    case stdvar(window) do
-      variance when is_float(variance) and variance >= 0 -> :math.sqrt(variance)
-      _nan -> nil
-    end
-  end
+  defp stddev(window), do: window |> stdvar() |> Value.sqrt()
 
   defp stdvar(%Window{first: same, last: same}), do: nil
   defp stdvar(%Window{first: first, last: last}) when last - first == 1, do: 0.0
-
-  defp stdvar(window) do
-    {_avg, count, q} =
-      window
-      |> Window.values()
-      |> Enum.reduce({0.0, 0, 0.0}, fn value, {avg, count, q} ->
-        count = count + 1
-        next = avg + (value - avg) / count
-        {next, count, q + (value - avg) * (value - next)}
-      end)
-
-    q / count
-  end
+  defp stdvar(window), do: Value.stdvar(Window.values(window))
 
   defp lag(%Window{first: same, last: same, prev_value: nil}), do: nil
 
@@ -627,7 +641,7 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp derive_fast(window), do: rate_between(window, window.prev_value, window.prev_timestamp)
 
   defp rate_between(window, value, timestamp) do
-    divide(sub(last(window), value), (last_timestamp(window) - timestamp) / 1000)
+    Value.divide(Value.sub(last(window), value), (last_timestamp(window) - timestamp) / 1000)
   end
 
   defp ideriv(%Window{first: same, last: same}), do: nil
@@ -638,8 +652,8 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
         nil
 
       prev ->
-        divide(
-          sub(elem(window.values, first), prev),
+        Value.divide(
+          Value.sub(elem(window.values, first), prev),
           (elem(window.timestamps, first) - window.prev_timestamp) / 1000
         )
     end
@@ -651,13 +665,13 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
 
     case earlier(window, window.last - 2, t_end) do
       {v_start, t_start} ->
-        divide(sub(v_end, v_start), (t_end - t_start) / 1000)
+        Value.divide(Value.sub(v_end, v_start), (t_end - t_start) / 1000)
 
       nil when window.prev_value == nil ->
         0.0
 
       nil ->
-        divide(sub(v_end, window.prev_value), (t_end - window.prev_timestamp) / 1000)
+        Value.divide(Value.sub(v_end, window.prev_value), (t_end - window.prev_timestamp) / 1000)
     end
   end
 
@@ -677,44 +691,52 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp idelta(%Window{first: first, last: last} = window) when last - first == 1 do
     case window.prev_value do
       nil -> last(window)
-      prev -> sub(last(window), prev)
+      prev -> Value.sub(last(window), prev)
     end
   end
 
-  defp idelta(window), do: sub(last(window), elem(window.values, window.last - 2))
+  defp idelta(window), do: Value.sub(last(window), elem(window.values, window.last - 2))
 
   defp delta(%Window{prev_value: nil, first: same, last: same}), do: nil
 
   defp delta(%Window{prev_value: nil, real_prev_value: real} = window) when real != nil,
-    do: sub(last(window), real)
+    do: Value.sub(last(window), real)
 
   defp delta(%Window{prev_value: nil} = window) do
     first = elem(window.values, window.first)
 
     change =
       cond do
-        window.last - window.first > 1 -> elem(window.values, window.first + 1) - first
-        window.real_next_value != nil -> window.real_next_value - first
+        window.last - window.first > 1 -> Value.sub(elem(window.values, window.first + 1), first)
+        window.real_next_value != nil -> Value.sub(window.real_next_value, first)
         true -> 0.0
       end
 
     cond do
-      abs(first) < 10 * (abs(change) + 1) -> last(window)
-      window.last - window.first == 1 -> 0.0
-      true -> sub(last(window), first)
+      Value.lt?(magnitude(first), Value.mul(10.0, Value.add(magnitude(change), 1.0))) ->
+        last(window)
+
+      window.last - window.first == 1 ->
+        0.0
+
+      true ->
+        Value.sub(last(window), first)
     end
   end
 
   defp delta(%Window{first: same, last: same}), do: 0.0
-  defp delta(window), do: sub(last(window), window.prev_value)
+  defp delta(window), do: Value.sub(last(window), window.prev_value)
+
+  defp magnitude(nil), do: nil
+  defp magnitude(value), do: abs(value)
 
   defp increase_pure(%Window{prev_value: nil, first: same, last: same}), do: nil
 
   defp increase_pure(%Window{prev_value: nil} = window),
-    do: sub(last(window), window.real_prev_value || 0.0)
+    do: Value.sub(last(window), window.real_prev_value || 0.0)
 
   defp increase_pure(%Window{first: same, last: same}), do: 0.0
-  defp increase_pure(window), do: sub(last(window), window.prev_value)
+  defp increase_pure(window), do: Value.sub(last(window), window.prev_value)
 
   defp changes(%Window{prev_value: nil, first: same, last: same}), do: nil
 
@@ -733,10 +755,13 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp count_changes([value | rest], previous, count) do
     cond do
       value == previous -> count_changes(rest, previous, count)
-      abs(value - previous) < 1.0e-12 * abs(value) -> count_changes(rest, previous, count)
+      negligible?(value, previous) -> count_changes(rest, previous, count)
       true -> count_changes(rest, value, count + 1)
     end
   end
+
+  defp negligible?(value, previous),
+    do: Value.lt?(magnitude(Value.sub(value, previous)), Value.mul(1.0e-12, abs(value)))
 
   defp resets(%Window{prev_value: nil, first: same, last: same}), do: nil
   defp resets(%Window{first: same, last: same}), do: 0.0
@@ -751,7 +776,7 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   defp count_resets([], _previous, count), do: :erlang.float(count)
 
   defp count_resets([value | rest], previous, count) do
-    reset? = value < previous and abs(value - previous) >= 1.0e-12 * abs(value)
+    reset? = value < previous and not negligible?(value, previous)
     count_resets(rest, value, if(reset?, do: count + 1, else: count))
   end
 
@@ -775,21 +800,31 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   def linear_regression([], _timestamps, _intercept_ms), do: {nil, nil}
 
   def linear_regression([first | _rest] = values, timestamps, intercept_ms) do
-    if Enum.all?(values, &(&1 == first)) do
-      {first, 0.0}
-    else
-      {v_sum, t_sum, tv_sum, tt_sum, n} =
-        values
-        |> Enum.zip(timestamps)
-        |> Enum.reduce({0.0, 0.0, 0.0, 0.0, 0}, fn {v, t}, {vs, ts, tvs, tts, n} ->
-          dt = (t - intercept_ms) / 1000
-          {vs + v, ts + dt, tvs + dt * v, tts + dt * dt, n + 1}
-        end)
-
-      t_diff = tt_sum - t_sum * t_sum / n
-      slope = if abs(t_diff) >= 1.0e-6, do: (tv_sum - t_sum * v_sum / n) / t_diff, else: 0.0
-      {v_sum / n - slope * t_sum / n, slope}
+    case shape(values, first) do
+      {true, _infinite} -> {first, 0.0}
+      {false, true} -> {nil, nil}
+      {false, false} -> fit(values, timestamps, intercept_ms)
     end
+  end
+
+  defp shape(values, first) do
+    Enum.reduce(values, {true, false}, fn v, {constant, infinite} ->
+      {constant and v == first, infinite or Value.inf?(v)}
+    end)
+  end
+
+  defp fit(values, timestamps, intercept_ms) do
+    {v_sum, t_sum, tv_sum, tt_sum, n} =
+      values
+      |> Enum.zip(timestamps)
+      |> Enum.reduce({0.0, 0.0, 0.0, 0.0, 0}, fn {v, t}, {vs, ts, tvs, tts, n} ->
+        dt = (t - intercept_ms) / 1000
+        {vs + v, ts + dt, tvs + dt * v, tts + dt * dt, n + 1}
+      end)
+
+    t_diff = tt_sum - t_sum * t_sum / n
+    slope = if abs(t_diff) >= 1.0e-6, do: (tv_sum - t_sum * v_sum / n) / t_diff, else: 0.0
+    {v_sum / n - slope * t_sum / n, slope}
   end
 
   @doc """
@@ -798,57 +833,5 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   above `1` is `+Inf`, both held to the largest double.
   """
   @spec quantile(value(), [float()]) :: value()
-  def quantile(nil, _values), do: nil
-  def quantile(_phi, []), do: nil
-  def quantile(phi, _values) when phi < 0, do: -@inf
-  def quantile(phi, _values) when phi > 1, do: @inf
-
-  def quantile(phi, values) do
-    sorted = values |> Enum.sort() |> List.to_tuple()
-    n = tuple_size(sorted)
-    rank = phi * (n - 1)
-    floored = floor(rank)
-    lower = max(0, floored)
-    upper = min(n - 1, lower + 1)
-    weight = rank - floored
-    elem(sorted, lower) * (1 - weight) + elem(sorted, upper) * weight
-  end
-
-  defp sum(values) do
-    values |> Enum.sum() |> :erlang.float()
-  rescue
-    ArithmeticError -> Enum.reduce(values, 0.0, &add/2)
-  end
-
-  defp add(a, b) do
-    a + b
-  rescue
-    ArithmeticError -> if a > 0, do: @inf, else: -@inf
-  end
-
-  defp sub(a, b), do: add(a, -b)
-
-  defp mul(a, b) do
-    a * b
-  rescue
-    ArithmeticError -> if a > 0 == b > 0, do: @inf, else: -@inf
-  end
-
-  defp divide(numerator, denominator) do
-    if denominator == 0, do: by_zero(numerator), else: quotient(numerator, denominator)
-  end
-
-  defp by_zero(numerator) do
-    cond do
-      numerator > 0 -> @inf
-      numerator < 0 -> -@inf
-      true -> nil
-    end
-  end
-
-  defp quotient(numerator, denominator) do
-    numerator / denominator
-  rescue
-    ArithmeticError -> if numerator > 0 == denominator > 0, do: @inf, else: -@inf
-  end
+  def quantile(phi, values), do: Value.quantile_sorted(phi, Enum.sort(values))
 end

@@ -64,14 +64,14 @@ defmodule SmolqueryVictoriaMetrics.MetadataTest do
     end
   end
 
-  describe "request/3" do
+  describe "request/4" do
     test "defaults, and match[] repeated with match singular" do
       pairs = [{"match[]", "up"}, {"match", "load"}, {"match[]", "node"}]
 
-      assert {:ok, request} = Metadata.request(:labels, pairs, @t0_ms)
+      assert {:ok, request} = Metadata.request(:labels, pairs, @t0_ms, 30_000)
       assert request.range == {@t0_ms - 300_000, @t0_ms}
       assert request.limit == 0
-      assert request.opts == []
+      assert request.opts == [timeout_ms: 30_000]
       assert [["up"], ["node"], ["load"]] = names(request.selector)
     end
 
@@ -79,20 +79,27 @@ defmodule SmolqueryVictoriaMetrics.MetadataTest do
       pairs = [{"limit", "5"}, {"timeout", "2s"}, {"limit", "9"}]
 
       assert {:ok, %{limit: 5, opts: [timeout_ms: 2_000], selector: nil}} =
-               Metadata.request(:labels, pairs, @t0_ms)
+               Metadata.request(:labels, pairs, @t0_ms, 30_000)
+    end
+
+    test "a timeout past the ceiling is the ceiling" do
+      for timeout <- ["1000h", "100y"] do
+        assert {:ok, %{opts: [timeout_ms: 30_000]}} =
+                 Metadata.request(:labels, [{"timeout", timeout}], @t0_ms, 30_000)
+      end
     end
 
     test "an unreadable limit or timeout is bad data" do
       assert {:error, {:bad_data, ~s(cannot parse integer "limit"="ten")}} =
-               Metadata.request(:labels, [{"limit", "ten"}], @t0_ms)
+               Metadata.request(:labels, [{"limit", "ten"}], @t0_ms, 30_000)
 
       assert {:error, {:bad_data, _message}} =
-               Metadata.request(:labels, [{"timeout", "-1"}], @t0_ms)
+               Metadata.request(:labels, [{"timeout", "-1"}], @t0_ms, 30_000)
     end
 
     test "series requires a match" do
       assert {:error, {:bad_data, "missing `match[]` arg"}} =
-               Metadata.request(:series, [], @t0_ms)
+               Metadata.request(:series, [], @t0_ms, 30_000)
     end
   end
 

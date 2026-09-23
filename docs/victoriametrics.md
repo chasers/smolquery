@@ -174,7 +174,7 @@ The routes, each on `GET` and on a form-encoded `POST`, as Grafana sends them:
 - **`/api/v1/query`.** `query` is required. `time` is now by default, and `step` is 5 minutes, the least a bare selector looks back.
 - **`/api/v1/query_range`.** `start` is 5 minutes ago by default, `end` now, `step` 5 minutes. An `end` before `start` is `start` plus 5 minutes. A grid of 50 points or more is aligned to the step, as VictoriaMetrics' `AdjustStartEnd` does, unless `nocache=1`.
 - **Query length.** `query`, and each `match[]`, is held to `SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES` (16,384), VictoriaMetrics' `-search.maxQueryLen`. A longer one, or one that is not UTF-8, is a 400 before it is parsed. Brackets nest at most 1,000 deep.
-- **Times and durations.** Unix seconds, integer or fractional, or RFC 3339. A duration is seconds or MetricsQL's (`15s`, `1h30m`). `timeout` bounds each query job.
+- **Times and durations.** Unix seconds, integer or fractional, or RFC 3339. A duration is seconds or MetricsQL's (`15s`, `1h30m`). `timeout` is one deadline for the whole request, held to `SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS` (30 s, VictoriaMetrics' `-search.maxQueryDuration`), which is also its default: every job gets what is left of it, and a request past it is cancelled and answers 503 `timeout`.
 - **`/api/v1/labels`, `/api/v1/label/<name>/values`, `/api/v1/series`.** `start` is 5 minutes before `end`, which is now, when missing or 0. `match[]` repeats, and `match` is read too; a series matching any is kept. `limit` is 0 when missing. The label routes cap it at 100,000 and use that cap when it is not positive. `/api/v1/series` needs `match[]` (400 without) and is held to `max_series`. Names beginning `U__` are unescaped as VictoriaMetrics does.
 - **Fixed answers**, byte for byte as VictoriaMetrics writes them: `/api/v1/status/buildinfo` (`{"version":"2.24.0"}`), `/api/v1/metadata` (`{}`), and empty `/api/v1/rules`, `/api/v1/alerts`, `/api/v1/notifiers` and `/api/v1/query_exemplars`.
 
@@ -202,7 +202,8 @@ ported from v1.152.0's `app/vmselect/promql`:
 | variable | default | what |
 |---|---|---|
 | `SMOLQUERY_VICTORIAMETRICS_MAX_SERIES` | `10000` | series one selector, or one `/api/v1/series`, may match |
-| `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES` | `20000000` | raw samples one selector may read into the node |
+| `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES` | `5000000` | raw samples one selector may read into the node, about 50 bytes each while the query runs |
+| `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY` | `10000000` | raw samples all of one query's selectors may read between them (`a / b + c` is three) |
 | `SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES` | `30000` | points in a `query_range` grid (`-search.maxPointsPerTimeseries`); Grafana asks for about 1,000 |
 
 Size them from `smolquery_victoriametrics_query_series_total` and
@@ -212,8 +213,7 @@ count in `smolquery_victoriametrics_request_microseconds_bucket{le="+Inf"}`.
 **Where it differs from VictoriaMetrics:**
 
 - **Scalars.** An instant query of a scalar expression answers `resultType` `scalar`. VictoriaMetrics answers a one-point vector; Grafana's connection test reads either.
-- **Errors.** A query that does not parse is a 422 here, a 400 in VictoriaMetrics. `errorType` is Prometheus' word (`bad_data`, `execution`, `timeout`, `unavailable`) where VictoriaMetrics writes the status code.
-- **Rollup parameters.** A rollup's scalar argument, the `0.9` of `quantile_over_time`, takes the value of its first point, not one per point.
+- **Errors.** A query that does not parse is a 422 here, a 400 in VictoriaMetrics. `errorType` is Prometheus' word (`bad_data`, `execution`, `timeout`, `unavailable`) where VictoriaMetrics writes the status code. A job that failed for the node's reasons, not the query's (an engine that died or ran out of memory, a disk or connection error, an unreachable worker or buffer node), is a 503 `unavailable` with `retry-after`, which Grafana and vmalert retry.
 - **Regular expressions.** Selectors match in DuckDB, which is RE2, as VictoriaMetrics is. The `label_*` functions match in the node, which is PCRE; the common syntax is the same.
 - **`default_rollup` in a subquery** keeps the `max(step, lookback)` window of a bare selector.
 - **Not read:** `WITH` templates; remote write 2.0; native histograms and exemplars (dropped and counted); staleness markers, so a series ends when the lookback passes it, not at the marker; the `extra_label` and `extra_filters[]` query arguments; `/api/v1/status/tsdb`, which would be a day-long scan here; `/api/v1/import` and `/api/v1/export`.
@@ -221,10 +221,10 @@ count in `smolquery_victoriametrics_request_microseconds_bucket{le="+Inf"}`.
 ## What it costs
 
 - **The label routes scan the range.** `/api/v1/labels`, the label values and `/api/v1/series` read every sample between `start` and `end` that the selectors allow. A selector with `name =` prunes to that metric; none prunes by time only. Keep Grafana's label browser to a short range. A series index is T-569.
-- **Tier 1 moves samples into the BEAM.** Each selector is two query jobs, its series and then its samples, and the rollups run in the node over what they read. That is why the ceilings above exist. Pushing the common rollups into SQL is T-568.
+- **Tier 1 moves samples into the BEAM.** Each selector is one query job, grouped by series with its samples as two lists, and the rollups run in the node over what they read, about 50 bytes a sample. That is why the ceilings above exist. Pushing the common rollups into SQL is T-568.
 - **Measured** by `bench/victoriametrics.exs` on the aarch64 dev box (8 cores), all in the hot tier ([results](../bench/results/victoriametrics.md)):
   - Remote write, 10,000-sample blocks from eight writers: about 345,000 samples a second into an empty table and 363,000 with 2.4 million samples already there; p50 about 210 ms, p99 under 530 ms.
   - 1,000 series, six hours at 15 s: `sum by (job) (rate(m[5m]))` over the six hours reads 1.44 million samples in 1.2 s and evaluates in 1.2 s. Over one hour it answers in 0.9 s.
-  - A fetch has a floor of about 0.7 s, one series or a thousand: `m{instance="host-1"}` over six hours answers in 0.8 s.
+  - A fetch's floor is one job's planning and the hot tier's files, not two jobs and a scatter (T-576): `m{instance="host-1"}` over six hours answers in 0.28 s (0.8 s before), and one series among 1,000 over 50 / 200 hot micro-segments reads in 181 / 301 ms, against 591 / 792 ms when a selector was a series query and a samples query.
   - A wide matrix costs more to send than to compute: `rate(m[5m])` over six hours for 1,000 series is 1.44 million points of JSON, 9 s past its 2.2 s of query.
   - `/api/v1/labels` over six hours: 0.27 s. `/api/v1/label/job/values`: 0.45 s.

@@ -30,6 +30,7 @@ defmodule SmolqueryVictoriaMetrics.Params do
   @max_duration_ms 100 * 365 * 24 * 3600 * 1000
   @max_time_ms div(9_223_372_036_854_775_807, 1_000_000)
   @max_body_bytes 1_048_576
+  @max_float_seconds 1.0e15
 
   @typedoc "A request's arguments in the order Go's `r.Form` holds them: the body's, then the URL's."
   @type pairs :: [{String.t(), String.t()}]
@@ -144,6 +145,7 @@ defmodule SmolqueryVictoriaMetrics.Params do
   defp parse_time(key, text) do
     case seconds(text) || rfc3339(text) do
       nil -> {:error, "cannot parse #{key}=#{text}: not Unix seconds or RFC 3339"}
+      :out_of_range -> {:error, "#{key}=#{text} is out of the range a timestamp holds"}
       ms -> {:ok, ms |> max(0) |> min(@max_time_ms)}
     end
   end
@@ -162,7 +164,8 @@ defmodule SmolqueryVictoriaMetrics.Params do
 
   defp float_seconds(text) do
     case Float.parse(text) do
-      {seconds, ""} -> trunc(seconds * 1000)
+      {seconds, ""} when abs(seconds) <= @max_float_seconds -> trunc(seconds * 1000)
+      {_seconds, ""} -> :out_of_range
       _other -> nil
     end
   end
@@ -172,6 +175,24 @@ defmodule SmolqueryVictoriaMetrics.Params do
       {:ok, datetime, _offset} -> DateTime.to_unix(datetime, :millisecond)
       {:error, _reason} -> nil
     end
+  end
+
+  @doc """
+  The request's `timeout` in milliseconds, held to `max_ms`, which is also
+  its default: VictoriaMetrics' `-search.maxQueryDuration` bounds whatever a
+  client asks for.
+
+      iex> SmolqueryVictoriaMetrics.Params.timeout(%{"timeout" => "100y"}, 30_000)
+      {:ok, 30_000}
+      iex> SmolqueryVictoriaMetrics.Params.timeout(%{"timeout" => "5s"}, 30_000)
+      {:ok, 5_000}
+      iex> SmolqueryVictoriaMetrics.Params.timeout(%{}, 30_000)
+      {:ok, 30_000}
+  """
+  @spec timeout(%{String.t() => String.t()}, pos_integer()) ::
+          {:ok, pos_integer()} | {:error, String.t()}
+  def timeout(params, max_ms) do
+    with {:ok, ms} <- duration(params, "timeout", max_ms), do: {:ok, min(ms, max_ms)}
   end
 
   @doc """
@@ -194,6 +215,9 @@ defmodule SmolqueryVictoriaMetrics.Params do
       {:ok, ms} ->
         {:error, "#{key}=#{ms}ms is out of allowed range [1ms ... #{@max_duration_ms}ms]"}
 
+      :out_of_range ->
+        {:error, "#{key}=#{text} is out of allowed range [1ms ... #{@max_duration_ms}ms]"}
+
       :error ->
         {:error, "cannot parse #{key}=#{inspect(text)}"}
     end
@@ -201,8 +225,11 @@ defmodule SmolqueryVictoriaMetrics.Params do
 
   defp duration_ms(text) do
     case Float.parse(text) do
-      {seconds, ""} ->
+      {seconds, ""} when abs(seconds) <= @max_float_seconds ->
         {:ok, trunc(seconds * 1000)}
+
+      {_seconds, ""} ->
+        :out_of_range
 
       _duration ->
         case MetricsQL.duration_to_ms(text, 0) do

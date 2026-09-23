@@ -44,6 +44,13 @@ defmodule SmolqueryVictoriaMetrics.ParamsTest do
         assert message =~ "cannot parse t=#{text}"
       end
     end
+
+    test "seconds past what a double of milliseconds holds are refused, not raised" do
+      for text <- ["1e308", "-1e308", "1.7976931348623157e308"] do
+        assert {:error, message} = Params.time(%{"t" => text}, "t", 0), text
+        assert message =~ "out of the range"
+      end
+    end
   end
 
   describe "duration/3, as VictoriaMetrics' GetDuration reads it" do
@@ -66,13 +73,22 @@ defmodule SmolqueryVictoriaMetrics.ParamsTest do
     end
 
     test "zero, negative, past 100 years, or unreadable is refused" do
-      for text <- ["0", "-1", "-5s", "200y"] do
+      for text <- ["0", "-1", "-5s", "200y", "1e308", "-1e308"] do
         assert {:error, message} = Params.duration(%{"step" => text}, "step", nil), text
         assert message =~ "is out of allowed range"
       end
 
       assert {:error, "cannot parse step=\"soon\""} =
                Params.duration(%{"step" => "soon"}, "step", nil)
+    end
+  end
+
+  describe "timeout/2" do
+    test "held to the ceiling, which is also the default" do
+      assert Params.timeout(%{"timeout" => "1000h"}, 30_000) == {:ok, 30_000}
+      assert Params.timeout(%{"timeout" => "250ms"}, 30_000) == {:ok, 250}
+      assert Params.timeout(%{"timeout" => "undefined"}, 30_000) == {:ok, 30_000}
+      assert {:error, _message} = Params.timeout(%{"timeout" => "1e308"}, 30_000)
     end
   end
 

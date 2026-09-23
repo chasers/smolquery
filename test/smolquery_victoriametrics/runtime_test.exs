@@ -26,8 +26,10 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
     assert runtime.table == {"metrics", "samples"}
     assert runtime.lookback_ms == 300_000
     assert runtime.max_series == 10_000
-    assert runtime.max_samples == 20_000_000
+    assert runtime.max_samples == 5_000_000
+    assert runtime.max_samples_per_query == 10_000_000
     assert runtime.max_points_per_series == 30_000
+    assert runtime.max_query_duration_ms == 30_000
     assert runtime.max_decoded_bytes == 33_554_432
     assert runtime.max_query_bytes == 16_384
     assert runtime.ingest_name == Smolquery.IngestService
@@ -37,10 +39,18 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
 
   test "takes the query ceilings" do
     runtime =
-      Runtime.new(password: "given", max_series: 5, max_samples: 50, max_points_per_series: 500)
+      Runtime.new(
+        password: "given",
+        max_series: 5,
+        max_samples: 50,
+        max_samples_per_query: 70,
+        max_points_per_series: 500,
+        max_query_duration_ms: 900
+      )
 
-    assert {runtime.max_series, runtime.max_samples, runtime.max_points_per_series} ==
-             {5, 50, 500}
+    assert {runtime.max_series, runtime.max_samples, runtime.max_samples_per_query,
+            runtime.max_points_per_series, runtime.max_query_duration_ms} ==
+             {5, 50, 70, 500, 900}
   end
 
   test "takes the decoded-body bound" do

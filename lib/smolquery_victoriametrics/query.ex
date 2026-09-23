@@ -21,7 +21,11 @@ defmodule SmolqueryVictoriaMetrics.Query do
       aligned to the step, `start` down and `end` up with the count kept,
       unless `nocache=1`, as `AdjustStartEnd` does so dashboards share
       points;
-    * `timeout` bounds each query service job the request runs.
+    * `timeout` bounds the whole request, held to the runtime's
+      `max_query_duration_ms` (VictoriaMetrics' `-search.maxQueryDuration`,
+      30 s), which is also its default. It is one deadline: each query
+      service job the request runs is given what is left of it, and a
+      selector reached after it has passed is not read.
 
   Times and durations are read by `SmolqueryVictoriaMetrics.Params`. The
   expression is parsed by `SmolqueryVictoriaMetrics.MetricsQL` and
@@ -45,12 +49,18 @@ defmodule SmolqueryVictoriaMetrics.Query do
       duration that does not read;
     * 422 `execution` — an expression that does not parse, a function not
       ported, an argument of the wrong kind, a selector with no non-empty
-      matcher, duplicate series, and a query past `max_series`,
-      `max_samples` or `max_points_per_series`;
-    * 503 `timeout` — a job past its `timeout`;
+      matcher, duplicate series, a statement the engine refused, and a
+      query past `max_series`, `max_samples`, `max_samples_per_query` or
+      `max_points_per_series`;
+    * 503 `timeout` — a request past its deadline; the job running then is
+      cancelled;
     * 503 `unavailable`, with `retry-after` — the query service is not
-      running here or is at its job limit, or a buffer node holding unsealed
-      samples could not be reached.
+      running here or is at its job limit, or a job failed for the
+      service's reasons rather than the query's
+      (`Smolquery.QueryService.Client.service_failure?/1`): an engine that
+      did not start, died or ran out of memory, a disk or connection error,
+      a worker or a buffer node holding unsealed samples that could not be
+      reached. Grafana and vmalert retry these; a 422 they do not.
 
   ## Telemetry
 
@@ -58,13 +68,15 @@ defmodule SmolqueryVictoriaMetrics.Query do
   `%{series: n, samples: n, duration_us: n, fetch_us: n}`: what it read into
   the node, which `Smolquery.Telemetry` counts so the ceilings can be sized
   from production numbers, and how long it took. `fetch_us` is the time
-  spent in `SmolqueryVictoriaMetrics.Samples` reading raw samples by SQL,
-  summed over the query's selectors; the rest of `duration_us` is parsing,
-  the rollup sweep and evaluation in the node.
+  spent in `SmolqueryVictoriaMetrics.Samples.select/4`, summed over the
+  query's selectors: the grouped query and copying its lists into the
+  node. The rest of `duration_us` is parsing, the rollup sweep, evaluation
+  and rendering the JSON.
   """
 
   import Plug.Conn
 
+  alias Smolquery.QueryService.Client
   alias SmolqueryVictoriaMetrics.Errors
   alias SmolqueryVictoriaMetrics.Eval
   alias SmolqueryVictoriaMetrics.MetricsQL
@@ -95,13 +107,15 @@ defmodule SmolqueryVictoriaMetrics.Query do
     with {:ok, query} <- query(params),
          {:ok, query} <- Params.query_text(query, runtime.max_query_bytes),
          {:ok, grid} <- grid(kind, params, now_ms()),
-         {:ok, timeout} <- bad_data(Params.duration(params, "timeout", nil)),
+         {:ok, timeout} <- bad_data(Params.timeout(params, runtime.max_query_duration_ms)),
          {:ok, expr} <- parse(query) do
+      deadline = System.monotonic_time(:millisecond) + timeout
+
       context =
         Map.merge(grid, %{
           lookback_ms: runtime.lookback_ms,
           max_points: runtime.max_points_per_series,
-          fetch: timed(fetch_us, &Samples.select(runtime, &1, &2, timeout_opts(timeout)))
+          fetch: timed(fetch_us, fetcher(runtime, deadline))
         })
 
       kind |> evaluate(expr, context, started) |> answer(conn, fetch_us)
@@ -172,8 +186,47 @@ defmodule SmolqueryVictoriaMetrics.Query do
     end
   end
 
-  defp timeout_opts(nil), do: []
-  defp timeout_opts(ms), do: [timeout_ms: ms]
+  @doc """
+  How a query reads its selectors: `SmolqueryVictoriaMetrics.Samples.select/4`
+  under the request's one `deadline` (monotonic milliseconds) and its one
+  sample budget. Each read is given the time left, and refused with
+  `:timeout` once none is; each is held to `max_samples` or to what is left
+  of `max_samples_per_query`, whichever is less, and a read that would pass
+  the latter is `{:too_many_samples_per_query, max}`.
+  """
+  @spec fetcher(Runtime.t(), integer()) :: Eval.fetch()
+  def fetcher(%Runtime{} = runtime, deadline) do
+    read = :counters.new(1, [])
+    per_selector = runtime.max_samples
+    per_query = runtime.max_samples_per_query
+
+    fn selector, range ->
+      limit = min(per_selector, per_query - :counters.get(read, 1))
+
+      with {:ok, left} <- time_left(deadline),
+           {:ok, series} <-
+             budgeted(
+               Samples.select(runtime, selector, range, max_samples: limit, timeout_ms: left),
+               limit < per_selector,
+               per_query
+             ) do
+        :counters.add(read, 1, Enum.reduce(series, 0, &(length(&1.timestamps) + &2)))
+        {:ok, series}
+      end
+    end
+  end
+
+  defp time_left(deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left > 0 -> {:ok, left}
+      _past -> {:error, :timeout}
+    end
+  end
+
+  defp budgeted({:error, {:too_many_samples, _limit}}, true, per_query),
+    do: {:error, {:too_many_samples_per_query, per_query}}
+
+  defp budgeted(result, _query_budget_binds, _per_query), do: result
 
   defp evaluate(:instant, expr, context, started) do
     cond do
@@ -286,10 +339,20 @@ defmodule SmolqueryVictoriaMetrics.Query do
           "raise its step, or raise SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES"
       )
 
+  def failure({:too_many_samples_per_query, max}),
+    do:
+      execution(
+        "the query's selectors read more than #{max} samples between them; narrow them " <>
+          "or the time range, or raise SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY"
+      )
+
   def failure({:invalid_time, ms}), do: {400, "bad_data", "time #{ms} ms is out of range", nil}
 
   def failure(:timeout),
-    do: {503, "timeout", "the query did not finish within its timeout and was cancelled", nil}
+    do:
+      {503, "timeout",
+       "the query did not finish within its timeout and was cancelled; see the `timeout` " <>
+         "arg and SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS", nil}
 
   def failure(:cancelled), do: {503, "timeout", "the query was cancelled", nil}
 
@@ -302,15 +365,24 @@ defmodule SmolqueryVictoriaMetrics.Query do
   def failure({:job, {:hot_tier_unavailable, _reason}}), do: hot_tier_unavailable()
   def failure({:job, {:hot_tier_unavailable, _ref, _reason}}), do: hot_tier_unavailable()
 
-  def failure({:job, {:invalid_query, message}}) when is_binary(message), do: execution(message)
-  def failure({:job, error}) when is_exception(error), do: execution(Exception.message(error))
-  def failure({:job, error}), do: execution("query failed: #{inspect(error)}")
+  def failure({:job, error}) do
+    message = job_message(error)
+
+    if Client.service_failure?(error),
+      do: {503, "unavailable", message <> "; retry", 1},
+      else: execution(message)
+  end
+
   def failure(reason), do: {500, "internal", "query failed: #{inspect(reason)}", nil}
 
   defp hot_tier_unavailable,
     do:
       {503, "unavailable",
        "a buffer node holding unsealed samples for this query could not be reached; retry", 1}
+
+  defp job_message({:invalid_query, message}) when is_binary(message), do: message
+  defp job_message(error) when is_exception(error), do: Exception.message(error)
+  defp job_message(error), do: "query failed: #{inspect(error)}"
 
   defp execution(message), do: {422, "execution", message, nil}
 

@@ -63,6 +63,21 @@ defmodule Smolquery.QueryService.Client do
     :result_max_rows
   ]
 
+  @service_failures [
+    :engine_failed,
+    :engine_exit,
+    :query_crashed,
+    :worker_unreachable,
+    :statement_failed,
+    :extension_failed,
+    :setting_failed,
+    :hot_tier_unavailable,
+    :pinned_hot_retired,
+    :pinned_hot_expired
+  ]
+
+  @server_message ~r/\A(IO|HTTP|Connection|Internal|Out of Memory) Error|INTERNAL Error/i
+
   @doc """
   Runs `sql` and waits for its result.
 
@@ -184,6 +199,61 @@ defmodule Smolquery.QueryService.Client do
   catch
     :exit, _reason -> :ok
   end
+
+  @doc """
+  Ends job `job_id` now instead of when its result TTL expires: its result
+  frame is dropped from the service and a later `fetch/2` is `:not_found`.
+  A caller that has taken the frame it needed calls this so a large result
+  is not held twice, once by the caller and once by the service, for the
+  TTL. A job still running is cancelled first; releasing an unknown job is
+  `:ok`.
+  """
+  @spec release(atom(), String.t()) :: :ok
+  def release(name, job_id) do
+    case whereis(name, job_id) do
+      {:ok, pid} -> Runner.release(pid)
+      {:error, _reason} -> :ok
+    end
+  catch
+    :exit, _reason -> :ok
+  end
+
+  @doc """
+  Whether a failed job's `error` is the service's rather than the
+  statement's, so that sending the same statement again later can succeed:
+  an engine that did not start or died, a worker or a buffer node that
+  could not be reached, a bootstrap statement that failed, a pinned read
+  the hot tier no longer holds, or an engine error whose text is one
+  `server_failure_message?/1` recognises. A statement the engine refused
+  (a parser, binder or regular-expression error) is not.
+  """
+  @spec service_failure?(term()) :: boolean()
+  def service_failure?(error) when is_tuple(error) and tuple_size(error) >= 2,
+    do: elem(error, 0) in @service_failures or invalid_query_message?(error)
+
+  def service_failure?(error) when is_exception(error),
+    do: error |> Exception.message() |> server_failure_message?()
+
+  def service_failure?(_error), do: false
+
+  defp invalid_query_message?({:invalid_query, message}) when is_binary(message),
+    do: server_failure_message?(message)
+
+  defp invalid_query_message?(_error), do: false
+
+  @doc """
+  Whether an engine error's text is the server's failure — the disk, memory,
+  a connection the engine could not make, an internal error — rather than
+  the statement's.
+
+      iex> Smolquery.QueryService.Client.server_failure_message?("Out of Memory Error: failed to allocate")
+      true
+      iex> Smolquery.QueryService.Client.server_failure_message?("Binder Error: column x not found")
+      false
+  """
+  @spec server_failure_message?(String.t()) :: boolean()
+  def server_failure_message?(message) when is_binary(message),
+    do: Regex.match?(@server_message, message)
 
   defp do_await(name, job_id, pid, timeout) do
     Runner.await(pid, timeout)

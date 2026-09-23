@@ -229,6 +229,30 @@ defmodule SmolqueryVictoriaMetrics.EvalTest do
                run("m @ NaN", grid, [series])
     end
 
+    test "@ past what a timestamp holds is refused, not raised" do
+      grid = %{start_ms: 0, end_ms: 15_000, step_ms: 15_000}
+
+      for query <- ["m @ 1e308", "m @ Inf", "m @ -Inf", "rate(m[1m] @ 1e300)"] do
+        assert {:error, {:invalid_at, message}} = run(query, grid, []), query
+        assert message =~ "`@` modifier must return a time a timestamp holds", query
+      end
+    end
+
+    test "a rollup's scalar argument is read at each point, not the first" do
+      series = counter(%{"__name__" => "m"}, 15_000, 20, 6)
+      grid = %{start_ms: 60_000, end_ms: 120_000, step_ms: 30_000}
+
+      assert {:ok, [%Series{values: values}], _stats} =
+               run("count_gt_over_time(m[1m], time() / 5)", grid, [series])
+
+      assert values == [{60_000, 2.0}, {90_000, 3.0}, {120_000, 4.0}]
+
+      assert {:ok, [%Series{values: quantiles}], _stats} =
+               run("quantile_over_time(time() / 120, m[1m])", grid, [series])
+
+      assert quantiles == [{60_000, 15.0}, {90_000, 31.5}, {120_000, 48.0}]
+    end
+
     test "instant_range/3 turns an instant window on anything but a selector into a range query" do
       {:ok, expr} = MetricsQL.parse("rate(m[1m])[5m:30s]")
 

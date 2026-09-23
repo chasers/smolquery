@@ -53,17 +53,48 @@ that reads raw samples into the node (`fetch_us` of
 evaluation, `rest` rendering the JSON and sending it; the driver does not
 decode the answer.
 
+### After the review of T-564: one grouped query a selector (T-576)
+
+Same command and machine, on the review commit: each selector is one
+`GROUP BY series` job with its samples as two lists, instead of a series
+query (an aggregate the query service scattered over four workers) and a
+samples query.
+
+```
+query                                         series   samples  wall ms  fetch ms  sweep ms  rest ms
+rate(m[5m]) 1h                                  1000    280000   2226.5     382.2     127.8   1712.0
+rate(m[5m]) 6h                                  1000   1440000  11263.3     955.1    1036.2   9255.8
+sum by (job) (rate(m[5m])) 1h                   1000    280000    827.1     625.8     198.4      6.8
+sum by (job) (rate(m[5m])) 6h                   1000   1440000   2503.1    1080.1    1380.8     42.2
+m{instance="host-1"} 6h                            1      1440    276.8     273.5       0.4      3.0
+/api/v1/labels 6h                                                 246.8
+/api/v1/label/job/values 6h                                       444.5
+```
+
+The one-series read fell from 771 ms of fetch to 274, and a thousand
+series over an hour from 693 to 382. Measured apart, on the test stack
+(`Smolquery.Test.VictoriaMetricsStack`, one series among 1,000, the median
+of seven reads of `Samples.select/4`):
+
+| hot micro-segments | series + samples queries | one grouped query |
+|---|---|---|
+| 50 | 591 ms | 181 ms |
+| 200 | 792 ms | 301 ms |
+
 ## What this settles
 
 - **Tier 1 is not the bottleneck at this size.** Reading 1.44 million samples
   into the node takes about 1.2 s, and sweeping them about 1 s. The design's
-  ceilings (PL-70: `max_samples` 20,000,000) are about 17 s of fetch at this
-  rate, which is what `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES` should be sized
-  against.
-- **A fetch has a floor of about 0.7 s**, one series or a thousand: the
-  one-series `default_rollup` pays the same two query-service jobs (series,
-  then samples) over the hot tier. That floor, not the rollup, is what a
-  small Grafana panel waits on, over a hot tier that nothing sealed.
+  first ceiling (PL-70: `max_samples` 20,000,000) was about 17 s of fetch at
+  this rate and 1 GB or more held in one process; the review of T-564 lowered
+  it to 5,000,000 a selector and 10,000,000 a query, about 0.25 and 0.5 GB,
+  which is what `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES` and
+  `_MAX_SAMPLES_PER_QUERY` should be sized against.
+- **A fetch had a floor of about 0.7 s**, one series or a thousand: the
+  one-series `default_rollup` paid the same two query-service jobs (series,
+  then samples) over the hot tier, the first scattered. One grouped job
+  brought it to about 0.27 s (above); what is left is one job's planning
+  and the hot tier's files, which label matchers cannot prune.
 - **Rendering a wide matrix costs more than computing it.** 1,000 series of
   1,441 points is 1.44 million points of JSON: 9 s past the query, against
   2.2 s for the query. An aggregate that answers ten series renders in

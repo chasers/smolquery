@@ -238,13 +238,18 @@ defmodule SmolqueryVictoriaMetrics.Eval.Value do
 
   @doc """
   The population variance of `values` without their `nil`s, by Welford's
-  method as VictoriaMetrics computes it; `nil` for none.
+  method as VictoriaMetrics computes it; `nil` for none, and for values
+  holding an infinity, whose `Inf - Inf` makes Go's `NaN`.
   """
   @spec stdvar([t()]) :: t()
   def stdvar(values) do
+    present = Enum.reject(values, &is_nil/1)
+    if Enum.any?(present, &inf?/1), do: nil, else: welford(present)
+  end
+
+  defp welford(values) do
     {avg_count_q, count} =
       values
-      |> Enum.reject(&is_nil/1)
       |> Enum.reduce({{0.0, 0.0}, 0}, fn v, {{avg, q}, count} ->
         count = count + 1
         avg_new = avg + (v - avg) / count

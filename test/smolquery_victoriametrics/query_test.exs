@@ -330,6 +330,48 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
       assert body(response)["error"] =~ "more than 1 series"
     end
 
+    test "past max_samples is 422, per selector and summed over the query", %{stack: stack} do
+      one_selector = %{"query" => "up", "time" => "#{@t0 + 300}"}
+      three_selectors = %{"query" => "up + up + up", "time" => "#{@t0 + 300}"}
+
+      small = limited(stack, max_samples: 42, max_samples_per_query: 1_000)
+      assert get(small, "/api/v1/query", one_selector).status == 200
+
+      small = limited(stack, max_samples: 41, max_samples_per_query: 1_000)
+      response = get(small, "/api/v1/query", one_selector)
+      assert response.status == 422
+      assert body(response)["error"] =~ "more than 41 samples"
+
+      budget = limited(stack, max_samples: 42, max_samples_per_query: 126)
+      assert get(budget, "/api/v1/query", three_selectors).status == 200
+
+      budget = limited(stack, max_samples: 42, max_samples_per_query: 125)
+      response = get(budget, "/api/v1/query", three_selectors)
+      assert response.status == 422
+      assert body(response)["error"] =~ "more than 125 samples between them"
+      assert body(response)["error"] =~ "SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY"
+    end
+
+    test "a timeout is held to max_query_duration_ms, and is one deadline for the request", %{
+      stack: stack
+    } do
+      for timeout <- ["100y", "1000h", "1e9"] do
+        response =
+          get(stack, "/api/v1/query", %{"query" => "up", "time" => "#{@t0}", "timeout" => timeout})
+
+        assert response.status == 200, timeout
+      end
+
+      many = Enum.map_join(1..12, " + ", fn _one -> "up" end)
+      short = limited(stack, max_query_duration_ms: 250)
+
+      response =
+        get(short, "/api/v1/query", %{"query" => many, "time" => "#{@t0}", "timeout" => "1h"})
+
+      assert response.status == 503
+      assert %{"errorType" => "timeout"} = body(response)
+    end
+
     test "a missing query, or a start, end or step that does not read, is 400 bad_data", %{
       stack: stack
     } do
@@ -341,7 +383,10 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
             {"/api/v1/query_range", %{"query" => "up", "step" => "0"}},
             {"/api/v1/query_range", %{"query" => "up", "step" => "-15s"}},
             {"/api/v1/query_range", %{"query" => "up", "step" => "often"}},
-            {"/api/v1/query", %{"query" => "up", "timeout" => "never"}}
+            {"/api/v1/query", %{"query" => "up", "timeout" => "never"}},
+            {"/api/v1/query", %{"query" => "up", "timeout" => "1e308"}},
+            {"/api/v1/query", %{"query" => "up", "time" => "1e308"}},
+            {"/api/v1/query_range", %{"query" => "up", "step" => "1e308"}}
           ] do
         response = get(stack, path, params)
 
@@ -568,5 +613,25 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
 
     assert {422, "execution", "Invalid regex", nil} =
              Query.failure({:job, {:invalid_query, "Invalid regex"}})
+  end
+
+  test "failure/1 answers a job the service failed 503 with retry-after, the query's 422" do
+    for error <- [
+          {:engine_failed, :emfile},
+          {:worker_unreachable, :nodedown},
+          {:statement_failed, "ATTACH", :locked},
+          {:pinned_hot_retired, {"metrics", "samples"}, ["x"]},
+          %Adbc.Error{message: "Out of Memory Error: could not allocate block of size 256 KiB"},
+          %Adbc.Error{message: "IO Error: Could not read from file"}
+        ] do
+      assert {503, "unavailable", _message, 1} = Query.failure({:job, error}), inspect(error)
+    end
+
+    for error <- [
+          {:invalid_query, "Binder Error: column x not found"},
+          %Adbc.Error{message: "Invalid Input Error: invalid perl operator: (?="}
+        ] do
+      assert {422, "execution", _message, nil} = Query.failure({:job, error}), inspect(error)
+    end
   end
 end

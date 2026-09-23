@@ -41,9 +41,11 @@ defmodule Smolquery.Test.VictoriaMetricsStack do
 
   @doc """
   Starts the stack under the test's supervisor. `opts` are extra
-  `SmolqueryVictoriaMetrics.Runtime` options, such as the query ceilings.
+  `SmolqueryVictoriaMetrics.Runtime` options, such as the query ceilings,
+  and `query_opts:` extra `Smolquery.QueryService.Supervisor` options.
   """
   def start(context, opts \\ []) do
+    {query_opts, opts} = Keyword.pop(opts, :query_opts, [])
     unique = :erlang.unique_integer([:positive])
     dir = Path.join(context.tmp_dir, "vm_stack_#{unique}")
     lake = :"vm_stack_lake_#{unique}"
@@ -85,7 +87,8 @@ defmodule Smolquery.Test.VictoriaMetricsStack do
        buffer_base_url: HotServer.base_url(buffer),
        engine_extensions: [:httpfs],
        allowed_directories: [context.tmp_dir],
-       job_bootstrap: [DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)]},
+       job_bootstrap: [DuckLake.attach_statement(DuckLake.default_catalog(), metadata, data_path)]}
+      |> then(fn {supervisor, base} -> {supervisor, Keyword.merge(base, query_opts)} end),
       id: query
     )
 

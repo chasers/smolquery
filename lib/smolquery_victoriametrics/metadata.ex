@@ -30,7 +30,8 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
       at most that many, or 100,000 when it is not positive or larger
       (`SmolqueryVictoriaMetrics.Labels`); `/api/v1/series` truncates its
       sorted answer to it when positive;
-    * `timeout` bounds each query service job.
+    * `timeout` bounds each query service job, held to the runtime's
+      `max_query_duration_ms`, which is also its default.
 
   `/api/v1/series` is the rollup engine's series query
   (`SmolqueryVictoriaMetrics.Samples.series/4`) over the pooled selectors,
@@ -103,7 +104,7 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   defp respond(conn, runtime, route, pairs) do
     with {:ok, route} <- label_name(route),
          :ok <- matches_within(pairs, runtime.max_query_bytes),
-         {:ok, request} <- request(route, pairs, now_ms()),
+         {:ok, request} <- request(route, pairs, now_ms(), runtime.max_query_duration_ms),
          {:ok, data} <- answer(route, runtime, request) do
       conn
       |> put_resp_content_type("application/json")
@@ -128,17 +129,19 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
 
   @doc """
   The arguments of a request to `route` from its `pairs`, with `now_ms` as
-  the default `end`.
+  the default `end` and `max_timeout_ms` as the default and the ceiling of
+  `timeout`.
   """
-  @spec request(route(), Params.pairs(), integer()) :: {:ok, request()} | {:error, term()}
-  def request(route, pairs, now_ms) do
+  @spec request(route(), Params.pairs(), integer(), pos_integer()) ::
+          {:ok, request()} | {:error, term()}
+  def request(route, pairs, now_ms, max_timeout_ms) do
     params = Params.values(pairs)
 
     with {:ok, range} <- range(params, now_ms),
          {:ok, limit} <- bad_data(Params.int(params, "limit")),
-         {:ok, timeout} <- bad_data(Params.duration(params, "timeout", nil)),
+         {:ok, timeout} <- bad_data(Params.timeout(params, max_timeout_ms)),
          {:ok, selector} <- selector(Params.all(pairs, ["match[]", "match"]), route == :series) do
-      {:ok, %{range: range, limit: limit, selector: selector, opts: timeout_opts(timeout)}}
+      {:ok, %{range: range, limit: limit, selector: selector, opts: [timeout_ms: timeout]}}
     end
   end
 
@@ -293,9 +296,6 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
 
   defp bad_data({:ok, value}), do: {:ok, value}
   defp bad_data({:error, message}), do: {:error, {:bad_data, message}}
-
-  defp timeout_opts(nil), do: []
-  defp timeout_opts(ms), do: [timeout_ms: ms]
 
   defp now_ms, do: System.system_time(:millisecond)
 end
