@@ -19,6 +19,7 @@ mix run bench/otel_logs.exs 2>/dev/null           # OTel logs over HTTP: wide in
 mix run bench/profile.exs 2>/dev/null             # where BEAM CPU goes under ingest: threads, processes, microstates
 mix run bench/clickhouse_catalog.exs 2>/dev/null  # what a system.* statement costs as the lake gets more tables
 mix run bench/victoriametrics.exs 2>/dev/null     # remote write in, MetricsQL out: samples/s, fetch vs sweep
+SERIES=10000000 mix run bench/victoriametrics_cardinality.exs 2>/dev/null  # label filters over N series in the sealed tier
 
 SEGMENTS=1500 ROWS=2000 mix run bench/planner.exs   # bigger catalog, smaller segments
 ROWS=10000000 CLIENTS=16 mix run bench/adbc.exs     # push the fetch and concurrency sizes
