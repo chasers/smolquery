@@ -81,6 +81,15 @@ defmodule SmolqueryApi.AdmissionTest do
     {server, reservation}
   end
 
+  defp admitted(name, bytes) do
+    {:ok, conn} =
+      conn(:post, "/", "")
+      |> put_req_header("content-length", Integer.to_string(bytes))
+      |> Admission.admit_body(name, 1_000)
+
+    conn
+  end
+
   test "an admitted insert lands and releases its reservation", %{name: name} do
     response = post_ndjson(name, ~s({"id": 1}\n))
 
@@ -193,6 +202,40 @@ defmodule SmolqueryApi.AdmissionTest do
       hold(name, 5)
 
       assert conn(:post, "/", "") |> Admission.admit_body(name, 6) == {:error, :admission_full}
+    end
+  end
+
+  describe "resize/2" do
+    test "holds the reservation to the new size until the response is sent", %{name: name} do
+      conn = admitted(name, 10)
+
+      assert Admission.resize(conn, 80) == :ok
+      assert Admission.in_flight(name) == 80
+
+      Plug.Conn.send_resp(conn, 200, "")
+
+      await(fn -> Admission.in_flight(name) == 0 end)
+    end
+
+    test "a request alone on the counter is never refused by its own bytes", %{name: name} do
+      conn = admitted(name, 10)
+
+      assert Admission.resize(conn, 5_000) == :ok
+      assert Admission.in_flight(name) == 5_000
+    end
+
+    test "refuses past the limit beside other requests and keeps what was held", %{name: name} do
+      hold(name, 50)
+      conn = admitted(name, 10)
+
+      assert Admission.resize(conn, 60) == {:error, :admission_full}
+      assert Admission.in_flight(name) == 60
+      assert Admission.resize(conn, 40) == :ok
+      assert Admission.in_flight(name) == 90
+    end
+
+    test "a conn admitted uncounted resizes uncounted" do
+      assert Admission.resize(conn(:post, "/", ""), 1_000) == :ok
     end
   end
 

@@ -14,8 +14,9 @@ defmodule SmolqueryVictoriaMetrics.RemoteWrite do
       Sample       { double value = 1; int64 timestamp = 2; }
 
   A series comes out as `%{name: name, labels: labels, samples: samples}`:
-  `name` is the `__name__` label, or `nil` when there is none; `labels` is
-  every other label as `{name, value}` in the order sent, which is not always
+  `name` is the first `__name__` label, or `nil` when there is none; `labels`
+  is every other label as `{name, value}` in the order sent, a second
+  `__name__` among them, so a caller can refuse the repeat, which is not always
   sorted: vmagent v1.152.0 sends a series' own labels before the `instance`
   and `job` it adds. `samples` is `{timestamp_ms, value}` in the order sent.
 
@@ -115,6 +116,18 @@ defmodule SmolqueryVictoriaMetrics.RemoteWrite do
   end
 
   @doc """
+  What a body in `encoding` declares it inflates to, read from its header
+  without inflating anything: the snappy preamble, or the content sizes of
+  every zstd frame summed, `:unknown` when a frame declares none. A body with
+  no encoding is its own size.
+  """
+  @spec declared_length(binary(), encoding()) ::
+          {:ok, non_neg_integer() | :unknown} | {:error, error()}
+  def declared_length(body, :snappy), do: Snappy.declared_length(body)
+  def declared_length(body, :zstd), do: Zstd.declared_length(body)
+  def declared_length(body, :identity), do: {:ok, byte_size(body)}
+
+  @doc """
   Inflates a body in `encoding`, holding its uncompressed size to
   `:max_bytes`, and decodes the `WriteRequest` inside it.
 
@@ -170,7 +183,7 @@ defmodule SmolqueryVictoriaMetrics.RemoteWrite do
   defp series_field(1, 2, message, {name, labels, samples, dropped}) do
     with {:ok, label} <- label(message) do
       case label do
-        {"__name__", value} -> {:ok, {value, labels, samples, dropped}}
+        {"__name__", value} when is_nil(name) -> {:ok, {value, labels, samples, dropped}}
         label -> {:ok, {name, [label | labels], samples, dropped}}
       end
     end

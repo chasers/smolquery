@@ -9,7 +9,9 @@ defmodule SmolqueryVictoriaMetrics.Errors do
   only the status. Prometheus and the OpenTelemetry collector retry a 429 or
   a 5xx and drop the block on any other 4xx. vmagent v1.152.0 drops it on a
   400, 409 or 415, after re-sending a zstd block once as snappy, and retries
-  every other status, 401 and 413 included. Grafana shows `error`.
+  every other status forever, 401 and 413 included, with the rest of its
+  queue held behind that block: a block no retry can fix must be a 400 or a
+  415 for vmagent to move on. Grafana shows `error`.
   """
 
   import Plug.Conn

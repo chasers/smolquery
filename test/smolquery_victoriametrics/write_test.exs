@@ -16,6 +16,7 @@ defmodule SmolqueryVictoriaMetrics.WriteTest do
   alias Smolquery.IngestService
   alias Smolquery.Schema
   alias Smolquery.Test.MapCatalog
+  alias SmolqueryApi.Admission
   alias SmolqueryVictoriaMetrics.RemoteWrite
   alias SmolqueryVictoriaMetrics.Router
   alias SmolqueryVictoriaMetrics.Runtime
@@ -232,18 +233,102 @@ defmodule SmolqueryVictoriaMetrics.WriteTest do
       assert remote_write(name, fixture("write_zstd.bin"), "gzip").status == 415
     end
 
-    test "a snappy body that declares more than the limit is 413", %{name: name} do
-      response = remote_write(name, varint(1_000_000_000) <> <<0, 0, 0>>, "snappy")
-
-      assert response.status == 413
-      assert JSON.decode!(response.resp_body)["error"] =~ "limited to 8000000 bytes"
-    end
-
     test "a body past the limit as sent is 413", %{name: name} do
       runtime = %{elem(Runtime.fetch(name), 1) | max_ndjson_bytes: 100}
       Runtime.put(runtime)
 
       assert remote_write(name, :binary.copy(<<0>>, 200), "zstd").status == 413
+    end
+
+    test "a proto other than remote write 1.0 is 415", %{name: name, buffer: buffer} do
+      for proto <- ["io.prometheus.write.v3.Request", "prometheus.WriteRequestV2"] do
+        response =
+          post(name, fixture("write_snappy.bin"), [
+            {"content-type", "application/x-protobuf; proto=#{proto}"},
+            {"content-encoding", "snappy"}
+          ])
+
+        assert response.status == 415, proto
+        assert JSON.decode!(response.resp_body)["error"] =~ "prometheus.WriteRequest"
+      end
+
+      assert landed(buffer) == 0
+    end
+
+    @tag :capture_log
+    test "a block that declares more than max_decoded_bytes is 400, which vmagent drops", %{
+      name: name
+    } do
+      response = remote_write(name, varint(1_000_000_000) <> <<0, 0, 0>>, "snappy")
+
+      assert response.status == 400
+      assert %{"errorType" => "bad_data", "error" => error} = JSON.decode!(response.resp_body)
+      assert error =~ "33554432 bytes"
+      assert error =~ "SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES"
+    end
+
+    test "a block that inflates past max_decoded_bytes logs both sizes", %{name: name} do
+      runtime = %{elem(Runtime.fetch(name), 1) | max_decoded_bytes: 100}
+      Runtime.put(runtime)
+      body = bytes(15, :binary.copy(<<0>>, 500)) |> :zstd.compress() |> IO.iodata_to_binary()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert remote_write(name, body, "zstd").status == 400
+        end)
+
+      assert log =~ "#{byte_size(body)}-byte zstd body inflates to 503 bytes"
+      assert log =~ "max_decoded_bytes 100"
+    end
+
+    test "a block of vmagent's default 8 MiB is read", %{name: name} do
+      protobuf = bytes(15, :binary.copy(<<0>>, 8_388_700))
+      assert byte_size(protobuf) > 8_388_608
+
+      assert remote_write(name, protobuf |> :zstd.compress() |> IO.iodata_to_binary(), "zstd").status ==
+               204
+    end
+
+    test "a series that repeats a label name is 400 and named", %{name: name, buffer: buffer} do
+      for labels <- [
+            label("__name__", "up") <> label("job", "b") <> label("job", "a"),
+            label("__name__", "up") <> label("__name__", "down") <> label("job", "b")
+          ] do
+        response = remote_write(name, bytes(1, labels <> sample(1_700_000_000_000, 1.0)), "")
+
+        assert response.status == 400
+
+        assert JSON.decode!(response.resp_body)["error"] =~
+                 ~r/^series up\{.*\} has more than one label named/
+      end
+
+      assert landed(buffer) == 0
+    end
+
+    test "the write holds what the block inflates to against admission while it runs", %{
+      name: name
+    } do
+      start_supervised!({Admission, name: name, limit: 1_000_000_000})
+      body = fixture("write_snappy.bin")
+      {:ok, declared} = Smolquery.Snappy.declared_length(body)
+      test = self()
+
+      :telemetry.attach(
+        "vm-write-admission-#{name}",
+        [:smolquery, :victoriametrics, :samples],
+        fn _event, _measurements, %{result: "written"}, _config ->
+          send(test, {:in_flight, Admission.in_flight(name)})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("vm-write-admission-#{name}") end)
+
+      assert remote_write(name, body, "snappy").status == 204
+      assert_receive {:in_flight, in_flight}
+      assert in_flight == byte_size(body) + declared
+      assert declared > 5 * byte_size(body)
+      assert Admission.in_flight(name) == 0
     end
 
     test "a body that does not decode is 400", %{name: name, buffer: buffer} do
@@ -318,8 +403,40 @@ defmodule SmolqueryVictoriaMetrics.WriteTest do
 
       assert Write.rows([%{name: "", labels: [], samples: []}]) == {:error, :unnamed_series}
 
+      assert Write.rows([%{name: nil, labels: [{"__name__", ""}], samples: []}]) ==
+               {:error, :unnamed_series}
+
       assert Write.rows([%{name: "up", labels: [], samples: [{9_223_372_036_854_775_807, 1.0}]}]) ==
                {:error, {:invalid_timestamp, 9_223_372_036_854_775_807}}
+    end
+
+    test "drops labels whose value is empty, before the fingerprint" do
+      assert {:ok, [with_empty]} =
+               Write.rows([
+                 %{name: "up", labels: [{"env", ""}, {"job", "api"}], samples: [{0, 1.0}]}
+               ])
+
+      assert {:ok, [without]} =
+               Write.rows([%{name: "up", labels: [{"job", "api"}], samples: [{0, 1.0}]}])
+
+      assert with_empty == without
+      assert with_empty["labels"] == %{"job" => "api"}
+    end
+
+    test "refuses a repeated label name, __name__ included, but not one with an empty value" do
+      assert {:error, {:duplicate_label, ~s(up{job="b",job="a"}), "job"}} =
+               Write.rows([%{name: "up", labels: [{"job", "b"}, {"job", "a"}], samples: []}])
+
+      assert {:error, {:duplicate_label, _series, "__name__"}} =
+               Write.rows([%{name: "up", labels: [{"__name__", "up"}], samples: []}])
+
+      assert {:ok, [%{"labels" => %{"job" => "b"}}]} =
+               Write.rows([
+                 %{name: "up", labels: [{"job", "b"}, {"job", ""}], samples: [{0, 1.0}]}
+               ])
+
+      assert {:ok, [%{"name" => "up"}]} =
+               Write.rows([%{name: "", labels: [{"__name__", "up"}], samples: [{0, 1.0}]}])
     end
   end
 

@@ -108,7 +108,8 @@ defmodule SmolqueryVictoriaMetrics.ParamsTest do
         conn(:post, "/x", String.duplicate("a", 1_048_577))
         |> put_req_header("content-type", "application/x-www-form-urlencoded")
 
-      assert Params.read(conn) == {:error, {:bad_data, "the request body is too large"}}
+      assert {:error, {:bad_data, "the request body is too large"}, %Plug.Conn{}} =
+               Params.read(conn)
     end
   end
 

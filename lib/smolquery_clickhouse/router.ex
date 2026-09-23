@@ -142,7 +142,7 @@ defmodule SmolqueryClickHouse.Router do
           do: Errors.send_exception(conn, @body_insert),
           else: query(conn, runtime, sql, [])
 
-      {:error, :too_large} ->
+      {:error, :too_large, conn} ->
         Errors.send_exception(conn, @query_too_large)
     end
   end

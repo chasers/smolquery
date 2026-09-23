@@ -9,7 +9,10 @@ defmodule SmolqueryApi.BodyTest do
     assert {:ok, "hello world", %Plug.Conn{}} = Body.read(conn(:post, "/", "hello world"), 11)
   end
 
-  test "refuses a body past the limit" do
-    assert Body.read(conn(:post, "/", String.duplicate("x", 12)), 11) == {:error, :too_large}
+  test "refuses a body past the limit with the conn it read" do
+    conn = conn(:post, "/", String.duplicate("x", 12))
+
+    assert {:error, :too_large, %Plug.Conn{} = read} = Body.read(conn, 11)
+    assert read.adapter != conn.adapter
   end
 end

@@ -1,6 +1,7 @@
 defmodule SmolqueryVictoriaMetrics.SupervisorTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Test.RawHttp
   alias Smolquery.Test.VictoriaMetricsStack
   alias SmolqueryApi.Admission
   alias SmolqueryVictoriaMetrics.Runtime
@@ -130,4 +131,43 @@ defmodule SmolqueryVictoriaMetrics.SupervisorTest do
       SmolqueryVictoriaMetrics.Supervisor.start_link(name: :vm_no_password, password: "")
     end
   end
+
+  test "answers an oversized write and the next request on the same connection promptly" do
+    {_name, base} = start_edge(max_ndjson_bytes: 100_000)
+    socket = base |> URI.parse() |> Map.fetch!(:port) |> RawHttp.connect()
+
+    headers = [
+      {"authorization", "Bearer " <> @password},
+      {"content-type", "application/x-protobuf"}
+    ]
+
+    assert {413, _body} =
+             RawHttp.request(socket, "POST", "/api/v1/write", headers, zeros(300_000))
+
+    assert {status, _body} =
+             RawHttp.request(socket, "POST", "/api/v1/write", headers, zeros(50_000))
+
+    assert status in [400, 503]
+  end
+
+  test "answers an oversized form query and the next request on the same connection" do
+    {_name, base} = start_edge()
+    socket = base |> URI.parse() |> Map.fetch!(:port) |> RawHttp.connect()
+
+    headers = [
+      {"authorization", "Bearer " <> @password},
+      {"content-type", "application/x-www-form-urlencoded"}
+    ]
+
+    for path <- ["/api/v1/query", "/api/v1/series"] do
+      form = "query=" <> String.duplicate("a", 1_100_000)
+
+      assert {400, body} = RawHttp.request(socket, "POST", path, headers, form)
+      assert body =~ "too large"
+    end
+
+    assert RawHttp.request(socket, "GET", "/health", []) == {200, "OK"}
+  end
+
+  defp zeros(bytes), do: :binary.copy(<<0>>, bytes)
 end

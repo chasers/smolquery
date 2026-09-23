@@ -197,6 +197,16 @@ if victoriametrics_max_points =
       )
 end
 
+if victoriametrics_max_decoded =
+     System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_decoded_bytes:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES",
+        victoriametrics_max_decoded
+      )
+end
+
 if metrics_port = System.get_env("SMOLQUERY_METRICS_PORT") do
   config :smolquery, Smolquery.MetricsServer,
     port: Smolquery.RuntimeConfig.port!("SMOLQUERY_METRICS_PORT", metrics_port)

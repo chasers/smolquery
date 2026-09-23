@@ -25,27 +25,44 @@ defmodule SmolqueryVictoriaMetrics.Write do
   answered from the original commit instead of written twice.
 
   `SmolqueryVictoriaMetrics.Router` has already checked the password and
-  counted the body against ingest admission by the time this runs.
+  counted the body as sent against ingest admission by the time this runs.
+  Once the body is read, its reservation is resized to the body plus what it
+  declares it inflates to (`SmolqueryApi.Admission.resize/2`), or plus
+  `max_decoded_bytes` when a zstd frame declares no size, before anything is
+  inflated: a compressed block holds tens of times its wire size once it is
+  decoded to rows, and admission counts what the node will hold.
+
+  ## Labels
+
+  A label whose value is empty is dropped before anything else, as
+  VictoriaMetrics drops it on ingest and as PromQL reads `a=""`: the label
+  is absent. What is left must name the series exactly once with
+  `__name__`, and no other label name may repeat, as Prometheus refuses a
+  repeated label name; either refusal is the whole request's.
 
   ## Answers
 
-  VictoriaMetrics' own: a 204 with no body once the rows are durable. A 4xx
-  other than 429 tells Prometheus and the collector to drop the block, so it
-  is kept for a block that no retry can fix, and every refusal the client
-  can outwait is a 429 or a 5xx. vmagent drops a block only on a 400, 409 or
-  415 and retries the rest (`SmolqueryVictoriaMetrics.Errors`), so a 413 is
-  one it sends again until its block fits:
+  VictoriaMetrics' own: a 204 with no body once the rows are durable.
+  Prometheus and the collector drop a block on any 4xx but 429 and retry a
+  429 or a 5xx. vmagent v1.152.0 drops a block only on a 400, 409 or 415 and
+  retries every other status forever, with its queue stuck behind the block
+  (`SmolqueryVictoriaMetrics.Errors`). So a block that no retry can fix is a
+  400 or a 415, and every refusal the client can outwait is a 429 or a 5xx:
 
-    * 400 — the body does not decompress or decode, a series has no
-      `__name__`, or a timestamp is past what a `TIMESTAMP` holds;
-    * 413 — the body, or what it declares it inflates to, is past
-      `max_ndjson_bytes`;
-    * 415 — a `Content-Type` other than `application/x-protobuf`, remote
-      write 2.0 (`proto=io.prometheus.write.v2.Request`, so the sender falls
-      back to 1.0 as the specification says it must), or a `Content-Encoding`
-      other than `snappy`, `zstd` or none;
-    * 429 with `retry-after` — the buffer is full, overloaded or at its
-      backlog ceiling;
+    * 400 — the body does not decompress or decode; it inflates, or
+      declares it inflates, past `max_decoded_bytes`, as VictoriaMetrics
+      answers its `-maxInsertRequestSize`; a series has no `__name__`, or
+      repeats a label name; or a timestamp is past what a `TIMESTAMP`
+      holds;
+    * 413 — the body as sent is past `max_ndjson_bytes`. vmagent's
+      compressed blocks are far below it, and every other client drops the
+      block;
+    * 415 — a `Content-Type` other than `application/x-protobuf`, a `proto`
+      parameter other than `prometheus.WriteRequest` (remote write 2.0 among
+      them, so the sender falls back to 1.0 as the specification says it
+      must), or a `Content-Encoding` other than `snappy`, `zstd` or none;
+    * 429 with `retry-after` — the in-flight bytes the edge admits are
+      taken, or the buffer is full, overloaded or at its backlog ceiling;
     * 503 with `retry-after` — the ingest or buffer service is not reachable,
       the table's ownership is moving, or the catalog could not answer;
     * 500 — the table refused a row, which with an all-or-nothing write means
@@ -59,22 +76,28 @@ defmodule SmolqueryVictoriaMetrics.Write do
   and a `result` of `"written"`, `"nan"`, `"histogram"`, `"exemplar"` or
   `"refused"`: rows written, NaN samples dropped (PL-70 D6), native histograms
   and exemplars dropped (PL-70 D7), and rows a refused write did not write.
-  The drops are counted only once the block is written, so a retried block is
-  not counted twice.
+  The counts are of what each request carried. A retried block that the
+  buffer answers from its first commit is counted again: the ingest service
+  answers a duplicate with the original acknowledgement, and nothing in it
+  tells the two apart.
   """
 
   import Plug.Conn
+
+  require Logger
 
   alias Plug.Conn.Utils
   alias Smolquery.BufferService.Backlog
   alias Smolquery.Catalog
   alias Smolquery.IngestService
   alias Smolquery.Schema
+  alias SmolqueryApi.Admission
   alias SmolqueryApi.Body
   alias SmolqueryVictoriaMetrics.Errors
   alias SmolqueryVictoriaMetrics.RemoteWrite
   alias SmolqueryVictoriaMetrics.Runtime
 
+  @remote_write_v1 "prometheus.WriteRequest"
   @remote_write_v2 "io.prometheus.write.v2.Request"
   @clustering ["name", "ts"]
   @schema Schema.new!([
@@ -87,6 +110,11 @@ defmodule SmolqueryVictoriaMetrics.Write do
 
   @type row :: %{String.t() => term()}
 
+  @type rows_error ::
+          :unnamed_series
+          | {:duplicate_label, String.t(), String.t()}
+          | {:invalid_timestamp, integer()}
+
   @doc """
   Writes the remote-write body of `conn` to the runtime's table and answers.
   """
@@ -94,7 +122,7 @@ defmodule SmolqueryVictoriaMetrics.Write do
   def call(conn, %Runtime{} = runtime) do
     with :ok <- content_type(get_req_header(conn, "content-type")),
          {:ok, encoding} <- encoding(get_req_header(conn, "content-encoding")),
-         {:ok, body, conn} <- read(conn, runtime) do
+         {:ok, body, conn} <- Body.read(conn, runtime.max_ndjson_bytes) do
       write_body(conn, runtime, body, encoding)
     else
       {:error, reason, conn} -> answer(conn, reason, runtime)
@@ -102,22 +130,38 @@ defmodule SmolqueryVictoriaMetrics.Write do
     end
   end
 
-  defp read(conn, runtime) do
-    case Body.read(conn, runtime.max_ndjson_bytes) do
-      {:ok, body, conn} -> {:ok, body, conn}
-      {:error, :too_large} -> {:error, :too_large, conn}
-    end
-  end
-
   defp write_body(conn, runtime, body, encoding) do
-    with {:ok, decoded} <-
-           RemoteWrite.decode_body(body, encoding, max_bytes: runtime.max_ndjson_bytes),
+    max = runtime.max_decoded_bytes
+
+    with {:ok, inflated} <- inflated_bytes(body, encoding, max),
+         :ok <- Admission.resize(conn, byte_size(body) + inflated),
+         {:ok, decoded} <- RemoteWrite.decode_body(body, encoding, max_bytes: max),
          {:ok, rows} <- rows(decoded.timeseries),
          {:ok, written} <- write(runtime, rows, batch_id(body)) do
       samples(decoded.dropped, written)
       send_resp(conn, 204, "")
     else
-      {:error, reason} -> answer(conn, reason, runtime)
+      {:error, {:too_large, bytes, max}} ->
+        Logger.warning(
+          "remote write refused: a #{byte_size(body)}-byte #{encoding} body inflates to " <>
+            "#{bytes} bytes, past max_decoded_bytes #{max}"
+        )
+
+        answer(conn, {:too_large, bytes, max}, runtime)
+
+      {:error, reason} ->
+        answer(conn, reason, runtime)
+    end
+  end
+
+  defp inflated_bytes(_body, :identity, _max), do: {:ok, 0}
+
+  defp inflated_bytes(body, encoding, max) do
+    case RemoteWrite.declared_length(body, encoding) do
+      {:ok, :unknown} -> {:ok, max}
+      {:ok, declared} when declared > max -> {:error, {:too_large, declared, max}}
+      {:ok, declared} -> {:ok, declared}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -132,12 +176,13 @@ defmodule SmolqueryVictoriaMetrics.Write do
   @doc """
   The rows a decoded request writes, one per sample, in the order sent.
 
-  A series with no `__name__`, or an empty one, is refused whole, as
-  VictoriaMetrics refuses it, and so is a timestamp outside what a
-  `TIMESTAMP` holds. A series with no samples writes nothing.
+  Labels with an empty value are dropped first, `__name__` among them. A
+  series then left with no `__name__`, or with a label name more than once,
+  `__name__` included, is refused whole, as VictoriaMetrics and Prometheus
+  refuse it, and so is a timestamp outside what a `TIMESTAMP` holds. A series
+  with no samples writes nothing.
   """
-  @spec rows([RemoteWrite.series()]) ::
-          {:ok, [row()]} | {:error, :unnamed_series | {:invalid_timestamp, integer()}}
+  @spec rows([RemoteWrite.series()]) :: {:ok, [row()]} | {:error, rows_error()}
   def rows(timeseries) do
     timeseries
     |> Enum.reduce_while({:ok, []}, fn series, {:ok, acc} ->
@@ -152,23 +197,49 @@ defmodule SmolqueryVictoriaMetrics.Write do
   defp in_order({:ok, reversed}), do: {:ok, Enum.reverse(reversed)}
   defp in_order(error), do: error
 
-  defp series_rows(%{name: name}, _acc) when name in [nil, ""], do: {:error, :unnamed_series}
+  defp series_rows(%{samples: samples} = series, acc) do
+    with {:ok, name, sorted} <- labels(series) do
+      base = %{
+        "name" => name,
+        "series" => sorted_fingerprint(name, sorted),
+        "labels" => Map.new(sorted)
+      }
 
-  defp series_rows(%{name: name, labels: labels, samples: samples}, acc) do
-    sorted = Enum.sort(labels)
+      Enum.reduce_while(samples, {:ok, acc}, &sample_row(base, &1, &2))
+    end
+  end
 
-    base = %{
-      "name" => name,
-      "series" => sorted_fingerprint(name, sorted),
-      "labels" => Map.new(sorted)
-    }
+  defp sample_row(base, {timestamp_ms, value}, {:ok, acc}) do
+    case timestamp(timestamp_ms) do
+      {:ok, ts} -> {:cont, {:ok, [Map.merge(base, %{"ts" => ts, "value" => value}) | acc]}}
+      :error -> {:halt, {:error, {:invalid_timestamp, timestamp_ms}}}
+    end
+  end
 
-    Enum.reduce_while(samples, {:ok, acc}, fn {timestamp_ms, value}, {:ok, acc} ->
-      case timestamp(timestamp_ms) do
-        {:ok, ts} -> {:cont, {:ok, [Map.merge(base, %{"ts" => ts, "value" => value}) | acc]}}
-        :error -> {:halt, {:error, {:invalid_timestamp, timestamp_ms}}}
-      end
-    end)
+  defp labels(%{name: name, labels: labels} = series) do
+    all = if is_nil(name), do: labels, else: [{"__name__", name} | labels]
+    sorted = all |> Enum.reject(&match?({_label, ""}, &1)) |> Enum.sort()
+
+    case repeated(sorted) do
+      nil -> named(sorted)
+      label -> {:error, {:duplicate_label, describe_series(series), label}}
+    end
+  end
+
+  defp repeated([{label, _value}, {label, _other} | _rest]), do: label
+  defp repeated([_first | rest]), do: repeated(rest)
+  defp repeated([]), do: nil
+
+  defp named(sorted) do
+    case List.keytake(sorted, "__name__", 0) do
+      {{"__name__", name}, rest} -> {:ok, name, rest}
+      nil -> {:error, :unnamed_series}
+    end
+  end
+
+  defp describe_series(%{name: name, labels: labels}) do
+    pairs = Enum.map_join(labels, ",", fn {label, value} -> "#{label}=#{inspect(value)}" end)
+    "#{name}{#{pairs}}"
   end
 
   @doc """
@@ -215,11 +286,8 @@ defmodule SmolqueryVictoriaMetrics.Write do
 
   defp content_type([type | _rest]) do
     case Utils.content_type(type) do
-      {:ok, "application", "x-protobuf", %{"proto" => @remote_write_v2}} ->
-        {:error, :remote_write_v2}
-
-      {:ok, "application", "x-protobuf", _params} ->
-        :ok
+      {:ok, "application", "x-protobuf", params} ->
+        proto(Map.get(params, "proto"))
 
       _other ->
         {:error, {:unsupported_content_type, type}}
@@ -227,6 +295,11 @@ defmodule SmolqueryVictoriaMetrics.Write do
   end
 
   defp content_type([]), do: {:error, {:unsupported_content_type, nil}}
+
+  defp proto(nil), do: :ok
+  defp proto(@remote_write_v1), do: :ok
+  defp proto(@remote_write_v2), do: {:error, :remote_write_v2}
+  defp proto(other), do: {:error, {:unsupported_proto, other}}
 
   defp encoding([header | _rest]), do: RemoteWrite.encoding(header)
   defp encoding([]), do: RemoteWrite.encoding(nil)
@@ -296,6 +369,12 @@ defmodule SmolqueryVictoriaMetrics.Write do
        "remote write 2.0 (proto=#{@remote_write_v2}) is not read here; send Prometheus remote write 1.0",
        nil}
 
+  defp describe({:unsupported_proto, proto}, _runtime),
+    do:
+      {415, "bad_data",
+       "proto=#{inspect(proto)} is not read here; send Prometheus remote write 1.0 (proto=#{@remote_write_v1})",
+       nil}
+
   defp describe({:unsupported_content_type, type}, _runtime),
     do:
       {415, "bad_data",
@@ -304,8 +383,17 @@ defmodule SmolqueryVictoriaMetrics.Write do
   defp describe(:unsupported_encoding, _runtime),
     do: {415, "bad_data", "the Content-Encoding is not read here; send snappy, zstd or none", nil}
 
-  defp describe(:too_large, runtime), do: too_large(runtime.max_ndjson_bytes)
-  defp describe({:too_large, _bytes, max}, _runtime), do: too_large(max)
+  defp describe(:too_large, runtime),
+    do:
+      {413, "bad_data",
+       "remote write bodies are limited to #{runtime.max_ndjson_bytes} bytes as sent; send smaller blocks",
+       nil}
+
+  defp describe({:too_large, _bytes, max}, _runtime),
+    do:
+      {400, "bad_data",
+       "the block inflates past #{max} bytes, the edge's max_decoded_bytes " <>
+         "(SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES); it is dropped, send smaller blocks", nil}
 
   defp describe({invalid, message}, _runtime)
        when invalid in [:invalid_snappy, :invalid_zstd, :invalid_write_request],
@@ -314,8 +402,14 @@ defmodule SmolqueryVictoriaMetrics.Write do
   defp describe(:unnamed_series, _runtime),
     do: {400, "bad_data", "a series has no __name__ label", nil}
 
+  defp describe({:duplicate_label, series, label}, _runtime),
+    do: {400, "bad_data", "series #{series} has more than one label named #{label}", nil}
+
   defp describe({:invalid_timestamp, ms}, _runtime),
     do: {400, "bad_data", "sample timestamp #{ms} ms is out of range", nil}
+
+  defp describe(:admission_full, _runtime),
+    do: {429, "unavailable", "too many write bytes in flight, retry later", 1}
 
   defp describe(:buffer_full, _runtime),
     do: {429, "unavailable", "buffer full, retry later", 1}
@@ -362,11 +456,6 @@ defmodule SmolqueryVictoriaMetrics.Write do
 
   defp describe(reason, _runtime),
     do: {500, "internal", "write failed: #{inspect(reason)}", nil}
-
-  defp too_large(max),
-    do:
-      {413, "bad_data", "remote write bodies are limited to #{max} bytes; send smaller blocks",
-       nil}
 
   defp unavailable(message, retry_after), do: {503, "unavailable", message, retry_after}
 

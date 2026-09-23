@@ -81,14 +81,12 @@ defmodule SmolqueryApi.InsertController do
 
     with {:ok, batch_id} <- insert_id(conn.query_params),
          {:ok, skip?} <- skip_invalid_rows(conn.query_params),
-         {:ok, body, conn} <- Body.read(conn, max_bytes),
-         {:ok, result} <-
-           insert_ndjson(runtime, table_ref, body, batch_id: batch_id, skip_invalid_rows: skip?) do
-      respond(conn, result)
+         {:ok, body, read} <- Body.read(conn, max_bytes) do
+      write_ndjson(read, runtime, table_ref, body, batch_id: batch_id, skip_invalid_rows: skip?)
     else
-      {:error, :too_large} ->
+      {:error, :too_large, read} ->
         Errors.send_error(
-          conn,
+          read,
           413,
           "PAYLOAD_TOO_LARGE",
           "NDJSON insert bodies are limited to #{max_bytes} bytes; split the file into smaller bodies"
@@ -96,6 +94,13 @@ defmodule SmolqueryApi.InsertController do
 
       {:error, reason} ->
         insert_error(conn, reason)
+    end
+  end
+
+  defp write_ndjson(conn, runtime, table_ref, body, opts) do
+    case insert_ndjson(runtime, table_ref, body, opts) do
+      {:ok, result} -> respond(conn, result)
+      {:error, reason} -> insert_error(conn, reason)
     end
   end
 

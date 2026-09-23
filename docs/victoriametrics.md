@@ -66,15 +66,17 @@ Prometheus remote write: a protobuf `WriteRequest`, compressed, on `POST /api/v1
 ```sh
 vmagent-prod -promscrape.config=scrape.yml \
   -remoteWrite.url=http://smolquery:8428/api/v1/write \
-  -remoteWrite.bearerToken="$SMOLQUERY_VICTORIAMETRICS_PASSWORD" \
-  -remoteWrite.maxBlockSize=4MiB
+  -remoteWrite.bearerToken="$SMOLQUERY_VICTORIAMETRICS_PASSWORD"
 ```
 
 or `-remoteWrite.basicAuth.username=vmagent -remoteWrite.basicAuth.password=...`
-in place of the token. `-remoteWrite.maxBlockSize` is there because vmagent
-retries a 413 without end: its default block, 8 MiB before compression, is past
-the edge's 8,000,000-byte limit. Keep the block under
-`SMOLQUERY_INSERT_MAX_NDJSON_BYTES`, or raise that.
+in place of the token.
+`-remoteWrite.maxBlockSize` is not needed: its default, 8 MiB before
+compression, is a quarter of the edge's decoded bound
+(`SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES`, 32 MiB), and a compressed block
+is far below the 8,000,000 bytes a body may be as sent. That matters, because
+vmagent drops a block only on a 400, 409 or 415 and retries every other refusal
+forever, with its queue stuck behind the block.
 
 **Prometheus.**
 
@@ -98,24 +100,28 @@ exporters:
 What the edge does with a request:
 
 - **Protocols.** VictoriaMetrics' own, which vmagent sends by default: `Content-Encoding: zstd`. Prometheus remote write 1.0: `Content-Encoding: snappy`, what Prometheus and the collector send. A body with no encoding is read as it is. Both are decoded in the node with no new dependency.
-- **Refused protocols.** Remote write 2.0 (`Content-Type: application/x-protobuf;proto=io.prometheus.write.v2.Request`) is a 415, so a 2.0 sender falls back to 1.0 as the specification says it must. So is any content type but `application/x-protobuf`, and any encoding but `zstd`, `snappy` or none.
-- **Body limits.** The body as sent, and what it declares it inflates to, are each held to `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` (8,000,000), the API's insert limit. The declared size is checked before anything is decompressed, so a small body cannot expand into a large one. The edge keeps its own in-flight counter, sized as the API's is by `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES`.
+- **Refused protocols.** Remote write 2.0 (`Content-Type: application/x-protobuf;proto=io.prometheus.write.v2.Request`) is a 415, so a 2.0 sender falls back to 1.0 as the specification says it must. So is any other `proto` than none or `prometheus.WriteRequest`, any content type but `application/x-protobuf`, and any encoding but `zstd`, `snappy` or none.
+- **Body limits.** The body as sent is held to `SMOLQUERY_INSERT_MAX_NDJSON_BYTES` (8,000,000), the API's insert limit, and what it inflates to to `SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES` (32 MiB), four times vmagent's largest default block. The declared size is checked before anything is decompressed, so a small body cannot expand into a large one. A block past the decoded bound is a 400 that names it, as VictoriaMetrics answers its `-maxInsertRequestSize`, so vmagent drops it rather than stalling on it; the refusal is logged at warning with both sizes.
+- **In-flight bytes.** The edge keeps its own in-flight counter, sized as the API's is by `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES`. A write is counted at its size as sent before its body is read, then at that plus what it declares it inflates to before it is decompressed (the whole bound when a zstd frame declares no size). Decoded rows still take several times the protobuf, so leave the limit headroom.
+- **Labels.** A label with an empty value is dropped, as VictoriaMetrics drops it and PromQL reads it: absent. A series left with no `__name__`, or with a label name more than once (`__name__` included), is a 400 that names the series, as Prometheus refuses it.
 - **All or nothing.** A block is written whole or not at all.
-- **Once.** The block's SHA-256 is its batch id, so a vmagent retry after a lost answer is answered from the first commit, not written twice.
+- **Once.** The block's SHA-256 is its batch id, so a vmagent retry after a lost answer is answered from the first commit, not written twice. The `smolquery_victoriametrics_samples_total` counts are of what each request carried, so such a retry is counted again.
 - **NaN is dropped, ±Inf is clamped.** The row path cannot carry IEEE specials. A NaN sample, Prometheus' staleness marker included, is left out and counted (`result="nan"`). `+Inf` and `-Inf` are stored as the largest finite double and its negation, and answered as `+Inf` and `-Inf`.
 - **Not stored.** Native histograms, exemplars and metadata are counted and dropped.
 
 The answers, and what each client does with them. vmagent's behavior is its
-v1.152.0 source (`app/vmagent/remotewrite/client.go`):
+v1.152.0 source (`app/vmagent/remotewrite/client.go`): it drops a block only on a
+400, 409 or 415 and retries every other status forever, so a block no retry can
+fix is answered 400 or 415:
 
 | status | when | vmagent | Prometheus, the collector |
 |---|---|---|---|
 | 204 | written | next block | next block |
-| 400 | the body does not decode, a series has no `__name__`, or a timestamp is out of range | a zstd block is re-sent as snappy and vmagent switches to remote write 1.0 for good; a snappy block is dropped | dropped |
+| 400 | the body does not decode, it inflates past `SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES`, a series has no `__name__` or repeats a label name, or a timestamp is out of range | a zstd block is re-sent as snappy and vmagent switches to remote write 1.0 for good; a snappy block is dropped | dropped |
 | 401 | no or wrong password | retried with backoff | dropped |
-| 413 | past the body limit | **retried with backoff, forever** | dropped |
-| 415 | a content type, encoding or remote write 2.0 the edge does not read | as 400 | dropped |
-| 429 | the buffer is full, overloaded or at its backlog ceiling; `retry-after` | retried after `retry-after` | retried |
+| 413 | the body as sent is past `SMOLQUERY_INSERT_MAX_NDJSON_BYTES`; a compressed vmagent block never is | **retried with backoff, forever** | dropped |
+| 415 | a content type, `proto`, encoding or remote write 2.0 the edge does not read | as 400 | dropped |
+| 429 | the edge's in-flight bytes are taken, or the buffer is full, overloaded or at its backlog ceiling; `retry-after` | retried after `retry-after` | retried |
 | 500 | the table refused a row; nothing was written | retried | retried |
 | 503 | the ingest or buffer service is unreachable, ownership is moving, or the catalog did not answer; `retry-after` | retried after `retry-after` | retried |
 

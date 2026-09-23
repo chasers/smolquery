@@ -64,10 +64,17 @@ defmodule SmolqueryClickHouse.Insert do
          {:ok, format} <- format(insert.format),
          settings = Map.merge(conn.query_params, insert.settings),
          {:ok, opts} <- insert_opts(insert, settings, runtime),
-         {:ok, body, read} <- Body.read(conn, runtime.max_ndjson_bytes),
-         {:ok, result} <- insert(runtime, table_ref(conn, insert), body, format, opts) do
-      summary(read, result, byte_size(body))
+         {:ok, body, read} <- Body.read(conn, runtime.max_ndjson_bytes) do
+      write(read, runtime, table_ref(conn, insert), body, format, opts)
     else
+      {:error, :too_large, read} -> Errors.send_exception(read, describe(:too_large, runtime))
+      {:error, reason} -> Errors.send_exception(conn, describe(reason, runtime))
+    end
+  end
+
+  defp write(conn, runtime, table_ref, body, format, opts) do
+    case insert(runtime, table_ref, body, format, opts) do
+      {:ok, result} -> summary(conn, result, byte_size(body))
       {:error, reason} -> Errors.send_exception(conn, describe(reason, runtime))
     end
   end

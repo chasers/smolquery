@@ -93,17 +93,25 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   """
   @spec call(Plug.Conn.t(), Runtime.t(), route()) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, route) do
+    case Params.read(conn) do
+      {:ok, pairs, conn} -> respond(conn, runtime, route, pairs)
+      {:error, reason, conn} -> refuse(conn, reason)
+    end
+  end
+
+  defp respond(conn, runtime, route, pairs) do
     with {:ok, route} <- label_name(route),
-         {:ok, pairs, conn} <- Params.read(conn),
          {:ok, request} <- request(route, pairs, now_ms()),
          {:ok, data} <- answer(route, runtime, request) do
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(200, Response.data(data))
     else
-      {:error, reason} -> Errors.send_error(conn, Query.failure(reason))
+      {:error, reason} -> refuse(conn, reason)
     end
   end
+
+  defp refuse(conn, reason), do: Errors.send_error(conn, Query.failure(reason))
 
   @doc """
   The arguments of a request to `route` from its `pairs`, with `now_ms` as

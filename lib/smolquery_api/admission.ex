@@ -26,8 +26,12 @@ defmodule SmolqueryApi.Admission do
 
   The counter releases when the response is sent, and a monitor on the
   request process releases on crash, so an abandoned request cannot leak its
-  reservation. The server is one process per edge instance; two calls per
-  request is noise next to a multi-megabyte body.
+  reservation. A route that learns more about the body once it is read, as a
+  compressed remote write learns what it inflates to, calls `resize/2` to hold
+  the reservation to what the request will really keep resident.
+
+  The server is one process per edge instance; two or three calls per request
+  are noise next to a multi-megabyte body.
 
   A request dispatched for an instance with no admission server passes
   uncounted. In production the server starts under its edge's supervisor
@@ -43,6 +47,8 @@ defmodule SmolqueryApi.Admission do
 
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Runtime
+
+  @private :smolquery_api_admission
 
   @doc """
   Starts an admission server.
@@ -117,7 +123,9 @@ defmodule SmolqueryApi.Admission do
 
       {:ok, reservation} ->
         {:ok,
-         Plug.Conn.register_before_send(conn, fn conn ->
+         conn
+         |> Plug.Conn.put_private(@private, {server, reservation})
+         |> Plug.Conn.register_before_send(fn conn ->
            release(server, reservation)
            conn
          end)}
@@ -127,11 +135,28 @@ defmodule SmolqueryApi.Admission do
     end
   end
 
-  defp admit(server, bytes) do
-    GenServer.call(server, {:admit, bytes, self()})
+  defp admit(server, bytes), do: call(server, {:admit, bytes, self()}, :no_server)
+
+  defp call(server, request, no_server) do
+    GenServer.call(server, request)
   catch
-    :exit, _reason -> :no_server
+    :exit, _reason -> no_server
   end
+
+  @doc """
+  Holds `conn`'s reservation to `bytes` from now on, larger or smaller.
+
+  Admitted by the rule `admit_body/3` follows, with this request's own
+  reservation left out of the count: a request alone on the counter is
+  resized whatever it asks, so a request is never refused by its own bytes.
+  A refusal keeps the reservation as it was. A conn with no reservation,
+  admitted uncounted, is resized uncounted.
+  """
+  @spec resize(Plug.Conn.t(), non_neg_integer()) :: :ok | {:error, :admission_full}
+  def resize(%Plug.Conn{private: %{@private => {server, reservation}}}, bytes),
+    do: call(server, {:resize, reservation, bytes}, :ok)
+
+  def resize(%Plug.Conn{}, _bytes), do: :ok
 
   @doc """
   Releases an admitted reservation.
@@ -186,6 +211,13 @@ defmodule SmolqueryApi.Admission do
     end
   end
 
+  def handle_call({:resize, reservation, bytes}, _from, state) do
+    case Map.fetch(state.reservations, reservation) do
+      {:ok, held} -> resized(state, reservation, held, bytes)
+      :error -> {:reply, :ok, state}
+    end
+  end
+
   def handle_call(:in_flight, _from, state), do: {:reply, state.in_flight, state}
 
   @impl GenServer
@@ -200,6 +232,21 @@ defmodule SmolqueryApi.Admission do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp resized(state, reservation, held, bytes) do
+    others = state.in_flight - held
+
+    if others > 0 and others + bytes > state.limit do
+      {:reply, {:error, :admission_full}, state}
+    else
+      {:reply, :ok,
+       %{
+         state
+         | in_flight: others + bytes,
+           reservations: Map.put(state.reservations, reservation, bytes)
+       }}
+    end
+  end
 
   defp drop(state, reservation) do
     case Map.pop(state.reservations, reservation) do

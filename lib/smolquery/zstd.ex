@@ -46,16 +46,23 @@ defmodule Smolquery.Zstd do
   Decodes `body`, one or more zstd frames, to at most `max_bytes` bytes.
   """
   @spec decode(binary(), max_bytes: non_neg_integer()) :: {:ok, binary()} | {:error, error()}
-  def decode(<<>>, _opts), do: invalid("the body is empty")
-
   def decode(body, opts) when is_binary(body) do
     max = Keyword.fetch!(opts, :max_bytes)
 
-    with {:ok, declared} <- frames(body, 0),
+    with {:ok, declared} <- declared_length(body),
          :ok <- within(declared, max) do
       inflate(body, max)
     end
   end
+
+  @doc """
+  The uncompressed size `body`'s frames declare, summed, read from the frame
+  headers without inflating anything; `:unknown` when a frame declares no
+  content size. The body must be whole, well-formed frames.
+  """
+  @spec declared_length(binary()) :: {:ok, non_neg_integer() | :unknown} | {:error, error()}
+  def declared_length(<<>>), do: invalid("the body is empty")
+  def declared_length(body) when is_binary(body), do: frames(body, 0)
 
   defp within(declared, max) when is_integer(declared) and declared > max,
     do: {:error, {:too_large, declared, max}}

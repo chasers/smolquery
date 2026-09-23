@@ -81,10 +81,17 @@ defmodule SmolqueryVictoriaMetrics.Query do
   @spec call(Plug.Conn.t(), Runtime.t(), :instant | :range) :: Plug.Conn.t()
   def call(conn, %Runtime{} = runtime, kind) do
     started = System.monotonic_time(:microsecond)
+
+    case Params.read(conn) do
+      {:ok, pairs, conn} -> run(conn, runtime, kind, Params.values(pairs), started)
+      {:error, reason, conn} -> refuse(conn, reason)
+    end
+  end
+
+  defp run(conn, runtime, kind, params, started) do
     fetch_us = :counters.new(1, [:write_concurrency])
 
-    with {:ok, params, conn} <- params(conn),
-         {:ok, query} <- query(params),
+    with {:ok, query} <- query(params),
          {:ok, grid} <- grid(kind, params, now_ms()),
          {:ok, timeout} <- bad_data(Params.duration(params, "timeout", nil)),
          {:ok, expr} <- parse(query) do
@@ -99,10 +106,6 @@ defmodule SmolqueryVictoriaMetrics.Query do
     else
       {:error, reason} -> refuse(conn, reason)
     end
-  end
-
-  defp params(conn) do
-    with {:ok, pairs, conn} <- Params.read(conn), do: {:ok, Params.values(pairs), conn}
   end
 
   defp query(%{"query" => query}) when query != "", do: {:ok, query}

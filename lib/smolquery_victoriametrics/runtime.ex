@@ -18,7 +18,8 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         lookback_ms: 300_000,
         max_series: 10_000,
         max_samples: 20_000_000,
-        max_points_per_series: 30_000
+        max_points_per_series: 30_000,
+        max_decoded_bytes: 33_554_432
 
   `password` is what every client must present, as a `Bearer` token or HTTP
   basic auth (`SmolqueryVictoriaMetrics.Auth`). It defaults to the API key
@@ -55,6 +56,13 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   own `SmolqueryApi.Admission` counter admits at once, derived as
   `SmolqueryApi.Runtime.insert_max_in_flight_bytes/2` derives the API's.
 
+  `max_decoded_bytes` is the most a remote write block may inflate to
+  (`SMOLQUERY_VICTORIAMETRICS_MAX_DECODED_BYTES`, `33_554_432`, 32 MiB): four
+  times vmagent v1.152.0's largest block, `-remoteWrite.maxBlockSize` 8 MiB of
+  uncompressed protobuf, so its default blocks are always read. A block past
+  it is a 400, which vmagent drops rather than retries
+  (`SmolqueryVictoriaMetrics.Write`).
+
   `catalog` is what the edge creates its table through: a `Smolquery.Catalog`
   given outright, or the options of a lake the edge reads through its own
   engine, as the ClickHouse edge's is.
@@ -78,6 +86,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     ingest_name: Smolquery.IngestService,
     query_name: Smolquery.QueryService,
     max_ndjson_bytes: 8_000_000,
+    max_decoded_bytes: 33_554_432,
     insert_max_in_flight_bytes: nil,
     lookback_ms: 300_000,
     max_series: 10_000,
@@ -96,6 +105,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           ingest_name: atom(),
           query_name: atom(),
           max_ndjson_bytes: pos_integer(),
+          max_decoded_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil,
           lookback_ms: pos_integer(),
           max_series: pos_integer(),
@@ -152,6 +162,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         :max_series,
         :max_samples,
         :max_points_per_series,
+        :max_decoded_bytes,
         :ip,
         :port | @api_defaults
       ])

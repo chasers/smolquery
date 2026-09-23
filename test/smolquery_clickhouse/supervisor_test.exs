@@ -1,6 +1,7 @@
 defmodule SmolqueryClickHouse.SupervisorTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Test.RawHttp
   alias SmolqueryApi.Admission
   alias SmolqueryClickHouse.Runtime
 
@@ -51,6 +52,21 @@ defmodule SmolqueryClickHouse.SupervisorTest do
 
     assert response.status != 414
     assert [_code] = Req.Response.get_header(response, "x-clickhouse-exception-code")
+  end
+
+  test "answers an oversized insert and the next request on the same connection promptly" do
+    {_name, base} = start_edge(max_ndjson_bytes: 100_000)
+    socket = base |> URI.parse() |> Map.fetch!(:port) |> RawHttp.connect()
+    path = "/?query=INSERT%20INTO%20logs.events%20FORMAT%20RowBinary"
+    headers = [{"x-clickhouse-key", @password}]
+
+    assert {413, _body} =
+             RawHttp.request(socket, "POST", path, headers, :binary.copy(<<0>>, 300_000))
+
+    assert {status, _body} =
+             RawHttp.request(socket, "POST", path, headers, :binary.copy(<<0>>, 50_000))
+
+    assert status >= 400
   end
 
   test "starts the edge's own admission counter" do

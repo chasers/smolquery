@@ -49,6 +49,13 @@ defmodule SmolqueryVictoriaMetrics.RemoteWriteTest do
       assert RemoteWrite.decode(<<>>) == {:ok, %{timeseries: [], dropped: @none}}
     end
 
+    test "a second __name__ stays among the labels, for the writer to refuse" do
+      protobuf = series([label("__name__", "up"), label("__name__", "down"), label("a", "1")])
+
+      assert {:ok, %{timeseries: [%{name: "up", labels: [{"__name__", "down"}, {"a", "1"}]}]}} =
+               RemoteWrite.decode(protobuf)
+    end
+
     test "a series takes its name from __name__ and keeps the other labels in order" do
       body =
         series([
@@ -162,6 +169,19 @@ defmodule SmolqueryVictoriaMetrics.RemoteWriteTest do
         assert {:error, {:invalid_write_request, message}} = RemoteWrite.decode(body)
         assert message =~ fragment
       end
+    end
+  end
+
+  describe "declared_length/2" do
+    test "reads what a body declares it inflates to, per encoding" do
+      assert RemoteWrite.declared_length(snappy_literal("abc"), :snappy) == {:ok, 3}
+      assert RemoteWrite.declared_length("abcd", :identity) == {:ok, 4}
+
+      zstd = fixture("write_zstd.bin")
+      {:ok, %{frameContentSize: declared}} = :zstd.get_frame_header(zstd)
+      assert RemoteWrite.declared_length(zstd, :zstd) == {:ok, declared}
+
+      assert {:error, {:invalid_snappy, _message}} = RemoteWrite.declared_length(<<>>, :snappy)
     end
   end
 

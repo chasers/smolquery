@@ -36,15 +36,18 @@ defmodule SmolqueryVictoriaMetrics.Params do
 
   @doc """
   Every argument of `conn`: a form-encoded `POST` body's pairs, then the
-  URL's, each in the order sent. A body past 1 MiB is refused.
+  URL's, each in the order sent. A body past 1 MiB is refused, with the
+  conn as far as it was read, which is the conn the refusal must be sent on
+  (`SmolqueryApi.Body`).
   """
-  @spec read(Plug.Conn.t()) :: {:ok, pairs(), Plug.Conn.t()} | {:error, {:bad_data, String.t()}}
+  @spec read(Plug.Conn.t()) ::
+          {:ok, pairs(), Plug.Conn.t()} | {:error, {:bad_data, String.t()}, Plug.Conn.t()}
   def read(conn) do
     url = conn.query_string |> URI.query_decoder() |> Enum.to_list()
 
     case form(conn) do
       {:ok, form, conn} -> {:ok, form ++ url, conn}
-      {:error, :too_large} -> {:error, {:bad_data, "the request body is too large"}}
+      {:error, :too_large, conn} -> {:error, {:bad_data, "the request body is too large"}, conn}
     end
   end
 

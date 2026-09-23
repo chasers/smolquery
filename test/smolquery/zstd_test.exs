@@ -107,4 +107,14 @@ defmodule Smolquery.ZstdTest do
     assert Zstd.decode(body, max_bytes: declared - 1) ==
              {:error, {:too_large, declared, declared - 1}}
   end
+
+  test "declared_length/1 sums the frames' content sizes without inflating" do
+    body = File.read!(@fixture)
+    assert {:ok, %{frameContentSize: declared}} = :zstd.get_frame_header(body)
+
+    assert Zstd.declared_length(body) == {:ok, declared}
+    assert Zstd.declared_length(body <> body) == {:ok, 2 * declared}
+    assert {:error, {:invalid_zstd, _message}} = Zstd.declared_length("junk")
+    assert {:error, {:invalid_zstd, _message}} = Zstd.declared_length(<<>>)
+  end
 end

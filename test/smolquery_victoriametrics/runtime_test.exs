@@ -28,6 +28,7 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
     assert runtime.max_series == 10_000
     assert runtime.max_samples == 20_000_000
     assert runtime.max_points_per_series == 30_000
+    assert runtime.max_decoded_bytes == 33_554_432
     assert runtime.ingest_name == Smolquery.IngestService
     assert runtime.query_name == Smolquery.QueryService
     assert runtime.catalog_opts == []
@@ -39,6 +40,10 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
 
     assert {runtime.max_series, runtime.max_samples, runtime.max_points_per_series} ==
              {5, 50, 500}
+  end
+
+  test "takes the decoded-body bound" do
+    assert Runtime.new(password: "given", max_decoded_bytes: 1_024).max_decoded_bytes == 1_024
   end
 
   test "the password defaults to the API key" do
