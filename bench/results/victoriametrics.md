@@ -28,7 +28,9 @@ Load — 1000 series of m over 6 h at 15 s
 ```
 
 Each request is 1,000 series of 10 samples, snappy framed, 10,000 samples as
-vmagent's default block. About 350,000 samples a second with eight writers,
+vmagent's default block. The framing is one literal chunk, no compression:
+the decoder copies it out with no back-references, so a real vmagent's zstd
+or compressed snappy block costs more to decode than this measures. About 350,000 samples a second with eight writers,
 and no slower with 2.4 million samples already in the hot tier. The p99 of
 the first round is the table's first commits. No request was refused.
 

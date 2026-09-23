@@ -126,11 +126,28 @@ defmodule SmolqueryVictoriaMetrics.MetadataTest do
       end
     end
 
-    test "anything else is bad data" do
-      for name <- ["1job", "job-name", "", "a.b", "%C3%A9"] do
-        assert {:error, {:bad_data, "invalid label name " <> _quoted}} =
-                 Metadata.label_name({:label_values, name}),
-               name
+    test "any UTF-8 name is taken, percent-decoded, as VictoriaMetrics takes it" do
+      for {segment, name} <- [
+            {"http.method", "http.method"},
+            {"job-name", "job-name"},
+            {"1job", "1job"},
+            {"%C3%A9", "é"},
+            {"a%2Fb", "a/b"},
+            {"%F0%9F%98%80", "😀"}
+          ] do
+        assert Metadata.label_name({:label_values, segment}) == {:ok, {:label_values, name}},
+               segment
+      end
+    end
+
+    test "an empty name, a malformed escape, or bytes that are not UTF-8 are bad data" do
+      assert Metadata.label_name({:label_values, ""}) ==
+               {:error, {:bad_data, "missing label name"}}
+
+      for segment <- ["%FF", "%C3", "%G1", "abc%"] do
+        assert {:error, {:bad_data, "invalid label name " <> _why}} =
+                 Metadata.label_name({:label_values, segment}),
+               segment
       end
     end
   end
@@ -213,9 +230,17 @@ defmodule SmolqueryVictoriaMetrics.MetadataTest do
                ["http_requests_total", "up"]
     end
 
-    test "an invalid label name is 400", %{stack: stack} do
-      assert %{"errorType" => "bad_data", "error" => "invalid label name \"job-name\""} =
-               error(get(stack, "/api/v1/label/job-name/values", []), 400)
+    test "a label name that is not UTF-8 is 400; a dotted one is answered", %{stack: stack} do
+      assert %{"errorType" => "bad_data", "error" => "invalid label name \"%FF\": not UTF-8"} =
+               error(get(stack, "/api/v1/label/%FF/values", []), 400)
+
+      :ok =
+        VictoriaMetricsStack.write(stack, [
+          {%{"__name__" => "otel", "http.method" => "GET"}, [{@t0_ms, 1.0}]}
+        ])
+
+      assert data(get(stack, "/api/v1/label/http.method/values", [])) == ["GET"]
+      assert data(get(stack, "/api/v1/label/U__http_2e_method/values", [])) == ["GET"]
     end
 
     test "/api/v1/series for one matcher and for two, sorted, __name__ first", %{stack: stack} do

@@ -70,8 +70,8 @@ defmodule SmolqueryVictoriaMetrics.Query do
   from production numbers, and how long it took. `fetch_us` is the time
   spent in `SmolqueryVictoriaMetrics.Samples.select/4`, summed over the
   query's selectors: the grouped query and copying its lists into the
-  node. The rest of `duration_us` is parsing, the rollup sweep, evaluation
-  and rendering the JSON.
+  node. The rest of `duration_us` is parsing, the rollup sweep and
+  evaluation; rendering the JSON comes after it and is not counted.
   """
 
   import Plug.Conn

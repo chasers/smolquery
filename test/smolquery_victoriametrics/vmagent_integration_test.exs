@@ -6,8 +6,10 @@ defmodule SmolqueryVictoriaMetrics.VmagentIntegrationTest do
 
   The binary is downloaded from the VictoriaMetrics release for this
   machine's architecture, checked against the release's checksums, and
-  kept in `~/.cache/smolquery/vmagent/v1.152.0/`. A download or checksum
-  failure fails the test: it is not skipped.
+  kept in `~/.cache/smolquery/vmagent/v1.152.0/`, which CI caches under a
+  key naming the same version (`.github/workflows/ci.yml`): a version bump
+  here bumps it there. A download or checksum failure fails the test: it is
+  not skipped.
   """
 
   use ExUnit.Case, async: false
@@ -162,7 +164,9 @@ defmodule SmolqueryVictoriaMetrics.VmagentIntegrationTest do
   end
 
   defp wait_until_up!(edge, agent) do
-    up? = fn -> match?([%{"value" => [_time, "1"]}], vector(edge, ~s|up{job="vmagent"}|)) end
+    up? = fn ->
+      match?({:ok, [%{"value" => [_time, "1"]}]}, try_vector(edge, ~s|up{job="vmagent"}|))
+    end
 
     assert Eventually.until(up?, 60, 500),
            "up{job=\"vmagent\"} did not answer 1 within 30 seconds; vmagent said:\n" <>
@@ -170,9 +174,26 @@ defmodule SmolqueryVictoriaMetrics.VmagentIntegrationTest do
   end
 
   defp scrapes(edge) do
-    case vector(edge, ~s|count_over_time(up{job="vmagent"}[1m])|) do
-      [%{"value" => [_time, count]}] -> String.to_integer(count)
-      _none -> 0
+    case try_vector(edge, ~s|count_over_time(up{job="vmagent"}[1m])|) do
+      {:ok, [%{"value" => [_time, count]}]} -> String.to_integer(count)
+      _none_yet -> 0
+    end
+  end
+
+  defp try_vector(edge, query) do
+    response =
+      Req.get!(edge <> "/api/v1/query",
+        params: %{"query" => query},
+        auth: {:bearer, VictoriaMetricsStack.password()},
+        retry: false
+      )
+
+    case response do
+      %{status: 200, body: %{"data" => %{"resultType" => "vector", "result" => result}}} ->
+        {:ok, result}
+
+      _not_yet ->
+        :error
     end
   end
 

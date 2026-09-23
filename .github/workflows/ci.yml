@@ -110,6 +110,14 @@ jobs:
           path: ~/.duckdb
           key: duckdb-${{ runner.os }}-${{ hashFiles('mix.lock') }}
 
+      # The vmagent integration test downloads a 143 MB release tarball into
+      # this directory; the key names the version the test pins (@version).
+      - name: Cache the vmagent release
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/smolquery/vmagent
+          key: vmagent-${{ runner.os }}-${{ runner.arch }}-v1.152.0
+
       - run: mix deps.get
       - name: Start epmd for the two-node gen_rpc tests
         run: epmd -daemon

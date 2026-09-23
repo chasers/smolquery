@@ -346,7 +346,16 @@ defmodule Bench.VictoriaMetrics do
     end
   end
 
-  defp median(values), do: values |> Enum.sort() |> Enum.at(div(length(values), 2))
+  defp median(values) do
+    sorted = Enum.sort(values)
+    count = length(sorted)
+    middle = div(count, 2)
+
+    case {rem(count, 2), Enum.at(sorted, middle - 1), Enum.at(sorted, middle)} do
+      {0, low, high} when is_number(low) and is_number(high) and low != high -> (low + high) / 2
+      {_parity, _low, high} -> high
+    end
+  end
 
   defp opt_ms(nil), do: ""
   defp opt_ms(us), do: ms(us)

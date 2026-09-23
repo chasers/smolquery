@@ -314,10 +314,12 @@ defmodule Smolquery.Telemetry do
         "per query against SMOLQUERY_VICTORIAMETRICS_MAX_SERIES.",
     "smolquery_victoriametrics_query_samples_total" =>
       "Raw samples the VictoriaMetrics edge's queries read into the node to compute rollups " <>
-        "(PL-70); per query against SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES.",
+        "(PL-70); per query against SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY.",
     "smolquery_victoriametrics_query_microseconds_total" =>
-      "Time the VictoriaMetrics edge's answered queries spent, by phase: fetch, reading raw " <>
-        "samples by SQL, and evaluate, the rollup sweep and evaluation in the node (T-567).",
+      "Time the VictoriaMetrics edge's answered queries spent, by phase: fetch, each " <>
+        "selector's grouped query and copying its samples into the node, and evaluate, " <>
+        "parsing, the rollup sweep and evaluation in the node; rendering the JSON answer " <>
+        "is in neither (T-567).",
     "smolquery_ingest_rows_accepted_total" => "Rows the ingest edge accepted and forwarded.",
     "smolquery_ingest_rows_rejected_total" => "Rows the ingest edge rejected in validation.",
     "smolquery_buffer_commits_total" => "Group commits, by result.",

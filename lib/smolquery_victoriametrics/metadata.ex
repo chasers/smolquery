@@ -39,10 +39,14 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   metric name and then the labels in name order, and each series is written
   `__name__` first, as VictoriaMetrics writes it.
 
-  A label name in the path must be a Prometheus label name,
-  `[a-zA-Z_][a-zA-Z0-9_]*`. One spelled `U__...` is unescaped as the UTF-8
-  escaping of Prometheus' proposal 0028 defines, as VictoriaMetrics does,
-  so a label whose name is not a legacy one can still be asked for.
+  A label name in the path is percent-decoded, as Go's `URL.Path` is, and
+  may be any UTF-8 text: VictoriaMetrics' `LabelValuesHandler` does not
+  check it, Prometheus 3 accepts any UTF-8 name, and the write path stores
+  any (vmagent's OpenTelemetry path keeps `http.method`). It is bound as a
+  parameter, never written into the SQL. One spelled `U__...` is unescaped
+  as the UTF-8 escaping of Prometheus' proposal 0028 defines, as
+  VictoriaMetrics does. An empty name, a malformed percent escape, or bytes
+  that are not UTF-8 are a 400.
 
   ## Cost
 
@@ -76,8 +80,8 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   alias SmolqueryVictoriaMetrics.Samples
 
   @default_range_ms 300_000
-  @label_name ~r/\A[a-zA-Z_][a-zA-Z0-9_]*\z/
   @hex ~r/\A[0-9a-fA-F]{1,6}\z/
+  @malformed_escape ~r/%(?![0-9a-fA-F]{2})/
 
   @typedoc "Which of the three routes: label names, one label's values, or series."
   @type route :: :labels | {:label_values, String.t()} | :series
@@ -204,24 +208,36 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   end
 
   @doc """
-  A label name from a request's path, checked and unescaped: `U__` names are
-  Prometheus' UTF-8 escaping, `_2e_` a code point in hex and `__` an
-  underscore; one that does not unescape is taken as it is, as
-  VictoriaMetrics takes it.
+  A label name from a request's path segment, percent-decoded and
+  unescaped: any UTF-8 name is taken; `U__` names are Prometheus' UTF-8
+  escaping, `_2e_` a code point in hex and `__` an underscore, and one that
+  does not unescape is taken as it is, as VictoriaMetrics takes it.
 
       iex> SmolqueryVictoriaMetrics.Metadata.label_name({:label_values, "U__http_2e_method"})
       {:ok, {:label_values, "http.method"}}
-      iex> SmolqueryVictoriaMetrics.Metadata.label_name({:label_values, "job-name"})
-      {:error, {:bad_data, "invalid label name \\"job-name\\""}}
+      iex> SmolqueryVictoriaMetrics.Metadata.label_name({:label_values, "http.method"})
+      {:ok, {:label_values, "http.method"}}
+      iex> SmolqueryVictoriaMetrics.Metadata.label_name({:label_values, "%FF"})
+      {:error, {:bad_data, "invalid label name \\"%FF\\": not UTF-8"}}
   """
   @spec label_name(route()) :: {:ok, route()} | {:error, {:bad_data, String.t()}}
-  def label_name({:label_values, name}) do
-    if Regex.match?(@label_name, name),
-      do: {:ok, {:label_values, unescape(name)}},
-      else: {:error, {:bad_data, "invalid label name #{inspect(name)}"}}
+  def label_name({:label_values, segment}) do
+    case decode(segment) do
+      {:ok, ""} -> {:error, {:bad_data, "missing label name"}}
+      {:ok, name} -> {:ok, {:label_values, unescape(name)}}
+      {:error, why} -> {:error, {:bad_data, "invalid label name #{inspect(segment)}: #{why}"}}
+    end
   end
 
   def label_name(route), do: {:ok, route}
+
+  defp decode(segment) do
+    cond do
+      Regex.match?(@malformed_escape, segment) -> {:error, "malformed percent escape"}
+      String.valid?(URI.decode(segment)) -> {:ok, URI.decode(segment)}
+      true -> {:error, "not UTF-8"}
+    end
+  end
 
   defp unescape("U__" <> escaped = name) do
     case unescape(escaped, []) do

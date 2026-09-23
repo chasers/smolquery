@@ -174,8 +174,8 @@ defmodule SmolqueryVictoriaMetrics.RouterTest do
     end
   end
 
-  test "an invalid label name is 400 before anything is read", %{name: name} do
-    response = conn(:get, "/api/v1/label/job-name/values") |> authed() |> request(name)
+  test "a label name that is not UTF-8 is 400 before anything is read", %{name: name} do
+    response = conn(:get, "/api/v1/label/%FF/values") |> authed() |> request(name)
 
     assert response.status == 400
     assert %{"errorType" => "bad_data"} = JSON.decode!(response.resp_body)
