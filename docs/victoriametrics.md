@@ -183,7 +183,7 @@ ported from v1.152.0's `app/vmselect/promql`:
 
 - **Rollups.** `rate` and `increase` do not extrapolate: they take the last sample in the window against the sample before the window, which counts. Counter resets are removed from the whole series first.
 - **An omitted window.** `rate(m)` takes the step, widened by the series' scrape interval for the functions VictoriaMetrics widens (`getScrapeInterval`, `getMaxPrevInterval`).
-- **The lookback.** A bare selector is `default_rollup`: the last sample in `max(step, lookback)`. The lookback is `SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS`, 5 minutes by default.
+- **The lookback.** A bare selector is `default_rollup`: the last sample in `max(step, lookback)`. The lookback is `SMOLQUERY_VICTORIAMETRICS_LOOKBACK_MS`, 5 minutes by default. Inside a subquery, `default_rollup` over the inner points takes the window written (none when none is) and widens it past the step only to the gap it expects between two points (`maxPrevInterval`), as VictoriaMetrics does; the lookback plays no part there.
 - **`keep_metric_names`.** Rollups and transforms drop `__name__`, as VictoriaMetrics does, unless the call says `keep_metric_names`. An aggregate keeps only its `by` labels.
 - **Values.** A value is a string, as Go's `FormatFloat(v, 'f', -1, 64)` writes it. An instant `m[5m]` answers the raw samples. A scalar is a series with no labels.
 - **Selectors.** `name = ` prunes to that metric's files. A selector with no non-empty matcher, `{}` included, is refused before any SQL runs. `{a="1" or b="2"}` filter sets are read. A metric the table does not have, or a table not created yet, answers empty.
@@ -215,7 +215,6 @@ count in `smolquery_victoriametrics_request_microseconds_bucket{le="+Inf"}`.
 - **Scalars.** An instant query of a scalar expression answers `resultType` `scalar`. VictoriaMetrics answers a one-point vector; Grafana's connection test reads either.
 - **Errors.** A query that does not parse is a 422 here, a 400 in VictoriaMetrics. `errorType` is Prometheus' word (`bad_data`, `execution`, `timeout`, `unavailable`) where VictoriaMetrics writes the status code. A job that failed for the node's reasons, not the query's (an engine that died or ran out of memory, a disk or connection error, an unreachable worker or buffer node), is a 503 `unavailable` with `retry-after`, which Grafana and vmalert retry.
 - **Regular expressions.** Selectors match in DuckDB, which is RE2, as VictoriaMetrics is. The `label_*` functions match in the node, which is PCRE; the common syntax is the same.
-- **`default_rollup` in a subquery** keeps the `max(step, lookback)` window of a bare selector.
 - **Not read:** `WITH` templates; remote write 2.0; native histograms and exemplars (dropped and counted); staleness markers, so a series ends when the lookback passes it, not at the marker; the `extra_label` and `extra_filters[]` query arguments; `/api/v1/status/tsdb`, which would be a day-long scan here; `/api/v1/import` and `/api/v1/export`.
 
 ## What it costs

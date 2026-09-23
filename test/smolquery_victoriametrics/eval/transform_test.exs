@@ -76,6 +76,8 @@ defmodule SmolqueryVictoriaMetrics.Eval.TransformTest do
     assert Transform.round_to(2.5, 1.0) == 3.0
     assert Transform.round_to(123.456, 10.0) == 120.0
     assert Transform.round_to(1.0, 0.0) == nil
+    assert Transform.round_to(5.0, 1.0e-320) == nil
+    assert Transform.round_to(0.0, 1.0e-320) == nil
     assert Transform.decimal_exponent(0.01) == -2
     assert Transform.decimal_exponent(1.0) == 0
     assert Transform.decimal_exponent(100.0) == 2

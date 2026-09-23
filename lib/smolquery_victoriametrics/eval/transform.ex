@@ -354,7 +354,7 @@ defmodule SmolqueryVictoriaMetrics.Eval.Transform do
   def round_to(_v, nil), do: nil
 
   def round_to(v, nearest) do
-    p10 = :math.pow(10, -decimal_exponent(nearest))
+    p10 = Value.pow(10.0, :erlang.float(-decimal_exponent(nearest)))
     shifted = Value.add(v, 0.5 * copysign(nearest, v))
 
     case Value.sub(shifted, Value.mod(shifted, nearest)) do

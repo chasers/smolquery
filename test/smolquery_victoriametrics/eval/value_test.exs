@@ -57,6 +57,13 @@ defmodule SmolqueryVictoriaMetrics.Eval.ValueTest do
       assert Value.divide(0.0, 0.0) == nil
     end
 
+    test "division by a negative zero is the infinity of the other sign, as in Go" do
+      assert Value.divide(1.0, -0.0) == -@inf
+      assert Value.divide(-1.0, -0.0) == @inf
+      assert Value.divide(@inf, -0.0) == -@inf
+      assert Value.divide(-0.0, -0.0) == nil
+    end
+
     test "mod/2 keeps the sign of the dividend, and is nil by zero" do
       assert Value.mod(5.0, 3.0) == 2.0
       assert Value.mod(-5.0, 3.0) == -2.0
@@ -105,6 +112,8 @@ defmodule SmolqueryVictoriaMetrics.Eval.ValueTest do
     assert Value.quantile_sorted(0.25, [0.0, 4.0]) == 1.0
     assert Value.stdvar([1.0, 3.0, nil]) == 1.0
     assert Value.stdvar([nil]) == nil
+    assert Value.stdvar([0.0, 1.0e200]) == @inf
+    assert Value.stdvar([@inf, 1.0]) == nil
     assert Value.sqrt(-1.0) == nil
     assert Value.sqrt(@inf) == @inf
     assert Value.sqrt(4.0) == 2.0
@@ -138,6 +147,10 @@ defmodule SmolqueryVictoriaMetrics.Eval.ValueTest do
     assert Value.parse(".5") == 0.5
     assert Value.parse("+Inf") == @inf
     assert Value.parse("-inf") == -@inf
+    assert Value.parse("1.") == 1.0
+    assert Value.parse("-1.") == -1.0
+    assert Value.parse("1.e2") == 100.0
+    assert Value.parse("1..") == nil
     assert Value.parse("12abc") == nil
     assert Value.parse("") == nil
   end

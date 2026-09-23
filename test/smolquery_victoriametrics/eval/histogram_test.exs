@@ -81,6 +81,34 @@ defmodule SmolqueryVictoriaMetrics.Eval.HistogramTest do
     assert_in_delta stddev * stddev, stdvar, 1.0e-12
   end
 
+  test "a bucket bound past what n * n holds answers Go's infinity or NaN, not a raise" do
+    wide = fn pairs ->
+      for {le, count} <- pairs, do: series(%{"le" => le}, [count, count])
+    end
+
+    assert [{_labels, [@inf, @inf]}] =
+             run("histogram_stdvar", [
+               wide.([{"0.1", 1.0e6}, {"1e160", 1_000_001.0}, {"+Inf", 1_000_001.0}])
+             ])
+
+    assert [{_labels, [nil, nil]}] =
+             run("histogram_stdvar", [wide.([{"0.1", 2.0}, {"1e200", 6.0}, {"+Inf", 10.0}])])
+
+    assert [{_labels, [avg, avg]}] =
+             run("histogram_avg", [wide.([{"1e308", 2.0}, {"1.7e308", 4.0}, {"+Inf", 4.0}])])
+
+    assert is_float(avg)
+  end
+
+  test "a bucket bound written with a trailing point, 1., is read as Go reads it" do
+    input =
+      for {le, count} <- [{"1.", 2.0}, {"2.", 4.0}, {"+Inf", 4.0}],
+          do: series(%{"le" => le}, [count, count])
+
+    assert [{_labels, [q, q]}] = run("histogram_quantile", [scalar(0.5), input])
+    assert q == 1.0
+  end
+
   test "to_le/1 turns vmrange buckets into cumulative le buckets" do
     input = [
       series(%{"vmrange" => "0.1...0.2", "x" => "y"}, [1.0, 0.0]),

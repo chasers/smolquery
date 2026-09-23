@@ -364,11 +364,11 @@ defmodule SmolqueryVictoriaMetrics.Eval.Histogram do
       |> Enum.reject(fn {le, _v} -> Value.inf?(le) end)
       |> Enum.reduce({{0.0, 0.0, 0.0}, 0.0, 0.0}, fn {le, v},
                                                      {{sum, sum2, total}, le_prev, v_prev} ->
-        n = (le + le_prev) / 2
+        n = Value.divide(Value.add(le, le_prev), 2.0)
         weight = Value.sub(v, v_prev)
 
-        {{Value.add(sum, Value.mul(n, weight)), Value.add(sum2, Value.mul(n * n, weight)),
-          Value.add(total, weight)}, le, v}
+        {{Value.add(sum, Value.mul(n, weight)),
+          Value.add(sum2, Value.mul(Value.mul(n, n), weight)), Value.add(total, weight)}, le, v}
       end)
       |> elem(0)
 

@@ -3,6 +3,7 @@ defmodule SmolqueryVictoriaMetrics.Eval.AggregateTest do
 
   alias SmolqueryVictoriaMetrics.Eval.Aggregate
   alias SmolqueryVictoriaMetrics.Eval.Series
+  alias SmolqueryVictoriaMetrics.Eval.Value
   alias SmolqueryVictoriaMetrics.MetricsQL
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.Modifier
 
@@ -118,6 +119,40 @@ defmodule SmolqueryVictoriaMetrics.Eval.AggregateTest do
            ]
   end
 
+  test "mad drops a deviation that is NaN, as VictoriaMetrics' quantile does" do
+    inf = Value.inf()
+
+    input =
+      for {first, i} <- Enum.with_index([1.0, 2.0, inf, inf, inf, inf], 1),
+          do: series(%{"i" => "#{i}"}, [first, i * 1.0])
+
+    assert aggregate("mad(m)", [input]) == [{%{}, [inf, 1.5]}]
+  end
+
+  test "topk and bottomk rebuild each series once: within 4x of sum over 300 x 300" do
+    grid = Enum.map(0..299, &(&1 * 1000))
+
+    input =
+      for s <- 0..299 do
+        values = Enum.map(0..299, fn p -> :erlang.phash2({s, p}, 1000) * 1.0 end)
+        %Series{labels: %{"i" => "#{s}"}, values: Enum.zip(grid, values)}
+      end
+
+    time = fn query, args ->
+      {:ok, expr} = MetricsQL.parse(query)
+      Aggregate.apply(expr, args, grid)
+      {us, {:ok, _series}} = :timer.tc(fn -> Aggregate.apply(expr, args, grid) end)
+      us
+    end
+
+    sum = time.("sum(m)", [input])
+    top = time.("topk(5, m)", [[Series.constant(grid, 5.0)], input])
+    bottom = time.("bottomk(5, m)", [[Series.constant(grid, 5.0)], input])
+
+    assert top < 4 * sum + 20_000, "topk #{top} us against sum #{sum} us"
+    assert bottom < 4 * sum + 20_000, "bottomk #{bottom} us against sum #{sum} us"
+  end
+
   test "topk and bottomk choose at each point" do
     input = [series(%{"i" => "1"}, [1.0, 9.0]), series(%{"i" => "2"}, [5.0, 2.0])]
 
@@ -129,6 +164,20 @@ defmodule SmolqueryVictoriaMetrics.Eval.AggregateTest do
     assert aggregate("bottomk(1, m)", [scalar(1.0), input]) == [
              {%{"i" => "2"}, [nil, 2.0]},
              {%{"i" => "1"}, [1.0, nil]}
+           ]
+
+    same = [
+      series(%{"i" => "1"}, [3.0, 3.0]),
+      series(%{"i" => "2"}, [3.0, 3.0]),
+      series(%{"i" => "3"}, [nil, 1.0])
+    ]
+
+    assert aggregate("topk(1, m)", [scalar(1.0), same]) == [{%{"i" => "2"}, [3.0, 3.0]}]
+
+    assert aggregate("bottomk(2, m)", [scalar(2.0), same]) == [
+             {%{"i" => "3"}, [nil, 1.0]},
+             {%{"i" => "2"}, [3.0, 3.0]},
+             {%{"i" => "1"}, [3.0, nil]}
            ]
   end
 
