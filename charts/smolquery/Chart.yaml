@@ -1,0 +1,16 @@
+apiVersion: v2
+name: smolquery
+description: A production chart for the smolquery DuckDB and Elixir release.
+type: application
+version: 0.1.0
+appVersion: "0.13.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - smolquery
+  - duckdb
+  - parquet
+home: https://github.com/chasers/smolquery
+sources:
+  - https://github.com/chasers/smolquery
+maintainers:
+  - name: smolquery maintainers

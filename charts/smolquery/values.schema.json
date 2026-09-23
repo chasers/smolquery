@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["existingSecret", "topology", "replicas", "replicationFactor"],
+  "properties": {
+    "existingSecret": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {"name": {"type": "string", "minLength": 1}}
+    },
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+      },
+      "required": ["repository", "tag", "digest", "pullPolicy"]
+    },
+    "imagePullSecrets": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}}}},
+    "nameOverride": {"type": "string", "maxLength": 63, "pattern": "^(|[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$"},
+    "fullnameOverride": {"type": "string", "maxLength": 47, "pattern": "^(|[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$"},
+    "topology": {"type": "string", "enum": ["split", "symmetric"]},
+    "replicas": {
+      "type": "object", "additionalProperties": false, "required": ["api", "buffer", "storage", "server"],
+      "properties": {
+        "api": {"type": "integer", "minimum": 1},
+        "buffer": {"type": "integer", "minimum": 1},
+        "storage": {"type": "integer", "minimum": 1},
+        "server": {"type": "integer", "minimum": 1}
+      }
+    },
+    "replicationFactor": {"type": "integer", "minimum": 2},
+    "service": {
+      "type": "object", "additionalProperties": false, "required": ["type", "annotations", "ports"],
+      "properties": {
+        "type": {"type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "ports": {
+          "type": "object", "additionalProperties": false,
+          "required": ["http", "web", "hotServer", "metrics", "genRpc", "genRpcTls"],
+          "properties": {
+            "http": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "web": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "hotServer": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "metrics": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "genRpc": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "genRpcTls": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        }
+      }
+    },
+    "metricsService": {
+      "type": "object", "additionalProperties": false, "required": ["enabled", "annotations", "type", "port"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "type": {"type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "tls": {
+      "type": "object", "additionalProperties": false, "required": ["enabled", "secretName"],
+      "properties": {"enabled": {"type": "boolean"}, "secretName": {"type": "string"}},
+      "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"secretName": {"minLength": 1}}}}]
+    },
+    "persistence": {
+      "type": "object", "additionalProperties": false, "required": ["accessModes", "size", "storageClass", "annotations"],
+      "properties": {
+        "accessModes": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany", "ReadWriteOncePod"]}},
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "serviceAccount": {
+      "type": "object", "additionalProperties": false, "required": ["create", "name", "annotations"],
+      "properties": {
+        "create": {"type": "boolean"}, "name": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "podOperations": {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "resources": {"type": "object", "additionalProperties": true},
+    "securityContext": {"type": "object", "additionalProperties": true},
+    "containerSecurityContext": {"type": "object", "additionalProperties": true},
+    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+    "affinity": {"type": "object", "additionalProperties": true},
+    "tolerations": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "topologySpreadConstraints": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "priorityClassName": {"type": "string"},
+    "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+    "podLabels": {"type": "object", "additionalProperties": {"type": "string"}},
+    "probes": {
+      "type": "object", "additionalProperties": false, "required": ["api", "buffer", "server"],
+      "properties": {
+        "api": {"$ref": "#/definitions/probePair"},
+        "buffer": {"$ref": "#/definitions/probePair"},
+        "server": {"$ref": "#/definitions/probePair"}
+      }
+    },
+    "env": {"type": "object", "patternProperties": {"^[A-Za-z_][A-Za-z0-9_]*$": {"type": ["string", "number", "boolean"]}}, "additionalProperties": false},
+    "commonExtraEnv": {"$ref": "#/definitions/envList"},
+    "roleExtraEnv": {
+      "type": "object", "additionalProperties": false, "required": ["api", "buffer", "storage", "server"],
+      "properties": {"api": {"$ref": "#/definitions/envList"}, "buffer": {"$ref": "#/definitions/envList"}, "storage": {"$ref": "#/definitions/envList"}, "server": {"$ref": "#/definitions/envList"}}
+    },
+    "extraVolumes": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "extraVolumeMounts": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "initContainers": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "pdb": {
+      "type": "object", "additionalProperties": false,
+      "required": ["api", "buffer", "storage", "server"],
+      "properties": {
+        "api": {"$ref": "#/definitions/pdb"}, "buffer": {"$ref": "#/definitions/pdb"}, "storage": {"$ref": "#/definitions/pdb"}, "server": {"$ref": "#/definitions/pdb"}
+      }
+    }
+  },
+  "definitions": {
+    "pdb": {"type": "object", "additionalProperties": false, "required": ["enabled", "minAvailable"], "properties": {"enabled": {"type": "boolean"}, "minAvailable": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^(?:[0-9]|[1-9][0-9]|100)%$"}]}}},
+    "probePair": {"type": "object", "additionalProperties": false, "required": ["readiness", "liveness"], "properties": {"readiness": {"type": "object", "additionalProperties": true}, "liveness": {"type": "object", "additionalProperties": true}}},
+    "envList": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}, "value": {"type": ["string", "number", "boolean"]}, "valueFrom": {"type": "object", "additionalProperties": true}}}}
+  }
+}
