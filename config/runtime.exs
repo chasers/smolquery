@@ -217,6 +217,15 @@ if victoriametrics_max_points =
       )
 end
 
+if victoriametrics_pushdown = System.get_env("SMOLQUERY_VICTORIAMETRICS_PUSHDOWN") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    pushdown:
+      Smolquery.RuntimeConfig.boolean!(
+        "SMOLQUERY_VICTORIAMETRICS_PUSHDOWN",
+        victoriametrics_pushdown
+      )
+end
+
 if victoriametrics_max_query = System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES") do
   config :smolquery, SmolqueryVictoriaMetrics,
     max_query_bytes:

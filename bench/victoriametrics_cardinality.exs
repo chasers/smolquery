@@ -17,7 +17,9 @@ defmodule Bench.VictoriaMetricsCardinality do
   projects, one matching a ninth of them, a `job` equality (a tenth of the
   series) and a `project` inequality (nearly all). A selector expected to
   match more than `MAX_SERIES` series is skipped and says so, since the edge
-  would refuse it (its ceiling here is one million). `in range` is every
+  would refuse it (its ceiling here is one million). With the aggregate
+  pushed down (T-568) a `count(...)` is not refused, so raise `MAX_SERIES`
+  to run them. `in range` is every
   sample of `m` in the range, which is what the scan reads since nothing
   prunes on a label. Then the SQL controls and the label routes
   (`Bench.VictoriaMetricsSupport`).

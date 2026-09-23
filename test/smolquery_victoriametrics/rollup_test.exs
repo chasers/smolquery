@@ -678,4 +678,14 @@ defmodule SmolqueryVictoriaMetrics.RollupTest do
                {:ok, [{10, 1.0}, {20, 9.0}, {30, nil}]}
     end
   end
+
+  describe "window_ms/4" do
+    test "default_rollup with no window written reads max(step, lookback); any other keeps what was written" do
+      assert Rollup.window_ms("default_rollup", 0, 15_000, 300_000) == 300_000
+      assert Rollup.window_ms("default_rollup", 0, 600_000, 300_000) == 600_000
+      assert Rollup.window_ms("default_rollup", 60_000, 15_000, 300_000) == 60_000
+      assert Rollup.window_ms("rate", 0, 15_000, 300_000) == 0
+      assert Rollup.window_ms("sum_over_time", 120_000, 15_000, 300_000) == 120_000
+    end
+  end
 end

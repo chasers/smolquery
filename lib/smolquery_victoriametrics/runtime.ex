@@ -114,6 +114,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     max_samples_per_query: 10_000_000,
     max_points_per_series: 30_000,
     max_query_duration_ms: 30_000,
+    pushdown: true,
     ip: {127, 0, 0, 1},
     port: 8428
   ]
@@ -136,6 +137,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           max_samples_per_query: pos_integer(),
           max_points_per_series: pos_integer(),
           max_query_duration_ms: pos_integer(),
+          pushdown: boolean(),
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -189,6 +191,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         :max_samples_per_query,
         :max_points_per_series,
         :max_query_duration_ms,
+        :pushdown,
         :max_decoded_bytes,
         :max_query_bytes,
         :ip,

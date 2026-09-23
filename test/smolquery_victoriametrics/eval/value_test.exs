@@ -154,4 +154,13 @@ defmodule SmolqueryVictoriaMetrics.Eval.ValueTest do
     assert Value.parse("12abc") == nil
     assert Value.parse("") == nil
   end
+
+  describe "from_number/1 on a double read back from a frame" do
+    test "Explorer's infinities and NaN read as the stored bounds and nil" do
+      assert Value.from_number(:infinity) == Value.inf()
+      assert Value.from_number(:neg_infinity) == Value.neg_inf()
+      assert Value.from_number(:nan) == nil
+      assert Value.from_number(2) == 2.0
+    end
+  end
 end

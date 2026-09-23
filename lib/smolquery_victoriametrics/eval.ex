@@ -32,7 +32,9 @@ defmodule SmolqueryVictoriaMetrics.Eval do
       and answers at the grid's own points; `@ t` evaluates at `t` alone
       and answers that value at every point; `t` is any expression with one
       series, `start()` and `end()` included;
-    * aggregates (`SmolqueryVictoriaMetrics.Eval.Aggregate`), binary
+    * aggregates (`SmolqueryVictoriaMetrics.Eval.Aggregate`), one of which
+      over one rollup of a selector runs in SQL instead when the context
+      says how (`SmolqueryVictoriaMetrics.Pushdown`, T-568), binary
       operators (`SmolqueryVictoriaMetrics.Eval.Binary`), transforms
       (`SmolqueryVictoriaMetrics.Eval.Transform`) and unions `(a, b)`.
 
@@ -91,6 +93,7 @@ defmodule SmolqueryVictoriaMetrics.Eval do
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.StringLiteral
   alias SmolqueryVictoriaMetrics.MetricsQL.Durations
   alias SmolqueryVictoriaMetrics.MetricsQL.Functions
+  alias SmolqueryVictoriaMetrics.Pushdown
   alias SmolqueryVictoriaMetrics.Rollup
   alias SmolqueryVictoriaMetrics.Samples
 
@@ -110,8 +113,14 @@ defmodule SmolqueryVictoriaMetrics.Eval do
              {:ok, [Samples.series()]} | {:error, term()})
 
   @typedoc """
-  The grid, the edge's `lookback_ms`, the grid's point ceiling, and how to
-  read a selector.
+  Runs a pushed aggregate (`SmolqueryVictoriaMetrics.Pushdown.run/3`): its
+  series and what it scanned.
+  """
+  @type aggregate :: (Pushdown.t() -> {:ok, result(), stats()} | {:error, term()})
+
+  @typedoc """
+  The grid, the edge's `lookback_ms`, the grid's point ceiling, how to read
+  a selector, and, when given, how to run an aggregate in SQL.
   """
   @type context :: %{
           required(:start_ms) => integer(),
@@ -120,6 +129,7 @@ defmodule SmolqueryVictoriaMetrics.Eval do
           required(:lookback_ms) => pos_integer(),
           required(:max_points) => pos_integer(),
           required(:fetch) => fetch(),
+          optional(:aggregate) => aggregate(),
           optional(:timestamps) => [integer()]
         }
 
@@ -266,9 +276,10 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   defp eval(%AggrFuncExpr{name: name} = node, context) do
     if name in Aggregate.functions() do
-      with {:ok, args, stats} <- eval_all(node.args, context),
-           {:ok, series} <- Aggregate.apply(node, args, context.timestamps),
-           do: {:ok, series, stats}
+      case pushed(node, context) do
+        :none -> aggregate(node, context)
+        result -> result
+      end
     else
       {:error, {:unsupported, "aggregate function #{name}()"}}
     end
@@ -284,6 +295,21 @@ defmodule SmolqueryVictoriaMetrics.Eval do
     with {:ok, args, stats} <- eval_all(exprs, context),
          do: {:ok, Transform.union(args, context.timestamps), stats}
   end
+
+  defp aggregate(node, context) do
+    with {:ok, args, stats} <- eval_all(node.args, context),
+         {:ok, series} <- Aggregate.apply(node, args, context.timestamps),
+         do: {:ok, series, stats}
+  end
+
+  defp pushed(node, %{aggregate: run} = context) when is_function(run, 1) do
+    case Pushdown.plan(node, context) do
+      {:ok, plan} -> run.(plan)
+      :none -> :none
+    end
+  end
+
+  defp pushed(_node, _context), do: :none
 
   defp eval_all(exprs, context) do
     with {:ok, results} <- Args.collect(exprs, &eval_one(&1, context)) do
@@ -481,8 +507,8 @@ defmodule SmolqueryVictoriaMetrics.Eval do
     end)
   end
 
-  defp window("default_rollup", 0, context), do: max(context.step_ms, context.lookback_ms)
-  defp window(_name, window, _context), do: window
+  defp window(name, written, context),
+    do: Rollup.window_ms(name, written, context.step_ms, context.lookback_ms)
 
   defp non_negative(window, step) do
     if resolve(window, step) < 0,

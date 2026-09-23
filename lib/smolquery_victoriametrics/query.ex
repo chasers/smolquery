@@ -81,6 +81,7 @@ defmodule SmolqueryVictoriaMetrics.Query do
   alias SmolqueryVictoriaMetrics.Eval
   alias SmolqueryVictoriaMetrics.MetricsQL
   alias SmolqueryVictoriaMetrics.Params
+  alias SmolqueryVictoriaMetrics.Pushdown
   alias SmolqueryVictoriaMetrics.Response
   alias SmolqueryVictoriaMetrics.Runtime
   alias SmolqueryVictoriaMetrics.Samples
@@ -115,7 +116,8 @@ defmodule SmolqueryVictoriaMetrics.Query do
         Map.merge(grid, %{
           lookback_ms: runtime.lookback_ms,
           max_points: runtime.max_points_per_series,
-          fetch: timed(fetch_us, fetcher(runtime, deadline))
+          fetch: timed(fetch_us, fetcher(runtime, deadline)),
+          aggregate: timed_aggregate(fetch_us, aggregator(runtime, deadline))
         })
 
       kind |> evaluate(expr, context, started) |> answer(conn, fetch_us)
@@ -177,13 +179,17 @@ defmodule SmolqueryVictoriaMetrics.Query do
     end
   end
 
-  defp timed(counter, fetch) do
-    fn selector, range ->
-      started = System.monotonic_time(:microsecond)
-      result = fetch.(selector, range)
-      :counters.add(counter, 1, System.monotonic_time(:microsecond) - started)
-      result
-    end
+  defp timed(counter, fetch),
+    do: fn selector, range -> measure(counter, fn -> fetch.(selector, range) end) end
+
+  defp timed_aggregate(_counter, nil), do: nil
+  defp timed_aggregate(counter, run), do: fn plan -> measure(counter, fn -> run.(plan) end) end
+
+  defp measure(counter, fun) do
+    started = System.monotonic_time(:microsecond)
+    result = fun.()
+    :counters.add(counter, 1, System.monotonic_time(:microsecond) - started)
+    result
   end
 
   @doc """
@@ -213,6 +219,23 @@ defmodule SmolqueryVictoriaMetrics.Query do
         :counters.add(read, 1, Enum.reduce(series, 0, &(length(&1.timestamps) + &2)))
         {:ok, series}
       end
+    end
+  end
+
+  @doc """
+  How a query runs an aggregate in SQL (`SmolqueryVictoriaMetrics.Pushdown`,
+  T-568) under the request's `deadline`, or `nil` when the runtime has
+  `pushdown: false`, which keeps every aggregate in Elixir. A pushed
+  aggregate reads no samples into the node, so the sample budget above does
+  not apply to it; `max_series` bounds its output.
+  """
+  @spec aggregator(Runtime.t(), integer()) :: Eval.aggregate() | nil
+  def aggregator(%Runtime{pushdown: false}, _deadline), do: nil
+
+  def aggregator(%Runtime{} = runtime, deadline) do
+    fn plan ->
+      with {:ok, left} <- time_left(deadline),
+           do: Pushdown.run(runtime, plan, timeout_ms: left)
     end
   end
 

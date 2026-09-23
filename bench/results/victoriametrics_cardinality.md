@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Run | 2026-09-23 |
-| Commit | `7d5e7bb` plus T-583 (the commit that adds this file) |
+| Commit | `7d5e7bb` plus T-583 (the commit that adds this file); the pushdown section on the commit of T-568 |
 | Command | `TMPDIR=/home/dev/bench-tmp SERIES=<n> PROJECTS=<n / 100> REPS=3 LAKE_MEMORY=16GB mix run bench/victoriametrics_cardinality.exs 2>/dev/null` at 100,000, 10,000,000 and 100,000,000 series (defaults otherwise: `SAMPLES=1 HOURS=1 MAX_SERIES=1000000`) |
 | Machine | aarch64, 8 cores, 31 GiB, Linux 6.12 (the dev box) |
 | Runtime | Elixir 1.20.2 / OTP 29, 8 schedulers |
@@ -140,6 +140,47 @@ query                               series   samples  wall ms  fetch ms  sweep m
 /api/v1/label/project/values 1h                        6489.1
 ```
 
+## The same selectors with the aggregate pushed down (T-568)
+
+The same two datasets, reused from `SEGMENTS_DIR`, on the commit that adds
+`SmolqueryVictoriaMetrics.Pushdown`, with `MAX_SERIES` raised so the bench
+runs the wide selectors it skipped above. `count(m{...})` is an aggregate
+over one rollup of a selector, so each of these is now one SQL statement
+that answers one row per step; nothing is copied into the node but 240
+rows, and `fetch` is that statement's time.
+
+```
+Label filters — 10000000 series, 100000 projects, 1 h; 10000000 samples of m in range; median of 3
+query                               series   samples  wall ms  fetch ms  sweep ms  rest ms
+m{instance="host-1"}                     1         1    342.3     341.5       0.2      0.7
+m{project="project-1"}                 100       100    367.8     366.6       0.2      1.1
+m{project=~"project-(1|22|333)"}       300       300    446.2     445.0       0.2      1.0
+m{project=~"project-1.*"}          1111100   1111100    569.6     562.8       0.2      1.7
+m{job="job-1"}                     1000000   1000000    513.5     512.2       0.2      1.1
+m{project!="project-1"}            9999900   9999900   1405.0    1349.7       0.2      1.1
+```
+
+```
+Label filters — 100000000 series, 1000000 projects, 1 h; 100000000 samples of m in range; median of 3
+query                               series   samples  wall ms  fetch ms  sweep ms  rest ms
+m{instance="host-1"}                     1         1   2388.0    2387.2       0.2      0.6
+m{project="project-1"}                 100       100   2428.0    2426.8       0.2      1.0
+m{project=~"project-(1|22|333)"}       300       300   3207.6    3206.5       0.2      1.0
+m{project=~"project-1.*"}         11111100  11111100   4380.6    4379.3       0.2      1.0
+m{job="job-1"}                    10000000  10000000   3459.8    3458.6       0.2      1.0
+m{project!="project-1"}           99999900  99999900  20300.0   20298.8       0.1      1.0
+```
+
+The first shape of the pushed SQL joined the samples to the grid on
+`ts <= t < ts + window` and grouped the join by series and point with an
+ordered `last(...)`: at a million matched series that was twenty million
+join rows and as many groups, and the job engine answered
+`Out of Memory Error: failed to pin block` at its 1 GB. The shape that
+landed unnests each sample into the grid points it covers, bounded for the
+last-sample rollups by a `lead` over the series, so the rows are one per
+series and point with no group by series at all, and the one-stage
+aggregate over them is what the numbers above measure.
+
 ## What this settles
 
 - **A label matcher is a scan of the metric, at about 21 ns a row.** Past the
@@ -179,3 +220,12 @@ query                               series   samples  wall ms  fetch ms  sweep m
 - **Storage is 9 bytes a sample** with three labels a row under zstd, and
   DuckDB writes it at 425,000 rows a second on this box; a billion series
   is about 9 GB.
+- **Pushed down, a wide selector costs its scan and little else.**
+  `count(m{job="job-1"})` at a million matched series went from 124 s to
+  0.51 s, and the same count over all 9,999,900 series of the metric, which
+  the edge refused before, answers in 1.4 s. At a hundred million series
+  the million-series count is 3.5 s, ten million 3.5 s, and the whole
+  metric 20 s, inside the job engine's 1 GB. The `lead` over each series
+  and the unnest into the grid cost about 7 ns a sample over the 21 ns scan;
+  the per-series Elixir sweep and the copy are gone. What is left at depth
+  is the MAP scan, which is T-569.

@@ -162,6 +162,20 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   def keeps_metric_name?(name), do: String.downcase(name) in @keep_metric_name
 
   @doc """
+  The window a rollup over a selector reads, in milliseconds, from the one
+  written (`0` for none): `default_rollup` with none written reads
+  `max(step_ms, lookback_ms)`, a sample being current for `lookback_ms`
+  after it was taken; any other function keeps `0`, which `apply/4` reads
+  as the step, widened for the functions `may_adjust_window?/1` allows.
+  `SmolqueryVictoriaMetrics.Eval` and `SmolqueryVictoriaMetrics.Pushdown`
+  both resolve a window through this rule.
+  """
+  @spec window_ms(String.t(), non_neg_integer(), pos_integer(), pos_integer()) ::
+          non_neg_integer()
+  def window_ms("default_rollup", 0, step_ms, lookback_ms), do: max(step_ms, lookback_ms)
+  def window_ms(_name, written_ms, _step_ms, _lookback_ms), do: written_ms
+
+  @doc """
   Whether a window left out may widen past the step
   (`rollupFuncsCanAdjustWindow`).
   """
