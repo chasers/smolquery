@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+chart="$root/charts/smolquery"
+common=(
+  --set image.pullPolicy=Never
+  --set replicas.api=1,replicas.buffer=2,replicas.storage=1,replicas.server=2
+  --set replicationFactor=2
+)
+
+helm install topology-split "$chart" \
+  --namespace topology-split --create-namespace "${common[@]}"
+helm upgrade topology-split "$chart" \
+  --namespace topology-split --reuse-values
+if output=$(helm upgrade topology-split "$chart" \
+  --namespace topology-split --reuse-values \
+  --set fullnameOverride=renamed-split 2>&1); then
+  echo "split identity rename unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq "nameOverride and fullnameOverride cannot change" <<<"$output"
+if output=$(helm upgrade topology-split "$chart" \
+  --namespace topology-split --reuse-values \
+  --set topology=symmetric,fullnameOverride=renamed-symmetric 2>&1); then
+  echo "split-to-symmetric upgrade unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq "topology cannot change from split to symmetric in place" <<<"$output"
+
+helm install topology-symmetric "$chart" \
+  --namespace topology-symmetric --create-namespace \
+  "${common[@]}" --set topology=symmetric
+helm upgrade topology-symmetric "$chart" \
+  --namespace topology-symmetric --reuse-values
+if output=$(helm upgrade topology-symmetric "$chart" \
+  --namespace topology-symmetric --reuse-values \
+  --set nameOverride=renamed-symmetric 2>&1); then
+  echo "symmetric identity rename unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq "nameOverride and fullnameOverride cannot change" <<<"$output"
+if output=$(helm upgrade topology-symmetric "$chart" \
+  --namespace topology-symmetric --reuse-values \
+  --set topology=split,nameOverride=renamed-split 2>&1); then
+  echo "symmetric-to-split upgrade unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq "topology cannot change from symmetric to split in place" <<<"$output"
+
+echo "live topology upgrade guards passed"
