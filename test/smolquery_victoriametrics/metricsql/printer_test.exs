@@ -62,4 +62,19 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.PrinterTest do
     assert reprint(~S|{"metric name","a-b"="x\ty"}|) == ~S|metric\ name{a\-b="x\ty"}|
     assert Printer.to_string(%StringLiteral{value: <<"é", 0xFF>>}) == ~S|"é\xff"|
   end
+
+  test "what used to print into a different tree prints back to itself" do
+    for {query, text} <- [
+          {~s|{__name__="sum"} or b|, "(sum) or b"},
+          {~s|{__name__="count"} unless b|, "(count) unless b"},
+          {~s|a > {__name__="bool"}[5m]|, "a > (bool[5m])"},
+          {~s|a + {__name__="on"} offset 5m|, "a + (on offset 5m)"},
+          {~S|{__name__="a\U000F0000b"}|, "a\\udb80\\udc00b"}
+        ] do
+      {:ok, expr} = Parser.parse(query)
+
+      assert Printer.to_string(expr) == text
+      assert Parser.parse(text) == {:ok, expr}, query
+    end
+  end
 end

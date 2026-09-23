@@ -270,6 +270,23 @@ defmodule SmolqueryVictoriaMetrics.MetadataTest do
       assert data(get(stack, "/api/v1/series", [{"match[]", "up"} | empty])) == []
     end
 
+    test "a match[] past max_query_bytes, or not UTF-8, is 400 bad_data", %{stack: stack} do
+      name = :"#{stack.name}_short_#{:erlang.unique_integer([:positive])}"
+      Runtime.put(%{stack.runtime | name: name, max_query_bytes: 8})
+      on_exit(fn -> Runtime.delete(name) end)
+      short = %{stack | name: name}
+
+      assert %{"errorType" => "bad_data", "error" => error} =
+               error(get(short, "/api/v1/series", [{"match[]", "up{job=\"node\"}"}]), 400)
+
+      assert error =~ "match[]: the query is 14 bytes, past the 8-byte limit"
+
+      for path <- ["/api/v1/series", "/api/v1/labels"] do
+        assert %{"error" => "match[]: the query is not valid UTF-8"} =
+                 error(get_raw(stack, path, "match[]=%FF"), 400)
+      end
+    end
+
     test "a bad match[] is 400, one matching everything 422", %{stack: stack} do
       assert %{"errorType" => "bad_data"} =
                error(get(stack, "/api/v1/labels", [{"match[]", "sum(up)"}]), 400)

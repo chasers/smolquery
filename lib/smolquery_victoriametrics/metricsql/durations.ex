@@ -8,8 +8,9 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Durations do
   the query. Units are case-insensitive except that minutes are a lower-case
   `m`: `M` is the number multiplier, a million. Parts add up (`1h30m`), and a
   part after the first may be negative, which makes every later part negative
-  too (`1h-5m` is 55 minutes, `2h-5m10s` is 2 h - 5 m - 10 s). A leading minus
-  negates the whole. A bare decimal is seconds (`3600`, `1.5`, `-10`).
+  too (`1h-5m` is 55 minutes, `2h-5m10s` is 2 h - 5 m - 10 s), as long as it
+  is below zero: `1h-0m5m` is 65 minutes, as VictoriaMetrics has it. A leading
+  minus negates the whole. A part too large for a double is refused. A bare decimal is seconds (`3600`, `1.5`, `-10`).
 
   The value is split into a fixed part in milliseconds and a part in steps,
   because `i` is only known once a query has a step. `to_ms/2` resolves both
@@ -86,21 +87,29 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Durations do
   defp parts(rest, text, negative, {ms, steps}) do
     case Regex.run(@part, rest) do
       [part, minus, number, unit] ->
-        negative = negative or minus == "-"
-        value = if negative, do: -to_number(number), else: to_number(number)
         tail = binary_part(rest, byte_size(part), byte_size(rest) - byte_size(part))
-        parts(tail, text, negative, add({ms, steps}, value, String.downcase(unit)))
+
+        with {:ok, value} <- part_value(minus, number, text, negative),
+             do: parts(tail, text, negative or value < 0, add({ms, steps}, value, unit))
 
       nil ->
         {:error, "cannot parse duration #{inspect(text)}"}
     end
   end
 
-  defp add({ms, steps}, value, "i"), do: {ms, steps + value}
-  defp add({ms, steps}, value, unit), do: {ms + value * Map.fetch!(@unit_ms, unit), steps}
-
-  defp to_number(number) do
-    {:ok, value} = Literal.decimal(number)
-    value
+  defp part_value(minus, number, text, negative) do
+    case Literal.decimal(number) do
+      {:ok, value} when is_float(value) -> {:ok, signed(value, minus, negative)}
+      _too_big -> {:error, "too big duration #{inspect(text)}"}
+    end
   end
+
+  defp signed(value, "-", _negative), do: -value
+  defp signed(value, _minus, true), do: -value
+  defp signed(value, _minus, false), do: value
+
+  defp add({ms, steps}, value, unit) when unit in ["i", "I"], do: {ms, steps + value}
+
+  defp add({ms, steps}, value, unit),
+    do: {ms + value * Map.fetch!(@unit_ms, String.downcase(unit)), steps}
 end

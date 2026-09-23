@@ -155,4 +155,36 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.LexerTest do
     assert Lexer.error_at({:punct, "@", {1, 9}}, "duplicate @ modifier") ==
              {:error, {:syntax, "duplicate @ modifier at 1:9"}}
   end
+
+  describe "cost" do
+    defp elapsed_ms(fun) do
+      {us, _result} = :timer.tc(fun)
+      div(us, 1000)
+    end
+
+    test "grows with the query, not with the query times the token count" do
+      query = String.duplicate("a+", 32_000) <> "a"
+
+      assert elapsed_ms(fn -> {:ok, _tokens} = Lexer.tokenize(query) end) < 250
+    end
+
+    test "a string of escaped quotes is scanned once" do
+      query = ~s(") <> String.duplicate(~S(\"), 20_000) <> ~s(")
+
+      assert elapsed_ms(fn -> {:ok, [{:string, _, _}, _eof]} = Lexer.tokenize(query) end) < 250
+    end
+
+    test "a run of backslashes before a quote escapes it only when odd" do
+      assert {:ok, [{:string, ~S("a\\"), _}, _eof]} = Lexer.tokenize(~S("a\\"))
+      assert {:ok, [{:string, ~S("a\\\"b"), _}, _eof]} = Lexer.tokenize(~S("a\\\"b"))
+      assert {:error, {:syntax, _message}} = Lexer.tokenize(~S("a\"))
+    end
+
+    test "non-ASCII letters and escapes still make one identifier" do
+      assert {:ok, [{:ident, "härte_ä1", _}, _eof]} = Lexer.tokenize("härte_ä1")
+      assert {:ok, [{:ident, "a\\-b\\u00e4\\x41", _}, _eof]} = Lexer.tokenize("a\\-b\\u00e4\\x41")
+      assert {:ok, [{:ident, "a", _}, {:op, "-", _} | _]} = Lexer.tokenize(~S(a-b))
+      assert Lexer.ident_prefix?("ä") and not Lexer.ident_prefix?("1a")
+    end
+  end
 end

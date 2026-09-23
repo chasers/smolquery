@@ -13,14 +13,18 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
 
   ## Operators
 
-  Operators are read left to right and every new one is rebalanced against
-  the one on its left by precedence, as VictoriaMetrics does it
-  (`balanceBinaryOp`): `^` binds tightest and is right-associative; then
-  `* / % atan2`; `+ -`; the comparisons; `and unless`; `or`; MetricsQL's
-  `if ifnot`; and `default` loosest. Unary minus is `0 - x` and takes part in
-  the rebalancing, so `-a ^ 2` is `-(a ^ 2)`. `bool` is only for a comparison,
-  and `group_left`/`group_right` never for `and`, `or` or `unless`, nor a fill
-  for any of those or `if`, `ifnot` or `default`.
+  Operators group by precedence, into the trees VictoriaMetrics'
+  `balanceBinaryOp` rebalances them to: `^` binds tightest and is
+  right-associative; then `* / % atan2`; `+ -`; the comparisons;
+  `and unless`; `or`; MetricsQL's `if ifnot`; and `default` loosest. Unary
+  minus is `0 - x` at the precedence of `-`, and what binds tighter than it
+  after its operand is its operand's, so `-a ^ 2` is `-(a ^ 2)` and
+  `-a + b` is `(-a) + b`. The operators are read by precedence climbing, once
+  each, so a chain of any length costs its length; rebalancing each new
+  operator down the tree, as `balanceBinaryOp` does, costs the square.
+  `bool` is only for a comparison, and `group_left`/`group_right` never for
+  `and`, `or` or `unless`, nor a fill for any of those or `if`, `ifnot` or
+  `default`. A fill takes one minus at most: `fill(-inf)`, not `fill(--1)`.
 
   ## Words
 
@@ -35,8 +39,16 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
     * `WITH (...)` anywhere: `{:error, {:unsupported, "WITH templates"}}`.
     * A window or a subquery on a range vector, `(m[5m])[10m:1m]`.
     * `keep_metric_names` after an aggregation, a selector or a literal.
+    * An aggregation `limit` past the int64 range, and a duration past what a
+      double holds.
     * An unknown function, `{:unknown_function, name}`, and a wrong number of
       arguments, `{:arity, message}` (`SmolqueryVictoriaMetrics.MetricsQL.Functions`).
+    * Brackets nested more than 1,000 deep: `{:syntax, "expression is nested
+      too deeply at ..."}`, before anything is parsed.
+
+  The built-in templates (`SmolqueryVictoriaMetrics.MetricsQL.Builtins`)
+  are expanded once the whole expression is parsed, as VictoriaMetrics
+  expands them, so a template is one operand.
 
   Every other error is `{:syntax, message}`, naming the token met, its
   `line:column`, and what was expected there.
@@ -102,6 +114,10 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
     atan2: 5,
     ^: 6
   }
+  @loosest -2
+  @unary_minus 4
+  @max_depth 1_000
+  @max_int64 9_223_372_036_854_775_807
   @comparisons [:==, :!=, :>, :<, :>=, :<=]
   @logical_sets [:and, :or, :unless]
   @set_ops [:and, :or, :unless, :if, :ifnot, :default]
@@ -130,13 +146,26 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
           {:ok, SmolqueryVictoriaMetrics.MetricsQL.Ast.expr()} | {:error, reason()}
   def parse(query) when is_binary(query) do
     with {:ok, tokens} <- Lexer.tokenize(query),
+         :ok <- shallow(tokens, 0),
          {:ok, expr, rest} <- expr(tokens),
          :ok <- finished(rest),
-         expr = unwrap(expr),
+         {:ok, expr} <- expr |> unwrap() |> Builtins.expand_all(),
          :ok <- Functions.check(expr) do
       {:ok, expr}
     end
   end
+
+  defp shallow([{:punct, open, _position} = token | rest], depth) when open in ["(", "[", "{"] do
+    if depth == @max_depth,
+      do: Lexer.error_at(token, "expression is nested too deeply"),
+      else: shallow(rest, depth + 1)
+  end
+
+  defp shallow([{:punct, close, _position} | rest], depth) when close in [")", "]", "}"],
+    do: shallow(rest, max(depth - 1, 0))
+
+  defp shallow([{:eof, _text, _position}], _depth), do: :ok
+  defp shallow([_token | rest], depth), do: shallow(rest, depth)
 
   defp finished([{:eof, _text, _position}]), do: :ok
 
@@ -146,19 +175,27 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
       else: Lexer.unexpected(token, "an operator or the end of the query")
   end
 
-  defp expr(tokens) do
-    with {:ok, left, rest} <- single(tokens), do: operators(left, rest)
+  defp expr(tokens), do: operand(tokens, @loosest)
+
+  defp operand(tokens, min) do
+    with {:ok, single, rest} <- single(tokens), do: absorb(single, rest, min)
   end
 
-  defp operators(left, [token | rest] = tokens) do
-    case binary_op(token) do
-      nil ->
-        {:ok, left, tokens}
+  defp absorb(%BinaryOpExpr{} = unary, tokens, min) do
+    with {:ok, right, rest} <- absorb(unary.right, tokens, max(min, @unary_minus)),
+         do: climb(%{unary | right: right}, rest, min)
+  end
 
-      op ->
-        with {:ok, node, rest} <- operation(%BinaryOpExpr{op: op, left: left, right: nil}, rest) do
-          operators(balance(node), rest)
-        end
+  defp absorb(left, tokens, min), do: climb(left, tokens, min)
+
+  defp climb(left, [token | rest] = tokens, min) do
+    op = binary_op(token)
+
+    if op != nil and Map.fetch!(@priority, op) > min do
+      with {:ok, node, rest} <- operation(%BinaryOpExpr{op: op, left: left, right: nil}, rest),
+           do: climb(node, rest, min)
+    else
+      {:ok, left, tokens}
     end
   end
 
@@ -170,8 +207,9 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
     with {:ok, node, rest} <- bool_modifier(node, tokens),
          {:ok, node, rest} <- group_modifier(node, rest),
          {:ok, node, rest} <- fills(node, rest),
-         {:ok, right, rest} <- single(rest) do
-      {keep, rest} = keep_metric_names(rest)
+         {:ok, right, rest} <- single(rest),
+         {keep, rest} = keep_metric_names(rest),
+         {:ok, right, rest} <- absorb(right, rest, right_binding(node.op)) do
       {:ok, %{node | right: right, keep_metric_names: keep}, rest}
     end
   end
@@ -243,12 +281,14 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
   defp fill(node, "fill_right", value), do: %{node | fill_right: value}
 
   defp fill_value([{:op, "-", _position} | rest]) do
-    with {:ok, number, rest} <- fill_value(rest) do
+    with {:ok, number, rest} <- fill_number(rest) do
       {:ok, %Number{value: negate(number.value), text: "-" <> number.text}, rest}
     end
   end
 
-  defp fill_value([token | rest]) do
+  defp fill_value(tokens), do: fill_number(tokens)
+
+  defp fill_number([token | rest]) do
     with {:ok, number} <- number(token) do
       case rest do
         [{:punct, ")", _position} | rest] -> {:ok, number, rest}
@@ -259,25 +299,14 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
 
   defp negate(:inf), do: :neg_inf
   defp negate(:nan), do: :nan
-  defp negate(value), do: -value
+  defp negate(value) when is_float(value), do: -value
 
   defp keep_metric_names([token | rest] = tokens) do
     if word(token) == "keep_metric_names", do: {true, rest}, else: {false, tokens}
   end
 
-  defp balance(%BinaryOpExpr{op: op, left: %BinaryOpExpr{op: left_op} = left} = node) do
-    if rebalance?(left_op, op),
-      do: %{left | right: balance(%{node | left: left.right})},
-      else: node
-  end
-
-  defp balance(node), do: node
-
-  defp rebalance?(left_op, op) do
-    priority = Map.fetch!(@priority, op)
-    left_priority = Map.fetch!(@priority, left_op)
-    priority > left_priority or (priority == left_priority and op == :^)
-  end
+  defp right_binding(:^), do: Map.fetch!(@priority, :^) - 1
+  defp right_binding(op), do: Map.fetch!(@priority, op)
 
   defp single([{:ident, text, _position}, {:punct, "(", _paren} | _rest] = tokens) do
     if String.downcase(text) == "with",
@@ -298,7 +327,9 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
     if word(token) == "offset", do: rollup(expr, tokens), else: {:ok, expr, tokens}
   end
 
-  defp primary([{:duration, text, _position} | rest]), do: {:ok, duration(text), rest}
+  defp primary([{:duration, text, _position} = token | rest]) do
+    with {:ok, duration} <- duration(token, text), do: {:ok, duration, rest}
+  end
 
   defp primary([{:string, _text, _position} | _rest] = tokens) do
     with {:ok, value, rest} <- Selector.string_value(tokens),
@@ -338,11 +369,13 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
 
   defp number(token), do: Lexer.unexpected(token, "a number")
 
-  defp duration("$__interval"), do: duration("1i")
+  defp duration(token, "$__interval"), do: duration(token, "1i")
 
-  defp duration(text) do
-    {:ok, {ms, steps}} = Durations.parse(text)
-    %Duration{text: text, ms: ms, steps: steps}
+  defp duration(token, text) do
+    case Durations.parse(text) do
+      {:ok, {ms, steps}} -> {:ok, %Duration{text: text, ms: ms, steps: steps}}
+      {:error, message} -> Lexer.error_at(token, message)
+    end
   end
 
   defp ident_expr([{:ident, text, _position}, next | _rest] = tokens) do
@@ -374,13 +407,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
 
     with {:ok, args, rest} <- arg_list(rest) do
       {keep, rest} = keep_metric_names(rest)
-
-      case Builtins.expand(name, args) do
-        {:ok, %FuncExpr{} = expanded} -> {:ok, %{expanded | keep_metric_names: keep}, rest}
-        {:ok, expanded} -> {:ok, expanded, rest}
-        {:error, reason} -> {:error, reason}
-        :none -> {:ok, %FuncExpr{name: name, args: args, keep_metric_names: keep}, rest}
-      end
+      {:ok, %FuncExpr{name: name, args: args, keep_metric_names: keep}, rest}
     end
   end
 
@@ -427,7 +454,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
   defp limit_value([{:number, text, _position} = token | rest]) do
     case Integer.parse(text) do
       {0, ""} -> {:ok, nil, rest}
-      {limit, ""} -> {:ok, limit, rest}
+      {limit, ""} when limit <= @max_int64 -> {:ok, limit, rest}
       _other -> Lexer.unexpected(token, "an integer limit")
     end
   end
@@ -547,9 +574,14 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
 
   defp positive_duration([{_kind, text, _position} = token | rest]) do
     cond do
-      Lexer.duration?(text) -> {:ok, duration(text), rest}
-      Lexer.number_prefix?(text) -> seconds(token, rest)
-      true -> Lexer.unexpected(token, "a duration")
+      Lexer.duration?(text) ->
+        with {:ok, duration} <- duration(token, text), do: {:ok, duration, rest}
+
+      Lexer.number_prefix?(text) ->
+        seconds(token, rest)
+
+      true ->
+        Lexer.unexpected(token, "a duration")
     end
   end
 
@@ -587,10 +619,10 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Parser do
     end
   end
 
-  defp signed_duration([{:op, "-", _position} | rest]) do
-    with {:ok, positive, rest} <- positive_duration(rest) do
-      {:ok, duration("-" <> positive.text), rest}
-    end
+  defp signed_duration([{:op, "-", _position} = minus | rest]) do
+    with {:ok, positive, rest} <- positive_duration(rest),
+         {:ok, negative} <- duration(minus, "-" <> positive.text),
+         do: {:ok, negative, rest}
   end
 
   defp signed_duration(tokens), do: positive_duration(tokens)

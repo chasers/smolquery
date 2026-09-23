@@ -27,4 +27,15 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.BuiltinsTest do
     assert printed("alias") == "alias"
     assert {:error, {:arity, _message}} = MetricsQL.parse("alias(1)")
   end
+
+  test "expand_all/1 expands every template in a tree, innermost first" do
+    {:ok, expr} = MetricsQL.parse(~s|sum(alias(range_median(m), "x")) + ru(a, b)|)
+
+    assert MetricsQL.to_string(expr) ==
+             ~s|sum(label_set(range_quantile(0.5, m), "__name__", "x")) + | <>
+               "((clamp_min(b - clamp_min(a, 0), 0) / clamp_min(b, 0)) * 100)"
+
+    call = %SmolqueryVictoriaMetrics.MetricsQL.Ast.FuncExpr{name: "ru", args: []}
+    assert {:error, {:arity, _message}} = Builtins.expand_all(call)
+  end
 end

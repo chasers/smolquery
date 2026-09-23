@@ -170,4 +170,75 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.ParserTest do
       assert message =~ ~s|unexpected token "*"|
     end
   end
+
+  describe "review of T-563" do
+    defp printed(query) do
+      {:ok, expr} = Parser.parse(query)
+      SmolqueryVictoriaMetrics.MetricsQL.to_string(expr)
+    end
+
+    test "a chain of ^ parses in linear time, right-associative" do
+      query = Enum.map_join(1..8_000, "^", fn _ -> "a" end)
+      {us, {:ok, expr}} = :timer.tc(fn -> Parser.parse(query) end)
+
+      assert us < 1_000_000
+      assert %BinaryOpExpr{op: :^, left: %MetricExpr{}, right: %BinaryOpExpr{op: :^}} = expr
+    end
+
+    test "unary minus absorbs what binds tighter than + and nothing looser" do
+      assert printed("-a ^ 2 * b + c") == "(0 - ((a ^ 2) * b)) + c"
+      assert printed("a * -b ^ c") == "a * (0 - (b ^ c))"
+      assert printed("a ^ -b * c") == "(a ^ (0 - b)) * c"
+      assert printed("a or -b * c + d") == "a or ((0 - (b * c)) + d)"
+    end
+
+    test "nesting past 1,000 levels is refused, and 1,000 is not" do
+      deep = fn n -> String.duplicate("(", n) <> "a" <> String.duplicate(")", n) end
+
+      assert {:ok, %MetricExpr{}} = Parser.parse(deep.(1_000))
+      assert {:error, {:syntax, message}} = Parser.parse(deep.(1_001))
+      assert message =~ "expression is nested too deeply"
+      assert {:error, {:syntax, _message}} = Parser.parse(String.duplicate("abs(", 1_001))
+    end
+
+    test "a template is one operand, expanded after the parse" do
+      assert printed("ru(a, b) ^ 2") ==
+               "((clamp_min(b - clamp_min(a, 0), 0) / clamp_min(b, 0)) * 100) ^ 2"
+    end
+
+    test "keep_metric_names is dropped on every template" do
+      for query <- [
+            ~s|alias(m, "x") keep_metric_names|,
+            "range_median(m) keep_metric_names",
+            "ttf(m) keep_metric_names"
+          ] do
+        assert {:ok, %FuncExpr{keep_metric_names: false}} = Parser.parse(query), query
+      end
+    end
+
+    test "fill takes exactly one minus, and -inf" do
+      assert {:ok, %BinaryOpExpr{fill_left: %Number{value: :neg_inf}}} =
+               Parser.parse("a + fill(-inf) b")
+
+      for query <- ["a + fill(--inf) b", "a + fill(--1) b"] do
+        assert {:error, {:syntax, _message}} = Parser.parse(query), query
+      end
+    end
+
+    test "a duration past a double is a syntax error" do
+      huge = String.duplicate("9", 400)
+
+      for query <- ["m[#{huge}s]", "m offset #{huge}m", "#{huge}h"] do
+        assert {:error, {:syntax, message}} = Parser.parse(query), query
+        assert message =~ "too big duration"
+      end
+    end
+
+    test "limit is an int64" do
+      assert {:ok, %AggrFuncExpr{limit: 9_223_372_036_854_775_807}} =
+               Parser.parse("sum(a) limit 9223372036854775807")
+
+      assert {:error, {:syntax, _message}} = Parser.parse("sum(a) limit 9223372036854775808")
+    end
+  end
 end

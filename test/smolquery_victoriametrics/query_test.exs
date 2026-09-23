@@ -229,6 +229,45 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
   end
 
   describe "refusals" do
+    test "a query past max_query_bytes, or not UTF-8, is 400 bad_data before it is parsed", %{
+      stack: stack
+    } do
+      long = limited(stack, max_query_bytes: 16)
+
+      response = get(long, "/api/v1/query", %{"query" => String.duplicate("a+", 20) <> "a"})
+
+      assert response.status == 400
+      assert %{"errorType" => "bad_data", "error" => error} = body(response)
+      assert error =~ "past the 16-byte limit"
+      assert error =~ "SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES"
+
+      response = VictoriaMetricsStack.request(stack, :get, "/api/v1/query?query=%FF")
+
+      assert response.status == 400
+
+      assert %{"errorType" => "bad_data", "error" => "the query is not valid UTF-8"} =
+               body(response)
+    end
+
+    test "a regex the engine refuses is 422 execution with the engine's message", %{
+      stack: stack
+    } do
+      response = get(stack, "/api/v1/query", %{"query" => ~s|up{job=~"(?=x)"}|})
+
+      assert response.status == 422
+      assert %{"errorType" => "execution", "error" => error} = body(response)
+      assert error =~ "invalid perl operator: (?="
+    end
+
+    test "a window below zero is 422", %{stack: stack} do
+      for query <- ["up[5m-10m]", "rate(up[5m-10m])", "max_over_time(up[5m-10m:1m])"] do
+        response = get(stack, "/api/v1/query", %{"query" => query})
+
+        assert response.status == 422, query
+        assert body(response)["error"] =~ "duration cannot be negative", query
+      end
+    end
+
     test "a parse error is 422 execution", %{stack: stack} do
       response = get(stack, "/api/v1/query", %{"query" => "rate(up[5m]"})
 

@@ -79,4 +79,13 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.LiteralTest do
     assert Literal.escape_ident("温度:x.y") == "温度:x.y"
     assert Literal.escape_ident("a\u0001") == ~S|a\x01|
   end
+
+  test "a character past U+FFFF that cannot stand bare escapes as a surrogate pair" do
+    name = "a" <> <<0xF0000::utf8>>
+
+    assert Literal.escape_ident(name) == "a\\udb80\\udc00"
+    assert Literal.unescape_ident("a\\udb80\\udc00") == name
+    assert Literal.unescape_ident(~S(a\udb80x)) == ~S(a\udb80x)
+    assert Literal.escape_ident("a😀") == ~S(a\😀)
+  end
 end

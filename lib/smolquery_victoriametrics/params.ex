@@ -66,6 +66,31 @@ defmodule SmolqueryVictoriaMetrics.Params do
   defp form?([]), do: false
 
   @doc """
+  A MetricsQL text from a request, checked before it is parsed: at most
+  `max_bytes` bytes, as VictoriaMetrics' `-search.maxQueryLen` holds it, and
+  valid UTF-8. Neither refusal repeats the text.
+
+      iex> SmolqueryVictoriaMetrics.Params.query_text("up", 16)
+      {:ok, "up"}
+      iex> SmolqueryVictoriaMetrics.Params.query_text(<<0xFF>>, 16)
+      {:error, {:bad_data, "the query is not valid UTF-8"}}
+  """
+  @spec query_text(binary(), pos_integer()) ::
+          {:ok, String.t()} | {:error, {:bad_data, String.t()}}
+  def query_text(text, max_bytes) when byte_size(text) > max_bytes,
+    do:
+      {:error,
+       {:bad_data,
+        "the query is #{byte_size(text)} bytes, past the #{max_bytes}-byte limit " <>
+          "(SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES)"}}
+
+  def query_text(text, _max_bytes) do
+    if String.valid?(text),
+      do: {:ok, text},
+      else: {:error, {:bad_data, "the query is not valid UTF-8"}}
+  end
+
+  @doc """
   One value per key, the first given, as Go's `FormValue` reads it: the
   body's over the URL's.
 

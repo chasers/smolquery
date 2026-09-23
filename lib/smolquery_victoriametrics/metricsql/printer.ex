@@ -18,7 +18,16 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Printer do
       not read back as a number;
     * a string on the left of `+` is parenthesized when what follows would
       read as more of the string, `("a") + "b"` and `("a") + b`, since
-      `"a" + "b"` reads back as the one string `"ab"`.
+      `"a" + "b"` reads back as the one string `"ab"`;
+    * a metric named for an aggregate function is parenthesized on the left
+      of a word operator, `(sum) or b`, since `sum or b` reads back as an
+      aggregation;
+    * a metric named for a reserved word is parenthesized on the right of an
+      operator with its window, offset or `@` inside, `a > (bool[5m])`,
+      since `a > bool[5m]` reads `bool` as the modifier;
+    * a character past U+FFFF that cannot stand in an identifier is escaped
+      as a UTF-16 surrogate pair, `\\udb80\\udc00` for U+F0000, since `\\u` takes four
+      digits.
   """
 
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.AggrFuncExpr
@@ -32,10 +41,12 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Printer do
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.ParensExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.RollupExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.StringLiteral
+  alias SmolqueryVictoriaMetrics.MetricsQL.Functions
   alias SmolqueryVictoriaMetrics.MetricsQL.Literal
 
   @filter_ops %{eq: "=", neq: "!=", re: "=~", nre: "!~"}
   @reserved ~w(on ignoring group_left group_right bool prefix fill fill_left fill_right)
+  @word_ops [:atan2, :and, :or, :unless, :if, :ifnot, :default]
 
   @doc """
   The canonical MetricsQL text of `expr`.
@@ -144,7 +155,19 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Printer do
   defp left_parens?(%BinaryOpExpr{op: :+, left: %StringLiteral{}, right: right}),
     do: continues_string?(right)
 
+  defp left_parens?(%BinaryOpExpr{op: op, left: left}) when op in @word_ops,
+    do: operand_parens?(left) or aggregate_name?(left)
+
   defp left_parens?(%BinaryOpExpr{left: left}), do: operand_parens?(left)
+
+  defp aggregate_name?(%MetricExpr{filter_sets: [[_name]] = sets}) do
+    case name_prefix(sets) do
+      nil -> false
+      name -> Functions.kind(name) == :aggregate
+    end
+  end
+
+  defp aggregate_name?(_expr), do: false
 
   defp continues_string?(%StringLiteral{}), do: true
   defp continues_string?(%RollupExpr{expr: expr}), do: continues_string?(expr)
@@ -165,6 +188,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Printer do
 
   defp reserved_operand?(%MetricExpr{} = metric), do: reserved?(metric_name(metric.filter_sets))
   defp reserved_operand?(%FuncExpr{name: name}), do: reserved?(name)
+  defp reserved_operand?(%RollupExpr{expr: expr}), do: reserved_operand?(expr)
   defp reserved_operand?(_expr), do: false
 
   defp reserved?(nil), do: false

@@ -28,17 +28,22 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
 
   `$__rate_interval` becomes `$__interval`, as Grafana's two variables do in
   VictoriaMetrics. `#` starts a comment that runs to the end of the line.
+
+  The query is checked to be UTF-8 once, and every token is then read by
+  matching its own bytes, so tokenizing costs the length of the query, not
+  its length times the number of tokens.
   """
 
   @type position :: {pos_integer(), pos_integer()}
   @type kind :: :ident | :string | :number | :duration | :op | :filter_op | :punct | :eof
   @type token :: {kind(), String.t(), position()}
 
-  @escape ~S"\\(?:[xX][0-9a-fA-F]{2}|[uU][0-9a-fA-F]{4}|[^xXuU\p{C}\p{Z}]| )"
-  @ident Regex.compile!("\\A(?:[\\p{L}_:]|#{@escape})(?:[\\p{L}_:0-9.]|#{@escape})*", "u")
+  @letter ~r/\A\p{L}\z/u
+  @unescapable ~r/\A[\p{C}\p{Z}]\z/u
   @duration_part ~S"\d+(?:\.\d*)?(?:[mM][sS]|m(?![iIbB])|[sShHdDwWyYiI])"
   @duration Regex.compile!("\\A#{@duration_part}(?:-?#{@duration_part})*")
-  @space ~r/\A[ \t\n\v\f\r]+/
+  @space ~c" \t\n\v\f\r"
+  @digits_or_dot ~c"0123456789."
   @ops ["==", "!=", ">=", "<=", "+", "-", "*", "/", "%", "^", ">", "<"]
   @filter_ops ["=~", "!~", "="]
   @punct ~c"{}[](),@"
@@ -64,7 +69,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
   `isIdentPrefix` decides it.
   """
   @spec ident_prefix?(String.t()) :: boolean()
-  def ident_prefix?(text), do: Regex.match?(@ident, text)
+  def ident_prefix?(text), do: ident_length(text, 0, :first) > 0
 
   @doc """
   Whether all of `text` is one duration: `5m`, `1h30m`, `3.5d-10s`, `2i`.
@@ -113,17 +118,17 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
     end
   end
 
-  defp scan(query, position, acc) do
-    case Regex.run(@space, query) do
-      [space] -> skip(query, space, position, acc)
-      nil -> token(query, position, acc)
-    end
+  defp scan(<<char, _rest::binary>> = query, position, acc) when char in @space do
+    length = space_length(query, 0)
+    scan(rest_at(query, length), advance(position, binary_part(query, 0, length)), acc)
   end
 
-  defp skip(query, space, position, acc) do
-    rest = binary_part(query, byte_size(space), byte_size(query) - byte_size(space))
-    scan(rest, advance(position, space), acc)
-  end
+  defp scan(query, position, acc), do: token(query, position, acc)
+
+  defp space_length(<<char, rest::binary>>, length) when char in @space,
+    do: space_length(rest, length + 1)
+
+  defp space_length(_query, length), do: length
 
   defp token(query, position, acc) do
     case next(query) do
@@ -152,11 +157,56 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
   end
 
   defp ident(query) do
-    case Regex.run(@ident, query) do
-      [text] -> {:ok, :ident, text, text}
-      nil -> :none
+    case ident_length(query, 0, :first) do
+      0 ->
+        :none
+
+      length ->
+        text = binary_part(query, 0, length)
+        {:ok, :ident, text, text}
     end
   end
+
+  defp ident_length(<<char, rest::binary>>, length, _place)
+       when char in ?a..?z or char in ?A..?Z or char in [?_, ?:],
+       do: ident_length(rest, length + 1, :rest)
+
+  defp ident_length(<<char, rest::binary>>, length, :rest) when char in @digits_or_dot,
+    do: ident_length(rest, length + 1, :rest)
+
+  defp ident_length(<<?\\, rest::binary>>, length, _place) do
+    case escape_length(rest) do
+      0 -> length
+      escape -> ident_length(rest_at(rest, escape), length + 1 + escape, :rest)
+    end
+  end
+
+  defp ident_length(<<char::utf8, rest::binary>>, length, _place) when char >= 0x80 do
+    if Regex.match?(@letter, <<char::utf8>>),
+      do: ident_length(rest, length + byte_size(<<char::utf8>>), :rest),
+      else: length
+  end
+
+  defp ident_length(_query, length, _place), do: length
+
+  defp escape_length(<<x, a, b, _rest::binary>>) when x in [?x, ?X] do
+    if hex?(a) and hex?(b), do: 3, else: 0
+  end
+
+  defp escape_length(<<u, a, b, c, d, _rest::binary>>) when u in [?u, ?U] do
+    if Enum.all?([a, b, c, d], &hex?/1), do: 5, else: 0
+  end
+
+  defp escape_length(<<letter, _rest::binary>>) when letter in [?x, ?X, ?u, ?U], do: 0
+  defp escape_length(<<?\s, _rest::binary>>), do: 1
+
+  defp escape_length(<<char::utf8, _rest::binary>>) do
+    if Regex.match?(@unescapable, <<char::utf8>>), do: 0, else: byte_size(<<char::utf8>>)
+  end
+
+  defp escape_length(<<>>), do: 0
+
+  defp hex?(char), do: char in ?0..?9 or char in ?a..?f or char in ?A..?F
 
   defp string(<<mark, rest::binary>>) when mark in [?", ?', ?`] do
     case closing(rest, mark, 0) do
@@ -171,23 +221,15 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
 
   defp string(_query), do: :none
 
-  defp closing(rest, mark, from) do
-    case :binary.match(rest, <<mark>>, scope: {from, byte_size(rest) - from}) do
-      {index, 1} ->
-        if escaped?(rest, index), do: closing(rest, mark, index + 1), else: {:ok, index}
-
-      :nomatch ->
-        :error
+  defp closing(rest, mark, from) when from < byte_size(rest) do
+    case :binary.match(rest, [<<mark>>, "\\"], scope: {from, byte_size(rest) - from}) do
+      {index, 1} when binary_part(rest, index, 1) == "\\" -> closing(rest, mark, index + 2)
+      {index, 1} -> {:ok, index}
+      :nomatch -> :error
     end
   end
 
-  defp escaped?(rest, index) do
-    ~r/\\*\z/
-    |> Regex.run(binary_part(rest, 0, index))
-    |> hd()
-    |> byte_size()
-    |> rem(2) == 1
-  end
+  defp closing(_rest, _mark, _from), do: :error
 
   defp prefix(query, candidates, kind) do
     case Enum.find(candidates, &String.starts_with?(query, &1)) do
@@ -277,7 +319,7 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Lexer do
   end
 
   defp advance({line, column}, consumed) do
-    case String.split(consumed, "\n") do
+    case :binary.split(consumed, "\n", [:global]) do
       [same_line] -> {line, column + String.length(same_line)}
       lines -> {line + length(lines) - 1, String.length(List.last(lines)) + 1}
     end

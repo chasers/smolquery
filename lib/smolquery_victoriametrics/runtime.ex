@@ -19,7 +19,8 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         max_series: 10_000,
         max_samples: 20_000_000,
         max_points_per_series: 30_000,
-        max_decoded_bytes: 33_554_432
+        max_decoded_bytes: 33_554_432,
+        max_query_bytes: 16_384
 
   `password` is what every client must present, as a `Bearer` token or HTTP
   basic auth (`SmolqueryVictoriaMetrics.Auth`). It defaults to the API key
@@ -49,6 +50,11 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   and the points of one query's step grid, which is VictoriaMetrics'
   `-search.maxPointsPerTimeseries`. A query past any of them is refused
   rather than run (`SmolqueryVictoriaMetrics.Query`).
+
+  `max_query_bytes` is the longest MetricsQL text a request may carry, in
+  `query` or in each `match[]` (`SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES`,
+  `16_384`), VictoriaMetrics' `-search.maxQueryLen`. A longer one is a 400
+  before it is parsed.
 
   `max_ndjson_bytes` and `insert_max_in_flight_bytes` default to the API's
   (`SMOLQUERY_INSERT_MAX_NDJSON_BYTES`, `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES`):
@@ -87,6 +93,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     query_name: Smolquery.QueryService,
     max_ndjson_bytes: 8_000_000,
     max_decoded_bytes: 33_554_432,
+    max_query_bytes: 16_384,
     insert_max_in_flight_bytes: nil,
     lookback_ms: 300_000,
     max_series: 10_000,
@@ -106,6 +113,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           query_name: atom(),
           max_ndjson_bytes: pos_integer(),
           max_decoded_bytes: pos_integer(),
+          max_query_bytes: pos_integer(),
           insert_max_in_flight_bytes: pos_integer() | nil,
           lookback_ms: pos_integer(),
           max_series: pos_integer(),
@@ -163,6 +171,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         :max_samples,
         :max_points_per_series,
         :max_decoded_bytes,
+        :max_query_bytes,
         :ip,
         :port | @api_defaults
       ])

@@ -54,7 +54,8 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   ## Refusals
 
     * 400 `bad_data` — a time, duration or `limit` that does not read, a
-      `match[]` that is not a selector, a label name that is not one, or
+      `match[]` that is not a selector, is past `max_query_bytes` or is not
+      UTF-8, a label name that is not one, or
       `/api/v1/series` without `match[]`;
     * everything else as `SmolqueryVictoriaMetrics.Query.failure/1` has it:
       422 for a selector with no non-empty matcher or past `max_series`,
@@ -101,6 +102,7 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
 
   defp respond(conn, runtime, route, pairs) do
     with {:ok, route} <- label_name(route),
+         :ok <- matches_within(pairs, runtime.max_query_bytes),
          {:ok, request} <- request(route, pairs, now_ms()),
          {:ok, data} <- answer(route, runtime, request) do
       conn
@@ -112,6 +114,17 @@ defmodule SmolqueryVictoriaMetrics.Metadata do
   end
 
   defp refuse(conn, reason), do: Errors.send_error(conn, Query.failure(reason))
+
+  defp matches_within(pairs, max_bytes) do
+    pairs
+    |> Params.all(["match[]", "match"])
+    |> Enum.find_value(:ok, fn match ->
+      case Params.query_text(match, max_bytes) do
+        {:ok, _match} -> nil
+        {:error, {:bad_data, message}} -> {:error, {:bad_data, "match[]: " <> message}}
+      end
+    end)
+  end
 
   @doc """
   The arguments of a request to `route` from its `pairs`, with `now_ms` as

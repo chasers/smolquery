@@ -27,4 +27,10 @@ defmodule SmolqueryVictoriaMetrics.ErrorsTest do
     assert conn.status == 503
     assert get_resp_header(conn, "retry-after") == ["5"]
   end
+
+  test "a message that quotes bytes that are not UTF-8 is still sent" do
+    conn = Errors.send_error(conn(:get, "/"), {400, "bad_data", "bad " <> <<0xFF>>, nil})
+
+    assert %{"error" => "bad �"} = JSON.decode!(conn.resp_body)
+  end
 end

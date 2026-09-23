@@ -44,7 +44,9 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   As `evalRollupFuncWithMetricExpr` and `evalRollupFuncNoCache`:
 
-    * the window is the one written, resolved at the step (`5m`, `2i`); a
+    * the window is the one written, resolved at the step (`5m`, `2i`), and
+      one that resolves below zero (`5m-10m`) is refused with
+      `{:invalid_argument, "duration cannot be negative; ..."}`; a
       window not written is `0`, which `SmolqueryVictoriaMetrics.Rollup`
       reads as the step, widened for the functions that may widen it. For
       `default_rollup` alone, the bare selector's function, a window not
@@ -163,7 +165,8 @@ defmodule SmolqueryVictoriaMetrics.Eval do
     to = time_ms - resolve(rollup.offset, step)
     from = to - resolve(rollup.window, step) + 1
 
-    with {:ok, fetched} <- context.fetch.(selector, {from, to}) do
+    with :ok <- non_negative(rollup.window, step),
+         {:ok, fetched} <- context.fetch.(selector, {from, to}) do
       series =
         for %{labels: labels, timestamps: timestamps, values: values} <- fetched,
             points = within(timestamps, values, from, to),
@@ -194,12 +197,13 @@ defmodule SmolqueryVictoriaMetrics.Eval do
   What an instant query of a window on anything but a bare selector
   answers, `q[5m]`, `q[5m:1m]`, `m[5m:1m]` (VictoriaMetrics' `IsRollup`):
   `q` over the range query `[t - offset - window, t - offset]` at the
-  subquery's step, or the request's. `:none` for any other expression.
+  subquery's step, or the request's. `:none` for any other expression, and
+  for a window that resolves below zero, which `run/2` refuses.
   """
   @spec instant_range(Ast.expr(), integer(), pos_integer()) ::
           {:ok, Ast.expr(), {integer(), integer(), pos_integer()}} | :none
   def instant_range(%RollupExpr{window: %Duration{}, at: nil} = rollup, time_ms, step_ms) do
-    if raw?(rollup) do
+    if raw?(rollup) or non_negative(rollup.window, step_ms) != :ok do
       :none
     else
       step = with 0 <- resolve(rollup.step, step_ms), do: step_ms
@@ -375,11 +379,14 @@ defmodule SmolqueryVictoriaMetrics.Eval do
     shifted = with_grid(context, context.start_ms - offset, context.end_ms - offset, step)
 
     result =
-      case rollup.expr do
-        %MetricExpr{} = selector ->
+      case {non_negative(rollup.window, step), rollup.expr} do
+        {{:error, reason}, _expr} ->
+          {:error, reason}
+
+        {:ok, %MetricExpr{} = selector} ->
           selector_rollup(name, scalars, selector, rollup, keep, shifted)
 
-        _inner ->
+        {:ok, _inner} ->
           subquery_rollup(name, scalars, rollup, keep, shifted)
       end
 
@@ -466,6 +473,12 @@ defmodule SmolqueryVictoriaMetrics.Eval do
 
   defp window("default_rollup", 0, context), do: max(context.step_ms, context.lookback_ms)
   defp window(_name, window, _context), do: window
+
+  defp non_negative(window, step) do
+    if resolve(window, step) < 0,
+      do: {:error, {:invalid_argument, "duration cannot be negative; got #{window.text}"}},
+      else: :ok
+  end
 
   defp resolve(nil, _step), do: 0
   defp resolve(%Duration{ms: ms, steps: steps}, step), do: Durations.resolve(ms, steps, step)

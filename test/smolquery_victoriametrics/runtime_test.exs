@@ -29,6 +29,7 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
     assert runtime.max_samples == 20_000_000
     assert runtime.max_points_per_series == 30_000
     assert runtime.max_decoded_bytes == 33_554_432
+    assert runtime.max_query_bytes == 16_384
     assert runtime.ingest_name == Smolquery.IngestService
     assert runtime.query_name == Smolquery.QueryService
     assert runtime.catalog_opts == []

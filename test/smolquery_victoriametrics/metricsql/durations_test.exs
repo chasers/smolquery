@@ -45,4 +45,14 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.DurationsTest do
     assert Durations.resolve(1.0e30, 0, 0) == 9_223_372_036_854_775_807
     assert Durations.resolve(-1.0e30, 0, 0) == -9_223_372_036_854_775_808
   end
+
+  test "a zero part after a minus does not make later parts negative" do
+    assert Durations.to_ms("1h-0m5m", 1_000) == {:ok, 3_900_000}
+    assert Durations.to_ms("1h-5m5m", 1_000) == {:ok, 3_000_000}
+  end
+
+  test "a part past the largest double is refused, not raised" do
+    assert {:error, message} = Durations.parse(String.duplicate("9", 400) <> "ms")
+    assert message =~ "too big duration"
+  end
 end

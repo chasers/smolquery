@@ -40,8 +40,9 @@ defmodule SmolqueryVictoriaMetrics.Query do
 
   `SmolqueryVictoriaMetrics.Errors`' JSON form, with:
 
-    * 400 `bad_data` — `query` missing, or a time or duration that does not
-      read;
+    * 400 `bad_data` — `query` missing, past `max_query_bytes`
+      (`SmolqueryVictoriaMetrics.Runtime`) or not UTF-8, or a time or
+      duration that does not read;
     * 422 `execution` — an expression that does not parse, a function not
       ported, an argument of the wrong kind, a selector with no non-empty
       matcher, duplicate series, and a query past `max_series`,
@@ -92,6 +93,7 @@ defmodule SmolqueryVictoriaMetrics.Query do
     fetch_us = :counters.new(1, [:write_concurrency])
 
     with {:ok, query} <- query(params),
+         {:ok, query} <- Params.query_text(query, runtime.max_query_bytes),
          {:ok, grid} <- grid(kind, params, now_ms()),
          {:ok, timeout} <- bad_data(Params.duration(params, "timeout", nil)),
          {:ok, expr} <- parse(query) do

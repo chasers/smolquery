@@ -276,7 +276,9 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Literal do
 
   @doc """
   An identifier token's name: every `\\c`, `\\xhh` and `\\uhhhh` replaced by
-  the character it stands for. A backslash that escapes nothing valid is kept.
+  the character it stands for, and a UTF-16 surrogate pair, `\\uhhhh\\uhhhh`,
+  by the one character past U+FFFF it encodes. A backslash that escapes
+  nothing valid is kept.
   """
   @spec unescape_ident(String.t()) :: String.t()
   def unescape_ident(text), do: ident_chars(text, [])
@@ -301,7 +303,20 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Literal do
   defp ident_chars(<<char::utf8, rest::binary>>, acc),
     do: ident_chars(rest, [<<char::utf8>> | acc])
 
-  defp hex_char(hex, rest, <<?\\, tail::binary>>, acc) do
+  defp hex_char(hex, <<?\\, u, low::binary-size(4), rest::binary>> = after_high, text, acc)
+       when u in [?u, ?U] do
+    with {high, ""} when high in 0xD800..0xDBFF <- Integer.parse(hex, 16),
+         {low, ""} when low in 0xDC00..0xDFFF <- Integer.parse(low, 16) do
+      char = 0x10000 + ((high - 0xD800) <<< 10) + (low - 0xDC00)
+      ident_chars(rest, [<<char::utf8>> | acc])
+    else
+      _not_a_pair -> single_hex_char(hex, after_high, text, acc)
+    end
+  end
+
+  defp hex_char(hex, rest, text, acc), do: single_hex_char(hex, rest, text, acc)
+
+  defp single_hex_char(hex, rest, <<?\\, tail::binary>>, acc) do
     case Integer.parse(hex, 16) do
       {value, ""} when value < 0xD800 or value in 0xE000..0x10FFFF ->
         ident_chars(rest, [<<value::utf8>> | acc])
@@ -313,8 +328,8 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Literal do
 
   @doc """
   `name` as an identifier: characters that may not stand in an identifier at
-  their place are escaped with a backslash, and unprintable ones as `\\xhh` or
-  `\\uhhhh`.
+  their place are escaped with a backslash, and unprintable ones as `\\xhh`,
+  `\\uhhhh`, or a surrogate pair of those past U+FFFF.
   """
   @spec escape_ident(String.t()) :: String.t()
   def escape_ident(name) do
@@ -334,7 +349,13 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.Literal do
     cond do
       printable?(char) -> "\\" <> text
       char < 256 -> hex_escape(?x, char, 2)
-      true -> hex_escape(?u, char &&& 0xFFFF, 4)
+      char < 0x10000 -> hex_escape(?u, char, 4)
+      true -> surrogates(char - 0x10000)
     end
   end
+
+  defp surrogates(offset),
+    do:
+      hex_escape(?u, 0xD800 + (offset >>> 10), 4) <>
+        hex_escape(?u, 0xDC00 + (offset &&& 0x3FF), 4)
 end

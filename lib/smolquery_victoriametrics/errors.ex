@@ -12,6 +12,10 @@ defmodule SmolqueryVictoriaMetrics.Errors do
   every other status forever, 401 and 413 included, with the rest of its
   queue held behind that block: a block no retry can fix must be a 400 or a
   415 for vmagent to move on. Grafana shows `error`.
+
+  A message is sent as UTF-8 whatever it quotes: a byte that is not is
+  replaced, so a refusal that repeats what a client sent cannot fail to
+  encode.
   """
 
   import Plug.Conn
@@ -27,7 +31,12 @@ defmodule SmolqueryVictoriaMetrics.Errors do
   """
   @spec send_error(Plug.Conn.t(), t()) :: Plug.Conn.t()
   def send_error(conn, {status, type, message, retry_after}) do
-    body = JSON.encode!(%{"status" => "error", "errorType" => type, "error" => message})
+    body =
+      JSON.encode!(%{
+        "status" => "error",
+        "errorType" => type,
+        "error" => String.replace_invalid(message)
+      })
 
     conn
     |> retry_after(retry_after)

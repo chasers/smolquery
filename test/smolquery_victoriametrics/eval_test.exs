@@ -324,4 +324,18 @@ defmodule SmolqueryVictoriaMetrics.EvalTest do
   test "describe/1 writes labels as a selector" do
     assert Eval.describe(%{"__name__" => "up", "b" => "2", "a" => "1"}) == ~s|up{a="1", b="2"}|
   end
+
+  test "a window below zero is refused where VictoriaMetrics refuses it" do
+    grid = %{start_ms: 60_000, end_ms: 60_000, step_ms: 15_000}
+
+    for query <- ["rate(up[5m-10m])", "max_over_time(up[5m-10m:1m])"] do
+      assert {:error, {:invalid_argument, "duration cannot be negative; got 5m-10m"}} =
+               run(query, grid, [@up]),
+             query
+    end
+
+    {:ok, raw} = MetricsQL.parse("up[5m-10m]")
+    assert {:error, {:invalid_argument, _message}} = Eval.raw(raw, 60_000, context(grid, [@up]))
+    assert Eval.instant_range(raw, 60_000, 15_000) == :none
+  end
 end
