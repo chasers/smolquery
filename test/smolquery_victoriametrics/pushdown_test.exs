@@ -8,9 +8,16 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
 
   alias Explorer.DataFrame
   alias Smolquery.Test.VictoriaMetricsStack
+  alias SmolqueryVictoriaMetrics.Eval
+  alias SmolqueryVictoriaMetrics.Eval.Constants
   alias SmolqueryVictoriaMetrics.Eval.Series
   alias SmolqueryVictoriaMetrics.MetricsQL
+  alias SmolqueryVictoriaMetrics.MetricsQL.Ast.AggrFuncExpr
+  alias SmolqueryVictoriaMetrics.MetricsQL.Ast.FuncExpr
+  alias SmolqueryVictoriaMetrics.Params
   alias SmolqueryVictoriaMetrics.Pushdown
+  alias SmolqueryVictoriaMetrics.Query
+  alias SmolqueryVictoriaMetrics.Response
   alias SmolqueryVictoriaMetrics.Runtime
 
   @moduletag :capture_log
@@ -28,7 +35,7 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
 
   defp plan(query) do
     {:ok, expr} = MetricsQL.parse(query)
-    Pushdown.plan(expr, @context)
+    Pushdown.plan(Constants.prepare(expr), @context)
   end
 
   defp plan!(query) do
@@ -114,6 +121,44 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       assert %Pushdown{offset_ms: 60_000} = plan!("sum(last_over_time(m[5m] offset 1m))")
     end
 
+    test "without, the other aggregates, and a rollup with a number argument are planned" do
+      assert %Pushdown{without: ["job", "instance"], labels: [], name_in_key: false} =
+               plan!("sum without (job, instance) (m)")
+
+      assert %Pushdown{without: []} = plan!("avg without () (m)")
+      assert %Pushdown{aggregate: "quantile", phi: 0.9} = plan!("quantile(0.9, m)")
+      assert %Pushdown{aggregate: "median", phi: 0.5} = plan!("median by (job) (m)")
+      assert %Pushdown{aggregate: "stddev"} = plan!("stddev(m)")
+      assert %Pushdown{aggregate: "group"} = plan!("group by (job) (m)")
+
+      assert %Pushdown{rollup: "quantile_over_time", scalar: 0.95, phi: nil} =
+               plan!("max(quantile_over_time(0.95, m[5m]))")
+
+      assert %Pushdown{rollup: "count_gt_over_time", scalar: 10.0} =
+               plan!("sum by (job) (count_gt_over_time(m[5m], 10))")
+
+      assert %Pushdown{rollup: "changes", read_from_ms: -600_000} = plan!("sum(changes(m[5m]))")
+
+      assert %Pushdown{rollup: "rate_over_sum", adjust_window: true} =
+               plan!("sum(rate_over_sum(m))")
+
+      for query <- [
+            "quantile(time(), m)",
+            "sum(count_gt_over_time(m[5m], time()))",
+            "sum(quantile_over_time(0.9, m[1d]))",
+            "topk(2, m)"
+          ] do
+        assert plan(query) == :none, query
+      end
+    end
+
+    test "a rollup that takes a number is not planned without one" do
+      {:ok, %AggrFuncExpr{args: [%FuncExpr{args: [rollup, _ten]} = call]} = expr} =
+        MetricsQL.parse("sum(count_gt_over_time(m[5m], 10))")
+
+      assert Pushdown.plan(%{expr | args: [%{call | args: [rollup]}]}, @context) == :none
+    end
+
     test "a rollup other than the last sample is pushed only up to 32 steps of window" do
       assert %Pushdown{window_ms: 960_000} = plan!("sum(sum_over_time(m[16m]))")
       assert plan("sum(sum_over_time(m[16m1s]))") == :none
@@ -124,17 +169,14 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
 
     test "what stays in Elixir" do
       for query <- [
-            "sum without (job) (m)",
             "topk(3, m)",
             "sum(m @ 100)",
             "sum(m[5m:1m])",
             "sum(m[5m:])",
             "sum(m) limit 2",
             "sum(m + 1)",
-            "quantile(0.9, m)",
             "sum(m[5m-10m])",
             "sum(rate(m[5m:1m]))",
-            "sum(changes(m[5m]))",
             "sum(m, m)"
           ] do
         assert plan(query) == :none, query
@@ -324,10 +366,13 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
           {%{"__name__" => "c", "job" => "i"},
            [{@t0_ms + 50_000, @inf}, {@t0_ms + 200_000, 3.0}]},
           {%{"__name__" => "c", "job" => "j"},
-           [{@t0_ms + 50_000, 1.0e300}, {@t0_ms + 65_000, 2.0}]}
+           [{@t0_ms + 50_000, 1.0e300}, {@t0_ms + 65_000, 2.0}]},
+          {%{"__name__" => "c", "job" => "k"},
+           for(i <- 0..4, do: {@t0_ms + i * 15_000, i + 1.0}) ++
+             for(i <- 0..8, do: {@t0_ms + 180_000 + i * 15_000, i + 1.0})}
         ])
 
-      %{stack: stack, elixir: limited(stack, pushdown: false)}
+      %{stack: stack}
     end
 
     @queries [
@@ -363,11 +408,50 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       "sum by (job) (rate(c[2m] offset -15s))",
       "sum(up offset 1m)",
       "sum(rate(c[5m]))",
-      "count(rate(c[1m]))"
+      "count(rate(c[1m]))",
+      "sum without (job) (up)",
+      "avg without (instance, job) (gauge)",
+      "count without () (up)",
+      "quantile(0.9, up)",
+      "quantile(1.5, up)",
+      "quantile(-1, gauge)",
+      "median by (job) (c)",
+      "stddev by (job) (up)",
+      "stdvar(c)",
+      "stddev(gauge)",
+      "group by (job) (gauge)",
+      "distinct(up)",
+      "sum2(gauge)",
+      "sum by (job) (sum2_over_time(c[1m]))",
+      "max by (job) (range_over_time(c[2m]))",
+      "sum by (job) (distinct_over_time(c[2m]))",
+      "max by (job) (tmin_over_time(c[2m]))",
+      "max by (job) (tmax_over_time(c[2m]))",
+      "max by (job) (timestamp(c[1m]))",
+      "sum by (job) (stddev_over_time(c[2m]))",
+      "sum by (job) (stdvar_over_time(gauge[2m]))",
+      "sum by (job) (quantile_over_time(0.5, c[2m]))",
+      "sum by (job) (quantile_over_time(0.9, gauge[1m]))",
+      "sum by (job) (quantile_over_time(2, c[1m]))",
+      "sum by (job) (geomean_over_time(c[2m]))",
+      "sum by (job) (rate_over_sum(c[1m]))",
+      "sum by (job) (rate_over_sum(c))",
+      "sum by (job) (count_gt_over_time(c[2m], 10))",
+      "sum by (job) (count_le_over_time(c[2m], 10))",
+      "sum by (job) (count_eq_over_time(c[2m], 4))",
+      "sum by (job) (count_ne_over_time(c[2m], 4))",
+      "sum by (job) (changes(c[1m]))",
+      "sum by (job) (changes(c))",
+      "sum by (job) (resets(c[1m]))",
+      "sum by (job) (lag(c[1m]))",
+      "sum by (job) (lifetime(c[1m]))",
+      "sum by (job) (scrape_interval(c[1m]))",
+      "quantile without (job) (0.5, c[1m])",
+      "stddev without (instance) (changes(c[2m]))"
     ]
 
     test "a pushed aggregate answers what the evaluator answers, over a range and at an instant",
-         %{stack: stack, elixir: elixir} do
+         %{stack: stack} do
       for query <- @queries do
         assert {:ok, _plan} = plan(query), query
 
@@ -385,12 +469,12 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
 
         for params <- [range, off_grid] do
           assert {query, params, answer(stack, "/api/v1/query_range", params)} ==
-                   {query, params, answer(elixir, "/api/v1/query_range", params)}
+                   {query, params, evaluated(stack, :range, params)}
         end
 
         for params <- [instant, odd_instant] do
           assert {query, params, answer(stack, "/api/v1/query", params)} ==
-                   {query, params, answer(elixir, "/api/v1/query", params)}
+                   {query, params, evaluated(stack, :instant, params)}
         end
       end
     end
@@ -437,6 +521,52 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       assert body(before)["data"]["result"] == []
       assert_receive {:query, %{series: 0, samples: 1}}
     end
+  end
+
+  defp evaluated(stack, :range, params) do
+    {:ok, start} = Params.time(params, "start", 0)
+    {:ok, finish} = Params.time(params, "end", 0)
+    {:ok, step} = Params.duration(params, "step", 300_000)
+    {start, finish} = Query.align(start, finish, step, false)
+
+    evaluate(
+      stack,
+      params["query"],
+      %{start_ms: start, end_ms: finish, step_ms: step},
+      &Response.matrix/2
+    )
+  end
+
+  defp evaluated(stack, :instant, params) do
+    {:ok, time} = Params.time(params, "time", 0)
+
+    evaluate(
+      stack,
+      params["query"],
+      %{start_ms: time, end_ms: time, step_ms: 300_000},
+      &Response.vector/2
+    )
+  end
+
+  defp evaluate(stack, query, grid, render) do
+    {:ok, expr} = MetricsQL.parse(query)
+    runtime = stack.runtime
+    deadline = System.monotonic_time(:millisecond) + 60_000
+
+    context =
+      Map.merge(grid, %{
+        lookback_ms: runtime.lookback_ms,
+        max_points: runtime.max_points_per_series,
+        fetch: Query.fetcher(runtime, deadline)
+      })
+
+    {:ok, series, _stats} = Eval.run(expr, context)
+
+    series
+    |> render.(%{series: 0, duration_ms: 0})
+    |> IO.iodata_to_binary()
+    |> JSON.decode!()
+    |> Map.delete("stats")
   end
 
   defp answer(stack, path, params) do

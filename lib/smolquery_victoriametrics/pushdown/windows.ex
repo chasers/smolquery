@@ -50,6 +50,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
   answers it.
   """
 
+  alias SmolqueryVictoriaMetrics.Pushdown.Whole
   alias SmolqueryVictoriaMetrics.Rollup
 
   @functions ~w(
@@ -72,6 +73,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
   @spec stages(String.t(), map(), [String.t()], boolean(), boolean()) :: iodata()
   def stages(rollup, refs, keys, instant?, adjust_window?) do
     columns = Enum.map(keys, &[", ", &1])
+    scalar = Map.get(refs, :scalar)
 
     [
       "o AS (SELECT *, row_number() OVER win AS idx, count(*) OVER (PARTITION BY series) AS n, ",
@@ -106,7 +108,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       "d2 AS (SELECT *, mine[len(older) + 1:] AS items FROM d1), ",
       "d AS (SELECT series",
       columns,
-      ", k, t, max_prev, win, CASE WHEN held THEN len(items) ELSE 0 END AS cnt, ",
+      ", k, t, max_prev, win, items, CASE WHEN held THEN len(items) ELSE 0 END AS cnt, ",
       "CASE WHEN NOT held THEN ts_ms WHEN len(older) > 0 THEN older[-1].ts ELSE before.ts END AS prev_ts, ",
       "CASE WHEN NOT held THEN cv WHEN len(older) > 0 THEN older[-1].v ELSE before.v END AS prev_v, ",
       "items[1].ts AS f_ts, items[1].v AS f_v, ",
@@ -114,9 +116,15 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       "ts_ms AS l_ts, cv AS l_v, items[-2].v AS l_lag_v, ",
       "items[group_first - items[1].idx].v AS e_v, items[group_first - items[1].idx].ts AS e_ts FROM d2), ",
       "dp AS (SELECT *, prev_ts IS NOT NULL AND prev_ts > t - win - max_prev AS has_prev FROM d), ",
-      "e AS (SELECT *, #{value(rollup)} AS v FROM dp), "
+      "e AS (SELECT *, #{expression(rollup, scalar)} AS v FROM dp), "
     ]
   end
+
+  defp expression(rollup, scalar) do
+    if rollup in @functions, do: value(rollup), else: Whole.value(rollup, scalar)
+  end
+
+  defp reads_prev?(rollup), do: rollup in @reads_prev or Whole.reads_prev?(rollup)
 
   defp sample, do: "{'idx': r.idx, 'ts': r.ts_ms, 'v': r.cv}"
 
@@ -133,19 +141,27 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
     end
   end
 
-  defp before(rollup) when rollup in @reads_prev, do: ", max(#{sample()}) OVER bf AS before"
-  defp before(_rollup), do: ""
+  defp before(rollup) do
+    if reads_prev?(rollup), do: ", max(#{sample()}) OVER bf AS before", else: ""
+  end
 
-  defp before_window(rollup) when rollup in @reads_prev,
-    do:
-      ", bf AS (PARTITION BY r.series ORDER BY r.ts_ms RANGE BETWEEN UNBOUNDED PRECEDING AND mw.win + 1 PRECEDING)"
+  defp before_window(rollup) do
+    if reads_prev?(rollup),
+      do:
+        ", bf AS (PARTITION BY r.series ORDER BY r.ts_ms " <>
+          "RANGE BETWEEN UNBOUNDED PRECEDING AND mw.win + 1 PRECEDING)",
+      else: ""
+  end
 
-  defp before_window(_rollup), do: ""
+  defp before_column(rollup) do
+    if reads_prev?(rollup), do: "before", else: "NULL::STRUCT(idx BIGINT, ts BIGINT, v DOUBLE)"
+  end
 
-  defp before_column(rollup) when rollup in @reads_prev, do: "before"
-  defp before_column(_rollup), do: "NULL::STRUCT(idx BIGINT, ts BIGINT, v DOUBLE)"
+  defp empty_windows(rollup, refs) do
+    if reads_prev?(rollup), do: empty_stream(refs), else: ""
+  end
 
-  defp empty_windows(rollup, refs) when rollup in @reads_prev do
+  defp empty_stream(refs) do
     [
       " UNION ALL SELECT w.*, false AS held, unnest(generate_series(",
       "greatest(0, CAST(ceil((w.ts_ms + w.win - #{refs.start}) / #{refs.step}) AS BIGINT)), ",
@@ -155,12 +171,10 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
     ]
   end
 
-  defp empty_windows(_rollup, _refs), do: ""
-
   defp max_prev(refs, true), do: refs.step
 
   defp max_prev(refs, false),
-    do: ["CASE WHEN max(n) < 2 THEN #{refs.step} ELSE ", inflate(quantile(refs)), " END"]
+    do: inflate("(CASE WHEN max(n) < 2 THEN #{refs.step} ELSE #{quantile(refs)} END)")
 
   defp quantile(refs) do
     gaps =
@@ -168,9 +182,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
         "FILTER (WHERE prev_ts IS NOT NULL AND idx >= n - 19))"
 
     "(SELECT CASE WHEN trunc(est) > 0 THEN CAST(trunc(est) AS BIGINT) ELSE #{refs.step} END " <>
-      "FROM (SELECT q[lower + 1] * (1 - weight) + q[least(len(q) - 1, lower + 1) + 1] * weight AS est " <>
-      "FROM (SELECT q, CAST(floor(rank) AS BIGINT) AS lower, rank - floor(rank) AS weight " <>
-      "FROM (SELECT q, 0.6 * (len(q) - 1) AS rank FROM (SELECT #{gaps} AS q)))))"
+      "FROM (SELECT #{Whole.quantile(gaps, "0.6")} AS est))"
   end
 
   defp inflate(interval) do

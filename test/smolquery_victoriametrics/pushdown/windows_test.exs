@@ -22,7 +22,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WindowsTest do
       assert sql =~
                "r AS (SELECT *, max(c_sum) OVER (PARTITION BY series ORDER BY idx ROWS UNBOUNDED PRECEDING) AS cv FROM r1)"
 
-      assert sql =~ "m AS (SELECT series, CASE WHEN max(n) < 2 THEN $5 ELSE"
+      assert sql =~ "FROM (SELECT (CASE WHEN max(n) < 2 THEN $5 ELSE"
       assert sql =~ "0.6 * (len(q) - 1) AS rank"
       assert sql =~ "WHEN i <= 2000 THEN i + 4 * i"
       assert sql =~ "mw AS (SELECT series, max_prev, $6 AS win FROM m)"

@@ -182,7 +182,10 @@ defmodule Bench.VictoriaMetricsCardinality do
           {~s|m{job="job-1"}|, div(config.series, 10)},
           {~s|m{project!="project-1"}|, config.series - per_project},
           {~s|rate(m{job="job-1"}[1m])|, div(config.series, 10)},
-          {~s|increase(m{project="project-1"}[5m])|, per_project}
+          {~s|increase(m{project="project-1"}[5m])|, per_project},
+          {~s|changes(m{job="job-1"}[1m])|, div(config.series, 10)},
+          {~s|quantile_over_time(0.9, m{job="job-1"}[1m])|, div(config.series, 10)},
+          {~s|stddev_over_time(m{job="job-1"}[1m])|, div(config.series, 10)}
         ] do
       if expected > config.max_series do
         IO.puts(label(selector, 34) <> "  skipped: #{expected} series expected")

@@ -182,7 +182,6 @@ defmodule SmolqueryVictoriaMetrics.Query do
   defp timed(counter, fetch),
     do: fn selector, range -> measure(counter, fn -> fetch.(selector, range) end) end
 
-  defp timed_aggregate(_counter, nil), do: nil
   defp timed_aggregate(counter, run), do: fn plan -> measure(counter, fn -> run.(plan) end) end
 
   defp measure(counter, fun) do
@@ -224,14 +223,11 @@ defmodule SmolqueryVictoriaMetrics.Query do
 
   @doc """
   How a query runs an aggregate in SQL (`SmolqueryVictoriaMetrics.Pushdown`,
-  T-568) under the request's `deadline`, or `nil` when the runtime has
-  `pushdown: false`, which keeps every aggregate in Elixir. A pushed
-  aggregate reads no samples into the node, so the sample budget above does
-  not apply to it; `max_series` bounds its output.
+  T-568) under the request's `deadline`. A pushed aggregate reads no
+  samples into the node, so the sample budget above does not apply to it;
+  `max_series` bounds its output.
   """
-  @spec aggregator(Runtime.t(), integer()) :: Eval.aggregate() | nil
-  def aggregator(%Runtime{pushdown: false}, _deadline), do: nil
-
+  @spec aggregator(Runtime.t(), integer()) :: Eval.aggregate()
   def aggregator(%Runtime{} = runtime, deadline) do
     fn plan ->
       with {:ok, left} <- time_left(deadline),

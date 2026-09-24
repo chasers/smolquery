@@ -208,6 +208,30 @@ first shape that joined a stream of each window's first sample to a stream
 of its last ran out of that memory: the last-sample stream alone was
 sixteen million rows in a hash table.
 
+## The whole-window family pushed down (T-586)
+
+The same 10M-series, four-samples dataset, on the commit of T-586, which
+folds `changes`, `quantile_over_time`, `stddev_over_time` and the other
+whole-window rollups over the window list the descriptor carries:
+
+```
+Label filters — 10000000 series, 100000 projects, 1 h; 40000000 samples of m in range; median of 3
+query                               series   samples  wall ms  fetch ms  sweep ms  rest ms
+m{job="job-1"}                           1   4000000   1108.8    1107.6       0.2      1.2
+rate(m{job="job-1"}[1m])                 1   4000000   4490.4    4488.9       0.2      1.2
+changes(m{job="job-1"}[1m])              1   4000000   4516.3    4514.4       0.2      1.5
+quantile_over_time(0.9, m{job="job-1"}[1m])       1   4000000  10110.7   10109.4       0.3      1.1
+stddev_over_time(m{job="job-1"}[1m])       1   4000000   3683.5    3682.3       0.3      1.0
+```
+
+`changes` and `stddev_over_time` cost what `rate` costs: the descriptor,
+then a fold over a window of one to four samples per point.
+`quantile_over_time` is twice that, since its fold sorts the window and
+interpolates through three nested scalar subqueries per point; a
+`quantile_cont` would be cheaper but interpolates in a different order of
+operations, and the byte-for-byte comparison with the evaluator is what
+this layer holds to.
+
 ## What this settles
 
 - **A label matcher is a scan of the metric, at about 21 ns a row.** Past the
@@ -261,3 +285,8 @@ sixteen million rows in a hash table.
   for the plain count of the same series, with the counter-reset pass, the
   scrape-interval estimate and the window lists all in SQL, and nothing but
   240 rows crossing into the node.
+- **A fold over the window costs what the descriptor costs.** `changes`
+  and `stddev_over_time` over a million series and four million samples
+  answer in 3.7 to 4.5 s, the same as `rate`; `quantile_over_time` in
+  10 s, its sort and interpolation per point. Nothing but 240 rows crosses
+  into the node for any of them.
