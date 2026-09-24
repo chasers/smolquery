@@ -83,6 +83,27 @@ of seven reads of `Samples.select/4`):
 | 50 | 591 ms | 181 ms |
 | 200 | 792 ms | 301 ms |
 
+
+### After T-585: the rate family in SQL
+
+Same command and machine, on the commit of T-585, where `sum by (job)
+(rate(m[5m]))` is one SQL statement (`SmolqueryVictoriaMetrics.Pushdown`,
+`SmolqueryVictoriaMetrics.Pushdown.Windows`) and `rate(m[5m])` alone, a
+thousand output series, still evaluates in Elixir:
+
+```
+query                                         series   samples  wall ms  fetch ms  sweep ms  rest ms
+rate(m[5m]) 1h                                  1000    280000   2172.9     386.7      96.7   1714.3
+rate(m[5m]) 6h                                  1000   1440000  11572.7    1118.9     884.0   9540.3
+sum by (job) (rate(m[5m])) 1h                     10    280000    352.2     344.8       0.2      7.1
+sum by (job) (rate(m[5m])) 6h                     10   1440000    934.4     863.0       0.3     55.9
+m{instance="host-1"} 6h                            1      1440    280.3     276.1       0.5      3.3
+```
+
+The six-hour `sum by (job) (rate(m[5m]))` went from 2.5 s (1.08 s of
+fetch, 1.38 s of sweep) to 0.93 s, and the one-hour from 0.83 s to 0.35 s;
+the sweep is gone and the fetch is the statement. `samples` is what the
+statement scanned.
 ## What this settles
 
 - **Tier 1 is not the bottleneck at this size.** Reading 1.44 million samples

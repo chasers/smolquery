@@ -160,6 +160,7 @@ defmodule SmolqueryVictoriaMetrics.Eval.ValueTest do
       assert Value.from_number(:infinity) == Value.inf()
       assert Value.from_number(:neg_infinity) == Value.neg_inf()
       assert Value.from_number(:nan) == nil
+      assert Value.from_number(nil) == nil
       assert Value.from_number(2) == 2.0
     end
   end

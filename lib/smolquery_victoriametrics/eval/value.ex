@@ -49,9 +49,10 @@ defmodule SmolqueryVictoriaMetrics.Eval.Value do
   @doc """
   A number literal's value: `:inf`, `:neg_inf` and `:nan` as values, a float
   held to the infinities; and a double read back from a frame, where
-  Explorer says `:infinity`, `:neg_infinity` and `:nan`.
+  Explorer says `:infinity`, `:neg_infinity` and `:nan`, and `nil` for NULL.
   """
-  @spec from_number(float() | :inf | :neg_inf | :nan | :infinity | :neg_infinity) :: t()
+  @spec from_number(float() | :inf | :neg_inf | :nan | :infinity | :neg_infinity | nil) :: t()
+  def from_number(nil), do: nil
   def from_number(inf) when inf in [:inf, :infinity], do: @inf
   def from_number(neg) when neg in [:neg_inf, :neg_infinity], do: -@inf
   def from_number(:nan), do: nil

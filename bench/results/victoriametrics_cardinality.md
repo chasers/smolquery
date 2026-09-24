@@ -181,6 +181,33 @@ last-sample rollups by a `lead` over the series, so the rows are one per
 series and point with no group by series at all, and the one-stage
 aggregate over them is what the numbers above measure.
 
+## The rate family pushed down (T-585)
+
+The 10M-series dataset again, with `SAMPLES=4` (four samples a series over
+the hour, 40 million rows), on the commit of T-585, which computes `rate`
+and its kin in SQL: the descriptor of each window (its first and last
+samples, the one before it, how many it holds) built from a list each
+sample carries of the samples within one window of it, no join.
+
+```
+Label filters — 10000000 series, 100000 projects, 1 h; 40000000 samples of m in range; median of 3
+query                               series   samples  wall ms  fetch ms  sweep ms  rest ms
+m{instance="host-1"}                     1         4    818.8     818.0       0.2      0.6
+m{project="project-1"}                   1       400    893.0     884.9       0.2      8.0
+m{project=~"project-(1|22|333)"}         1      1200   1209.4    1208.3       0.2      1.0
+m{project=~"project-1.*"}                1   4444400   1492.5    1490.7       0.2      1.2
+m{job="job-1"}                           1   4000000   1148.1    1146.7       0.2      1.1
+m{project!="project-1"}                  1  39999600   4219.5    4218.4       0.2      1.0
+rate(m{job="job-1"}[1m])                 1   4000000   3754.4    3718.5       0.2      1.2
+increase(m{project="project-1"}[5m])     1       400    929.2     927.5       0.2      1.0
+```
+
+`count(rate(m{job="job-1"}[1m]))` reads a million series, four million
+samples, and answers 240 points in 3.75 s inside the job engine's 1 GB. A
+first shape that joined a stream of each window's first sample to a stream
+of its last ran out of that memory: the last-sample stream alone was
+sixteen million rows in a hash table.
+
 ## What this settles
 
 - **A label matcher is a scan of the metric, at about 21 ns a row.** Past the
@@ -229,3 +256,8 @@ aggregate over them is what the numbers above measure.
   and the unnest into the grid cost about 7 ns a sample over the 21 ns scan;
   the per-series Elixir sweep and the copy are gone. What is left at depth
   is the MAP scan, which is T-569.
+- **The rate family costs about as much as a count.** `count(rate(m[1m]))`
+  over a million series and four million samples is 3.75 s against 1.15 s
+  for the plain count of the same series, with the counter-reset pass, the
+  scrape-interval estimate and the window lists all in SQL, and nothing but
+  240 rows crossing into the node.

@@ -180,7 +180,9 @@ defmodule Bench.VictoriaMetricsCardinality do
           {~s|m{project=~"project-(1\|22\|333)"}|, 3 * per_project},
           {~s|m{project=~"project-1.*"}|, prefixed(config.projects, "1") * per_project},
           {~s|m{job="job-1"}|, div(config.series, 10)},
-          {~s|m{project!="project-1"}|, config.series - per_project}
+          {~s|m{project!="project-1"}|, config.series - per_project},
+          {~s|rate(m{job="job-1"}[1m])|, div(config.series, 10)},
+          {~s|increase(m{project="project-1"}[5m])|, per_project}
         ] do
       if expected > config.max_series do
         IO.puts(label(selector, 34) <> "  skipped: #{expected} series expected")

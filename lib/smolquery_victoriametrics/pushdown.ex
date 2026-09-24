@@ -18,15 +18,19 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
       modifier, and no `limit`;
     * `rollup` is `default_rollup` (a bare selector, or `m[5m]`),
       `last_over_time`, `sum_over_time`, `count_over_time`, `min_over_time`,
-      `max_over_time` or `avg_over_time`, over a selector with at most a
-      window: no `offset`, no `@`, no subquery.
+      `max_over_time` or `avg_over_time`, or one of the rollups read off a
+      window's edges (`SmolqueryVictoriaMetrics.Pushdown.Windows`, T-585):
+      `rate`, `deriv_fast`, `increase`, `increase_pure`, `delta`, `idelta`,
+      `irate`, `ideriv`, `first_over_time`, `present_over_time`; over a
+      selector with at most a window and an `offset`: no `@`, no subquery.
 
-  Anything else, `without`, `rate`, `topk`, an aggregate over an
-  expression, evaluates in Elixir as before. `rate` and `increase` stay
-  there because their window, when none is written, and the sample they
-  read before it depend on the series' own scrape interval
-  (`SmolqueryVictoriaMetrics.Rollup`), which SQL would have to estimate the
-  same way; the functions here read exactly the window written.
+  Anything else, `without`, `topk`, `changes`, an aggregate over an
+  expression, evaluates in Elixir as before. An `offset` moves the grid
+  and the read back and the answer forward again, as
+  `SmolqueryVictoriaMetrics.Eval` does. A transform, a binary operator or
+  `topk` over a pushed aggregate already evaluates over the pushed result:
+  `histogram_quantile(0.9, sum by (le) (rate(b[5m])))` and
+  `sum(rate(a[5m])) / sum(rate(b[5m]))` read no sample into the node.
 
   ## The SQL
 
@@ -110,6 +114,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.Modifier
   alias SmolqueryVictoriaMetrics.MetricsQL.Ast.RollupExpr
   alias SmolqueryVictoriaMetrics.MetricsQL.Durations
+  alias SmolqueryVictoriaMetrics.Pushdown.Windows
   alias SmolqueryVictoriaMetrics.Rollup
   alias SmolqueryVictoriaMetrics.Runtime
   alias SmolqueryVictoriaMetrics.Samples
@@ -123,7 +128,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
     "max_over_time" => "max(value)",
     "avg_over_time" => "avg(value)"
   }
-  @rollups @last ++ Map.keys(@inner)
+  @windows Windows.functions()
+  @rollups @last ++ Map.keys(@inner) ++ @windows
   @max_window_steps 32
   @inf "1.7976931348623157e308"
 
@@ -136,7 +142,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
     :end_ms,
     :step_ms,
     :timestamps,
-    :labels
+    :labels,
+    :read_from_ms
   ]
   defstruct [
     :selector,
@@ -148,13 +155,19 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
     :step_ms,
     :timestamps,
     :labels,
-    name_in_key: false
+    :read_from_ms,
+    name_in_key: false,
+    adjust_window: false,
+    offset_ms: 0
   ]
 
   @typedoc """
   A pushed aggregate: the selector, the rollup and aggregate names, the
-  window and grid in milliseconds, the `by` labels other than `__name__`,
-  and whether `__name__` is a group key too.
+  window and grid in milliseconds (the grid moved back by `offset_ms`, the
+  selector's `offset`, and the answer moved forward again), where the read
+  starts, the `by` labels other than `__name__`, and whether `__name__` is
+  a group key too. `adjust_window` says the window is `max(step, max_prev)`
+  per series, a rate with no window written.
   """
   @type t :: %__MODULE__{
           selector: MetricExpr.t(),
@@ -166,7 +179,10 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
           step_ms: pos_integer(),
           timestamps: [integer()],
           labels: [String.t()],
-          name_in_key: boolean()
+          read_from_ms: integer(),
+          name_in_key: boolean(),
+          adjust_window: boolean(),
+          offset_ms: integer()
         }
 
   @typedoc "What the query answered and read: the groups, and the samples scanned."
@@ -180,30 +196,42 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   def plan(%AggrFuncExpr{name: name, args: [arg], modifier: modifier, limit: nil}, context)
       when name in @aggregates do
     with {:ok, by} <- grouping(modifier),
-         {:ok, rollup, selector, window, keeps} <- rollup(arg, context),
-         :ok <- bounded(rollup, window, context) do
+         {:ok, rollup} <- rollup(arg, context),
+         :ok <- bounded(rollup, context) do
+      offset = rollup.offset_ms
+      step = context.step_ms
+
       {:ok,
        %__MODULE__{
-         selector: selector,
-         rollup: rollup,
+         selector: rollup.selector,
+         rollup: rollup.name,
          aggregate: name,
-         window_ms: window,
-         start_ms: context.start_ms,
-         end_ms: context.end_ms,
-         step_ms: context.step_ms,
-         timestamps: context.timestamps,
+         window_ms: rollup.window_ms,
+         adjust_window: rollup.adjust_window,
+         offset_ms: offset,
+         read_from_ms: context.start_ms - offset - read_back(rollup, context),
+         start_ms: context.start_ms - offset,
+         end_ms: context.end_ms - offset,
+         step_ms: step,
+         timestamps: Enum.map(context.timestamps, &(&1 - offset)),
          labels: List.delete(by || [], "__name__"),
          name_in_key:
-           by != nil and "__name__" in by and (keeps or Rollup.keeps_metric_name?(rollup))
+           by != nil and "__name__" in by and
+             (rollup.keep or Rollup.keeps_metric_name?(rollup.name))
        }}
     end
   end
 
   def plan(_node, _context), do: :none
 
-  defp bounded(rollup, _window, _context) when rollup in @last, do: :ok
+  defp read_back(%{name: name, written_ms: written}, context) when name in @windows,
+    do: max(written, context.step_ms) + context.lookback_ms
 
-  defp bounded(_rollup, window, context) do
+  defp read_back(%{window_ms: window}, _context), do: window
+
+  defp bounded(%{name: rollup}, _context) when rollup in @last, do: :ok
+
+  defp bounded(%{window_ms: window}, context) do
     if window <= @max_window_steps * context.step_ms, do: :ok, else: :none
   end
 
@@ -215,11 +243,11 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   defp grouping(_modifier), do: :none
 
   defp rollup(%MetricExpr{} = selector, context),
-    do: {:ok, "default_rollup", selector, window(0, "default_rollup", context), false}
+    do: {:ok, described("default_rollup", selector, 0, 0, false, context)}
 
   defp rollup(%RollupExpr{expr: %MetricExpr{} = selector} = rollup, context) do
-    with {:ok, written} <- written_window(rollup, context),
-         do: {:ok, "default_rollup", selector, window(written, "default_rollup", context), false}
+    with {:ok, written, offset} <- written(rollup, context),
+         do: {:ok, described("default_rollup", selector, written, offset, false, context)}
   end
 
   defp rollup(%FuncExpr{name: name, args: [arg], keep_metric_names: keep}, context) do
@@ -230,32 +258,36 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   defp rollup(_expr, _context), do: :none
 
   defp function_rollup(name, %MetricExpr{} = selector, keep, context),
-    do: {:ok, name, selector, window(0, name, context), keep}
+    do: {:ok, described(name, selector, 0, 0, keep, context)}
 
   defp function_rollup(name, %RollupExpr{expr: %MetricExpr{} = selector} = rollup, keep, context) do
-    with {:ok, written} <- written_window(rollup, context),
-         do: {:ok, name, selector, window(written, name, context), keep}
+    with {:ok, written, offset} <- written(rollup, context),
+         do: {:ok, described(name, selector, written, offset, keep, context)}
   end
 
   defp function_rollup(_name, _arg, _keep, _context), do: :none
 
-  defp written_window(
-         %RollupExpr{step: nil, offset: nil, at: nil, inherit_step: false, window: window},
-         context
-       ) do
-    case resolve(window, context.step_ms) do
-      ms when ms >= 0 -> {:ok, ms}
+  defp written(%RollupExpr{step: nil, at: nil, inherit_step: false} = rollup, context) do
+    case resolve(rollup.window, context.step_ms) do
+      ms when ms >= 0 -> {:ok, ms, resolve(rollup.offset, context.step_ms)}
       _negative -> :none
     end
   end
 
-  defp written_window(_rollup, _context), do: :none
+  defp written(_rollup, _context), do: :none
 
-  defp window(written, name, context) do
-    case Rollup.window_ms(name, written, context.step_ms, context.lookback_ms) do
-      0 -> context.step_ms
-      window -> window
-    end
+  defp described(name, selector, written, offset, keep, context) do
+    resolved = Rollup.window_ms(name, written, context.step_ms, context.lookback_ms)
+
+    %{
+      name: name,
+      selector: selector,
+      written_ms: written,
+      window_ms: if(resolved == 0, do: context.step_ms, else: resolved),
+      adjust_window: resolved == 0 and Rollup.may_adjust_window?(name),
+      offset_ms: offset,
+      keep: keep
+    }
   end
 
   defp resolve(nil, _step), do: 0
@@ -267,7 +299,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   @spec sql(t(), Runtime.t()) :: {:ok, String.t(), [term()]} | {:error, term()}
   def sql(%__MODULE__{} = plan, %Runtime{} = runtime) do
     with {:ok, predicate, params} <-
-           Samples.where(plan.selector, plan.start_ms - plan.window_ms, plan.end_ms) do
+           Samples.where(plan.selector, plan.read_from_ms, plan.end_ms) do
       bound = length(params)
 
       label_columns =
@@ -298,10 +330,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
         "WITH s AS (SELECT ",
         Enum.intersperse(read, ", "),
         " FROM #{Samples.table(runtime)} WHERE #{predicate}), ",
-        "e AS (SELECT series#{by}, value, ",
-        "unnest(generate_series(#{first_point(refs)}, #{last_point(plan, refs)})) AS k ",
-        "FROM #{expanded(plan)}), ",
-        stages(plan, by),
+        unnested(plan, refs, by),
+        stages(plan, keys, by, refs),
         "c AS (SELECT count(*) AS samples FROM s) ",
         "SELECT #{refs.start} + a.k * #{refs.step} AS t, a.*, c.samples ",
         "FROM c LEFT JOIN a ON true"
@@ -317,6 +347,14 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   defp value_column do
     "CASE WHEN value >= #{@inf} THEN 'infinity'::DOUBLE " <>
       "WHEN value <= -#{@inf} THEN '-infinity'::DOUBLE ELSE value END AS value"
+  end
+
+  defp unnested(%__MODULE__{rollup: rollup}, _refs, _by) when rollup in @windows, do: []
+
+  defp unnested(plan, refs, by) do
+    "e AS (SELECT series#{by}, value, " <>
+      "unnest(generate_series(#{first_point(refs)}, #{last_point(plan, refs)})) AS k " <>
+      "FROM #{expanded(plan)}), "
   end
 
   defp first_point(refs),
@@ -339,23 +377,33 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
 
   defp expanded(_plan), do: "s"
 
-  defp stages(%__MODULE__{rollup: rollup, aggregate: aggregate}, by) when rollup in @last,
-    do: single(aggregate_column(aggregate, "value"), by)
+  defp stages(%__MODULE__{rollup: rollup} = plan, keys, by, refs) when rollup in @windows do
+    instant? = plan.start_ms == plan.end_ms
 
-  defp stages(%__MODULE__{rollup: "count_over_time", aggregate: "sum"}, by),
+    [
+      Windows.stages(rollup, refs, keys, instant?, plan.adjust_window),
+      single(aggregate_column(plan.aggregate, "v"), by)
+    ]
+  end
+
+  defp stages(%__MODULE__{rollup: rollup, aggregate: aggregate}, _keys, by, _refs)
+       when rollup in @last,
+       do: single(aggregate_column(aggregate, "value"), by)
+
+  defp stages(%__MODULE__{rollup: "count_over_time", aggregate: "sum"}, _keys, by, _refs),
     do: single("count(*)::DOUBLE", by)
 
-  defp stages(%__MODULE__{rollup: rollup, aggregate: "count"}, by)
+  defp stages(%__MODULE__{rollup: rollup, aggregate: "count"}, _keys, by, _refs)
        when rollup in ["count_over_time", "min_over_time", "max_over_time"],
        do: single("count(DISTINCT series)::DOUBLE", by)
 
-  defp stages(%__MODULE__{rollup: "min_over_time", aggregate: "min"}, by),
+  defp stages(%__MODULE__{rollup: "min_over_time", aggregate: "min"}, _keys, by, _refs),
     do: single("min(value)", by)
 
-  defp stages(%__MODULE__{rollup: "max_over_time", aggregate: "max"}, by),
+  defp stages(%__MODULE__{rollup: "max_over_time", aggregate: "max"}, _keys, by, _refs),
     do: single("max(value)", by)
 
-  defp stages(%__MODULE__{rollup: rollup, aggregate: aggregate}, by) do
+  defp stages(%__MODULE__{rollup: rollup, aggregate: aggregate}, _keys, by, _refs) do
     "r AS (SELECT k#{by}, series, #{Map.fetch!(@inner, rollup)} AS v " <>
       "FROM e GROUP BY k#{by}, series), " <>
       "a AS (SELECT k#{by}, #{aggregate_column(aggregate, "v")} AS value FROM r GROUP BY k#{by}), "
@@ -416,7 +464,11 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
       series =
         for {labels, points} <- groups do
           at = Map.new(points)
-          %Series{labels: labels, values: Enum.map(plan.timestamps, &{&1, Map.get(at, &1)})}
+
+          %Series{
+            labels: labels,
+            values: Enum.map(plan.timestamps, &{&1 + plan.offset_ms, Map.get(at, &1)})
+          }
         end
 
       {:ok, series, %{series: map_size(groups), samples: samples(frame)}}

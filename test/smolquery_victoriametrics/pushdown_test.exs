@@ -68,6 +68,52 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       assert %Pushdown{labels: ["a", "b"]} = plan!("sum by (a, b, a) (m)")
     end
 
+    test "the rate family reads the fetch's range, and widens an unwritten window per series" do
+      assert %Pushdown{
+               rollup: "rate",
+               window_ms: 300_000,
+               adjust_window: false,
+               read_from_ms: -600_000
+             } = plan!("sum by (job) (rate(m[5m]))")
+
+      assert %Pushdown{
+               rollup: "rate",
+               window_ms: 30_000,
+               adjust_window: true,
+               read_from_ms: -330_000
+             } =
+               plan!("sum(rate(m))")
+
+      assert %Pushdown{rollup: "increase", window_ms: 30_000, adjust_window: false} =
+               plan!("sum(increase(m))")
+
+      assert %Pushdown{rollup: "irate", adjust_window: true} = plan!("max(irate(m))")
+
+      assert %Pushdown{rollup: "first_over_time", window_ms: 60_000} =
+               plan!("count(first_over_time(m[1m]))")
+
+      assert %Pushdown{rollup: "present_over_time", window_ms: 900_000} =
+               plan!("sum(present_over_time(m[15m]))")
+
+      assert plan("sum(present_over_time(m[1d]))") == :none
+      assert plan("sum(rate(m[1h]))") == :none
+    end
+
+    test "offset moves the grid and the read back, and the answer forward again" do
+      assert %Pushdown{
+               offset_ms: 60_000,
+               start_ms: -60_000,
+               end_ms: 0,
+               timestamps: [-60_000, -30_000, 0],
+               read_from_ms: -360_000
+             } = plan!("sum(m offset 1m)")
+
+      assert %Pushdown{offset_ms: -30_000, start_ms: 30_000, read_from_ms: -570_000} =
+               plan!("sum(rate(m[5m] offset -30s))")
+
+      assert %Pushdown{offset_ms: 60_000} = plan!("sum(last_over_time(m[5m] offset 1m))")
+    end
+
     test "a rollup other than the last sample is pushed only up to 32 steps of window" do
       assert %Pushdown{window_ms: 960_000} = plan!("sum(sum_over_time(m[16m]))")
       assert plan("sum(sum_over_time(m[16m1s]))") == :none
@@ -79,9 +125,7 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
     test "what stays in Elixir" do
       for query <- [
             "sum without (job) (m)",
-            "sum(rate(m[5m]))",
             "topk(3, m)",
-            "sum(m offset 1m)",
             "sum(m @ 100)",
             "sum(m[5m:1m])",
             "sum(m[5m:])",
@@ -89,7 +133,8 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
             "sum(m + 1)",
             "quantile(0.9, m)",
             "sum(m[5m-10m])",
-            "sum(last_over_time(m[5m] offset 1m))",
+            "sum(rate(m[5m:1m]))",
+            "sum(changes(m[5m]))",
             "sum(m, m)"
           ] do
         assert plan(query) == :none, query
@@ -212,6 +257,7 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
 
   describe "over the stack" do
     @describetag :tmp_dir
+    @describetag timeout: 600_000
 
     setup context do
       stack = VictoriaMetricsStack.start(context)
@@ -236,7 +282,49 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
           {%{"__name__" => "up", "job" => "c"},
            for(i <- 0..20, do: {@t0_ms + 7_000 + i * 15_000, 3.0})},
           {%{"__name__" => "up", "job" => "d"},
-           for(i <- 0..8, do: {@t0_ms + 4_000 + i * 37_000, i * 1.0})}
+           for(i <- 0..8, do: {@t0_ms + 4_000 + i * 37_000, i * 1.0})},
+          {%{"__name__" => "c", "job" => "a"},
+           for(
+             i <- 0..20,
+             do: {@t0_ms + i * 15_000, if(i < 10, do: 6.0 * i, else: 3.0 + 6 * (i - 10))}
+           )},
+          {%{"__name__" => "c", "job" => "b"},
+           Enum.with_index(
+             [100.0, 110.0, 120.0, 118.0, 130.0, 145.0, 150.0, 20.0, 25.0, 40.0],
+             fn v, i ->
+               {@t0_ms + i * 15_000, v}
+             end
+           )},
+          {%{"__name__" => "c", "job" => "c"},
+           [
+             {@t0_ms, 1.0},
+             {@t0_ms + 60_000, 8.0},
+             {@t0_ms + 61_000, 9.0},
+             {@t0_ms + 200_000, 30.0},
+             {@t0_ms + 290_000, 31.0}
+           ]},
+          {%{"__name__" => "c", "job" => "d"}, [{@t0_ms + 100_000, 42.0}]},
+          {%{"__name__" => "c", "job" => "e"},
+           [
+             {@t0_ms + 30_000, 5.0},
+             {@t0_ms + 30_000, 7.0},
+             {@t0_ms + 45_000, 9.0},
+             {@t0_ms + 45_000, 9.0}
+           ]},
+          {%{"__name__" => "c", "job" => "f"}, for(i <- 0..20, do: {@t0_ms + i * 15_000, 4.0})},
+          {%{"__name__" => "c", "job" => "g"},
+           [
+             {@t0_ms, 1.0},
+             {@t0_ms + 15_000, @inf},
+             {@t0_ms + 30_000, 5.0},
+             {@t0_ms + 60_000, 6.0}
+           ]},
+          {%{"__name__" => "c", "job" => "h"},
+           for(i <- 0..12, do: {@t0_ms + 2_000 + i * 23_000, 1000.0 + i * i * 1.0})},
+          {%{"__name__" => "c", "job" => "i"},
+           [{@t0_ms + 50_000, @inf}, {@t0_ms + 200_000, 3.0}]},
+          {%{"__name__" => "c", "job" => "j"},
+           [{@t0_ms + 50_000, 1.0e300}, {@t0_ms + 65_000, 2.0}]}
         ])
 
       %{stack: stack, elixir: limited(stack, pushdown: false)}
@@ -256,7 +344,26 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       "sum(nothing)",
       "sum by (job) (max_over_time(up[2m]))",
       "avg by (job) (gauge)",
-      "max(gauge[1m])"
+      "max(gauge[1m])",
+      "sum by (job) (rate(c[1m]))",
+      "sum by (job) (rate(c))",
+      "max by (job) (increase(c[2m]))",
+      "sum by (job) (increase(c))",
+      "sum by (job) (increase_pure(c[1m]))",
+      "sum by (job) (delta(c[1m]))",
+      "sum by (job) (delta(c))",
+      "sum by (job) (idelta(c[1m]))",
+      "sum by (job) (irate(c[1m]))",
+      "sum by (job) (irate(c))",
+      "avg by (job) (ideriv(c[45s]))",
+      "avg by (job) (deriv_fast(c[1m]))",
+      "count by (job) (first_over_time(c[1m]))",
+      "sum by (job) (present_over_time(c[30s]))",
+      "sum by (job) (rate(c[1m] offset 30s))",
+      "sum by (job) (rate(c[2m] offset -15s))",
+      "sum(up offset 1m)",
+      "sum(rate(c[5m]))",
+      "count(rate(c[1m]))"
     ]
 
     test "a pushed aggregate answers what the evaluator answers, over a range and at an instant",

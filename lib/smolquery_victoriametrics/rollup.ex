@@ -176,6 +176,14 @@ defmodule SmolqueryVictoriaMetrics.Rollup do
   def window_ms(_name, written_ms, _step_ms, _lookback_ms), do: written_ms
 
   @doc """
+  Whether `name` reads its series with counter resets removed first
+  (`rate`, `increase`, `increase_pure`, `irate`), as `apply/4` prepares it
+  and as `SmolqueryVictoriaMetrics.Pushdown.Windows` corrects it in SQL.
+  """
+  @spec removes_counter_resets?(String.t()) :: boolean()
+  def removes_counter_resets?(name), do: String.downcase(name) in @remove_counter_resets
+
+  @doc """
   Whether a window left out may widen past the step
   (`rollupFuncsCanAdjustWindow`).
   """
