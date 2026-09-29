@@ -199,22 +199,35 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
 
   @doc """
   `tables` in the order the span lane takes them: most span candidates first
-  (files under half of `compact_target_bytes` in the table's listing), then
-  by name (T-603). The span lane stops starting merges at its budget, so
+  (settled files under half of `compact_target_bytes` in the table's
+  listing; a recent file is the hour lane's), then by name (T-603). The
+  count is the table's, not this node's share of it: ownership is per span
+  and decided while planning. The span lane stops starting merges at its budget, so
   this order decides who waits, and a table's place in the catalog listing
   used to decide it: ten quiet bench tables ahead of `metrics.samples` at
   19k files.
   """
-  @spec by_need([Catalog.table_ref()], %{Catalog.table_ref() => [map()]}, Runtime.t()) ::
-          [Catalog.table_ref()]
-  def by_need(tables, _listings, %Runtime{compact_target_bytes: nil}), do: tables
+  @spec by_need(
+          [Catalog.table_ref()],
+          %{Catalog.table_ref() => [map()]},
+          Runtime.t(),
+          integer()
+        ) :: [Catalog.table_ref()]
+  def by_need(tables, listings, runtime, now_ms \\ System.os_time(:millisecond))
 
-  def by_need(tables, listings, runtime) do
+  def by_need(tables, _listings, %Runtime{compact_target_bytes: nil}, _now_ms), do: tables
+
+  def by_need(tables, listings, runtime, now_ms) do
     below = div(runtime.compact_target_bytes, 2)
 
     Enum.sort_by(tables, fn table_ref ->
-      files = Map.get(listings, table_ref, [])
-      {-Enum.count(files, &(&1.bytes < below)), table_ref}
+      small =
+        for %{path: path, bytes: bytes} <- Map.get(listings, table_ref, []),
+            bytes < below,
+            do: path
+
+      {settled, _recent} = by_level(runtime, small, now_ms)
+      {-length(settled), table_ref}
     end)
   end
 
