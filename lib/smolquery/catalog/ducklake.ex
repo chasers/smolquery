@@ -101,12 +101,20 @@ defmodule Smolquery.Catalog.DuckLake do
   ## A call that exits is an error here, never a crash upstream
 
   Every statement this module runs goes through `Smolquery.Engine.try_query/4`
-  or `Smolquery.Engine.try_transaction/3`, so a call that times out on a busy
+  or `Smolquery.Engine.try_transaction/4`, so a call that times out on a busy
   connection, or finds the connection gone, comes back as
   `{:error, %Smolquery.Engine.CallExited{}}` like any other failure (T-464).
   Each is also one `[:smolquery, :catalog, :statement]` event, by kind and
   result (T-549): over the `[:smolquery, :catalog, :op]` events, how many
-  statements one catalog operation costs, and how long each takes.
+  statements one catalog operation costs, and how long each takes. The
+  swap's transaction also times its parts, as kinds `:delete`, `:add` and
+  `:commit` inside the one `:transaction`, so a slow retirement, a slow
+  registration and a commit that conflicts are told apart (T-573). Every
+  attempt `with_commit_retries/2` makes is one
+  `[:smolquery, :catalog, :commit_attempt]` event, by attempt number and
+  result (`:ok`, `:conflict` or `:error`), and a conflict it retries is
+  logged at info: a retried conflict otherwise shows nowhere but a
+  subtraction of statement counts.
   Every `Smolquery.Catalog` callback already promises `{:error, term()}`, and
   the callers that matter are sweeps: the compactor, retention and GC each
   visit every table in one long-lived process, and an exit from one table's
@@ -775,7 +783,7 @@ defmodule Smolquery.Catalog.DuckLake do
   defp swap(config, ref, name, add, retire) do
     case transaction(
            config,
-           [delete_statement(name, retire), add_statement(config, ref, add)],
+           [{:delete, delete_statement(name, retire)}, {:add, add_statement(config, ref, add)}],
            config.swap_timeout_ms
          ) do
       :ok -> {:ok, :committed}
@@ -1447,10 +1455,18 @@ defmodule Smolquery.Catalog.DuckLake do
   defp with_commit_retries(run, attempt \\ 1) do
     case run.() do
       {:ok, _result} ->
+        attempted(attempt, :ok)
         :ok
 
       {:error, error} ->
+        attempted(attempt, if(retryable?(error), do: :conflict, else: :error))
+
         if retryable?(error) and attempt < @commit_attempts do
+          Logger.info(
+            "catalog commit attempt #{attempt} of #{@commit_attempts} conflicted, retrying: " <>
+              Exception.message(error)
+          )
+
           Process.sleep(backoff(attempt))
           with_commit_retries(run, attempt + 1)
         else
@@ -1468,6 +1484,13 @@ defmodule Smolquery.Catalog.DuckLake do
       )
     end
   end
+
+  defp attempted(attempt, result),
+    do:
+      :telemetry.execute([:smolquery, :catalog, :commit_attempt], %{count: 1}, %{
+        attempt: attempt,
+        result: result
+      })
 
   defp backoff(attempt), do: (1 <<< attempt) * 5 + :rand.uniform(10)
 
@@ -1570,7 +1593,11 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp transaction(config, statements, timeout),
     do:
-      statement(:transaction, fn -> Engine.try_transaction(config.engine, statements, timeout) end)
+      statement(:transaction, fn ->
+        Engine.try_transaction(config.engine, statements, timeout,
+          span: [:smolquery, :catalog, :statement]
+        )
+      end)
 
   defp statement(kind, run) do
     Smolquery.Telemetry.span(

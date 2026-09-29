@@ -760,6 +760,35 @@ defmodule Smolquery.TelemetryTest do
              before_statement_inf + 1
   end
 
+  test "counts catalog commit attempts by attempt and result, and the swap's parts by kind (T-573)" do
+    conflict = ~s({attempt="1",result="conflict"})
+    landed = ~s({attempt="2",result="ok"})
+    delete = ~s({kind="delete",result="ok"})
+    before_conflict = value("smolquery_catalog_commit_attempts_total", conflict)
+    before_landed = value("smolquery_catalog_commit_attempts_total", landed)
+    before_delete = value("smolquery_catalog_statements_total", delete)
+
+    :telemetry.execute([:smolquery, :catalog, :commit_attempt], %{count: 1}, %{
+      attempt: 1,
+      result: :conflict
+    })
+
+    :telemetry.execute([:smolquery, :catalog, :commit_attempt], %{count: 1}, %{
+      attempt: 2,
+      result: :ok
+    })
+
+    :telemetry.execute(
+      [:smolquery, :catalog, :statement],
+      %{duration_us: 29_000_000},
+      %{kind: :delete, result: :ok}
+    )
+
+    assert value("smolquery_catalog_commit_attempts_total", conflict) == before_conflict + 1
+    assert value("smolquery_catalog_commit_attempts_total", landed) == before_landed + 1
+    assert value("smolquery_catalog_statements_total", delete) == before_delete + 1
+  end
+
   test "outcome/1 folds a call's answer to ok or error" do
     assert Telemetry.outcome(:ok) == :ok
     assert Telemetry.outcome({:ok, 7}) == :ok

@@ -150,8 +150,14 @@ defmodule Smolquery.Telemetry do
                                           — one per job or shard engine acquired (PL-50)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
-      [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction, result}
-                                          — one per statement the DuckLake catalog sent its engine
+      [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction |
+                                          :delete | :add | :commit, result}
+                                          — one per statement the DuckLake catalog sent its engine;
+                                          delete, add and commit are the timed parts of the
+                                          swap's one transaction (T-573)
+      [:smolquery, :catalog, :commit_attempt] %{count}, meta %{attempt: 1..5,
+                                          result: :ok | :conflict | :error}
+                                          — one per attempt of a DuckLake commit, retries included
       [:smolquery, :config_store, :op]    %{duration_us}, meta %{op: :setup | :fetch | :ensure | :advance,
                                           result: :ok | :not_found | :conflict | :error}
                                           — one per ring configuration store call over Postgrex:
@@ -271,6 +277,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
+    [:smolquery, :catalog, :commit_attempt],
     [:smolquery, :config_store, :op],
     [:db_connection, :connection_error],
     [:smolquery, :lifecycle, :broadcast]
@@ -450,7 +457,11 @@ defmodule Smolquery.Telemetry do
         "30 s timeout so a statement that timed out lands in it; counters, not a histogram (T-549).",
     "smolquery_catalog_statements_total" =>
       "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
-        "result; over ops, what one op costs in statements (T-549).",
+        "result; over ops, what one op costs in statements (T-549). Kinds delete, add and " <>
+        "commit are the parts of the compaction swap's transaction, counted inside it (T-573).",
+    "smolquery_catalog_commit_attempts_total" =>
+      "Attempts at a DuckLake commit, by attempt number and result: ok, conflict (retried " <>
+        "until the fifth) or error. Conflicts over ok is the conflict rate (T-573).",
     "smolquery_catalog_statement_microseconds_total" =>
       "Time catalog statements took, by kind and result; divide by statements for the mean.",
     "smolquery_catalog_statement_microseconds_bucket" =>
@@ -1003,6 +1014,14 @@ defmodule Smolquery.Telemetry do
     )
   end
 
+  def handle_event([:smolquery, :catalog, :commit_attempt], _measurements, meta, nil) do
+    bump(
+      {"smolquery_catalog_commit_attempts_total",
+       [attempt: commit_attempt(meta), result: commit_result(meta)]},
+      1
+    )
+  end
+
   def handle_event([:smolquery, :config_store, :op], measurements, meta, nil) do
     op_timed(
       "smolquery_config_store_op",
@@ -1123,8 +1142,16 @@ defmodule Smolquery.Telemetry do
   defp catalog_op(%{op: op}) when op in @catalog_ops, do: op
   defp catalog_op(_meta), do: :unknown
 
-  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction], do: kind
+  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction, :delete, :add, :commit],
+    do: kind
+
   defp catalog_kind(_meta), do: :unknown
+
+  defp commit_attempt(%{attempt: attempt}) when attempt in 1..5, do: attempt
+  defp commit_attempt(_meta), do: :unknown
+
+  defp commit_result(%{result: result}) when result in [:ok, :conflict, :error], do: result
+  defp commit_result(_meta), do: :unknown
 
   defp config_store_op(%{op: op}) when op in @config_store_ops, do: op
   defp config_store_op(_meta), do: :unknown

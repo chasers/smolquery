@@ -238,16 +238,17 @@ defmodule Smolquery.Engine do
   end
 
   @doc """
-  Same as `transaction/3`, but an exit from the call comes back as an error —
+  Same as `transaction/4`, but an exit from the call comes back as an error —
   `try_query/4`'s contract for a transaction (T-464).
 
   A transaction whose call exits is still running on the connection, and
   commits or rolls back on its own time; the caller learns only that it did
   not hear the answer.
   """
-  @spec try_transaction(handle(), [String.t()], timeout()) :: :ok | {:error, Exception.t()}
-  def try_transaction(handle, statements, timeout \\ 30_000) do
-    catching_exit(fn -> transaction(handle, statements, timeout) end)
+  @spec try_transaction(handle(), [Connection.statement()], timeout(), keyword()) ::
+          :ok | {:error, Exception.t()}
+  def try_transaction(handle, statements, timeout \\ 30_000, opts \\ []) do
+    catching_exit(fn -> transaction(handle, statements, timeout, opts) end)
   end
 
   defp catching_exit(call) do
@@ -271,16 +272,18 @@ defmodule Smolquery.Engine do
   Runs `statements` in order inside one transaction: all commit, or the first
   failure rolls every prior statement back and is returned.
 
-  See `Smolquery.Engine.Connection.transaction/3` for why the transaction runs
-  inside the connection process and why statements carry no parameters.
+  See `Smolquery.Engine.Connection.transaction/4` for why the transaction runs
+  inside the connection process, why statements carry no parameters, and
+  what `span: event` times.
 
   `timeout` bounds the call the way `query/4`'s does, and the same caveat
   applies: a transaction whose call times out is still running, and commits
   or rolls back on its own time.
   """
-  @spec transaction(handle(), [String.t()], timeout()) :: :ok | {:error, Exception.t()}
-  def transaction(handle, statements, timeout \\ 30_000) do
-    Connection.transaction(connection(handle), statements, timeout)
+  @spec transaction(handle(), [Connection.statement()], timeout(), keyword()) ::
+          :ok | {:error, Exception.t()}
+  def transaction(handle, statements, timeout \\ 30_000, opts \\ []) do
+    Connection.transaction(connection(handle), statements, timeout, opts)
   end
 
   @doc """

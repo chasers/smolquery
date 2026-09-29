@@ -74,6 +74,34 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     assert_received {:statement, _measurements, %{kind: :transaction, result: :ok}}
   end
 
+  test "the swap times its delete, add and commit, and counts its commit attempt (T-573)", %{
+    catalog: catalog,
+    segments_dir: dir
+  } do
+    parent = self()
+    handler = "ducklake-swap-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach_many(
+      handler,
+      [[:smolquery, :catalog, :statement], [:smolquery, :catalog, :commit_attempt]],
+      fn event, _measurements, meta, _config -> send(parent, {event, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    a = write_segment(dir, 1, 10)
+    merged = write_merged(dir, [{1, 10}])
+    {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+    {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
+
+    for kind <- [:delete, :add, :commit, :transaction] do
+      assert_received {[:smolquery, :catalog, :statement], %{kind: ^kind, result: :ok}}
+    end
+
+    assert_received {[:smolquery, :catalog, :commit_attempt], %{attempt: 1, result: :ok}}
+  end
+
   defp schema do
     Schema.new!([
       {"id", :int64, nullable: false},
