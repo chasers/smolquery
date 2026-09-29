@@ -143,9 +143,17 @@ defmodule Smolquery.Catalog.DuckLake do
   the group's rows under the bounds, and anything but the merged row count, or
   a failure computing them, falls back to the unbounded `DELETE` with a
   warning. A column is bounded only when the footer has min, max and a zero
-  null count in every row group. The check is what catches schema evolution:
-  an input written before a timestamp column was added reads that column as
-  NULL, so no bound can cover it, and its swap takes the unbounded path.
+  null count in every row group, so a column added after some inputs were
+  written, which those inputs read as NULL, is simply not bounded. The check
+  catches what the footer cannot see: a materialized timestamp the merge
+  computed for inputs whose files lack it, a double registration, a partial
+  earlier delete. A nanosecond column's stats render at microseconds; the
+  second of widening covers that truncation.
+
+  The bound prunes only as well as the group is narrow in time. Groups are
+  picked in write order, so a group holding one backfilled file spans that
+  file's whole range, prunes little, and pays for its guard as well as its
+  `DELETE`. That costs time, never rows.
   """
 
   @behaviour Smolquery.Catalog

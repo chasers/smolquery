@@ -355,6 +355,11 @@ defmodule Smolquery.Catalog do
   reports the current snapshot without re-writing. And like `drop_segments/3`,
   the dropped files are left on disk — older snapshots still read them, and
   deleting them is GC's job once no snapshot does.
+
+  `segments` must hold exactly the rows of `paths`, and their `row_count`s
+  must sum to those rows. `Smolquery.Catalog.DuckLake` relies on it to bound
+  the swap's `DELETE` (T-594): a count that disagrees costs the slow,
+  unbounded path and a warning on every swap.
   """
   @spec replace_segments(t(), table_ref(), [Segment.t()], [String.t()]) ::
           {:ok, snapshot()} | {:error, term()}
