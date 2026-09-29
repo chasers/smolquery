@@ -91,7 +91,7 @@ defmodule Smolquery.StorageService.Scheduler.Job do
       :telemetry.execute(
         [:smolquery, :compact, :swap],
         %{replaced: length(paths), duration_us: elapsed_us(started_at)},
-        %{result: :ok, table_ref: table_ref}
+        %{result: :ok, table_ref: table_ref, level: group.level}
       )
 
       {:ok,
@@ -168,7 +168,7 @@ defmodule Smolquery.StorageService.Scheduler.Job do
     :telemetry.execute(
       [:smolquery, :compact, :swap],
       %{replaced: 0, duration_us: elapsed_us(started_at)},
-      %{result: :error, table_ref: table_ref}
+      %{result: :error, table_ref: table_ref, level: Keyword.get(opts, :level, :hour)}
     )
 
     recycle_on_exit(runtime, reason)

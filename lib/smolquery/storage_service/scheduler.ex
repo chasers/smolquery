@@ -131,6 +131,7 @@ defmodule Smolquery.StorageService.Scheduler do
   alias Smolquery.StorageService.Scheduler.Job
   alias Smolquery.StorageService.Scheduler.Planner
   alias Smolquery.StorageService.Scheduler.Quarantine
+  alias Smolquery.Telemetry
 
   @enforce_keys [:runtime]
   defstruct [
@@ -210,7 +211,7 @@ defmodule Smolquery.StorageService.Scheduler do
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.scheduler(name), :sweep, timeout)
 
   defp run(state) do
-    runtime = spill_gated(state.runtime)
+    runtime = spill_gated(state.runtime, spill_free())
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       {cooling, due} = Enum.split_with(tables, &Backoff.cooling_down?(state.cooldowns, &1))
@@ -244,6 +245,8 @@ defmodule Smolquery.StorageService.Scheduler do
       span_cooldowns =
         Backoff.adjusted_span_cooldowns(state.span_cooldowns, span_swept, span, runtime)
 
+      gauged(listings, span_waiting, span_cooling)
+
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
         failed: for({:failed, failure} <- outcomes, do: failure),
@@ -267,6 +270,28 @@ defmodule Smolquery.StorageService.Scheduler do
            span_widths: span_widths
        }}
     end
+  end
+
+  defp gauged(listings, span_waiting, span_cooling) do
+    for {{dataset, table}, files} <- listings do
+      Telemetry.put_gauge(
+        "smolquery_compaction_table_files",
+        [dataset: dataset, table: table],
+        length(files)
+      )
+    end
+
+    Telemetry.put_gauge(
+      "smolquery_compaction_lane_tables",
+      [lane: :span, state: :waiting],
+      length(span_waiting)
+    )
+
+    Telemetry.put_gauge(
+      "smolquery_compaction_lane_tables",
+      [lane: :span, state: :cooling],
+      length(span_cooling)
+    )
   end
 
   defp hour_lane(_runtime, _state, []), do: {[], %{}, [], false}
@@ -449,10 +474,19 @@ defmodule Smolquery.StorageService.Scheduler do
     _kind, _reason -> []
   end
 
-  defp spill_gated(%Runtime{compact_target_bytes: nil} = runtime), do: runtime
+  defp spill_free do
+    free = Smolquery.DiskSpace.free_bytes(Runtime.spill_root())
 
-  defp spill_gated(runtime) do
-    case span_pause(runtime) do
+    with {:ok, bytes} <- free,
+         do: Telemetry.put_gauge("smolquery_compaction_spill_free_bytes", [], bytes)
+
+    free
+  end
+
+  defp spill_gated(%Runtime{compact_target_bytes: nil} = runtime, _free), do: runtime
+
+  defp spill_gated(runtime, free) do
+    case span_pause(runtime, free) do
       :ok ->
         runtime
 
@@ -463,11 +497,10 @@ defmodule Smolquery.StorageService.Scheduler do
     end
   end
 
-  defp span_pause(runtime) do
+  defp span_pause(runtime, free) do
     root = Runtime.spill_root()
 
-    case {Engine.abandoned_spill(Runtime.compact_engine(runtime.name)),
-          Smolquery.DiskSpace.free_bytes(root)} do
+    case {Engine.abandoned_spill(Runtime.compact_engine(runtime.name)), free} do
       {[_ | _] = leaves, _free} ->
         {:abandoned_spill,
          "a recycled compaction engine still spills to #{Enum.join(leaves, ", ")}"}
