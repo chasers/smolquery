@@ -59,6 +59,17 @@ defmodule Smolquery.Engine.Connection do
   because the instance died without removing it, stops counting once it has
   been quiet for the window, rather than blocking the caller until a restart.
 
+  ## A bootstrap statement waits out a SQLite lock
+
+  A lake on SQLite metadata (a single node, every test) has one file every
+  engine's `ATTACH` and side-table `CREATE TABLE` reads, and DuckDB's sqlite
+  extension sets no busy timeout: while one connection writes, another
+  connection's statement fails with `database is locked` at once. Warm job
+  engines, edge supervisors and seals starting together made that one CI run
+  in three (T-604, T-574, T-580). A bootstrap statement that fails that way
+  is retried, seven attempts over about 1.6 s; any other failure fails the
+  start as before.
+
   Isolation lives here because `Smolquery.QueryService.Runner` creates
   connections directly rather than through `Smolquery.Engine`.
 
@@ -88,6 +99,9 @@ defmodule Smolquery.Engine.Connection do
   alias Smolquery.Identifier
 
   @default_spill_root ".tmp"
+
+  @locked_attempts 7
+  @locked_wait_ms 25
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
   @session [TimeZone: "UTC"]
@@ -478,14 +492,41 @@ defmodule Smolquery.Engine.Connection do
     end
   end
 
-  defp run_statements(adbc, statements) do
-    bootstrap(statements, fn sql ->
-      case Adbc.Connection.query(adbc, sql) do
-        {:ok, _result} -> :ok
-        {:error, reason} -> {:error, {:statement_failed, safe_sql(sql), reason}}
-      end
-    end)
+  defp run_statements(adbc, statements),
+    do: bootstrap(statements, &run_statement(adbc, &1))
+
+  defp run_statement(adbc, sql) do
+    case unlocked(fn -> Adbc.Connection.query(adbc, sql) end, @locked_attempts) do
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, {:statement_failed, safe_sql(sql), reason}}
+    end
   end
+
+  defp unlocked(run, attempts) do
+    result = run.()
+
+    if attempts > 1 and locked_failure?(result) do
+      Process.sleep(@locked_wait_ms * Integer.pow(2, @locked_attempts - attempts))
+      unlocked(run, attempts - 1)
+    else
+      result
+    end
+  end
+
+  defp locked_failure?({:error, error}), do: locked?(error)
+  defp locked_failure?(_result), do: false
+
+  @doc """
+  Whether an error is SQLite metadata refusing a statement because another
+  connection holds its lock. DuckDB's sqlite extension sets no busy timeout,
+  so a lake on SQLite answers every connection but the lock's holder this way
+  at once, however briefly the lock is held.
+  """
+  @spec locked?(term()) :: boolean()
+  def locked?(%{__exception__: true} = error),
+    do: String.contains?(Exception.message(error), "database is locked")
+
+  def locked?(_error), do: false
 
   defp safe_sql(sql) do
     if sql =~ ~r/password|secret|key_id/i do

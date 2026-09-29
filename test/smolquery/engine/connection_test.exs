@@ -12,6 +12,44 @@ defmodule Smolquery.Engine.ConnectionTest do
     :ok
   end
 
+  describe "a bootstrap statement and a SQLite lock (T-604)" do
+    @describetag :tmp_dir
+
+    test "waits out a lock another connection holds, then starts", %{tmp_dir: dir} do
+      file = Path.join(dir, "catalog.sqlite")
+      attach = "ATTACH '#{file}' AS meta (TYPE sqlite)"
+      {:ok, holder} = Connection.start_link(database: @database, extensions: [:sqlite])
+      {:ok, _attached} = Connection.query(holder, attach)
+      {:ok, _created} = Connection.query(holder, "CREATE TABLE meta.t (n INTEGER)")
+      adbc = Connection.adbc_connection(holder)
+      {:ok, _begun} = Adbc.Connection.query(adbc, "BEGIN TRANSACTION")
+      {:ok, _held} = Adbc.Connection.query(adbc, "INSERT INTO meta.t VALUES (1)")
+
+      other = start_supervised!({DuckDB, process_options: [name: __MODULE__.Other]}, id: :other)
+      release = Task.async(fn -> Process.sleep(200) && Adbc.Connection.query(adbc, "COMMIT") end)
+
+      assert {:ok, conn} =
+               Connection.start_link(
+                 database: other,
+                 extensions: [:sqlite],
+                 statements: [
+                   "ATTACH '#{file}' AS meta (TYPE sqlite)",
+                   "INSERT INTO meta.t VALUES (2)"
+                 ]
+               )
+
+      assert {:ok, _committed} = Task.await(release)
+      assert {:ok, counted} = Connection.query(conn, "SELECT count(*) FROM meta.t")
+      assert Result.one!(counted) == 2
+    end
+
+    test "locked?/1 matches only SQLite's lock refusal" do
+      assert Connection.locked?(%Adbc.Error{message: "IO Error: database is locked"})
+      refute Connection.locked?(%Adbc.Error{message: "Catalog Error: no such table"})
+      refute Connection.locked?(:database_is_locked)
+    end
+  end
+
   describe "start_link/1" do
     test "starts unnamed when no name is given" do
       assert {:ok, pid} = Connection.start_link(database: @database)
