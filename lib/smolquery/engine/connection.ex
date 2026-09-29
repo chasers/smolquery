@@ -55,6 +55,9 @@ defmodule Smolquery.Engine.Connection do
   its leaf is still there beside the rebuilt one's. `abandoned_spill/1`
   lists those leaves, so a caller can refuse to start another spilling
   merge while one it gave up on is still writing to the same disk (T-601).
+  Only a leaf written to recently counts: a leaf that outlived its instance,
+  because the instance died without removing it, stops counting once it has
+  been quiet for the window, rather than blocking the caller until a restart.
 
   Isolation lives here because `Smolquery.QueryService.Runner` creates
   connections directly rather than through `Smolquery.Engine`.
@@ -550,11 +553,12 @@ defmodule Smolquery.Engine.Connection do
 
   @doc """
   The spill leaves, under the application `:spill_dir`, of `database`'s other
-  instances in this OS process: instances a rebuild left running a statement.
-  Empty when `database` is not running, or the spill root cannot be listed.
+  instances in this OS process that were written to in the last `quiet_ms`:
+  instances a rebuild left running a statement. Empty when `database` is not
+  running, or the spill root cannot be listed.
   """
-  @spec abandoned_spill(GenServer.server()) :: [Path.t()]
-  def abandoned_spill(database) do
+  @spec abandoned_spill(GenServer.server(), non_neg_integer()) :: [Path.t()]
+  def abandoned_spill(database, quiet_ms \\ 600_000) do
     root = Application.get_env(:smolquery, :spill_dir, @default_spill_root)
 
     with pid when is_pid(pid) <- GenServer.whereis(database),
@@ -562,13 +566,29 @@ defmodule Smolquery.Engine.Connection do
       prefix = instance_prefix(database)
       current = prefix <> pid_token(pid)
 
+      since = System.os_time(:second) - div(quiet_ms, 1_000)
+
       for entry <- entries,
           String.starts_with?(entry, prefix),
           entry != current,
-          do: Path.join(root, entry)
+          leaf = Path.join(root, entry),
+          written_since?(leaf, since),
+          do: leaf
     else
       _none -> []
     end
+  end
+
+  defp written_since?(leaf, since) do
+    files =
+      case File.ls(leaf) do
+        {:ok, names} -> Enum.map(names, &Path.join(leaf, &1))
+        {:error, _gone} -> []
+      end
+
+    Enum.any?([leaf | files], fn path ->
+      match?({:ok, %File.Stat{mtime: mtime}} when mtime >= since, File.stat(path, time: :posix))
+    end)
   end
 
   defp default_temp_directory(database) do

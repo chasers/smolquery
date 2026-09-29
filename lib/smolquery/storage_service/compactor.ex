@@ -172,15 +172,18 @@ defmodule Smolquery.StorageService.Compactor do
   sort, so every span merge spilled to DuckDB's 32 GiB temp cap and filled
   the storage nodes' disks within ten minutes of the roll (T-601).
 
-  So the span level also caps a group's rows at `compact_span_decoded_bytes`
-  over an estimated decoded row width: the mean text width of up to
-  1,024 rows of the group's first file, the one read this
-  costs per plan. Text is a proxy for what DuckDB holds, not a measure of it;
-  the span cap halving below remains the correction when it guesses low.
+  So once a span group forms, its rows are also capped at
+  `compact_span_decoded_bytes` over an estimated decoded row width: the mean
+  text width of up to 1,024 rows of the group's first file, read only then.
+  A group over that cap is cut again under it. Text is a proxy for what
+  DuckDB holds, not a measure of it; the span cap halving below remains the
+  correction when it guesses low. A sample that fails is
+  `{:width_sample_failed, error}`, which names no file, so it never counts
+  toward quarantining a file that is fine.
 
   A sweep also runs without its span level, hour level only, when spilling
-  is unsafe: while a recycled compaction engine's abandoned merge still holds
-  a spill directory (`Smolquery.Engine.abandoned_spill/1`; adbc cannot cancel
+  is unsafe: while a recycled compaction engine's abandoned merge still
+  writes to a spill directory (`Smolquery.Engine.abandoned_spill/1`; adbc cannot cancel
   it, and deleting its files under it crashed the VM in T-460), or while the
   spill filesystem has less than `compact_spill_floor_bytes` free. Each
   compaction engine instance also sizes its own temp cap from free space as
@@ -1138,22 +1141,19 @@ defmodule Smolquery.StorageService.Compactor do
     if length(candidates) < runtime.compact_min_inputs do
       :skip
     else
-      with {:ok, runtime} <- decoded_capped(runtime, level, candidates) do
-        plan_undersized(runtime, level, candidates)
-      end
+      plan_undersized(runtime, level, candidates)
     end
   end
 
-  defp decoded_capped(runtime, :hour, _candidates), do: {:ok, runtime}
-
-  defp decoded_capped(runtime, :span, [sample | _rest]) do
+  defp decoded_capped(runtime, entries, %{paths: [sample | _rest], row_count: rows} = group) do
     case row_width(runtime, sample) do
       {:ok, width} ->
-        {:ok,
-         %{runtime | compact_max_rows: max(div(runtime.compact_span_decoded_bytes, width), 1)}}
+        cap = max(div(runtime.compact_span_decoded_bytes, width), 1)
+
+        if rows <= cap, do: {:ok, group}, else: group(%{runtime | compact_max_rows: cap}, entries)
 
       {:error, reason} ->
-        {:error, reason, [sample]}
+        {:error, reason}
     end
   end
 
@@ -1164,7 +1164,7 @@ defmodule Smolquery.StorageService.Compactor do
 
     case Engine.try_query(Runtime.compact_engine(runtime.name), sql, [path]) do
       {:ok, %{rows: [[width]]}} -> {:ok, max(width, 1)}
-      {:error, error} -> {:error, {:sizing_failed, error}}
+      {:error, error} -> {:error, {:width_sample_failed, error}}
     end
   end
 
@@ -1213,9 +1213,12 @@ defmodule Smolquery.StorageService.Compactor do
   defp carried_group([], _runtime, _carry, _carried), do: :skip
 
   defp carried_group([bucket_entries | rest], runtime, :span, []) do
-    case group(runtime, bucket_entries) do
+    with {:ok, group} <- group(runtime, bucket_entries),
+         {:ok, group} <- decoded_capped(runtime, bucket_entries, group) do
+      {:ok, group}
+    else
       :skip -> carried_group(rest, runtime, :span, [])
-      {:ok, group} -> {:ok, group}
+      {:error, _reason} = failed -> failed
     end
   end
 

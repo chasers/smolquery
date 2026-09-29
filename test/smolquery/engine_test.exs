@@ -212,7 +212,7 @@ defmodule Smolquery.EngineTest do
       assert size =~ ~r/^12\d(\.\d+)? MiB$/
     end
 
-    test "lists the spill leaves of this engine's other instances, never its own" do
+    test "lists the recently written spill leaves of this engine's other instances, never its own" do
       name = __MODULE__.Abandoned
       start_supervised!({Engine, name: name}, id: name)
       assert Engine.abandoned_spill(name) == []
@@ -225,6 +225,9 @@ defmodule Smolquery.EngineTest do
 
       assert Engine.abandoned_spill(name) == [leaf]
       assert Engine.abandoned_spill(__MODULE__.NotStarted) == []
+
+      File.touch!(leaf, System.os_time(:second) - 3_600)
+      assert Engine.abandoned_spill(name) == []
     end
   end
 
