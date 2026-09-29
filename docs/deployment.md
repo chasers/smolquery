@@ -198,6 +198,23 @@ compaction interval (`compact_interval_ms`, five minutes) and never counts towar
 third in a row. Both are storage-side; no protocol
 changes. One more DuckDB connection per storage pod.
 
+To see where compaction time goes (T-603):
+
+- `smolquery_compaction_microseconds_total{result,level}` over wall time, by
+  `level`, is each lane's share of a storage pod. The hour lane runs first
+  every sweep; the span lane gets at most `SMOLQUERY_COMPACT_SPAN_BUDGET_MS`
+  to start merges.
+- `smolquery_compaction_table_files{dataset,table}` is each table's live file
+  count at the last sweep. A table whose count only grows is falling behind.
+- `smolquery_compaction_lane_tables{lane="span",state}` counts the tables the
+  span lane left `waiting` (budget spent) or `cooling` (backing off span
+  failures) at the last sweep.
+- `smolquery_compaction_spill_free_bytes` is the free space on the spill
+  filesystem at the start of each sweep.
+- A `compaction span level of ... learned N bytes a row` warning says a span
+  merge failed and the table's groups are sized from its measured cost from
+  now on.
+
 The merges that failed were OOMs under a configured
 `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT` of 512 MiB in a 6 Gi container whose
 derived quarter is 1536 MiB. That override predates T-452, when storage pods

@@ -485,6 +485,33 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert %{span_cooldowns: %{@table => ^cooling}} = :sys.get_state(scheduler)
     end
 
+    test "a sweep reports each table's files, the spill space and the span lane's queue (T-603)",
+         context do
+      runtime =
+        start_scheduler(
+          context,
+          Keyword.merge(@span,
+            compact_bucket_ms: 3_600_000,
+            compact_span_ms: 86_400_000,
+            compact_span_budget_ms: 0
+          )
+        )
+
+      now = div(System.os_time(:millisecond), 1_000)
+      seal(runtime, context.catalog, 1, 1..5)
+      seal(runtime, context.catalog, 2, 6..10)
+      seal(runtime, context.catalog, now, 11..15)
+      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :swap]])
+
+      assert {:ok, %{span_waiting: [@table]}} = Scheduler.sweep(context.storage)
+
+      metrics = Smolquery.Telemetry.render()
+      assert metrics =~ ~s|smolquery_compaction_table_files{dataset="analytics",table="events"} 3|
+      assert metrics =~ ~s|smolquery_compaction_lane_tables{lane="span",state="waiting"} 1|
+      assert metrics =~ "smolquery_compaction_spill_free_bytes "
+      refute_received {[:smolquery, :compact, :swap], ^ref, _measurements, _meta}
+    end
+
     test "a learned width shrinks the table's span groups (T-603)", context do
       runtime = start_scheduler(context, Keyword.merge(@span, compact_below_bytes: 100))
 

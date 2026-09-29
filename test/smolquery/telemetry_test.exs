@@ -640,7 +640,7 @@ defmodule Smolquery.TelemetryTest do
   end
 
   test "counts a compaction's duration by result" do
-    before_us = value("smolquery_compaction_microseconds_total", ~s({result="ok"}))
+    before_us = value("smolquery_compaction_microseconds_total", ~s({result="ok",level="hour"}))
 
     :telemetry.execute(
       [:smolquery, :compact, :swap],
@@ -648,7 +648,7 @@ defmodule Smolquery.TelemetryTest do
       %{result: :ok}
     )
 
-    assert value("smolquery_compaction_microseconds_total", ~s({result="ok"})) ==
+    assert value("smolquery_compaction_microseconds_total", ~s({result="ok",level="hour"})) ==
              before_us + 4_200
   end
 
@@ -787,6 +787,25 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_catalog_commit_attempts_total", conflict) == before_conflict + 1
     assert value("smolquery_catalog_commit_attempts_total", landed) == before_landed + 1
     assert value("smolquery_catalog_statements_total", move) == before_move + 1
+  end
+
+  test "labels compaction attempts by level, an unlabelled one as the hour level (T-603)" do
+    span = ~s({result="ok",level="span"})
+    hour = ~s({result="error",level="hour"})
+    before_span = value("smolquery_compactions_total", span)
+    before_hour = value("smolquery_compactions_total", hour)
+
+    :telemetry.execute([:smolquery, :compact, :swap], %{replaced: 2, duration_us: 10}, %{
+      result: :ok,
+      level: :span
+    })
+
+    :telemetry.execute([:smolquery, :compact, :swap], %{replaced: 0, duration_us: 10}, %{
+      result: :error
+    })
+
+    assert value("smolquery_compactions_total", span) == before_span + 1
+    assert value("smolquery_compactions_total", hour) == before_hour + 1
   end
 
   test "counts sweeps whose span level paused, by reason (T-601)" do

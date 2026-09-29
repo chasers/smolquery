@@ -82,7 +82,8 @@ defmodule Smolquery.Telemetry do
                                           consecutively; backs off between attempts and
                                           alerts like a release at the stuck threshold (T-450)
       [:smolquery, :compact, :swap]       %{replaced, duration_us},
-                                          meta %{result: :ok | :error, table_ref: ref}
+                                          meta %{result: :ok | :error, table_ref: ref,
+                                          level: :hour | :span}
       [:smolquery, :compact, :quarantine] %{count}, meta %{table_ref: ref, paths: [String.t()]}
                                           — a compaction group that failed identically
                                           5 times (a Scheduler.Quarantine constant, not a
@@ -369,9 +370,10 @@ defmodule Smolquery.Telemetry do
       "Oversized-claim releases that could not replicate; a nonzero rate means sealing on a table is stalled (T-297).",
     "smolquery_seal_claim_failures_total" =>
       "Claims the replicas refused; a nonzero rate means the owner is backing off and the table's hot tier is not sealing (T-450).",
-    "smolquery_compactions_total" => "Compaction swaps, by result.",
+    "smolquery_compactions_total" => "Compaction swaps, by result and level (hour or span).",
     "smolquery_compaction_microseconds_total" =>
-      "Time compaction attempts ran, by result; divide by compactions for the mean (T-244).",
+      "Time compaction attempts ran, by result and level; divide by compactions for the " <>
+        "mean (T-244). Rate over wall time by level is each lane's share of a node (T-603).",
     "smolquery_compaction_segments_replaced_total" =>
       "Sealed segments replaced by compaction merges.",
     "smolquery_compaction_quarantined_segments_total" =>
@@ -627,7 +629,15 @@ defmodule Smolquery.Telemetry do
     "smolquery_buffer_unsealed_bytes" =>
       "Bytes of unsealed micro-segments this buffer node holds across every table (T-457).",
     "smolquery_buffer_unsealed_entries_limit" =>
-      "The unsealed entry count at which this buffer node refuses commits (T-457)."
+      "The unsealed entry count at which this buffer node refuses commits (T-457).",
+    "smolquery_compaction_table_files" =>
+      "Live files per table, from the compaction scheduler's last listing (T-603). Every " <>
+        "storage node lists every table, so any node's value is the table's.",
+    "smolquery_compaction_spill_free_bytes" =>
+      "Free bytes on the spill filesystem, read at the start of each compaction sweep (T-603).",
+    "smolquery_compaction_lane_tables" =>
+      "Tables the last sweep's span lane left, by state: waiting (not reached within " <>
+        "compact_span_budget_ms) or cooling (backing off span failures) (T-603)."
   }
 
   @kernel_counters %{
@@ -879,10 +889,11 @@ defmodule Smolquery.Telemetry do
   end
 
   def handle_event([:smolquery, :compact, :swap], measurements, meta, nil) do
-    bump({"smolquery_compactions_total", [result: result(meta)]}, 1)
+    labels = [result: result(meta), level: compact_level(meta)]
+    bump({"smolquery_compactions_total", labels}, 1)
 
     bump(
-      {"smolquery_compaction_microseconds_total", [result: result(meta)]},
+      {"smolquery_compaction_microseconds_total", labels},
       Map.get(measurements, :duration_us, 0)
     )
 
@@ -1173,6 +1184,9 @@ defmodule Smolquery.Telemetry do
     do: kind
 
   defp catalog_kind(_meta), do: :unknown
+
+  defp compact_level(%{level: level}) when level in [:hour, :span], do: level
+  defp compact_level(_meta), do: :hour
 
   defp span_paused_reason(%{reason: reason}) when reason in [:abandoned_spill, :spill_floor],
     do: reason
