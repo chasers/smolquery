@@ -23,8 +23,8 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Scheduler.Caps
   alias Smolquery.StorageService.Scheduler.Failure
+  alias Smolquery.StorageService.Scheduler.Planner
 
-  @span_max_rows 9_223_372_036_854_775_807
   @stuck_after 5
   @conflicts_warn_after 3
 
@@ -204,7 +204,7 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
   defp failure_backs_off?(%{level: :span, span_cap: cap, reason: reason}, runtime, _row_caps) do
     if Failure.span_shrinks?(reason),
       do: cap <= runtime.compact_max_bytes,
-      else: backs_off?(reason, @span_max_rows)
+      else: backs_off?(reason, Planner.span_max_rows())
   end
 
   defp failure_backs_off?(%{table: table_ref, reason: reason}, runtime, row_caps),
