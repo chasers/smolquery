@@ -687,7 +687,7 @@ the wiring is configuration.
   through `Smolquery.StorageService.Routing`. Routing is a second `Ring`. Its
   key is the storage-node subset of cluster membership, not the buffer's. The
   client casts to the owner node directly. In the same way, `Sealer` and
-  `Compactor` gate on `Routing.own?/2` before they act on a signal or a
+  `Scheduler` gate on `Routing.own?/2` before they act on a signal or a
   sweep's table. Two storage replicas therefore never double-merge the same
   table. Only a cluster with no storage node reachable anywhere is reported
   rather than raised. A raise would take down the `TableBuffer` that
@@ -797,7 +797,7 @@ registers that one.
 
 ### Compaction
 
-`Smolquery.StorageService.Compactor` re-merges undersized sealed segments, so
+`Smolquery.StorageService.Scheduler` re-merges undersized sealed segments, so
 a quiet table stops accreting files. Undersized segments are the residue of
 eager and age-cap seals. The compactor sweeps every `compact_interval_ms`. It
 needs no signals: the catalog itself says which segments are small, with sizes

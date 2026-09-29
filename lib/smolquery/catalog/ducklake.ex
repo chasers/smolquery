@@ -130,7 +130,7 @@ defmodule Smolquery.Catalog.DuckLake do
   `ducklake_merge_adjacent_files/2` must never be called on a smolquery table:
   over externally-registered files it crashes DuckDB fatally (ducklake
   `67480b1d`, format 0.4), and a fatal error invalidates the whole database.
-  Compaction stays `Smolquery.StorageService.Compactor`'s job, built on
+  Compaction stays `Smolquery.StorageService.Scheduler`'s job, built on
   `replace_segments/4`: registration and retirement in one metadata
   transaction, so a single snapshot carries both
   (`Smolquery.Catalog.DuckLake.Swap`).
@@ -138,7 +138,7 @@ defmodule Smolquery.Catalog.DuckLake do
   ## A swap whose inputs are not all live refuses
 
   Two compactions can merge overlapping groups: two nodes while the ring
-  changes, or the two levels of `Smolquery.StorageService.Compactor` if a
+  changes, or the two levels of `Smolquery.StorageService.Scheduler` if a
   merge outlasts the bucket between them. The loser's `DELETE` then finds its
   retired inputs already gone and removes nothing for them, while its add
   registers a merged file holding their rows a second time. So the swap,

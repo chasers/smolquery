@@ -36,7 +36,7 @@ defmodule Smolquery.StorageService.Routing do
   table's seal concurrency is therefore `min(P, N) x max_concurrent_seals`,
   and `write_partitions` is the knob that raises it.
 
-  `Smolquery.StorageService.Sealer` and `Smolquery.StorageService.Compactor`
+  `Smolquery.StorageService.Sealer` and `Smolquery.StorageService.Scheduler`
   both call `own?/2` before acting on a signal or a sweep's table — the gate
   D6 describes. Routing to the right node in the first place (this module's
   `owner/2`) makes that gate meaningful rather than a permanent no-op: without

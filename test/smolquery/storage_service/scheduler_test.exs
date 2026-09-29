@@ -1,6 +1,6 @@
-defmodule Smolquery.StorageService.CompactorTest do
+defmodule Smolquery.StorageService.SchedulerTest do
   @moduledoc """
-  The compactor against a real DuckLake catalog and a real merge.
+  The scheduler against a real DuckLake catalog and a real merge.
 
   Tagged `:integration` because the swap is the part that can actually be wrong:
   `replace_segments/4` composing registration and retirement in one DuckLake
@@ -20,11 +20,10 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
-  import Bitwise
 
-  alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.StorageService.Scheduler
   alias Smolquery.Test.SegmentFixture
 
   import ExUnit.CaptureLog
@@ -59,7 +58,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     %{storage: storage, catalog: catalog}
   end
 
-  defp start_compactor(context, opts) do
+  defp start_scheduler(context, opts) do
     runtime =
       Runtime.new(
         [
@@ -77,7 +76,7 @@ defmodule Smolquery.StorageService.CompactorTest do
         |> Keyword.merge(opts)
       )
 
-    start_supervised!({Compactor, runtime}, id: {:compactor, context.storage})
+    start_supervised!({Scheduler, runtime}, id: {:scheduler, context.storage})
     Runtime.put(runtime)
     on_exit(fn -> Runtime.delete(context.storage) end)
 
@@ -107,13 +106,13 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "replaces an undersized run with one merged segment in one snapshot", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     a = seal(runtime, context.catalog, 1, 1..10)
     b = seal(runtime, context.catalog, 2, 11..20)
     c = seal(runtime, context.catalog, 3, 21..30)
     {:ok, before_swap} = Catalog.current_snapshot(context.catalog)
 
-    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert {:ok, report} = Scheduler.sweep(context.storage)
 
     assert [%{table: @table, replaced: 3, key: key, snapshot: snapshot}] = report.compacted
     assert report.failed == []
@@ -167,7 +166,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
   test "a legacy input without ids is projected as of its registration snapshot: a re-added name reads NULL (PL-62)",
        context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     catalog = context.catalog
     :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
     wide = Schema.new!([{"id", :int64}, {"ts_int", :int64}])
@@ -178,13 +177,13 @@ defmodule Smolquery.StorageService.CompactorTest do
     :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :string)})
     assert lake_pairs(context.storage) == [[1, nil], [2, nil]]
 
-    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap], failed: []}} = Scheduler.sweep(context.storage)
     assert lake_pairs(context.storage) == [[1, nil], [2, nil]]
   end
 
   test "inputs written with ids are projected by id across a drop and a re-add (PL-62)",
        context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     catalog = context.catalog
     :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
     {:ok, before} = Catalog.table_schema(catalog, @table)
@@ -211,13 +210,13 @@ defmodule Smolquery.StorageService.CompactorTest do
       context.tmp_dir
     )
 
-    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap], failed: []}} = Scheduler.sweep(context.storage)
     assert lake_pairs(context.storage) == [[1, nil], [2, "x"]]
   end
 
   test "a materialized column added after the inputs sealed is computed by the compaction (PL-61 L5)",
        context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     catalog = context.catalog
     :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
     {:ok, plain} = Catalog.table_schema(catalog, @table)
@@ -242,12 +241,12 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     assert lake_stamps(context.storage) == [[1, nil], [2, nil]]
 
-    assert {:ok, %{compacted: [_swap], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap], failed: []}} = Scheduler.sweep(context.storage)
     assert lake_stamps(context.storage) == [[1, ~N[2023-11-14 22:13:20.000000]], [2, nil]]
   end
 
   test "the chunked merge recomputes a materialized column too (PL-61 L5 review)", context do
-    runtime = start_compactor(context, merge_inputs_per_call: 2)
+    runtime = start_scheduler(context, merge_inputs_per_call: 2)
     catalog = context.catalog
     :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("ts_int", :int64)})
     {:ok, plain} = Catalog.table_schema(catalog, @table)
@@ -270,7 +269,7 @@ defmodule Smolquery.StorageService.CompactorTest do
         {:add_column, Field.new!("ts", :timestamp, materialized: "epoch_ms(ts_int)")}
       )
 
-    assert {:ok, %{compacted: [%{replaced: 3}], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{replaced: 3}], failed: []}} = Scheduler.sweep(context.storage)
 
     assert lake_stamps(context.storage) == [
              [1, ~N[2023-11-14 22:14:20.000000]],
@@ -286,12 +285,12 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "readers pinned before the swap still see the inputs", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     a = seal(runtime, context.catalog, 1, 1..10)
     b = seal(runtime, context.catalog, 2, 11..20)
     {:ok, pinned} = Catalog.current_snapshot(context.catalog)
 
-    assert {:ok, %{compacted: [_swap]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap]}} = Scheduler.sweep(context.storage)
 
     assert {:ok, paths} = Catalog.segments(context.catalog, @table, pinned)
     assert Enum.sort(paths) == Enum.sort([a.path, b.path])
@@ -307,23 +306,23 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     test "merges settled files across buckets toward the target, past the hour level's row cap",
          context do
-      runtime = start_compactor(context, @span)
+      runtime = start_scheduler(context, @span)
       for index <- 1..3, do: seal(runtime, context.catalog, index, (index * 10 - 9)..(index * 10))
 
       assert {:ok, %{compacted: [%{replaced: 3, rows: 30}], failed: []}} =
-               Compactor.sweep(context.storage)
+               Scheduler.sweep(context.storage)
 
       assert lake_rows(context.storage) == 30
     end
 
     test "caps a span group's rows by its estimated decoded size (T-601)", context do
-      runtime = start_compactor(context, Keyword.merge(@span, compact_span_decoded_bytes: 1))
+      runtime = start_scheduler(context, Keyword.merge(@span, compact_span_decoded_bytes: 1))
 
       sealed =
         for index <- 1..3,
             do: seal(runtime, context.catalog, index, (index * 10 - 9)..(index * 10))
 
-      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
 
       assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
       assert Enum.sort(current) == Enum.sort(Enum.map(sealed, & &1.path))
@@ -332,7 +331,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     test "a sweep runs the hour level only while the spill disk is below its floor (T-601)",
          context do
       runtime =
-        start_compactor(
+        start_scheduler(
           context,
           Keyword.merge(@span,
             compact_below_bytes: 100,
@@ -346,7 +345,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       log =
         capture_log(fn ->
-          assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+          assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
         end)
 
       assert log =~ "span level paused"
@@ -355,7 +354,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     test "a sweep runs the hour level only while a recycled engine still spills (T-601)",
          context do
-      runtime = start_compactor(context, Keyword.merge(@span, compact_below_bytes: 100))
+      runtime = start_scheduler(context, Keyword.merge(@span, compact_below_bytes: 100))
       seal(runtime, context.catalog, 1, 1..10)
       seal(runtime, context.catalog, 2, 11..20)
 
@@ -367,7 +366,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       log =
         capture_log(fn ->
-          assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+          assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
         end)
 
       assert log =~ "still spills to #{leaf}"
@@ -375,19 +374,19 @@ defmodule Smolquery.StorageService.CompactorTest do
       File.rm_rf!(leaf)
 
       assert {:ok, %{compacted: [%{level: :span}], failed: []}} =
-               Compactor.sweep(context.storage)
+               Scheduler.sweep(context.storage)
     end
 
     test "never merges across spans", context do
-      runtime = start_compactor(context, @span)
+      runtime = start_scheduler(context, @span)
       a = seal(runtime, context.catalog, 1, 1..10)
       b = seal(runtime, context.catalog, 2, 11..20)
       c = seal(runtime, context.catalog, 11, 21..30)
       d = seal(runtime, context.catalog, 12, 31..40)
 
-      assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
-      assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
-      assert {:ok, %{compacted: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [%{replaced: 2}]}} = Scheduler.sweep(context.storage)
+      assert {:ok, %{compacted: [%{replaced: 2}]}} = Scheduler.sweep(context.storage)
+      assert {:ok, %{compacted: []}} = Scheduler.sweep(context.storage)
 
       assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
       assert [_, _] = current
@@ -397,17 +396,17 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     test "merges settled files the hour level would leave alone, under half the target",
          context do
-      runtime = start_compactor(context, Keyword.merge(@span, compact_below_bytes: 100))
+      runtime = start_scheduler(context, Keyword.merge(@span, compact_below_bytes: 100))
       seal(runtime, context.catalog, 1, 1..10)
       seal(runtime, context.catalog, 2, 11..20)
 
       assert {:ok, %{compacted: [%{replaced: 2, level: :span}], failed: []}} =
-               Compactor.sweep(context.storage)
+               Scheduler.sweep(context.storage)
     end
 
     test "leaves a file at or past half the target alone", context do
       runtime =
-        start_compactor(
+        start_scheduler(
           context,
           Keyword.merge(@span, compact_below_bytes: 64, compact_target_bytes: 130)
         )
@@ -415,7 +414,7 @@ defmodule Smolquery.StorageService.CompactorTest do
       a = seal(runtime, context.catalog, 1, 1..10)
       b = seal(runtime, context.catalog, 2, 11..20)
 
-      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
 
       assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
       assert Enum.sort(current) == Enum.sort([a.path, b.path])
@@ -423,7 +422,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     test "keeps recent files at the hour level, under its row cap", context do
       runtime =
-        start_compactor(
+        start_scheduler(
           context,
           Keyword.merge(@span, compact_bucket_ms: 3_600_000, compact_span_ms: 86_400_000)
         )
@@ -432,53 +431,53 @@ defmodule Smolquery.StorageService.CompactorTest do
       seal(runtime, context.catalog, now, 1..10)
       seal(runtime, context.catalog, now, 11..20)
 
-      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
       assert lake_rows(context.storage) == 20
     end
   end
 
   test "a second sweep finds nothing left to do", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert {:ok, %{compacted: [_swap]}} = Compactor.sweep(context.storage)
-    assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap]}} = Scheduler.sweep(context.storage)
+    assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
     assert lake_rows(context.storage) == 20
   end
 
   test "skips a table with fewer segments than the minimum", context do
-    runtime = start_compactor(context, compact_min_inputs: 3)
+    runtime = start_scheduler(context, compact_min_inputs: 3)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "leaves segments at or above the size floor alone", context do
-    runtime = start_compactor(context, compact_below_bytes: 1)
+    runtime = start_scheduler(context, compact_below_bytes: 1)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 
   test "a ceiling too small for two inputs compacts nothing", context do
-    runtime = start_compactor(context, compact_max_bytes: 1)
+    runtime = start_scheduler(context, compact_max_bytes: 1)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "groups oldest first and leaves what would pass the ceiling", context do
     engine = Runtime.engine(context.storage)
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     a = seal(runtime, context.catalog, 1, 1..10)
     b = seal(runtime, context.catalog, 2, 11..20)
     c = seal(runtime, context.catalog, 3, 21..30)
@@ -493,14 +492,14 @@ defmodule Smolquery.StorageService.CompactorTest do
       |> Map.fetch!(:rows)
       |> Map.new(fn [path, bytes] -> {path, bytes} end)
 
-    stop_supervised!({:compactor, context.storage})
+    stop_supervised!({:scheduler, context.storage})
 
     capped =
-      start_compactor(context,
+      start_scheduler(context,
         compact_max_bytes: Map.fetch!(sizes, a.path) + Map.fetch!(sizes, b.path)
       )
 
-    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Scheduler.sweep(context.storage)
 
     merged = Store.location(capped.store, key)
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -509,38 +508,38 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "a backlog past merge_inputs_per_call merges in one sweep, not across sweeps", context do
-    runtime = start_compactor(context, merge_inputs_per_call: 2)
+    runtime = start_scheduler(context, merge_inputs_per_call: 2)
 
     for n <- 1..5 do
       seal(runtime, context.catalog, n, (n * 10 - 9)..(n * 10))
     end
 
-    assert {:ok, %{compacted: [%{replaced: 5, key: key}]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{replaced: 5, key: key}]}} = Scheduler.sweep(context.storage)
 
     merged = Store.location(runtime.store, key)
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
     assert current == [merged]
     assert lake_rows(context.storage) == 50
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "a sweep survives an engine that cannot answer its calls (T-251)", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
     stop_supervised!(Runtime.compact_engine(context.storage))
 
-    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [], failed: [failure]}} = Scheduler.sweep(context.storage)
     assert %{table: @table, reason: {:sizing_failed, %CallExited{} = error}} = failure
     assert Exception.message(error) =~ "exited before replying"
-    assert is_pid(Process.whereis(Runtime.compactor(context.storage)))
+    assert is_pid(Process.whereis(Runtime.scheduler(context.storage)))
   end
 
   test "a sweep recycles the compaction engine after a call exit (T-259)", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
@@ -548,27 +547,27 @@ defmodule Smolquery.StorageService.CompactorTest do
     database = Process.whereis(Engine.database_name(compact_engine))
     Process.unregister(Engine.connection_name(compact_engine))
 
-    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [], failed: [failure]}} = Scheduler.sweep(context.storage)
     assert %{table: @table, reason: {:sizing_failed, %CallExited{reason: :noproc}}} = failure
 
     refute Process.whereis(Engine.database_name(compact_engine)) == database
     assert is_pid(Process.whereis(Engine.connection_name(compact_engine)))
 
-    assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Scheduler.sweep(context.storage)
   end
 
   test "a swap whose transaction times out fails the table without crashing or recycling (T-460)",
        context do
     catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
-    runtime = start_compactor(context, catalog: catalog)
+    runtime = start_scheduler(context, catalog: catalog)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    compactor = Process.whereis(Runtime.compactor(context.storage))
+    compactor = Process.whereis(Runtime.scheduler(context.storage))
     compact_engine = Runtime.compact_engine(context.storage)
     database = Process.whereis(Engine.database_name(compact_engine))
 
-    assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [], failed: [failure]}} = Scheduler.sweep(context.storage)
     assert %{table: @table, reason: %CallExited{reason: :timeout}} = failure
     assert Process.alive?(compactor)
     assert Process.whereis(Engine.database_name(compact_engine)) == database
@@ -579,12 +578,12 @@ defmodule Smolquery.StorageService.CompactorTest do
 
   test "a file the catalog sizes at or above the threshold is never opened, so a corrupt one costs nothing (T-463)",
        context do
-    runtime = start_compactor(context, compact_below_bytes: 1)
+    runtime = start_scheduler(context, compact_below_bytes: 1)
     good = seal(runtime, context.catalog, 1, 1..10)
     bad = seal(runtime, context.catalog, 2, 11..20)
     File.write!(bad.path, "not a parquet file")
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -593,7 +592,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
   test "a sweep stops at the first call exit and defers the tables behind it (T-460)", context do
     catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
-    runtime = start_compactor(context, catalog: catalog)
+    runtime = start_scheduler(context, catalog: catalog)
     other = {"analytics", "clicks"}
     :ok = Catalog.create_table(context.catalog, other, schema())
     seal(runtime, context.catalog, 1, 1..10)
@@ -601,7 +600,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     seal(runtime, context.catalog, 3, 21..30, other)
     seal(runtime, context.catalog, 4, 31..40, other)
 
-    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert {:ok, report} = Scheduler.sweep(context.storage)
 
     assert [%{table: first, reason: %CallExited{reason: :timeout}}] =
              report.failed
@@ -614,25 +613,25 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, second, :current)
 
     assert {:ok, %{failed: [%{table: ^first}], deferred: [^second]}} =
-             Compactor.sweep(context.storage)
+             Scheduler.sweep(context.storage)
   end
 
   test "a catalog listing that exits fails the sweep instead of crashing it (T-460)", context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    compactor = Process.whereis(Runtime.compactor(context.storage))
+    compactor = Process.whereis(Runtime.scheduler(context.storage))
     Process.unregister(Engine.connection_name(Runtime.catalog_engine(context.storage), 2))
 
-    assert Compactor.sweep(context.storage) == {:error, %CallExited{reason: :noproc}}
+    assert Scheduler.sweep(context.storage) == {:error, %CallExited{reason: :noproc}}
 
     assert Process.alive?(compactor)
   end
 
   test "quarantines a segment that fails compaction identically, then stops replanning it (T-310)",
        context do
-    runtime = start_compactor(context, [])
+    runtime = start_scheduler(context, [])
     good = seal(runtime, context.catalog, 1, 1..10)
     bad = seal(runtime, context.catalog, 2, 11..20)
 
@@ -641,13 +640,13 @@ defmodule Smolquery.StorageService.CompactorTest do
     bad_path = bad.path
 
     for _sweep <- 1..5 do
-      assert {:ok, %{compacted: [], failed: [failure]}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], failed: [failure]}} = Scheduler.sweep(context.storage)
 
       assert %{table: @table, reason: {:sizing_failed, %Adbc.Error{}}, paths: [^bad_path]} =
                failure
     end
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok,
               %{
                 compacted: [],
@@ -662,12 +661,12 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "rows cap a group the byte ceiling would admit (T-260)", context do
-    runtime = start_compactor(context, compact_max_rows: 20)
+    runtime = start_scheduler(context, compact_max_rows: 20)
     a = seal(runtime, context.catalog, 1, 1..10)
     b = seal(runtime, context.catalog, 2, 11..20)
     c = seal(runtime, context.catalog, 3, 21..30)
 
-    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{replaced: 2, key: key}]}} = Scheduler.sweep(context.storage)
 
     merged = Store.location(runtime.store, key)
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -678,13 +677,13 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "a row-heavy head no neighbor fits beside cannot wedge the table (T-260)", context do
-    runtime = start_compactor(context, compact_max_rows: 25)
+    runtime = start_scheduler(context, compact_max_rows: 25)
     a = seal(runtime, context.catalog, 1, 1..20)
     b = seal(runtime, context.catalog, 2, 21..30)
     c = seal(runtime, context.catalog, 3, 31..40)
 
     assert {:ok, %{compacted: [%{replaced: 2, key: key}], failed: []}} =
-             Compactor.sweep(context.storage)
+             Scheduler.sweep(context.storage)
 
     merged = Store.location(runtime.store, key)
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -695,52 +694,52 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   test "an empty catalog sweeps nothing", context do
-    start_compactor(context, [])
+    start_scheduler(context, [])
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
   end
 
   test "a table this node's storage ring hands to another node is left alone", context do
-    runtime = start_compactor(context, ring: [:"storage1@elsewhere.invalid"])
+    runtime = start_scheduler(context, ring: [:"storage1@elsewhere.invalid"])
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert Compactor.sweep(context.storage) ==
+    assert Scheduler.sweep(context.storage) ==
              {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
 
   test "a self-sufficient bucket groups alone; stragglers carry forward (T-269)", context do
-    runtime = start_compactor(context, compact_bucket_ms: 1_000)
+    runtime = start_scheduler(context, compact_bucket_ms: 1_000)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 1, 11..20)
     seal(runtime, context.catalog, 2, 21..30)
     seal(runtime, context.catalog, 2, 31..40)
 
-    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert {:ok, report} = Scheduler.sweep(context.storage)
     assert [%{table: @table, replaced: 2, rows: 20}] = report.compacted
     assert {:ok, [_merged, _c, _d]} = Catalog.segments(context.catalog, @table, :current)
 
-    assert {:ok, second} = Compactor.sweep(context.storage)
+    assert {:ok, second} = Scheduler.sweep(context.storage)
     assert [%{table: @table, replaced: 3, rows: 40}] = second.compacted
     assert lake_rows(context.storage) == 40
   end
 
   test "a bucket below compact_min_inputs rolls into the next owned bucket", context do
-    runtime = start_compactor(context, compact_bucket_ms: 1_000)
+    runtime = start_scheduler(context, compact_bucket_ms: 1_000)
     seal(runtime, context.catalog, 1, 1..10)
     seal(runtime, context.catalog, 2, 11..20)
 
-    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert {:ok, report} = Scheduler.sweep(context.storage)
     assert [%{table: @table, replaced: 2}] = report.compacted
     assert lake_rows(context.storage) == 20
   end
 
   test "an unowned bucket is left for its owner (T-269)", context do
     runtime =
-      start_compactor(context,
+      start_scheduler(context,
         ring: [node(), :"storage1@elsewhere.invalid"],
         compact_bucket_ms: 1_000
       )
@@ -755,7 +754,7 @@ defmodule Smolquery.StorageService.CompactorTest do
     a = seal(runtime, context.catalog, theirs, 21..30)
     b = seal(runtime, context.catalog, theirs, 31..40)
 
-    assert {:ok, report} = Compactor.sweep(context.storage)
+    assert {:ok, report} = Scheduler.sweep(context.storage)
     assert [%{table: @table, replaced: 2}] = report.compacted
     assert report.failed == []
 
@@ -767,9 +766,9 @@ defmodule Smolquery.StorageService.CompactorTest do
   end
 
   describe "the compaction catalog connection (T-458)" do
-    test "the compactor commits through the catalog engine's last connection, never the seal side's",
+    test "the scheduler commits through the catalog engine's last connection, never the seal side's",
          context do
-      runtime = start_compactor(context, [])
+      runtime = start_scheduler(context, [])
       seal(runtime, context.catalog, 1, 1..10)
       seal(runtime, context.catalog, 2, 11..20)
       catalog_engine = Runtime.catalog_engine(context.storage)
@@ -782,7 +781,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       try do
         assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} =
-                 Compactor.sweep(context.storage)
+                 Scheduler.sweep(context.storage)
       after
         :ok = :sys.resume(seal_side)
       end
@@ -829,7 +828,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     defp flaky_compactor(context, failures, opts) do
       inner = Store.Local.new(dir: Path.join(context.tmp_dir, "sealed"))
-      runtime = start_compactor(context, [store: FlakyPut.new(inner, failures)] ++ opts)
+      runtime = start_scheduler(context, [store: FlakyPut.new(inner, failures)] ++ opts)
       seal(%{runtime | store: inner}, context.catalog, 1, 1..10)
       seal(%{runtime | store: inner}, context.catalog, 2, 11..20)
 
@@ -840,15 +839,15 @@ defmodule Smolquery.StorageService.CompactorTest do
          context do
       flaky_compactor(context, 3, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
 
-      assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Scheduler.sweep(context.storage)
 
-      assert Compactor.sweep(context.storage) ==
+      assert Scheduler.sweep(context.storage) ==
                {:ok,
                 %{compacted: [], failed: [], quarantined: [], cooling: [@table], deferred: []}}
 
       Process.sleep(350)
 
-      assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{failed: [%{table: @table}], cooling: []}} = Scheduler.sweep(context.storage)
     end
 
     # The base is well past what a sweep takes on a slow CI runner.
@@ -859,30 +858,30 @@ defmodule Smolquery.StorageService.CompactorTest do
       )
 
       assert {:ok, %{failed: [%{reason: {:put_failed, _key, :enospc}}]}} =
-               Compactor.sweep(context.storage)
+               Scheduler.sweep(context.storage)
 
-      assert {:ok, %{compacted: [], cooling: [@table]}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], cooling: [@table]}} = Scheduler.sweep(context.storage)
 
       Process.sleep(1_600)
 
       assert {:ok, %{compacted: [%{replaced: 2}], cooling: []}} =
-               Compactor.sweep(context.storage)
+               Scheduler.sweep(context.storage)
 
-      assert {:ok, %{compacted: [], failed: [], cooling: []}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [], failed: [], cooling: []}} = Scheduler.sweep(context.storage)
     end
 
     test "a base of zero never leaves a table out", context do
       flaky_compactor(context, 3, compact_backoff_base_ms: 0)
 
       for _sweep <- 1..3 do
-        assert {:ok, %{failed: [_failure], cooling: []}} = Compactor.sweep(context.storage)
+        assert {:ok, %{failed: [_failure], cooling: []}} = Scheduler.sweep(context.storage)
       end
     end
 
     test "a corruption-shaped failure is the quarantine's to stop, and never backs off",
          context do
       runtime =
-        start_compactor(context, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
+        start_scheduler(context, compact_backoff_base_ms: 300, compact_backoff_max_ms: 300)
 
       _good = seal(runtime, context.catalog, 1, 1..10)
       bad = seal(runtime, context.catalog, 2, 11..20)
@@ -890,7 +889,7 @@ defmodule Smolquery.StorageService.CompactorTest do
 
       for _sweep <- 1..2 do
         assert {:ok, %{failed: [%{reason: {:sizing_failed, %Adbc.Error{}}}], cooling: []}} =
-                 Compactor.sweep(context.storage)
+                 Scheduler.sweep(context.storage)
       end
     end
   end
@@ -917,555 +916,13 @@ defmodule Smolquery.StorageService.CompactorTest do
       :ok = Catalog.create_table(catalog, @table, schema())
       single = %{context | storage: storage, catalog: catalog}
 
-      {runtime, log} = with_log(fn -> start_compactor(single, []) end)
+      {runtime, log} = with_log(fn -> start_scheduler(single, []) end)
 
       assert log =~ "carries no connection 2 for compaction"
       seal(runtime, catalog, 1, 1..10)
       seal(runtime, catalog, 2, 11..20)
 
-      assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(storage)
-    end
-  end
-
-  describe "the span level's caps (T-592)" do
-    defp span_failure(reason, cap),
-      do: {:failed, %{table: @table, reason: reason, paths: [], level: :span, span_cap: cap}}
-
-    defp span_oom(cap),
-      do:
-        span_failure(
-          {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}},
-          cap
-        )
-
-    test "a span merge that runs out of memory or time halves the table's span cap" do
-      runtime = Runtime.new(name: __MODULE__.SpanCaps)
-
-      for reason <- [
-            {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}},
-            CallExited.new(:timeout),
-            {:call_exited, CallExited.new(:timeout)}
-          ] do
-        log =
-          capture_log(fn ->
-            assert Compactor.adjusted_span_caps(
-                     %{},
-                     [span_failure(reason, 1_073_741_824)],
-                     runtime
-                   ) ==
-                     %{@table => 536_870_912}
-          end)
-
-        assert log =~ "its groups shrink to 536870912 bytes"
-      end
-    end
-
-    test "the span cap never shrinks below compact_max_bytes, and other failures leave it" do
-      runtime = Runtime.new(name: __MODULE__.SpanFloor, compact_max_bytes: 100_000_000)
-
-      capture_log(fn ->
-        assert Compactor.adjusted_span_caps(%{}, [span_oom(150_000_000)], runtime) ==
-                 %{@table => 100_000_000}
-      end)
-
-      assert Compactor.adjusted_span_caps(
-               %{},
-               [span_failure(:commit_conflict, 150_000_000)],
-               runtime
-             ) ==
-               %{}
-    end
-
-    test "a span failure leaves the hour level's row cap alone" do
-      assert Compactor.adjusted_row_caps(%{}, [span_oom(1_073_741_824)], 4_194_304) == %{}
-    end
-
-    test "a span failure backs off only once its cap cannot shrink; a lost race never does" do
-      runtime =
-        Runtime.with_compact_max_rows(
-          Runtime.new(name: __MODULE__.SpanBackoff, compact_backoff_base_ms: 100)
-        )
-
-      shrinkable = [span_oom(1_073_741_824)]
-      at_floor = [span_oom(runtime.compact_max_bytes)]
-      lost = [{:failed, %{table: @table, reason: {:inputs_not_live, ["a"]}, paths: []}}]
-
-      assert Compactor.adjusted_cooldowns(%{}, [@table], shrinkable, runtime, %{}, 0) == %{}
-
-      assert %{@table => _backoff} =
-               Compactor.adjusted_cooldowns(%{}, [@table], at_floor, runtime, %{}, 0)
-
-      assert Compactor.adjusted_cooldowns(%{}, [@table], lost, runtime, %{}, 0) == %{}
-    end
-  end
-
-  describe "adjusted_cooldowns/6 (T-458)" do
-    @other {"analytics", "other"}
-
-    defp backoff_runtime(base, max) do
-      Runtime.with_compact_max_rows(
-        Runtime.new(
-          name: __MODULE__.Backoff,
-          compact_backoff_base_ms: base,
-          compact_backoff_max_ms: max
-        )
-      )
-    end
-
-    defp failed(table_ref), do: {:failed, %{table: table_ref, reason: :boom, paths: []}}
-
-    test "the wait doubles per consecutive failure of a table, up to the ceiling" do
-      runtime = backoff_runtime(100, 250)
-
-      cooldowns =
-        Enum.reduce(1..3, %{}, fn _n, acc ->
-          Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, %{}, 1_000)
-        end)
-
-      assert cooldowns == %{@table => %{consecutive: 3, retry_at: 1_250}}
-
-      assert Compactor.adjusted_cooldowns(%{}, [@table], [failed(@table)], runtime, %{}, 1_000) ==
-               %{@table => %{consecutive: 1, retry_at: 1_100}}
-    end
-
-    test "a swept table that did not fail is cleared; a table the sweep left out keeps its entry" do
-      runtime = backoff_runtime(100, 250)
-
-      before = %{
-        @table => %{consecutive: 2, retry_at: 5},
-        @other => %{consecutive: 1, retry_at: 9}
-      }
-
-      ok = [{:ok, %{table: @table}}]
-
-      assert Compactor.adjusted_cooldowns(before, [@table], ok, runtime, %{}, 0) ==
-               %{@other => %{consecutive: 1, retry_at: 9}}
-
-      assert Compactor.adjusted_cooldowns(before, [@table], [:skip], runtime, %{}, 0) ==
-               %{@other => %{consecutive: 1, retry_at: 9}}
-    end
-
-    test "a failure with a recovery of its own is left to it, and clears the cooldown" do
-      runtime = backoff_runtime(100, 250)
-      cooling = %{@table => %{consecutive: 2, retry_at: 5}}
-
-      oom =
-        {:failed,
-         %{
-           table: @table,
-           reason:
-             {:put_failed, "k", {:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}},
-           paths: ["a"]
-         }}
-
-      corrupt =
-        {:failed,
-         %{
-           table: @table,
-           reason: {:sizing_failed, %Adbc.Error{message: "Invalid Input Error: No magic bytes"}},
-           paths: ["a"]
-         }}
-
-      # The cap is above the floor, so the OOM halves it and must be seen again.
-      assert Compactor.adjusted_cooldowns(cooling, [@table], [oom], runtime, %{}, 0) == %{}
-      # A corrupt input is counted toward quarantine, which is the stop for it.
-      assert Compactor.adjusted_cooldowns(cooling, [@table], [corrupt], runtime, %{}, 0) == %{}
-
-      # At the floor there is nothing left to halve, so the OOM backs off.
-      at_floor = %{@table => %{cap: 65_536}}
-
-      assert Compactor.adjusted_cooldowns(%{}, [@table], [oom], runtime, at_floor, 0) ==
-               %{@table => %{consecutive: 1, retry_at: 100}}
-    end
-
-    test "a commit conflict waits one sweep interval and never reaches the max wait (T-595)" do
-      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
-      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
-
-      conflicts =
-        Enum.reduce(1..10, %{}, fn _n, acc ->
-          Compactor.adjusted_cooldowns(acc, [@table], conflict, runtime, %{}, 1_000)
-        end)
-
-      assert conflicts == %{@table => %{consecutive: 0, conflicts: 10, retry_at: 1_040}}
-
-      assert Compactor.adjusted_cooldowns(conflicts, [@table], [failed(@table)], runtime, %{}, 0) ==
-               %{@table => %{consecutive: 1, retry_at: 100}}
-    end
-
-    test "a conflict keeps a failure streak's count, and a success clears both (T-595)" do
-      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
-      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
-      failing = %{@table => %{consecutive: 3, retry_at: 0}}
-
-      after_conflict = Compactor.adjusted_cooldowns(failing, [@table], conflict, runtime, %{}, 0)
-      assert after_conflict == %{@table => %{consecutive: 3, conflicts: 1, retry_at: 40}}
-
-      assert Compactor.adjusted_cooldowns(
-               after_conflict,
-               [@table],
-               [failed(@table)],
-               runtime,
-               %{},
-               0
-             ) ==
-               %{@table => %{consecutive: 4, retry_at: 250}}
-
-      ok = [{:ok, %{table: @table}}]
-      assert Compactor.adjusted_cooldowns(after_conflict, [@table], ok, runtime, %{}, 0) == %{}
-    end
-
-    test "each conflict is an event, and the third in a row warns (T-595)" do
-      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
-      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
-      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :conflict]])
-
-      log =
-        capture_log(fn ->
-          Enum.reduce(1..3, %{}, fn _n, acc ->
-            Compactor.adjusted_cooldowns(acc, [@table], conflict, runtime, %{}, 0)
-          end)
-        end)
-
-      assert_receive {[:smolquery, :compact, :conflict], ^ref, %{conflicts: 1, wait_ms: 40},
-                      %{table_ref: @table}}
-
-      assert_receive {[:smolquery, :compact, :conflict], ^ref, %{conflicts: 3}, _meta}
-      assert log =~ "[warning]"
-      assert log =~ "3 sweeps in a row"
-      refute log =~ "stalled"
-    end
-
-    test "every deferral is an event, and the log escalates at five consecutive failures" do
-      runtime = backoff_runtime(100, 250)
-      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :backoff]])
-
-      log =
-        capture_log(fn ->
-          Enum.reduce(1..5, %{}, fn _n, acc ->
-            Compactor.adjusted_cooldowns(acc, [@table], [failed(@table)], runtime, %{}, 0)
-          end)
-        end)
-
-      assert_receive {[:smolquery, :compact, :backoff], ^ref, %{consecutive: 1, wait_ms: 100},
-                      %{table_ref: @table}}
-
-      assert_receive {[:smolquery, :compact, :backoff], ^ref, %{consecutive: 5, wait_ms: 250}, _}
-      assert log =~ "compaction of #{inspect(@table)} backs off 100 ms (1 consecutive failure(s))"
-      assert log =~ "compaction on this table is stalled (T-458)"
-    end
-  end
-
-  describe "adjusted_row_caps/3 (T-262)" do
-    @resolved 4_194_304
-
-    defp oom_failure(table) do
-      {:failed,
-       %{
-         table: table,
-         reason:
-           {:put_failed, "analytics/events/x.parquet",
-            {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}}}
-       }}
-    end
-
-    defp staging_oom_failure(table) do
-      {:failed,
-       %{
-         table: table,
-         reason: {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}}
-       }}
-    end
-
-    defp compacted(table, rows) do
-      {:ok, %{table: table, key: "k", replaced: 2, rows: rows, snapshot: 1}}
-    end
-
-    test "a merge OOM halves the table's cap" do
-      caps = Compactor.adjusted_row_caps(%{}, [oom_failure(@table)], @resolved)
-
-      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
-    end
-
-    test "an OOM failure carrying the group's rows tightens the cap the same way" do
-      {:failed, failure} = oom_failure(@table)
-
-      caps =
-        Compactor.adjusted_row_caps(%{}, [{:failed, Map.put(failure, :rows, 300_000)}], @resolved)
-
-      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
-    end
-
-    test "a staging-phase OOM tightens the cap the same way" do
-      caps = Compactor.adjusted_row_caps(%{}, [staging_oom_failure(@table)], @resolved)
-
-      assert caps == %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: false}}
-    end
-
-    test "repeated OOMs keep halving, never below the floor, and grow the patience" do
-      caps =
-        Enum.reduce(1..30, %{}, fn _sweep, caps ->
-          Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved)
-        end)
-
-      assert caps == %{@table => %{cap: 65_536, streak: 0, patience: 64, probe: false}}
-    end
-
-    test "cap-filling successes raise the cap after the patience and shed at the resolved cap" do
-      caps = %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 2, probe: false}}
-      quarter = compacted(@table, div(@resolved, 4))
-      half = compacted(@table, div(@resolved, 2))
-
-      counted = Compactor.adjusted_row_caps(caps, [quarter], @resolved)
-
-      assert counted == %{
-               @table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}
-             }
-
-      doubled = Compactor.adjusted_row_caps(counted, [quarter], @resolved)
-
-      assert doubled == %{
-               @table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}
-             }
-
-      counted = Compactor.adjusted_row_caps(doubled, [half], @resolved)
-      assert Compactor.adjusted_row_caps(counted, [half], @resolved) == %{}
-    end
-
-    test "an OOM at a probed cap re-tightens and clears the probe (T-283)" do
-      caps = %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 2, probe: true}}
-
-      assert Compactor.adjusted_row_caps(caps, [oom_failure(@table)], @resolved) ==
-               %{@table => %{cap: div(@resolved, 4), streak: 0, patience: 4, probe: false}}
-    end
-
-    test "a success at a probed cap proves it and clears the probe (T-283)" do
-      caps = %{@table => %{cap: div(@resolved, 2), streak: 0, patience: 4, probe: true}}
-      half = compacted(@table, div(@resolved, 2))
-
-      assert Compactor.adjusted_row_caps(caps, [half], @resolved) ==
-               %{@table => %{cap: div(@resolved, 2), streak: 1, patience: 4, probe: false}}
-    end
-
-    test "a small group's success is not evidence for a raise" do
-      caps = %{@table => %{cap: div(@resolved, 4), streak: 1, patience: 2, probe: false}}
-
-      assert Compactor.adjusted_row_caps(caps, [compacted(@table, 100)], @resolved) == caps
-    end
-
-    test "a cap that makes every plan skip still earns its raise, so the floor unwedges" do
-      caps = %{@table => %{cap: 65_536, streak: 0, patience: 2, probe: false}}
-
-      counted = Compactor.adjusted_row_caps(caps, [{:skip, @table}], @resolved)
-      doubled = Compactor.adjusted_row_caps(counted, [{:skip, @table}], @resolved)
-
-      assert doubled == %{@table => %{cap: 131_072, streak: 0, patience: 2, probe: true}}
-    end
-
-    test "a success or skip without an override changes nothing" do
-      assert Compactor.adjusted_row_caps(%{}, [compacted(@table, 100)], @resolved) == %{}
-      assert Compactor.adjusted_row_caps(%{}, [{:skip, @table}], @resolved) == %{}
-    end
-
-    test "a failure that is not a merge OOM changes nothing" do
-      timeout =
-        {:failed,
-         %{
-           table: @table,
-           reason:
-             {:put_failed, "analytics/events/x.parquet",
-              {:merge_failed, %Smolquery.Engine.CallExited{reason: :timeout}}}
-         }}
-
-      sizing = {:failed, %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "x"}}}}
-
-      assert Compactor.adjusted_row_caps(%{}, [timeout, sizing, :skip], @resolved) == %{}
-    end
-  end
-
-  describe "adjusted_quarantine/4 (T-310)" do
-    @paths ["analytics/events/a.parquet", "analytics/events/b.parquet"]
-
-    defp corrupt_failure(table, paths) do
-      {:failed,
-       %{table: table, reason: {:sizing_failed, %Adbc.Error{message: "bad footer"}}, paths: paths}}
-    end
-
-    test "a failure below the threshold only counts, it does not quarantine" do
-      {:failed, %{reason: reason}} = corrupt_failure(@table, @paths)
-
-      {quarantine, quarantined} =
-        Compactor.adjusted_quarantine(%{}, MapSet.new(), [corrupt_failure(@table, @paths)], 3)
-
-      assert quarantine == %{Enum.sort(@paths) => %{reason: reason, streak: 1}}
-      assert quarantined == MapSet.new()
-    end
-
-    test "the Nth identical failure quarantines every path and drops the streak" do
-      {quarantine, quarantined} =
-        Enum.reduce(1..3, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
-          Compactor.adjusted_quarantine(
-            quarantine,
-            quarantined,
-            [corrupt_failure(@table, @paths)],
-            3
-          )
-        end)
-
-      assert quarantine == %{}
-      assert quarantined == MapSet.new([Enum.sort(@paths)])
-    end
-
-    test "a merge OOM never counts toward quarantine, however often it repeats" do
-      {quarantine, quarantined} =
-        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
-          {:failed, failure} = oom_failure(@table)
-          failure = Map.put(failure, :paths, @paths)
-
-          Compactor.adjusted_quarantine(quarantine, quarantined, [{:failed, failure}], 3)
-        end)
-
-      assert quarantine == %{}
-      assert quarantined == MapSet.new()
-    end
-
-    test "an engine call exit never counts toward quarantine, however often it repeats" do
-      exited =
-        {:failed,
-         %{
-           table: @table,
-           reason: {:sizing_failed, %CallExited{reason: :timeout}},
-           paths: @paths
-         }}
-
-      {quarantine, quarantined} =
-        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
-          Compactor.adjusted_quarantine(quarantine, quarantined, [exited], 3)
-        end)
-
-      assert quarantine == %{}
-      assert quarantined == MapSet.new()
-    end
-
-    test "a failure with no known paths never counts toward quarantine" do
-      unattributed = {:failed, %{table: @table, reason: :mystery, paths: []}}
-
-      {quarantine, quarantined} =
-        Compactor.adjusted_quarantine(%{}, MapSet.new(), [unattributed], 1)
-
-      assert quarantine == %{}
-      assert quarantined == MapSet.new()
-    end
-
-    test "a success or skip changes nothing" do
-      assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [compacted(@table, 100)], 3) ==
-               {%{}, MapSet.new()}
-
-      assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [{:skip, @table}], 3) ==
-               {%{}, MapSet.new()}
-    end
-
-    test "quarantine is keyed by the exact path set, not the table" do
-      other_paths = ["analytics/events/c.parquet"]
-      {:failed, %{reason: reason}} = corrupt_failure(@table, @paths)
-
-      {quarantine, _quarantined} =
-        Compactor.adjusted_quarantine(
-          %{},
-          MapSet.new(),
-          [corrupt_failure(@table, @paths), corrupt_failure(@table, other_paths)],
-          3
-        )
-
-      assert quarantine == %{
-               Enum.sort(@paths) => %{reason: reason, streak: 1},
-               other_paths => %{reason: reason, streak: 1}
-             }
-    end
-
-    test "a changed reason restarts the streak instead of accumulating" do
-      first = corrupt_failure(@table, @paths)
-
-      changed =
-        {:failed,
-         %{table: @table, reason: {:sizing_failed, %Adbc.Error{message: "other"}}, paths: @paths}}
-
-      {quarantine, quarantined} =
-        Enum.reduce([first, changed, first], {%{}, MapSet.new()}, fn outcome, acc ->
-          Compactor.adjusted_quarantine(elem(acc, 0), elem(acc, 1), [outcome], 3)
-        end)
-
-      assert %{streak: 1} = quarantine[Enum.sort(@paths)]
-      assert quarantined == MapSet.new()
-    end
-
-    test "a store put failure never counts toward quarantine" do
-      outage =
-        {:failed,
-         %{
-           table: @table,
-           reason: {:put_failed, "analytics/events/x.parquet", {:s3_status, 503, "slow down"}},
-           paths: @paths
-         }}
-
-      {quarantine, quarantined} =
-        Enum.reduce(1..10, {%{}, MapSet.new()}, fn _sweep, {quarantine, quarantined} ->
-          Compactor.adjusted_quarantine(quarantine, quarantined, [outage], 3)
-        end)
-
-      assert quarantine == %{}
-      assert quarantined == MapSet.new()
-    end
-
-    test "a catalog conflict or a swap invariant failure never counts toward quarantine" do
-      for reason <- [:commit_conflict, {:inputs_survived_swap, @paths}] do
-        failure = {:failed, %{table: @table, reason: reason, paths: @paths}}
-
-        assert Compactor.adjusted_quarantine(%{}, MapSet.new(), [failure], 1) ==
-                 {%{}, MapSet.new()}
-      end
-    end
-  end
-
-  describe "active_quarantined_paths/2 (T-310)" do
-    test "a group binds while the listing holds every member" do
-      groups = MapSet.new([Enum.sort(@paths)])
-      listed = @paths ++ ["analytics/events/d.parquet"]
-
-      assert Compactor.active_quarantined_paths(groups, listed) == MapSet.new(@paths)
-    end
-
-    test "a group releases its survivors once any member leaves the listing" do
-      groups = MapSet.new([Enum.sort(@paths)])
-      [dropped | survivors] = @paths
-
-      assert Compactor.active_quarantined_paths(groups, survivors) == MapSet.new()
-      refute dropped in survivors
-    end
-  end
-
-  describe "engine_call_exited?/1" do
-    test "matches bare sizing and merge exits" do
-      exit = %CallExited{reason: :timeout}
-
-      assert Compactor.engine_call_exited?({:sizing_failed, exit})
-      assert Compactor.engine_call_exited?({:merge_failed, exit})
-    end
-
-    test "matches a final COPY's exit, which the store wraps" do
-      wrapped =
-        {:put_failed, "analytics/events/x.parquet",
-         {:merge_failed, %CallExited{reason: :timeout}}}
-
-      assert Compactor.engine_call_exited?(wrapped)
-    end
-
-    test "does not match plain errors" do
-      refute Compactor.engine_call_exited?({:merge_failed, %Adbc.Error{message: "x"}})
-
-      refute Compactor.engine_call_exited?(
-               {:put_failed, "x.parquet", {:merge_failed, %Adbc.Error{message: "x"}}}
-             )
+      assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Scheduler.sweep(storage)
     end
   end
 end

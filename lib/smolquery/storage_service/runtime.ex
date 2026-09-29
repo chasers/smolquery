@@ -113,7 +113,7 @@ defmodule Smolquery.StorageService.Runtime do
   snapshots that sealed them expire. The defaults (24 h against 10 min) hold
   that order with room to spare.
 
-  The `compact_*` knobs shape `Smolquery.StorageService.Compactor`'s sweep:
+  The `compact_*` knobs shape `Smolquery.StorageService.Scheduler`'s sweep:
   every `compact_interval_ms` it groups sealed segments under
   `compact_below_bytes` into merges of at least `compact_min_inputs` inputs
   and at most `compact_max_bytes` output, one group per table per sweep. The
@@ -133,7 +133,7 @@ defmodule Smolquery.StorageService.Runtime do
   — but those were very large rows, and a cap derived from their pin rate
   would starve typical workloads. The compactor fits the cap to the
   workload instead: a merge OOM halves a table's cap and sustained evidence
-  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  earns it back (`Smolquery.StorageService.Scheduler.Caps.adjusted_row_caps/3`,
   T-262), so a workload that pins more per row converges on its own cap
   after one bad merge, and every other workload keeps the full cap. Normal
   ~3x-compressible data hits the byte cap first, so the row cap only bites
@@ -162,7 +162,7 @@ defmodule Smolquery.StorageService.Runtime do
   files under half the target merge again, up to the target, into files of
   512 MiB to 1 GiB at the defaults, each covering at most one span, so
   retention still drops a file within a span of its TTL. See
-  `Smolquery.StorageService.Compactor` for the two levels.
+  `Smolquery.StorageService.Scheduler` for the two levels.
 
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
@@ -541,7 +541,7 @@ defmodule Smolquery.StorageService.Runtime do
   on 4, 3 and 2 in about the same time, because the sort waits on its spill and
   not on its cores (T-589). With the thread count left at the core count, a
   many-core pod gave each thread a sliver of a fixed limit, and the only lever
-  left was `Smolquery.StorageService.Compactor.adjusted_row_caps/3` halving the
+  left was `Smolquery.StorageService.Scheduler.Caps.adjusted_row_caps/3` halving the
   group (T-262, T-544).
 
   The limit is `compact_engine_memory_limit/2`, else the `memory_limit` the
@@ -681,7 +681,7 @@ defmodule Smolquery.StorageService.Runtime do
   bench with very large rows, and deriving every deployment's cap from it
   would starve typical workloads. The compactor owns fitting the cap to the
   workload instead — a merge OOM halves a table's cap and sustained evidence
-  earns it back (`Smolquery.StorageService.Compactor.adjusted_row_caps/3`,
+  earns it back (`Smolquery.StorageService.Scheduler.Caps.adjusted_row_caps/3`,
   T-262).
   """
   @spec with_compact_max_rows(t()) :: t()
@@ -766,8 +766,8 @@ defmodule Smolquery.StorageService.Runtime do
   @doc """
   The process re-merging undersized sealed segments.
   """
-  @spec compactor(atom()) :: atom()
-  def compactor(name), do: Module.concat(name, "Compactor")
+  @spec scheduler(atom()) :: atom()
+  def scheduler(name), do: Module.concat(name, "Scheduler")
 
   @doc """
   The process dropping segments past their table's TTL.
