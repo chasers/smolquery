@@ -155,10 +155,10 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
       [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction |
-                                          :delete | :add | :commit, result}
+                                          :stage | :move | :commit, result}
                                           — one per statement the DuckLake catalog sent its engine;
-                                          delete, add and commit are the timed parts of the
-                                          swap's one transaction (T-573)
+                                          stage, move and commit are the timed parts of the
+                                          compaction swap (T-573, T-600)
       [:smolquery, :catalog, :commit_attempt] %{count}, meta %{attempt: 1..5,
                                           result: :ok | :conflict | :error}
                                           — one per attempt of a DuckLake commit, retries included
@@ -466,8 +466,9 @@ defmodule Smolquery.Telemetry do
         "30 s timeout so a statement that timed out lands in it; counters, not a histogram (T-549).",
     "smolquery_catalog_statements_total" =>
       "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
-        "result; over ops, what one op costs in statements (T-549). Kinds delete, add and " <>
-        "commit are the parts of the compaction swap's transaction, counted inside it (T-573).",
+        "result; over ops, what one op costs in statements (T-549). Kinds stage, move and " <>
+        "commit are the parts of the compaction swap; move and commit are counted inside its " <>
+        "transaction (T-573, T-600).",
     "smolquery_catalog_commit_attempts_total" =>
       "Attempts at a DuckLake commit, by attempt number and result: ok, conflict (retried " <>
         "until the fifth) or error. Conflicts over ok is the conflict rate (T-573).",

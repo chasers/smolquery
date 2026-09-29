@@ -110,9 +110,11 @@ defmodule Smolquery.Catalog.DuckLake do
   Each is also one `[:smolquery, :catalog, :statement]` event, by kind and
   result (T-549): over the `[:smolquery, :catalog, :op]` events, how many
   statements one catalog operation costs, and how long each takes. The
-  swap's transaction also times its parts, as kinds `:delete`, `:add` and
-  `:commit` inside the one `:transaction`, so a slow retirement, a slow
-  registration and a commit that conflicts are told apart (T-573). Every
+  swap also times its parts, as kinds `:stage` (DuckLake registering the
+  merged file into the twin) and `:move` and `:commit` (the metadata
+  transaction, inside its one `:transaction`), so a slow registration, a
+  slow move and a commit that lost the snapshot key are told apart (T-573,
+  T-600). Every
   attempt `with_commit_retries/2` makes is one
   `[:smolquery, :catalog, :commit_attempt]` event, by attempt number and
   result (`:ok`, `:conflict` or `:error`), and a conflict it retries is
@@ -927,7 +929,7 @@ defmodule Smolquery.Catalog.DuckLake do
          table_id: table_id,
          stage_table_id: stage.id,
          next_row_id: next_row_id,
-         staged: Map.take(staged, [:data_file_id, :rows, :bytes]),
+         staged: Map.take(staged, [:data_file_id, :rows]),
          retire: retire,
          abandoned: abandoned,
          column_ids: column_ids,

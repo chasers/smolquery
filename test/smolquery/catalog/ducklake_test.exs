@@ -641,9 +641,18 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       merged = write_merged(dir, [{1, 10}, {2, 10}])
       {:ok, registered} = Catalog.register_segments(catalog, @table, [a, b])
 
+      stats =
+        ~s|SELECT s.record_count, s.file_size_bytes | <>
+          ~s|FROM "__ducklake_metadata_lake".ducklake_table_stats s | <>
+          ~s|JOIN "__ducklake_metadata_lake".ducklake_table t USING (table_id) | <>
+          ~s|WHERE t.table_name = 'events' AND t.end_snapshot IS NULL|
+
+      %Result{rows: before_stats} = Engine.query!(@engine, stats)
+
       assert {:ok, swapped} =
                Catalog.replace_segments(catalog, @table, [merged], [a.path, b.path])
 
+      assert %Result{rows: ^before_stats} = Engine.query!(@engine, stats)
       assert swapped > registered
       assert {:ok, before} = Catalog.segments(catalog, @table, swapped - 1)
       assert Enum.sort(before) == Enum.sort([a.path, b.path])

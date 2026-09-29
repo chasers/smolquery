@@ -39,8 +39,11 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
       with a name mapping in the table's column ids;
     * its `ducklake_file_column_stats` and `ducklake_file_variant_stats`
       moved with it;
-    * the table's `ducklake_table_stats` grown by the merged file, as
-      `ducklake_add_data_files` grows them;
+    * the table's `next_row_id` advanced past the moved file's new row ids.
+      Its `record_count` and `file_size_bytes` stay as they were, as
+      DuckLake's own `ducklake_merge_adjacent_files` leaves them: a
+      compaction keeps the table's rows, and growing them by each merged
+      file would count every compacted row once per compaction;
     * `merge_adjacent:<table_id>` in `ducklake_snapshot_changes`, so a
       concurrent DuckLake delete from the table still fails.
 
@@ -80,7 +83,7 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
           table_id: integer(),
           stage_table_id: integer(),
           next_row_id: integer(),
-          staged: %{data_file_id: integer(), rows: integer(), bytes: integer()},
+          staged: %{data_file_id: integer(), rows: integer()},
           retire: [integer()],
           abandoned: [integer()],
           column_ids: %{integer() => integer()},
@@ -212,9 +215,7 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
       ) ++
       [
         "UPDATE #{prefix}.ducklake_table_stats SET " <>
-          "record_count = record_count + #{plan.staged.rows}, " <>
-          "next_row_id = next_row_id + #{plan.staged.rows}, " <>
-          "file_size_bytes = file_size_bytes + #{plan.staged.bytes} WHERE table_id = #{table}"
+          "next_row_id = next_row_id + #{plan.staged.rows} WHERE table_id = #{table}"
       ] ++
       abandoned_statements(plan, prefix, snapshot) ++
       [
