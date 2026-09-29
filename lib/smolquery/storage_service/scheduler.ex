@@ -89,7 +89,7 @@ defmodule Smolquery.StorageService.Scheduler do
   due table: small, fast merges that keep file counts bounded. The **span
   lane** runs after it, over the same tables and the listing the hour lane
   already read, most span candidates first
-  (`Smolquery.StorageService.Scheduler.Planner.by_need/3`), and starts no
+  (`Smolquery.StorageService.Scheduler.Planner.by_need/4`), and starts no
   span merge once `compact_span_budget_ms` has passed; the tables it did not
   reach are reported as `span_waiting`. A merge already running
   finishes. Reusing the listing is safe: a span merge takes settled files,
