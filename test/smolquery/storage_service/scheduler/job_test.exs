@@ -24,6 +24,7 @@ defmodule Smolquery.StorageService.Scheduler.JobTest do
                  paths: ["a"],
                  level: :span,
                  span_cap: 1_024,
+                 width: 64,
                  ignored: true
                ) ==
                  {:failed,
@@ -33,7 +34,8 @@ defmodule Smolquery.StorageService.Scheduler.JobTest do
                     paths: ["a"],
                     rows: 10,
                     level: :span,
-                    span_cap: 1_024
+                    span_cap: 1_024,
+                    width: 64
                   }}
       end)
 

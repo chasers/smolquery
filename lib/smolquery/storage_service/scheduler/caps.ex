@@ -213,8 +213,11 @@ defmodule Smolquery.StorageService.Scheduler.Caps do
       its group's rows needed more than that, so a row costs at least the
       limit over the rows; the table learns twice that, so the next group
       lands well under the limit instead of just under it;
-    * any other failure a smaller group would avoid doubles the width the
-      group was planned at.
+    * a merge that ran out of memory doubles the width the group was planned
+      at. Only these two: a swap that timed out, a store put whose HTTP pool
+      died, or an engine call exit says nothing about a row's size, and a
+      width only grows, so learning from them would shrink a table's groups
+      for good on a few transient faults.
 
   A learned width only grows, and the planner uses the larger of it and the
   sample. Like the caps, it lives in the scheduler's state: a restart forgets
@@ -242,7 +245,7 @@ defmodule Smolquery.StorageService.Scheduler.Caps do
         div(2 * cap, rows) + 1
 
       :error ->
-        if Failure.span_shrinks?(reason) and is_integer(planned), do: planned * 2
+        if Failure.merge_oom?(reason) and is_integer(planned), do: planned * 2
     end
   end
 
