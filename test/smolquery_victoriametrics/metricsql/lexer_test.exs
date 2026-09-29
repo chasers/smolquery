@@ -156,22 +156,36 @@ defmodule SmolqueryVictoriaMetrics.MetricsQL.LexerTest do
              {:error, {:syntax, "duplicate @ modifier at 1:9"}}
   end
 
-  describe "cost" do
-    defp elapsed_ms(fun) do
-      {us, _result} = :timer.tc(fun)
-      div(us, 1000)
+  describe "cost, counted in reductions so a loaded runner cannot move it (T-604)" do
+    defp work(fun) do
+      {:reductions, before} = Process.info(self(), :reductions)
+      fun.()
+      {:reductions, spent} = Process.info(self(), :reductions)
+      spent - before
+    end
+
+    defp growth(build, check) do
+      small = work(fn -> check.(Lexer.tokenize(build.(4_000))) end)
+      large = work(fn -> check.(Lexer.tokenize(build.(16_000))) end)
+      large / small
     end
 
     test "grows with the query, not with the query times the token count" do
-      query = String.duplicate("a+", 32_000) <> "a"
+      ratio =
+        growth(&(String.duplicate("a+", &1) <> "a"), fn result ->
+          assert {:ok, _tokens} = result
+        end)
 
-      assert elapsed_ms(fn -> {:ok, _tokens} = Lexer.tokenize(query) end) < 250
+      assert ratio < 8, "4x the query cost #{Float.round(ratio, 1)}x the work"
     end
 
     test "a string of escaped quotes is scanned once" do
-      query = ~s(") <> String.duplicate(~S(\"), 20_000) <> ~s(")
+      ratio =
+        growth(&(~s(") <> String.duplicate(~S(\"), &1) <> ~s(")), fn result ->
+          assert {:ok, [{:string, _, _}, _eof]} = result
+        end)
 
-      assert elapsed_ms(fn -> {:ok, [{:string, _, _}, _eof]} = Lexer.tokenize(query) end) < 250
+      assert ratio < 8, "4x the quotes cost #{Float.round(ratio, 1)}x the work"
     end
 
     test "a run of backslashes before a quote escapes it only when odd" do

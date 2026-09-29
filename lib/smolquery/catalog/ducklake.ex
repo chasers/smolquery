@@ -182,6 +182,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Catalog.Connection
   alias Smolquery.Catalog.DuckLake.Swap
   alias Smolquery.Engine
+  alias Smolquery.Engine.Connection, as: EngineConnection
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
   alias Smolquery.Partitions
@@ -1716,7 +1717,7 @@ defmodule Smolquery.Catalog.DuckLake do
               Exception.message(error)
           )
 
-          Process.sleep(backoff(attempt))
+          Process.sleep(backoff(attempt, error))
           with_commit_retries(run, attempt + 1)
         else
           gave_up(error, attempt)
@@ -1741,7 +1742,11 @@ defmodule Smolquery.Catalog.DuckLake do
         result: result
       })
 
-  defp backoff(attempt), do: (1 <<< attempt) * 5 + :rand.uniform(10)
+  defp backoff(attempt, error) do
+    if EngineConnection.locked?(error),
+      do: (1 <<< attempt) * 50 + :rand.uniform(50),
+      else: (1 <<< attempt) * 5 + :rand.uniform(10)
+  end
 
   @doc """
   Whether a failed commit is worth retrying.

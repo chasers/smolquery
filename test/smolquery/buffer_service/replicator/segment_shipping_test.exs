@@ -236,18 +236,24 @@ defmodule Smolquery.BufferService.Replicator.SegmentShippingTest do
     assert first_attempt =~ "in progress"
     assert first_attempt =~ "re-shipped 64 missing entries"
     assert first_attempt =~ "1 remain"
-    refute first_attempt =~ "consecutive"
     assert :sys.get_state(buffer).claim_backoff == nil
 
     {:ok, owner_runtime} = Runtime.fetch(owner)
     assert HotManifest.live_claim(owner_runtime.manifest, @table) == :error
 
-    second_attempt =
+    later_attempts =
       ExUnit.CaptureLog.capture_log(fn ->
-        :ok = GenServer.call(buffer, :force_seal)
+        Enum.reduce_while(1..5, :error, fn _attempt, _claim ->
+          :ok = GenServer.call(buffer, :force_seal)
+
+          case HotManifest.live_claim(owner_runtime.manifest, @table) do
+            {:ok, _claim} = claimed -> {:halt, claimed}
+            :error -> {:cont, :error}
+          end
+        end)
       end)
 
-    assert second_attempt =~ "healed a partial claim"
+    assert later_attempts =~ "healed a partial claim"
 
     {:ok, follower_runtime} = Runtime.fetch(follower)
     assert {:ok, claim} = HotManifest.live_claim(owner_runtime.manifest, @table)

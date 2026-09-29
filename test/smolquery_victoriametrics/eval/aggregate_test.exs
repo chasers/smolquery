@@ -138,19 +138,20 @@ defmodule SmolqueryVictoriaMetrics.Eval.AggregateTest do
         %Series{labels: %{"i" => "#{s}"}, values: Enum.zip(grid, values)}
       end
 
-    time = fn query, args ->
+    work = fn query, args ->
       {:ok, expr} = MetricsQL.parse(query)
-      Aggregate.apply(expr, args, grid)
-      {us, {:ok, _series}} = :timer.tc(fn -> Aggregate.apply(expr, args, grid) end)
-      us
+      {:reductions, before} = Process.info(self(), :reductions)
+      {:ok, _series} = Aggregate.apply(expr, args, grid)
+      {:reductions, spent} = Process.info(self(), :reductions)
+      spent - before
     end
 
-    sum = time.("sum(m)", [input])
-    top = time.("topk(5, m)", [[Series.constant(grid, 5.0)], input])
-    bottom = time.("bottomk(5, m)", [[Series.constant(grid, 5.0)], input])
+    sum = work.("sum(m)", [input])
+    top = work.("topk(5, m)", [[Series.constant(grid, 5.0)], input])
+    bottom = work.("bottomk(5, m)", [[Series.constant(grid, 5.0)], input])
 
-    assert top < 4 * sum + 20_000, "topk #{top} us against sum #{sum} us"
-    assert bottom < 4 * sum + 20_000, "bottomk #{bottom} us against sum #{sum} us"
+    assert top < 4 * sum, "topk cost #{top} reductions against sum's #{sum}"
+    assert bottom < 4 * sum, "bottomk cost #{bottom} reductions against sum's #{sum}"
   end
 
   test "topk and bottomk choose at each point" do
