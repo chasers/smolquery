@@ -151,11 +151,25 @@ defmodule Smolquery.StorageService.Compactor do
   spills (T-591) and a row cap would hold a day of small rows to a fraction
   of the target. A file therefore reaches the target about two buckets after
   its data arrived, not once its day closes, at the cost of rewriting a day
-  file still under half the target about once a bucket until it gets there.
+  file still under half the target about once a bucket until it gets there:
+  for a table writing less than that in a day, up to about 24 rewrites of a
+  growing file, around 12 times the day's bytes. A table that seals at most
+  one file in a span keeps one file per span, since no merge crosses a span.
 
-  The bucket between the levels belongs to neither, so a merge the hour
-  level planned has finished, or failed, before the span level can plan any
-  of its files: the two never race for a group. Span-level work is owned per
+  The bucket between the levels belongs to neither, so a merge the hour level
+  planned has usually finished before the span level can plan any of its
+  files. Usually is not enough when rows would count twice, so correctness
+  does not rest on it: a swap whose inputs another swap already retired
+  refuses in the catalog and commits nothing (`Smolquery.Catalog.DuckLake`),
+  the next sweep replans from the current files, and that refusal never backs
+  the table off.
+
+  A failing span group does not re-run as it was. Its merge is 1 GiB with no
+  row cap, so the lever is bytes: an OOM, an engine call exit or a swap timeout
+  halves the table's span cap, never below `compact_max_bytes`, and the table
+  does not back off while the cap can still shrink; see
+  `adjusted_span_caps/3`. A span failure leaves the hour level's row cap
+  alone. Span-level work is owned per
   `{table_ref, {:span, span}}`, the way the hour level is per bucket, so a
   backlog of days spreads across the fleet. Only when the span level has
   nothing to do does the sweep turn to the hour level, still one group per
@@ -277,6 +291,7 @@ defmodule Smolquery.StorageService.Compactor do
   defstruct [
     :runtime,
     row_caps: %{},
+    span_caps: %{},
     quarantine: %{},
     quarantined_groups: MapSet.new(),
     cooldowns: %{}
@@ -360,6 +375,7 @@ defmodule Smolquery.StorageService.Compactor do
       swept = due -- deferred
 
       row_caps = adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
+      span_caps = adjusted_span_caps(state.span_caps, outcomes, runtime)
 
       {quarantine, quarantined_groups} =
         adjusted_quarantine(
@@ -383,6 +399,7 @@ defmodule Smolquery.StorageService.Compactor do
        %{
          state
          | row_caps: row_caps,
+           span_caps: span_caps,
            quarantine: quarantine,
            quarantined_groups: quarantined_groups,
            cooldowns: cooldowns
@@ -435,8 +452,8 @@ defmodule Smolquery.StorageService.Compactor do
         ) :: %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}}
   def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, row_caps, now_ms \\ now_ms()) do
     failed =
-      for {:failed, %{table: table_ref, reason: reason}} <- outcomes,
-          backs_off?(reason, table_capped(runtime, row_caps, table_ref).compact_max_rows),
+      for {:failed, %{table: table_ref} = failure} <- outcomes,
+          failure_backs_off?(failure, runtime, row_caps),
           into: MapSet.new(),
           do: table_ref
 
@@ -547,6 +564,9 @@ defmodule Smolquery.StorageService.Compactor do
         ) :: %{Catalog.table_ref() => map()}
   def adjusted_row_caps(row_caps, outcomes, resolved) do
     Enum.reduce(outcomes, row_caps, fn
+      {_outcome, %{level: :span}}, caps ->
+        caps
+
       {:ok, %{table: table, rows: rows}}, caps ->
         relax(caps, table, rows, resolved)
 
@@ -643,6 +663,56 @@ defmodule Smolquery.StorageService.Compactor do
         Map.put(caps, table, %{entry | cap: entry.cap * 2, streak: 0, probe: true})
     end
   end
+
+  @doc """
+  The per-table byte caps of the span level after a sweep (T-592).
+
+  A span-level group is sized by bytes up to `compact_target_bytes` and by no
+  row count, so the lever `adjusted_row_caps/3` gives the hour level does not
+  reach it. A span merge that fails for want of memory, spill or time, which
+  is an OOM, an engine call exit or a swap that timed out, halves that table's
+  span cap, never below `compact_max_bytes`, so the next sweep plans a smaller
+  group instead of the same one. Other failures leave the cap alone. Like the
+  row caps, these live in the compactor's state: a restart forgets them and
+  the table starts again at the target.
+  """
+  @spec adjusted_span_caps(%{Catalog.table_ref() => pos_integer()}, [term()], Runtime.t()) ::
+          %{Catalog.table_ref() => pos_integer()}
+  def adjusted_span_caps(span_caps, outcomes, runtime) do
+    Enum.reduce(outcomes, span_caps, fn
+      {:failed, %{level: :span, table: table, span_cap: cap, reason: reason}}, caps ->
+        if span_shrinks?(reason), do: shrink_span(caps, table, cap, runtime), else: caps
+
+      _other, caps ->
+        caps
+    end)
+  end
+
+  defp shrink_span(caps, table, cap, runtime) do
+    shrunk = max(div(cap, 2), runtime.compact_max_bytes)
+
+    Logger.warning(
+      "compaction span level of #{inspect(table)} failed on a group of up to #{cap} bytes; " <>
+        "its groups shrink to #{shrunk} bytes"
+    )
+
+    Map.put(caps, table, shrunk)
+  end
+
+  defp span_shrinks?(%CallExited{}), do: true
+  defp span_shrinks?({:call_exited, %CallExited{}}), do: true
+  defp span_shrinks?(reason), do: merge_oom?(reason) or engine_call_exited?(reason)
+
+  defp failure_backs_off?(%{reason: {:inputs_not_live, _paths}}, _runtime, _row_caps), do: false
+
+  defp failure_backs_off?(%{level: :span, span_cap: cap, reason: reason}, runtime, _row_caps) do
+    if span_shrinks?(reason),
+      do: cap <= runtime.compact_max_bytes,
+      else: backs_off?(reason, @span_max_rows)
+  end
+
+  defp failure_backs_off?(%{table: table_ref, reason: reason}, runtime, row_caps),
+    do: backs_off?(reason, table_capped(runtime, row_caps, table_ref).compact_max_rows)
 
   # See `adjusted_cooldowns/6`: a failure with a recovery of its own that
   # needs the next sweep is left to it.
@@ -768,9 +838,10 @@ defmodule Smolquery.StorageService.Compactor do
         do: path
   end
 
-  defp compact_table(runtime, row_caps, quarantined_groups, table_ref) do
-    runtime = table_capped(runtime, row_caps, table_ref)
-    compact_table(runtime, quarantined_groups, table_ref)
+  defp compact_table(runtime, state, table_ref) do
+    runtime = table_capped(runtime, state.row_caps, table_ref)
+    span_cap = Map.get(state.span_caps, table_ref, runtime.compact_target_bytes)
+    compact_capped(runtime, state.quarantined_groups, span_cap, table_ref)
   end
 
   defp table_capped(runtime, row_caps, table_ref) do
@@ -786,7 +857,7 @@ defmodule Smolquery.StorageService.Compactor do
   defp sweep_due(_runtime, _state, []), do: {[], []}
 
   defp sweep_due(runtime, state, [table_ref | rest]) do
-    outcome = compact_table(runtime, state.row_caps, state.quarantined_groups, table_ref)
+    outcome = compact_table(runtime, state, table_ref)
 
     if call_exited?(outcome) do
       Logger.warning(fn ->
@@ -805,23 +876,24 @@ defmodule Smolquery.StorageService.Compactor do
   defp call_exited?({:failed, %{reason: {:call_exited, %CallExited{}}}}), do: true
   defp call_exited?(_outcome), do: false
 
-  defp compact_table(runtime, quarantined_groups, table_ref) do
+  defp compact_capped(runtime, quarantined_groups, span_cap, table_ref) do
     started_at = System.monotonic_time(:microsecond)
 
     case exit_safe(:call_exited, fn ->
-           compact_listed(runtime, quarantined_groups, table_ref, started_at)
+           compact_listed(runtime, quarantined_groups, span_cap, table_ref, started_at)
          end) do
       {:error, reason} -> failed(runtime, table_ref, reason, started_at)
       outcome -> outcome
     end
   end
 
-  defp compact_listed(runtime, quarantined_groups, table_ref, started_at) do
+  defp compact_listed(runtime, quarantined_groups, span_cap, table_ref, started_at) do
     routing = Routing.resolve(runtime.name)
+    planning = %{routing: routing, quarantined_groups: quarantined_groups, files: nil}
 
     with {:ok, files} <- Catalog.segment_files(runtime.catalog, table_ref, :current),
          {:ok, group} <-
-           plan_levels(runtime, routing, table_ref, quarantined_groups, files, wall_ms()),
+           plan_levels(runtime, %{planning | files: files}, table_ref, span_cap, wall_ms()),
          :ok <- refuse_tombstoned(runtime, table_ref, group) do
       swap(runtime, table_ref, group, started_at)
     else
@@ -881,27 +953,19 @@ defmodule Smolquery.StorageService.Compactor do
     Enum.reject(owned, &MapSet.member?(active, &1))
   end
 
-  defp plan_levels(runtime, routing, table_ref, quarantined_groups, files, now_ms) do
-    case by_level(runtime, Enum.map(files, & &1.path), now_ms) do
+  defp plan_levels(runtime, planning, table_ref, span_cap, now_ms) do
+    case by_level(runtime, Enum.map(planning.files, & &1.path), now_ms) do
       {[], recent} ->
-        plan_level(runtime, :carry, routing, table_ref, quarantined_groups, files, recent)
+        plan_level(runtime, :hour, planning, table_ref, recent)
 
       {settled, recent} ->
-        span = span_level(runtime)
+        span = span_level(runtime, span_cap)
 
-        case plan_level(
-               span,
-               :no_carry,
-               routing,
-               {table_ref, :span},
-               quarantined_groups,
-               files,
-               settled
-             ) do
+        case plan_level(span, :span, planning, {table_ref, :span}, settled) do
           skipped when skipped in [:not_owned, :skip] ->
             runtime
-            |> plan_level(:carry, routing, table_ref, quarantined_groups, files, recent)
-            |> either_skip(skipped)
+            |> plan_level(:hour, planning, table_ref, recent)
+            |> hour_or_skip(skipped)
 
           planned ->
             planned
@@ -909,23 +973,22 @@ defmodule Smolquery.StorageService.Compactor do
     end
   end
 
-  defp either_skip(:not_owned, :skip), do: :skip
-  defp either_skip(hour, _span), do: hour
+  defp hour_or_skip(:not_owned, :skip), do: :skip
+  defp hour_or_skip(hour, _span), do: hour
 
-  defp plan_level(runtime, carry, routing, owner, quarantined_groups, files, paths) do
-    with [_ | _] = owned <- owned_paths(runtime, routing, owner, paths),
-         [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths) do
-      plan(runtime, carry, listed_among(files, plannable))
+  defp plan_level(runtime, level, planning, owner, paths) do
+    listed = Enum.map(planning.files, & &1.path)
+
+    with [_ | _] = owned <- owned_paths(runtime, planning.routing, owner, paths),
+         [_ | _] = plannable <- reject_quarantined(planning.quarantined_groups, owned, listed),
+         {:ok, group} <- plan(runtime, level, listed_among(planning.files, plannable)) do
+      {:ok, Map.merge(group, %{level: level, span_cap: runtime.compact_max_bytes})}
     else
       [] -> :not_owned
+      other -> other
     end
   end
 
-  # The hour level keeps the current bucket and the one before it; everything
-  # older than one more bucket is settled, and the span level merges it toward
-  # the target. The bucket between is neither's, so a merge the hour level
-  # started has finished before the span level can plan the same files. With
-  # no target, every file stays at the hour level, as before T-592.
   defp by_level(%Runtime{compact_target_bytes: nil}, paths, _now_ms), do: {[], paths}
 
   defp by_level(runtime, paths, now_ms) do
@@ -941,11 +1004,11 @@ defmodule Smolquery.StorageService.Compactor do
     end)
   end
 
-  defp span_level(runtime) do
+  defp span_level(runtime, span_cap) do
     %{
       runtime
       | compact_below_bytes: div(runtime.compact_target_bytes, 2),
-        compact_max_bytes: runtime.compact_target_bytes,
+        compact_max_bytes: span_cap,
         compact_max_rows: @span_max_rows,
         compact_bucket_ms: runtime.compact_span_ms
     }
@@ -980,43 +1043,43 @@ defmodule Smolquery.StorageService.Compactor do
     Enum.filter(files, &MapSet.member?(plannable, &1.path))
   end
 
-  defp plan(runtime, carry, files) do
+  defp plan(runtime, level, files) do
     candidates =
       for %{path: path, bytes: bytes} <- files, bytes < runtime.compact_below_bytes, do: path
 
     if length(candidates) < runtime.compact_min_inputs do
       :skip
     else
-      plan_undersized(runtime, carry, candidates)
+      plan_undersized(runtime, level, candidates)
     end
   end
 
-  defp plan_undersized(runtime, carry, owned) do
+  defp plan_undersized(runtime, level, owned) do
     with {:ok, undersized} <- undersized(runtime, owned) do
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
-      |> carried_group(runtime, carry, [])
+      |> carried_group(runtime, level, [])
     end
   end
 
   defp carried_group([], _runtime, _carry, _carried), do: :skip
 
-  defp carried_group([bucket_entries | rest], runtime, :no_carry, []) do
+  defp carried_group([bucket_entries | rest], runtime, :span, []) do
     case group(runtime, bucket_entries) do
-      :skip -> carried_group(rest, runtime, :no_carry, [])
+      :skip -> carried_group(rest, runtime, :span, [])
       {:ok, group} -> {:ok, group}
     end
   end
 
-  defp carried_group([bucket_entries | rest], runtime, :carry, carried) do
+  defp carried_group([bucket_entries | rest], runtime, :hour, carried) do
     candidates = carried ++ bucket_entries
 
     if length(candidates) < runtime.compact_min_inputs do
-      carried_group(rest, runtime, :carry, candidates)
+      carried_group(rest, runtime, :hour, candidates)
     else
       case group(runtime, candidates) do
-        :skip -> carried_group(rest, runtime, :carry, candidates)
+        :skip -> carried_group(rest, runtime, :hour, candidates)
         {:ok, group} -> {:ok, group}
       end
     end
@@ -1142,10 +1205,22 @@ defmodule Smolquery.StorageService.Compactor do
       )
 
       {:ok,
-       %{table: table_ref, key: key, replaced: length(paths), rows: row_count, snapshot: snapshot}}
+       %{
+         table: table_ref,
+         key: key,
+         replaced: length(paths),
+         rows: row_count,
+         snapshot: snapshot,
+         level: group.level
+       }}
     else
       {:error, reason} ->
-        failed(runtime, table_ref, reason, started_at, rows: row_count, paths: paths)
+        failed(runtime, table_ref, reason, started_at,
+          rows: row_count,
+          paths: paths,
+          level: group.level,
+          span_cap: group.span_cap
+        )
     end
   end
 
@@ -1200,13 +1275,11 @@ defmodule Smolquery.StorageService.Compactor do
 
     recycle_on_exit(runtime, reason)
 
-    failure = %{table: table_ref, reason: reason, paths: Keyword.get(opts, :paths, [])}
-
     failure =
-      case Keyword.get(opts, :rows) do
-        nil -> failure
-        rows -> Map.put(failure, :rows, rows)
-      end
+      opts
+      |> Keyword.take([:rows, :level, :span_cap])
+      |> Map.new()
+      |> Map.merge(%{table: table_ref, reason: reason, paths: Keyword.get(opts, :paths, [])})
 
     {:failed, failure}
   end

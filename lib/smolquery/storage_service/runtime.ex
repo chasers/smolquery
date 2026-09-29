@@ -765,7 +765,7 @@ defmodule Smolquery.StorageService.Runtime do
            compact_bucket_ms: bucket
          } = runtime
        )
-       when is_integer(target) and is_integer(below) and target > below and
+       when is_integer(target) and is_integer(below) and target > 2 * below and
               is_integer(span) and is_integer(bucket) and span > bucket,
        do: runtime
 
@@ -773,7 +773,7 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported compaction target: compact_target_bytes " <>
             "#{inspect(runtime.compact_target_bytes)}, compact_span_ms " <>
-            "#{inspect(runtime.compact_span_ms)} (expected integers, the target above " <>
+            "#{inspect(runtime.compact_span_ms)} (expected integers, the target above twice " <>
             "compact_below_bytes and the span above compact_bucket_ms)"
   end
 
