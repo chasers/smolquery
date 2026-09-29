@@ -112,6 +112,17 @@ defmodule Smolquery.Engine.LogTest do
       assert %Result{rows: [[0]]} = Engine.query!(engine, "SELECT count(*) FROM duckdb_logs")
     end
 
+    test "loses no row written between drains, however often they run", %{engine: engine} do
+      log =
+        capture_log([level: :info], fn ->
+          {:ok, _drain} = Log.start(engine, ["QueryLog"], interval_ms: 10)
+          for n <- 1..200, do: Engine.query!(engine, "SELECT #{n} AS mark_#{n}")
+          :ok = Log.stop(engine)
+        end)
+
+      for n <- 1..200, do: assert(log =~ "AS mark_#{n}\n")
+    end
+
     test "caps the rows one drain writes, and says how many it dropped", %{engine: engine} do
       log =
         capture_log([level: :info], fn ->
