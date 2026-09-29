@@ -27,7 +27,8 @@ defmodule Smolquery.Engine.Log do
   and truncates. At most `:max_rows` rows leave per drain; the count of the
   rest comes from the same read, and a warning reports it. Rows written
   between a drain's read and its truncation are lost; a log for diagnosis,
-  not an audit trail. The drain's own statements are left out. When the
+  not an audit trail. A drain that stops, at the end of its time or by
+  `stop/1`, drains once more first. The drain's own statements are left out. When the
   engine's instance is rebuilt, the drain connects to the new one and turns
   logging on there.
 
@@ -257,6 +258,7 @@ defmodule Smolquery.Engine.Log do
 
   @impl true
   def terminate(_reason, state) do
+    _drained = drained(state)
     _off = run(state, "CALL disable_logging()")
     _cleared = run(state, "CALL truncate_duckdb_logs()")
     :ok
