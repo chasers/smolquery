@@ -1155,7 +1155,7 @@ defmodule Smolquery.Telemetry do
   defp catalog_op(%{op: op}) when op in @catalog_ops, do: op
   defp catalog_op(_meta), do: :unknown
 
-  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction, :delete, :add, :commit],
+  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction, :stage, :move, :commit],
     do: kind
 
   defp catalog_kind(_meta), do: :unknown

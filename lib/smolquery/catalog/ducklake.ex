@@ -54,17 +54,20 @@ defmodule Smolquery.Catalog.DuckLake do
   DuckLake accepting both appends — is not closed by this and remains the
   ring gate's residual window; see `Smolquery.StorageService.Routing`.
 
-  What that retry fires on is matched narrowly, against four markers. Two came
+  What that retry fires on is matched narrowly, against six markers. Two came
   from failures observed here: DuckLake's own `"Transaction conflict"`, and
   SQLite metadata's `"database is locked"`. Two are the metadata database's
   own ordinary transient commits — Postgres `"deadlock detected"` and
   `"could not serialize access"` — which arrive verbatim, a metadata error
   being passed through whole rather than summarised (that pass-through is what
   finally made the bug below readable). Those two are not hypothetical here:
-  `replace_segments/4` sends a `DELETE` and an add in one transaction, and L6
-  below has two nodes committing against one metadata database, which is the
+  `replace_segments/4` writes several metadata tables in one transaction, and
+  L6 below has two nodes committing against one metadata database, which is the
   shape that deadlocks. Nothing else in smolquery retries them, so dropping
   them from this list would strand compaction on a failure that clears itself.
+  The last two name the snapshot key a swap's move writes
+  (`Smolquery.Catalog.DuckLake.Swap`): Postgres's `"ducklake_snapshot_pkey"`
+  and SQLite's `"ducklake_snapshot.snapshot_id"`, a commit that landed first.
 
   DuckDB wraps *every* commit-time failure in `"Failed to commit"`, permanent
   ones included, so keying on that prefix spent all five attempts on errors no
@@ -77,7 +80,7 @@ defmodule Smolquery.Catalog.DuckLake do
   the stats row each later one updates. A non-retryable commit now fails at
   once and carries the metadata database's own message.
 
-  All four exhaust into `:commit_conflict`, which therefore names contention
+  All six exhaust into `:commit_conflict`, which therefore names contention
   rather than strictly a lost race — a held SQLite file lock and a deadlock are
   neither of them races. Worth knowing when reading that atom out of a
   compaction log, where it is the whole of what an operator gets.
@@ -126,12 +129,9 @@ defmodule Smolquery.Catalog.DuckLake do
   over externally-registered files it crashes DuckDB fatally (ducklake
   `67480b1d`, format 0.4), and a fatal error invalidates the whole database.
   Compaction stays `Smolquery.StorageService.Compactor`'s job, built on
-  `replace_segments/4` — registration and retirement composed inside one
-  `Smolquery.Engine.transaction/2`, so a single snapshot carries both. The
-  swap runs its `DELETE` before its `ducklake_add_data_files`: the order is
-  invisible inside the transaction, and it puts the statement most likely to
-  fail (registering a merged file the table could reject) after one that has
-  already applied, so the rollback path is the one a real failure exercises.
+  `replace_segments/4`: registration and retirement in one metadata
+  transaction, so a single snapshot carries both
+  (`Smolquery.Catalog.DuckLake.Swap`).
 
   ## A swap whose inputs are not all live refuses
 
@@ -146,35 +146,28 @@ defmodule Smolquery.Catalog.DuckLake do
   merged file is an orphan for GC. A retry of a swap that did commit still
   answers first, from its registered additions.
 
-  ## The swap's `DELETE` is bounded, or it opens every file of the table
+  ## The swap is a compaction, not a delete
 
-  DuckLake answers `DELETE ... WHERE filename IN (...)` by opening every file
-  the table holds and discarding the ones whose name misses: a 5-file group on
-  a 200-file table opened all 200. On a local disk that is 0.7 s at 16,384
-  files; on S3 it is a request per file, and `metrics.samples` at 16,369 files
-  timed out every swap at 120 s (T-588, T-594). DuckLake does prune by the
-  per-file min/max it keeps in its metadata before opening anything, so the
-  swap's `DELETE` also bounds each timestamp column by the merged file's own
-  footer, widened by a second: the same 5-file group then opened 5.
+  The swap used to be a `DELETE ... WHERE filename IN (...)` and a
+  `ducklake_add_data_files` in one DuckLake transaction. It failed two ways
+  on `metrics.samples`. DuckLake answers that `DELETE` by opening every file
+  of the table (T-594), and even bounded by `ts` the transaction stayed open
+  29 s. And DuckLake refuses to commit a delete from a table another
+  transaction inserted into meanwhile. A seal is such an insert, so on a
+  table that seals every 20 s nearly every swap lost (T-595, T-600).
 
-  The merged file holds exactly the group's rows, so those bounds cover every
-  row the `DELETE` must remove. That is checked, not assumed: a bound that
-  missed a row would leave the input half-deleted and its remaining rows
-  counted twice, beside the merged copy. Before the transaction the swap counts
-  the group's rows under the bounds, and anything but the merged row count, or
-  a failure computing them, falls back to the unbounded `DELETE` with a
-  warning. A column is bounded only when the footer has min, max and a zero
-  null count in every row group, so a column added after some inputs were
-  written, which those inputs read as NULL, is simply not bounded. The check
-  catches what the footer cannot see: a materialized timestamp the merge
-  computed for inputs whose files lack it, a double registration, a partial
-  earlier delete. A nanosecond column's stats render at microseconds; the
-  second of widening covers that truncation.
+  So the swap stages the merged file into a hidden twin table, where DuckLake
+  itself registers it, then moves it onto the table and retires the inputs
+  in one metadata transaction tagged `merge_adjacent`, as DuckLake's own
+  compaction is. A seal in flight commits through it; a retention delete in
+  flight still conflicts. No data file is opened. `Smolquery.Catalog.DuckLake.Swap`
+  has the details. It also guards the inputs from the metadata, at the
+  snapshot it writes over: each is live, none has a delete file, and their
+  `record_count`s sum to the merged file's rows, so an input registered
+  twice or partly deleted refuses the swap rather than double or lose rows.
 
-  The bound prunes only as well as the group is narrow in time. Groups are
-  picked in write order, so a group holding one backfilled file spans that
-  file's whole range, prunes little, and pays for its guard as well as its
-  `DELETE`. That costs time, never rows.
+  Only `replace_segments/4` swaps this way. `drop_segments/3` (retention)
+  still retires through `DELETE`.
   """
 
   @behaviour Smolquery.Catalog
@@ -185,6 +178,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Catalog.DuckLake.Swap
   alias Smolquery.Engine
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -216,11 +210,15 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @default_catalog "lake"
   @commit_attempts 5
+  @move_attempts 10
+  @stage_abandon_ms 3_600_000
   @retryable_markers [
     "Transaction conflict",
     "database is locked",
     "deadlock detected",
-    "could not serialize access"
+    "could not serialize access",
+    "ducklake_snapshot_pkey",
+    "ducklake_snapshot.snapshot_id"
   ]
 
   @doc """
@@ -395,6 +393,9 @@ defmodule Smolquery.Catalog.DuckLake do
   defp postgres_metadata?(_metadata), do: false
 
   @impl Catalog
+  def create_dataset(%__MODULE__{} = _config, "__smolquery_stage" = dataset),
+    do: {:error, {:reserved_dataset, dataset}}
+
   def create_dataset(%__MODULE__{} = config, dataset) do
     with {:ok, name} <- dataset_name(config, dataset),
          {:ok, _result} <- query(config, "CREATE SCHEMA IF NOT EXISTS #{name}") do
@@ -407,8 +408,8 @@ defmodule Smolquery.Catalog.DuckLake do
     column(
       config,
       "SELECT schema_name FROM information_schema.schemata WHERE catalog_name = $1 " <>
-        "ORDER BY schema_name",
-      [config.catalog]
+        "AND schema_name <> $2 ORDER BY schema_name",
+      [config.catalog, Swap.stage_schema()]
     )
   end
 
@@ -769,7 +770,7 @@ defmodule Smolquery.Catalog.DuckLake do
           {:ok, :already_swapped}
 
         {pending, []} ->
-          swap(config, ref, name, pending, retire_predicate(config, ref, name, segments, drop))
+          swap(config, ref, name, segments, pending, drop)
 
         {_pending, retired} ->
           {:error, {:inputs_not_live, retired}}
@@ -777,94 +778,340 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp swap(config, ref, _name, add, nil),
+  defp swap(config, ref, _name, _segments, add, []),
     do: query(config, add_statement(config, ref, add), [], config.swap_timeout_ms)
 
-  defp swap(config, ref, name, add, retire) do
-    case transaction(
-           config,
-           [{:delete, delete_statement(name, retire)}, {:add, add_statement(config, ref, add)}],
-           config.swap_timeout_ms
-         ) do
-      :ok -> {:ok, :committed}
+  defp swap(config, ref, name, [merged], [_path], drop) do
+    with {:ok, table_id} <- table_id(config, ref),
+         {:ok, stage} <- ensure_stage(config, name, table_id),
+         :ok <- stage_merged(config, stage, merged.path) do
+      move(config, table_id, stage, merged, drop, @move_attempts)
+    end
+  end
+
+  defp swap(_config, _ref, _name, segments, _add, _drop),
+    do: {:error, {:swap_expects_one_file, length(segments)}}
+
+  defp table_id(config, {dataset, table}) do
+    sql =
+      "SELECT t.table_id FROM #{metadata_schema(config.catalog)}.ducklake_table t " <>
+        "JOIN #{metadata_schema(config.catalog)}.ducklake_schema s ON s.schema_id = t.schema_id " <>
+        "WHERE s.schema_name = $1 AND t.table_name = $2 " <>
+        "AND t.end_snapshot IS NULL AND s.end_snapshot IS NULL"
+
+    case query(config, sql, [dataset, table]) do
+      {:ok, %{rows: [[id]]}} -> {:ok, id}
+      {:ok, %{rows: []}} -> {:error, {:unknown_table, {dataset, table}}}
+      {:ok, %{rows: rows}} -> {:error, {:ambiguous_table, {dataset, table}, rows}}
       {:error, _error} = failed -> failed
     end
   end
 
-  defp retire_predicate(_config, _ref, _name, _segments, []), do: nil
+  defp ensure_stage(config, name, table_id) do
+    stage_ref = {Swap.stage_schema(), Swap.stage_table(table_id)}
 
-  defp retire_predicate(config, ref, name, segments, drop) do
-    by_file = by_file(drop)
+    with {:ok, columns} <- columns(config, table_id),
+         {:ok, stage} <- current_stage(config, stage_ref, columns) do
+      case stage do
+        {:ok, id, stage_columns} ->
+          {:ok, %{ref: stage_ref, id: id, columns: stage_columns, table_columns: columns}}
 
-    with {:ok, [_ | _] = bounds} <- merged_bounds(config, ref, segments),
-         bounded = Enum.join([by_file | bounds], " AND "),
-         :ok <- covers_group(config, name, bounded, segments) do
-      bounded
-    else
-      {:ok, []} ->
-        by_file
-
-      {:error, reason} ->
-        Logger.warning(
-          "swap of #{inspect(ref)} retires its inputs unbounded, opening every file " <>
-            "of the table: #{inspect(reason)}"
-        )
-
-        by_file
+        :recreate ->
+          recreate_stage(config, name, stage_ref, columns)
+      end
     end
   end
 
-  defp merged_bounds(config, ref, segments) do
-    with {:ok, schema} <- table_schema(config, ref) do
-      footer_bounds(config, Enum.map(segments, & &1.path), timestamp_columns(schema))
+  defp current_stage(config, stage_ref, columns) do
+    case table_id(config, stage_ref) do
+      {:ok, id} -> matching_stage(config, id, columns)
+      {:error, {:unknown_table, _ref}} -> {:ok, :recreate}
+      {:error, _reason} = failed -> failed
     end
   end
 
-  defp timestamp_columns(schema),
-    do:
-      for(
-        %Field{type: type, name: column} <- schema.fields,
-        type in [:timestamp, :timestamp_ns],
-        do: column
-      )
+  defp matching_stage(config, id, columns) do
+    with {:ok, stage_columns} <- columns(config, id) do
+      if Swap.matches?(stage_columns, columns),
+        do: {:ok, {:ok, id, stage_columns}},
+        else: {:ok, :recreate}
+    end
+  end
 
-  defp footer_bounds(_config, _paths, []), do: {:ok, []}
+  defp recreate_stage(config, name, {schema, table} = stage_ref, columns) do
+    stage = "#{Identifier.quote_name!(config.catalog)}.#{Identifier.quote_name!(schema)}"
+    twin = "#{stage}.#{Identifier.quote_name!(table)}"
 
-  defp footer_bounds(config, paths, columns) do
-    count = length(paths)
+    with :ok <-
+           transact(config, [
+             "CREATE SCHEMA IF NOT EXISTS #{stage}",
+             "DROP TABLE IF EXISTS #{twin}",
+             "CREATE TABLE #{twin} AS SELECT * FROM #{name} LIMIT 0"
+           ]),
+         {:ok, id} <- table_id(config, stage_ref),
+         {:ok, stage_columns} <- columns(config, id) do
+      {:ok, %{ref: stage_ref, id: id, columns: stage_columns, table_columns: columns}}
+    end
+  end
+
+  defp columns(config, table_id) do
+    sql =
+      "SELECT column_id, column_name, parent_column, column_type " <>
+        "FROM #{metadata_schema(config.catalog)}.ducklake_column " <>
+        "WHERE table_id = #{table_id} AND end_snapshot IS NULL"
+
+    with {:ok, result} <- query(config, sql) do
+      {:ok, Enum.map(result.rows, &List.to_tuple/1)}
+    end
+  end
+
+  defp stage_merged(config, stage, path) do
+    case staged_file(config, stage.id, path) do
+      {:ok, _staged} ->
+        :ok
+
+      {:error, :not_staged} ->
+        statement(:stage, fn ->
+          Engine.try_query(
+            config.engine,
+            add_statement(config, stage.ref, [path]),
+            [],
+            config.swap_timeout_ms
+          )
+        end)
+        |> case do
+          {:ok, _result} -> :ok
+          {:error, _error} = failed -> failed
+        end
+
+      {:error, _reason} = failed ->
+        failed
+    end
+  end
+
+  defp staged_file(config, stage_id, path) do
+    sql =
+      "SELECT data_file_id, record_count, file_size_bytes, mapping_id " <>
+        "FROM #{metadata_schema(config.catalog)}.ducklake_data_file " <>
+        "WHERE table_id = #{stage_id} AND end_snapshot IS NULL AND path = $1"
+
+    case query(config, sql, [path]) do
+      {:ok, %{rows: [[id, rows, bytes, mapping]]}} ->
+        {:ok, %{data_file_id: id, rows: rows, bytes: bytes, mapping_id: mapping}}
+
+      {:ok, %{rows: []}} ->
+        {:error, :not_staged}
+
+      {:error, _error} = failed ->
+        failed
+    end
+  end
+
+  defp move(config, table_id, stage, merged, drop, attempts) do
+    with {:ok, snapshot} <- latest_snapshot(config),
+         {:ok, plan} <- move_plan(config, table_id, stage, merged, drop, snapshot) do
+      write_move(config, plan, attempts)
+    end
+  end
+
+  defp move_plan(config, table_id, stage, merged, drop, snapshot) do
+    with {:ok, retire} <- live_inputs(config, table_id, drop, merged.row_count),
+         {:ok, staged} <- staged_file(config, stage.id, merged.path),
+         {:ok, abandoned} <- abandoned_stage_files(config, stage.id, merged.path),
+         {:ok, column_ids} <- Swap.column_ids(stage.columns, stage.table_columns),
+         {:ok, mappings} <- mappings(config, [table_id, stage.id]),
+         {:ok, next_row_id} <- next_row_id(config, table_id) do
+      {:ok,
+       %{
+         snapshot: snapshot,
+         table_id: table_id,
+         stage_table_id: stage.id,
+         next_row_id: next_row_id,
+         staged: Map.take(staged, [:data_file_id, :rows, :bytes]),
+         retire: retire,
+         abandoned: abandoned,
+         column_ids: column_ids,
+         mapping:
+           Swap.mapping(
+             staged.mapping_id && Map.get(mappings, staged.mapping_id),
+             Map.filter(mappings, fn {_id, mapping} -> mapping.table_id == table_id end)
+             |> Map.new(fn {id, mapping} -> {id, Map.delete(mapping, :table_id)} end),
+             column_ids
+           )
+       }}
+    end
+  end
+
+  defp live_inputs(config, table_id, drop, expected_rows) do
+    sql =
+      "SELECT df.data_file_id, df.path, CAST(df.record_count AS BIGINT), " <>
+        "(SELECT count(*) FROM #{metadata_schema(config.catalog)}.ducklake_delete_file del " <>
+        "WHERE del.table_id = #{table_id} AND del.data_file_id = df.data_file_id " <>
+        "AND del.end_snapshot IS NULL) " <>
+        "FROM #{metadata_schema(config.catalog)}.ducklake_data_file df " <>
+        "WHERE df.table_id = #{table_id} AND df.end_snapshot IS NULL " <>
+        "AND df.path IN (#{placeholders(1, length(drop))})"
+
+    with {:ok, result} <- query(config, sql, drop) do
+      live = Enum.map(result.rows, fn [_id, path | _rest] -> path end)
+      found = Enum.sum_by(result.rows, fn [_id, _path, rows, _deletes] -> rows end)
+
+      cond do
+        drop -- live != [] -> {:error, {:inputs_not_live, drop -- live}}
+        Enum.any?(result.rows, &(List.last(&1) > 0)) -> {:error, {:inputs_have_deletes, drop}}
+        found != expected_rows -> {:error, {:row_count_mismatch, expected_rows, found}}
+        true -> {:ok, Enum.map(result.rows, &hd/1)}
+      end
+    end
+  end
+
+  defp abandoned_stage_files(config, stage_id, path) do
+    sql =
+      "SELECT data_file_id, begin_snapshot " <>
+        "FROM #{metadata_schema(config.catalog)}.ducklake_data_file " <>
+        "WHERE table_id = #{stage_id} AND end_snapshot IS NULL AND path <> $1"
+
+    case query(config, sql, [path]) do
+      {:ok, %{rows: []}} -> {:ok, []}
+      {:ok, %{rows: others}} -> staged_before(config, others)
+      {:error, _error} = failed -> failed
+    end
+  end
+
+  defp staged_before(config, others) do
+    cutoff =
+      DateTime.utc_now()
+      |> DateTime.add(-@stage_abandon_ms, :millisecond)
+      |> DateTime.to_iso8601()
+
+    snapshots = others |> Enum.map(&List.last/1) |> Enum.uniq()
 
     sql =
-      "SELECT path_in_schema, " <>
-        "CAST(min(TRY_CAST(stats_min_value AS TIMESTAMP)) - INTERVAL 1 SECOND AS VARCHAR), " <>
-        "CAST(max(TRY_CAST(stats_max_value AS TIMESTAMP)) + INTERVAL 1 SECOND AS VARCHAR), " <>
-        "count(TRY_CAST(stats_min_value AS TIMESTAMP)) = count(*) " <>
-        "AND count(TRY_CAST(stats_max_value AS TIMESTAMP)) = count(*) " <>
-        "AND coalesce(bool_and(stats_null_count = 0), false) " <>
-        "FROM parquet_metadata([#{placeholders(1, count)}]) " <>
-        "WHERE path_in_schema IN (#{placeholders(count + 1, length(columns))}) " <>
-        "GROUP BY path_in_schema ORDER BY path_in_schema"
+      "SELECT snapshot_id FROM #{metadata_schema(config.catalog)}.ducklake_snapshot " <>
+        "WHERE snapshot_id IN (#{Enum.map_join(snapshots, ", ", &Integer.to_string/1)}) " <>
+        "AND CAST(snapshot_time AS TIMESTAMPTZ) < CAST($1 AS TIMESTAMPTZ)"
 
-    with {:ok, result} <- query(config, sql, paths ++ columns, config.swap_timeout_ms) do
-      {:ok,
-       for [column, low, high, true] <- result.rows do
-         "#{Identifier.quote_name!(column)} BETWEEN CAST(#{Identifier.sql_string(low)} " <>
-           "AS TIMESTAMP) AND CAST(#{Identifier.sql_string(high)} AS TIMESTAMP)"
-       end}
+    with {:ok, old} <- column(config, sql, [cutoff]) do
+      {:ok, for([id, snapshot] <- others, snapshot in old, do: id)}
     end
   end
 
-  defp covers_group(config, name, bounded, segments) do
-    expected = Enum.sum_by(segments, & &1.row_count)
+  defp mappings(config, table_ids) do
+    sql =
+      "SELECT m.mapping_id, m.table_id, m.type, n.column_id, n.source_name, " <>
+        "n.target_field_id, n.parent_column, n.is_partition " <>
+        "FROM #{metadata_schema(config.catalog)}.ducklake_column_mapping m " <>
+        "JOIN #{metadata_schema(config.catalog)}.ducklake_name_mapping n " <>
+        "ON n.mapping_id = m.mapping_id " <>
+        "WHERE m.table_id IN (#{Enum.map_join(table_ids, ", ", &Integer.to_string/1)})"
 
-    case query(
-           config,
-           "SELECT count(*) FROM #{name} WHERE #{bounded}",
-           [],
-           config.swap_timeout_ms
-         ) do
-      {:ok, %{rows: [[^expected]]}} -> :ok
-      {:ok, %{rows: [[found]]}} -> {:error, {:bounds_miss_rows, expected, found}}
+    with {:ok, result} <- query(config, sql) do
+      {:ok,
+       result.rows
+       |> Enum.group_by(&hd/1)
+       |> Map.new(fn {id, [[_id, table_id, type | _row] | _more] = rows} ->
+         {id,
+          %{
+            table_id: table_id,
+            type: type,
+            rows:
+              Enum.map(rows, fn [_id, _table, _type, column, source, target, parent, partition] ->
+                {column, source, target, parent, partition in [true, 1]}
+              end)
+          }}
+       end)}
+    end
+  end
+
+  defp next_row_id(config, table_id) do
+    sql =
+      "SELECT next_row_id FROM #{metadata_schema(config.catalog)}.ducklake_table_stats " <>
+        "WHERE table_id = #{table_id}"
+
+    case query(config, sql) do
+      {:ok, %{rows: [[next]]}} -> {:ok, next}
+      {:ok, %{rows: rows}} -> {:error, {:unexpected_table_stats, rows}}
       {:error, _error} = failed -> failed
+    end
+  end
+
+  defp latest_snapshot(config) do
+    with {:ok, id} <- current_snapshot(config) do
+      sql =
+        "SELECT snapshot_id, schema_version, next_catalog_id, next_file_id " <>
+          "FROM #{metadata_schema(config.catalog)}.ducklake_snapshot WHERE snapshot_id = #{id}"
+
+      case query(config, sql) do
+        {:ok, %{rows: [[^id, version, catalog_id, file_id]]}} ->
+          {:ok,
+           %{id: id, schema_version: version, next_catalog_id: catalog_id, next_file_id: file_id}}
+
+        {:ok, %{rows: rows}} ->
+          {:error, {:unexpected_snapshot_result, rows}}
+
+        {:error, _error} = failed ->
+          failed
+      end
+    end
+  end
+
+  defp write_move(config, plan, attempts) do
+    case transaction(config, move_statements(config, plan), config.swap_timeout_ms) do
+      :ok ->
+        {:ok, :committed}
+
+      {:error, error} ->
+        if Swap.lost_snapshot?(error) and attempts > 1,
+          do: rebase_move(config, plan, error, attempts),
+          else: {:error, error}
+    end
+  end
+
+  defp rebase_move(config, plan, error, attempts) do
+    with {:ok, snapshot} <- latest_snapshot(config),
+         {:ok, changes} <- changes_since(config, plan.snapshot.id, snapshot.id),
+         :ok <- rebasable(changes, plan, error),
+         {:ok, next_row_id} <- next_row_id(config, plan.table_id) do
+      write_move(config, %{plan | snapshot: snapshot, next_row_id: next_row_id}, attempts - 1)
+    end
+  end
+
+  defp rebasable(changes, plan, error) do
+    if Swap.rebase?(changes, plan.table_id, plan.stage_table_id),
+      do: :ok,
+      else: {:error, error}
+  end
+
+  defp changes_since(config, from, through) do
+    sql =
+      "SELECT changes_made FROM #{metadata_schema(config.catalog)}.ducklake_snapshot_changes " <>
+        "WHERE snapshot_id > #{from} AND snapshot_id <= #{through}"
+
+    column(config, sql)
+  end
+
+  defp move_statements(config, plan) do
+    case metadata_type(config) do
+      "postgres" ->
+        batch = plan |> Swap.statements(~s("public")) |> Enum.join(";\n")
+
+        [
+          {:move,
+           "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
+             "#{Identifier.sql_string(batch)})"}
+        ]
+
+      _through_duckdb ->
+        Enum.map(Swap.statements(plan, metadata_schema(config.catalog)), &{:move, &1})
+    end
+  end
+
+  defp metadata_type(config) do
+    sql = "SELECT type FROM duckdb_databases() WHERE database_name = $1"
+
+    case query(config, sql, ["__ducklake_metadata_" <> config.catalog]) do
+      {:ok, %{rows: [[type]]}} -> type
+      _unknown -> nil
     end
   end
 
@@ -1499,9 +1746,11 @@ defmodule Smolquery.Catalog.DuckLake do
 
   Public for the same reason `Smolquery.Engine.Connection.fatal?/1` is: it
   classifies DuckDB by message text, so the strings it keys on are pinned by a
-  test rather than trusted. Four are retryable — DuckLake's own
-  `"Transaction conflict"`, SQLite metadata's `"database is locked"`, and
-  Postgres metadata's `"deadlock detected"` and `"could not serialize access"`.
+  test rather than trusted. DuckLake's own `"Transaction conflict"`, SQLite
+  metadata's `"database is locked"`, and Postgres metadata's
+  `"deadlock detected"` and `"could not serialize access"` are retryable, and
+  so is a swap's move that lost the snapshot key to a concurrent commit
+  (`Smolquery.Catalog.DuckLake.Swap.lost_snapshot?/1`) after its own rebases.
   A commit that failed for any other reason is permanent, however much its
   wrapper reads like a lost race; see the moduledoc.
   """

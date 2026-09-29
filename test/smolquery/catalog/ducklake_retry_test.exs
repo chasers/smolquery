@@ -67,6 +67,18 @@ defmodule Smolquery.Catalog.DuckLakeRetryTest do
              })
     end
 
+    test "retries a swap whose move lost the snapshot key (T-600)" do
+      assert DuckLake.retryable?(%Adbc.Error{
+               message:
+                 "Failed to execute query: ERROR:  duplicate key value violates unique " <>
+                   ~s|constraint "ducklake_snapshot_pkey"|
+             })
+
+      assert DuckLake.retryable?(%Adbc.Error{
+               message: "Invalid Error: UNIQUE constraint failed: ducklake_snapshot.snapshot_id"
+             })
+    end
+
     test "retries SQLite metadata lock contention" do
       assert DuckLake.retryable?(%Adbc.Error{
                message: @wrapper <> "Failed to flush changes into DuckLake: database is locked"
