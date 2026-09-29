@@ -215,7 +215,7 @@ defmodule Smolquery.StorageService.Scheduler do
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       {cooling, due} = Enum.split_with(tables, &Backoff.cooling_down?(state.cooldowns, &1))
-      {hour, listings, deferred, stopped} = hour_lane(runtime, state, due)
+      {hour, listings, deferred, stopped} = timed(:hour, fn -> hour_lane(runtime, state, due) end)
       swept = due -- deferred
 
       {span_cooling, span_due} =
@@ -224,7 +224,15 @@ defmodule Smolquery.StorageService.Scheduler do
         |> Enum.split_with(&Backoff.cooling_down?(state.span_cooldowns, &1))
 
       {span, span_swept, span_waiting, span_deferred} =
-        span_lane(runtime, state, Planner.by_need(span_due, listings, runtime), listings, stopped)
+        timed(:span, fn ->
+          span_lane(
+            runtime,
+            state,
+            Planner.by_need(span_due, listings, runtime),
+            listings,
+            stopped
+          )
+        end)
 
       outcomes = hour ++ span
       row_caps = Caps.adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
@@ -272,14 +280,28 @@ defmodule Smolquery.StorageService.Scheduler do
     end
   end
 
+  defp timed(lane, run) do
+    started = System.monotonic_time(:microsecond)
+    result = run.()
+
+    :telemetry.execute(
+      [:smolquery, :compact, :lane],
+      %{duration_us: System.monotonic_time(:microsecond) - started},
+      %{lane: lane}
+    )
+
+    result
+  end
+
   defp gauged(listings, span_waiting, span_cooling) do
-    for {{dataset, table}, files} <- listings do
-      Telemetry.put_gauge(
-        "smolquery_compaction_table_files",
-        [dataset: dataset, table: table],
-        length(files)
-      )
-    end
+    {total, largest} =
+      Enum.reduce(listings, {0, 0}, fn {_table_ref, files}, {total, largest} ->
+        count = length(files)
+        {total + count, max(largest, count)}
+      end)
+
+    Telemetry.put_gauge("smolquery_compaction_listed_files", [], total)
+    Telemetry.put_gauge("smolquery_compaction_listed_files_max", [], largest)
 
     Telemetry.put_gauge(
       "smolquery_compaction_lane_tables",

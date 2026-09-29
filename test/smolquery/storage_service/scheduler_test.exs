@@ -506,7 +506,9 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert {:ok, %{span_waiting: [@table]}} = Scheduler.sweep(context.storage)
 
       metrics = Smolquery.Telemetry.render()
-      assert metrics =~ ~s|smolquery_compaction_table_files{dataset="analytics",table="events"} 3|
+      assert metrics =~ "smolquery_compaction_listed_files 3"
+      assert metrics =~ "smolquery_compaction_listed_files_max 3"
+      assert metrics =~ ~s|smolquery_compaction_lane_microseconds_total{lane="span"}|
       assert metrics =~ ~s|smolquery_compaction_lane_tables{lane="span",state="waiting"} 1|
       assert metrics =~ "smolquery_compaction_spill_free_bytes "
       refute_received {[:smolquery, :compact, :swap], ^ref, _measurements, _meta}
