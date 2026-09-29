@@ -183,6 +183,13 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   @span_max_rows 9_223_372_036_854_775_807
   @width_sample_rows 1024
 
+  @doc """
+  The span level's row ceiling: none that a group could reach. The span
+  level is bounded by bytes and, once a group forms, by its decoded size.
+  """
+  @spec span_max_rows() :: pos_integer()
+  def span_max_rows, do: @span_max_rows
+
   defp reject_quarantined(quarantined_groups, owned, listed) do
     active = Quarantine.active_quarantined_paths(quarantined_groups, listed)
 
