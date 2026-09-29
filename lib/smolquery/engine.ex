@@ -84,6 +84,7 @@ defmodule Smolquery.Engine do
   alias Smolquery.DuckDB
   alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Connection
+  alias Smolquery.Engine.Log
   alias Smolquery.Engine.Result
 
   @default_max_result_rows 100_000
@@ -342,6 +343,21 @@ defmodule Smolquery.Engine do
 
   defp connection({name, slot}), do: connection_name(name, slot)
   defp connection(name) when is_atom(name), do: connection_name(name)
+
+  @doc """
+  Turns DuckDB's own log on for engine `name` for `for:` minutes, drained into
+  the application's log (`Smolquery.Engine.Log`, T-599). `types` are DuckDB
+  log types such as `"QueryLog"` or `"HTTP"`. Meant for a remote console:
+
+      Smolquery.Engine.log(Smolquery.StorageService.CatalogEngine, ["QueryLog"], for: 10)
+
+  """
+  @spec log(atom(), [String.t()], keyword()) :: DynamicSupervisor.on_start_child()
+  def log(name, types, opts) do
+    minutes = Keyword.fetch!(opts, :for)
+
+    Log.start(name, types, for_ms: trunc(minutes * 60_000))
+  end
 
   @doc """
   Spill directories an engine's earlier instances still hold in this OS

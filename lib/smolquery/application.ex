@@ -33,6 +33,7 @@ defmodule Smolquery.Application do
         Smolquery.MetricsServer,
         Smolquery.MemoryMetrics,
         Smolquery.Allocator,
+        {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
         {Phoenix.PubSub, name: Smolquery.PubSub},
         Smolquery.Lifecycle,
         Smolquery.Cluster.RingCache

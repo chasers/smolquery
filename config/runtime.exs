@@ -295,6 +295,12 @@ end
 
 # Keep spills off `SMOLQUERY_DATA_DIR`, which may hold acknowledged buffer data.
 # Unset preserves DuckDB's `.tmp` filesystem.
+# T-599: DuckDB's own log on storage engines from boot, drained into the app's
+# log, e.g. "catalog:QueryLog,compact:QueryLog". HTTP only when named.
+if spec = System.get_env("SMOLQUERY_DUCKDB_LOG") do
+  config :smolquery, Smolquery.Engine.Log, boot: spec
+end
+
 if dir = System.get_env("SMOLQUERY_SPILL_DIR") do
   config :smolquery, :spill_dir, dir
 end
