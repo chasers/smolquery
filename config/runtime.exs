@@ -523,6 +523,26 @@ if ms = System.get_env("SMOLQUERY_COMPACT_BUCKET_MS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_BUCKET_MS", ms)
 end
 
+# T-592: files settle between half this and this many bytes, each spanning at
+# most SMOLQUERY_COMPACT_SPAN_MS. `off` keeps every merge at the hour level.
+case System.get_env("SMOLQUERY_COMPACT_TARGET_BYTES") do
+  nil ->
+    :ok
+
+  "off" ->
+    config :smolquery, Smolquery.StorageService, compact_target_bytes: nil
+
+  bytes ->
+    config :smolquery, Smolquery.StorageService,
+      compact_target_bytes:
+        Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_TARGET_BYTES", bytes)
+end
+
+if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_span_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_MS", ms)
+end
+
 # T-259: compaction runs on its own engine so a timed-out merge cannot starve
 # seals. Unset, the limit derives as a quarter of the cgroup memory limit.
 if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do

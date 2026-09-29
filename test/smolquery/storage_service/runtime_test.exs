@@ -241,6 +241,34 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
+  describe "compaction target (T-592)" do
+    test "defaults to files of 512 MiB to 1 GiB, spanning a day" do
+      runtime = Runtime.new(name: __MODULE__.DefaultTarget)
+
+      assert runtime.compact_target_bytes == 1_073_741_824
+      assert runtime.compact_span_ms == 86_400_000
+    end
+
+    test "a nil target turns the span level off" do
+      runtime = Runtime.new(name: __MODULE__.NoTarget, compact_target_bytes: nil)
+
+      assert runtime.compact_target_bytes == nil
+    end
+
+    test "refuses a target at or under compact_below_bytes, or a span at or under the bucket" do
+      for opts <- [
+            [compact_target_bytes: 1_024, compact_below_bytes: 1_024],
+            [compact_target_bytes: "1GiB"],
+            [compact_span_ms: 3_600_000],
+            [compact_target_bytes: nil, compact_span_ms: 1_000]
+          ] do
+        assert_raise ArgumentError, ~r/unsupported compaction target/, fn ->
+          Runtime.new([name: __MODULE__.BadTarget] ++ opts)
+        end
+      end
+    end
+  end
+
   describe "compact_engine_threads/3" do
     test "takes one thread per 256 MiB of the limit by default" do
       runtime = Runtime.new(name: __MODULE__.ThreadsPerLimit, compact_engine_memory_limit: "1GiB")

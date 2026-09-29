@@ -69,7 +69,8 @@ defmodule Smolquery.StorageService.CompactorTest do
           compact_below_bytes: 1_048_576,
           compact_max_bytes: 16_777_216,
           compact_interval_ms: 3_600_000,
-          compact_backoff_base_ms: 0
+          compact_backoff_base_ms: 0,
+          compact_target_bytes: nil
         ]
         |> Keyword.merge(opts)
       )
@@ -289,6 +290,74 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     assert {:ok, paths} = Catalog.segments(context.catalog, @table, pinned)
     assert Enum.sort(paths) == Enum.sort([a.path, b.path])
+  end
+
+  describe "the span level (T-592)" do
+    @span [
+      compact_bucket_ms: 1_000,
+      compact_span_ms: 10_000,
+      compact_target_bytes: 4_194_304,
+      compact_max_rows: 15
+    ]
+
+    test "merges settled files across buckets toward the target, past the hour level's row cap",
+         context do
+      runtime = start_compactor(context, @span)
+      for index <- 1..3, do: seal(runtime, context.catalog, index, (index * 10 - 9)..(index * 10))
+
+      assert {:ok, %{compacted: [%{replaced: 3, rows: 30}], failed: []}} =
+               Compactor.sweep(context.storage)
+
+      assert lake_rows(context.storage) == 30
+    end
+
+    test "never merges across spans", context do
+      runtime = start_compactor(context, @span)
+      a = seal(runtime, context.catalog, 1, 1..10)
+      b = seal(runtime, context.catalog, 2, 11..20)
+      c = seal(runtime, context.catalog, 11, 21..30)
+      d = seal(runtime, context.catalog, 12, 31..40)
+
+      assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: [%{replaced: 2}]}} = Compactor.sweep(context.storage)
+      assert {:ok, %{compacted: []}} = Compactor.sweep(context.storage)
+
+      assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+      assert [_, _] = current
+      refute Enum.any?([a, b, c, d], &(&1.path in current))
+      assert lake_rows(context.storage) == 40
+    end
+
+    test "leaves a file at or past half the target alone", context do
+      runtime =
+        start_compactor(
+          context,
+          Keyword.merge(@span, compact_below_bytes: 64, compact_target_bytes: 128)
+        )
+
+      a = seal(runtime, context.catalog, 1, 1..10)
+      b = seal(runtime, context.catalog, 2, 11..20)
+
+      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+
+      assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+      assert Enum.sort(current) == Enum.sort([a.path, b.path])
+    end
+
+    test "keeps recent files at the hour level", context do
+      runtime =
+        start_compactor(
+          context,
+          Keyword.merge(@span, compact_bucket_ms: 3_600_000, compact_span_ms: 86_400_000)
+        )
+
+      now = div(System.os_time(:millisecond), 1_000)
+      seal(runtime, context.catalog, now, 1..10)
+      seal(runtime, context.catalog, now, 11..20)
+
+      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+      assert lake_rows(context.storage) == 20
+    end
   end
 
   test "a second sweep finds nothing left to do", context do

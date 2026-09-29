@@ -157,6 +157,13 @@ defmodule Smolquery.StorageService.Runtime do
   inside one bucket still compacts on one node — a small backlog by
   definition.
 
+  `compact_target_bytes` and `compact_span_ms` set the size a table's files
+  settle at (T-592). Once a span of `compact_span_ms` (a day) has closed, its
+  files under half the target merge again, up to the target, into files of
+  512 MiB to 1 GiB at the defaults, each covering at most one span, so
+  retention still drops a file within a span of its TTL. See
+  `Smolquery.StorageService.Compactor` for the two levels.
+
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
   the merge engine, one rung down: explicit knob, else a quarter of the
@@ -285,6 +292,8 @@ defmodule Smolquery.StorageService.Runtime do
     compact_max_bytes: 134_217_728,
     compact_max_rows: nil,
     compact_bucket_ms: 3_600_000,
+    compact_target_bytes: 1_073_741_824,
+    compact_span_ms: 86_400_000,
     compact_engine_memory_limit: nil,
     compact_engine_mib_per_thread: 256,
     compact_backoff_base_ms: 600_000,
@@ -325,6 +334,8 @@ defmodule Smolquery.StorageService.Runtime do
           compact_max_bytes: pos_integer(),
           compact_max_rows: pos_integer() | nil,
           compact_bucket_ms: pos_integer(),
+          compact_target_bytes: pos_integer() | nil,
+          compact_span_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
           compact_engine_mib_per_thread: pos_integer(),
           compact_backoff_base_ms: non_neg_integer(),
@@ -360,6 +371,8 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_max_bytes,
     :compact_max_rows,
     :compact_bucket_ms,
+    :compact_target_bytes,
+    :compact_span_ms,
     :compact_engine_memory_limit,
     :compact_engine_mib_per_thread,
     :compact_backoff_base_ms,
@@ -410,6 +423,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_bucket_ms()
+    |> validate_compact_target()
     |> validate_compact_inputs()
     |> validate_compact_max_rows()
     |> validate_compact_backoff()
@@ -734,6 +748,33 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_compact_bucket_ms(%__MODULE__{compact_bucket_ms: ms}) do
     raise ArgumentError,
           "unsupported compact_bucket_ms: #{inspect(ms)} (expected a positive integer)"
+  end
+
+  defp validate_compact_target(
+         %__MODULE__{compact_target_bytes: nil, compact_span_ms: span, compact_bucket_ms: bucket} =
+           runtime
+       )
+       when is_integer(span) and is_integer(bucket) and span > bucket,
+       do: runtime
+
+  defp validate_compact_target(
+         %__MODULE__{
+           compact_target_bytes: target,
+           compact_span_ms: span,
+           compact_below_bytes: below,
+           compact_bucket_ms: bucket
+         } = runtime
+       )
+       when is_integer(target) and is_integer(below) and target > below and
+              is_integer(span) and is_integer(bucket) and span > bucket,
+       do: runtime
+
+  defp validate_compact_target(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported compaction target: compact_target_bytes " <>
+            "#{inspect(runtime.compact_target_bytes)}, compact_span_ms " <>
+            "#{inspect(runtime.compact_span_ms)} (expected integers, the target above " <>
+            "compact_below_bytes and the span above compact_bucket_ms)"
   end
 
   defp validate_compact_inputs(%__MODULE__{compact_min_inputs: min} = runtime)
