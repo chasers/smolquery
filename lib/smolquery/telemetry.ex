@@ -92,6 +92,10 @@ defmodule Smolquery.Telemetry do
                                           — a table whose compaction failed and is left
                                           out of the sweep for wait_ms, doubling per
                                           consecutive failure (T-458)
+      [:smolquery, :compact, :conflict]   %{conflicts, wait_ms}, meta %{table_ref: ref}
+                                          — a table whose swap lost its catalog commit to a
+                                          concurrent write, left out for one sweep interval;
+                                          conflicts counts them in a row (T-595)
       [:smolquery, :hot_manifest, :change] %{entries},
                                           meta %{change: :added | :retired | :reaped |
                                           :recovered}
@@ -264,6 +268,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :compact, :swap],
     [:smolquery, :compact, :quarantine],
     [:smolquery, :compact, :backoff],
+    [:smolquery, :compact, :conflict],
     [:smolquery, :hot_manifest, :change],
     [:smolquery, :hot_manifest, :compaction],
     [:smolquery, :hot_manifest, :read],
@@ -370,6 +375,10 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_backoffs_total" =>
       "Compactions of a table deferred after a failed one; a sustained rate means a " <>
         "table's merge keeps failing and the sweep is waiting longer between attempts (T-458).",
+    "smolquery_compaction_conflicts_total" =>
+      "Compactions of a table that lost the catalog commit to a concurrent write, after the " <>
+        "catalog's own retries; each waits one sweep interval and none counts toward the " <>
+        "backoff (T-595).",
     "smolquery_hot_manifest_index_entries_total" =>
       "Entries entering and leaving a node's manifest index, by change. " <>
         "`added + recovered - reaped` is the resident entry count — the index's real " <>
@@ -882,6 +891,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :compact, :backoff], _measurements, _meta, nil) do
     bump({"smolquery_compaction_backoffs_total", []}, 1)
+  end
+
+  def handle_event([:smolquery, :compact, :conflict], _measurements, _meta, nil) do
+    bump({"smolquery_compaction_conflicts_total", []}, 1)
   end
 
   def handle_event([:smolquery, :hot_manifest, :change], measurements, meta, nil) do

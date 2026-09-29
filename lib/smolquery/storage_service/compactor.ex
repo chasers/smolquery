@@ -302,7 +302,19 @@ defmodule Smolquery.StorageService.Compactor do
   @stage_chunk_target_bytes 67_108_864
   @engine_recycle_wait_ms 5_000
   @quarantine_after 5
+
+  @typedoc """
+  A table left out of the sweep until `retry_at`, after `consecutive`
+  failures and, when it last lost a commit, `conflicts` of those in a row.
+  """
+  @type cooldown :: %{
+          required(:consecutive) => non_neg_integer(),
+          required(:retry_at) => integer(),
+          optional(:conflicts) => pos_integer()
+        }
+
   @stuck_after 5
+  @conflicts_warn_after 3
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
 
@@ -431,9 +443,20 @@ defmodule Smolquery.StorageService.Compactor do
   which `adjusted_quarantine/4` counts toward the quarantine that stops it
   (T-310). What backs off is the rest: an OOM at the floor, where halving
   has nothing left to give; an engine call exit, which ran the merge for
-  its whole budget; a store put, a catalog conflict, an invariant check.
+  its whole budget; a store put, an invariant check.
   `row_caps` is the state before the sweep, so the cap the OOM ran under
   is the one judged.
+
+  A catalog commit conflict (`:commit_conflict`) is neither: it is
+  contention with the table's own seals, not a failure that repeats, and the
+  catalog has already retried it five times inside one call. Counted toward
+  `consecutive`, it drove `metrics.samples` into the 4 h stall within a day
+  on conflicts alone (T-588, T-595). So a conflict waits one
+  `compact_interval_ms`, one or two sweeps depending on where the next one
+  falls, and leaves `consecutive` as it was: a real failure after a run of
+  conflicts still starts at one. The entry counts the conflicts in a row;
+  each is logged at info, and from the `#{@conflicts_warn_after}`th in a row
+  at warning, so contention stays visible without ever stalling the table.
 
   At `#{@stuck_after}` consecutive failures the log escalates to an error,
   the way the sealer's does at its stuck threshold: the difference between
@@ -443,14 +466,19 @@ defmodule Smolquery.StorageService.Compactor do
   them, and the first failure after it starts the count again.
   """
   @spec adjusted_cooldowns(
-          %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}},
+          %{Catalog.table_ref() => cooldown()},
           [Catalog.table_ref()],
           [term()],
           Runtime.t(),
           %{Catalog.table_ref() => map()},
           integer()
-        ) :: %{Catalog.table_ref() => %{consecutive: pos_integer(), retry_at: integer()}}
+        ) :: %{Catalog.table_ref() => cooldown()}
   def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, row_caps, now_ms \\ now_ms()) do
+    conflicted =
+      for {:failed, %{table: table_ref, reason: :commit_conflict}} <- outcomes,
+          into: MapSet.new(),
+          do: table_ref
+
     failed =
       for {:failed, %{table: table_ref} = failure} <- outcomes,
           failure_backs_off?(failure, runtime, row_caps),
@@ -458,10 +486,46 @@ defmodule Smolquery.StorageService.Compactor do
           do: table_ref
 
     Enum.reduce(swept, cooldowns, fn table_ref, acc ->
-      if MapSet.member?(failed, table_ref),
-        do: back_off(acc, table_ref, runtime, now_ms),
-        else: Map.delete(acc, table_ref)
+      cond do
+        MapSet.member?(conflicted, table_ref) -> conflict_wait(acc, table_ref, runtime, now_ms)
+        MapSet.member?(failed, table_ref) -> back_off(acc, table_ref, runtime, now_ms)
+        true -> Map.delete(acc, table_ref)
+      end
     end)
+  end
+
+  defp conflict_wait(cooldowns, table_ref, runtime, now_ms) do
+    entry = Map.get(cooldowns, table_ref, %{consecutive: 0})
+    conflicts = Map.get(entry, :conflicts, 0) + 1
+    wait = runtime.compact_interval_ms
+
+    :telemetry.execute(
+      [:smolquery, :compact, :conflict],
+      %{conflicts: conflicts, wait_ms: wait},
+      %{table_ref: table_ref}
+    )
+
+    log_conflict(table_ref, conflicts, wait)
+
+    Map.put(cooldowns, table_ref, %{
+      consecutive: entry.consecutive,
+      conflicts: conflicts,
+      retry_at: now_ms + wait
+    })
+  end
+
+  defp log_conflict(table_ref, conflicts, wait) when conflicts >= @conflicts_warn_after do
+    Logger.warning(
+      "compaction of #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
+        "#{conflicts} sweeps in a row; retrying in #{wait} ms (T-595)"
+    )
+  end
+
+  defp log_conflict(table_ref, conflicts, wait) do
+    Logger.info(
+      "compaction of #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
+        "(#{conflicts} in a row); retrying in #{wait} ms"
+    )
   end
 
   defp back_off(cooldowns, table_ref, runtime, now_ms) do

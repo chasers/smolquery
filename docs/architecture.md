@@ -845,7 +845,10 @@ previous sweep's still-undersized output.
   the row cap is still above its floor, and a corruption-shaped failure, are
   left to the row-cap calibration and the quarantine, which need the next
   sweep. The log escalates to an error at five consecutive failures, and
-  `smolquery_compaction_backoffs_total` counts every deferral. Quarantine
+  `smolquery_compaction_backoffs_total` counts every deferral. A catalog
+  commit conflict is contention with the table's own seals, not a repeating
+  failure: it waits one `compact_interval_ms` and leaves the count alone
+  (T-595). Quarantine
   is the stop for a corrupt input; this is the pace for everything else.
 
 ### Clustering key
