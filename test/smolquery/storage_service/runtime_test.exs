@@ -1,6 +1,8 @@
 defmodule Smolquery.StorageService.RuntimeTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
   alias Smolquery.StorageService.Runtime
@@ -289,9 +291,28 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.compact_engine_threads(runtime, :none, 16) == 1
     end
 
-    test "refuses an unreadable limit at boot" do
+    test "reads DuckDB's long unit names" do
+      runtime =
+        Runtime.new(name: __MODULE__.ThreadsLongUnit, compact_engine_memory_limit: "2 gigabytes")
+
+      assert Runtime.compact_engine_threads(runtime, :none, 16) == 7
+    end
+
+    test "leaves DuckDB's default threads, with a warning, for a limit it cannot divide" do
+      for limit <- ["80%", "none", "-1"] do
+        runtime =
+          Runtime.new(name: __MODULE__.ThreadsUnreadable, compact_engine_memory_limit: limit)
+
+        log =
+          capture_log(fn -> assert Runtime.compact_engine_threads(runtime, :none, 16) == nil end)
+
+        assert log =~ "keeps DuckDB's default thread count"
+      end
+    end
+
+    test "still refuses a limit that is not a string at boot" do
       assert_raise ArgumentError, ~r/unsupported compact_engine_memory_limit/, fn ->
-        Runtime.new(name: __MODULE__.ThreadsUnreadable, compact_engine_memory_limit: "lots")
+        Runtime.new(name: __MODULE__.ThreadsNotString, compact_engine_memory_limit: 1_024)
       end
     end
 
