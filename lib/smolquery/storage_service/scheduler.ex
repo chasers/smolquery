@@ -140,7 +140,8 @@ defmodule Smolquery.StorageService.Scheduler do
     quarantine: %{},
     quarantined_groups: MapSet.new(),
     cooldowns: %{},
-    span_cooldowns: %{}
+    span_cooldowns: %{},
+    span_widths: %{}
   ]
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
@@ -227,6 +228,7 @@ defmodule Smolquery.StorageService.Scheduler do
       outcomes = hour ++ span
       row_caps = Caps.adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
       span_caps = Caps.adjusted_span_caps(state.span_caps, span, runtime)
+      span_widths = Caps.adjusted_span_widths(state.span_widths, span)
 
       {quarantine, quarantined_groups} =
         Quarantine.adjusted_quarantine(
@@ -261,7 +263,8 @@ defmodule Smolquery.StorageService.Scheduler do
            quarantine: quarantine,
            quarantined_groups: quarantined_groups,
            cooldowns: cooldowns,
-           span_cooldowns: span_cooldowns
+           span_cooldowns: span_cooldowns,
+           span_widths: span_widths
        }}
     end
   end
@@ -375,6 +378,7 @@ defmodule Smolquery.StorageService.Scheduler do
     planning = %{
       routing: Routing.resolve(runtime.name),
       quarantined_groups: state.quarantined_groups,
+      learned_width: Map.get(state.span_widths, table_ref),
       files: files
     }
 

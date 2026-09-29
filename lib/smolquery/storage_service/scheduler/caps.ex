@@ -197,6 +197,70 @@ defmodule Smolquery.StorageService.Scheduler.Caps do
     Map.put(caps, table, shrunk)
   end
 
+  @doc """
+  The per-table bytes a row costs in a span merge, learned from the span
+  merges that failed (T-603).
+
+  The planner caps a span group at `compact_span_decoded_bytes` over an
+  estimated row width, sampled as text. On the sandbox that sample was low
+  by at least 20x on the `bench.otel_logs_v*` tables: groups it held to
+  1 GiB each spilled past a 22 GiB temp limit and failed after three and a
+  half minutes. A sample of the file cannot see what the merge does with
+  it, so the merge's own failure is the measure:
+
+    * a merge that ran out of temp space names the limit it hit
+      (`Smolquery.StorageService.Scheduler.Failure.temp_cap_bytes/1`), and
+      its group's rows needed more than that, so a row costs at least the
+      limit over the rows; the table learns twice that, so the next group
+      lands well under the limit instead of just under it;
+    * any other failure a smaller group would avoid doubles the width the
+      group was planned at.
+
+  A learned width only grows, and the planner uses the larger of it and the
+  sample. Like the caps, it lives in the scheduler's state: a restart forgets
+  it and the table learns it again from one failure.
+  """
+  @spec adjusted_span_widths(%{Catalog.table_ref() => pos_integer()}, [term()]) ::
+          %{Catalog.table_ref() => pos_integer()}
+  def adjusted_span_widths(widths, outcomes) do
+    Enum.reduce(outcomes, widths, fn
+      {:failed, %{level: :span, table: table, rows: rows, reason: reason} = failure}, acc
+      when is_integer(rows) and rows > 0 ->
+        case learned_width(reason, rows, Map.get(failure, :width)) do
+          nil -> acc
+          width -> learn_width(acc, table, width, rows)
+        end
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp learned_width(reason, rows, planned) do
+    case Failure.temp_cap_bytes(reason) do
+      {:ok, cap} ->
+        div(2 * cap, rows) + 1
+
+      :error ->
+        if Failure.span_shrinks?(reason) and is_integer(planned), do: planned * 2
+    end
+  end
+
+  defp learn_width(widths, table, width, rows) do
+    case widths do
+      %{^table => known} when known >= width ->
+        widths
+
+      _lower_or_new ->
+        Logger.warning(
+          "compaction span level of #{inspect(table)} learned #{width} bytes a row from a " <>
+            "failed merge of #{rows} rows; its groups are sized by it from now on (T-603)"
+        )
+
+        Map.put(widths, table, width)
+    end
+  end
+
   @doc "The floor no row cap tightens below."
   @spec row_cap_floor() :: pos_integer()
   def row_cap_floor, do: @row_cap_floor

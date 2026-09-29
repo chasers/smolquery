@@ -68,6 +68,36 @@ defmodule Smolquery.StorageService.Scheduler.Failure do
 
   defp corruption_shaped?(_environmental_or_invariant), do: false
 
+  @units %{
+    "B" => 1,
+    "KiB" => 1024,
+    "MiB" => 1_048_576,
+    "GiB" => 1_073_741_824,
+    "TiB" => 1_099_511_627_776
+  }
+
+  @doc """
+  The temp directory limit a merge ran into, in bytes, when it failed for
+  want of spill space: DuckDB reports it as
+  `failed to offload data block of size ... (22.3 GiB/22.3 GiB used)`, the
+  second size being the limit (T-603). `:error` for any other failure.
+  """
+  @spec temp_cap_bytes(term()) :: {:ok, pos_integer()} | :error
+  def temp_cap_bytes({:put_failed, _key, reason}), do: temp_cap_bytes(reason)
+
+  def temp_cap_bytes({:merge_failed, %Adbc.Error{message: message}}) do
+    with true <- message =~ "failed to offload",
+         [_match, number, unit] <-
+           Regex.run(~r/\([\d.]+ \w+\/([\d.]+) (B|KiB|MiB|GiB|TiB) used\)/, message),
+         {value, ""} <- Float.parse(number) do
+      {:ok, trunc(value * Map.fetch!(@units, unit))}
+    else
+      _other -> :error
+    end
+  end
+
+  def temp_cap_bytes(_reason), do: :error
+
   @doc """
   Whether a span-level failure is one a smaller group would avoid: an OOM,
   or a call that exited for want of time.

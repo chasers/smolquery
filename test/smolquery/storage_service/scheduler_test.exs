@@ -485,6 +485,27 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert %{span_cooldowns: %{@table => ^cooling}} = :sys.get_state(scheduler)
     end
 
+    test "a learned width shrinks the table's span groups (T-603)", context do
+      runtime = start_scheduler(context, Keyword.merge(@span, compact_below_bytes: 100))
+
+      sealed =
+        for index <- 1..3,
+            do: seal(runtime, context.catalog, index, (index * 10 - 9)..(index * 10))
+
+      :sys.replace_state(Runtime.scheduler(context.storage), fn state ->
+        %{state | span_widths: %{@table => div(runtime.compact_span_decoded_bytes, 15)}}
+      end)
+
+      assert {:ok, %{compacted: [], failed: []}} = Scheduler.sweep(context.storage)
+      assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+      assert Enum.sort(current) == Enum.sort(Enum.map(sealed, & &1.path))
+
+      :sys.replace_state(Runtime.scheduler(context.storage), &%{&1 | span_widths: %{}})
+
+      assert {:ok, %{compacted: [%{level: :span, replaced: 3}]}} =
+               Scheduler.sweep(context.storage)
+    end
+
     test "a spent span budget leaves the span lane waiting, never the hour lane (T-603)",
          context do
       runtime =
