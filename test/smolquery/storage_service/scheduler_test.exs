@@ -442,6 +442,49 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert lake_rows(context.storage) == 20
     end
 
+    test "a call exit on the last table's hour lane skips the span lane (T-603 review)",
+         context do
+      catalog = DuckLake.new(engine: Runtime.catalog_engine(context.storage), swap_timeout_ms: 1)
+
+      runtime =
+        start_scheduler(
+          context,
+          Keyword.merge(@span,
+            catalog: catalog,
+            compact_bucket_ms: 3_600_000,
+            compact_span_ms: 86_400_000
+          )
+        )
+
+      now = div(System.os_time(:millisecond), 1_000)
+      seal(runtime, context.catalog, 1, 1..5)
+      seal(runtime, context.catalog, 2, 6..10)
+      seal(runtime, context.catalog, now, 11..15)
+      seal(runtime, context.catalog, now, 16..20)
+
+      capture_log(fn ->
+        assert {:ok, %{failed: [failure], compacted: []}} = Scheduler.sweep(context.storage)
+        refute Map.get(failure, :level) == :span
+      end)
+
+      assert {:ok, _snapshot} = Catalog.current_snapshot(Runtime.compaction_catalog(runtime))
+    end
+
+    test "a paused span level keeps the span lane's cooldowns (T-603 review)", context do
+      start_scheduler(
+        context,
+        Keyword.merge(@span, compact_spill_floor_bytes: 4_611_686_018_427_387_904)
+      )
+
+      scheduler = Runtime.scheduler(context.storage)
+      cooling = %{consecutive: 5, retry_at: System.monotonic_time(:millisecond) - 1}
+      :sys.replace_state(scheduler, &%{&1 | span_cooldowns: %{@table => cooling}})
+
+      capture_log(fn -> assert {:ok, _report} = Scheduler.sweep(context.storage) end)
+
+      assert %{span_cooldowns: %{@table => ^cooling}} = :sys.get_state(scheduler)
+    end
+
     test "a spent span budget leaves the span lane waiting, never the hour lane (T-603)",
          context do
       runtime =
@@ -504,7 +547,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
   end
 
@@ -522,7 +566,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
@@ -542,7 +587,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
   end
 
@@ -601,7 +647,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
   end
 
@@ -672,7 +719,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -744,7 +792,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -796,7 +845,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
   end
 
@@ -814,7 +864,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 cooling: [],
                 deferred: [],
                 span_cooling: [],
-                span_waiting: []
+                span_waiting: [],
+                span_deferred: []
               }}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
@@ -959,7 +1010,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
                   cooling: [@table],
                   deferred: [],
                   span_cooling: [],
-                  span_waiting: []
+                  span_waiting: [],
+                  span_deferred: []
                 }}
 
       Process.sleep(350)
