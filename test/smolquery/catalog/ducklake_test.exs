@@ -12,6 +12,8 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Engine
@@ -81,20 +83,26 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     ])
   end
 
-  defp write_segment(dir, day, count) do
-    rows =
-      for i <- 1..count do
-        %{
-          "id" => day * 1_000 + i,
-          "ts" => NaiveDateTime.new!(Date.new!(2026, 7, day), Time.new!(0, 0, 0)),
-          "name" => "row-#{i}",
-          "amount" => Decimal.new("#{i}.50")
-        }
-      end
+  defp write_segment(dir, day, count), do: write_rows(dir, rows(day, count))
 
+  defp write_merged(dir, parts),
+    do: write_rows(dir, Enum.flat_map(parts, fn {day, count} -> rows(day, count) end))
+
+  defp write_rows(dir, rows) do
     {:ok, segment} = SegmentFixture.write(rows, schema(), store: Local.new(dir: dir))
 
     segment
+  end
+
+  defp rows(day, count) do
+    for i <- 1..count do
+      %{
+        "id" => day * 1_000 + i,
+        "ts" => NaiveDateTime.new!(Date.new!(2026, 7, day), Time.new!(0, 0, 0)),
+        "name" => "row-#{i}",
+        "amount" => Decimal.new("#{i}.50")
+      }
+    end
   end
 
   defp row_count do
@@ -602,7 +610,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     } do
       a = write_segment(dir, 1, 10)
       b = write_segment(dir, 2, 10)
-      merged = write_segment(dir, 3, 20)
+      merged = write_merged(dir, [{1, 10}, {2, 10}])
       {:ok, registered} = Catalog.register_segments(catalog, @table, [a, b])
 
       assert {:ok, swapped} =
@@ -618,7 +626,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       segments_dir: dir
     } do
       a = write_segment(dir, 1, 10)
-      merged = write_segment(dir, 3, 10)
+      merged = write_merged(dir, [{1, 10}])
       {:ok, registered} = Catalog.register_segments(catalog, @table, [a])
 
       {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
@@ -662,12 +670,54 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       segments_dir: dir
     } do
       a = write_segment(dir, 1, 10)
-      merged = write_segment(dir, 3, 10)
+      merged = write_merged(dir, [{1, 10}])
       {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
       {:ok, swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
 
       assert Catalog.replace_segments(catalog, @table, [merged], [a.path]) == {:ok, swapped}
       assert Catalog.segments(catalog, @table, :current) == {:ok, [merged.path]}
+      assert row_count() == 10
+    end
+
+    test "retires its inputs without opening the table's other files (T-594)", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      other = write_segment(dir, 20, 10)
+      merged = write_merged(dir, [{1, 10}, {2, 10}])
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a, b, other])
+      File.rm!(other.path)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, _swapped} =
+                   Catalog.replace_segments(catalog, @table, [merged], [a.path, b.path])
+        end)
+
+      refute log =~ "unbounded"
+      assert {:ok, current} = Catalog.segments(catalog, @table, :current)
+      assert Enum.sort(current) == Enum.sort([merged.path, other.path])
+    end
+
+    test "falls back to the unbounded DELETE when the bounds would miss rows", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      unrelated = write_segment(dir, 3, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, _swapped} =
+                   Catalog.replace_segments(catalog, @table, [unrelated], [a.path])
+        end)
+
+      assert log =~ "retires its inputs unbounded"
+      assert log =~ "bounds_miss_rows"
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [unrelated.path]}
       assert row_count() == 10
     end
 
