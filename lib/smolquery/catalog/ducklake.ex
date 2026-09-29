@@ -124,6 +124,28 @@ defmodule Smolquery.Catalog.DuckLake do
   invisible inside the transaction, and it puts the statement most likely to
   fail (registering a merged file the table could reject) after one that has
   already applied, so the rollback path is the one a real failure exercises.
+
+  ## The swap's `DELETE` is bounded, or it opens every file of the table
+
+  DuckLake answers `DELETE ... WHERE filename IN (...)` by opening every file
+  the table holds and discarding the ones whose name misses: a 5-file group on
+  a 200-file table opened all 200. On a local disk that is 0.7 s at 16,384
+  files; on S3 it is a request per file, and `metrics.samples` at 16,369 files
+  timed out every swap at 120 s (T-588, T-594). DuckLake does prune by the
+  per-file min/max it keeps in its metadata before opening anything, so the
+  swap's `DELETE` also bounds each timestamp column by the merged file's own
+  footer, widened by a second: the same 5-file group then opened 5.
+
+  The merged file holds exactly the group's rows, so those bounds cover every
+  row the `DELETE` must remove. That is checked, not assumed: a bound that
+  missed a row would leave the input half-deleted and its remaining rows
+  counted twice, beside the merged copy. Before the transaction the swap counts
+  the group's rows under the bounds, and anything but the merged row count, or
+  a failure computing them, falls back to the unbounded `DELETE` with a
+  warning. A column is bounded only when the footer has min, max and a zero
+  null count in every row group. The check is what catches schema evolution:
+  an input written before a timestamp column was added reads that column as
+  NULL, so no bound can cover it, and its swap takes the unbounded path.
   """
 
   @behaviour Smolquery.Catalog
@@ -687,7 +709,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   def drop_segments(%__MODULE__{} = config, table, paths) do
     with {:ok, name} <- table_name(config, table),
-         :ok <- commit(config, delete_statement(name, paths)) do
+         :ok <- commit(config, delete_statement(name, by_file(paths))) do
       current_snapshot(config)
     end
   end
@@ -696,39 +718,125 @@ defmodule Smolquery.Catalog.DuckLake do
   def replace_segments(%__MODULE__{} = _config, _table, [], _paths), do: {:error, :no_segments}
 
   def replace_segments(%__MODULE__{} = config, {dataset, table}, segments, paths) do
-    add = segments |> Enum.map(& &1.path) |> Enum.uniq()
     drop = Enum.uniq(paths)
 
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         :ok <- with_commit_retries(fn -> swap_missing(config, {dataset, table}, add, drop) end) do
+         {:ok, name} <- table_name(config, {dataset, table}),
+         :ok <-
+           with_commit_retries(fn ->
+             swap_missing(config, {dataset, table}, name, segments, drop)
+           end) do
       current_snapshot(config)
     end
   end
 
-  defp swap_missing(config, ref, add, drop) do
+  defp swap_missing(config, ref, name, segments, drop) do
+    add = segments |> Enum.map(& &1.path) |> Enum.uniq()
+
     with {:ok, registered} <- segments(config, ref, :current) do
       case add -- registered do
-        [] -> {:ok, :already_swapped}
-        pending -> swap(config, ref, pending, drop)
+        [] ->
+          {:ok, :already_swapped}
+
+        pending ->
+          swap(config, ref, name, pending, retire_predicate(config, ref, name, segments, drop))
       end
     end
   end
 
-  defp swap(config, ref, add, []),
+  defp swap(config, ref, _name, add, nil),
     do: query(config, add_statement(config, ref, add), [], config.swap_timeout_ms)
 
-  defp swap(config, ref, add, drop) do
-    with {:ok, name} <- table_name(config, ref),
-         :ok <-
-           transaction(
-             config,
-             [delete_statement(name, drop), add_statement(config, ref, add)],
-             config.swap_timeout_ms
-           ) do
-      {:ok, :committed}
+  defp swap(config, ref, name, add, retire) do
+    case transaction(
+           config,
+           [delete_statement(name, retire), add_statement(config, ref, add)],
+           config.swap_timeout_ms
+         ) do
+      :ok -> {:ok, :committed}
+      {:error, _error} = failed -> failed
     end
   end
+
+  defp retire_predicate(_config, _ref, _name, _segments, []), do: nil
+
+  defp retire_predicate(config, ref, name, segments, drop) do
+    by_file = by_file(drop)
+
+    with {:ok, [_ | _] = bounds} <- merged_bounds(config, ref, segments),
+         bounded = Enum.join([by_file | bounds], " AND "),
+         :ok <- covers_group(config, name, bounded, segments) do
+      bounded
+    else
+      {:ok, []} ->
+        by_file
+
+      {:error, reason} ->
+        Logger.warning(
+          "swap of #{inspect(ref)} retires its inputs unbounded, opening every file " <>
+            "of the table: #{inspect(reason)}"
+        )
+
+        by_file
+    end
+  end
+
+  defp merged_bounds(config, ref, segments) do
+    with {:ok, schema} <- table_schema(config, ref) do
+      footer_bounds(config, Enum.map(segments, & &1.path), timestamp_columns(schema))
+    end
+  end
+
+  defp timestamp_columns(schema),
+    do:
+      for(
+        %Field{type: type, name: column} <- schema.fields,
+        type in [:timestamp, :timestamp_ns],
+        do: column
+      )
+
+  defp footer_bounds(_config, _paths, []), do: {:ok, []}
+
+  defp footer_bounds(config, paths, columns) do
+    count = length(paths)
+
+    sql =
+      "SELECT path_in_schema, " <>
+        "CAST(min(TRY_CAST(stats_min_value AS TIMESTAMP)) - INTERVAL 1 SECOND AS VARCHAR), " <>
+        "CAST(max(TRY_CAST(stats_max_value AS TIMESTAMP)) + INTERVAL 1 SECOND AS VARCHAR), " <>
+        "count(TRY_CAST(stats_min_value AS TIMESTAMP)) = count(*) " <>
+        "AND count(TRY_CAST(stats_max_value AS TIMESTAMP)) = count(*) " <>
+        "AND coalesce(bool_and(stats_null_count = 0), false) " <>
+        "FROM parquet_metadata([#{placeholders(1, count)}]) " <>
+        "WHERE path_in_schema IN (#{placeholders(count + 1, length(columns))}) " <>
+        "GROUP BY path_in_schema ORDER BY path_in_schema"
+
+    with {:ok, result} <- query(config, sql, paths ++ columns, config.swap_timeout_ms) do
+      {:ok,
+       for [column, low, high, true] <- result.rows do
+         "#{Identifier.quote_name!(column)} BETWEEN CAST(#{Identifier.sql_string(low)} " <>
+           "AS TIMESTAMP) AND CAST(#{Identifier.sql_string(high)} AS TIMESTAMP)"
+       end}
+    end
+  end
+
+  defp covers_group(config, name, bounded, segments) do
+    expected = Enum.sum_by(segments, & &1.row_count)
+
+    case query(
+           config,
+           "SELECT count(*) FROM #{name} WHERE #{bounded}",
+           [],
+           config.swap_timeout_ms
+         ) do
+      {:ok, %{rows: [[^expected]]}} -> :ok
+      {:ok, %{rows: [[found]]}} -> {:error, {:bounds_miss_rows, expected, found}}
+      {:error, _error} = failed -> failed
+    end
+  end
+
+  defp placeholders(first, count), do: Enum.map_join(first..(first + count - 1), ", ", &"$#{&1}")
 
   @impl Catalog
   def on_connection(%__MODULE__{engine: {name, _slot}} = config, slot),
@@ -1302,10 +1410,12 @@ defmodule Smolquery.Catalog.DuckLake do
       "allow_missing => true, ignore_extra_columns => true)"
   end
 
-  defp delete_statement(name, paths) do
+  defp delete_statement(name, where), do: "DELETE FROM #{name} WHERE #{where}"
+
+  defp by_file(paths) do
     literals = paths |> Enum.uniq() |> Enum.map_join(", ", &Identifier.sql_string/1)
 
-    "DELETE FROM #{name} WHERE filename IN (#{literals})"
+    "filename IN (#{literals})"
   end
 
   defp commit(config, sql), do: with_commit_retries(fn -> query(config, sql) end)
