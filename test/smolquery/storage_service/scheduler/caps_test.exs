@@ -210,4 +210,43 @@ defmodule Smolquery.StorageService.Scheduler.CapsTest do
       assert Caps.adjusted_row_caps(%{}, [timeout, sizing, :skip], @resolved) == %{}
     end
   end
+
+  describe "adjusted_span_widths/2 (T-603)" do
+    @offload "Out of Memory Error: failed to offload data block of size 256.0 KiB " <>
+               "(22.3 GiB/22.3 GiB used)"
+
+    defp span_failed(reason, rows, width),
+      do:
+        {:failed,
+         %{table: @table, reason: reason, paths: [], level: :span, rows: rows, width: width}}
+
+    test "a merge that ran out of temp space teaches twice the limit over its rows" do
+      cap = trunc(22.3 * 1_073_741_824)
+      failed = span_failed({:merge_failed, %Adbc.Error{message: @offload}}, 1_000_000, 200)
+
+      log =
+        capture_log(fn -> send(self(), {:widths, Caps.adjusted_span_widths(%{}, [failed])}) end)
+
+      assert_received {:widths, %{@table => width}}
+      assert width == div(2 * cap, 1_000_000) + 1
+      assert log =~ "learned #{width} bytes a row"
+    end
+
+    test "another failure a smaller group would avoid doubles the width it was planned at" do
+      oom = span_failed({:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}, 10, 300)
+
+      capture_log(fn ->
+        assert Caps.adjusted_span_widths(%{}, [oom]) == %{@table => 600}
+      end)
+    end
+
+    test "a width only grows, and hour-level or unrelated failures teach nothing" do
+      oom = span_failed({:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}, 10, 300)
+      hour = {:failed, %{table: @table, reason: :boom, paths: [], rows: 10}}
+      unrelated = span_failed(:commit_conflict, 10, 300)
+
+      assert Caps.adjusted_span_widths(%{@table => 5_000}, [oom]) == %{@table => 5_000}
+      assert Caps.adjusted_span_widths(%{}, [hour, unrelated, {:ok, %{table: @table}}]) == %{}
+    end
+  end
 end

@@ -109,7 +109,8 @@ defmodule Smolquery.StorageService.Scheduler.Job do
           rows: row_count,
           paths: paths,
           level: group.level,
-          span_cap: group.span_cap
+          span_cap: group.span_cap,
+          width: Map.get(group, :width)
         )
     end
   end
@@ -156,7 +157,7 @@ defmodule Smolquery.StorageService.Scheduler.Job do
 
   @doc """
   A compaction failure, logged and reported: the table, the reason, and what
-  of `:rows`, `:paths`, `:level` and `:span_cap` the caller knows. Recycles
+  of `:rows`, `:paths`, `:level`, `:span_cap` and `:width` the caller knows. Recycles
   the compaction engine first when the reason is an engine call exit.
   """
   @spec failed(Runtime.t(), Catalog.table_ref(), term(), integer(), keyword()) ::
@@ -174,7 +175,7 @@ defmodule Smolquery.StorageService.Scheduler.Job do
 
     failure =
       opts
-      |> Keyword.take([:rows, :level, :span_cap])
+      |> Keyword.take([:rows, :level, :span_cap, :width])
       |> Map.new()
       |> Map.merge(%{table: table_ref, reason: reason, paths: Keyword.get(opts, :paths, [])})
 

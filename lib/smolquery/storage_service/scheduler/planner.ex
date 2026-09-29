@@ -153,8 +153,11 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   `compact_span_decoded_bytes` over an estimated decoded row width: the mean
   text width of up to 1,024 rows of the group's first file, read only then.
   A group over that cap is cut again under it. Text is a proxy for what
-  DuckDB holds, not a measure of it; the span cap halving below remains the
-  correction when it guesses low. A sample that fails is
+  DuckDB holds, not a measure of it, and on the `bench.otel_logs_v*` tables
+  it was low by at least 20x (T-603). So the width used is the larger of the
+  sample and the width the table learned from its own failed span merges
+  (`Smolquery.StorageService.Scheduler.Caps.adjusted_span_widths/2`); the
+  span cap halving below remains a second correction. A sample that fails is
   `{:width_sample_failed, error}`, which names no file, so it never counts
   toward quarantining a file that is fine.
 
@@ -235,7 +238,8 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   The one group this node compacts next for `table_ref` in `lane`, from the
   table's current `files`: `:hour` plans the recent files (every file, with
   the span level off), `:span` the settled ones. `planning` carries the ring
-  (`:routing`) and this node's quarantined groups (`:quarantined_groups`);
+  (`:routing`), this node's quarantined groups (`:quarantined_groups`) and
+  the table's learned span width (`:learned_width`, or none);
   `span_cap` is the table's learned span cap. Answers `:not_owned` when this
   node owns none of the lane's files, `:skip` when it owns some and nothing
   is worth merging, and an error, with the paths that failed when it knows
@@ -268,7 +272,13 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
 
     with [_ | _] = owned <- owned_paths(runtime, planning.routing, owner, paths),
          [_ | _] = plannable <- reject_quarantined(planning.quarantined_groups, owned, listed),
-         {:ok, group} <- plan_files(runtime, level, listed_among(planning.files, plannable)) do
+         {:ok, group} <-
+           plan_files(
+             runtime,
+             level,
+             listed_among(planning.files, plannable),
+             Map.get(planning, :learned_width)
+           ) do
       {:ok, Map.merge(group, %{level: level, span_cap: runtime.compact_max_bytes})}
     else
       [] -> :not_owned
@@ -328,28 +338,37 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
     Enum.filter(files, &MapSet.member?(plannable, &1.path))
   end
 
-  defp plan_files(runtime, level, files) do
+  defp plan_files(runtime, level, files, learned) do
     candidates =
       for %{path: path, bytes: bytes} <- files, bytes < runtime.compact_below_bytes, do: path
 
     if length(candidates) < runtime.compact_min_inputs do
       :skip
     else
-      plan_undersized(runtime, level, candidates)
+      plan_undersized(runtime, level, candidates, learned)
     end
   end
 
-  defp decoded_capped(runtime, entries, %{paths: [sample | _rest], row_count: rows} = group) do
+  defp decoded_capped(runtime, entries, %{paths: [sample | _rest]} = group, learned) do
     case row_width(runtime, sample) do
-      {:ok, width} ->
+      {:ok, sampled} ->
+        width = max(sampled, learned || 0)
         cap = max(div(runtime.compact_span_decoded_bytes, width), 1)
 
-        if rows <= cap, do: {:ok, group}, else: group(%{runtime | compact_max_rows: cap}, entries)
+        with {:ok, group} <- capped_group(runtime, entries, group, cap) do
+          {:ok, Map.put(group, :width, width)}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  defp capped_group(_runtime, _entries, %{row_count: rows} = group, cap) when rows <= cap,
+    do: {:ok, group}
+
+  defp capped_group(runtime, entries, _group, cap),
+    do: group(%{runtime | compact_max_rows: cap}, entries)
 
   defp row_width(runtime, path) do
     sql =
@@ -362,35 +381,35 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
     end
   end
 
-  defp plan_undersized(runtime, level, owned) do
+  defp plan_undersized(runtime, level, owned, learned) do
     with {:ok, undersized} <- undersized(runtime, owned) do
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
-      |> carried_group(runtime, level, [])
+      |> carried_group(runtime, level, [], learned)
     end
   end
 
-  defp carried_group([], _runtime, _carry, _carried), do: :skip
+  defp carried_group([], _runtime, _carry, _carried, _learned), do: :skip
 
-  defp carried_group([bucket_entries | rest], runtime, :span, []) do
+  defp carried_group([bucket_entries | rest], runtime, :span, [], learned) do
     with {:ok, group} <- group(runtime, bucket_entries),
-         {:ok, group} <- decoded_capped(runtime, bucket_entries, group) do
+         {:ok, group} <- decoded_capped(runtime, bucket_entries, group, learned) do
       {:ok, group}
     else
-      :skip -> carried_group(rest, runtime, :span, [])
+      :skip -> carried_group(rest, runtime, :span, [], learned)
       {:error, _reason} = failed -> failed
     end
   end
 
-  defp carried_group([bucket_entries | rest], runtime, :hour, carried) do
+  defp carried_group([bucket_entries | rest], runtime, :hour, carried, learned) do
     candidates = carried ++ bucket_entries
 
     if length(candidates) < runtime.compact_min_inputs do
-      carried_group(rest, runtime, :hour, candidates)
+      carried_group(rest, runtime, :hour, candidates, learned)
     else
       case group(runtime, candidates) do
-        :skip -> carried_group(rest, runtime, :hour, candidates)
+        :skip -> carried_group(rest, runtime, :hour, candidates, learned)
         {:ok, group} -> {:ok, group}
       end
     end
