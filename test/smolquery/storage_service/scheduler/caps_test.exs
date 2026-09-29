@@ -232,7 +232,7 @@ defmodule Smolquery.StorageService.Scheduler.CapsTest do
       assert log =~ "learned #{width} bytes a row"
     end
 
-    test "another failure a smaller group would avoid doubles the width it was planned at" do
+    test "a merge that ran out of memory doubles the width it was planned at" do
       oom = span_failed({:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}, 10, 300)
 
       capture_log(fn ->
@@ -244,9 +244,20 @@ defmodule Smolquery.StorageService.Scheduler.CapsTest do
       oom = span_failed({:merge_failed, %Adbc.Error{message: "Out of Memory Error"}}, 10, 300)
       hour = {:failed, %{table: @table, reason: :boom, paths: [], rows: 10}}
       unrelated = span_failed(:commit_conflict, 10, 300)
+      timed_out = span_failed(%Smolquery.Engine.CallExited{reason: :timeout}, 10, 300)
+
+      engine_exit =
+        span_failed({:merge_failed, %Smolquery.Engine.CallExited{reason: :timeout}}, 10, 300)
 
       assert Caps.adjusted_span_widths(%{@table => 5_000}, [oom]) == %{@table => 5_000}
-      assert Caps.adjusted_span_widths(%{}, [hour, unrelated, {:ok, %{table: @table}}]) == %{}
+
+      assert Caps.adjusted_span_widths(%{}, [
+               hour,
+               unrelated,
+               timed_out,
+               engine_exit,
+               {:ok, %{table: @table}}
+             ]) == %{}
     end
   end
 end
