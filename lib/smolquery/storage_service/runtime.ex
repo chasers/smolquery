@@ -161,7 +161,9 @@ defmodule Smolquery.StorageService.Runtime do
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
   the merge engine, one rung down: explicit knob, else a quarter of the
   cgroup limit, else `Smolquery.Engine`'s application config; see
-  `compact_engine_memory_limit/2`.
+  `compact_engine_memory_limit/2`. Its thread count follows from that limit,
+  one thread per `compact_engine_mib_per_thread`, so a merge's sort always has
+  the memory it needs on each thread to spill; see `compact_engine_threads/3`.
 
   `merge_inputs_per_call` bounds how many `read_parquet` inputs any one of the
   merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
@@ -282,6 +284,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_max_rows: nil,
     compact_bucket_ms: 3_600_000,
     compact_engine_memory_limit: nil,
+    compact_engine_mib_per_thread: 256,
     compact_backoff_base_ms: 600_000,
     compact_backoff_max_ms: 14_400_000,
     merge_engine: nil,
@@ -321,6 +324,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_max_rows: pos_integer() | nil,
           compact_bucket_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
+          compact_engine_mib_per_thread: pos_integer(),
           compact_backoff_base_ms: non_neg_integer(),
           compact_backoff_max_ms: pos_integer(),
           merge_engine: Smolquery.Engine.handle() | nil,
@@ -355,6 +359,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_max_rows,
     :compact_bucket_ms,
     :compact_engine_memory_limit,
+    :compact_engine_mib_per_thread,
     :compact_backoff_base_ms,
     :compact_backoff_max_ms,
     :merge_inputs_per_call,
@@ -399,6 +404,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> struct!(Keyword.take(config, @limits))
     |> validate_engine_memory_limit()
     |> validate_compact_engine_memory_limit()
+    |> validate_compact_engine_mib_per_thread()
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_bucket_ms()
@@ -482,6 +488,89 @@ defmodule Smolquery.StorageService.Runtime do
 
   def compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}, cgroup),
     do: derived_memory_limit(limit, cgroup, 4)
+
+  @doc """
+  The DuckDB thread count the compaction engine starts with: one thread per
+  `compact_engine_mib_per_thread` of its memory limit, at least one and at
+  most `cores` (T-591).
+
+  A compaction merge is one `COPY ... ORDER BY`, and DuckDB's sort needs a
+  floor of memory on every thread before it can spill; below it the sort fails
+  to pin a block instead. A week of `metrics.samples`-shaped rows, 80.6M of
+  them, ran out of memory at 512 MB on 8 threads and on 6, and merged at 512 MB
+  on 4, 3 and 2 in about the same time, because the sort waits on its spill and
+  not on its cores (T-589). With the thread count left at the core count, a
+  many-core pod gave each thread a sliver of a fixed limit, and the only lever
+  left was `Smolquery.StorageService.Compactor.adjusted_row_caps/3` halving the
+  group (T-262, T-544).
+
+  The limit is `compact_engine_memory_limit/2`, else the `memory_limit` the
+  engine inherits from `Smolquery.Engine`'s application config; with neither,
+  the answer is `nil` and the engine keeps DuckDB's defaults. Raises on a limit
+  that is not a DuckDB size string, which boot validation already refuses for
+  a configured one.
+  """
+  @spec compact_engine_threads(t(), {:ok, pos_integer()} | :none, pos_integer()) ::
+          pos_integer() | nil
+  def compact_engine_threads(
+        runtime,
+        cgroup \\ Smolquery.CgroupMemory.limit_bytes(),
+        cores \\ Smolquery.Engine.thread_count()
+      )
+
+  def compact_engine_threads(%__MODULE__{} = runtime, cgroup, cores) do
+    case compact_engine_memory_limit(runtime, cgroup) || inherited_memory_limit() do
+      nil -> nil
+      limit -> threads_within(limit, runtime.compact_engine_mib_per_thread, cores)
+    end
+  end
+
+  defp threads_within(limit, mib_per_thread, cores) do
+    case size_bytes(limit) do
+      {:ok, bytes} ->
+        bytes |> div(mib_per_thread * 1_048_576) |> min(cores) |> max(1)
+
+      :error ->
+        raise ArgumentError,
+              "unreadable compaction engine memory_limit: #{inspect(limit)} " <>
+                "(expected a DuckDB size string like \"1GiB\")"
+    end
+  end
+
+  defp inherited_memory_limit do
+    :smolquery
+    |> Application.get_env(Smolquery.Engine, [])
+    |> Keyword.get(:memory_limit)
+  end
+
+  @size_units %{
+    "b" => 1,
+    "byte" => 1,
+    "bytes" => 1,
+    "k" => 1_000,
+    "kb" => 1_000,
+    "m" => 1_000_000,
+    "mb" => 1_000_000,
+    "g" => 1_000_000_000,
+    "gb" => 1_000_000_000,
+    "t" => 1_000_000_000_000,
+    "tb" => 1_000_000_000_000,
+    "kib" => 1_024,
+    "mib" => 1_048_576,
+    "gib" => 1_073_741_824,
+    "tib" => 1_099_511_627_776
+  }
+
+  defp size_bytes(limit) do
+    with [_match, number, unit] <-
+           Regex.run(~r/\A\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)\s*\z/, limit),
+         {:ok, factor} <- Map.fetch(@size_units, String.downcase(unit)),
+         {value, ""} <- Float.parse(number) do
+      {:ok, trunc(value * factor)}
+    else
+      _unreadable -> :error
+    end
+  end
 
   defp derived_memory_limit(limit, _cgroup, _divisor) when is_binary(limit), do: limit
 
@@ -654,15 +743,39 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp validate_compact_engine_memory_limit(
-         %__MODULE__{compact_engine_memory_limit: limit} = runtime
-       )
-       when is_binary(limit) or is_nil(limit),
+         %__MODULE__{compact_engine_memory_limit: nil} = runtime
+       ),
        do: runtime
 
-  defp validate_compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}) do
+  defp validate_compact_engine_memory_limit(
+         %__MODULE__{compact_engine_memory_limit: limit} = runtime
+       )
+       when is_binary(limit) do
+    case size_bytes(limit) do
+      {:ok, _bytes} -> runtime
+      :error -> refuse_compact_engine_memory_limit(limit)
+    end
+  end
+
+  defp validate_compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}),
+    do: refuse_compact_engine_memory_limit(limit)
+
+  defp refuse_compact_engine_memory_limit(limit) do
     raise ArgumentError,
           "unsupported compact_engine_memory_limit: #{inspect(limit)} " <>
             "(expected a DuckDB size string like \"1GiB\", or nil)"
+  end
+
+  defp validate_compact_engine_mib_per_thread(
+         %__MODULE__{compact_engine_mib_per_thread: mib} = runtime
+       )
+       when is_integer(mib) and mib > 0,
+       do: runtime
+
+  defp validate_compact_engine_mib_per_thread(%__MODULE__{compact_engine_mib_per_thread: mib}) do
+    raise ArgumentError,
+          "unsupported compact_engine_mib_per_thread: #{inspect(mib)} " <>
+            "(expected a positive integer)"
   end
 
   defp validate_compact_backoff(

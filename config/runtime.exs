@@ -529,6 +529,14 @@ if limit = System.get_env("SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT") do
   config :smolquery, Smolquery.StorageService, compact_engine_memory_limit: limit
 end
 
+# T-591: the compaction engine takes one thread per this many MiB of its
+# memory limit, so its sort spills instead of failing to pin a block.
+if mib = System.get_env("SMOLQUERY_STORAGE_COMPACT_MIB_PER_THREAD") do
+  config :smolquery, Smolquery.StorageService,
+    compact_engine_mib_per_thread:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_STORAGE_COMPACT_MIB_PER_THREAD", mib)
+end
+
 # T-458: a table whose compaction keeps failing is left out of the sweep for
 # `min(base * 2^(n-1), max)` after n consecutive failures, so a merge that
 # OOMs every time does not re-run every interval. The base may be 0 (no

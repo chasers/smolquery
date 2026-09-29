@@ -239,6 +239,71 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
+  describe "compact_engine_threads/3" do
+    test "takes one thread per 256 MiB of the limit by default" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsPerLimit, compact_engine_memory_limit: "1GiB")
+
+      assert Runtime.compact_engine_threads(runtime, :none, 16) == 4
+    end
+
+    test "never takes more threads than cores" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsCapped, compact_engine_memory_limit: "8GiB")
+
+      assert Runtime.compact_engine_threads(runtime, :none, 8) == 8
+    end
+
+    test "takes one thread under a limit smaller than one thread's share" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsFloor, compact_engine_memory_limit: "100MB")
+
+      assert Runtime.compact_engine_threads(runtime, :none, 8) == 1
+    end
+
+    test "follows the limit derived from the cgroup" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsDerived)
+
+      assert Runtime.compact_engine_threads(runtime, {:ok, 6 * 1_073_741_824}, 16) == 6
+    end
+
+    test "honours a configured share per thread" do
+      runtime =
+        Runtime.new(
+          name: __MODULE__.ThreadsShare,
+          compact_engine_memory_limit: "1536MiB",
+          compact_engine_mib_per_thread: 512
+        )
+
+      assert Runtime.compact_engine_threads(runtime, :none, 16) == 3
+    end
+
+    test "reads DuckDB's decimal and SI sizes" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsSi, compact_engine_memory_limit: "1.5 GB")
+
+      assert Runtime.compact_engine_threads(runtime, :none, 16) == 5
+    end
+
+    test "without a limit of its own follows the inherited engine memory_limit" do
+      runtime = Runtime.new(name: __MODULE__.ThreadsInherited)
+      inherited = Application.get_env(:smolquery, Smolquery.Engine)[:memory_limit]
+
+      assert inherited == "512MB"
+      assert Runtime.compact_engine_threads(runtime, :none, 16) == 1
+    end
+
+    test "refuses an unreadable limit at boot" do
+      assert_raise ArgumentError, ~r/unsupported compact_engine_memory_limit/, fn ->
+        Runtime.new(name: __MODULE__.ThreadsUnreadable, compact_engine_memory_limit: "lots")
+      end
+    end
+
+    test "refuses a share per thread that is not a positive integer" do
+      for mib <- [0, -1, "256", nil] do
+        assert_raise ArgumentError, ~r/unsupported compact_engine_mib_per_thread/, fn ->
+          Runtime.new(name: __MODULE__.ThreadsBadShare, compact_engine_mib_per_thread: mib)
+        end
+      end
+    end
+  end
+
   describe "with_compact_max_rows/1" do
     test "an explicit cap survives untouched" do
       runtime = Runtime.new(name: __MODULE__.ExplicitRowCap, compact_max_rows: 20)

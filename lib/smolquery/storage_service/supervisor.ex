@@ -47,7 +47,10 @@ defmodule Smolquery.StorageService.Supervisor do
   is exactly the number an operator cannot read off their own configuration
   (T-250). The compaction engine resolves the same way one rung down —
   explicit knob, else a quarter of the cgroup limit — per
-  `Smolquery.StorageService.Runtime.compact_engine_memory_limit/2`. Merge
+  `Smolquery.StorageService.Runtime.compact_engine_memory_limit/2`, and takes
+  one thread per `compact_engine_mib_per_thread` of that limit, so its sort
+  spills rather than failing to pin a block
+  (`Smolquery.StorageService.Runtime.compact_engine_threads/3`, T-591). Merge
   and compaction sessions also set `preserve_insertion_order = false`,
   DuckDB's named mitigation for out-of-memory `COPY`: rows nobody asked to
   order may come out reordered, which no reader of a segment depends on,
@@ -157,7 +160,23 @@ defmodule Smolquery.StorageService.Supervisor do
       )
 
     [{:name, Runtime.compact_engine(runtime.name)} | shared_engine_opts(runtime)] ++
-      compact_limit
+      compact_limit ++ compact_threads(runtime)
+  end
+
+  defp compact_threads(%Runtime{} = runtime) do
+    case Runtime.compact_engine_threads(runtime) do
+      nil ->
+        []
+
+      threads ->
+        Logger.info(
+          "storage compaction engine threads=#{threads} " <>
+            "(one per #{runtime.compact_engine_mib_per_thread} MiB of memory_limit, " <>
+            "at most #{Smolquery.Engine.thread_count()})"
+        )
+
+        [threads: threads]
+    end
   end
 
   defp shared_engine_opts(%Runtime{} = runtime) do

@@ -116,6 +116,7 @@ defmodule Smolquery.DeployedShape do
         StorageRuntime.engine_memory_limit(runtime) || engine_memory_limit(),
       compact_engine_memory_limit:
         StorageRuntime.compact_engine_memory_limit(runtime) || engine_memory_limit(),
+      compact_engine_threads: StorageRuntime.compact_engine_threads(runtime) || :duckdb_default,
       merge_inputs_per_call: runtime.merge_inputs_per_call,
       merge_copy_timeout_ms: runtime.merge_copy_timeout_ms,
       merge_staging_timeout_ms: runtime.merge_staging_timeout_ms,
