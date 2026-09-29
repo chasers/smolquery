@@ -88,9 +88,10 @@ defmodule Smolquery.StorageService.Scheduler do
   So a sweep now runs two lanes. The **hour lane** runs first, over every
   due table: small, fast merges that keep file counts bounded. The **span
   lane** runs after it, over the same tables and the listing the hour lane
-  already read, and starts no span merge once `compact_span_budget_ms` has
-  passed; the tables it did not reach are reported as `span_waiting` and
-  come first in no particular order next sweep. A merge already running
+  already read, most span candidates first
+  (`Smolquery.StorageService.Scheduler.Planner.by_need/3`), and starts no
+  span merge once `compact_span_budget_ms` has passed; the tables it did not
+  reach are reported as `span_waiting`. A merge already running
   finishes. Reusing the listing is safe: a span merge takes settled files,
   which an hour swap never touches, and a swap whose inputs another node
   retired meanwhile refuses in the catalog.
@@ -221,7 +222,7 @@ defmodule Smolquery.StorageService.Scheduler do
         |> Enum.split_with(&Backoff.cooling_down?(state.span_cooldowns, &1))
 
       {span, span_swept, span_waiting, span_deferred} =
-        span_lane(runtime, state, span_due, listings, stopped)
+        span_lane(runtime, state, Planner.by_need(span_due, listings, runtime), listings, stopped)
 
       outcomes = hour ++ span
       row_caps = Caps.adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)

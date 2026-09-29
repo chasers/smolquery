@@ -198,6 +198,27 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   @doc """
+  `tables` in the order the span lane takes them: most span candidates first
+  (files under half of `compact_target_bytes` in the table's listing), then
+  by name (T-603). The span lane stops starting merges at its budget, so
+  this order decides who waits, and a table's place in the catalog listing
+  used to decide it: ten quiet bench tables ahead of `metrics.samples` at
+  19k files.
+  """
+  @spec by_need([Catalog.table_ref()], %{Catalog.table_ref() => [map()]}, Runtime.t()) ::
+          [Catalog.table_ref()]
+  def by_need(tables, _listings, %Runtime{compact_target_bytes: nil}), do: tables
+
+  def by_need(tables, listings, runtime) do
+    below = div(runtime.compact_target_bytes, 2)
+
+    Enum.sort_by(tables, fn table_ref ->
+      files = Map.get(listings, table_ref, [])
+      {-Enum.count(files, &(&1.bytes < below)), table_ref}
+    end)
+  end
+
+  @doc """
   The one group this node compacts next for `table_ref` in `lane`, from the
   table's current `files`: `:hour` plans the recent files (every file, with
   the span level off), `:span` the settled ones. `planning` carries the ring
