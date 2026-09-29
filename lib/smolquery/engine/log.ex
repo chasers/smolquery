@@ -21,13 +21,16 @@ defmodule Smolquery.Engine.Log do
   opens its own connection to the instance rather than using the engine's:
   an engine connection runs one statement at a time, so a drain there would
   wait behind a multi-minute merge, time out, never truncate, and delay the
-  seal it queued in front of. Logs are kept in memory, so every
-  `:interval_ms` the drain reads `duckdb_logs`, writes each row to `Logger`,
-  its line naming the engine and the connection, transaction and query ids,
-  and truncates. At most `:max_rows` rows leave per drain; the count of the
-  rest comes from the same read, and a warning reports it. Rows written
-  between a drain's read and its truncation are lost; a log for diagnosis,
-  not an audit trail. A drain that stops, at the end of its time or by
+  seal it queued in front of. Every `:interval_ms` the drain reads the rows
+  of `duckdb_logs` newer than the last one it wrote, and writes each to
+  `Logger`, its line naming the engine and the connection, transaction and
+  query ids. At most `:max_rows` rows leave per drain; the rest are skipped
+  past, counted in a warning from the same read, so a burst cannot flood the
+  log pipeline or build a backlog. Logs are kept in memory, so the drain
+  truncates them once they pass 10,000 rows; a row written between that
+  read and that truncation is lost. Truncating on every drain lost rows on
+  nearly every drain of a busy engine. A log for diagnosis, not an audit
+  trail. A drain that stops, at the end of its time or by
   `stop/1`, drains once more first. The drain's own statements are left out. When the
   engine's instance is rebuilt, the drain connects to the new one and turns
   logging on there.
@@ -63,6 +66,7 @@ defmodule Smolquery.Engine.Log do
 
   @interval_ms 5_000
   @max_rows 1_000
+  @truncate_after 10_000
   @roles %{"catalog" => :catalog, "merge" => :merge, "compact" => :compact}
 
   @type option ::
@@ -222,6 +226,7 @@ defmodule Smolquery.Engine.Log do
       max_rows: Keyword.get(opts, :max_rows, @max_rows),
       conn: nil,
       instance: nil,
+      mark: nil,
       expiry: nil
     }
 
@@ -292,7 +297,7 @@ defmodule Smolquery.Engine.Log do
 
     case Adbc.Connection.start_link(database: instance) do
       {:ok, conn} ->
-        enable(%{state | conn: conn, instance: instance})
+        enable(%{state | conn: conn, instance: instance, mark: nil})
 
       {:error, error} ->
         Logger.warning(
@@ -331,23 +336,55 @@ defmodule Smolquery.Engine.Log do
   defp drained(state) do
     types = Enum.map_join(state.types, ", ", &"'#{&1}'")
 
+    newer = if state.mark, do: "AND epoch_us(timestamp) > #{state.mark} ", else: ""
+
     with {:ok, %Result{rows: rows}} <-
            run(
              state,
              "SELECT type, log_level, connection_id, transaction_id, query_id, message, " <>
-               "count(*) OVER () FROM duckdb_logs WHERE type IN (#{types}) " <>
+               "epoch_us(timestamp), count(*) OVER (), max(epoch_us(timestamp)) OVER () " <>
+               "FROM duckdb_logs WHERE type IN (#{types}) " <>
                "AND message NOT LIKE '%duckdb_logs%' AND message NOT LIKE '%_logging(%' " <>
-               "ORDER BY timestamp LIMIT #{state.max_rows}"
+               newer <> "ORDER BY timestamp LIMIT #{state.max_rows}"
            ),
-         {:ok, _cleared} <- run(state, "CALL truncate_duckdb_logs()") do
+         :ok <- trimmed(state) do
       Enum.each(rows, &emit(state.engine, &1))
-      dropped(state.engine, rows)
+      %{state | mark: marked(state, rows)}
     else
       failure ->
         Logger.warning("DuckDB log drain on #{inspect(state.engine)} failed: #{inspect(failure)}")
+        state
     end
+  end
 
-    state
+  defp marked(state, []), do: state.mark
+
+  defp marked(
+         state,
+         [[_type, _level, _conn, _txn, _query, _message, _at, total, last] | _] = rows
+       ) do
+    over = total - length(rows)
+
+    if over > 0,
+      do:
+        Logger.warning(
+          "DuckDB log drain on #{inspect(state.engine)} dropped #{over} row(s) over its cap"
+        )
+
+    last
+  end
+
+  defp trimmed(state) do
+    case run(state, "SELECT count(*) FROM duckdb_logs") do
+      {:ok, %Result{rows: [[count]]}} when count > @truncate_after ->
+        with {:ok, _cleared} <- run(state, "CALL truncate_duckdb_logs()"), do: :ok
+
+      {:ok, _small} ->
+        :ok
+
+      {:error, _error} = failed ->
+        failed
+    end
   end
 
   defp run(%{conn: nil}, _sql), do: {:error, :not_connected}
@@ -361,23 +398,11 @@ defmodule Smolquery.Engine.Log do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  defp emit(engine, [type, level, connection, transaction, query, message, _total]) do
+  defp emit(engine, [type, level, connection, transaction, query, message, _at, _total, _last]) do
     Logger.info(
       "duckdb #{inspect(engine)} #{type} #{level} conn=#{connection} txn=#{transaction} " <>
         "query=#{query}: #{redact(type, message || "")}"
     )
-  end
-
-  defp dropped(_engine, []), do: :ok
-
-  defp dropped(engine, [[_type, _level, _conn, _txn, _query, _message, total] | _rest] = rows) do
-    over = total - length(rows)
-
-    if over > 0,
-      do:
-        Logger.warning(
-          "DuckDB log drain on #{inspect(engine)} dropped #{over} row(s) over its cap"
-        )
   end
 
   defp valid_types!(types) do
