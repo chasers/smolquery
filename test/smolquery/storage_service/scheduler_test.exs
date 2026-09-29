@@ -420,6 +420,50 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert Enum.sort(current) == Enum.sort([a.path, b.path])
     end
 
+    test "one sweep runs the hour lane and then the span lane for the same table (T-603)",
+         context do
+      runtime =
+        start_scheduler(
+          context,
+          Keyword.merge(@span, compact_bucket_ms: 3_600_000, compact_span_ms: 86_400_000)
+        )
+
+      now = div(System.os_time(:millisecond), 1_000)
+      seal(runtime, context.catalog, 1, 1..5)
+      seal(runtime, context.catalog, 2, 6..10)
+      seal(runtime, context.catalog, now, 11..15)
+      seal(runtime, context.catalog, now, 16..20)
+
+      assert {:ok, %{compacted: [hour, span], failed: [], span_waiting: []}} =
+               Scheduler.sweep(context.storage)
+
+      assert %{level: :hour, replaced: 2} = hour
+      assert %{level: :span, replaced: 2} = span
+      assert lake_rows(context.storage) == 20
+    end
+
+    test "a spent span budget leaves the span lane waiting, never the hour lane (T-603)",
+         context do
+      runtime =
+        start_scheduler(
+          context,
+          Keyword.merge(@span,
+            compact_bucket_ms: 3_600_000,
+            compact_span_ms: 86_400_000,
+            compact_span_budget_ms: 0
+          )
+        )
+
+      now = div(System.os_time(:millisecond), 1_000)
+      seal(runtime, context.catalog, 1, 1..5)
+      seal(runtime, context.catalog, 2, 6..10)
+      seal(runtime, context.catalog, now, 11..15)
+      seal(runtime, context.catalog, now, 16..20)
+
+      assert {:ok, %{compacted: [%{level: :hour}], span_waiting: [@table]}} =
+               Scheduler.sweep(context.storage)
+    end
+
     test "keeps recent files at the hour level, under its row cap", context do
       runtime =
         start_scheduler(
@@ -452,7 +496,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
   end
 
   test "leaves segments at or above the size floor alone", context do
@@ -461,7 +514,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
@@ -472,7 +534,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
   end
 
   test "groups oldest first and leaves what would pass the ceiling", context do
@@ -522,7 +593,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     assert lake_rows(context.storage) == 50
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
   end
 
   test "a sweep survives an engine that cannot answer its calls (T-251)", context do
@@ -584,7 +664,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     File.write!(bad.path, "not a parquet file")
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
     assert Enum.sort(current) == Enum.sort([good.path, bad.path])
@@ -653,7 +742,9 @@ defmodule Smolquery.StorageService.SchedulerTest do
                 failed: [],
                 quarantined: [[bad.path]],
                 cooling: [],
-                deferred: []
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
               }}
 
     assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
@@ -697,7 +788,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     start_scheduler(context, [])
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
   end
 
   test "a table this node's storage ring hands to another node is left alone", context do
@@ -706,7 +806,16 @@ defmodule Smolquery.StorageService.SchedulerTest do
     seal(runtime, context.catalog, 2, 11..20)
 
     assert Scheduler.sweep(context.storage) ==
-             {:ok, %{compacted: [], failed: [], quarantined: [], cooling: [], deferred: []}}
+             {:ok,
+              %{
+                compacted: [],
+                failed: [],
+                quarantined: [],
+                cooling: [],
+                deferred: [],
+                span_cooling: [],
+                span_waiting: []
+              }}
 
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, @table, :current)
   end
@@ -843,7 +952,15 @@ defmodule Smolquery.StorageService.SchedulerTest do
 
       assert Scheduler.sweep(context.storage) ==
                {:ok,
-                %{compacted: [], failed: [], quarantined: [], cooling: [@table], deferred: []}}
+                %{
+                  compacted: [],
+                  failed: [],
+                  quarantined: [],
+                  cooling: [@table],
+                  deferred: [],
+                  span_cooling: [],
+                  span_waiting: []
+                }}
 
       Process.sleep(350)
 

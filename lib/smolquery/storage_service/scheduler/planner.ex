@@ -165,10 +165,11 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   `Smolquery.StorageService.Scheduler.Caps.adjusted_span_caps/3`. A span failure leaves the hour level's row cap
   alone. Span-level work is owned per
   `{table_ref, {:span, span}}`, the way the hour level is per bucket, so a
-  backlog of days spreads across the fleet. Only when the span level has
-  nothing to do does the sweep turn to the hour level, still one group per
-  table per sweep. A `compact_target_bytes` of `nil` turns the span level
-  off and leaves every file at the hour level, as before.
+  backlog of days spreads across the fleet. Each level is its own lane of
+  the sweep, one group per table per lane (see
+  `Smolquery.StorageService.Scheduler`). A `compact_target_bytes` of `nil`
+  turns the span level off and leaves every file at the hour level, as
+  before.
   """
 
   alias Smolquery.Catalog
@@ -197,39 +198,36 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   @doc """
-  The one group this node compacts next for `table_ref`, from the table's
-  current `files`: at the span level when it has a group, else at the hour
-  level. `planning` carries the ring (`:routing`) and this node's
-  quarantined groups (`:quarantined_groups`); `span_cap` is the table's
-  learned span cap. Answers `:not_owned` when this node owns none of the
-  table's files, `:skip` when it owns some and nothing is worth merging, and
-  an error, with the paths that failed when it knows them, when sizing
-  failed.
+  The one group this node compacts next for `table_ref` in `lane`, from the
+  table's current `files`: `:hour` plans the recent files (every file, with
+  the span level off), `:span` the settled ones. `planning` carries the ring
+  (`:routing`) and this node's quarantined groups (`:quarantined_groups`);
+  `span_cap` is the table's learned span cap. Answers `:not_owned` when this
+  node owns none of the lane's files, `:skip` when it owns some and nothing
+  is worth merging, and an error, with the paths that failed when it knows
+  them, when sizing failed.
   """
-  @spec plan(Runtime.t(), map(), Catalog.table_ref(), pos_integer() | nil, integer()) ::
+  @spec plan(
+          Runtime.t(),
+          map(),
+          Catalog.table_ref(),
+          pos_integer() | nil,
+          integer(),
+          :hour | :span
+        ) ::
           {:ok, map()} | :skip | :not_owned | {:error, term()} | {:error, term(), [String.t()]}
-  def plan(runtime, planning, table_ref, span_cap, now_ms) do
-    case by_level(runtime, Enum.map(planning.files, & &1.path), now_ms) do
-      {[], recent} ->
+  def plan(runtime, planning, table_ref, span_cap, now_ms, lane) do
+    case {lane, by_level(runtime, Enum.map(planning.files, & &1.path), now_ms)} do
+      {:hour, {_settled, recent}} ->
         plan_level(runtime, :hour, planning, table_ref, recent)
 
-      {settled, recent} ->
-        span = span_level(runtime, span_cap)
+      {:span, {[], _recent}} ->
+        :skip
 
-        case plan_level(span, :span, planning, {table_ref, :span}, settled) do
-          skipped when skipped in [:not_owned, :skip] ->
-            runtime
-            |> plan_level(:hour, planning, table_ref, recent)
-            |> hour_or_skip(skipped)
-
-          planned ->
-            planned
-        end
+      {:span, {settled, _recent}} ->
+        plan_level(span_level(runtime, span_cap), :span, planning, {table_ref, :span}, settled)
     end
   end
-
-  defp hour_or_skip(:not_owned, :skip), do: :skip
-  defp hour_or_skip(hour, _span), do: hour
 
   defp plan_level(runtime, level, planning, owner, paths) do
     listed = Enum.map(planning.files, & &1.path)
