@@ -51,6 +51,11 @@ defmodule Smolquery.Engine.Connection do
   (T-460). Each instance removes its own leaf when it closes. The OS pid
   keeps two VMs sharing one spill root apart.
 
+  That makes an abandoned instance visible: until its statement finishes,
+  its leaf is still there beside the rebuilt one's. `abandoned_spill/1`
+  lists those leaves, so a caller can refuse to start another spilling
+  merge while one it gave up on is still writing to the same disk (T-601).
+
   Isolation lives here because `Smolquery.QueryService.Runner` creates
   connections directly rather than through `Smolquery.Engine`.
 
@@ -92,7 +97,7 @@ defmodule Smolquery.Engine.Connection do
           | {:statements, [String.t()]}
           | {:max_rows, pos_integer() | :infinity}
           | {:temp_directory, Path.t()}
-          | {:max_temp_directory_size, String.t()}
+          | {:max_temp_directory_size, String.t() | (-> String.t() | nil)}
 
   @typedoc "A transaction statement: SQL, or SQL labelled with the kind its span reports."
   @type statement :: String.t() | {atom(), String.t()}
@@ -113,7 +118,10 @@ defmodule Smolquery.Engine.Connection do
       ceiling.
     * `:temp_directory` — spill directory. Defaults to a distinct child of the
       application `:spill_dir` (`.tmp` unless configured).
-    * `:max_temp_directory_size` — per-instance spill limit (e.g. `"10GiB"`).
+    * `:max_temp_directory_size` — per-instance spill limit (e.g. `"10GiB"`),
+      or a zero-arity function answering one (or `nil` for none). A function
+      is called each time an instance starts, so a rebuilt instance sizes its
+      limit from the disk as it is then, not as it was at boot (T-601).
       Defaults to the application key of the same name; unset uses DuckDB's
       default of 90% of free space.
 
@@ -531,8 +539,35 @@ defmodule Smolquery.Engine.Connection do
       Application.get_env(:smolquery, :max_temp_directory_size)
     end)
     |> case do
+      size when is_function(size, 0) -> size.()
+      size -> size
+    end
+    |> case do
       nil -> []
       size -> [max_temp_directory_size: size]
+    end
+  end
+
+  @doc """
+  The spill leaves, under the application `:spill_dir`, of `database`'s other
+  instances in this OS process: instances a rebuild left running a statement.
+  Empty when `database` is not running, or the spill root cannot be listed.
+  """
+  @spec abandoned_spill(GenServer.server()) :: [Path.t()]
+  def abandoned_spill(database) do
+    root = Application.get_env(:smolquery, :spill_dir, @default_spill_root)
+
+    with pid when is_pid(pid) <- GenServer.whereis(database),
+         {:ok, entries} <- File.ls(root) do
+      prefix = instance_prefix(database)
+      current = prefix <> pid_token(pid)
+
+      for entry <- entries,
+          String.starts_with?(entry, prefix),
+          entry != current,
+          do: Path.join(root, entry)
+    else
+      _none -> []
     end
   end
 
@@ -550,12 +585,13 @@ defmodule Smolquery.Engine.Connection do
     end
   end
 
-  defp registered_instance_token(database) do
-    pid = GenServer.whereis(database)
-    label = if is_atom(database), do: Atom.to_string(database), else: "database"
-    encoded = URI.encode(label, &URI.char_unreserved?/1)
+  defp registered_instance_token(database),
+    do: instance_prefix(database) <> pid_token(GenServer.whereis(database))
 
-    "#{encoded}-os#{System.pid()}-db#{pid_token(pid)}"
+  defp instance_prefix(database) do
+    label = if is_atom(database), do: Atom.to_string(database), else: "database"
+
+    "#{URI.encode(label, &URI.char_unreserved?/1)}-os#{System.pid()}-db"
   end
 
   defp pid_token(pid) do

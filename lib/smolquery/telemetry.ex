@@ -96,6 +96,10 @@ defmodule Smolquery.Telemetry do
                                           — a table whose swap lost its catalog commit to a
                                           concurrent write, left out for one sweep interval;
                                           conflicts counts them in a row (T-595)
+      [:smolquery, :compact, :span_paused] %{count}, meta %{reason: :abandoned_spill |
+                                          :spill_floor}
+                                          — a sweep that ran its hour level only, because
+                                          spilling was unsafe (T-601)
       [:smolquery, :hot_manifest, :change] %{entries},
                                           meta %{change: :added | :retired | :reaped |
                                           :recovered}
@@ -269,6 +273,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :compact, :quarantine],
     [:smolquery, :compact, :backoff],
     [:smolquery, :compact, :conflict],
+    [:smolquery, :compact, :span_paused],
     [:smolquery, :hot_manifest, :change],
     [:smolquery, :hot_manifest, :compaction],
     [:smolquery, :hot_manifest, :read],
@@ -375,6 +380,10 @@ defmodule Smolquery.Telemetry do
     "smolquery_compaction_backoffs_total" =>
       "Compactions of a table deferred after a failed one; a sustained rate means a " <>
         "table's merge keeps failing and the sweep is waiting longer between attempts (T-458).",
+    "smolquery_compaction_span_paused_total" =>
+      "Sweeps that ran the hour level only because spilling was unsafe, by reason: " <>
+        "abandoned_spill (a recycled engine's merge still spills) or spill_floor (the spill " <>
+        "filesystem is below compact_spill_floor_bytes) (T-601).",
     "smolquery_compaction_conflicts_total" =>
       "Compactions of a table that lost the catalog commit to a concurrent write, after the " <>
         "catalog's own retries; each waits one sweep interval and none counts toward the " <>
@@ -898,6 +907,10 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_compaction_conflicts_total", []}, 1)
   end
 
+  def handle_event([:smolquery, :compact, :span_paused], _measurements, meta, nil) do
+    bump({"smolquery_compaction_span_paused_total", [reason: span_paused_reason(meta)]}, 1)
+  end
+
   def handle_event([:smolquery, :hot_manifest, :change], measurements, meta, nil) do
     bump(
       {"smolquery_hot_manifest_index_entries_total", [change: Map.get(meta, :change, :unknown)]},
@@ -1160,6 +1173,11 @@ defmodule Smolquery.Telemetry do
     do: kind
 
   defp catalog_kind(_meta), do: :unknown
+
+  defp span_paused_reason(%{reason: reason}) when reason in [:abandoned_spill, :spill_floor],
+    do: reason
+
+  defp span_paused_reason(_meta), do: :unknown
 
   defp commit_attempt(%{attempt: attempt}) when attempt in 1..5, do: attempt
   defp commit_attempt(_meta), do: :unknown

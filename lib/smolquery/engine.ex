@@ -97,7 +97,7 @@ defmodule Smolquery.Engine do
           | {:threads, pos_integer()}
           | {:max_result_rows, pos_integer() | :infinity}
           | {:temp_directory, Path.t()}
-          | {:max_temp_directory_size, String.t()}
+          | {:max_temp_directory_size, String.t() | (-> String.t() | nil)}
           | {:external_file_cache, boolean()}
 
   @doc """
@@ -155,7 +155,8 @@ defmodule Smolquery.Engine do
     * `:extensions`, `:memory_limit`, `:threads` — override the application
       configuration for this instance.
     * `:temp_directory`, `:max_temp_directory_size` — override the spill
-      directory and its per-instance limit.
+      directory and its per-instance limit; the limit may be a function
+      evaluated per instance (`Smolquery.Engine.Connection`).
     * `:external_file_cache` — whether DuckDB caches the files this engine
       reads (`enable_external_file_cache`). Off unless set; see the
       moduledoc for why a long-lived engine must not keep one.
@@ -341,6 +342,14 @@ defmodule Smolquery.Engine do
 
   defp connection({name, slot}), do: connection_name(name, slot)
   defp connection(name) when is_atom(name), do: connection_name(name)
+
+  @doc """
+  Spill directories an engine's earlier instances still hold in this OS
+  process: a statement a rebuild abandoned is still running and spilling
+  there (`Smolquery.Engine.Connection.abandoned_spill/1`, T-601).
+  """
+  @spec abandoned_spill(atom()) :: [Path.t()]
+  def abandoned_spill(name), do: Connection.abandoned_spill(database_name(name))
 
   @doc """
   The registered name of an engine's database process.

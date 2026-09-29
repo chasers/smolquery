@@ -160,7 +160,21 @@ defmodule Smolquery.StorageService.Supervisor do
       )
 
     [{:name, Runtime.compact_engine(runtime.name)} | shared_engine_opts(runtime)] ++
-      compact_limit ++ compact_threads(runtime)
+      compact_limit ++
+      compact_threads(runtime) ++
+      [max_temp_directory_size: fn -> compact_spill_cap(runtime) end]
+  end
+
+  defp compact_spill_cap(%Runtime{} = runtime) do
+    cap = Runtime.compact_spill_cap(runtime)
+
+    Logger.info(
+      "storage compaction engine max_temp_directory_size=#{inspect(cap)} " <>
+        "(1/#{runtime.compact_spill_share} of the free space under #{Runtime.spill_root()}, " <>
+        "at most the configured max_temp_directory_size)"
+    )
+
+    cap
   end
 
   defp compact_threads(%Runtime{} = runtime) do

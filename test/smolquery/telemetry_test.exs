@@ -789,6 +789,15 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_catalog_statements_total", move) == before_move + 1
   end
 
+  test "counts sweeps whose span level paused, by reason (T-601)" do
+    floor = ~s({reason="spill_floor"})
+    before = value("smolquery_compaction_span_paused_total", floor)
+
+    :telemetry.execute([:smolquery, :compact, :span_paused], %{count: 1}, %{reason: :spill_floor})
+
+    assert value("smolquery_compaction_span_paused_total", floor) == before + 1
+  end
+
   test "outcome/1 folds a call's answer to ok or error" do
     assert Telemetry.outcome(:ok) == :ok
     assert Telemetry.outcome({:ok, 7}) == :ok
