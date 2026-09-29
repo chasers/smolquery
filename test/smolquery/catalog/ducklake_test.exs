@@ -701,6 +701,25 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Enum.sort(current) == Enum.sort([merged.path, other.path])
     end
 
+    test "refuses, committing nothing, when another swap already retired an input", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a, b])
+      winner = write_merged(dir, [{1, 10}])
+      {:ok, before} = Catalog.replace_segments(catalog, @table, [winner], [a.path])
+
+      loser = write_merged(dir, [{1, 10}, {2, 10}])
+
+      assert Catalog.replace_segments(catalog, @table, [loser], [a.path, b.path]) ==
+               {:error, {:inputs_not_live, [a.path]}}
+
+      assert Catalog.current_snapshot(catalog) == {:ok, before}
+      assert row_count() == 20
+    end
+
     test "falls back to the unbounded DELETE when the bounds would miss rows", %{
       catalog: catalog,
       segments_dir: dir

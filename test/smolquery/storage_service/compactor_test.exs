@@ -328,11 +328,21 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert lake_rows(context.storage) == 40
     end
 
+    test "merges settled files the hour level would leave alone, under half the target",
+         context do
+      runtime = start_compactor(context, Keyword.merge(@span, compact_below_bytes: 100))
+      seal(runtime, context.catalog, 1, 1..10)
+      seal(runtime, context.catalog, 2, 11..20)
+
+      assert {:ok, %{compacted: [%{replaced: 2, level: :span}], failed: []}} =
+               Compactor.sweep(context.storage)
+    end
+
     test "leaves a file at or past half the target alone", context do
       runtime =
         start_compactor(
           context,
-          Keyword.merge(@span, compact_below_bytes: 64, compact_target_bytes: 128)
+          Keyword.merge(@span, compact_below_bytes: 64, compact_target_bytes: 130)
         )
 
       a = seal(runtime, context.catalog, 1, 1..10)
@@ -344,7 +354,7 @@ defmodule Smolquery.StorageService.CompactorTest do
       assert Enum.sort(current) == Enum.sort([a.path, b.path])
     end
 
-    test "keeps recent files at the hour level", context do
+    test "keeps recent files at the hour level, under its row cap", context do
       runtime =
         start_compactor(
           context,
@@ -851,6 +861,78 @@ defmodule Smolquery.StorageService.CompactorTest do
       seal(runtime, catalog, 2, 11..20)
 
       assert {:ok, %{compacted: [%{replaced: 2}], failed: []}} = Compactor.sweep(storage)
+    end
+  end
+
+  describe "the span level's caps (T-592)" do
+    defp span_failure(reason, cap),
+      do: {:failed, %{table: @table, reason: reason, paths: [], level: :span, span_cap: cap}}
+
+    defp span_oom(cap),
+      do:
+        span_failure(
+          {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}},
+          cap
+        )
+
+    test "a span merge that runs out of memory or time halves the table's span cap" do
+      runtime = Runtime.new(name: __MODULE__.SpanCaps)
+
+      for reason <- [
+            {:merge_failed, %Adbc.Error{message: "Out of Memory Error: failed to pin block"}},
+            CallExited.new(:timeout),
+            {:call_exited, CallExited.new(:timeout)}
+          ] do
+        log =
+          capture_log(fn ->
+            assert Compactor.adjusted_span_caps(
+                     %{},
+                     [span_failure(reason, 1_073_741_824)],
+                     runtime
+                   ) ==
+                     %{@table => 536_870_912}
+          end)
+
+        assert log =~ "its groups shrink to 536870912 bytes"
+      end
+    end
+
+    test "the span cap never shrinks below compact_max_bytes, and other failures leave it" do
+      runtime = Runtime.new(name: __MODULE__.SpanFloor, compact_max_bytes: 100_000_000)
+
+      capture_log(fn ->
+        assert Compactor.adjusted_span_caps(%{}, [span_oom(150_000_000)], runtime) ==
+                 %{@table => 100_000_000}
+      end)
+
+      assert Compactor.adjusted_span_caps(
+               %{},
+               [span_failure(:commit_conflict, 150_000_000)],
+               runtime
+             ) ==
+               %{}
+    end
+
+    test "a span failure leaves the hour level's row cap alone" do
+      assert Compactor.adjusted_row_caps(%{}, [span_oom(1_073_741_824)], 4_194_304) == %{}
+    end
+
+    test "a span failure backs off only once its cap cannot shrink; a lost race never does" do
+      runtime =
+        Runtime.with_compact_max_rows(
+          Runtime.new(name: __MODULE__.SpanBackoff, compact_backoff_base_ms: 100)
+        )
+
+      shrinkable = [span_oom(1_073_741_824)]
+      at_floor = [span_oom(runtime.compact_max_bytes)]
+      lost = [{:failed, %{table: @table, reason: {:inputs_not_live, ["a"]}, paths: []}}]
+
+      assert Compactor.adjusted_cooldowns(%{}, [@table], shrinkable, runtime, %{}, 0) == %{}
+
+      assert %{@table => _backoff} =
+               Compactor.adjusted_cooldowns(%{}, [@table], at_floor, runtime, %{}, 0)
+
+      assert Compactor.adjusted_cooldowns(%{}, [@table], lost, runtime, %{}, 0) == %{}
     end
   end
 

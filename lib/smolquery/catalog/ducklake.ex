@@ -125,6 +125,19 @@ defmodule Smolquery.Catalog.DuckLake do
   fail (registering a merged file the table could reject) after one that has
   already applied, so the rollback path is the one a real failure exercises.
 
+  ## A swap whose inputs are not all live refuses
+
+  Two compactions can merge overlapping groups: two nodes while the ring
+  changes, or the two levels of `Smolquery.StorageService.Compactor` if a
+  merge outlasts the bucket between them. The loser's `DELETE` then finds its
+  retired inputs already gone and removes nothing for them, while its add
+  registers a merged file holding their rows a second time. So the swap,
+  inside its commit retry and against the listing it already reads, refuses
+  with `{:error, {:inputs_not_live, paths}}` when any input has left the
+  table, and commits nothing. The winner's merge stands, and the loser's
+  merged file is an orphan for GC. A retry of a swap that did commit still
+  answers first, from its registered additions.
+
   ## The swap's `DELETE` is bounded, or it opens every file of the table
 
   DuckLake answers `DELETE ... WHERE filename IN (...)` by opening every file
@@ -743,12 +756,15 @@ defmodule Smolquery.Catalog.DuckLake do
     add = segments |> Enum.map(& &1.path) |> Enum.uniq()
 
     with {:ok, registered} <- segments(config, ref, :current) do
-      case add -- registered do
-        [] ->
+      case {add -- registered, drop -- registered} do
+        {[], _retired} ->
           {:ok, :already_swapped}
 
-        pending ->
+        {pending, []} ->
           swap(config, ref, name, pending, retire_predicate(config, ref, name, segments, drop))
+
+        {_pending, retired} ->
+          {:error, {:inputs_not_live, retired}}
       end
     end
   end
