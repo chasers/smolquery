@@ -135,6 +135,33 @@ defmodule Smolquery.StorageService.Compactor do
   stays a candidate and merges with future arrivals. It never re-merges
   alone; `compact_min_inputs` gates that.
 
+  ## Files settle at a target size, two levels, as soon as they can (T-592)
+
+  The policy above tops out at `compact_max_bytes` inside an hour bucket, so
+  on a table that seals small files often it tops out much lower: at about
+  6 MB, the 1 h bucket held `metrics.samples` to 168 files a week, and a
+  backlog of 16k never converged (T-588). Every query pays per file.
+
+  So compaction runs at two levels, split by age. The **hour level** is the
+  policy above, over the current bucket and the one before it. Every file
+  older than one more bucket is **settled**, and the **span level** merges
+  settled files under half of `compact_target_bytes` toward the target:
+  grouped within one `compact_span_ms` (a day), never carried across spans,
+  capped by the target's bytes and by no row count, because the merge
+  spills (T-591) and a row cap would hold a day of small rows to a fraction
+  of the target. A file therefore reaches the target about two buckets after
+  its data arrived, not once its day closes, at the cost of rewriting a day
+  file still under half the target about once a bucket until it gets there.
+
+  The bucket between the levels belongs to neither, so a merge the hour
+  level planned has finished, or failed, before the span level can plan any
+  of its files: the two never race for a group. Span-level work is owned per
+  `{table_ref, {:span, span}}`, the way the hour level is per bucket, so a
+  backlog of days spreads across the fleet. Only when the span level has
+  nothing to do does the sweep turn to the hour level, still one group per
+  table per sweep. A `compact_target_bytes` of `nil` turns the span level
+  off and leaves every file at the hour level, as before.
+
   ## A failing table backs off instead of re-running every sweep
 
   "The sweep is the retry" is the right shape for a crash, and the wrong
@@ -256,6 +283,7 @@ defmodule Smolquery.StorageService.Compactor do
   ]
 
   @group_max_staging_chunks 64
+  @span_max_rows 9_223_372_036_854_775_807
   @stage_chunk_target_bytes 67_108_864
   @engine_recycle_wait_ms 5_000
   @quarantine_after 5
@@ -792,14 +820,12 @@ defmodule Smolquery.StorageService.Compactor do
     routing = Routing.resolve(runtime.name)
 
     with {:ok, files} <- Catalog.segment_files(runtime.catalog, table_ref, :current),
-         paths = Enum.map(files, & &1.path),
-         [_ | _] = owned <- owned_paths(runtime, routing, table_ref, paths),
-         [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths),
-         {:ok, group} <- plan(runtime, listed_among(files, plannable)),
+         {:ok, group} <-
+           plan_levels(runtime, routing, table_ref, quarantined_groups, files, wall_ms()),
          :ok <- refuse_tombstoned(runtime, table_ref, group) do
       swap(runtime, table_ref, group, started_at)
     else
-      [] ->
+      :not_owned ->
         :skip
 
       :skip ->
@@ -855,16 +881,91 @@ defmodule Smolquery.StorageService.Compactor do
     Enum.reject(owned, &MapSet.member?(active, &1))
   end
 
-  defp owned_paths(runtime, routing, table_ref, paths) do
+  defp plan_levels(runtime, routing, table_ref, quarantined_groups, files, now_ms) do
+    case by_level(runtime, Enum.map(files, & &1.path), now_ms) do
+      {[], recent} ->
+        plan_level(runtime, :carry, routing, table_ref, quarantined_groups, files, recent)
+
+      {settled, recent} ->
+        span = span_level(runtime)
+
+        case plan_level(
+               span,
+               :no_carry,
+               routing,
+               {table_ref, :span},
+               quarantined_groups,
+               files,
+               settled
+             ) do
+          skipped when skipped in [:not_owned, :skip] ->
+            runtime
+            |> plan_level(:carry, routing, table_ref, quarantined_groups, files, recent)
+            |> either_skip(skipped)
+
+          planned ->
+            planned
+        end
+    end
+  end
+
+  defp either_skip(:not_owned, :skip), do: :skip
+  defp either_skip(hour, _span), do: hour
+
+  defp plan_level(runtime, carry, routing, owner, quarantined_groups, files, paths) do
+    with [_ | _] = owned <- owned_paths(runtime, routing, owner, paths),
+         [_ | _] = plannable <- reject_quarantined(quarantined_groups, owned, paths) do
+      plan(runtime, carry, listed_among(files, plannable))
+    else
+      [] -> :not_owned
+    end
+  end
+
+  # The hour level keeps the current bucket and the one before it; everything
+  # older than one more bucket is settled, and the span level merges it toward
+  # the target. The bucket between is neither's, so a merge the hour level
+  # started has finished before the span level can plan the same files. With
+  # no target, every file stays at the hour level, as before T-592.
+  defp by_level(%Runtime{compact_target_bytes: nil}, paths, _now_ms), do: {[], paths}
+
+  defp by_level(runtime, paths, now_ms) do
+    grace = runtime.compact_bucket_ms
+
+    Enum.reduce(paths, {[], []}, fn path, {settled, recent} ->
+      case bucket(path, grace) do
+        :error -> {settled, recent}
+        hour when (hour + 1) * grace + 2 * grace <= now_ms -> {[path | settled], recent}
+        hour when (hour + 1) * grace + grace > now_ms -> {settled, [path | recent]}
+        _between -> {settled, recent}
+      end
+    end)
+  end
+
+  defp span_level(runtime) do
+    %{
+      runtime
+      | compact_below_bytes: div(runtime.compact_target_bytes, 2),
+        compact_max_bytes: runtime.compact_target_bytes,
+        compact_max_rows: @span_max_rows,
+        compact_bucket_ms: runtime.compact_span_ms
+    }
+  end
+
+  defp owned_paths(runtime, routing, owner, paths) do
     paths
     |> Enum.sort_by(&Path.basename/1)
     |> Enum.filter(fn path ->
       case bucket(path, runtime.compact_bucket_ms) do
         :error -> false
-        bucket -> Routing.own?(routing, {table_ref, bucket})
+        bucket -> Routing.own?(routing, owner_key(owner, bucket))
       end
     end)
   end
+
+  defp owner_key({table_ref, :span}, bucket), do: {table_ref, {:span, bucket}}
+  defp owner_key(table_ref, bucket), do: {table_ref, bucket}
+
+  defp wall_ms, do: System.os_time(:millisecond)
 
   defp bucket(path, bucket_ms) do
     case path |> Path.basename(".parquet") |> Id.timestamp() do
@@ -879,36 +980,43 @@ defmodule Smolquery.StorageService.Compactor do
     Enum.filter(files, &MapSet.member?(plannable, &1.path))
   end
 
-  defp plan(runtime, files) do
+  defp plan(runtime, carry, files) do
     candidates =
       for %{path: path, bytes: bytes} <- files, bytes < runtime.compact_below_bytes, do: path
 
     if length(candidates) < runtime.compact_min_inputs do
       :skip
     else
-      plan_undersized(runtime, candidates)
+      plan_undersized(runtime, carry, candidates)
     end
   end
 
-  defp plan_undersized(runtime, owned) do
+  defp plan_undersized(runtime, carry, owned) do
     with {:ok, undersized} <- undersized(runtime, owned) do
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
-      |> carried_group(runtime, [])
+      |> carried_group(runtime, carry, [])
     end
   end
 
-  defp carried_group([], _runtime, _carry), do: :skip
+  defp carried_group([], _runtime, _carry, _carried), do: :skip
 
-  defp carried_group([bucket_entries | rest], runtime, carry) do
-    candidates = carry ++ bucket_entries
+  defp carried_group([bucket_entries | rest], runtime, :no_carry, []) do
+    case group(runtime, bucket_entries) do
+      :skip -> carried_group(rest, runtime, :no_carry, [])
+      {:ok, group} -> {:ok, group}
+    end
+  end
+
+  defp carried_group([bucket_entries | rest], runtime, :carry, carried) do
+    candidates = carried ++ bucket_entries
 
     if length(candidates) < runtime.compact_min_inputs do
-      carried_group(rest, runtime, candidates)
+      carried_group(rest, runtime, :carry, candidates)
     else
       case group(runtime, candidates) do
-        :skip -> carried_group(rest, runtime, candidates)
+        :skip -> carried_group(rest, runtime, :carry, candidates)
         {:ok, group} -> {:ok, group}
       end
     end

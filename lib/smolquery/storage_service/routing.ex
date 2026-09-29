@@ -57,9 +57,13 @@ defmodule Smolquery.StorageService.Routing do
   @typedoc """
   What ownership is checked for: a table for seal, GC, and retention work,
   or a `{table_ref, bucket}` pair for compaction (T-269), where the bucket
-  is a segment ULID's timestamp over `compact_bucket_ms`.
+  is a segment ULID's timestamp over `compact_bucket_ms`, or `{table_ref, {:span,
+  span}}` for the span level, over `compact_span_ms` (T-592).
   """
-  @type key :: Store.table_ref() | {Store.table_ref(), non_neg_integer()}
+  @type key ::
+          Store.table_ref()
+          | {Store.table_ref(), non_neg_integer()}
+          | {Store.table_ref(), {:span, non_neg_integer()}}
 
   @doc """
   The routing for an instance.
