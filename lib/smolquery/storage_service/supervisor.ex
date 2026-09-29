@@ -90,6 +90,7 @@ defmodule Smolquery.StorageService.Supervisor do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine
+  alias Smolquery.Engine.Log
   alias Smolquery.EngineSecrets
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
@@ -128,7 +129,12 @@ defmodule Smolquery.StorageService.Supervisor do
           {Compactor, runtime},
           {Retention, runtime},
           {GC, runtime}
-        ]
+        ] ++
+        Log.boot_engines(%{
+          catalog: Runtime.catalog_engine(runtime.name),
+          merge: Runtime.engine(runtime.name),
+          compact: Runtime.compact_engine(runtime.name)
+        })
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
