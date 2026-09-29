@@ -57,6 +57,21 @@ defmodule Smolquery.Engine.LogTest do
 
       assert Log.redact("QueryLog", "SELECT 1") == "SELECT 1"
     end
+
+    test "a catalog ATTACH, a URL and an S3 setting lose their credentials, and keep the rest" do
+      attach =
+        "ATTACH IF NOT EXISTS 'ducklake:postgres:dbname=smolquery host=catalog.internal " <>
+          "user=app password=hunter2 sslmode=require' AS \"lake\" (DATA_PATH 's3://b/lake')"
+
+      redacted = Log.redact("QueryLog", attach)
+      refute redacted =~ "hunter2"
+      assert redacted =~ "password=<redacted> sslmode=require"
+      assert redacted =~ "host=catalog.internal"
+
+      refute Log.redact("QueryLog", "ATTACH 'postgres://app:hunter2@db:5432/x'") =~ "hunter2"
+      refute Log.redact("QueryLog", "SET s3_secret_access_key='abc'") =~ "abc"
+      refute Log.redact("QueryLog", "SET s3_session_token = zzsecret") =~ "zzsecret"
+    end
   end
 
   test "boot_engines/2 starts a drain per configured role that has an engine" do
@@ -121,13 +136,49 @@ defmodule Smolquery.Engine.LogTest do
       assert off in [false, 0]
     end
 
-    test "Engine.log/3 takes minutes, and a second call replaces the first", %{engine: engine} do
+    test "Engine.log/3 takes minutes, and a second call retargets the same drain", %{
+      engine: engine
+    } do
       {:ok, first} = Engine.log(engine, ["QueryLog"], for: 1)
-      {:ok, second} = Engine.log(engine, ["QueryLog"], for: 1)
+      {:ok, second} = Engine.log(engine, ["QueryLog", "HTTP"], for: 1)
 
-      refute Process.alive?(first)
-      assert Process.alive?(second)
+      assert first == second
+      assert Process.alive?(first)
       :ok = Log.stop(engine)
+    end
+
+    test "a runtime call on a boot drain retargets it, and it outlives the call's time", %{
+      engine: engine
+    } do
+      boot = start_supervised!({Log, engine: engine, types: ["QueryLog"], interval_ms: 50})
+
+      assert {:ok, ^boot} = Log.start(engine, ["QueryLog", "HTTP"], for_ms: 100)
+      Process.sleep(300)
+
+      assert Process.alive?(boot)
+
+      assert %Result{rows: [[on]]} =
+               Engine.query!(engine, "SELECT current_setting('enable_logging')")
+
+      assert on in [true, 1]
+    end
+
+    test "drains on a connection of its own, so a busy engine connection does not hold it", %{
+      engine: engine
+    } do
+      busy = Process.whereis(Engine.connection_name(engine))
+
+      log =
+        capture_log([level: :info], fn ->
+          {:ok, _drain} = Log.start(engine, ["QueryLog"], interval_ms: 50)
+          Engine.query!(engine, "SELECT 777 AS marker")
+          :ok = :sys.suspend(busy)
+          Process.sleep(300)
+          :ok = :sys.resume(busy)
+          :ok = Log.stop(engine)
+        end)
+
+      assert log =~ "SELECT 777 AS marker"
     end
   end
 end

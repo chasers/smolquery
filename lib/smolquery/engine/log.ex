@@ -10,24 +10,30 @@ defmodule Smolquery.Engine.Log do
   time, without a restart; a restart would change what is being measured,
   since the compactor's backoffs and row caps live in memory.
   `SMOLQUERY_DUCKDB_LOG` turns it on at boot for the storage engines it
-  names (`boot_engines/2`).
+  names (`boot_engines/2`). A runtime call on an engine that already has a
+  drain retargets that drain for the set time, and a boot drain then goes
+  back to its own types.
 
-  ## One engine, drained
+  ## One engine, drained on a connection of its own
 
   `enable_logging` is per DuckDB instance, so it covers every connection of
-  the engine it runs on, and each row carries its `connection_id`. Logs are
-  kept in memory, so this process reads `duckdb_logs` every
-  `:interval_ms`, writes each row to `Logger`, its line naming the engine and the
-  connection, transaction and query ids, and truncates. At most `:max_rows` rows leave
-  per drain; the rest are counted in a warning and dropped with the
-  truncation, so a burst cannot flood the log pipeline. Rows written between
-  a drain's read and its truncation are lost; a log for diagnosis, not an
-  audit trail. The drain's own statements are left out. When the engine's
-  instance is rebuilt, the next drain turns logging on again on the new one.
+  the engine it runs on, and each row carries its `connection_id`. The drain
+  opens its own connection to the instance rather than using the engine's:
+  an engine connection runs one statement at a time, so a drain there would
+  wait behind a multi-minute merge, time out, never truncate, and delay the
+  seal it queued in front of. Logs are kept in memory, so every
+  `:interval_ms` the drain reads `duckdb_logs`, writes each row to `Logger`,
+  its line naming the engine and the connection, transaction and query ids,
+  and truncates. At most `:max_rows` rows leave per drain; the count of the
+  rest comes from the same read, and a warning reports it. Rows written
+  between a drain's read and its truncation are lost; a log for diagnosis,
+  not an audit trail. The drain's own statements are left out. When the
+  engine's instance is rebuilt, the drain connects to the new one and turns
+  logging on there.
 
   ## Nothing secret leaves
 
-  DuckDB logs what it runs verbatim, and two things it runs carry
+  DuckDB logs what it runs verbatim, and what the engines run carries
   credentials:
 
     * an `HTTP` row records each request's headers, including the S3
@@ -37,7 +43,11 @@ defmodule Smolquery.Engine.Log do
       and nothing else of it is logged;
     * a `QueryLog` row of a `CREATE SECRET` holds the key, the secret and the
       session token, and `Smolquery.EngineSecrets` runs one per engine. Such
-      a row is logged as `CREATE SECRET <redacted>`.
+      a row is logged as `CREATE SECRET <redacted>`;
+    * a catalog engine's `ATTACH` holds the metadata database's connection
+      string, password included (`Smolquery.DatabaseUrl`). In every other
+      `QueryLog` row a `password=` value, the credentials of a URL and an S3
+      key setting are replaced by `<redacted>`.
 
   `HTTP` is never on unless asked for by name, and `redact/2` is applied to
   every row either way.
@@ -48,6 +58,7 @@ defmodule Smolquery.Engine.Log do
   require Logger
 
   alias Smolquery.Engine
+  alias Smolquery.Engine.Result
 
   @interval_ms 5_000
   @max_rows 1_000
@@ -61,20 +72,26 @@ defmodule Smolquery.Engine.Log do
           | {:max_rows, pos_integer()}
 
   @doc """
-  Turns DuckDB logging on for `engine` and drains it, under
-  `Smolquery.Engine.LogSupervisor`, replacing any drain the engine already
-  has. Turned off again after `:for_ms`.
+  Turns DuckDB logging on for `engine` and drains it for `:for_ms`. With no
+  drain on the engine, one starts under `Smolquery.Engine.LogSupervisor` and
+  stops when the time is up. With one already there, that drain logs
+  `types` for the time instead, and a boot drain then returns to its own.
   """
-  @spec start(atom(), [String.t()], [option()]) :: DynamicSupervisor.on_start_child()
+  @spec start(atom(), [String.t()], [option()]) :: {:ok, pid()} | {:error, term()}
   def start(engine, types, opts \\ []) do
-    :ok = stop(engine)
+    case Process.whereis(name(engine)) do
+      nil ->
+        DynamicSupervisor.start_child(
+          Smolquery.Engine.LogSupervisor,
+          Supervisor.child_spec({__MODULE__, [engine: engine, types: types, base: false] ++ opts},
+            restart: :temporary
+          )
+        )
 
-    DynamicSupervisor.start_child(
-      Smolquery.Engine.LogSupervisor,
-      Supervisor.child_spec({__MODULE__, [engine: engine, types: types] ++ opts},
-        restart: :temporary
-      )
-    )
+      pid ->
+        with :ok <- GenServer.call(pid, {:override, types, Keyword.get(opts, :for_ms, :infinity)}),
+             do: {:ok, pid}
+    end
   end
 
   @doc "Stops `engine`'s drain, turning its logging off, if it has one."
@@ -91,7 +108,7 @@ defmodule Smolquery.Engine.Log do
     do: %{id: name(Keyword.fetch!(opts, :engine)), start: {__MODULE__, :start_link, [opts]}}
 
   @doc "Starts a drain for `:engine`, logging `:types`."
-  @spec start_link([option()]) :: GenServer.on_start()
+  @spec start_link([option() | {:base, boolean()}]) :: GenServer.on_start()
   def start_link(opts) do
     engine = Keyword.fetch!(opts, :engine)
 
@@ -152,7 +169,8 @@ defmodule Smolquery.Engine.Log do
   @doc """
   What of a log row may leave DuckDB: an `HTTP` row rebuilt from its method,
   URL without query string, range, status and duration; a `CREATE SECRET`
-  replaced whole; anything else as it is.
+  replaced whole; any other statement with its passwords, URL credentials
+  and S3 key settings replaced.
   """
   @spec redact(String.t(), String.t()) :: String.t()
   def redact("HTTP", message) do
@@ -176,110 +194,152 @@ defmodule Smolquery.Engine.Log do
     if Regex.match?(
          ~r/\A\s*CREATE\s+(OR\s+REPLACE\s+)?(PERSISTENT\s+|TEMPORARY\s+)?SECRET\b/i,
          message
-       ),
-       do: "CREATE SECRET <redacted>",
-       else: message
+       ) do
+      "CREATE SECRET <redacted>"
+    else
+      message
+      |> String.replace(~r/(\bpassword\s*=\s*)('[^']*'|"[^"]*"|[^\s'",)]+)/i, "\\1<redacted>")
+      |> String.replace(~r/(:\/\/[^:\/@\s'"]+:)[^@\s'"]+@/, "\\1<redacted>@")
+      |> String.replace(
+        ~r/(\bs3_(secret_access_key|session_token|access_key_id)\s*=\s*)('[^']*'|[^\s;]+)/i,
+        "\\1<redacted>"
+      )
+    end
   end
 
   @impl true
   def init(opts) do
     types = Keyword.fetch!(opts, :types)
-
-    unless types != [] and Enum.all?(types, &valid_type?/1) do
-      raise ArgumentError, "unsupported DuckDB log types: #{inspect(types)}"
-    end
+    :ok = valid_types!(types)
+    Process.flag(:trap_exit, true)
 
     state = %{
       engine: Keyword.fetch!(opts, :engine),
+      base: if(Keyword.get(opts, :base, true), do: types),
       types: types,
       interval_ms: Keyword.get(opts, :interval_ms, @interval_ms),
       max_rows: Keyword.get(opts, :max_rows, @max_rows),
-      instance: nil
+      conn: nil,
+      instance: nil,
+      expiry: nil
     }
 
-    Process.flag(:trap_exit, true)
+    Process.send_after(self(), :drain, state.interval_ms)
 
-    case Keyword.get(opts, :for_ms, :infinity) do
-      :infinity -> :ok
-      ms -> Process.send_after(self(), :expire, ms)
-    end
-
-    {:ok, state, {:continue, :enable}}
+    {:ok, state |> connected() |> expire_after(Keyword.get(opts, :for_ms, :infinity))}
   end
 
   @impl true
-  def handle_continue(:enable, state) do
-    Process.send_after(self(), :drain, state.interval_ms)
-    {:noreply, enabled(state)}
+  def handle_call({:override, types, for_ms}, _from, state) do
+    :ok = valid_types!(types)
+    {:reply, :ok, state |> drained() |> retarget(types) |> expire_after(for_ms)}
   end
 
   @impl true
   def handle_info(:drain, state) do
-    state = state |> enabled() |> drained()
+    state = state |> connected() |> drained()
     Process.send_after(self(), :drain, state.interval_ms)
     {:noreply, state}
   end
 
-  def handle_info(:expire, state) do
-    {:stop, :normal, drained(state)}
-  end
+  def handle_info({:expire, ref}, %{expiry: ref, base: nil} = state),
+    do: {:stop, :normal, drained(state)}
+
+  def handle_info({:expire, ref}, %{expiry: ref} = state),
+    do: {:noreply, %{retarget(drained(state), state.base) | expiry: nil}}
+
+  def handle_info({:expire, _stale}, state), do: {:noreply, state}
+
+  def handle_info({:EXIT, conn, _reason}, %{conn: conn} = state),
+    do: {:noreply, %{state | conn: nil, instance: nil}}
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    _off = Engine.try_query(state.engine, "CALL disable_logging()")
-    _cleared = Engine.try_query(state.engine, "CALL truncate_duckdb_logs()")
+    _off = run(state, "CALL disable_logging()")
+    _cleared = run(state, "CALL truncate_duckdb_logs()")
     :ok
   end
 
-  defp enabled(state) do
+  defp expire_after(state, :infinity), do: %{state | expiry: nil}
+
+  defp expire_after(state, ms) do
+    ref = make_ref()
+    Process.send_after(self(), {:expire, ref}, ms)
+    %{state | expiry: ref}
+  end
+
+  defp retarget(state, types) do
+    _off = run(state, "CALL disable_logging()")
+    enable(%{state | types: types})
+  end
+
+  defp connected(state) do
     instance = Process.whereis(Engine.database_name(state.engine))
 
-    if instance == state.instance or is_nil(instance) do
-      state
-    else
-      types = Enum.map_join(state.types, ", ", &"'#{&1}'")
-
-      case Engine.try_query(
-             state.engine,
-             "CALL enable_logging([#{types}], level := 'trace', storage := 'memory')"
-           ) do
-        {:ok, _result} ->
-          Logger.info(
-            "DuckDB logging #{Enum.join(state.types, ", ")} on #{inspect(state.engine)}"
-          )
-
-          %{state | instance: instance}
-
-        {:error, error} ->
-          Logger.warning("DuckDB logging on #{inspect(state.engine)} failed: #{inspect(error)}")
-          state
-      end
+    cond do
+      is_nil(instance) -> state
+      instance == state.instance and is_pid(state.conn) -> state
+      true -> reconnect(state, instance)
     end
   end
 
-  defp drained(%{instance: nil} = state), do: state
+  defp reconnect(state, instance) do
+    close(state.conn)
+
+    case Adbc.Connection.start_link(database: instance) do
+      {:ok, conn} ->
+        enable(%{state | conn: conn, instance: instance})
+
+      {:error, error} ->
+        Logger.warning(
+          "DuckDB log drain on #{inspect(state.engine)} cannot connect: #{inspect(error)}"
+        )
+
+        %{state | conn: nil, instance: nil}
+    end
+  end
+
+  defp close(nil), do: :ok
+
+  defp close(conn) do
+    Process.unlink(conn)
+    Process.exit(conn, :shutdown)
+  end
+
+  defp enable(%{conn: nil} = state), do: state
+
+  defp enable(state) do
+    types = Enum.map_join(state.types, ", ", &"'#{&1}'")
+
+    case run(state, "CALL enable_logging([#{types}], level := 'trace', storage := 'memory')") do
+      {:ok, _result} ->
+        Logger.info("DuckDB logging #{Enum.join(state.types, ", ")} on #{inspect(state.engine)}")
+
+      {:error, error} ->
+        Logger.warning("DuckDB logging on #{inspect(state.engine)} failed: #{inspect(error)}")
+    end
+
+    state
+  end
+
+  defp drained(%{conn: nil} = state), do: state
 
   defp drained(state) do
     types = Enum.map_join(state.types, ", ", &"'#{&1}'")
-    own = "message NOT LIKE '%duckdb_logs%' AND message NOT LIKE '%_logging(%'"
 
-    with {:ok, %{rows: [[total]]}} <-
-           Engine.try_query(
-             state.engine,
-             "SELECT count(*) FROM duckdb_logs WHERE type IN (#{types}) AND #{own}"
-           ),
-         {:ok, %{rows: rows}} <-
-           Engine.try_query(
-             state.engine,
-             "SELECT type, log_level, connection_id, transaction_id, query_id, message " <>
-               "FROM duckdb_logs WHERE type IN (#{types}) AND #{own} " <>
+    with {:ok, %Result{rows: rows}} <-
+           run(
+             state,
+             "SELECT type, log_level, connection_id, transaction_id, query_id, message, " <>
+               "count(*) OVER () FROM duckdb_logs WHERE type IN (#{types}) " <>
+               "AND message NOT LIKE '%duckdb_logs%' AND message NOT LIKE '%_logging(%' " <>
                "ORDER BY timestamp LIMIT #{state.max_rows}"
            ),
-         {:ok, _cleared} <- Engine.try_query(state.engine, "CALL truncate_duckdb_logs()") do
+         {:ok, _cleared} <- run(state, "CALL truncate_duckdb_logs()") do
       Enum.each(rows, &emit(state.engine, &1))
-      dropped(state.engine, total - length(rows))
+      dropped(state.engine, rows)
     else
       failure ->
         Logger.warning("DuckDB log drain on #{inspect(state.engine)} failed: #{inspect(failure)}")
@@ -288,20 +348,41 @@ defmodule Smolquery.Engine.Log do
     state
   end
 
-  defp emit(engine, [type, level, connection, transaction, query, message]) do
+  defp run(%{conn: nil}, _sql), do: {:error, :not_connected}
+
+  defp run(%{conn: conn}, sql) do
+    case Adbc.Connection.query(conn, sql) do
+      {:ok, result} -> {:ok, Result.from_adbc(result)}
+      {:error, _error} = failed -> failed
+    end
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp emit(engine, [type, level, connection, transaction, query, message, _total]) do
     Logger.info(
       "duckdb #{inspect(engine)} #{type} #{level} conn=#{connection} txn=#{transaction} " <>
         "query=#{query}: #{redact(type, message || "")}"
     )
   end
 
-  defp dropped(_engine, 0), do: :ok
+  defp dropped(_engine, []), do: :ok
 
-  defp dropped(engine, count),
-    do:
-      Logger.warning(
-        "DuckDB log drain on #{inspect(engine)} dropped #{count} row(s) over its cap"
-      )
+  defp dropped(engine, [[_type, _level, _conn, _txn, _query, _message, total] | _rest] = rows) do
+    over = total - length(rows)
+
+    if over > 0,
+      do:
+        Logger.warning(
+          "DuckDB log drain on #{inspect(engine)} dropped #{over} row(s) over its cap"
+        )
+  end
+
+  defp valid_types!(types) do
+    if types != [] and Enum.all?(types, &valid_type?/1),
+      do: :ok,
+      else: raise(ArgumentError, "unsupported DuckDB log types: #{inspect(types)}")
+  end
 
   defp valid_type?(type), do: is_binary(type) and Regex.match?(~r/\A[A-Za-z]+\z/, type)
 
