@@ -74,7 +74,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     assert_received {:statement, _measurements, %{kind: :transaction, result: :ok}}
   end
 
-  test "the swap times its delete, add and commit, and counts its commit attempt (T-573)", %{
+  test "the swap times its stage, move and commit, and counts its commit attempt (T-573)", %{
     catalog: catalog,
     segments_dir: dir
   } do
@@ -95,7 +95,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
     {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
 
-    for kind <- [:delete, :add, :commit, :transaction] do
+    for kind <- [:stage, :move, :commit, :transaction] do
       assert_received {[:smolquery, :catalog, :statement], %{kind: ^kind, result: :ok}}
     end
 
@@ -644,7 +644,10 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert {:ok, swapped} =
                Catalog.replace_segments(catalog, @table, [merged], [a.path, b.path])
 
-      assert swapped == registered + 1
+      assert swapped > registered
+      assert {:ok, before} = Catalog.segments(catalog, @table, swapped - 1)
+      assert Enum.sort(before) == Enum.sort([a.path, b.path])
+      assert Catalog.segments(catalog, @table, swapped) == {:ok, [merged.path]}
       assert Catalog.segments(catalog, @table, :current) == {:ok, [merged.path]}
       assert row_count() == 20
     end
@@ -748,24 +751,100 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert row_count() == 20
     end
 
-    test "falls back to the unbounded DELETE when the bounds would miss rows", %{
+    test "refuses, retiring nothing, when the merged file's rows are not its inputs' (T-600)", %{
       catalog: catalog,
       segments_dir: dir
     } do
       a = write_segment(dir, 1, 10)
-      unrelated = write_segment(dir, 3, 10)
+      doubled = write_merged(dir, [{1, 10}, {2, 10}])
       {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
 
-      log =
-        capture_log(fn ->
-          assert {:ok, _swapped} =
-                   Catalog.replace_segments(catalog, @table, [unrelated], [a.path])
-        end)
+      assert Catalog.replace_segments(catalog, @table, [doubled], [a.path]) ==
+               {:error, {:row_count_mismatch, 20, 10}}
 
-      assert log =~ "retires its inputs unbounded"
-      assert log =~ "bounds_miss_rows"
-      assert Catalog.segments(catalog, @table, :current) == {:ok, [unrelated.path]}
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [a.path]}
       assert row_count() == 10
+    end
+
+    test "the twin table follows a column the table gained, and is never listed (T-600)", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+
+      {:ok, _swapped} =
+        Catalog.replace_segments(catalog, @table, [write_merged(dir, [{1, 10}])], [a.path])
+
+      :ok =
+        Catalog.alter_table(
+          catalog,
+          @table,
+          {:add_column, %Field{name: "extra", type: :int64, nullable: true}}
+        )
+
+      b = write_segment(dir, 2, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [b])
+      merged = write_merged(dir, [{2, 10}])
+
+      assert {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [b.path])
+      assert row_count() == 20
+
+      assert %Result{rows: [[10]]} =
+               Engine.query!(
+                 @engine,
+                 ~s|SELECT count(*) FROM lake."analytics"."events" | <>
+                   "WHERE ts >= TIMESTAMP '2026-07-02' AND ts < TIMESTAMP '2026-07-03'"
+               )
+
+      assert {:ok, datasets} = Catalog.list_datasets(catalog)
+      refute DuckLake.Swap.stage_schema() in datasets
+
+      assert Catalog.create_dataset(catalog, DuckLake.Swap.stage_schema()) ==
+               {:error, {:reserved_dataset, DuckLake.Swap.stage_schema()}}
+    end
+
+    test "retires a staged file an interrupted swap left behind, once it is an hour old (T-600)",
+         %{
+           catalog: catalog,
+           segments_dir: dir
+         } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a, b])
+
+      {:ok, _swapped} =
+        Catalog.replace_segments(catalog, @table, [write_merged(dir, [{1, 10}])], [a.path])
+
+      orphan = write_merged(dir, [{2, 10}])
+      stage = ~s|lake."#{DuckLake.Swap.stage_schema()}"|
+
+      %Result{rows: [[twin]]} =
+        Engine.query!(
+          @engine,
+          "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'lake' " <>
+            "AND table_schema = '#{DuckLake.Swap.stage_schema()}'"
+        )
+
+      Engine.query!(
+        @engine,
+        "CALL ducklake_add_data_files('lake', '#{twin}', ['#{orphan.path}'], " <>
+          "schema => '#{DuckLake.Swap.stage_schema()}', allow_missing => true)"
+      )
+
+      Engine.query!(
+        @engine,
+        ~s|UPDATE "__ducklake_metadata_lake".ducklake_snapshot SET snapshot_time = '2020-01-01 00:00:00+00' | <>
+          ~s|WHERE snapshot_id = (SELECT max(snapshot_id) FROM "__ducklake_metadata_lake".ducklake_snapshot)|
+      )
+
+      {:ok, _swapped} =
+        Catalog.replace_segments(catalog, @table, [write_merged(dir, [{2, 10}])], [b.path])
+
+      assert %Result{rows: [[0]]} =
+               Engine.query!(@engine, "SELECT count(*) FROM #{stage}.#{twin}")
+
+      assert row_count() == 20
     end
 
     test "refuses to become a drop when there is nothing to add", %{catalog: catalog} do
@@ -1234,6 +1313,27 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       assert {:error, _pinned_read_fails_cleanly} = Catalog.segments(catalog, @table, first)
       assert Catalog.segments(catalog, @table, :current) == {:ok, [b.path]}
+      assert row_count() == 10
+    end
+
+    test "expiry is what makes a swapped-out file invisible to known_segments (T-600)", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [a])
+      merged = write_merged(dir, [{1, 10}])
+      {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
+
+      assert {:ok, known} = Catalog.known_segments(catalog)
+      assert a.path in known
+
+      Process.sleep(1_100)
+      assert {:ok, _expired} = Catalog.expire_snapshots(catalog, 1_000)
+
+      assert {:ok, known} = Catalog.known_segments(catalog)
+      refute a.path in known
+      assert merged.path in known
       assert row_count() == 10
     end
 

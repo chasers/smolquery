@@ -49,7 +49,8 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
        name: @engine,
        metadata: metadata,
        data_path: Path.join(context.tmp_dir, "data"),
-       catalog: @catalog_name}
+       catalog: @catalog_name,
+       connections: 2}
     )
 
     catalog = DuckLake.new(engine: @engine, catalog: @catalog_name)
@@ -132,6 +133,49 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
              ])
 
     assert row_count() == 4
+  end
+
+  test "a seal in flight commits through the swap; a delete in flight does not (T-600)", %{
+    catalog: catalog,
+    segments_dir: segments_dir
+  } do
+    a = write_segment(segments_dir, 2)
+    b = write_segment(segments_dir, 2)
+    sealed = write_segment(segments_dir, 2)
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+    other = Engine.Connection.adbc_connection(Engine.connection_name(@engine, 2))
+
+    {:ok, _begun} = Adbc.Connection.query(other, "BEGIN TRANSACTION")
+
+    {:ok, _pending} =
+      Adbc.Connection.query(
+        other,
+        "CALL ducklake_add_data_files('#{@catalog_name}', 'events', ['#{sealed.path}'], " <>
+          "schema => 'analytics', allow_missing => true, ignore_extra_columns => true)"
+      )
+
+    merged = write_segment(segments_dir, 2)
+    assert {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [merged], [a.path])
+
+    assert {:ok, _committed} = Adbc.Connection.query(other, "COMMIT")
+    assert {:ok, live} = Catalog.segments(catalog, @table, :current)
+    assert Enum.sort(live) == Enum.sort([merged.path, b.path, sealed.path])
+    assert row_count() == 6
+
+    {:ok, _begun} = Adbc.Connection.query(other, "BEGIN TRANSACTION")
+
+    {:ok, _deleting} =
+      Adbc.Connection.query(
+        other,
+        ~s|DELETE FROM #{@catalog_name}."analytics"."events" WHERE filename = '#{b.path}'|
+      )
+
+    again = write_segment(segments_dir, 2)
+    assert {:ok, _swapped} = Catalog.replace_segments(catalog, @table, [again], [sealed.path])
+
+    assert {:error, error} = Adbc.Connection.query(other, "COMMIT")
+    assert Exception.message(error) =~ "compacted"
+    assert row_count() == 6
   end
 
   defp schema do

@@ -178,8 +178,8 @@ Properties worth knowing:
 - **Compaction is not free.** `ducklake_merge_adjacent_files` crashes DuckDB on
   externally-registered files, so smolquery never calls it. smolquery builds
   compaction on `replace_segments/4`. That function registers the merged
-  segment and drops its inputs inside one transaction
-  (`Smolquery.Engine.transaction/2`). A single snapshot carries both changes.
+  segment and drops its inputs inside one metadata transaction
+  (`Smolquery.Catalog.DuckLake.Swap`). A single snapshot carries both changes.
   No snapshot ever double-counts the rows or loses them.
 
 One table in `Smolquery.Schema` maps the types: logical type ↔ Explorer
@@ -818,10 +818,19 @@ one sweep. An input-count cap would instead make each sweep re-ingest the
 previous sweep's still-undersized output.
 
 - **The swap is atomic.** `Catalog.replace_segments/4` registers the merged
-  segment and drops its inputs in one DuckLake transaction. A single snapshot
+  segment and drops its inputs in one metadata transaction. A single snapshot
   carries both changes. No snapshot double-counts the rows or loses them.
   Readers pinned at earlier snapshots keep reading the old files. GC reclaims
   the old files once no snapshot references them.
+- **The swap never conflicts with a seal** (T-600). It is written the way
+  DuckLake writes its own compaction, tagged `merge_adjacent`, not as a
+  `DELETE`. DuckLake refuses a delete from a table that another transaction
+  inserted into, and a seal is an insert. So the swap used to lose to the
+  table's own seals, and on a table sealing every 20 s nearly every swap
+  lost. DuckLake still registers the merged file itself, into a hidden twin
+  table, so it computes the file's statistics. The swap then moves that file
+  onto the table. A retention delete that runs concurrently still conflicts,
+  as it should.
 - **The swap is verified.** File-level drops only work because the lake is
   attached with `DATA_INLINING_ROW_LIMIT 0`. When that setting is broken, the
   symptom is silently slower queries. After every swap, the compactor re-reads

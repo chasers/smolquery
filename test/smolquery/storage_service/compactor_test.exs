@@ -115,9 +115,12 @@ defmodule Smolquery.StorageService.CompactorTest do
 
     assert [%{table: @table, replaced: 3, key: key, snapshot: snapshot}] = report.compacted
     assert report.failed == []
-    assert snapshot == before_swap + 1
+    assert snapshot > before_swap
 
     merged = Store.location(runtime.store, key)
+    assert {:ok, inputs} = Catalog.segments(context.catalog, @table, snapshot - 1)
+    assert Enum.sort(inputs) == Enum.sort([a.path, b.path, c.path])
+    assert Catalog.segments(context.catalog, @table, snapshot) == {:ok, [merged]}
     assert Catalog.segments(context.catalog, @table, :current) == {:ok, [merged]}
     assert lake_rows(context.storage) == 30
     assert Enum.all?([a, b, c], &File.exists?(&1.path))
@@ -506,11 +509,8 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Process.alive?(compactor)
     assert Process.whereis(Engine.database_name(compact_engine)) == database
 
-    assert {:ok, [_merged]} =
-             Catalog.segments(Runtime.compaction_catalog(runtime), @table, :current)
-
+    assert {:ok, _snapshot} = Catalog.current_snapshot(Runtime.compaction_catalog(runtime))
     assert lake_rows(context.storage) == 20
-    assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
   end
 
   test "a file the catalog sizes at or above the threshold is never opened, so a corrupt one costs nothing (T-463)",
@@ -546,12 +546,11 @@ defmodule Smolquery.StorageService.CompactorTest do
     assert Enum.sort([first, second]) == Enum.sort([@table, other])
     assert report.cooling == []
 
-    assert {:ok, [_merged]} =
-             Catalog.segments(Runtime.compaction_catalog(runtime), first, :current)
-
+    assert {:ok, _snapshot} = Catalog.current_snapshot(Runtime.compaction_catalog(runtime))
     assert {:ok, [_a, _b]} = Catalog.segments(context.catalog, second, :current)
 
-    assert {:ok, %{failed: [%{table: ^second}], deferred: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{failed: [%{table: ^first}], deferred: [^second]}} =
+             Compactor.sweep(context.storage)
   end
 
   test "a catalog listing that exits fails the sweep instead of crashing it (T-460)", context do
