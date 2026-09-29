@@ -4,7 +4,7 @@ defmodule SmolqueryApi.SegmentController do
   `Smolquery.Catalog.drop_segments/3`.
 
   The operator escape hatch a permanently corrupt sealed segment needs
-  (T-310): `StorageService.Compactor` quarantines a segment it cannot compact
+  (T-310): `StorageService.Scheduler` quarantines a segment it cannot compact
   rather than fixing it, and nothing else in the system can make the table
   readable again on its own. Dropping formalizes the loss instead — the rows
   the segment held are gone from every future snapshot, and every other

@@ -37,11 +37,11 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
-  alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.HotTier
   alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Runtime, as: StorageRuntime
+  alias Smolquery.StorageService.Scheduler
   alias Smolquery.Test.Eventually
 
   @moduletag :integration
@@ -108,7 +108,7 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
       )
     end
 
-    start_supervised!({Compactor, storage_runtime}, id: {:compactor, storage})
+    start_supervised!({Scheduler, storage_runtime}, id: {:scheduler, storage})
     start_supervised!({GC, storage_runtime}, id: {:gc, storage})
 
     start_supervised!(
@@ -207,7 +207,7 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
 
     assert visible_ids(context) == all
 
-    assert {:ok, %{compacted: [%{key: ^key}], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{key: ^key}], failed: []}} = Scheduler.sweep(context.storage)
 
     assert visible_ids(context) == all
 
@@ -226,7 +226,7 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
     refute File.exists?(Store.location(context.storage_runtime.store, key))
     assert visible_ids(context) == Enum.to_list(1..20)
 
-    assert {:ok, %{compacted: [%{key: ^key}], failed: []}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [%{key: ^key}], failed: []}} = Scheduler.sweep(context.storage)
     assert visible_ids(context) == Enum.to_list(1..20)
   end
 
@@ -235,7 +235,7 @@ defmodule Smolquery.StorageService.MaintenanceConsistencyTest do
     b = seal(context, 11..20, 2_000)
     {:ok, pinned} = Catalog.current_snapshot(context.catalog)
 
-    assert {:ok, %{compacted: [_swap]}} = Compactor.sweep(context.storage)
+    assert {:ok, %{compacted: [_swap]}} = Scheduler.sweep(context.storage)
 
     assert {:ok, %{swept: []}} = GC.sweep(context.storage)
     assert File.exists?(a.path)

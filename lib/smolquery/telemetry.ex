@@ -85,7 +85,7 @@ defmodule Smolquery.Telemetry do
                                           meta %{result: :ok | :error, table_ref: ref}
       [:smolquery, :compact, :quarantine] %{count}, meta %{table_ref: ref, paths: [String.t()]}
                                           — a compaction group that failed identically
-                                          5 times (a Compactor module constant, not a
+                                          5 times (a Scheduler.Quarantine constant, not a
                                           runtime setting) and stopped being planned on
                                           this node; alert on rate > 0 (T-310)
       [:smolquery, :compact, :backoff]    %{consecutive, wait_ms}, meta %{table_ref: ref}

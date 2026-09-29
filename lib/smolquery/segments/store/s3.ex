@@ -7,7 +7,7 @@ defmodule Smolquery.Segments.Store.S3 do
 
   `shared?/1` is `true`: a location this store returns is an `s3://` URL any
   node can read directly through DuckDB's `httpfs`, which is exactly the flag
-  `QueryService.Planner` (and `StorageService.Compactor`, re-reading sealed
+  `QueryService.Planner` (and `StorageService.Scheduler`, re-reading sealed
   segments to re-merge them) uses to skip the hop through
   `BufferService.HotServer` a non-shared store needs.
 

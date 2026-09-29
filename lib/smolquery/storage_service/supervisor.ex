@@ -92,10 +92,10 @@ defmodule Smolquery.StorageService.Supervisor do
   alias Smolquery.Engine
   alias Smolquery.Engine.Log
   alias Smolquery.EngineSecrets
-  alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.GC
   alias Smolquery.StorageService.Retention
   alias Smolquery.StorageService.Runtime
+  alias Smolquery.StorageService.Scheduler
   alias Smolquery.StorageService.Sealer
 
   @doc """
@@ -126,7 +126,7 @@ defmodule Smolquery.StorageService.Supervisor do
           Supervisor.child_spec({Engine, compact_engine_opts(runtime)},
             id: Runtime.compact_engine(runtime.name)
           ),
-          {Compactor, runtime},
+          {Scheduler, runtime},
           {Retention, runtime},
           {GC, runtime}
         ] ++
