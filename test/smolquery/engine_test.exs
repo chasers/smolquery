@@ -189,6 +189,45 @@ defmodule Smolquery.EngineTest do
     end
   end
 
+  describe "spill limits and abandoned spill (T-601)" do
+    test "a function temp cap is evaluated when the instance starts" do
+      name = __MODULE__.SpillCap
+      parent = self()
+
+      start_supervised!(
+        {Engine,
+         name: name,
+         max_temp_directory_size: fn ->
+           send(parent, :sized)
+           "123MiB"
+         end},
+        id: name
+      )
+
+      assert_received :sized
+
+      assert %Result{rows: [[size]]} =
+               Engine.query!(name, "SELECT current_setting('max_temp_directory_size')")
+
+      assert size =~ ~r/^12\d(\.\d+)? MiB$/
+    end
+
+    test "lists the spill leaves of this engine's other instances, never its own" do
+      name = __MODULE__.Abandoned
+      start_supervised!({Engine, name: name}, id: name)
+      assert Engine.abandoned_spill(name) == []
+
+      label = URI.encode(Atom.to_string(Engine.database_name(name)), &URI.char_unreserved?/1)
+      root = Application.get_env(:smolquery, :spill_dir, ".tmp")
+      leaf = Path.join(root, "#{label}-os#{System.pid()}-db0.9.9")
+      File.mkdir_p!(leaf)
+      on_exit(fn -> File.rm_rf!(leaf) end)
+
+      assert Engine.abandoned_spill(name) == [leaf]
+      assert Engine.abandoned_spill(__MODULE__.NotStarted) == []
+    end
+  end
+
   describe "try_transaction/3" do
     test "commits like transaction/3 and returns its errors" do
       assert Engine.try_transaction(@engine, ["CREATE TABLE try_txn (n INTEGER)"]) == :ok

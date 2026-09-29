@@ -164,6 +164,29 @@ defmodule Smolquery.StorageService.Compactor do
   the next sweep replans from the current files, and that refusal never backs
   the table off.
 
+  ## A span merge is sized by what it decodes to, and pauses when the disk is short
+
+  Bytes on disk do not bound a merge. The `bench.clickstack_*` tables keep
+  attribute bags as `MAP` or `VARIANT`: about 4 bytes a row on disk and about
+  3 KiB in a merge. A 1 GiB span group of them was hundreds of gigabytes of
+  sort, so every span merge spilled to DuckDB's 32 GiB temp cap and filled
+  the storage nodes' disks within ten minutes of the roll (T-601).
+
+  So the span level also caps a group's rows at `compact_span_decoded_bytes`
+  over an estimated decoded row width: the mean text width of up to
+  1,024 rows of the group's first file, the one read this
+  costs per plan. Text is a proxy for what DuckDB holds, not a measure of it;
+  the span cap halving below remains the correction when it guesses low.
+
+  A sweep also runs without its span level, hour level only, when spilling
+  is unsafe: while a recycled compaction engine's abandoned merge still holds
+  a spill directory (`Smolquery.Engine.abandoned_spill/1`; adbc cannot cancel
+  it, and deleting its files under it crashed the VM in T-460), or while the
+  spill filesystem has less than `compact_spill_floor_bytes` free. Each
+  compaction engine instance also sizes its own temp cap from free space as
+  it starts (`Runtime.compact_spill_cap/2`), so a rebuilt engine takes a share
+  of what the abandoned one left rather than another fixed 32 GiB.
+
   A failing span group does not re-run as it was. Its merge is 1 GiB with no
   row cap, so the lever is bytes: an OOM, an engine call exit or a swap timeout
   halves the table's span cap, never below `compact_max_bytes`, and the table
@@ -302,6 +325,7 @@ defmodule Smolquery.StorageService.Compactor do
   @stage_chunk_target_bytes 67_108_864
   @engine_recycle_wait_ms 5_000
   @quarantine_after 5
+  @width_sample_rows 1024
 
   @typedoc """
   A table left out of the sweep until `retry_at`, after `consecutive`
@@ -379,7 +403,7 @@ defmodule Smolquery.StorageService.Compactor do
   def sweep(name, timeout \\ 60_000), do: GenServer.call(Runtime.compactor(name), :sweep, timeout)
 
   defp run(state) do
-    runtime = state.runtime
+    runtime = spill_gated(state.runtime)
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       {cooling, due} = Enum.split_with(tables, &cooling_down?(state.cooldowns, &1))
@@ -1114,7 +1138,66 @@ defmodule Smolquery.StorageService.Compactor do
     if length(candidates) < runtime.compact_min_inputs do
       :skip
     else
-      plan_undersized(runtime, level, candidates)
+      with {:ok, runtime} <- decoded_capped(runtime, level, candidates) do
+        plan_undersized(runtime, level, candidates)
+      end
+    end
+  end
+
+  defp decoded_capped(runtime, :hour, _candidates), do: {:ok, runtime}
+
+  defp decoded_capped(runtime, :span, [sample | _rest]) do
+    case row_width(runtime, sample) do
+      {:ok, width} ->
+        {:ok,
+         %{runtime | compact_max_rows: max(div(runtime.compact_span_decoded_bytes, width), 1)}}
+
+      {:error, reason} ->
+        {:error, reason, [sample]}
+    end
+  end
+
+  defp row_width(runtime, path) do
+    sql =
+      "SELECT CAST(coalesce(avg(strlen(CAST(sampled AS VARCHAR))), 1) AS BIGINT) " <>
+        "FROM (SELECT * FROM read_parquet($1) LIMIT #{@width_sample_rows}) AS sampled"
+
+    case Engine.try_query(Runtime.compact_engine(runtime.name), sql, [path]) do
+      {:ok, %{rows: [[width]]}} -> {:ok, max(width, 1)}
+      {:error, error} -> {:error, {:sizing_failed, error}}
+    end
+  end
+
+  defp spill_gated(%Runtime{compact_target_bytes: nil} = runtime), do: runtime
+
+  defp spill_gated(runtime) do
+    case span_pause(runtime) do
+      :ok ->
+        runtime
+
+      {reason, detail} ->
+        Logger.warning("compaction span level paused for this sweep: #{detail} (T-601)")
+        :telemetry.execute([:smolquery, :compact, :span_paused], %{count: 1}, %{reason: reason})
+        %{runtime | compact_target_bytes: nil}
+    end
+  end
+
+  defp span_pause(runtime) do
+    root = Runtime.spill_root()
+
+    case {Engine.abandoned_spill(Runtime.compact_engine(runtime.name)),
+          Smolquery.DiskSpace.free_bytes(root)} do
+      {[_ | _] = leaves, _free} ->
+        {:abandoned_spill,
+         "a recycled compaction engine still spills to #{Enum.join(leaves, ", ")}"}
+
+      {[], {:ok, free}} when free < runtime.compact_spill_floor_bytes ->
+        {:spill_floor,
+         "#{free} bytes free under #{root}, below compact_spill_floor_bytes " <>
+           "#{runtime.compact_spill_floor_bytes}"}
+
+      _room ->
+        :ok
     end
   end
 

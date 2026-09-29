@@ -20,6 +20,8 @@ defmodule Smolquery.StorageService.CompactorTest do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Writer
+  import Bitwise
+
   alias Smolquery.StorageService.Compactor
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
@@ -312,6 +314,68 @@ defmodule Smolquery.StorageService.CompactorTest do
                Compactor.sweep(context.storage)
 
       assert lake_rows(context.storage) == 30
+    end
+
+    test "caps a span group's rows by its estimated decoded size (T-601)", context do
+      runtime = start_compactor(context, Keyword.merge(@span, compact_span_decoded_bytes: 1))
+
+      sealed =
+        for index <- 1..3,
+            do: seal(runtime, context.catalog, index, (index * 10 - 9)..(index * 10))
+
+      assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+
+      assert {:ok, current} = Catalog.segments(context.catalog, @table, :current)
+      assert Enum.sort(current) == Enum.sort(Enum.map(sealed, & &1.path))
+    end
+
+    test "a sweep runs the hour level only while the spill disk is below its floor (T-601)",
+         context do
+      runtime =
+        start_compactor(
+          context,
+          Keyword.merge(@span,
+            compact_below_bytes: 100,
+            compact_spill_floor_bytes: 4_611_686_018_427_387_904
+          )
+        )
+
+      seal(runtime, context.catalog, 1, 1..10)
+      seal(runtime, context.catalog, 2, 11..20)
+      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :span_paused]])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+        end)
+
+      assert log =~ "span level paused"
+      assert_receive {[:smolquery, :compact, :span_paused], ^ref, _count, %{reason: :spill_floor}}
+    end
+
+    test "a sweep runs the hour level only while a recycled engine still spills (T-601)",
+         context do
+      runtime = start_compactor(context, Keyword.merge(@span, compact_below_bytes: 100))
+      seal(runtime, context.catalog, 1, 1..10)
+      seal(runtime, context.catalog, 2, 11..20)
+
+      database = Engine.database_name(Runtime.compact_engine(context.storage))
+      label = URI.encode(Atom.to_string(database), &URI.char_unreserved?/1)
+      leaf = Path.join(Runtime.spill_root(), "#{label}-os#{System.pid()}-db0.1.2")
+      File.mkdir_p!(leaf)
+      on_exit(fn -> File.rm_rf!(leaf) end)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{compacted: [], failed: []}} = Compactor.sweep(context.storage)
+        end)
+
+      assert log =~ "still spills to #{leaf}"
+
+      File.rm_rf!(leaf)
+
+      assert {:ok, %{compacted: [%{level: :span}], failed: []}} =
+               Compactor.sweep(context.storage)
     end
 
     test "never merges across spans", context do

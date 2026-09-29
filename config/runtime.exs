@@ -538,6 +538,26 @@ case System.get_env("SMOLQUERY_COMPACT_TARGET_BYTES") do
         Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_TARGET_BYTES", bytes)
 end
 
+# T-601: what keeps a spilling compaction merge off a full disk. See
+# Smolquery.StorageService.Runtime for the three.
+if bytes = System.get_env("SMOLQUERY_COMPACT_SPAN_DECODED_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    compact_span_decoded_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_DECODED_BYTES", bytes)
+end
+
+if share = System.get_env("SMOLQUERY_COMPACT_SPILL_SHARE") do
+  config :smolquery, Smolquery.StorageService,
+    compact_spill_share:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPILL_SHARE", share)
+end
+
+if bytes = System.get_env("SMOLQUERY_COMPACT_SPILL_FLOOR_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    compact_spill_floor_bytes:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_SPILL_FLOOR_BYTES", bytes)
+end
+
 if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_MS") do
   config :smolquery, Smolquery.StorageService,
     compact_span_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_MS", ms)

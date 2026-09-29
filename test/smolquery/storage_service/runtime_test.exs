@@ -269,6 +269,44 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
+  describe "compact_spill_cap/2 (T-601)" do
+    setup do
+      configured = Application.get_env(:smolquery, :max_temp_directory_size)
+
+      on_exit(fn ->
+        if configured,
+          do: Application.put_env(:smolquery, :max_temp_directory_size, configured),
+          else: Application.delete_env(:smolquery, :max_temp_directory_size)
+      end)
+    end
+
+    test "takes a share of the free space, below the configured cap" do
+      runtime = Runtime.new(name: __MODULE__.SpillShare)
+      Application.put_env(:smolquery, :max_temp_directory_size, "32GiB")
+
+      assert Runtime.compact_spill_cap(runtime, {:ok, 100 * 1_073_741_824}) == "25600MiB"
+      assert Runtime.compact_spill_cap(runtime, {:ok, 400 * 1_073_741_824}) == "32GiB"
+    end
+
+    test "with no configured cap takes the share, and with free space unknown keeps the config" do
+      runtime = Runtime.new(name: __MODULE__.SpillUnknown, compact_spill_share: 2)
+      Application.delete_env(:smolquery, :max_temp_directory_size)
+
+      assert Runtime.compact_spill_cap(runtime, {:ok, 10 * 1_048_576}) == "5MiB"
+      assert Runtime.compact_spill_cap(runtime, :error) == nil
+    end
+
+    test "refuses a share or decoded budget that is not positive" do
+      assert_raise ArgumentError, ~r/compaction spill settings/, fn ->
+        Runtime.new(name: __MODULE__.SpillBad, compact_spill_share: 0)
+      end
+
+      assert_raise ArgumentError, ~r/compaction spill settings/, fn ->
+        Runtime.new(name: __MODULE__.DecodedBad, compact_span_decoded_bytes: -1)
+      end
+    end
+  end
+
   describe "compact_engine_threads/3" do
     test "takes one thread per 256 MiB of the limit by default" do
       runtime = Runtime.new(name: __MODULE__.ThreadsPerLimit, compact_engine_memory_limit: "1GiB")

@@ -172,6 +172,20 @@ defmodule Smolquery.StorageService.Runtime do
   one thread per `compact_engine_mib_per_thread`, so a merge's sort always has
   the memory it needs on each thread to spill; see `compact_engine_threads/3`.
 
+  Three settings keep a spilling merge from filling a node's disk (T-601):
+
+    * `compact_span_decoded_bytes` caps a span-level group by its estimated
+      size in memory, 8 GiB by default. Compressed bytes cannot see it: a
+      `MAP` or `VARIANT` row of about 4 bytes on disk decodes to about 3 KiB,
+      so a 1 GiB group was hundreds of gigabytes of sort, and every merge
+      spilled to DuckDB's temp cap.
+    * `compact_spill_floor_bytes` pauses the span level for a sweep while
+      the spill filesystem has less free space than this, 2 GiB by default.
+    * `compact_spill_share` sizes each compaction engine instance's
+      `max_temp_directory_size` as this share of the spill filesystem's free
+      space when the instance starts, at most the configured
+      `:max_temp_directory_size`; see `compact_spill_cap/2`.
+
   `merge_inputs_per_call` bounds how many `read_parquet` inputs any one of the
   merge's engine calls carries (T-246, T-247). Per-input cost is what outruns
   the engine's 30 s call timeout: the eu-central-1 sandbox measured ≥ ~830 ms
@@ -296,6 +310,9 @@ defmodule Smolquery.StorageService.Runtime do
     compact_span_ms: 86_400_000,
     compact_engine_memory_limit: nil,
     compact_engine_mib_per_thread: 256,
+    compact_span_decoded_bytes: 8_589_934_592,
+    compact_spill_floor_bytes: 2_147_483_648,
+    compact_spill_share: 4,
     compact_backoff_base_ms: 600_000,
     compact_backoff_max_ms: 14_400_000,
     merge_engine: nil,
@@ -338,6 +355,9 @@ defmodule Smolquery.StorageService.Runtime do
           compact_span_ms: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
           compact_engine_mib_per_thread: pos_integer(),
+          compact_span_decoded_bytes: pos_integer(),
+          compact_spill_floor_bytes: non_neg_integer(),
+          compact_spill_share: pos_integer(),
           compact_backoff_base_ms: non_neg_integer(),
           compact_backoff_max_ms: pos_integer(),
           merge_engine: Smolquery.Engine.handle() | nil,
@@ -375,6 +395,9 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_span_ms,
     :compact_engine_memory_limit,
     :compact_engine_mib_per_thread,
+    :compact_span_decoded_bytes,
+    :compact_spill_floor_bytes,
+    :compact_spill_share,
     :compact_backoff_base_ms,
     :compact_backoff_max_ms,
     :merge_inputs_per_call,
@@ -420,6 +443,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_engine_memory_limit()
     |> validate_compact_engine_memory_limit()
     |> validate_compact_engine_mib_per_thread()
+    |> validate_compact_spill()
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_bucket_ms()
@@ -554,6 +578,45 @@ defmodule Smolquery.StorageService.Runtime do
         )
 
         nil
+    end
+  end
+
+  @doc """
+  The spill root every engine's instances write under: the application
+  `:spill_dir`, `.tmp` unless configured.
+  """
+  @spec spill_root() :: Path.t()
+  def spill_root, do: Application.get_env(:smolquery, :spill_dir, ".tmp")
+
+  @doc """
+  A compaction engine instance's `max_temp_directory_size`, decided when the
+  instance starts (T-601): `compact_spill_share` of the spill filesystem's
+  free bytes, never above the configured `:max_temp_directory_size`.
+
+  A fixed 32 GiB per instance filled the sandbox's 100 GB node disks: each
+  recycle of the compaction engine left its abandoned merge spilling up to
+  the cap, and started another instance with the same cap beside it. Sized
+  from free space, each new instance gets a share of what the last one left.
+  With free space unknown, the configured limit stands, and `nil` means none.
+  """
+  @spec compact_spill_cap(t(), {:ok, non_neg_integer()} | :error) :: String.t() | nil
+  def compact_spill_cap(
+        %__MODULE__{} = runtime,
+        free \\ Smolquery.DiskSpace.free_bytes(spill_root())
+      ) do
+    configured = Application.get_env(:smolquery, :max_temp_directory_size)
+
+    case free do
+      {:ok, bytes} ->
+        share = max(div(bytes, runtime.compact_spill_share * 1_048_576), 1)
+
+        case configured && size_bytes(configured) do
+          {:ok, cap} when cap < share * 1_048_576 -> configured
+          _share_is_smaller -> "#{share}MiB"
+        end
+
+      :error ->
+        configured
     end
   end
 
@@ -819,6 +882,26 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported compact_engine_mib_per_thread: #{inspect(mib)} " <>
             "(expected a positive integer)"
+  end
+
+  defp validate_compact_spill(
+         %__MODULE__{
+           compact_span_decoded_bytes: decoded,
+           compact_spill_floor_bytes: floor,
+           compact_spill_share: share
+         } = runtime
+       )
+       when is_integer(decoded) and decoded > 0 and is_integer(floor) and floor >= 0 and
+              is_integer(share) and share > 0,
+       do: runtime
+
+  defp validate_compact_spill(%__MODULE__{} = runtime) do
+    raise ArgumentError,
+          "unsupported compaction spill settings: compact_span_decoded_bytes " <>
+            "#{inspect(runtime.compact_span_decoded_bytes)}, compact_spill_floor_bytes " <>
+            "#{inspect(runtime.compact_spill_floor_bytes)}, compact_spill_share " <>
+            "#{inspect(runtime.compact_spill_share)} (expected positive integers, " <>
+            "the floor may be 0)"
   end
 
   defp validate_compact_backoff(
