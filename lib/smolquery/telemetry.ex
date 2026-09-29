@@ -97,6 +97,8 @@ defmodule Smolquery.Telemetry do
                                           — a table whose swap lost its catalog commit to a
                                           concurrent write, left out for one sweep interval;
                                           conflicts counts them in a row (T-595)
+      [:smolquery, :compact, :lane]       %{duration_us}, meta %{lane: :hour | :span}
+                                          — one per lane per compaction sweep (T-603)
       [:smolquery, :compact, :span_paused] %{count}, meta %{reason: :abandoned_spill |
                                           :spill_floor}
                                           — a sweep that ran its hour level only, because
@@ -275,6 +277,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :compact, :backoff],
     [:smolquery, :compact, :conflict],
     [:smolquery, :compact, :span_paused],
+    [:smolquery, :compact, :lane],
     [:smolquery, :hot_manifest, :change],
     [:smolquery, :hot_manifest, :compaction],
     [:smolquery, :hot_manifest, :read],
@@ -386,6 +389,9 @@ defmodule Smolquery.Telemetry do
       "Sweeps that ran the hour level only because spilling was unsafe, by reason: " <>
         "abandoned_spill (a recycled engine's merge still spills) or spill_floor (the spill " <>
         "filesystem is below compact_spill_floor_bytes) (T-601).",
+    "smolquery_compaction_lane_microseconds_total" =>
+      "Time each compaction lane of a sweep took, by lane (hour or span), listing, sizing " <>
+        "and planning included; rate over wall time is each lane's share of a node (T-603).",
     "smolquery_compaction_conflicts_total" =>
       "Compactions of a table that lost the catalog commit to a concurrent write, after the " <>
         "catalog's own retries; each waits one sweep interval and none counts toward the " <>
@@ -630,9 +636,11 @@ defmodule Smolquery.Telemetry do
       "Bytes of unsealed micro-segments this buffer node holds across every table (T-457).",
     "smolquery_buffer_unsealed_entries_limit" =>
       "The unsealed entry count at which this buffer node refuses commits (T-457).",
-    "smolquery_compaction_table_files" =>
-      "Live files per table, from the compaction scheduler's last listing (T-603). Every " <>
-        "storage node lists every table, so any node's value is the table's.",
+    "smolquery_compaction_listed_files" =>
+      "Live files across the tables the compaction scheduler listed in its last sweep (T-603).",
+    "smolquery_compaction_listed_files_max" =>
+      "Live files of the largest table the compaction scheduler listed in its last sweep " <>
+        "(T-603); a count that only grows is a table falling behind.",
     "smolquery_compaction_spill_free_bytes" =>
       "Free bytes on the spill filesystem, read at the start of each compaction sweep (T-603).",
     "smolquery_compaction_lane_tables" =>
@@ -916,6 +924,14 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :compact, :conflict], _measurements, _meta, nil) do
     bump({"smolquery_compaction_conflicts_total", []}, 1)
+  end
+
+  def handle_event([:smolquery, :compact, :lane], measurements, meta, nil) do
+    bump(
+      {"smolquery_compaction_lane_microseconds_total",
+       [lane: compact_level(%{level: Map.get(meta, :lane)})]},
+      Map.get(measurements, :duration_us, 0)
+    )
   end
 
   def handle_event([:smolquery, :compact, :span_paused], _measurements, meta, nil) do

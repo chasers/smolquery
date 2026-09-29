@@ -200,12 +200,16 @@ changes. One more DuckDB connection per storage pod.
 
 To see where compaction time goes (T-603):
 
-- `smolquery_compaction_microseconds_total{result,level}` over wall time, by
-  `level`, is each lane's share of a storage pod. The hour lane runs first
-  every sweep; the span lane gets at most `SMOLQUERY_COMPACT_SPAN_BUDGET_MS`
-  to start merges.
-- `smolquery_compaction_table_files{dataset,table}` is each table's live file
-  count at the last sweep. A table whose count only grows is falling behind.
+- `smolquery_compaction_lane_microseconds_total{lane}` over wall time is each
+  lane's share of a storage pod, listing, footer sizing and planning
+  included. The hour lane runs first every sweep; the span lane gets at most
+  `SMOLQUERY_COMPACT_SPAN_BUDGET_MS` to start merges.
+  `smolquery_compaction_microseconds_total{result,level}` is the part spent
+  in planned merges.
+- `smolquery_compaction_listed_files` and `smolquery_compaction_listed_files_max`
+  are the live files across all tables and in the largest table at the last
+  sweep. Metrics carry no table label, so which table is largest is in the
+  catalog (`segment_stats`); a max that only grows is a table falling behind.
 - `smolquery_compaction_lane_tables{lane="span",state}` counts the tables the
   span lane left `waiting` (budget spent) or `cooling` (backing off span
   failures) at the last sweep.
