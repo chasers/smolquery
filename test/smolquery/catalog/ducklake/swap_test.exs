@@ -60,7 +60,7 @@ defmodule Smolquery.Catalog.DuckLake.SwapTest do
           table_id: 1,
           stage_table_id: 9,
           next_row_id: 100,
-          staged: %{data_file_id: 39, rows: 20, bytes: 2_048},
+          staged: %{data_file_id: 39, rows: 20},
           retire: [7, 8],
           abandoned: [],
           column_ids: %{1 => 1, 3 => 4},
@@ -86,7 +86,9 @@ defmodule Smolquery.Catalog.DuckLake.SwapTest do
                  "WHERE data_file_id = 39"
 
       assert sql =~ "column_id = CASE column_id WHEN 1 THEN 1 WHEN 3 THEN 4 ELSE column_id END"
-      assert sql =~ "record_count = record_count + 20, next_row_id = next_row_id + 20"
+      assert sql =~ "SET next_row_id = next_row_id + 20 WHERE table_id = 1"
+      refute sql =~ "record_count ="
+      refute sql =~ "file_size_bytes ="
       refute sql =~ "deleted_from_table"
     end
 
