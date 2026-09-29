@@ -94,6 +94,9 @@ defmodule Smolquery.Engine.Connection do
           | {:temp_directory, Path.t()}
           | {:max_temp_directory_size, String.t()}
 
+  @typedoc "A transaction statement: SQL, or SQL labelled with the kind its span reports."
+  @type statement :: String.t() | {atom(), String.t()}
+
   @doc """
   Starts a bootstrapped connection to the ADBC database in `:database`.
 
@@ -224,11 +227,19 @@ defmodule Smolquery.Engine.Connection do
   callers from validated identifiers and escaped literals
   (`Smolquery.Identifier`), and offering bindings here would suggest
   user-supplied values belong in one. They do not.
+
+  ## Timing each statement
+
+  With `span: event`, each statement given as `{kind, sql}` and the `COMMIT`
+  (kind `:commit`) are each one `event` span, metadata `%{kind: kind,
+  result: :ok | :error}`, timed inside this process. A caller outside it sees
+  only the whole call, so this is the only place that can tell a slow
+  statement from a slow commit (T-573). A plain string statement is untimed.
   """
-  @spec transaction(GenServer.server(), [String.t()], timeout()) ::
+  @spec transaction(GenServer.server(), [statement()], timeout(), keyword()) ::
           :ok | {:error, Exception.t()}
-  def transaction(conn, statements, timeout \\ 30_000) do
-    case GenServer.call(conn, {:transaction, statements}, timeout) do
+  def transaction(conn, statements, timeout \\ 30_000, opts \\ []) do
+    case GenServer.call(conn, {:transaction, statements, Keyword.get(opts, :span)}, timeout) do
       {:ok, :committed} -> :ok
       {:error, error} -> {:error, error}
     end
@@ -300,9 +311,9 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @impl true
-  def handle_call({:transaction, statements}, _from, state) do
+  def handle_call({:transaction, statements, span}, _from, state) do
     state.adbc
-    |> run_transaction(statements)
+    |> run_transaction(statements, span)
     |> reply_or_stop(state)
   end
 
@@ -352,22 +363,33 @@ defmodule Smolquery.Engine.Connection do
     end
   end
 
-  defp run_transaction(adbc, statements) do
+  defp run_transaction(adbc, statements, span) do
     with {:ok, _begun} <- Adbc.Connection.query(adbc, "BEGIN TRANSACTION"),
-         :ok <- apply_or_rollback(adbc, statements),
-         {:ok, _committed} <- Adbc.Connection.query(adbc, "COMMIT") do
+         :ok <- apply_or_rollback(adbc, statements, span),
+         {:ok, _committed} <- timed(adbc, {:commit, "COMMIT"}, span) do
       {:ok, :committed}
     end
   end
 
-  defp apply_or_rollback(adbc, statements) do
-    Enum.reduce_while(statements, :ok, fn sql, :ok ->
-      case Adbc.Connection.query(adbc, sql) do
+  defp apply_or_rollback(adbc, statements, span) do
+    Enum.reduce_while(statements, :ok, fn statement, :ok ->
+      case timed(adbc, statement, span) do
         {:ok, _result} -> {:cont, :ok}
         {:error, error} -> {:halt, rollback(adbc, error)}
       end
     end)
   end
+
+  defp timed(adbc, {kind, sql}, span) when is_list(span) do
+    Smolquery.Telemetry.span(
+      span,
+      &{%{}, %{kind: kind, result: Smolquery.Telemetry.outcome(&1)}},
+      fn -> Adbc.Connection.query(adbc, sql) end
+    )
+  end
+
+  defp timed(adbc, {_kind, sql}, nil), do: Adbc.Connection.query(adbc, sql)
+  defp timed(adbc, sql, _span) when is_binary(sql), do: Adbc.Connection.query(adbc, sql)
 
   defp rollback(adbc, error) do
     case Adbc.Connection.query(adbc, "ROLLBACK") do

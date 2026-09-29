@@ -233,6 +233,43 @@ defmodule Smolquery.EngineTest do
       assert Exception.message(error) =~ "txn_rollback"
     end
 
+    test "span: times each labelled statement and the commit, and leaves plain ones untimed (T-573)" do
+      parent = self()
+      event = [:smolquery, :test, :"txn_span_#{System.unique_integer([:positive])}"]
+      handler = "txn-span-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        event,
+        fn _event, measurements, meta, _config -> send(parent, {:span, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert Engine.transaction(
+               @engine,
+               [
+                 "CREATE TABLE txn_span (n INTEGER)",
+                 {:insert, "INSERT INTO txn_span VALUES (1)"}
+               ],
+               30_000,
+               span: event
+             ) == :ok
+
+      assert_received {:span, %{duration_us: _us}, %{kind: :insert, result: :ok}}
+      assert_received {:span, %{duration_us: _us}, %{kind: :commit, result: :ok}}
+      refute_received {:span, _measurements, _meta}
+
+      assert {:error, _error} =
+               Engine.transaction(@engine, [{:insert, "SELECT * FROM no_such_table"}], 30_000,
+                 span: event
+               )
+
+      assert_received {:span, _measurements, %{kind: :insert, result: :error}}
+      refute_received {:span, _measurements, %{kind: :commit}}
+    end
+
     test "returns the failing statement's error, not the rollback's" do
       assert {:error, error} = Engine.transaction(@engine, ["SELECT * FROM no_such_table"])
       assert Exception.message(error) =~ "no_such_table"
