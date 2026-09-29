@@ -252,6 +252,8 @@ defmodule Smolquery.StorageService.Runtime do
   reasoning (T-250).
   """
 
+  require Logger
+
   alias Smolquery.BufferService.Ring
   alias Smolquery.Catalog
   alias Smolquery.Segments.Store
@@ -506,9 +508,10 @@ defmodule Smolquery.StorageService.Runtime do
 
   The limit is `compact_engine_memory_limit/2`, else the `memory_limit` the
   engine inherits from `Smolquery.Engine`'s application config; with neither,
-  the answer is `nil` and the engine keeps DuckDB's defaults. Raises on a limit
-  that is not a DuckDB size string, which boot validation already refuses for
-  a configured one.
+  the answer is `nil` and the engine keeps DuckDB's defaults. A limit this
+  cannot read as a size, such as `80%` or `none`, which DuckDB accepts, also
+  answers `nil` with a warning: the engine then starts as it did before T-591,
+  and never fails to start over a limit DuckDB would take.
   """
   @spec compact_engine_threads(t(), {:ok, pos_integer()} | :none, pos_integer()) ::
           pos_integer() | nil
@@ -531,9 +534,12 @@ defmodule Smolquery.StorageService.Runtime do
         bytes |> div(mib_per_thread * 1_048_576) |> min(cores) |> max(1)
 
       :error ->
-        raise ArgumentError,
-              "unreadable compaction engine memory_limit: #{inspect(limit)} " <>
-                "(expected a DuckDB size string like \"1GiB\")"
+        Logger.warning(
+          "compaction engine memory_limit #{inspect(limit)} is not a size this can " <>
+            "divide into threads; the engine keeps DuckDB's default thread count"
+        )
+
+        nil
     end
   end
 
@@ -549,6 +555,14 @@ defmodule Smolquery.StorageService.Runtime do
     "bytes" => 1,
     "k" => 1_000,
     "kb" => 1_000,
+    "kilobyte" => 1_000,
+    "kilobytes" => 1_000,
+    "megabyte" => 1_000_000,
+    "megabytes" => 1_000_000,
+    "gigabyte" => 1_000_000_000,
+    "gigabytes" => 1_000_000_000,
+    "terabyte" => 1_000_000_000_000,
+    "terabytes" => 1_000_000_000_000,
     "m" => 1_000_000,
     "mb" => 1_000_000,
     "g" => 1_000_000_000,
@@ -743,24 +757,12 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp validate_compact_engine_memory_limit(
-         %__MODULE__{compact_engine_memory_limit: nil} = runtime
-       ),
-       do: runtime
-
-  defp validate_compact_engine_memory_limit(
          %__MODULE__{compact_engine_memory_limit: limit} = runtime
        )
-       when is_binary(limit) do
-    case size_bytes(limit) do
-      {:ok, _bytes} -> runtime
-      :error -> refuse_compact_engine_memory_limit(limit)
-    end
-  end
+       when is_binary(limit) or is_nil(limit),
+       do: runtime
 
-  defp validate_compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}),
-    do: refuse_compact_engine_memory_limit(limit)
-
-  defp refuse_compact_engine_memory_limit(limit) do
+  defp validate_compact_engine_memory_limit(%__MODULE__{compact_engine_memory_limit: limit}) do
     raise ArgumentError,
           "unsupported compact_engine_memory_limit: #{inspect(limit)} " <>
             "(expected a DuckDB size string like \"1GiB\", or nil)"
