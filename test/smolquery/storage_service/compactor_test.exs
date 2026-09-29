@@ -1015,6 +1015,64 @@ defmodule Smolquery.StorageService.CompactorTest do
                %{@table => %{consecutive: 1, retry_at: 100}}
     end
 
+    test "a commit conflict waits one sweep interval and never reaches the max wait (T-595)" do
+      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
+      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
+
+      conflicts =
+        Enum.reduce(1..10, %{}, fn _n, acc ->
+          Compactor.adjusted_cooldowns(acc, [@table], conflict, runtime, %{}, 1_000)
+        end)
+
+      assert conflicts == %{@table => %{consecutive: 0, conflicts: 10, retry_at: 1_040}}
+
+      assert Compactor.adjusted_cooldowns(conflicts, [@table], [failed(@table)], runtime, %{}, 0) ==
+               %{@table => %{consecutive: 1, retry_at: 100}}
+    end
+
+    test "a conflict keeps a failure streak's count, and a success clears both (T-595)" do
+      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
+      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
+      failing = %{@table => %{consecutive: 3, retry_at: 0}}
+
+      after_conflict = Compactor.adjusted_cooldowns(failing, [@table], conflict, runtime, %{}, 0)
+      assert after_conflict == %{@table => %{consecutive: 3, conflicts: 1, retry_at: 40}}
+
+      assert Compactor.adjusted_cooldowns(
+               after_conflict,
+               [@table],
+               [failed(@table)],
+               runtime,
+               %{},
+               0
+             ) ==
+               %{@table => %{consecutive: 4, retry_at: 250}}
+
+      ok = [{:ok, %{table: @table}}]
+      assert Compactor.adjusted_cooldowns(after_conflict, [@table], ok, runtime, %{}, 0) == %{}
+    end
+
+    test "each conflict is an event, and the third in a row warns (T-595)" do
+      runtime = %{backoff_runtime(100, 250) | compact_interval_ms: 40}
+      conflict = [{:failed, %{table: @table, reason: :commit_conflict, paths: []}}]
+      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :conflict]])
+
+      log =
+        capture_log(fn ->
+          Enum.reduce(1..3, %{}, fn _n, acc ->
+            Compactor.adjusted_cooldowns(acc, [@table], conflict, runtime, %{}, 0)
+          end)
+        end)
+
+      assert_receive {[:smolquery, :compact, :conflict], ^ref, %{conflicts: 1, wait_ms: 40},
+                      %{table_ref: @table}}
+
+      assert_receive {[:smolquery, :compact, :conflict], ^ref, %{conflicts: 3}, _meta}
+      assert log =~ "[warning]"
+      assert log =~ "3 sweeps in a row"
+      refute log =~ "stalled"
+    end
+
     test "every deferral is an event, and the log escalates at five consecutive failures" do
       runtime = backoff_runtime(100, 250)
       ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :compact, :backoff]])

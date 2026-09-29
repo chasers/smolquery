@@ -191,7 +191,11 @@ compaction fails now waits `SMOLQUERY_COMPACT_BACKOFF_BASE_MS` (default ten
 minutes, two sweeps) before the sweep looks at it again, doubling per
 consecutive failure up to `SMOLQUERY_COMPACT_BACKOFF_MAX_MS` (four hours);
 `smolquery_compaction_backoffs_total` counts the deferrals and the log
-escalates to an error at five in a row. Both are storage-side; no protocol
+escalates to an error at five in a row. A swap that loses its catalog commit to
+a concurrent seal (`:commit_conflict`) is not such a failure: it waits one
+compaction interval (`compact_interval_ms`, five minutes) and never counts toward the backoff (T-595);
+`smolquery_compaction_conflicts_total` counts those, and the log warns from the
+third in a row. Both are storage-side; no protocol
 changes. One more DuckDB connection per storage pod.
 
 The merges that failed were OOMs under a configured
