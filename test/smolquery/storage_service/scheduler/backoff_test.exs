@@ -166,4 +166,54 @@ defmodule Smolquery.StorageService.Scheduler.BackoffTest do
       assert log =~ "compaction on this table is stalled (T-458)"
     end
   end
+
+  describe "adjusted_span_cooldowns/5 (T-603)" do
+    test "a span failure its cap cannot shrink waits in the span lane, a shrinkable one does not" do
+      runtime =
+        Runtime.with_compact_max_rows(
+          Runtime.new(
+            name: __MODULE__.SpanLane,
+            compact_backoff_base_ms: 100,
+            compact_backoff_max_ms: 250
+          )
+        )
+
+      stuck =
+        {:failed,
+         %{
+           table: @table,
+           reason: :boom,
+           paths: [],
+           level: :span,
+           span_cap: runtime.compact_max_bytes
+         }}
+
+      shrinkable =
+        {:failed,
+         %{
+           table: @table,
+           reason: {:merge_failed, %Adbc.Error{message: "Out of Memory Error"}},
+           paths: [],
+           level: :span,
+           span_cap: runtime.compact_max_bytes * 4
+         }}
+
+      log =
+        capture_log(fn ->
+          assert Backoff.adjusted_span_cooldowns(%{}, [@table], [stuck], runtime, 1_000) ==
+                   %{@table => %{consecutive: 1, retry_at: 1_100}}
+        end)
+
+      assert log =~ "compaction span level of"
+      assert Backoff.adjusted_span_cooldowns(%{}, [@table], [shrinkable], runtime, 1_000) == %{}
+    end
+
+    test "a span lane that compacted clears its cooldown" do
+      runtime = Runtime.with_compact_max_rows(Runtime.new(name: __MODULE__.SpanClear))
+      cooling = %{@table => %{consecutive: 2, retry_at: 5}}
+      ok = [{:ok, %{table: @table, level: :span}}]
+
+      assert Backoff.adjusted_span_cooldowns(cooling, [@table], ok, runtime, 0) == %{}
+    end
+  end
 end

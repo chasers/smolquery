@@ -564,6 +564,14 @@ if bytes = System.get_env("SMOLQUERY_COMPACT_SPILL_FLOOR_BYTES") do
       Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_SPILL_FLOOR_BYTES", bytes)
 end
 
+# T-603: how long a sweep may spend starting span-level merges, after every
+# table's hour level has run.
+if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_BUDGET_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_span_budget_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_SPAN_BUDGET_MS", ms)
+end
+
 if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_MS") do
   config :smolquery, Smolquery.StorageService,
     compact_span_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_MS", ms)

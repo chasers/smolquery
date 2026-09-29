@@ -164,6 +164,15 @@ defmodule Smolquery.StorageService.Runtime do
   retention still drops a file within a span of its TTL. See
   `Smolquery.StorageService.Scheduler` for the two levels.
 
+  `compact_span_budget_ms` bounds the span level's share of a sweep (T-603).
+  Each sweep runs the hour level for every table first, then span-level
+  merges until this much time has passed, two minutes by default: no span
+  merge starts after that, and the tables not reached wait for the next
+  sweep. A span merge already running finishes, so a sweep can pass the
+  budget by one merge. `0` runs no span merge at all, the way a
+  `compact_target_bytes` of `nil` does, while keeping the settled files out
+  of the hour level.
+
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
   the merge engine, one rung down: explicit knob, else a quarter of the
@@ -308,6 +317,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_bucket_ms: 3_600_000,
     compact_target_bytes: 1_073_741_824,
     compact_span_ms: 86_400_000,
+    compact_span_budget_ms: 120_000,
     compact_engine_memory_limit: nil,
     compact_engine_mib_per_thread: 256,
     compact_span_decoded_bytes: 8_589_934_592,
@@ -353,6 +363,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_bucket_ms: pos_integer(),
           compact_target_bytes: pos_integer() | nil,
           compact_span_ms: pos_integer(),
+          compact_span_budget_ms: non_neg_integer(),
           compact_engine_memory_limit: String.t() | nil,
           compact_engine_mib_per_thread: pos_integer(),
           compact_span_decoded_bytes: pos_integer(),
@@ -393,6 +404,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_bucket_ms,
     :compact_target_bytes,
     :compact_span_ms,
+    :compact_span_budget_ms,
     :compact_engine_memory_limit,
     :compact_engine_mib_per_thread,
     :compact_span_decoded_bytes,
@@ -444,6 +456,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compact_engine_memory_limit()
     |> validate_compact_engine_mib_per_thread()
     |> validate_compact_spill()
+    |> validate_compact_span_budget()
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_compact_bucket_ms()
@@ -902,6 +915,15 @@ defmodule Smolquery.StorageService.Runtime do
             "#{inspect(runtime.compact_spill_floor_bytes)}, compact_spill_share " <>
             "#{inspect(runtime.compact_spill_share)} (expected positive integers, " <>
             "the floor may be 0)"
+  end
+
+  defp validate_compact_span_budget(%__MODULE__{compact_span_budget_ms: ms} = runtime)
+       when is_integer(ms) and ms >= 0,
+       do: runtime
+
+  defp validate_compact_span_budget(%__MODULE__{compact_span_budget_ms: ms}) do
+    raise ArgumentError,
+          "unsupported compact_span_budget_ms: #{inspect(ms)} (expected a non-negative integer)"
   end
 
   defp validate_compact_backoff(

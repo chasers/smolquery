@@ -269,6 +269,17 @@ defmodule Smolquery.StorageService.RuntimeTest do
     end
   end
 
+  test "compact_span_budget_ms defaults to two minutes and refuses a negative budget (T-603)" do
+    assert Runtime.new(name: __MODULE__.SpanBudget).compact_span_budget_ms == 120_000
+
+    assert Runtime.new(name: __MODULE__.NoSpan, compact_span_budget_ms: 0).compact_span_budget_ms ==
+             0
+
+    assert_raise ArgumentError, ~r/compact_span_budget_ms/, fn ->
+      Runtime.new(name: __MODULE__.BadBudget, compact_span_budget_ms: -1)
+    end
+  end
+
   describe "compact_spill_cap/2 (T-601)" do
     setup do
       configured = Application.get_env(:smolquery, :max_temp_directory_size)

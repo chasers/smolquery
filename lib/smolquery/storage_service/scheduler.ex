@@ -77,6 +77,31 @@ defmodule Smolquery.StorageService.Scheduler do
   own. The tables behind the exit are reported as `deferred` — untouched, no
   cooldown counted — and the next sweep finds them where they are.
 
+  ## Two lanes: every table's hour level first, then span merges on a budget
+
+  A sweep used to take each table in listing order and plan its span level
+  first, turning to the hour level only when the span level had nothing. On
+  the sandbox that let ten bench tables, each failing a span merge after
+  three minutes, hold every storage node for most of each sweep: no sweep
+  reached `metrics.samples` in half an hour, and its backlog grew (T-603).
+
+  So a sweep now runs two lanes. The **hour lane** runs first, over every
+  due table: small, fast merges that keep file counts bounded. The **span
+  lane** runs after it, over the same tables and the listing the hour lane
+  already read, and starts no span merge once `compact_span_budget_ms` has
+  passed; the tables it did not reach are reported as `span_waiting` and
+  come first in no particular order next sweep. A merge already running
+  finishes. Reusing the listing is safe: a span merge takes settled files,
+  which an hour swap never touches, and a swap whose inputs another node
+  retired meanwhile refuses in the catalog.
+
+  Each lane backs off on its own. A table whose hour-level compaction fails
+  waits in `cooling` and is not listed; a table whose span merges fail waits
+  in `span_cooling` (`Smolquery.StorageService.Scheduler.Backoff.adjusted_span_cooldowns/5`)
+  while its hour lane runs every sweep. A call that exits stops the lane it
+  exited in, and a stopped hour lane skips the span lane: the catalog
+  connection is still busy with it.
+
   ## The parts
 
     * `Smolquery.StorageService.Scheduler.Planner`: which files of a table to
@@ -109,7 +134,8 @@ defmodule Smolquery.StorageService.Scheduler do
     span_caps: %{},
     quarantine: %{},
     quarantined_groups: MapSet.new(),
-    cooldowns: %{}
+    cooldowns: %{},
+    span_cooldowns: %{}
   ]
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
@@ -166,7 +192,9 @@ defmodule Smolquery.StorageService.Scheduler do
   Reports what was compacted and what failed, per table, plus the groups this
   node currently quarantines and the tables it left out of this sweep
   because their last compaction failed (`cooling`, T-458), and the tables it
-  left untouched behind a call that exited (`deferred`, T-460) — the
+  left untouched behind a call that exited (`deferred`, T-460), and for the
+  span lane the tables waiting out a span failure (`span_cooling`) and the
+  ones its budget did not reach (`span_waiting`, T-603) — the
   observable form of the policy above, and what tests assert on. A wedged table shows
   up as a non-empty `quarantined` even on a sweep where nothing else
   happens.
@@ -179,11 +207,22 @@ defmodule Smolquery.StorageService.Scheduler do
 
     with {:ok, tables} <- Catalog.tables(runtime.catalog) do
       {cooling, due} = Enum.split_with(tables, &Backoff.cooling_down?(state.cooldowns, &1))
-      {outcomes, deferred} = sweep_due(runtime, state, due)
+      {hour, listings, deferred} = hour_lane(runtime, state, due)
       swept = due -- deferred
 
+      {span_cooling, span_due} =
+        swept
+        |> Enum.filter(&Map.has_key?(listings, &1))
+        |> Enum.split_with(&Backoff.cooling_down?(state.span_cooldowns, &1))
+
+      {span, span_swept, span_waiting} =
+        if deferred == [],
+          do: span_lane(runtime, state, span_due, listings),
+          else: {[], [], span_due}
+
+      outcomes = hour ++ span
       row_caps = Caps.adjusted_row_caps(state.row_caps, outcomes, runtime.compact_max_rows)
-      span_caps = Caps.adjusted_span_caps(state.span_caps, outcomes, runtime)
+      span_caps = Caps.adjusted_span_caps(state.span_caps, span, runtime)
 
       {quarantine, quarantined_groups} =
         Quarantine.adjusted_quarantine(
@@ -194,14 +233,19 @@ defmodule Smolquery.StorageService.Scheduler do
         )
 
       cooldowns =
-        Backoff.adjusted_cooldowns(state.cooldowns, swept, outcomes, runtime, state.row_caps)
+        Backoff.adjusted_cooldowns(state.cooldowns, swept, hour, runtime, state.row_caps)
+
+      span_cooldowns =
+        Backoff.adjusted_span_cooldowns(state.span_cooldowns, span_swept, span, runtime)
 
       report = %{
         compacted: for({:ok, swap} <- outcomes, do: swap),
         failed: for({:failed, failure} <- outcomes, do: failure),
         quarantined: quarantined_groups |> MapSet.to_list() |> Enum.sort(),
         cooling: Enum.sort(cooling),
-        deferred: Enum.sort(deferred)
+        deferred: Enum.sort(deferred),
+        span_cooling: Enum.sort(span_cooling),
+        span_waiting: Enum.sort(span_waiting)
       }
 
       {:ok, report,
@@ -211,56 +255,103 @@ defmodule Smolquery.StorageService.Scheduler do
            span_caps: span_caps,
            quarantine: quarantine,
            quarantined_groups: quarantined_groups,
-           cooldowns: cooldowns
+           cooldowns: cooldowns,
+           span_cooldowns: span_cooldowns
        }}
     end
   end
 
-  defp compact_table(runtime, state, table_ref) do
-    runtime = Caps.table_capped(runtime, state.row_caps, table_ref)
-    span_cap = Map.get(state.span_caps, table_ref, runtime.compact_target_bytes)
-    compact_capped(runtime, state.quarantined_groups, span_cap, table_ref)
-  end
+  defp hour_lane(_runtime, _state, []), do: {[], %{}, []}
 
-  defp sweep_due(_runtime, _state, []), do: {[], []}
+  defp hour_lane(runtime, state, [table_ref | rest]) do
+    {outcome, listing} = listed_hour(runtime, state, table_ref)
 
-  defp sweep_due(runtime, state, [table_ref | rest]) do
-    outcome = compact_table(runtime, state, table_ref)
-
-    if call_exited?(outcome) do
+    if stops_sweep?(outcome) do
       Logger.warning(fn ->
         "compaction sweep stopped after a call exited on #{inspect(table_ref)}: " <>
           "#{length(rest)} table(s) deferred to the next sweep"
       end)
 
-      {[outcome], rest}
+      {[outcome], %{}, rest}
     else
-      {outcomes, deferred} = sweep_due(runtime, state, rest)
-      {[outcome | outcomes], deferred}
+      {outcomes, listings, deferred} = hour_lane(runtime, state, rest)
+      listings = if listing, do: Map.put(listings, table_ref, listing), else: listings
+
+      {[outcome | outcomes], listings, deferred}
     end
   end
 
-  defp call_exited?({:failed, %{reason: reason}}), do: Failure.stops_sweep?(reason)
-  defp call_exited?(_outcome), do: false
-
-  defp compact_capped(runtime, quarantined_groups, span_cap, table_ref) do
+  defp listed_hour(runtime, state, table_ref) do
     started_at = System.monotonic_time(:microsecond)
 
     case exit_safe(:call_exited, fn ->
-           compact_listed(runtime, quarantined_groups, span_cap, table_ref, started_at)
+           Catalog.segment_files(runtime.catalog, table_ref, :current)
          end) do
-      {:error, reason} -> Job.failed(runtime, table_ref, reason, started_at)
+      {:ok, files} -> {compact_lane(runtime, state, table_ref, files, :hour), files}
+      {:error, reason} -> {Job.failed(runtime, table_ref, reason, started_at), nil}
+    end
+  end
+
+  defp span_lane(runtime, state, tables, listings) do
+    deadline = System.monotonic_time(:millisecond) + runtime.compact_span_budget_ms
+    {outcomes, swept, waiting} = span_lane(runtime, state, tables, listings, deadline)
+    span_waited(waiting)
+    {outcomes, swept, waiting}
+  end
+
+  defp span_lane(_runtime, _state, [], _listings, _deadline), do: {[], [], []}
+
+  defp span_lane(runtime, state, [table_ref | rest] = tables, listings, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {[], [], tables}
+    else
+      outcome = compact_lane(runtime, state, table_ref, Map.fetch!(listings, table_ref), :span)
+
+      if stops_sweep?(outcome) do
+        {[outcome], [table_ref], rest}
+      else
+        {outcomes, swept, waiting} = span_lane(runtime, state, rest, listings, deadline)
+        {[outcome | outcomes], [table_ref | swept], waiting}
+      end
+    end
+  end
+
+  defp span_waited([]), do: :ok
+
+  defp span_waited(waiting) do
+    Logger.info(fn ->
+      "compaction span lane spent its budget; #{length(waiting)} table(s) wait for the " <>
+        "next sweep (T-603)"
+    end)
+  end
+
+  defp stops_sweep?({:failed, %{reason: reason}}), do: Failure.stops_sweep?(reason)
+  defp stops_sweep?(_outcome), do: false
+
+  defp compact_lane(runtime, state, table_ref, files, lane) do
+    runtime = Caps.table_capped(runtime, state.row_caps, table_ref)
+    span_cap = Map.get(state.span_caps, table_ref, runtime.compact_target_bytes)
+    started_at = System.monotonic_time(:microsecond)
+    lane_failure = lane_failure(lane, span_cap)
+
+    case exit_safe(:call_exited, fn ->
+           planned(runtime, state, table_ref, files, lane, span_cap, started_at)
+         end) do
+      {:error, reason} -> Job.failed(runtime, table_ref, reason, started_at, lane_failure)
       outcome -> outcome
     end
   end
 
-  defp compact_listed(runtime, quarantined_groups, span_cap, table_ref, started_at) do
-    routing = Routing.resolve(runtime.name)
-    planning = %{routing: routing, quarantined_groups: quarantined_groups, files: nil}
+  defp planned(runtime, state, table_ref, files, lane, span_cap, started_at) do
+    planning = %{
+      routing: Routing.resolve(runtime.name),
+      quarantined_groups: state.quarantined_groups,
+      files: files
+    }
 
-    with {:ok, files} <- Catalog.segment_files(runtime.catalog, table_ref, :current),
-         {:ok, group} <-
-           Planner.plan(runtime, %{planning | files: files}, table_ref, span_cap, wall_ms()),
+    lane_failure = lane_failure(lane, span_cap)
+
+    with {:ok, group} <- Planner.plan(runtime, planning, table_ref, span_cap, wall_ms(), lane),
          :ok <- refuse_tombstoned(runtime, table_ref, group) do
       Job.run(runtime, table_ref, group, started_at)
     else
@@ -268,15 +359,21 @@ defmodule Smolquery.StorageService.Scheduler do
         :skip
 
       :skip ->
-        {:skip, table_ref}
+        skipped(lane, table_ref)
 
       {:error, reason} ->
-        Job.failed(runtime, table_ref, reason, started_at)
+        Job.failed(runtime, table_ref, reason, started_at, lane_failure)
 
       {:error, reason, failed_paths} ->
-        Job.failed(runtime, table_ref, reason, started_at, paths: failed_paths)
+        Job.failed(runtime, table_ref, reason, started_at, [paths: failed_paths] ++ lane_failure)
     end
   end
+
+  defp skipped(:hour, table_ref), do: {:skip, table_ref}
+  defp skipped(:span, _table_ref), do: :skip
+
+  defp lane_failure(:hour, _span_cap), do: []
+  defp lane_failure(:span, span_cap), do: [level: :span, span_cap: span_cap]
 
   defp exit_safe(step, call) do
     call.()

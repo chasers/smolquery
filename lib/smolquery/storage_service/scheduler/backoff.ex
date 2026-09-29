@@ -92,7 +92,27 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
           %{Catalog.table_ref() => map()},
           integer()
         ) :: %{Catalog.table_ref() => cooldown()}
-  def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, row_caps, now_ms \\ now_ms()) do
+  def adjusted_cooldowns(cooldowns, swept, outcomes, runtime, row_caps, now_ms \\ now_ms()),
+    do: adjusted(cooldowns, swept, outcomes, runtime, row_caps, now_ms, "compaction of")
+
+  @doc """
+  The span lane's cooldowns after a sweep (T-603): `adjusted_cooldowns/6`'s
+  rules over the span lane's own outcomes, kept apart from the table's, so a
+  table whose span merges fail waits in the span lane only and its hour lane
+  runs every sweep. A span failure that its cap can still shrink does not
+  back off; see `Smolquery.StorageService.Scheduler.Caps.adjusted_span_caps/3`.
+  """
+  @spec adjusted_span_cooldowns(
+          %{Catalog.table_ref() => cooldown()},
+          [Catalog.table_ref()],
+          [term()],
+          Runtime.t(),
+          integer()
+        ) :: %{Catalog.table_ref() => cooldown()}
+  def adjusted_span_cooldowns(cooldowns, swept, outcomes, runtime, now_ms \\ now_ms()),
+    do: adjusted(cooldowns, swept, outcomes, runtime, %{}, now_ms, "compaction span level of")
+
+  defp adjusted(cooldowns, swept, outcomes, runtime, row_caps, now_ms, label) do
     conflicted =
       for {:failed, %{table: table_ref, reason: :commit_conflict}} <- outcomes,
           into: MapSet.new(),
@@ -106,14 +126,19 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
 
     Enum.reduce(swept, cooldowns, fn table_ref, acc ->
       cond do
-        MapSet.member?(conflicted, table_ref) -> conflict_wait(acc, table_ref, runtime, now_ms)
-        MapSet.member?(failed, table_ref) -> back_off(acc, table_ref, runtime, now_ms)
-        true -> Map.delete(acc, table_ref)
+        MapSet.member?(conflicted, table_ref) ->
+          conflict_wait(acc, table_ref, runtime, now_ms, label)
+
+        MapSet.member?(failed, table_ref) ->
+          back_off(acc, table_ref, runtime, now_ms, label)
+
+        true ->
+          Map.delete(acc, table_ref)
       end
     end)
   end
 
-  defp conflict_wait(cooldowns, table_ref, runtime, now_ms) do
+  defp conflict_wait(cooldowns, table_ref, runtime, now_ms, label) do
     entry = Map.get(cooldowns, table_ref, %{consecutive: 0})
     conflicts = Map.get(entry, :conflicts, 0) + 1
     wait = runtime.compact_interval_ms
@@ -124,7 +149,7 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
       %{table_ref: table_ref}
     )
 
-    log_conflict(table_ref, conflicts, wait)
+    log_conflict(label, table_ref, conflicts, wait)
 
     Map.put(cooldowns, table_ref, %{
       consecutive: entry.consecutive,
@@ -133,21 +158,21 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
     })
   end
 
-  defp log_conflict(table_ref, conflicts, wait) when conflicts >= @conflicts_warn_after do
+  defp log_conflict(label, table_ref, conflicts, wait) when conflicts >= @conflicts_warn_after do
     Logger.warning(
-      "compaction of #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
+      "#{label} #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
         "#{conflicts} sweeps in a row; retrying in #{wait} ms (T-595)"
     )
   end
 
-  defp log_conflict(table_ref, conflicts, wait) do
+  defp log_conflict(label, table_ref, conflicts, wait) do
     Logger.info(
-      "compaction of #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
+      "#{label} #{inspect(table_ref)} lost its catalog commit to a concurrent write " <>
         "(#{conflicts} in a row); retrying in #{wait} ms"
     )
   end
 
-  defp back_off(cooldowns, table_ref, runtime, now_ms) do
+  defp back_off(cooldowns, table_ref, runtime, now_ms, label) do
     consecutive =
       case cooldowns do
         %{^table_ref => %{consecutive: consecutive}} -> consecutive + 1
@@ -167,23 +192,23 @@ defmodule Smolquery.StorageService.Scheduler.Backoff do
       %{table_ref: table_ref}
     )
 
-    log_backoff(table_ref, consecutive, wait)
+    log_backoff(label, table_ref, consecutive, wait)
 
     Map.put(cooldowns, table_ref, %{consecutive: consecutive, retry_at: now_ms + wait})
   end
 
-  defp log_backoff(_table_ref, _consecutive, 0), do: :ok
+  defp log_backoff(_label, _table_ref, _consecutive, 0), do: :ok
 
-  defp log_backoff(table_ref, consecutive, wait) when consecutive >= @stuck_after do
+  defp log_backoff(label, table_ref, consecutive, wait) when consecutive >= @stuck_after do
     Logger.error(
-      "compaction of #{inspect(table_ref)} has failed #{consecutive} times in a row; " <>
+      "#{label} #{inspect(table_ref)} has failed #{consecutive} times in a row; " <>
         "next attempt in #{wait} ms — compaction on this table is stalled (T-458)"
     )
   end
 
-  defp log_backoff(table_ref, consecutive, wait) do
+  defp log_backoff(label, table_ref, consecutive, wait) do
     Logger.warning(
-      "compaction of #{inspect(table_ref)} backs off #{wait} ms " <>
+      "#{label} #{inspect(table_ref)} backs off #{wait} ms " <>
         "(#{consecutive} consecutive failure(s))"
     )
   end
