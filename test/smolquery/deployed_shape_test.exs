@@ -65,6 +65,15 @@ defmodule Smolquery.DeployedShapeTest do
       assert log =~ "compact_engine_memory_limit=1GiB"
     end
 
+    test "states the compaction engine's threads, derived from its limit" do
+      log =
+        capture_log(fn ->
+          DeployedShape.announce(storage_runtime(compact_engine_memory_limit: "512MiB"))
+        end)
+
+      assert log =~ "compact_engine_threads=2"
+    end
+
     test "names the store the sealed tier came up on" do
       log = capture_log(fn -> DeployedShape.announce(storage_runtime(dir: "/tmp/sealed")) end)
 
