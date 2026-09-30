@@ -47,21 +47,21 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
     Postgrex.start_link(opts)
   end
 
+  @doc """
+  Checks that the ring configuration table exists. It does not create it:
+  `Smolquery.Catalog.Migrations.SmolqueryTables` does, in the boot step
+  `Smolquery.Catalog.Migrator` runs before any service, because a
+  `CREATE TABLE IF NOT EXISTS` from several nodes at once collides (T-609).
+  A missing table is `{:error, {:missing_table, "smolquery_ring_config"}}`,
+  which the keeper retries: the database the cluster uses is not the lake's
+  metadata database, or the boot step has not migrated it.
+  """
   @impl Smolquery.Cluster.ConfigStore
   def setup(conn) do
-    ddl = """
-    CREATE TABLE IF NOT EXISTS #{@table} (
-      scope text PRIMARY KEY,
-      epoch bigint NOT NULL,
-      members text NOT NULL,
-      prev_members text,
-      changed_at timestamptz NOT NULL DEFAULT now()
-    )
-    """
-
     measured(:setup, fn ->
-      case Postgrex.query(conn, ddl, []) do
-        {:ok, _result} -> :ok
+      case Postgrex.query(conn, "SELECT to_regclass($1) IS NOT NULL", ["public.#{@table}"]) do
+        {:ok, %{rows: [[true]]}} -> :ok
+        {:ok, _missing} -> {:error, {:missing_table, @table}}
         {:error, reason} -> {:error, reason}
       end
     end)

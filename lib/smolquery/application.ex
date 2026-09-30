@@ -17,6 +17,10 @@ defmodule Smolquery.Application do
   run the same-named pubsub. A web-only pubsub would hear nothing (T-295).
   `Smolquery.MetricsServer` is role-independent for the same reason: the
   counters live where the work runs, so every node must be scrapable (T-302).
+
+  `Smolquery.Catalog.Migrator` prepares a Postgres metadata database before
+  the cluster and every service start, and the one ordering this module
+  does encode: they read the tables it makes (T-609).
   """
 
   use Application
@@ -36,6 +40,7 @@ defmodule Smolquery.Application do
         {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
         {Phoenix.PubSub, name: Smolquery.PubSub},
         Smolquery.Lifecycle,
+        Smolquery.Catalog.Migrator,
         Smolquery.Cluster.RingCache
       ] ++
         Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)

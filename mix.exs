@@ -60,6 +60,7 @@ defmodule Smolquery.MixProject do
       {:snabbkaffex, "~> 0.1.0", runtime: false},
       {:libcluster_postgres, "~> 0.2"},
       {:postgrex, "~> 0.22"},
+      {:ecto_sql, "~> 3.14"},
       {:phoenix, "~> 1.8"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_view, "~> 1.2"},

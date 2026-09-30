@@ -43,8 +43,9 @@ defmodule Smolquery.Cluster.ConfigStore do
   @callback start_link(keyword()) :: GenServer.on_start()
 
   @doc """
-  Prepares the store's schema. Idempotent, and safe to retry until it
-  succeeds — a caller booting before the store is reachable keeps calling.
+  Readies the store: its schema exists, or is made. Idempotent, and safe to
+  retry until it succeeds — a caller booting before the store is reachable
+  keeps calling.
   """
   @callback setup(server()) :: :ok | {:error, term()}
 
