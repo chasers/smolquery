@@ -88,15 +88,26 @@ defmodule Smolquery.StorageService.Scheduler.PlannerTest do
 
     test "merges a span's small files among themselves instead of rewriting its big one",
          context do
-      big = seal(context, "samples", @older_day + 1_000, 10_000)
+      big = seal(context, "samples", @older_day + 1_000, 100_000)
       small = for n <- 2..4, do: seal(context, "samples", @older_day + n * 1_000, 10)
 
       assert {:ok, %{paths: paths, row_count: 30}} = plan(context.runtime, [big | small])
       assert paths == Enum.map(small, & &1.path)
     end
 
+    test "merges new seals into a span's remainder rather than stacking tiers", context do
+      big = seal(context, "samples", @older_day + 1_000, 100_000)
+      remainder = seal(context, "samples", @older_day + 2_000, 5_000)
+      new = seal(context, "samples", @older_day + 3_000, 10)
+
+      assert {:ok, %{paths: paths, row_count: 5_010}} =
+               plan(context.runtime, [big, remainder, new])
+
+      assert paths == [remainder.path, new.path]
+    end
+
     test "yields to the next span when only its big file would grow", context do
-      big = seal(context, "samples", @older_day + 1_000, 10_000)
+      big = seal(context, "samples", @older_day + 1_000, 100_000)
       lone = seal(context, "samples", @older_day + 2_000, 10)
       newer = for n <- 1..2, do: seal(context, "samples", @newer_day + n * 1_000, 1)
 
@@ -104,11 +115,27 @@ defmodule Smolquery.StorageService.Scheduler.PlannerTest do
       assert paths == Enum.map(newer, & &1.path)
     end
 
-    test "folds the big file in once the small files add a tenth of its rows", context do
-      big = seal(context, "samples", @older_day + 1_000, 1_000)
-      small = for n <- 2..3, do: seal(context, "samples", @older_day + n * 1_000, 50)
+    test "passes over a span at rest without opening a footer", context do
+      at_rest =
+        for {n, bytes} <- [{1, 1_000_000}, {2, 10}] do
+          %{
+            path:
+              Path.join([context.dir, "gone", "#{Id.generate(@older_day + n * 1_000)}.parquet"]),
+            bytes: bytes
+          }
+        end
 
-      assert {:ok, %{paths: paths, row_count: 1_100}} = plan(context.runtime, [big | small])
+      newer = for n <- 1..2, do: seal(context, "samples", @newer_day + n * 1_000, 1)
+
+      assert {:ok, %{paths: paths}} = plan(context.runtime, at_rest ++ newer)
+      assert paths == Enum.map(newer, & &1.path)
+    end
+
+    test "folds the big file in once the rest add up to a tenth of it", context do
+      big = seal(context, "samples", @older_day + 1_000, 10_000)
+      small = for n <- 2..3, do: seal(context, "samples", @older_day + n * 1_000, 1_000)
+
+      assert {:ok, %{paths: paths, row_count: 12_000}} = plan(context.runtime, [big | small])
       assert paths == Enum.map([big | small], & &1.path)
     end
   end
@@ -130,9 +157,10 @@ defmodule Smolquery.StorageService.Scheduler.PlannerTest do
 
     Engine.query!(
       Runtime.compact_engine(context.runtime.name),
-      "COPY (SELECT range AS id FROM range(#{rows})) TO '#{String.replace(path, "'", "''")}' (FORMAT PARQUET)"
+      "COPY (SELECT hash(range) AS id FROM range(#{rows})) " <>
+        "TO '#{String.replace(path, "'", "''")}' (FORMAT PARQUET)"
     )
 
-    %{path: path, bytes: 0}
+    %{path: path, bytes: File.stat!(path).size}
   end
 end

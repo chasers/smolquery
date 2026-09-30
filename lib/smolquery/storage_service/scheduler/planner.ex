@@ -182,27 +182,28 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   accident: on the sandbox a node owning 2,160 candidates never sized one
   write partition's 1,392 seals at all.
 
-  The span lane then sizes one span at a time, oldest first, each up to the
-  valve, and moves to the next span only when one forms no group. A span with
-  fewer candidates than `compact_min_inputs` is passed over without opening a
-  footer. Sizing a span on its own means a span's group sees that span's
-  oldest candidates, not whatever of it fit beside older spans in one shared
-  valve. The valve is per span, not per plan: a shared one would hand a span
-  that fills it and forms no group the same starvation it exists to end.
-  Spans that yield hold few candidates (small files otherwise merge among
-  themselves), so the footers a plan reads past the first span stay few.
+  The span lane then takes one span at a time, oldest first, sizes it up to
+  the valve, and moves to the next span only when one forms no group. Sizing
+  a span on its own means its group sees that span's oldest candidates, not
+  whatever of it fit beside older spans in one shared valve.
 
-  A span group must add at least a tenth of its largest input's rows. One that
-  does not would rewrite a big file to absorb a few small ones: the sandbox
-  rewrote a 16.7M-row day file every sweep to add 5 seals of 2,600 rows, about
-  1,000x write amplification, and because that day always formed a group, the
-  day behind it with 1,935 seals never got a turn. So the largest input is
-  dropped and the group is formed again from the rest, which merges the small
-  files among themselves; when the rest forms no group, the span yields to
-  the next one. The big file is folded in once the small files' output is
-  itself a tenth of it. A settled span receives no new seals, so a span can
-  rest at its big file plus one remainder under a tenth of its rows: one extra
-  file a day, against rewriting the day's file for every handful of seals.
+  Before sizing, a span's candidates must be worth merging, judged from the
+  sizes the catalog recorded. When everything but the largest candidate
+  adds up to less than a tenth of it, merging them in would rewrite the big
+  file to absorb a few small ones: the sandbox rewrote a 16.7M-row day file
+  every sweep to add 5 seals of 2,600 rows, about 1,000x write amplification,
+  and because that day always formed a group, the day behind it with 1,935
+  seals never got a turn. So the big file is left out and the rest merge
+  among themselves, all at once; when the rest are fewer than
+  `compact_min_inputs`, the span yields to the next one without a footer
+  opened. A day's files are still arriving while its day is open, since a file
+  settles two buckets after it is written, so a span rests at its big file
+  plus at most one remainder: new seals merge into the remainder, which is
+  under a tenth of the big file by construction, and the remainder folds into
+  the big file once it reaches a tenth of it. A span at rest costs nothing on
+  a sweep, which is what lets the lane walk every span, oldest first, each
+  sweep. A size the catalog does not know is `0`, so a span missing sizes is
+  sized and merged whole, as before.
   """
 
   alias Smolquery.Catalog
@@ -370,8 +371,7 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   defp plan_files(runtime, level, files, learned) do
-    candidates =
-      for %{path: path, bytes: bytes} <- files, bytes < runtime.compact_below_bytes, do: path
+    candidates = Enum.filter(files, &(&1.bytes < runtime.compact_below_bytes))
 
     if length(candidates) < runtime.compact_min_inputs do
       :skip
@@ -413,7 +413,7 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   defp plan_undersized(runtime, :hour, candidates, _learned) do
-    with {:ok, undersized} <- undersized(runtime, candidates) do
+    with {:ok, undersized} <- undersized(runtime, Enum.map(candidates, & &1.path)) do
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
@@ -423,7 +423,7 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
 
   defp plan_undersized(runtime, :span, candidates, learned) do
     candidates
-    |> Enum.chunk_by(&bucket(&1, runtime.compact_bucket_ms))
+    |> Enum.chunk_by(&bucket(&1.path, runtime.compact_bucket_ms))
     |> span_group(runtime, learned)
   end
 
@@ -444,36 +444,28 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
 
   defp span_group([], _runtime, _learned), do: :skip
 
-  defp span_group([day | rest], runtime, learned) when length(day) < runtime.compact_min_inputs,
-    do: span_group(rest, runtime, learned)
-
   defp span_group([day | rest], runtime, learned) do
-    with {:ok, entries} <- undersized(runtime, day) do
-      case day_group(runtime, entries, learned) do
-        :skip -> span_group(rest, runtime, learned)
-        planned -> planned
-      end
+    with [_ | _] = candidates <- worth_merging(runtime, day),
+         {:ok, entries} <- undersized(runtime, candidates),
+         {:ok, group} <- group(runtime, entries) do
+      decoded_capped(runtime, entries, group, learned)
+    end
+    |> case do
+      skipped when skipped in [[], :skip] -> span_group(rest, runtime, learned)
+      planned -> planned
     end
   end
 
-  defp day_group(runtime, entries, learned) do
-    with {:ok, group} <- group(runtime, entries),
-         {:ok, group} <- decoded_capped(runtime, entries, group, learned) do
-      growing(runtime, entries, group, learned)
-    end
-  end
+  defp worth_merging(runtime, day) do
+    %{path: big, bytes: largest} = Enum.max_by(day, & &1.bytes)
+    rest = Enum.reject(day, &(&1.path == big))
 
-  defp growing(runtime, entries, group, learned) do
-    rows = Map.new(entries, fn {path, _bytes, rows} -> {path, rows} end)
+    candidates =
+      if Enum.sum_by(rest, & &1.bytes) * @span_min_growth < largest, do: rest, else: day
 
-    {head, largest} =
-      group.paths |> Enum.map(&{&1, Map.fetch!(rows, &1)}) |> Enum.max_by(&elem(&1, 1))
-
-    if (group.row_count - largest) * @span_min_growth < largest do
-      day_group(runtime, List.keydelete(entries, head, 0), learned)
-    else
-      {:ok, group}
-    end
+    if length(candidates) < runtime.compact_min_inputs,
+      do: [],
+      else: Enum.map(candidates, & &1.path)
   end
 
   defp undersized(runtime, paths) do
@@ -517,12 +509,12 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
     end
   end
 
-  defp group_filled(%{bytes: bytes, rows: rows, count: count} = acc, runtime)
-       when bytes >= runtime.compact_max_bytes or rows >= runtime.compact_max_rows or
-              count >= @group_max_staging_chunks * runtime.merge_inputs_per_call,
-       do: {:halt, acc}
-
-  defp group_filled(acc, _runtime), do: {:cont, acc}
+  defp group_filled(%{bytes: bytes, rows: rows, count: count} = acc, runtime) do
+    if bytes >= runtime.compact_max_bytes or rows >= runtime.compact_max_rows or
+         count >= valve(runtime),
+       do: {:halt, acc},
+       else: {:cont, acc}
+  end
 
   defp sizes_chunk(runtime, paths) do
     count = length(paths)
