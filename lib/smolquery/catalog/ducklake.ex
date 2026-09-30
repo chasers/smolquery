@@ -583,9 +583,8 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp schema_rows(%__MODULE__{reader: pool} = config, dataset, table) do
-    statement(:postgrex, fn ->
-      Reader.transaction(pool, &postgres_schema_rows(&1, config, dataset, table))
-    end)
+    fn -> Reader.transaction(pool, &postgres_schema_rows(&1, config, dataset, table)) end
+    |> read_or_fall_back(config, &schema_rows(&1, dataset, table))
   end
 
   defp postgres_schema_rows(conn, config, dataset, table) do
@@ -694,13 +693,8 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, result} <-
            read(
              config,
-             "SELECT DISTINCT df.path, df.path_is_relative " <>
-               "FROM #{meta(config, "ducklake_data_file")} df " <>
-               "JOIN #{meta(config, "ducklake_table")} t " <>
-               "ON t.table_id = df.table_id " <>
-               "JOIN #{meta(config, "ducklake_schema")} s " <>
-               "ON s.schema_id = t.schema_id " <>
-               "WHERE s.schema_name = $1 AND t.table_name = $2 AND df.begin_snapshot <= $3",
+             &("SELECT DISTINCT df.path, df.path_is_relative FROM #{live_files_joins(&1)} " <>
+                 "WHERE s.schema_name = $1 AND t.table_name = $2 AND df.begin_snapshot <= $3"),
              [dataset, table, snapshot]
            ) do
       absolute_paths(result.rows)
@@ -715,19 +709,10 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, result} <-
            read(
              config,
-             "SELECT CAST(COUNT(*) AS BIGINT), " <>
-               "CAST(COALESCE(SUM(df.record_count), 0) AS BIGINT), " <>
-               "CAST(COALESCE(SUM(df.file_size_bytes), 0) AS BIGINT) " <>
-               "FROM #{meta(config, "ducklake_data_file")} df " <>
-               "JOIN #{meta(config, "ducklake_table")} t " <>
-               "ON t.table_id = df.table_id " <>
-               "JOIN #{meta(config, "ducklake_schema")} s " <>
-               "ON s.schema_id = t.schema_id " <>
-               "WHERE s.schema_name = $1 AND t.table_name = $2 " <>
-               "AND df.begin_snapshot <= $3 " <>
-               "AND (df.end_snapshot IS NULL OR df.end_snapshot > $3) " <>
-               "AND t.begin_snapshot <= $3 " <>
-               "AND (t.end_snapshot IS NULL OR t.end_snapshot > $3)",
+             &("SELECT CAST(COUNT(*) AS BIGINT), " <>
+                 "CAST(COALESCE(SUM(df.record_count), 0) AS BIGINT), " <>
+                 "CAST(COALESCE(SUM(df.file_size_bytes), 0) AS BIGINT) " <>
+                 "FROM #{live_files_joins(&1)} WHERE #{@live_files}"),
              [dataset, table, snapshot]
            ) do
       case result.rows do
@@ -747,7 +732,7 @@ defmodule Smolquery.Catalog.DuckLake do
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         {:ok, result} <- read(config, segment_files_sql(config), [dataset, table, snapshot]) do
+         {:ok, result} <- read(config, &segment_files_sql/1, [dataset, table, snapshot]) do
       segment_file_rows(result.rows)
     end
   end
@@ -763,18 +748,18 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp segment_files_sql(config) do
-    "SELECT df.path, df.path_is_relative, " <>
-      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot, stats.column_ids " <>
-      "FROM #{live_files_joins(config)} " <>
-      "LEFT JOIN (SELECT fcs.data_file_id, " <>
+    "WITH live AS (SELECT df.data_file_id, df.table_id, df.path, df.path_is_relative, " <>
+      "df.record_count, df.file_size_bytes, df.begin_snapshot " <>
+      "FROM #{live_files_joins(config)} WHERE #{@live_files}) " <>
+      "SELECT live.path, live.path_is_relative, " <>
+      "CAST(COALESCE(live.record_count, 0) AS BIGINT), " <>
+      "CAST(COALESCE(live.file_size_bytes, 0) AS BIGINT), live.begin_snapshot, stats.column_ids " <>
+      "FROM live LEFT JOIN (SELECT fcs.data_file_id, " <>
       "array_agg(fcs.column_id ORDER BY fcs.column_id) AS column_ids " <>
-      "FROM ducklake_file_column_stats fcs WHERE fcs.table_id IN (" <>
-      "SELECT named.table_id FROM ducklake_table named " <>
-      "JOIN ducklake_schema owner ON owner.schema_id = named.schema_id " <>
-      "WHERE owner.schema_name = $1 AND named.table_name = $2) " <>
-      "GROUP BY fcs.data_file_id) stats ON stats.data_file_id = df.data_file_id " <>
-      "WHERE #{@live_files} ORDER BY df.path COLLATE \"C\""
+      "FROM ducklake_file_column_stats fcs JOIN live " <>
+      "ON live.table_id = fcs.table_id AND live.data_file_id = fcs.data_file_id " <>
+      "GROUP BY fcs.data_file_id) stats ON stats.data_file_id = live.data_file_id " <>
+      "ORDER BY live.path COLLATE \"C\""
   end
 
   defp live_files_joins(config) do
@@ -1194,8 +1179,7 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def schema_version(%__MODULE__{} = config) do
     sql =
-      "SELECT schema_version FROM #{meta(config, "ducklake_snapshot")} " <>
-        "ORDER BY snapshot_id DESC LIMIT 1"
+      &"SELECT schema_version FROM #{meta(&1, "ducklake_snapshot")} ORDER BY snapshot_id DESC LIMIT 1"
 
     with {:ok, result} <- read(config, sql, []) do
       case result.rows do
@@ -1207,7 +1191,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @impl Catalog
   def current_snapshot(%__MODULE__{} = config) do
-    with {:ok, result} <- read(config, current_snapshot_sql(config), []) do
+    with {:ok, result} <- read(config, &current_snapshot_sql/1, []) do
       case result.rows do
         [[snapshot]] -> {:ok, snapshot}
         rows -> {:error, {:unexpected_snapshot_result, rows}}
@@ -1754,10 +1738,35 @@ defmodule Smolquery.Catalog.DuckLake do
   defp current_snapshot_sql(_config),
     do: "SELECT snapshot_id FROM ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1"
 
-  defp read(%__MODULE__{reader: nil} = config, sql, params), do: query(config, sql, params)
+  defp read(%__MODULE__{reader: nil} = config, sql, params),
+    do: query(config, sql.(config), params)
 
-  defp read(%__MODULE__{reader: pool}, sql, params),
-    do: statement(:postgrex, fn -> Reader.query(pool, sql, params) end)
+  defp read(%__MODULE__{reader: pool} = config, sql, params) do
+    fn -> Reader.query(pool, sql.(config), params) end
+    |> read_or_fall_back(config, &read(&1, sql, params))
+  end
+
+  defp read_or_fall_back(run, %__MODULE__{reader: pool} = config, duckdb_read) do
+    case statement(:postgrex, run) do
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, reason} ->
+        warn_fallback(pool, reason)
+        duckdb_read.(%{config | reader: nil})
+    end
+  end
+
+  defp warn_fallback(pool, reason) do
+    unless :persistent_term.get({Reader, pool, :warned}, false) do
+      :persistent_term.put({Reader, pool, :warned}, true)
+
+      Logger.warning(
+        "catalog reader #{inspect(pool)} failed a read, which went through DuckDB instead; " <>
+          "later failures of this pool fall back silently: #{inspect(reason)}"
+      )
+    end
+  end
 
   defp add_statement(config, {dataset, table}, paths) do
     literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)

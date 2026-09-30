@@ -27,10 +27,29 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   The pool is started beside the lake's engine by
   `Smolquery.Catalog.DuckLake.children/2`, `pool_size` connections (4 by
   default, `SMOLQUERY_CATALOG_READER_POOL_SIZE`), so plans on one node read in
-  parallel. `SMOLQUERY_CATALOG_READER=off` sends every read back through
-  DuckDB. The connection comes from the `postgres:` metadata string itself;
-  one that carries a key Postgrex has no equivalent for (`sslmode`, say) keeps
-  the DuckDB path rather than connecting differently from DuckLake.
+  parallel. `SMOLQUERY_CATALOG_READER=false` sends every read back through
+  DuckDB.
+
+  ## A read the reader cannot answer goes to DuckDB
+
+  The connection comes from the `postgres:` metadata string, and libpq and
+  Postgrex do not default alike: libpq without a `host` dials the Unix socket,
+  takes the user's name for a missing `dbname`, reads `.pgpass`, and prefers
+  TLS. So the reader starts only for a string naming a TCP `host`, a `dbname`
+  and a `user`, with an `sslmode` of `disable` (plaintext, the default here,
+  as the ring store's Postgrex connection to the same database) or `require`
+  (TLS without verification); anything else keeps the DuckDB path. Its
+  connections pin `search_path` to `public`, where DuckLake keeps its tables
+  and where `Smolquery.Catalog.DuckLake.Swap` already writes them.
+
+  Whatever still differs, a read the reader fails is not a failed read:
+  `Smolquery.Catalog.DuckLake` answers it through DuckDB instead, and logs the
+  first such failure per pool. A checkout that fails, a pool not yet started
+  and a statement Postgres refuses all come back as errors, never an exit or
+  a raise, the contract `Smolquery.Engine.try_query/4` keeps for the engine
+  path (T-464). The pool queues checkouts for up to ten seconds before it
+  gives up on one, as a busy engine connection would, rather than DBConnection's
+  default of dropping them after 50 ms.
 
   ## Indexes
 
@@ -53,6 +72,8 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   """
 
   @default_pool_size 4
+  @queue_target_ms 10_000
+  @queue_interval_ms 30_000
 
   @scalar_types %{
     "boolean" => "BOOLEAN",
@@ -110,7 +131,13 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
     with true <- Keyword.get(config, :enabled, true),
          {:ok, connection} <- libpq_options(libpq) do
       {:ok,
-       Keyword.put(connection, :pool_size, Keyword.get(config, :pool_size, @default_pool_size))}
+       connection ++
+         [
+           pool_size: Keyword.get(config, :pool_size, @default_pool_size),
+           queue_target: @queue_target_ms,
+           queue_interval: @queue_interval_ms,
+           parameters: [search_path: "public"]
+         ]}
     else
       _off_or_unsupported -> :none
     end
@@ -120,16 +147,28 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
 
   @doc """
   The Postgrex options a libpq `key=value` string names, or `:error` when
-  it carries a key without a Postgrex equivalent or does not parse. Values
-  may be bare or single-quoted with `\\` escapes, the form
+  Postgrex would not connect as libpq does: a key without a Postgrex
+  equivalent, no TCP `host`, no `dbname` or `user`, an `sslmode` other than
+  `disable` or `require`, or a string that does not parse. Values may be bare
+  or single-quoted with `\\` escapes, the form
   `Smolquery.DatabaseUrl.libpq_metadata/1` writes.
   """
   @spec libpq_options(String.t()) :: {:ok, keyword()} | :error
   def libpq_options(libpq) do
-    with {:ok, pairs} <- libpq_pairs(String.trim_leading(libpq), []) do
-      Enum.reduce_while(pairs, {:ok, []}, &libpq_option/2)
+    with {:ok, pairs} <- libpq_pairs(String.trim_leading(libpq), []),
+         {:ok, options} <- Enum.reduce_while(pairs, {:ok, [ssl: false]}, &libpq_option/2),
+         true <- Enum.all?([:hostname, :database, :username], &Keyword.has_key?(options, &1)),
+         false <- String.starts_with?(options[:hostname], "/") do
+      {:ok, options}
+    else
+      _unlike_libpq -> :error
     end
   end
+
+  defp libpq_option({"sslmode", "disable"}, {:ok, options}), do: {:cont, {:ok, options}}
+
+  defp libpq_option({"sslmode", "require"}, {:ok, options}),
+    do: {:cont, {:ok, Keyword.put(options, :ssl, verify: :verify_none)}}
 
   defp libpq_option({key, value}, {:ok, options}) do
     case Map.fetch(@libpq_keys, key) do
@@ -192,6 +231,8 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
       {:ok, %Postgrex.Result{rows: rows}} -> {:ok, %{rows: rows || []}}
       {:error, error} -> {:error, error}
     end
+  catch
+    :exit, reason -> {:error, {:reader_exited, reason}}
   end
 
   @doc """
@@ -212,6 +253,10 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
         {:error, reason} -> Postgrex.rollback(conn, reason)
       end
     end)
+  rescue
+    error in DBConnection.ConnectionError -> {:error, error}
+  catch
+    :exit, reason -> {:error, {:reader_exited, reason}}
   end
 
   @doc """
