@@ -55,7 +55,7 @@ defmodule Smolquery.StorageService.MergeWindowedTest do
 
     assert merged.row_count == length(rows)
     assert read_in_file_order(runtime, merged) == Enum.sort_by(rows, &clustering_order/1)
-    refute File.exists?(scratch(merged))
+    assert scratch(runtime) == []
   end
 
   test "merges the same rows in the same order in one window or in many", context do
@@ -79,6 +79,27 @@ defmodule Smolquery.StorageService.MergeWindowedTest do
 
     assert read_in_file_order(context.runtime, merged) ==
              Enum.sort_by(rows, &clustering_order/1)
+  end
+
+  test "sorted_rows/3 is one window's rows when the merge would window, else the group's",
+       context do
+    runtime = %{context.runtime | compact_window_decoded_bytes: 1_000}
+
+    assert Merge.sorted_rows(runtime, 500, 10) == 100
+    assert Merge.sorted_rows(runtime, 50, 10) == 50
+    assert Merge.sorted_rows(runtime, 500, nil) == 500
+  end
+
+  test "clear_scratch/1 removes what a merge that died left behind", context do
+    leftover =
+      Path.expand(
+        Path.join([Runtime.spill_root(), "merge_windows", "#{context.runtime.name}", "stale"])
+      )
+
+    File.mkdir_p!(Path.join(leftover, "windows"))
+
+    assert Merge.clear_scratch(context.runtime) == :ok
+    assert scratch(context.runtime) == []
   end
 
   defp compact(runtime, sealed, id, opts) do
@@ -129,9 +150,10 @@ defmodule Smolquery.StorageService.MergeWindowedTest do
     |> Enum.map(&List.to_tuple/1)
   end
 
-  defp scratch(segment) do
-    {:ok, id} = Store.id(segment.key)
-
-    Path.expand(Path.join([Runtime.spill_root(), "merge_windows", id]))
+  defp scratch(runtime) do
+    [Runtime.spill_root(), "merge_windows", "#{runtime.name}", "*"]
+    |> Path.join()
+    |> Path.expand()
+    |> Path.wildcard()
   end
 end

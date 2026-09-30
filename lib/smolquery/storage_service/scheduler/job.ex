@@ -107,7 +107,7 @@ defmodule Smolquery.StorageService.Scheduler.Job do
     else
       {:error, reason} ->
         failed(runtime, table_ref, reason, started_at,
-          rows: row_count,
+          rows: Merge.sorted_rows(runtime, row_count, Map.get(group, :width)),
           paths: paths,
           level: group.level,
           span_cap: group.span_cap,
