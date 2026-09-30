@@ -49,6 +49,28 @@ defmodule Smolquery.Catalog.MigratorTest do
            ]
   end
 
+  test "prepared?/1 is the configured metadata, when the step can prepare it" do
+    previous = Application.get_env(:smolquery, DuckLake)
+    metadata = "postgres:dbname=smolquery host=db user=smol"
+    Application.put_env(:smolquery, DuckLake, metadata: metadata)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:smolquery, DuckLake, previous),
+        else: Application.delete_env(:smolquery, DuckLake)
+    end)
+
+    assert Migrator.prepared?(metadata)
+    refute Migrator.prepared?("postgres:dbname=other host=db user=smol")
+    Application.put_env(:smolquery, DuckLake, metadata: "postgres:dbname=smolquery")
+    refute Migrator.prepared?("postgres:dbname=smolquery")
+  end
+
+  test "prepare_cluster/1 has nothing to do without clustering" do
+    assert Migrator.prepare_cluster(enabled: false) == :ok
+    assert Migrator.prepare_cluster([]) == :ok
+  end
+
   test "prepare/1 has nothing to do for a SQLite lake" do
     assert Migrator.prepare(metadata: "sqlite:/tmp/never.sqlite", data_path: "/tmp/never") == :ok
     refute File.exists?("/tmp/never.sqlite")
@@ -124,9 +146,41 @@ defmodule Smolquery.Catalog.MigratorTest do
              ]
     end
 
+    test "a node booting into a migrated database attaches nothing", context do
+      :ok = Migrator.prepare(context.config)
+      unattachable = Keyword.put(context.config, :data_path, "/nonexistent/elsewhere")
+
+      assert Migrator.prepare(unattachable ++ [catalog: "another_lake"]) == :ok
+    end
+
+    test "prepares the cluster's database with the tables migration", context do
+      assert Migrator.prepare_cluster(enabled: true, postgres: context.connection) == :ok
+      assert "smolquery_ring_config" in tables(context.connection)
+      assert versions(context.connection) == [hd(@versions)]
+    end
+
+    test "a Postgres lake the step does not prepare keeps its bootstrap side tables",
+         context do
+      engine = __MODULE__.Unprepared
+
+      start_supervised!(
+        {DuckLake,
+         name: engine, metadata: context.config[:metadata], data_path: context.config[:data_path]}
+      )
+
+      assert Enum.all?(
+               ~w(smolquery_clustering smolquery_partitions smolquery_connections),
+               &(&1 in tables(context.connection))
+             )
+    end
+
     test "logs a step that cannot run and answers the error", context do
       config =
-        Keyword.update!(context.config, :metadata, &String.replace(&1, "password=", "password=x"))
+        Keyword.update!(
+          context.config,
+          :metadata,
+          &String.replace(&1, "dbname=#{context.connection[:database]}", "dbname=no_such_db")
+        )
 
       log = capture_log(fn -> assert {:error, _reason} = Migrator.prepare(config) end)
 
