@@ -377,6 +377,27 @@ defmodule Smolquery.StorageService.SchedulerTest do
                Scheduler.sweep(context.storage)
     end
 
+    test "a span group larger than one window merges window by window (T-607)", context do
+      :ok = Catalog.put_clustering(context.catalog, @table, ["id"])
+      runtime = start_scheduler(context, Keyword.merge(@span, compact_window_decoded_bytes: 1))
+
+      for {index, range} <- [{1, 21..30}, {2, 1..10}, {3, 11..20}],
+          do: seal(runtime, context.catalog, index, range)
+
+      assert {:ok, %{compacted: [%{replaced: 3, rows: 30, key: key, level: :span}], failed: []}} =
+               Scheduler.sweep(context.storage)
+
+      ids =
+        context.storage
+        |> Runtime.engine()
+        |> Engine.query!("SELECT id FROM read_parquet($1)", [Store.location(runtime.store, key)])
+        |> Map.fetch!(:rows)
+        |> List.flatten()
+
+      assert ids == Enum.to_list(1..30)
+      assert lake_rows(context.storage) == 30
+    end
+
     test "never merges across spans", context do
       runtime = start_scheduler(context, @span)
       a = seal(runtime, context.catalog, 1, 1..10)

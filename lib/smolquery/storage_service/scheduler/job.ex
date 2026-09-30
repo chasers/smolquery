@@ -80,7 +80,8 @@ defmodule Smolquery.StorageService.Scheduler.Job do
              key,
              paths,
              row_count: row_count,
-             inputs_per_call: staging_per_call(runtime, group)
+             inputs_per_call: staging_per_call(runtime, group),
+             width: Map.get(group, :width)
            ),
          {:ok, snapshot} <- swapped(runtime, table_ref, segment, paths) do
       Logger.info(fn ->

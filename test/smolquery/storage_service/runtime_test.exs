@@ -307,13 +307,17 @@ defmodule Smolquery.StorageService.RuntimeTest do
       assert Runtime.compact_spill_cap(runtime, :error) == nil
     end
 
-    test "refuses a share or decoded budget that is not positive" do
+    test "refuses a share, decoded budget or window that is not positive" do
       assert_raise ArgumentError, ~r/compaction spill settings/, fn ->
         Runtime.new(name: __MODULE__.SpillBad, compact_spill_share: 0)
       end
 
       assert_raise ArgumentError, ~r/compaction spill settings/, fn ->
         Runtime.new(name: __MODULE__.DecodedBad, compact_span_decoded_bytes: -1)
+      end
+
+      assert_raise ArgumentError, ~r/compact_window_decoded_bytes 0/, fn ->
+        Runtime.new(name: __MODULE__.WindowBad, compact_window_decoded_bytes: 0)
       end
     end
   end

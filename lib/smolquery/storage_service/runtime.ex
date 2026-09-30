@@ -181,13 +181,17 @@ defmodule Smolquery.StorageService.Runtime do
   one thread per `compact_engine_mib_per_thread`, so a merge's sort always has
   the memory it needs on each thread to spill; see `compact_engine_threads/3`.
 
-  Three settings keep a spilling merge from filling a node's disk (T-601):
+  Four settings keep a spilling merge from filling a node's disk (T-601, T-607):
 
     * `compact_span_decoded_bytes` caps a span-level group by its estimated
       size in memory, 8 GiB by default. Compressed bytes cannot see it: a
       `MAP` or `VARIANT` row of about 4 bytes on disk decodes to about 3 KiB,
       so a 1 GiB group was hundreds of gigabytes of sort, and every merge
       spilled to DuckDB's temp cap.
+    * `compact_window_decoded_bytes` is how much of a span merge is sorted
+      at once, 256 MiB of estimated decoded rows by default: a span group
+      larger than one window merges window by window, so it sorts in memory
+      and never spills (T-607); see `Smolquery.StorageService.Merge`.
     * `compact_spill_floor_bytes` pauses the span level for a sweep while
       the spill filesystem has less free space than this, 2 GiB by default.
     * `compact_spill_share` sizes each compaction engine instance's
@@ -321,6 +325,7 @@ defmodule Smolquery.StorageService.Runtime do
     compact_engine_memory_limit: nil,
     compact_engine_mib_per_thread: 256,
     compact_span_decoded_bytes: 8_589_934_592,
+    compact_window_decoded_bytes: 268_435_456,
     compact_spill_floor_bytes: 2_147_483_648,
     compact_spill_share: 4,
     compact_backoff_base_ms: 600_000,
@@ -367,6 +372,7 @@ defmodule Smolquery.StorageService.Runtime do
           compact_engine_memory_limit: String.t() | nil,
           compact_engine_mib_per_thread: pos_integer(),
           compact_span_decoded_bytes: pos_integer(),
+          compact_window_decoded_bytes: pos_integer(),
           compact_spill_floor_bytes: non_neg_integer(),
           compact_spill_share: pos_integer(),
           compact_backoff_base_ms: non_neg_integer(),
@@ -408,6 +414,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_engine_memory_limit,
     :compact_engine_mib_per_thread,
     :compact_span_decoded_bytes,
+    :compact_window_decoded_bytes,
     :compact_spill_floor_bytes,
     :compact_spill_share,
     :compact_backoff_base_ms,
@@ -900,18 +907,20 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_compact_spill(
          %__MODULE__{
            compact_span_decoded_bytes: decoded,
+           compact_window_decoded_bytes: window,
            compact_spill_floor_bytes: floor,
            compact_spill_share: share
          } = runtime
        )
-       when is_integer(decoded) and decoded > 0 and is_integer(floor) and floor >= 0 and
-              is_integer(share) and share > 0,
+       when is_integer(decoded) and decoded > 0 and is_integer(window) and window > 0 and
+              is_integer(floor) and floor >= 0 and is_integer(share) and share > 0,
        do: runtime
 
   defp validate_compact_spill(%__MODULE__{} = runtime) do
     raise ArgumentError,
           "unsupported compaction spill settings: compact_span_decoded_bytes " <>
-            "#{inspect(runtime.compact_span_decoded_bytes)}, compact_spill_floor_bytes " <>
+            "#{inspect(runtime.compact_span_decoded_bytes)}, compact_window_decoded_bytes " <>
+            "#{inspect(runtime.compact_window_decoded_bytes)}, compact_spill_floor_bytes " <>
             "#{inspect(runtime.compact_spill_floor_bytes)}, compact_spill_share " <>
             "#{inspect(runtime.compact_spill_share)} (expected positive integers, " <>
             "the floor may be 0)"
