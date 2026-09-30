@@ -28,6 +28,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
+  alias Smolquery.Test.Postgres
   alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
@@ -41,7 +42,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
   setup context do
     connection = postgres_connection()
     ensure_database!(connection)
-    reset_ducklake_tables!(connection)
+    Postgres.reset_ducklake!(connection)
     metadata = postgres_metadata(connection)
 
     start_supervised!(
@@ -227,13 +228,6 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     end
   end
 
-  defp reset_ducklake_tables!(connection) do
-    {:ok, conn} = Postgrex.start_link(connection)
-
-    Postgrex.query!(conn, drop_ducklake_tables_sql(), [])
-    GenServer.stop(conn)
-  end
-
   # A publication makes Postgres refuse UPDATE/DELETE on any covered table
   # that lacks a replica identity — the trap the moduledoc describes for
   # DuckLake's own PK-less tables. Covering only the smolquery side tables
@@ -257,21 +251,5 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
 
     Postgrex.query!(conn, "DROP PUBLICATION IF EXISTS smolquery_side_table_pub", [])
     GenServer.stop(conn)
-  end
-
-  defp drop_ducklake_tables_sql do
-    """
-    DO $$
-    DECLARE r RECORD;
-    BEGIN
-      FOR r IN SELECT tablename FROM pg_tables
-                WHERE schemaname = current_schema()
-                  AND (tablename LIKE 'ducklake\\_%' ESCAPE '\\'
-                       OR tablename LIKE 'smolquery\\_%' ESCAPE '\\')
-      LOOP
-        EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
-      END LOOP;
-    END $$;
-    """
   end
 end
