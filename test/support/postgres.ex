@@ -53,7 +53,9 @@ defmodule Smolquery.Test.Postgres do
   Drops every DuckLake metadata table and smolquery side table in the
   connection's database, so the next attach starts a clean catalog. A
   catalog's identity lives in its metadata database, so the Postgres suites
-  share one and reset it rather than each creating their own.
+  share one and reset it rather than each creating their own. The suites
+  also reset on exit: the federation suite ranks this database's tables by
+  size, and a lake left behind outranks its fixture table.
   """
   @spec reset_ducklake!(keyword()) :: :ok
   def reset_ducklake!(connection) do

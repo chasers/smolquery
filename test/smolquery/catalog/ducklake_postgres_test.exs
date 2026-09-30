@@ -43,6 +43,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     connection = postgres_connection()
     ensure_database!(connection)
     Postgres.reset_ducklake!(connection)
+    on_exit(fn -> Postgres.reset_ducklake!(connection) end)
     metadata = postgres_metadata(connection)
 
     start_supervised!(
