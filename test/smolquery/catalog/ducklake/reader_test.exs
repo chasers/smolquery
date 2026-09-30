@@ -130,6 +130,7 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
     setup context do
       connection = Postgres.ensure_database!()
       :ok = Postgres.reset_ducklake!(connection)
+      on_exit(fn -> Postgres.reset_ducklake!(connection) end)
 
       {catalog, opts} =
         DuckLake.resolve(
