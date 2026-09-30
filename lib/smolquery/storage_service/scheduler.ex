@@ -123,6 +123,7 @@ defmodule Smolquery.StorageService.Scheduler do
   alias Smolquery.Engine
   alias Smolquery.Engine.CallExited
   alias Smolquery.Segments.Store
+  alias Smolquery.StorageService.Merge
   alias Smolquery.StorageService.Routing
   alias Smolquery.StorageService.Runtime
   alias Smolquery.StorageService.Scheduler.Backoff
@@ -163,6 +164,7 @@ defmodule Smolquery.StorageService.Scheduler do
       | catalog: compaction_catalog(runtime)
     }
 
+    :ok = Merge.clear_scratch(runtime)
     GenServer.start_link(__MODULE__, runtime, name: Runtime.scheduler(runtime.name))
   end
 
