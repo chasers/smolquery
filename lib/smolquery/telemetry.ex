@@ -162,10 +162,11 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
       [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction |
-                                          :stage | :move | :commit, result}
+                                          :stage | :move | :commit | :postgrex, result}
                                           — one per statement the DuckLake catalog sent its engine;
                                           stage, move and commit are the timed parts of the
-                                          compaction swap (T-573, T-600)
+                                          compaction swap (T-573, T-600); postgrex is a read
+                                          sent over the Postgrex reader instead (T-608)
       [:smolquery, :catalog, :commit_attempt] %{count}, meta %{attempt: 1..5,
                                           result: :ok | :conflict | :error}
                                           — one per attempt of a DuckLake commit, retries included
@@ -485,7 +486,8 @@ defmodule Smolquery.Telemetry do
       "Statements the DuckLake catalog sent its engine, by kind (query or transaction) and " <>
         "result; over ops, what one op costs in statements (T-549). Kinds stage, move and " <>
         "commit are the parts of the compaction swap; move and commit are counted inside its " <>
-        "transaction (T-573, T-600).",
+        "transaction (T-573, T-600). Kind postgrex is a metadata read sent over Postgrex " <>
+        "instead of the engine (T-608).",
     "smolquery_catalog_commit_attempts_total" =>
       "Attempts at a DuckLake commit, by attempt number and result: ok, conflict (retried " <>
         "until the fifth) or error. Conflicts over ok is the conflict rate (T-573).",
@@ -1196,8 +1198,9 @@ defmodule Smolquery.Telemetry do
   defp catalog_op(%{op: op}) when op in @catalog_ops, do: op
   defp catalog_op(_meta), do: :unknown
 
-  defp catalog_kind(%{kind: kind}) when kind in [:query, :transaction, :stage, :move, :commit],
-    do: kind
+  defp catalog_kind(%{kind: kind})
+       when kind in [:query, :transaction, :stage, :move, :commit, :postgrex],
+       do: kind
 
   defp catalog_kind(_meta), do: :unknown
 

@@ -7,6 +7,8 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Catalog.DuckLake.Reader
@@ -19,38 +21,70 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
 
   describe "libpq_options/1" do
     test "reads bare and quoted values, the form DatabaseUrl writes" do
-      assert Reader.libpq_options(
-               "dbname=smolquery host='catalog.internal' port=5433 " <>
-                 "user='smol' password='it\\'s a \\\\ secret'"
-             ) ==
-               {:ok,
-                [
-                  password: "it's a \\ secret",
-                  username: "smol",
-                  port: 5433,
-                  hostname: "catalog.internal",
-                  database: "smolquery"
-                ]}
+      assert {:ok, options} =
+               Reader.libpq_options(
+                 "dbname=smolquery host='catalog.internal' port=5433 " <>
+                   "user='smol' password='it\\'s a \\\\ secret'"
+               )
+
+      assert Enum.sort(options) ==
+               Enum.sort(
+                 database: "smolquery",
+                 hostname: "catalog.internal",
+                 port: 5433,
+                 username: "smol",
+                 password: "it's a \\ secret",
+                 ssl: false
+               )
     end
 
-    test "refuses a key Postgrex has no equivalent for, and what does not parse" do
-      assert Reader.libpq_options("dbname=smolquery sslmode=require") == :error
-      assert Reader.libpq_options("dbname=smolquery port=fifty") == :error
+    test "maps sslmode disable to plaintext and require to TLS without verification" do
+      base = "dbname=smolquery host=db user=smol"
+
+      assert {:ok, disabled} = Reader.libpq_options(base <> " sslmode=disable")
+      assert disabled[:ssl] == false
+      assert {:ok, required} = Reader.libpq_options(base <> " sslmode=require")
+      assert required[:ssl] == [verify: :verify_none]
+    end
+
+    test "refuses what Postgrex would not connect to as libpq does" do
+      assert Reader.libpq_options("dbname=smolquery host=db user=smol sslmode=verify-full") ==
+               :error
+
+      assert Reader.libpq_options("dbname=smolquery host=/run/postgresql user=smol") == :error
+      assert Reader.libpq_options("dbname=smolquery user=smol") == :error
+      assert Reader.libpq_options("dbname=smolquery host=db") == :error
+      assert Reader.libpq_options("host=db user=smol") == :error
+      assert Reader.libpq_options("dbname=smolquery host=db user=smol port=fifty") == :error
+
+      assert Reader.libpq_options("dbname=smolquery host=db user=smol application_name=x") ==
+               :error
+
       assert Reader.libpq_options("password='unterminated") == :error
     end
   end
 
   describe "options/2" do
-    test "reads Postgres metadata with the configured pool size" do
-      assert {:ok, options} = Reader.options("postgres:dbname=smolquery host=db", pool_size: 7)
+    test "reads Postgres metadata with the configured pool size, queueing and search path" do
+      assert {:ok, options} =
+               Reader.options("postgres:dbname=smolquery host=db user=smol", pool_size: 7)
+
       assert options[:pool_size] == 7
       assert options[:hostname] == "db"
+      assert options[:queue_target] == 10_000
+      assert options[:parameters] == [search_path: "public"]
     end
 
-    test "stays in DuckDB for SQLite metadata, a reader switched off, or an unsupported key" do
+    test "stays in DuckDB for SQLite metadata, a reader switched off, or unlike libpq" do
       assert Reader.options("sqlite:/tmp/catalog.sqlite", []) == :none
-      assert Reader.options("postgres:dbname=smolquery host=db", enabled: false) == :none
-      assert Reader.options("postgres:dbname=smolquery sslmode=require", []) == :none
+
+      assert Reader.options("postgres:dbname=smolquery host=db user=smol", enabled: false) ==
+               :none
+
+      assert Reader.options("postgres:dbname=smolquery host=db user=smol sslmode=verify-ca", []) ==
+               :none
+
+      assert Reader.options("postgres:dbname=smolquery", []) == :none
       assert Reader.options(nil, []) == :none
     end
   end
@@ -145,6 +179,26 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       end
 
       assert {:ok, [_ | _]} = Catalog.segment_files(catalog, @variant, current)
+    end
+
+    test "a reader that cannot answer falls back to DuckDB, never an exit", context do
+      %{duckdb: duckdb, store: store} = context
+      fixture!(duckdb, store)
+      unreachable = %{duckdb | config: %{duckdb.config | reader: __MODULE__.NoSuchPool}}
+      {:ok, snapshot} = Catalog.current_snapshot(duckdb)
+
+      assert capture_log(fn ->
+               assert Catalog.current_snapshot(unreachable) == {:ok, snapshot}
+             end) =~ "went through DuckDB instead"
+
+      assert Catalog.schema_version(unreachable) == Catalog.schema_version(duckdb)
+      assert Catalog.table_schema(unreachable, @typed) == Catalog.table_schema(duckdb, @typed)
+
+      assert Catalog.segment_files(unreachable, @events, snapshot) ==
+               Catalog.segment_files(duckdb, @events, snapshot)
+
+      assert Catalog.segment_stats(unreachable, @events, snapshot) ==
+               Catalog.segment_stats(duckdb, @events, snapshot)
     end
 
     test "a relative path DuckLake wrote itself is refused on both paths", context do
