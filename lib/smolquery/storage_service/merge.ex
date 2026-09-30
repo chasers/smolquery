@@ -192,6 +192,47 @@ defmodule Smolquery.StorageService.Merge do
   runs the other way, so the gate is gone. The value is configured once at
   boot as `seal_row_group_size` on `Smolquery.StorageService.Runtime`.
 
+  ## A large span merge sorts window by window, so its memory is bounded (T-607)
+
+  A compaction's inputs are already sorted by the clustering key, and one
+  `COPY ... ORDER BY` over all of them sorts every row again, in a sort whose
+  memory and spill grow with the group: at 2,000 `metrics.samples` seals the
+  sort spilled 2.5 GiB for 251 MiB of inputs, and 4x the data cost 9x the
+  spill (T-605, `bench/merge_order.exs`). So a compaction whose caller passes
+  the group's estimated row width (`width:`, which the span planner knows)
+  and whose rows exceed one window, `compact_window_decoded_bytes` over that
+  width, merges as an external sort instead:
+
+    1. **Localize.** Each chunk of `merge_inputs_per_call` inputs is copied,
+       projected, to a local run file, in order and without a sort. The
+       per-call input cap holds exactly as on the other paths, and no later
+       step reads the store again.
+    2. **Partition.** One `COPY ... PARTITION_BY` over the runs writes every
+       row into its window's directory, windows split at quantiles of the
+       leading clustering column sampled from the runs. `NULL`s go to the last
+       window, matching `NULLS LAST`. A streaming write: nothing is sorted.
+    3. **Sort each window.** One `COPY ... ORDER BY` per window, oldest key
+       range first, each about one window of rows, so each fits the
+       compaction engine's memory and does not spill.
+    4. **Concatenate.** One `COPY` of the window parts in key order with
+       `PRESERVE_ORDER true` writes the segment. The compaction session runs
+       with `preserve_insertion_order = false`, under which a plain
+       concatenation reorders row groups; the per-statement option overrides
+       it for this statement only, without touching the shared connection.
+
+  Every row is read from the store once and written locally three times, and
+  each step deletes what the one before it wrote, so the scratch space under
+  `Smolquery.StorageService.Runtime.spill_root/0` peaks around twice the
+  group's compressed size: disk the spill floor already watches, and far
+  below a sort's spill of decoded rows. The scratch directory is named for the
+  output key, so a retry clears its predecessor's leftovers, and an `after`
+  block removes it however the merge ends.
+
+  The windows are only as fine as the leading column: a column with few
+  distinct values gives few windows, and a window holding one heavy value is
+  sorted whole, spilling as the single sort did. Without `width:`, without a
+  clustering key, or within one window, a merge takes the paths above.
+
   ## Compression has to match the writer's, or sealing inflates the data
 
   `COPY`'s default codec is snappy while `Smolquery.Segments.Writer` writes
@@ -225,6 +266,8 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.StorageService.Runtime
 
   @drop_staging_timeout_ms 5_000
+  @window_sample_rows 100_000
+  @window_column "__merge_window"
 
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
@@ -281,6 +324,11 @@ defmodule Smolquery.StorageService.Merge do
   and the compactor knows its inputs' sizes, so it shrinks the chunk when the
   inputs are large and one full-width chunk would move too many bytes in one
   call.
+
+  `width:` is the group's estimated decoded bytes a row, which the span
+  planner already knows. With it, a clustered group of more rows than
+  `compact_window_decoded_bytes` holds at that width merges window by
+  window instead of in one sort; see the moduledoc.
   """
   @spec compact(Runtime.t(), Store.table_ref(), Store.key(), [String.t()], keyword()) ::
           {:ok, Segment.t()} | {:error, term()}
@@ -294,9 +342,15 @@ defmodule Smolquery.StorageService.Merge do
     with {:ok, key} <- valid_key(key),
          {:ok, row_count} <- compact_row_count(runtime, urls, Keyword.get(opts, :row_count)),
          {:ok, sources} <- sealed_sources(runtime, table_ref, urls) do
-      merge(runtime, table_ref, key, with_urls(%{sources: sources, row_count: row_count}))
+      inputs = with_urls(%{sources: sources, row_count: row_count})
+      merge(runtime, table_ref, key, inputs, window_rows(runtime, Keyword.get(opts, :width)))
     end
   end
+
+  defp window_rows(_runtime, nil), do: nil
+
+  defp window_rows(runtime, width) when is_integer(width) and width > 0,
+    do: max(div(runtime.compact_window_decoded_bytes, width), 1)
 
   defp sealed_sources(runtime, table_ref, urls) do
     with {:ok, field_ids} <- file_field_ids(runtime, urls),
@@ -349,16 +403,136 @@ defmodule Smolquery.StorageService.Merge do
 
   defp compact_row_count(runtime, urls, nil), do: footer_row_count(runtime, urls)
 
-  defp merge(runtime, table_ref, key, inputs) do
+  defp merge(runtime, table_ref, key, inputs, window_rows \\ nil) do
     with {:ok, schema} <-
            Catalog.table_schema(runtime.catalog, Smolquery.Partitions.parent(table_ref)) do
-      if length(inputs.urls) <= runtime.merge_inputs_per_call do
-        merge_direct(runtime, key, schema, inputs)
-      else
-        merge_chunked(runtime, key, schema, inputs)
+      cond do
+        windowed?(schema, inputs, window_rows) ->
+          merge_windowed(runtime, key, schema, inputs, window_rows)
+
+        length(inputs.urls) <= runtime.merge_inputs_per_call ->
+          merge_direct(runtime, key, schema, inputs)
+
+        true ->
+          merge_chunked(runtime, key, schema, inputs)
       end
     end
   end
+
+  defp windowed?(_schema, _inputs, nil), do: false
+
+  defp windowed?(schema, inputs, window_rows),
+    do: inputs.row_count > window_rows and Schema.clustering_columns(schema) != []
+
+  defp merge_windowed(runtime, key, schema, inputs, window_rows) do
+    {:ok, id} = Store.id(key)
+    dir = Path.expand(Path.join([Runtime.spill_root(), "merge_windows", id]))
+    File.rm_rf!(dir)
+    File.mkdir_p!(dir)
+    windows = div(inputs.row_count + window_rows - 1, window_rows)
+
+    try do
+      with {:ok, runs} <- localize(runtime, schema, dir, inputs.sources),
+           :ok <- partition(runtime, schema, dir, runs, windows),
+           {:ok, parts} <- sort_windows(runtime, schema, dir),
+           {:ok, put} <- Store.put(runtime.store, key, &concatenate(runtime, schema, parts, &1)) do
+        {:ok, segment(key, put, inputs.row_count)}
+      end
+    after
+      File.rm_rf(dir)
+    end
+  end
+
+  defp localize(runtime, schema, dir, sources) do
+    sources
+    |> Enum.chunk_every(runtime.merge_inputs_per_call)
+    |> Enum.with_index(&{&1, Path.join(dir, "run_#{&2}.parquet")})
+    |> collect(fn {chunk, run} ->
+      with :ok <- localize_chunk(runtime, schema, chunk, run), do: {:ok, run}
+    end)
+  end
+
+  defp localize_chunk(runtime, schema, sources, run) do
+    with {:ok, select, urls} <- scan_select(runtime, schema, sources) do
+      sql =
+        "COPY (#{Schema.computed_select(schema, "(#{select})")}) " <>
+          "TO $#{length(urls) + 1} (FORMAT PARQUET, PRESERVE_ORDER true)"
+
+      with {:ok, _result} <- query(runtime, sql, urls ++ [run], runtime.merge_staging_timeout_ms),
+           do: :ok
+    end
+  end
+
+  defp partition(runtime, schema, dir, runs, windows) do
+    lead = schema |> Schema.clustering_columns() |> hd() |> Identifier.quote_name!()
+    fractions = Enum.map_join(1..max(windows - 1, 1), ", ", &"#{&1 / windows}")
+
+    sql = """
+    COPY (
+      WITH bounds AS (
+        SELECT coalesce(list_sort(list_distinct(quantile_disc(#{lead}, [#{fractions}]))), []) AS b
+        FROM (SELECT #{lead} FROM #{local_scan(runs)} USING SAMPLE #{@window_sample_rows} ROWS)
+      )
+      SELECT rows.*,
+             CASE WHEN rows.#{lead} IS NULL THEN len(bounds.b)
+                  ELSE len(list_filter(bounds.b, bound -> bound < rows.#{lead})) END AS #{@window_column}
+      FROM #{local_scan(runs)} AS rows, bounds
+    ) TO $#{length(runs) + 1} (FORMAT PARQUET, PARTITION_BY (#{@window_column}))
+    """
+
+    with {:ok, _result} <-
+           query(runtime, sql, runs ++ [Path.join(dir, "windows")], runtime.merge_copy_timeout_ms) do
+      Enum.each(runs, &File.rm!/1)
+    end
+  end
+
+  defp sort_windows(runtime, schema, dir) do
+    windows_dir = Path.join(dir, "windows")
+
+    sql =
+      "COPY (SELECT * FROM read_parquet($1, hive_partitioning = false)#{order_by(schema)}) " <>
+        "TO $2 (FORMAT PARQUET)"
+
+    windows_dir
+    |> File.ls!()
+    |> Enum.map(&window_index/1)
+    |> Enum.sort()
+    |> Enum.map(
+      &{Path.join(windows_dir, "#{@window_column}=#{&1}"), Path.join(dir, "part_#{&1}.parquet")}
+    )
+    |> collect(fn {window, part} -> sort_window(runtime, sql, window, part) end)
+  end
+
+  defp sort_window(runtime, sql, window, part) do
+    params = [Path.join(window, "*.parquet"), part]
+
+    with {:ok, _result} <- query(runtime, sql, params, runtime.merge_copy_timeout_ms) do
+      File.rm_rf!(window)
+      {:ok, part}
+    end
+  end
+
+  defp collect(items, fun, done \\ [])
+
+  defp collect([], _fun, done), do: {:ok, Enum.reverse(done)}
+
+  defp collect([item | rest], fun, done) do
+    with {:ok, value} <- fun.(item), do: collect(rest, fun, [value | done])
+  end
+
+  defp window_index(@window_column <> "=" <> index), do: String.to_integer(index)
+
+  defp concatenate(runtime, schema, parts, staged) do
+    sql = """
+    COPY (SELECT * FROM #{local_scan(parts)})
+    TO $#{length(parts) + 1} (#{parquet_options(runtime, schema)}, PRESERVE_ORDER true)
+    """
+
+    with {:ok, _result} <- query(runtime, sql, parts ++ [staged], runtime.merge_copy_timeout_ms),
+         do: :ok
+  end
+
+  defp local_scan(paths), do: "read_parquet([#{placeholders(paths)}])"
 
   defp merge_direct(runtime, key, schema, inputs) do
     with {:ok, select, urls} <- scan_select(runtime, schema, inputs.sources),

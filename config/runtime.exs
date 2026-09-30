@@ -552,6 +552,12 @@ if bytes = System.get_env("SMOLQUERY_COMPACT_SPAN_DECODED_BYTES") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_DECODED_BYTES", bytes)
 end
 
+if bytes = System.get_env("SMOLQUERY_COMPACT_WINDOW_DECODED_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    compact_window_decoded_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_WINDOW_DECODED_BYTES", bytes)
+end
+
 if share = System.get_env("SMOLQUERY_COMPACT_SPILL_SHARE") do
   config :smolquery, Smolquery.StorageService,
     compact_spill_share:
