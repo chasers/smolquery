@@ -25,6 +25,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Catalog.Migrator
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
@@ -45,12 +46,14 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     Postgres.reset_ducklake!(connection)
     on_exit(fn -> Postgres.reset_ducklake!(connection) end)
     metadata = postgres_metadata(connection)
+    data_path = Path.join(context.tmp_dir, "data")
+    :ok = Migrator.prepare(metadata: metadata, data_path: data_path, catalog: @catalog_name)
 
     start_supervised!(
       {DuckLake,
        name: @engine,
        metadata: metadata,
-       data_path: Path.join(context.tmp_dir, "data"),
+       data_path: data_path,
        catalog: @catalog_name,
        connections: 2}
     )

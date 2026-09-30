@@ -62,22 +62,13 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
 
   ## Indexes
 
-  DuckLake creates primary keys on Postgres and no other index, so the reads
-  here scan `ducklake_data_file`, `ducklake_column` and
-  `ducklake_file_column_stats` by `table_id`. The snapshot read uses
-  `ducklake_snapshot`'s primary key. Nothing here creates an index: several
-  nodes booting at once would race each other's `CREATE INDEX CONCURRENTLY`,
-  and a failed concurrent build leaves an invalid index that `IF NOT EXISTS`
-  then skips forever. An operator adds them once:
-
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS smolquery_data_file_table
-        ON ducklake_data_file (table_id, begin_snapshot);
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS smolquery_file_column_stats_table
-        ON ducklake_file_column_stats (table_id, data_file_id);
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS smolquery_column_table
-        ON ducklake_column (table_id);
-
-  They add to DuckLake's tables without changing its schema contract.
+  DuckLake creates primary keys on Postgres and no other index, so without
+  help the reads here scan `ducklake_data_file`, `ducklake_column` and
+  `ducklake_file_column_stats` by `table_id`; the snapshot read uses
+  `ducklake_snapshot`'s primary key. The indexes they want are a catalog
+  migration, `Smolquery.Catalog.Migrations.DucklakeReadIndexes`, which the
+  boot step builds `CONCURRENTLY`, one node at a time (T-609). They add to
+  DuckLake's tables without changing its schema contract.
   """
 
   require Logger

@@ -12,6 +12,7 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Catalog.DuckLake.Reader
+  alias Smolquery.Catalog.Migrator
   alias Smolquery.Engine
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
@@ -132,16 +133,14 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       :ok = Postgres.reset_ducklake!(connection)
       on_exit(fn -> Postgres.reset_ducklake!(connection) end)
 
-      {catalog, opts} =
-        DuckLake.resolve(
-          [
-            metadata: metadata(connection),
-            data_path: Path.join(context.tmp_dir, "data"),
-            catalog: @lake,
-            connections: 2
-          ],
-          @engine
-        )
+      lake = [
+        metadata: metadata(connection),
+        data_path: Path.join(context.tmp_dir, "data"),
+        catalog: @lake
+      ]
+
+      :ok = Migrator.prepare(lake)
+      {catalog, opts} = DuckLake.resolve(lake ++ [connections: 2], @engine)
 
       for child <- DuckLake.children(opts, @engine), do: start_supervised!(child)
 

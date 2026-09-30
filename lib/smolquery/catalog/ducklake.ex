@@ -281,12 +281,8 @@ defmodule Smolquery.Catalog.DuckLake do
       |> then(&EngineSecrets.sealed_tier_extensions(store, &1))
 
     bootstrap = [
-      attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration),
-      create_clustering_statement(catalog),
-      create_partitions_statement(catalog),
-      create_connections_statement(catalog),
-      create_materialized_statement(catalog),
-      create_required_statement(catalog)
+      attach_statement(catalog, metadata, data_path, automatic_migration: automatic_migration)
+      | side_table_statements(catalog, metadata)
     ]
 
     config
@@ -371,21 +367,25 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @doc """
   The children a supervisor starts for a catalog `resolve/2` returned —
-  none when the handle was given outright, the engine, and when the metadata
-  is Postgres the reader pool and its boot-time check (`Reader.check/1`).
+  none when the handle was given outright; else the engine, then, when the
+  metadata is Postgres, the reader pool and its boot-time check
+  (`Reader.check/1`). A Postgres metadata database is migrated once per node
+  before any of these start (`Smolquery.Catalog.Migrator`, T-609).
   """
   @spec children(keyword() | nil, atom()) :: [Supervisor.child_spec() | {module(), term()}]
   def children(nil, _engine), do: []
 
   def children(opts, engine) do
-    case Keyword.pop(opts, :reader) do
-      {nil, opts} ->
-        [{__MODULE__, [name: engine] ++ opts}]
+    {reader, opts} = Keyword.pop(opts, :reader)
 
-      {reader, opts} ->
-        pool = Reader.pool(engine)
-        [{__MODULE__, [name: engine] ++ opts}, {Reader, {pool, reader}}, Reader.check_child(pool)]
-    end
+    [{__MODULE__, [name: engine] ++ opts} | reader_children(reader, engine)]
+  end
+
+  defp reader_children(nil, _engine), do: []
+
+  defp reader_children(reader, engine) do
+    pool = Reader.pool(engine)
+    [{Reader, {pool, reader}}, Reader.check_child(pool)]
   end
 
   @doc """
@@ -430,6 +430,20 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp postgres_metadata?("postgres:" <> _), do: true
   defp postgres_metadata?(_metadata), do: false
+
+  defp side_table_statements(catalog, metadata) do
+    if postgres_metadata?(metadata) do
+      []
+    else
+      [
+        create_clustering_statement(catalog),
+        create_partitions_statement(catalog),
+        create_connections_statement(catalog),
+        create_materialized_statement(catalog),
+        create_required_statement(catalog)
+      ]
+    end
+  end
 
   @impl Catalog
   def create_dataset(%__MODULE__{} = _config, "__smolquery_stage" = dataset),
@@ -1474,6 +1488,13 @@ defmodule Smolquery.Catalog.DuckLake do
   defp retention_table(config), do: "#{metadata_schema(config.catalog)}.smolquery_retention"
 
   defp ensure_retention_table(config) do
+    case metadata_type(config) do
+      "postgres" -> :ok
+      _sqlite -> create_retention_table(config)
+    end
+  end
+
+  defp create_retention_table(config) do
     sql =
       "CREATE TABLE IF NOT EXISTS #{retention_table(config)} (" <>
         "dataset VARCHAR NOT NULL, table_name VARCHAR NOT NULL, " <>

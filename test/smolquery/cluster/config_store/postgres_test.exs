@@ -10,11 +10,13 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
   counters restart, leftover rows from a prior advance make the next
   `ensure` return epoch > 0 and the following `advance(..., 0, _)` look
   like a CAS conflict. Random scope keys keep tests from inheriting that
-  durable state; the table itself is still created by `setup/1`.
+  durable state. The table is made by the catalog's tables migration, as the
+  boot step makes it (T-609); `setup/1` checks it is there.
   """
 
   use ExUnit.Case, async: false
 
+  alias Smolquery.Catalog.Migrator
   alias Smolquery.Cluster.ConfigStore.Postgres
 
   @moduletag :integration
@@ -23,6 +25,8 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
   @node_b :"buffer2@pod.invalid"
 
   setup_all do
+    {:ok, options} = Migrator.options(libpq(connection_opts()))
+    {:ok, _versions} = Migrator.migrate(options, [hd(Migrator.migrations())])
     {:ok, conn} = Postgres.start_link(connection_opts())
     :ok = Postgres.setup(conn)
 
@@ -104,6 +108,12 @@ defmodule Smolquery.Cluster.ConfigStore.PostgresTest do
 
   defp unique_scope do
     "test:#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
+  end
+
+  defp libpq(connection) do
+    "postgres:dbname=#{connection[:database]} host=#{connection[:hostname]} " <>
+      "port=#{connection[:port]} user=#{connection[:username]} " <>
+      "password=#{connection[:password]}"
   end
 
   defp connection_opts do

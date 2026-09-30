@@ -101,6 +101,57 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
+### Rolling out: catalog reads over Postgrex, and a boot step that migrates the catalog database (T-608, T-609)
+
+**TL;DR.** With Postgres metadata, this release reads the catalog over Postgrex instead of DuckDB's postgres extension (T-608). It also adds a boot step that brings the metadata database up to date before any service starts (T-609). Roll it out like any release. The first pod to boot builds three indexes, and the others wait for it. Check the prerequisites below first. SQLite lakes see no change.
+
+**What happens on the first boot.** Every node runs `Smolquery.Catalog.Migrator` before the cluster and the services start:
+
+1. It takes a fleet-wide advisory lock. Other booting nodes poll every 500 ms until it's free.
+2. It attaches the lake, so DuckLake creates or upgrades its own tables as it always has. `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` still applies.
+3. It runs the catalog migrations and records them in `smolquery_schema_migrations`:
+   - `20260930110000`: smolquery's own tables: the table-option side tables, `smolquery_retention` and `smolquery_ring_config`. On an existing database these already exist, so nothing changes and the version is only recorded.
+   - `20260930120000`: three indexes on DuckLake's tables, built `CONCURRENTLY`: `smolquery_data_file_table`, `smolquery_file_column_stats_table` and `smolquery_column_table`. Seals and compactions keep committing while they build. The build takes time in proportion to `ducklake_file_column_stats` (hundreds of thousands of rows on the sandbox: seconds).
+
+Later boots find nothing to do and take well under a second.
+
+**Prerequisites. Check them before rolling:**
+
+- **Session-level connections.** The advisory lock is a session lock. A PgBouncer (or similar) in transaction or statement pooling mode between the pods and Postgres breaks it. Point `CATALOG_DATABASE_URL` at Postgres directly, or at a pool in session mode.
+- **Privileges.** The catalog role must be able to create tables in `public` and create indexes on DuckLake's tables. The role DuckLake has been using owns them, so this holds unless ownership was changed by hand.
+- **The connection must be one Postgrex can make as libpq does.** That means a TCP `host`, a `dbname` and a `user`, with `sslmode` `disable` or `require` if set. `CATALOG_DATABASE_URL` always produces this. A hand-written `SMOLQUERY_CATALOG` without a host, with a socket path, or with another `sslmode` skips the boot step and the Postgrex reader. It then reads through DuckDB as before, and the ring store refuses to start (next point).
+- **One database.** The ring configuration table is now made by the migration, in the lake's metadata database. `Smolquery.Cluster` must use the same database. It does whenever both come from `CATALOG_DATABASE_URL`. A `SMOLQUERY_CATALOG` naming another database leaves the cluster's without the table, and the ring store's setup answers `{:error, {:missing_table, "smolquery_ring_config"}}`.
+- **Startup probes.** A pod isn't ready until its boot step finishes. On the first rollout, give the startup probe room for the index build plus the other pods' turns on the lock.
+
+**A boot step that fails fails the boot.** The pod exits and restarts, and its log says "the catalog metadata database could not be prepared" with the reason. A pod that can't create its tables would otherwise fail later, on its first catalog read or ring change, and less clearly.
+
+**Mixed versions during the roll are safe.** Old pods keep running their `CREATE TABLE IF NOT EXISTS` bootstrap, which finds the tables in place. They never look at `smolquery_schema_migrations` or the new indexes.
+
+**The Postgrex reader** answers `current_snapshot`, `schema_version`, `table_schema`, `registered_through`, `segment_stats` and `segment_files`:
+
+- Each role that opens a lake keeps a pool of `SMOLQUERY_CATALOG_READER_POOL_SIZE` connections (4). Count them against Postgres's `max_connections`: roles per pod × pool size × pods.
+- At boot it reads the latest snapshot once. A failure there logs "catalog reader ... cannot read the catalog" at error level.
+- A read that fails is an error, as a DuckDB read failure always was. There is no silent fallback.
+- `SMOLQUERY_CATALOG_READER=false` sends every read back through DuckDB without a redeploy of anything else.
+- `smolquery_catalog_statements_total{kind="postgrex"}` counts its reads.
+
+**Verify after the roll:**
+
+```sql
+SELECT version FROM smolquery_schema_migrations ORDER BY 1;
+-- 20260930110000, 20260930120000
+
+SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE c.relname LIKE 'smolquery\_%\_table';
+-- three rows, all true
+```
+
+- One pod logs `catalog migrations applied: [...]`. No pod logs "could not be prepared" or "cannot read the catalog".
+- Query planning's `resolve` and `snapshot` spans drop to milliseconds.
+- Performance Insights no longer shows `ctid`-range `COPY`s of `ducklake_file_column_stats` or `ducklake_snapshot` from the query tier.
+
+**Rolling back** to a release before this one needs nothing. Old releases ignore `smolquery_schema_migrations` and the three indexes, and the indexes only make DuckLake's own reads cheaper. To remove them anyway: `DROP INDEX CONCURRENTLY` each, then `DROP TABLE smolquery_schema_migrations`. The next boot of this release rebuilds both.
+
 ### The web UI no longer falls back to long polling (T-468)
 
 The LiveView socket used to switch a tab to HTTP long polling whenever a WebSocket took more than 2.5 seconds to open, which is routine after a laptop wakes from sleep and Wi-Fi comes back. phoenix.js closes the still-connecting socket (the console shows "WebSocket is closed before the connection is established"), swaps the transport, and never tries the WebSocket again until a full page load. Long polling cannot survive a sleep: its server-side session dies after 15 seconds without a poll, so every later wake-up got a `410 Gone` and the "Something went wrong!" flash, with nothing in the server log because an idle shutdown is a normal exit. With three web pods and no session affinity, each poll also depended on a PubSub hop to the owning pod.
