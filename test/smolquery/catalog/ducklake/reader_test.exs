@@ -182,24 +182,30 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       assert {:ok, [_ | _]} = Catalog.segment_files(catalog, @variant, current)
     end
 
-    test "a reader that cannot answer falls back to DuckDB, never an exit", context do
+    test "a reader that cannot answer returns an error, never an exit or a DuckDB answer",
+         context do
       %{duckdb: duckdb, store: store} = context
       fixture!(duckdb, store)
       unreachable = %{duckdb | config: %{duckdb.config | reader: __MODULE__.NoSuchPool}}
       {:ok, snapshot} = Catalog.current_snapshot(duckdb)
 
-      assert capture_log(fn ->
-               assert Catalog.current_snapshot(unreachable) == {:ok, snapshot}
-             end) =~ "went through DuckDB instead"
+      assert {:error, {:reader_exited, _noproc}} = Catalog.current_snapshot(unreachable)
+      assert {:error, {:reader_exited, _noproc}} = Catalog.table_schema(unreachable, @typed)
 
-      assert Catalog.schema_version(unreachable) == Catalog.schema_version(duckdb)
-      assert Catalog.table_schema(unreachable, @typed) == Catalog.table_schema(duckdb, @typed)
+      assert {:error, {:reader_exited, _noproc}} =
+               Catalog.segment_files(unreachable, @events, snapshot)
+    end
 
-      assert Catalog.segment_files(unreachable, @events, snapshot) ==
-               Catalog.segment_files(duckdb, @events, snapshot)
+    test "check/1 reads through the pool, and logs an error when it cannot" do
+      assert Reader.check(Reader.pool(@engine)) == :ok
 
-      assert Catalog.segment_stats(unreachable, @events, snapshot) ==
-               Catalog.segment_stats(duckdb, @events, snapshot)
+      log =
+        capture_log(fn ->
+          assert {:error, {:reader_exited, _noproc}} = Reader.check(__MODULE__.NoSuchPool)
+        end)
+
+      assert log =~ "cannot read the catalog"
+      assert log =~ "SMOLQUERY_CATALOG_READER=false"
     end
 
     test "a relative path DuckLake wrote itself is refused on both paths", context do
