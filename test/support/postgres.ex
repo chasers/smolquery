@@ -48,4 +48,35 @@ defmodule Smolquery.Test.Postgres do
       {:error, error} -> raise error
     end
   end
+
+  @doc """
+  Drops every DuckLake metadata table and smolquery side table in the
+  connection's database, so the next attach starts a clean catalog. A
+  catalog's identity lives in its metadata database, so the Postgres suites
+  share one and reset it rather than each creating their own.
+  """
+  @spec reset_ducklake!(keyword()) :: :ok
+  def reset_ducklake!(connection) do
+    {:ok, conn} = Postgrex.start_link(connection)
+
+    Postgrex.query!(
+      conn,
+      """
+      DO $$
+      DECLARE r RECORD;
+      BEGIN
+        FOR r IN SELECT tablename FROM pg_tables
+                  WHERE schemaname = current_schema()
+                    AND (tablename LIKE 'ducklake\\_%' ESCAPE '\\'
+                         OR tablename LIKE 'smolquery\\_%' ESCAPE '\\')
+        LOOP
+          EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+        END LOOP;
+      END $$;
+      """,
+      []
+    )
+
+    GenServer.stop(conn)
+  end
 end

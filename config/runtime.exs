@@ -893,6 +893,19 @@ if metadata = System.get_env("SMOLQUERY_CATALOG") do
   config :smolquery, Smolquery.Catalog.DuckLake, metadata: metadata
 end
 
+# T-608: a Postgres-backed lake answers its metadata reads over Postgrex.
+# See Smolquery.Catalog.DuckLake.Reader.
+if reader = System.get_env("SMOLQUERY_CATALOG_READER") do
+  config :smolquery, Smolquery.Catalog.DuckLake.Reader,
+    enabled: Smolquery.RuntimeConfig.boolean!("SMOLQUERY_CATALOG_READER", reader)
+end
+
+if size = System.get_env("SMOLQUERY_CATALOG_READER_POOL_SIZE") do
+  config :smolquery, Smolquery.Catalog.DuckLake.Reader,
+    pool_size:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_CATALOG_READER_POOL_SIZE", size)
+end
+
 if migrate = System.get_env("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION") do
   config :smolquery, Smolquery.Catalog.DuckLake,
     automatic_migration:
