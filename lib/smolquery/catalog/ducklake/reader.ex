@@ -30,7 +30,7 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   parallel. `SMOLQUERY_CATALOG_READER=false` sends every read back through
   DuckDB.
 
-  ## A read the reader cannot answer goes to DuckDB
+  ## It connects as DuckLake does, and says so at boot when it cannot
 
   The connection comes from the `postgres:` metadata string, and libpq and
   Postgrex do not default alike: libpq without a `host` dials the Unix socket,
@@ -42,14 +42,23 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   connections pin `search_path` to `public`, where DuckLake keeps its tables
   and where `Smolquery.Catalog.DuckLake.Swap` already writes them.
 
-  Whatever still differs, a read the reader fails is not a failed read:
-  `Smolquery.Catalog.DuckLake` answers it through DuckDB instead, and logs the
-  first such failure per pool. A checkout that fails, a pool not yet started
-  and a statement Postgres refuses all come back as errors, never an exit or
-  a raise, the contract `Smolquery.Engine.try_query/4` keeps for the engine
-  path (T-464). The pool queues checkouts for up to ten seconds before it
-  gives up on one, as a busy engine connection would, rather than DBConnection's
-  default of dropping them after 50 ms.
+  A read the reader fails is a failed read, answered as the DuckDB path
+  answers one: `{:error, reason}`. It is not retried through DuckDB, which
+  reaches the same database: an outage fails both, and a connection that
+  DuckDB makes and Postgrex does not is a misconfiguration that a quiet
+  fallback would hide behind the slow path this module exists to remove.
+  `SMOLQUERY_CATALOG_READER=false` is the way back to DuckDB. A checkout that
+  fails, a pool not yet started and a statement Postgres refuses all come
+  back as errors, never an exit or a raise, the contract
+  `Smolquery.Engine.try_query/4` keeps for the engine path (T-464). The pool
+  queues checkouts for up to ten seconds before it gives up on one, as a busy
+  engine connection would, rather than DBConnection's default of dropping them
+  after 50 ms.
+
+  So that a misconfigured connection shows at deploy rather than as failed
+  plans, `Smolquery.Catalog.DuckLake.children/2` starts `check/1` after the
+  pool: one read of the latest snapshot through it, logged as an error when
+  it fails.
 
   ## Indexes
 
@@ -70,6 +79,8 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
 
   They add to DuckLake's tables without changing its schema contract.
   """
+
+  require Logger
 
   @default_pool_size 4
   @queue_target_ms 10_000
@@ -218,6 +229,40 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   @spec child_spec({atom(), keyword()}) :: Supervisor.child_spec()
   def child_spec({name, options}) do
     %{Postgrex.child_spec([name: name] ++ options) | id: name}
+  end
+
+  @doc """
+  The child that runs `check/1` once against `pool` after the pool starts, and
+  never restarts.
+  """
+  @spec check_child(atom()) :: Supervisor.child_spec()
+  def check_child(pool),
+    do: Supervisor.child_spec({Task, fn -> check(pool) end}, id: {__MODULE__, :check, pool})
+
+  @doc """
+  Reads the latest snapshot through `pool`, logging an error when it cannot:
+  the reader's boot-time check that it connects to the database DuckLake uses
+  and finds DuckLake's tables there.
+  """
+  @spec check(atom()) :: :ok | {:error, term()}
+  def check(pool) do
+    case query(
+           pool,
+           "SELECT snapshot_id FROM ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1",
+           []
+         ) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "catalog reader #{inspect(pool)} cannot read the catalog, so every catalog read " <>
+            "through it will fail; check the metadata connection, or set " <>
+            "SMOLQUERY_CATALOG_READER=false to read through DuckDB: #{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
   end
 
   @doc """

@@ -371,10 +371,10 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @doc """
   The children a supervisor starts for a catalog `resolve/2` returned —
-  none when the handle was given outright, the engine, and the reader pool
-  when the metadata is Postgres.
+  none when the handle was given outright, the engine, and when the metadata
+  is Postgres the reader pool and its boot-time check (`Reader.check/1`).
   """
-  @spec children(keyword() | nil, atom()) :: [{module(), term()}]
+  @spec children(keyword() | nil, atom()) :: [Supervisor.child_spec() | {module(), term()}]
   def children(nil, _engine), do: []
 
   def children(opts, engine) do
@@ -383,7 +383,8 @@ defmodule Smolquery.Catalog.DuckLake do
         [{__MODULE__, [name: engine] ++ opts}]
 
       {reader, opts} ->
-        [{__MODULE__, [name: engine] ++ opts}, {Reader, {Reader.pool(engine), reader}}]
+        pool = Reader.pool(engine)
+        [{__MODULE__, [name: engine] ++ opts}, {Reader, {pool, reader}}, Reader.check_child(pool)]
     end
   end
 
@@ -583,8 +584,9 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp schema_rows(%__MODULE__{reader: pool} = config, dataset, table) do
-    fn -> Reader.transaction(pool, &postgres_schema_rows(&1, config, dataset, table)) end
-    |> read_or_fall_back(config, &schema_rows(&1, dataset, table))
+    statement(:postgrex, fn ->
+      Reader.transaction(pool, &postgres_schema_rows(&1, config, dataset, table))
+    end)
   end
 
   defp postgres_schema_rows(conn, config, dataset, table) do
@@ -1741,32 +1743,8 @@ defmodule Smolquery.Catalog.DuckLake do
   defp read(%__MODULE__{reader: nil} = config, sql, params),
     do: query(config, sql.(config), params)
 
-  defp read(%__MODULE__{reader: pool} = config, sql, params) do
-    fn -> Reader.query(pool, sql.(config), params) end
-    |> read_or_fall_back(config, &read(&1, sql, params))
-  end
-
-  defp read_or_fall_back(run, %__MODULE__{reader: pool} = config, duckdb_read) do
-    case statement(:postgrex, run) do
-      {:ok, result} ->
-        {:ok, result}
-
-      {:error, reason} ->
-        warn_fallback(pool, reason)
-        duckdb_read.(%{config | reader: nil})
-    end
-  end
-
-  defp warn_fallback(pool, reason) do
-    unless :persistent_term.get({Reader, pool, :warned}, false) do
-      :persistent_term.put({Reader, pool, :warned}, true)
-
-      Logger.warning(
-        "catalog reader #{inspect(pool)} failed a read, which went through DuckDB instead; " <>
-          "later failures of this pool fall back silently: #{inspect(reason)}"
-      )
-    end
-  end
+  defp read(%__MODULE__{reader: pool} = config, sql, params),
+    do: statement(:postgrex, fn -> Reader.query(pool, sql.(config), params) end)
 
   defp add_statement(config, {dataset, table}, paths) do
     literals = Enum.map_join(paths, ", ", &Identifier.sql_string/1)
