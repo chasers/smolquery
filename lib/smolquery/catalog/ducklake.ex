@@ -182,6 +182,7 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Catalog.Connection
   alias Smolquery.Catalog.DuckLake.Reader
   alias Smolquery.Catalog.DuckLake.Swap
+  alias Smolquery.Catalog.Migrator
   alias Smolquery.Engine
   alias Smolquery.Engine.Connection, as: EngineConnection
   alias Smolquery.EngineSecrets
@@ -200,12 +201,19 @@ defmodule Smolquery.Catalog.DuckLake do
                 "AND (t.end_snapshot IS NULL OR t.end_snapshot > $3)"
 
   @enforce_keys [:engine, :catalog]
-  defstruct [:engine, :catalog, reader: nil, swap_timeout_ms: @default_swap_timeout_ms]
+  defstruct [
+    :engine,
+    :catalog,
+    reader: nil,
+    prepared: false,
+    swap_timeout_ms: @default_swap_timeout_ms
+  ]
 
   @type t :: %__MODULE__{
           engine: Engine.handle(),
           catalog: String.t(),
           reader: atom() | nil,
+          prepared: boolean(),
           swap_timeout_ms: timeout()
         }
 
@@ -307,6 +315,9 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:reader` — the `Smolquery.Catalog.DuckLake.Reader` pool that answers
       this catalog's metadata reads over Postgrex, or `nil` to read through
       DuckDB. `resolve/2` sets it for Postgres metadata.
+    * `:prepared` — whether the boot step made this lake's smolquery tables
+      (`Smolquery.Catalog.Migrator.prepared?/1`), so retention need not
+      create its table on first use. `resolve/2` sets it.
 
   """
   @spec new(keyword()) :: Catalog.t()
@@ -315,6 +326,7 @@ defmodule Smolquery.Catalog.DuckLake do
       engine: Keyword.get(opts, :engine, __MODULE__),
       catalog: Keyword.get(opts, :catalog, @default_catalog),
       reader: Keyword.get(opts, :reader),
+      prepared: Keyword.get(opts, :prepared, false),
       swap_timeout_ms: Keyword.get(opts, :swap_timeout_ms, @default_swap_timeout_ms)
     }
 
@@ -354,13 +366,17 @@ defmodule Smolquery.Catalog.DuckLake do
     opts = List.wrap(opts)
     configured = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
 
+    metadata = Keyword.get(configured, :metadata)
+
     {reader, opts} =
-      case Reader.options(Keyword.get(configured, :metadata)) do
+      case Reader.options(metadata) do
         {:ok, options} -> {Reader.pool(engine), Keyword.put(opts, :reader, options)}
         :none -> {nil, opts}
       end
 
-    handle = [engine: engine, reader: reader] ++ Keyword.take(opts, [:catalog, :swap_timeout_ms])
+    handle =
+      [engine: engine, reader: reader, prepared: Migrator.prepared?(metadata)] ++
+        Keyword.take(opts, [:catalog, :swap_timeout_ms])
 
     {new(handle), opts}
   end
@@ -432,7 +448,7 @@ defmodule Smolquery.Catalog.DuckLake do
   defp postgres_metadata?(_metadata), do: false
 
   defp side_table_statements(catalog, metadata) do
-    if postgres_metadata?(metadata) do
+    if Migrator.prepared?(metadata) do
       []
     else
       [
@@ -1487,12 +1503,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
   defp retention_table(config), do: "#{metadata_schema(config.catalog)}.smolquery_retention"
 
-  defp ensure_retention_table(config) do
-    case metadata_type(config) do
-      "postgres" -> :ok
-      _sqlite -> create_retention_table(config)
-    end
-  end
+  defp ensure_retention_table(%__MODULE__{prepared: true}), do: :ok
+  defp ensure_retention_table(config), do: create_retention_table(config)
 
   defp create_retention_table(config) do
     sql =

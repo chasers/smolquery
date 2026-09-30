@@ -52,14 +52,16 @@ defmodule Smolquery.Cluster.ConfigStore.Postgres do
   `Smolquery.Catalog.Migrations.SmolqueryTables` does, in the boot step
   `Smolquery.Catalog.Migrator` runs before any service, because a
   `CREATE TABLE IF NOT EXISTS` from several nodes at once collides (T-609).
-  A missing table is `{:error, {:missing_table, "smolquery_ring_config"}}`,
-  which the keeper retries: the database the cluster uses is not the lake's
-  metadata database, or the boot step has not migrated it.
+  The table is looked up as every other statement here names it, through the
+  connection's `search_path`, so `setup/1` answers `:ok` only when those
+  statements will find it. A missing table is
+  `{:error, {:missing_table, "smolquery_ring_config"}}`, which the keeper
+  retries.
   """
   @impl Smolquery.Cluster.ConfigStore
   def setup(conn) do
     measured(:setup, fn ->
-      case Postgrex.query(conn, "SELECT to_regclass($1) IS NOT NULL", ["public.#{@table}"]) do
+      case Postgrex.query(conn, "SELECT to_regclass($1) IS NOT NULL", [@table]) do
         {:ok, %{rows: [[true]]}} -> :ok
         {:ok, _missing} -> {:error, {:missing_table, @table}}
         {:error, reason} -> {:error, reason}
