@@ -173,6 +173,36 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   `Smolquery.StorageService.Scheduler`). A `compact_target_bytes` of `nil`
   turns the span level off and leaves every file at the hour level, as
   before.
+
+  ## A span day is sized alone, and a day that only grows a big file yields (T-606)
+
+  Candidates reach sizing in name order. They used to reach it in the
+  catalog's order, because the owned paths were mapped back onto the listing
+  by filtering it, and past the valve that made which files were sized an
+  accident: on the sandbox a node owning 2,160 candidates never sized one
+  write partition's 1,392 seals at all.
+
+  The span lane then sizes one span at a time, oldest first, each up to the
+  valve, and moves to the next span only when one forms no group. A span with
+  fewer candidates than `compact_min_inputs` is passed over without opening a
+  footer. Sizing a span on its own means a span's group sees that span's
+  oldest candidates, not whatever of it fit beside older spans in one shared
+  valve. The valve is per span, not per plan: a shared one would hand a span
+  that fills it and forms no group the same starvation it exists to end.
+  Spans that yield hold few candidates (small files otherwise merge among
+  themselves), so the footers a plan reads past the first span stay few.
+
+  A span group must add at least a tenth of its largest input's rows. One that
+  does not would rewrite a big file to absorb a few small ones: the sandbox
+  rewrote a 16.7M-row day file every sweep to add 5 seals of 2,600 rows, about
+  1,000x write amplification, and because that day always formed a group, the
+  day behind it with 1,935 seals never got a turn. So the largest input is
+  dropped and the group is formed again from the rest, which merges the small
+  files among themselves; when the rest forms no group, the span yields to
+  the next one. The big file is folded in once the small files' output is
+  itself a tenth of it. A settled span receives no new seals, so a span can
+  rest at its big file plus one remainder under a tenth of its rows: one extra
+  file a day, against rewriting the day's file for every handful of seals.
   """
 
   alias Smolquery.Catalog
@@ -186,6 +216,7 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   @group_max_staging_chunks 64
   @span_max_rows 9_223_372_036_854_775_807
   @width_sample_rows 1024
+  @span_min_growth 10
 
   @doc """
   The span level's row ceiling: none that a group could reach. The span
@@ -333,9 +364,9 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   defp listed_among(files, paths) do
-    plannable = MapSet.new(paths)
+    by_path = Map.new(files, &{&1.path, &1})
 
-    Enum.filter(files, &MapSet.member?(plannable, &1.path))
+    Enum.map(paths, &Map.fetch!(by_path, &1))
   end
 
   defp plan_files(runtime, level, files, learned) do
@@ -381,37 +412,67 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
     end
   end
 
-  defp plan_undersized(runtime, level, owned, learned) do
-    with {:ok, undersized} <- undersized(runtime, owned) do
+  defp plan_undersized(runtime, :hour, candidates, _learned) do
+    with {:ok, undersized} <- undersized(runtime, candidates) do
       undersized
       |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
       |> Enum.chunk_by(fn {path, _bytes, _rows} -> bucket(path, runtime.compact_bucket_ms) end)
-      |> carried_group(runtime, level, [], learned)
+      |> carried_group(runtime, [])
     end
   end
 
-  defp carried_group([], _runtime, _carry, _carried, _learned), do: :skip
-
-  defp carried_group([bucket_entries | rest], runtime, :span, [], learned) do
-    with {:ok, group} <- group(runtime, bucket_entries),
-         {:ok, group} <- decoded_capped(runtime, bucket_entries, group, learned) do
-      {:ok, group}
-    else
-      :skip -> carried_group(rest, runtime, :span, [], learned)
-      {:error, _reason} = failed -> failed
-    end
+  defp plan_undersized(runtime, :span, candidates, learned) do
+    candidates
+    |> Enum.chunk_by(&bucket(&1, runtime.compact_bucket_ms))
+    |> span_group(runtime, learned)
   end
 
-  defp carried_group([bucket_entries | rest], runtime, :hour, carried, learned) do
+  defp carried_group([], _runtime, _carried), do: :skip
+
+  defp carried_group([bucket_entries | rest], runtime, carried) do
     candidates = carried ++ bucket_entries
 
     if length(candidates) < runtime.compact_min_inputs do
-      carried_group(rest, runtime, :hour, candidates, learned)
+      carried_group(rest, runtime, candidates)
     else
       case group(runtime, candidates) do
-        :skip -> carried_group(rest, runtime, :hour, candidates, learned)
+        :skip -> carried_group(rest, runtime, candidates)
         {:ok, group} -> {:ok, group}
       end
+    end
+  end
+
+  defp span_group([], _runtime, _learned), do: :skip
+
+  defp span_group([day | rest], runtime, learned) when length(day) < runtime.compact_min_inputs,
+    do: span_group(rest, runtime, learned)
+
+  defp span_group([day | rest], runtime, learned) do
+    with {:ok, entries} <- undersized(runtime, day) do
+      case day_group(runtime, entries, learned) do
+        :skip -> span_group(rest, runtime, learned)
+        planned -> planned
+      end
+    end
+  end
+
+  defp day_group(runtime, entries, learned) do
+    with {:ok, group} <- group(runtime, entries),
+         {:ok, group} <- decoded_capped(runtime, entries, group, learned) do
+      growing(runtime, entries, group, learned)
+    end
+  end
+
+  defp growing(runtime, entries, group, learned) do
+    rows = Map.new(entries, fn {path, _bytes, rows} -> {path, rows} end)
+
+    {head, largest} =
+      group.paths |> Enum.map(&{&1, Map.fetch!(rows, &1)}) |> Enum.max_by(&elem(&1, 1))
+
+    if (group.row_count - largest) * @span_min_growth < largest do
+      day_group(runtime, List.keydelete(entries, head, 0), learned)
+    else
+      {:ok, group}
     end
   end
 
@@ -482,13 +543,13 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   defp group(runtime, undersized) do
-    ceiling = @group_max_staging_chunks * runtime.merge_inputs_per_call
-
     undersized
     |> Enum.sort_by(fn {path, _bytes, _rows} -> Path.basename(path) end)
-    |> Enum.take(ceiling)
+    |> Enum.take(valve(runtime))
     |> grouped(runtime)
   end
+
+  defp valve(runtime), do: @group_max_staging_chunks * runtime.merge_inputs_per_call
 
   defp grouped([], _runtime), do: :skip
 
