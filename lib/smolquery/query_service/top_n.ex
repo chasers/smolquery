@@ -386,14 +386,7 @@ defmodule Smolquery.QueryService.TopN do
     end
   end
 
-  defp define(connection, statements) do
-    Enum.reduce_while(statements, :ok, fn statement, :ok ->
-      case Connection.query(connection, statement, [], :infinity) do
-        {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
+  defp define(connection, statements), do: Connection.query_each(connection, statements)
 
   defp padding(%Schema{fields: fields}) do
     "SELECT " <>

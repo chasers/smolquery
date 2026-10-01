@@ -529,19 +529,12 @@ defmodule Smolquery.QueryService.Runner do
           :ok | {:error, term()}
   def federated_extension(_connection, %{federated: false}), do: :ok
 
-  def federated_extension(connection, %{federated: true} = plan) do
-    plan
-    |> Map.get(:federated_extensions, [:postgres])
-    |> Enum.reduce_while(:ok, fn extension, :ok ->
-      with {:ok, _installed} <-
-             Connection.query(connection, "INSTALL #{extension}", [], :infinity),
-           {:ok, _loaded} <- Connection.query(connection, "LOAD #{extension}", [], :infinity) do
-        {:cont, :ok}
-      else
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
+  def federated_extension(connection, %{federated: true, federated_extensions: extensions}),
+    do:
+      Connection.query_each(
+        connection,
+        Enum.flat_map(extensions, &["INSTALL #{&1}", "LOAD #{&1}"])
+      )
 
   defp lockdown(%Runtime{lockdown: false}, _plan, _job_id), do: []
 
@@ -572,14 +565,8 @@ defmodule Smolquery.QueryService.Runner do
 
   defp define_functions(%Runtime{clickhouse_functions: false}, _connection, _sql), do: :ok
 
-  defp define_functions(%Runtime{}, connection, sql) do
-    Enum.reduce_while(ClickHouseFunctions.statements_for(sql), :ok, fn statement, :ok ->
-      case Connection.query(connection, statement, [], :infinity) do
-        {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
+  defp define_functions(%Runtime{}, connection, sql),
+    do: Connection.query_each(connection, ClickHouseFunctions.statements_for(sql))
 
   defp run_statements(connection, plan, statements) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->

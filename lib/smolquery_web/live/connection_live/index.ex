@@ -24,7 +24,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   statement a query will run, not an approximation of it, and its failure text
   is the scrubbed reason — never the connection string.
 
-  ## Test runs off the LiveView process
+  ## Test and Query run off the LiveView process
 
   The probe reaches a remote database, and the wait is its own, not the
   page's. It runs under `start_async`, that connection's button is disabled
@@ -139,77 +139,42 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   end
 
   def handle_event("test", %{"name" => name}, socket) do
-    {:noreply, test(socket, name)}
+    {:noreply, run_async(socket, :test, name, &Federation.probe/1)}
   end
 
   def handle_event("query", %{"name" => name}, socket) do
-    {:noreply, list_tables(socket, name)}
+    {:noreply, run_async(socket, :tables, name, &Federation.tables/1)}
   end
 
   @impl Phoenix.LiveView
-  def handle_async({:tables, name}, {:ok, {:ok, [first | _rest]}}, socket) do
-    {:noreply,
-     socket
-     |> finish_test(name)
-     |> push_navigate(to: ~p"/query?#{[sql: Federation.table_query(name, first)]}")}
+  def handle_async({tag, name}, {:ok, outcome}, socket) do
+    {:noreply, socket |> finish_test(name) |> async_outcome(tag, name, outcome)}
   end
 
-  def handle_async({:tables, name}, {:ok, {:ok, []}}, socket) do
-    {:noreply, socket |> finish_test(name) |> put_flash(:info, "#{name} has no tables")}
-  end
-
-  def handle_async({:tables, name}, {:ok, {:error, reason}}, socket) do
-    {:noreply, socket |> finish_test(name) |> put_flash(:error, message(reason))}
-  end
-
-  def handle_async({:tables, name}, {:exit, _reason}, socket) do
+  def handle_async({_tag, name}, {:exit, _reason}, socket) do
     {:noreply,
      socket
      |> finish_test(name)
      |> put_flash(:error, message({:federation_error, name, :unavailable}))}
   end
 
-  def handle_async({:test, name}, {:ok, :ok}, socket) do
-    {:noreply, socket |> finish_test(name) |> put_flash(:info, "#{name} answered")}
-  end
+  defp async_outcome(socket, :test, name, :ok), do: put_flash(socket, :info, "#{name} answered")
 
-  def handle_async({:test, name}, {:ok, {:error, reason}}, socket) do
-    {:noreply, socket |> finish_test(name) |> put_flash(:error, message(reason))}
-  end
+  defp async_outcome(socket, :tables, name, {:ok, [first | _rest]}),
+    do: push_navigate(socket, to: ~p"/query?#{[sql: Federation.table_query(name, first)]}")
 
-  def handle_async({:test, name}, {:exit, _reason}, socket) do
-    {:noreply,
-     socket
-     |> finish_test(name)
-     |> put_flash(:error, message({:federation_error, name, :unavailable}))}
-  end
+  defp async_outcome(socket, :tables, name, {:ok, []}),
+    do: put_flash(socket, :info, "#{name} has no tables")
 
-  defp test(socket, name) do
-    if MapSet.member?(socket.assigns.busy, name) do
-      socket
-    else
-      start_test(socket, name)
-    end
-  end
+  defp async_outcome(socket, _tag, _name, {:error, reason}),
+    do: put_flash(socket, :error, message(reason))
 
-  defp start_test(socket, name) do
-    case Catalog.connection(socket.assigns.runtime.catalog, name) do
-      {:ok, connection} ->
-        socket
-        |> update(:busy, &MapSet.put(&1, name))
-        |> start_async({:test, name}, fn -> Federation.probe(connection) end)
-
-      {:error, reason} ->
-        put_flash(socket, :error, message(reason))
-    end
-  end
-
-  defp list_tables(socket, name) do
+  defp run_async(socket, tag, name, fun) do
     with false <- MapSet.member?(socket.assigns.busy, name),
          {:ok, connection} <- Catalog.connection(socket.assigns.runtime.catalog, name) do
       socket
       |> update(:busy, &MapSet.put(&1, name))
-      |> start_async({:tables, name}, fn -> Federation.tables(connection) end)
+      |> start_async({tag, name}, fn -> fun.(connection) end)
     else
       true -> socket
       {:error, reason} -> put_flash(socket, :error, message(reason))
@@ -218,7 +183,10 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
 
   defp cancel_test(socket, name) do
     if MapSet.member?(socket.assigns.busy, name) do
-      socket |> cancel_async({:test, name}) |> finish_test(name)
+      socket
+      |> cancel_async({:test, name})
+      |> cancel_async({:tables, name})
+      |> finish_test(name)
     else
       socket
     end
@@ -286,7 +254,6 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
        when key_id not in [nil, ""],
        do: Map.delete(params, "s3_secret")
 
-  defp blank_storage_secret(%{"s3_secret" => ""} = params), do: params
   defp blank_storage_secret(params), do: params
 
   defp load_connections(socket) do
@@ -469,6 +436,12 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       >
         <form id="connection-form" phx-change="form_changed" phx-submit="save" class="space-y-2">
           <div class="grid gap-2 md:grid-cols-2">
+            <input
+              :if={@editing != nil}
+              type="hidden"
+              name="connection[kind]"
+              value={@form["kind"]}
+            />
             <select
               name="connection[kind]"
               disabled={@editing != nil}

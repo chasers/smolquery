@@ -33,8 +33,10 @@ defmodule Smolquery.Catalog.Connection do
 
     * `data_path`, where the lake's files live, required: an `s3://` URL, or a
       local path under one of `Smolquery.Federation`'s `:local_roots`, which
-      are none by default, so a connection cannot hand a query the node's own
-      filesystem. The query engine is allowed to read exactly this path.
+      are none by default. The check is lexical (symlinks are not resolved),
+      and it guards against a mistaken path, not a hostile catalog: the files
+      a lake's catalog lists are read wherever they are (see
+      `Smolquery.Federation`).
     * optional S3 credentials for it, `s3_key_id` and `s3_secret`, both or
       neither, with `s3_region`, `s3_endpoint` and `s3_url_style`. The secret
       is sealed like the password, into `:storage_secret`, and like it is
@@ -334,6 +336,7 @@ defmodule Smolquery.Catalog.Connection do
       else: {:error, {:invalid_param, "data_path"}}
   end
 
+  defp within?(_path, "/"), do: true
   defp within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
 
   defp local_roots do

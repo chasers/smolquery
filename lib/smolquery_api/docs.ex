@@ -195,8 +195,9 @@ defmodule SmolqueryApi.Docs do
         "path" => "/v1/connections",
         "auth" => "bearer",
         "summary" =>
-          "Every registered federated Postgres connection. Passwords are " <>
-            "never returned, on this or any other route."
+          "Every registered federated connection, Postgres databases and " <>
+            "DuckLakes. Passwords and S3 secrets are never returned, on this or " <>
+            "any other route."
       },
       %{
         "method" => "POST",
@@ -213,7 +214,15 @@ defmodule SmolqueryApi.Docs do
           "database" => "database name",
           "username" => "role to connect as",
           "password" => "sealed before storage, never returned",
-          "sslmode" => "libpq sslmode, default require"
+          "sslmode" => "libpq sslmode, default require",
+          "kind" => "postgres (default) or ducklake; fixed once registered",
+          "data_path" =>
+            "ducklake only, required: s3:// URL or a local path under a configured root",
+          "s3_key_id" => "ducklake only, optional; with s3_secret",
+          "s3_secret" => "ducklake only, optional; sealed before storage, never returned",
+          "s3_region" => "ducklake only, optional",
+          "s3_endpoint" => "ducklake only, optional; https://host:port, or http:// for plaintext",
+          "s3_url_style" => "ducklake only, optional; path or vhost"
         }
       },
       %{
@@ -243,8 +252,9 @@ defmodule SmolqueryApi.Docs do
         "auth" => "bearer",
         "summary" =>
           "Attach the connection in a throwaway engine and read one row " <>
-            "through it. 422 when the remote database does not answer; the " <>
-            "reason never quotes the connection string."
+            "through it (for a DuckLake, one row of its first table). 422 when " <>
+            "the remote database does not answer; the reason never quotes the " <>
+            "connection string or a secret."
       },
       %{
         "method" => "POST",

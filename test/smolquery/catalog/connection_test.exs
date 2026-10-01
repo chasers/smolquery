@@ -205,6 +205,9 @@ defmodule Smolquery.Catalog.ConnectionTest do
 
       assert Connection.new(lake(%{"data_path" => "/srv/lakes-other"})) ==
                {:error, {:invalid_param, "data_path"}}
+
+      Application.put_env(:smolquery, Smolquery.Federation, local_roots: ["/"])
+      assert {:ok, _connection} = Connection.new(lake(%{"data_path" => "/data/lake/"}))
     end
 
     test "seals the S3 secret, needs the key id beside it, and never returns it" do

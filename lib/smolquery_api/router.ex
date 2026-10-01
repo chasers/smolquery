@@ -30,7 +30,7 @@ defmodule SmolqueryApi.Router do
       DELETE /v1/datasets/:ds/tables/:table/columns/:column  drop a column
       DELETE /v1/datasets/:ds/tables/:table/segments  drop segments by path
       POST /v1/datasets/:ds/tables/:table/insert   streaming insert
-      GET  /v1/connections                         list federated Postgres connections
+      GET  /v1/connections                         list federated connections
       POST /v1/connections                         register one (replaces by name)
       GET  /v1/connections/:name                   one connection, never its password
       PATCH /v1/connections/:name                  change fields; an absent password is kept

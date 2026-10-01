@@ -152,6 +152,37 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       assert has_element?(lv, "button[phx-click=query][phx-value-name=sales]")
     end
 
+    test "editing a DuckLake connection keeps its lake fields and saves their changes",
+         %{conn: conn} do
+      runtime = start_web!()
+
+      seed(runtime, %{
+        "name" => "sales",
+        "kind" => "ducklake",
+        "data_path" => "s3://lakes/sales/"
+      })
+
+      {:ok, lv, _html} = live(conn, ~p"/connections")
+      lv |> element("button[phx-click=edit][phx-value-name=sales]") |> render_click()
+      assert has_element?(lv, "input[name='connection[data_path]']")
+
+      lv
+      |> form("#connection-form", connection: %{"data_path" => "s3://lakes/sales-v2/"})
+      |> render_change()
+
+      assert has_element?(lv, "input[name='connection[data_path]']")
+
+      html =
+        lv
+        |> form("#connection-form", connection: %{"data_path" => "s3://lakes/sales-v2/"})
+        |> render_submit()
+
+      assert html =~ "Connection sales saved"
+      assert {:ok, stored} = Catalog.connection(runtime.catalog, "sales")
+      assert stored.kind == "ducklake"
+      assert stored.data_path == "s3://lakes/sales-v2/"
+    end
+
     test "the form is closed until New connection opens it", %{conn: conn} do
       start_web!()
 
