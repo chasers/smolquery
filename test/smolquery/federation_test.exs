@@ -122,6 +122,36 @@ defmodule Smolquery.FederationTest do
       refute reason =~ "s3cret"
     end
 
+    test "check/2 refuses a data path in the sealed tier's bucket, and takes one elsewhere" do
+      sealed = ["s3://acme/"]
+
+      assert Federation.check(lake(%{"data_path" => "s3://acme/"}), sealed) ==
+               {:error, {:federated_path_in_sealed_bucket, "sales"}}
+
+      assert Federation.check(lake(%{"data_path" => "s3://acme/lakes/sales"}), sealed) ==
+               {:error, {:federated_path_in_sealed_bucket, "sales"}}
+
+      assert Federation.check(lake(%{"data_path" => "s3://acme-lakes/sales/"}), sealed) == :ok
+      assert Federation.check(lake(), []) == :ok
+      assert Federation.check(connection(), sealed) == :ok
+    end
+
+    test "a DuckLake connection read back without a data path is an error, not a crash" do
+      broken = %{lake() | data_path: nil}
+
+      assert Federation.statements(broken) == {:error, {:missing_data_path, "sales"}}
+      assert Federation.attach_statement(broken) == {:error, {:missing_data_path, "sales"}}
+    end
+
+    test "redact_statement/2 finds the secret past a key id that mimics it" do
+      crafted = lake(%{"s3_key_id" => "x, SECRET 'y", "s3_secret" => "realsecret"})
+      {:ok, [secret, _attach]} = Federation.statements(crafted)
+
+      redacted = Federation.redact_statement({:failed, "said realsecret"}, secret)
+      refute redacted =~ "realsecret"
+      assert redacted =~ "said <redacted>"
+    end
+
     test "table_query/2 reads the first rows of a table" do
       assert Federation.table_query("sales", {"main", "orders"}) ==
                ~s|select *\nfrom "sales"."main"."orders"\nlimit 100;\n|

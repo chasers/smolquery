@@ -26,8 +26,10 @@ defmodule Smolquery.Federation do
   other, so a wrong path fails the attach, at `probe/1` and at query time,
   rather than reading somewhere unexpected. When the connection has S3
   credentials, a `CREATE TEMPORARY SECRET` scoped to the data path comes
-  first: it serves that prefix and nothing else, so it can never answer for
-  the sealed tier's bucket.
+  first. DuckDB answers an `s3://` read with the secret whose scope is the
+  longest prefix of it, and the sealed tier's secret covers its whole bucket,
+  so a lake in that bucket would answer for some of the node's own segments:
+  `check/2` refuses one, and the planner calls it before any attach.
 
   ## A DuckLake connection trusts that lake's catalog
 
@@ -64,6 +66,9 @@ defmodule Smolquery.Federation do
   The `ATTACH` that makes `connection` reachable under its own name.
   """
   @spec attach_statement(Connection.t()) :: {:ok, String.t()} | {:error, term()}
+  def attach_statement(%Connection{kind: "ducklake", data_path: nil} = connection),
+    do: {:error, {:missing_data_path, connection.name}}
+
   def attach_statement(%Connection{kind: "ducklake"} = connection) do
     with {:ok, string} <- Connection.connection_string(connection) do
       {:ok,
@@ -86,11 +91,33 @@ defmodule Smolquery.Federation do
   connection with S3 credentials, the storage secret, then the attach.
   """
   @spec statements(Connection.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def statements(%Connection{kind: "ducklake", data_path: nil} = connection),
+    do: {:error, {:missing_data_path, connection.name}}
+
   def statements(%Connection{} = connection) do
     with {:ok, secret} <- secret_statements(connection),
          {:ok, attach} <- attach_statement(connection) do
       {:ok, secret ++ [attach]}
     end
+  end
+
+  @doc """
+  Refuses a DuckLake connection whose data path lies in a bucket the sealed
+  tier reads (`sealed_prefixes`, as `Smolquery.EngineSecrets.sealed_prefixes/1`
+  gives them): its scoped secret would answer for the node's own segments.
+  """
+  @spec check(Connection.t(), [String.t()]) :: :ok | {:error, term()}
+  def check(%Connection{kind: "ducklake", data_path: "s3://" <> _ = path} = connection, sealed) do
+    if Enum.any?(sealed, &overlaps?(path, &1)),
+      do: {:error, {:federated_path_in_sealed_bucket, connection.name}},
+      else: :ok
+  end
+
+  def check(%Connection{}, _sealed), do: :ok
+
+  defp overlaps?(path, prefix) do
+    path = if String.ends_with?(path, "/"), do: path, else: path <> "/"
+    String.starts_with?(path, prefix) or String.starts_with?(prefix, path)
   end
 
   @doc """
@@ -278,10 +305,8 @@ defmodule Smolquery.Federation do
   end
 
   def redact_statement(reason, "CREATE OR REPLACE TEMPORARY SECRET " <> rest) do
-    with [_before, after_secret] <- String.split(rest, ", SECRET '", parts: 2),
-         {:ok, secret} <- literal(after_secret, "") do
-      redact(reason, secret)
-    else
+    case secret_literal(rest, "") do
+      {:ok, secret} when secret != "" -> redact(reason, secret)
       _no_secret -> reason
     end
   end
@@ -297,6 +322,27 @@ defmodule Smolquery.Federation do
   defp literal(<<char::binary-size(1), rest::binary>>, acc), do: literal(rest, acc <> char)
 
   defp literal("", _acc), do: :error
+
+  defp secret_literal("'" <> rest, before) do
+    with {:ok, value, after_literal} <- literal_with_rest(rest, "") do
+      if String.ends_with?(before, "SECRET "),
+        do: {:ok, value},
+        else: secret_literal(after_literal, "")
+    end
+  end
+
+  defp secret_literal(<<char::binary-size(1), rest::binary>>, before),
+    do: secret_literal(rest, before <> char)
+
+  defp secret_literal("", _before), do: :error
+
+  defp literal_with_rest("''" <> rest, acc), do: literal_with_rest(rest, acc <> "'")
+  defp literal_with_rest("'" <> rest, acc), do: {:ok, acc, rest}
+
+  defp literal_with_rest(<<char::binary-size(1), rest::binary>>, acc),
+    do: literal_with_rest(rest, acc <> char)
+
+  defp literal_with_rest("", _acc), do: :error
 
   defp redact(reason, string) do
     reason

@@ -50,6 +50,28 @@ defmodule Smolquery.Engine.ConnectionTest do
     end
   end
 
+  describe "query_each/2" do
+    test "runs every statement in order, and stops at the first that fails" do
+      {:ok, conn} = Connection.start_link(database: @database)
+
+      assert Connection.query_each(conn, [
+               "CREATE TABLE each_t (n INTEGER)",
+               "INSERT INTO each_t VALUES (1)"
+             ]) ==
+               :ok
+
+      assert {:error, %Adbc.Error{}} =
+               Connection.query_each(conn, [
+                 "INSERT INTO each_t VALUES (2)",
+                 "NOT SQL",
+                 "INSERT INTO each_t VALUES (3)"
+               ])
+
+      assert {:ok, count} = Connection.query(conn, "SELECT count(*) FROM each_t")
+      assert Result.one!(count) == 2
+    end
+  end
+
   describe "start_link/1" do
     test "starts unnamed when no name is given" do
       assert {:ok, pid} = Connection.start_link(database: @database)

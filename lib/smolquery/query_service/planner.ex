@@ -259,6 +259,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Cluster
   alias Smolquery.Engine.Ast
   alias Smolquery.Engine.Connection
+  alias Smolquery.EngineSecrets
   alias Smolquery.Federation
   alias Smolquery.Identifier
   alias Smolquery.Partitions
@@ -486,9 +487,13 @@ defmodule Smolquery.QueryService.Planner do
   defp federated(_runtime, []), do: {:ok, []}
 
   defp federated(%Runtime{} = runtime, names) do
+    sealed = EngineSecrets.sealed_prefixes(runtime.store)
+
     Enum.reduce_while(names, {:ok, []}, fn {name, reference}, {:ok, acc} ->
-      case connection(runtime, name, reference) do
-        {:ok, connection} -> {:cont, {:ok, [connection | acc]}}
+      with {:ok, connection} <- connection(runtime, name, reference),
+           :ok <- Federation.check(connection, sealed) do
+        {:cont, {:ok, [connection | acc]}}
+      else
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)

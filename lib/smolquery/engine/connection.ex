@@ -150,6 +150,21 @@ defmodule Smolquery.Engine.Connection do
   end
 
   @doc """
+  Runs `statements` one after another with no parameters and no timeout,
+  stopping at the first that fails: the job engine's setup statements,
+  whose results nobody reads.
+  """
+  @spec query_each(GenServer.server(), [String.t()]) :: :ok | {:error, Exception.t()}
+  def query_each(conn, statements) do
+    Enum.reduce_while(statements, :ok, fn statement, :ok ->
+      case query(conn, statement, [], :infinity) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @doc """
   Runs `sql` with positional `params` (`$1..$n`), returning a `Result`.
 
   Parameters are bound through `Smolquery.Engine.Params`, which types timestamps
