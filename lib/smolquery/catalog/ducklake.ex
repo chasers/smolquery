@@ -194,6 +194,9 @@ defmodule Smolquery.Catalog.DuckLake do
   alias Smolquery.Segments.Store
 
   @default_swap_timeout_ms 120_000
+  @connection_columns "name, host, port, database_name, username, secret, sslmode, " <>
+                        "created_at, updated_at, COALESCE(kind, 'postgres'), options, " <>
+                        "storage_secret"
   @live_files "s.schema_name = $1 AND t.table_name = $2 " <>
                 "AND df.begin_snapshot <= $3 " <>
                 "AND (df.end_snapshot IS NULL OR df.end_snapshot > $3) " <>
@@ -457,7 +460,7 @@ defmodule Smolquery.Catalog.DuckLake do
         create_connections_statement(catalog),
         create_materialized_statement(catalog),
         create_required_statement(catalog)
-      ]
+      ] ++ alter_connections_statements(catalog)
     end
   end
 
@@ -1650,7 +1653,24 @@ defmodule Smolquery.Catalog.DuckLake do
       "database_name VARCHAR NOT NULL, username VARCHAR NOT NULL, " <>
       "secret VARCHAR NOT NULL, sslmode VARCHAR NOT NULL, " <>
       "created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, " <>
+      "kind VARCHAR DEFAULT 'postgres', options VARCHAR, storage_secret VARCHAR, " <>
       "PRIMARY KEY (name))"
+  end
+
+  @doc """
+  The `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements that give a
+  connections table made before T-610 its `kind`, `options` and
+  `storage_secret` columns. Bootstrap SQL like
+  `create_connections_statement/1`, for a lake the catalog migrations do not
+  prepare; a no-op on a table that has them. Through SQLite an existing row
+  takes `NULL` rather than the default, so a read takes a `NULL` kind as
+  `postgres`.
+  """
+  @spec alter_connections_statements(String.t()) :: [String.t()]
+  def alter_connections_statements(catalog) do
+    for column <- ["kind VARCHAR DEFAULT 'postgres'", "options VARCHAR", "storage_secret VARCHAR"] do
+      "ALTER TABLE #{connections_table(catalog)} ADD COLUMN IF NOT EXISTS #{column}"
+    end
   end
 
   @impl Catalog
@@ -1661,20 +1681,24 @@ defmodule Smolquery.Catalog.DuckLake do
     transaction(config, [
       delete_connection_sql(config, connection.name),
       "INSERT INTO #{connections_table(config.catalog)} " <>
-        "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at) " <>
+        "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at, " <>
+        "kind, options, storage_secret) " <>
         "VALUES (#{Identifier.sql_string(connection.name)}, " <>
         "#{Identifier.sql_string(connection.host)}, #{connection.port}, " <>
         "#{Identifier.sql_string(connection.database)}, " <>
         "#{Identifier.sql_string(connection.username)}, " <>
         "#{Identifier.sql_string(connection.secret)}, " <>
-        "#{Identifier.sql_string(connection.sslmode)}, #{created_at}, #{now})"
+        "#{Identifier.sql_string(connection.sslmode)}, #{created_at}, #{now}, " <>
+        "#{Identifier.sql_string(connection.kind)}, " <>
+        "#{Identifier.sql_string(Jason.encode!(Connection.options(connection)))}, " <>
+        "#{nullable_string(connection.storage_secret)})"
     ])
   end
 
   @impl Catalog
   def connection(%__MODULE__{} = config, name) do
     sql =
-      "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
+      "SELECT #{@connection_columns} " <>
         "FROM #{connections_table(config.catalog)} WHERE name = #{Identifier.sql_string(name)}"
 
     case query(config, sql) do
@@ -1687,7 +1711,7 @@ defmodule Smolquery.Catalog.DuckLake do
   @impl Catalog
   def list_connections(%__MODULE__{} = config) do
     sql =
-      "SELECT name, host, port, database_name, username, secret, sslmode, created_at, updated_at " <>
+      "SELECT #{@connection_columns} " <>
         "FROM #{connections_table(config.catalog)} ORDER BY name"
 
     with {:ok, %{rows: rows}} <- query(config, sql) do
@@ -1699,6 +1723,9 @@ defmodule Smolquery.Catalog.DuckLake do
   def delete_connection(%__MODULE__{} = config, name) do
     with {:ok, _result} <- query(config, delete_connection_sql(config, name)), do: :ok
   end
+
+  defp nullable_string(nil), do: "NULL"
+  defp nullable_string(value), do: Identifier.sql_string(value)
 
   defp delete_connection_sql(config, name) do
     "DELETE FROM #{connections_table(config.catalog)} " <>
@@ -1714,10 +1741,14 @@ defmodule Smolquery.Catalog.DuckLake do
          secret,
          sslmode,
          created_at,
-         updated_at
+         updated_at,
+         kind,
+         options,
+         storage_secret
        ]) do
     %Connection{
       name: name,
+      kind: kind,
       host: host,
       port: port,
       database: database,
@@ -1727,6 +1758,16 @@ defmodule Smolquery.Catalog.DuckLake do
       created_at: created_at,
       updated_at: updated_at
     }
+    |> Connection.with_options(decode_options(options), storage_secret)
+  end
+
+  defp decode_options(nil), do: %{}
+
+  defp decode_options(options) do
+    case Jason.decode(options) do
+      {:ok, %{} = decoded} -> decoded
+      _unreadable -> %{}
+    end
   end
 
   defp delete_partitions_below_sql(config, dataset, table, count) do

@@ -296,7 +296,8 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, statement} <- gate(ast),
          :ok <- gate_table_functions(statement, runtime.lockdown),
          {:ok, refs, federated} <- classified(statement),
-         {:ok, attaches} <- Trace.span(:federated, fn -> federated(runtime, federated) end),
+         {:ok, connections} <- Trace.span(:federated, fn -> federated(runtime, federated) end),
+         {:ok, attaches} <- attaches(connections),
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
@@ -330,7 +331,7 @@ defmodule Smolquery.QueryService.Planner do
 
       {:ok,
        Trace.span(:build, fn ->
-         build(query, snapshot, refs, tables, members, hot, attaches, page)
+         build(query, snapshot, refs, tables, members, hot, {connections, attaches}, page)
        end)}
     end
   end
@@ -486,15 +487,26 @@ defmodule Smolquery.QueryService.Planner do
 
   defp federated(%Runtime{} = runtime, names) do
     Enum.reduce_while(names, {:ok, []}, fn {name, reference}, {:ok, acc} ->
-      with {:ok, connection} <- connection(runtime, name, reference),
-           {:ok, statement} <- Federation.attach_statement(connection) do
-        {:cont, {:ok, [statement | acc]}}
-      else
+      case connection(runtime, name, reference) do
+        {:ok, connection} -> {:cont, {:ok, [connection | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, statements} -> {:ok, Enum.reverse(statements)}
+      {:ok, connections} -> {:ok, Enum.reverse(connections)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attaches(connections) do
+    Enum.reduce_while(connections, {:ok, []}, fn connection, {:ok, acc} ->
+      case Federation.statements(connection) do
+        {:ok, statements} -> {:cont, {:ok, [statements | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, statements} -> {:ok, statements |> Enum.reverse() |> List.flatten()}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -847,7 +859,7 @@ defmodule Smolquery.QueryService.Planner do
 
   defp gathered(pages), do: pages |> Enum.reverse() |> Enum.concat()
 
-  defp build(query, snapshot, refs, tables, members, hot, attaches, page) do
+  defp build(query, snapshot, refs, tables, members, hot, {connections, attaches}, page) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
     schemas = Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end)
 
@@ -858,6 +870,7 @@ defmodule Smolquery.QueryService.Planner do
       tables: refs,
       statements: attaches ++ statements,
       federated: attaches != [],
+      federated_extensions: connections |> Enum.flat_map(&Federation.extensions/1) |> Enum.uniq(),
       params: query.params,
       hot: hot,
       hot_members:

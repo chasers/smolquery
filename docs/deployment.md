@@ -101,7 +101,16 @@ job engine's own `job_memory_limit`.
 
 One note per release, newest first.
 
-### Rolling out: catalog reads over Postgrex, and a boot step that migrates the catalog database (T-608, T-609)
+### 0.21.0: federated DuckLake connections (T-610)
+
+You can register another DuckLake as a connection and query it: `"kind": "ducklake"` on `POST /v1/connections`, or the kind selector on the connections page. It takes the lake's Postgres metadata database, its data path and optional S3 credentials, sealed like a password. The lake attaches read-only at its data path, and a query reads it as `name.schema.table`, alone or joined with smolquery tables. See [api.md](api.md).
+
+- **The catalog migration `20261001100000`** adds `kind`, `options` and `storage_secret` to `smolquery_connections` (`ADD COLUMN IF NOT EXISTS`). The boot step below applies it. A lake the step doesn't prepare (SQLite, or the cases listed below) gets the same columns from its bootstrap.
+- **Mixed versions:** create and edit DuckLake connections only after every pod runs 0.21.0. A pre-0.21 pod reads a DuckLake connection as a Postgres one, so a query it plans against one fails, and an edit made through it resets the kind. Postgres connections work on both versions throughout.
+- **Local data paths** are refused unless they sit under a root in `config :smolquery, Smolquery.Federation, local_roots: [...]`, which is empty by default. `s3://` paths always work.
+- **Trust:** DuckLake reads an attached lake's files itself, and the query engine's lockdown doesn't restrict those reads. A lake's catalog decides which files a query reads, and an entry can be an absolute path anywhere the node can open. Register only lakes whose catalog you trust as you trust this deployment. Registering one takes the credential key, as it does for Postgres.
+
+### 0.21.0: catalog reads over Postgrex, and a boot step that migrates the catalog database (T-608, T-609)
 
 **TL;DR.** With Postgres metadata, this release reads the catalog over Postgrex instead of DuckDB's postgres extension (T-608). It also adds a boot step that brings the metadata database up to date before any service starts (T-609). Roll it out like any release. The first pod to boot builds three indexes, and the others wait for it. Check the prerequisites below first. SQLite lakes see no change.
 
@@ -139,7 +148,7 @@ Later boots read `smolquery_schema_migrations`, find nothing pending, and neithe
 
 ```sql
 SELECT version FROM smolquery_schema_migrations ORDER BY 1;
--- 20260930110000, 20260930120000
+-- 20260930110000, 20260930120000, 20261001100000
 
 SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
  WHERE c.relname LIKE 'smolquery\_%\_table';

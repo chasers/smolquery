@@ -529,11 +529,18 @@ defmodule Smolquery.QueryService.Runner do
           :ok | {:error, term()}
   def federated_extension(_connection, %{federated: false}), do: :ok
 
-  def federated_extension(connection, %{federated: true}) do
-    with {:ok, _installed} <- Connection.query(connection, "INSTALL postgres", [], :infinity),
-         {:ok, _loaded} <- Connection.query(connection, "LOAD postgres", [], :infinity) do
-      :ok
-    end
+  def federated_extension(connection, %{federated: true} = plan) do
+    plan
+    |> Map.get(:federated_extensions, [:postgres])
+    |> Enum.reduce_while(:ok, fn extension, :ok ->
+      with {:ok, _installed} <-
+             Connection.query(connection, "INSTALL #{extension}", [], :infinity),
+           {:ok, _loaded} <- Connection.query(connection, "LOAD #{extension}", [], :infinity) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp lockdown(%Runtime{lockdown: false}, _plan, _job_id), do: []
@@ -543,7 +550,8 @@ defmodule Smolquery.QueryService.Runner do
 
     directories =
       runtime.allowed_directories ++
-        EngineSecrets.sealed_prefixes(runtime.store) ++ partial_directories(runtime, job_id)
+        EngineSecrets.sealed_prefixes(runtime.store) ++
+        partial_directories(runtime, job_id)
 
     [
       "SET allowed_directories = #{sql_list(directories)}",

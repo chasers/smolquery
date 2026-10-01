@@ -131,6 +131,72 @@ defmodule Smolquery.Catalog.DuckLakeConnectionsTest do
     refute inspect(result.rows) =~ "hunter2"
   end
 
+  test "a DuckLake connection round-trips, its S3 secret sealed (T-610)", %{catalog: catalog} do
+    original =
+      connection(%{
+        "name" => "sales",
+        "kind" => "ducklake",
+        "data_path" => "s3://lakes/sales/",
+        "s3_key_id" => "AKIA1",
+        "s3_secret" => "s3cret",
+        "s3_region" => "eu-west-1"
+      })
+
+    :ok = Catalog.put_connection(catalog, original)
+    assert {:ok, stored} = Catalog.connection(catalog, "sales")
+
+    assert stored.kind == "ducklake"
+    assert stored.data_path == "s3://lakes/sales/"
+    assert stored.storage == %{key_id: "AKIA1", region: "eu-west-1"}
+    assert Connection.storage_secret(stored) == {:ok, "s3cret"}
+
+    schema = Identifier.quote_name!("__ducklake_metadata_" <> DuckLake.default_catalog())
+    {:ok, result} = Engine.query(@engine, "SELECT * FROM #{schema}.smolquery_connections")
+    refute inspect(result.rows) =~ "s3cret"
+  end
+
+  test "a connections table from before T-610 gains its columns, and its rows read as Postgres",
+       context do
+    stop_supervised!(@engine)
+    path = Path.join(context.tmp_dir, "old.sqlite")
+    engine = __MODULE__.OldLake
+    catalog = DuckLake.default_catalog()
+    table = "__ducklake_metadata_#{catalog}.smolquery_connections"
+
+    start_supervised!(
+      {Engine,
+       name: engine,
+       extensions: [:ducklake, :sqlite],
+       statements: [DuckLake.attach_statement(catalog, "sqlite:" <> path, context.tmp_dir)]},
+      id: engine
+    )
+
+    Engine.query!(
+      engine,
+      "CREATE TABLE #{table} (name VARCHAR NOT NULL, host VARCHAR NOT NULL, port INTEGER NOT NULL, " <>
+        "database_name VARCHAR NOT NULL, username VARCHAR NOT NULL, secret VARCHAR NOT NULL, " <>
+        "sslmode VARCHAR NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, " <>
+        "PRIMARY KEY (name))"
+    )
+
+    Engine.query!(
+      engine,
+      "INSERT INTO #{table} VALUES ('old', 'h', 5432, 'd', 'u', '#{connection().secret}', 'require', 1, 2)"
+    )
+
+    stop_supervised!(engine)
+
+    start_supervised!(
+      {DuckLake,
+       name: __MODULE__.Upgraded, metadata: "sqlite:" <> path, data_path: context.tmp_dir}
+    )
+
+    upgraded = DuckLake.new(engine: __MODULE__.Upgraded)
+
+    assert {:ok, %Connection{name: "old", kind: "postgres", data_path: nil}} =
+             Catalog.connection(upgraded, "old")
+  end
+
   test "an unknown connection names itself", %{catalog: catalog} do
     assert Catalog.connection(catalog, "nope") == {:error, {:unknown_connection, "nope"}}
   end

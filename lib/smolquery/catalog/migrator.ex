@@ -184,7 +184,8 @@ defmodule Smolquery.Catalog.Migrator do
   def migrations do
     [
       {20_260_930_110_000, Migrations.SmolqueryTables},
-      {20_260_930_120_000, Migrations.DucklakeReadIndexes}
+      {20_260_930_120_000, Migrations.DucklakeReadIndexes},
+      {20_261_001_100_000, Migrations.ConnectionKinds}
     ]
   end
 

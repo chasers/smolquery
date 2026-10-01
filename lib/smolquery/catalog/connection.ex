@@ -1,6 +1,7 @@
 defmodule Smolquery.Catalog.Connection do
   @moduledoc """
-  A registered Postgres database a query may join against (T-322).
+  A registered external database a query may join against: a Postgres
+  database (T-322), or another DuckLake, its catalog and its files (T-610).
 
   The catalog is where these live, for the reason `Smolquery.Catalog.DuckLake`
   gives its partition-count side table: every node must read one answer rather
@@ -23,6 +24,24 @@ defmodule Smolquery.Catalog.Connection do
   passes `Smolquery.Identifier.validate/1` here, at registration, rather than
   being escaped at every later use.
 
+  ## Two kinds
+
+  `kind` is `"postgres"`, the default and every connection made before
+  T-610, or `"ducklake"`. A DuckLake connection is the lake's metadata
+  database, which is Postgres, so it carries the same host, port, database,
+  username, sealed password and `sslmode` a Postgres connection does, plus:
+
+    * `data_path`, where the lake's files live, required: an `s3://` URL, or a
+      local path under one of `Smolquery.Federation`'s `:local_roots`, which
+      are none by default, so a connection cannot hand a query the node's own
+      filesystem. The query engine is allowed to read exactly this path.
+    * optional S3 credentials for it, `s3_key_id` and `s3_secret`, both or
+      neither, with `s3_region`, `s3_endpoint` and `s3_url_style`. The secret
+      is sealed like the password, into `:storage_secret`, and like it is
+      never returned.
+
+  The kind is fixed at registration: `update/2` does not change it.
+
   ## `sslmode` defaults to `require`
 
   libpq defaults to `prefer`, which silently accepts plaintext when the server
@@ -36,7 +55,7 @@ defmodule Smolquery.Catalog.Connection do
   alias Smolquery.Identifier
   alias Smolquery.Secrets
 
-  @derive {Inspect, except: [:secret]}
+  @derive {Inspect, except: [:secret, :storage_secret]}
   @enforce_keys [:name, :host, :port, :database, :username, :secret, :sslmode]
   defstruct [
     :name,
@@ -47,8 +66,19 @@ defmodule Smolquery.Catalog.Connection do
     :secret,
     :sslmode,
     :created_at,
-    :updated_at
+    :updated_at,
+    kind: "postgres",
+    data_path: nil,
+    storage: %{},
+    storage_secret: nil
   ]
+
+  @type storage :: %{
+          optional(:key_id) => String.t(),
+          optional(:region) => String.t(),
+          optional(:endpoint) => String.t(),
+          optional(:url_style) => String.t()
+        }
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -59,8 +89,21 @@ defmodule Smolquery.Catalog.Connection do
           secret: String.t(),
           sslmode: String.t(),
           created_at: integer() | nil,
-          updated_at: integer() | nil
+          updated_at: integer() | nil,
+          kind: String.t(),
+          data_path: String.t() | nil,
+          storage: storage(),
+          storage_secret: String.t() | nil
         }
+
+  @kinds ~w(postgres ducklake)
+  @url_styles ~w(path vhost)
+  @storage_fields [
+    {"s3_key_id", :key_id},
+    {"s3_region", :region},
+    {"s3_endpoint", :endpoint},
+    {"s3_url_style", :url_style}
+  ]
 
   @sslmodes ~w(disable allow prefer require verify-ca verify-full)
   @default_sslmode "require"
@@ -73,6 +116,12 @@ defmodule Smolquery.Catalog.Connection do
   def sslmodes, do: @sslmodes
 
   @doc """
+  The kinds a connection may be.
+  """
+  @spec kinds() :: [String.t()]
+  def kinds, do: @kinds
+
+  @doc """
   The port a connection uses when none is given.
   """
   @spec default_port() :: :inet.port_number()
@@ -82,12 +131,14 @@ defmodule Smolquery.Catalog.Connection do
   Builds a connection, sealing the plaintext `:password` into `:secret`.
 
   Takes a map keyed by strings — the shape the API and the UI both already
-  hold — so neither has to convert before validating. `:port` and `:sslmode`
-  have defaults; everything else is required.
+  hold — so neither has to convert before validating. `:kind`, `:port` and
+  `:sslmode` have defaults; a DuckLake connection also requires
+  `"data_path"`; everything else is required.
   """
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(params) when is_map(params) do
     with {:ok, name} <- name(params),
+         {:ok, kind} <- kind(params),
          {:ok, host} <- required(params, "host"),
          {:ok, database} <- required(params, "database"),
          {:ok, username} <- required(params, "username"),
@@ -95,16 +146,17 @@ defmodule Smolquery.Catalog.Connection do
          {:ok, port} <- port(params),
          {:ok, sslmode} <- sslmode(params),
          {:ok, secret} <- Secrets.seal(password) do
-      {:ok,
-       %__MODULE__{
-         name: name,
-         host: host,
-         port: port,
-         database: database,
-         username: username,
-         secret: secret,
-         sslmode: sslmode
-       }}
+      %__MODULE__{
+        name: name,
+        kind: kind,
+        host: host,
+        port: port,
+        database: database,
+        username: username,
+        secret: secret,
+        sslmode: sslmode
+      }
+      |> with_lake(params)
     end
   end
 
@@ -124,17 +176,61 @@ defmodule Smolquery.Catalog.Connection do
          {:ok, port} <- port(params, connection.port),
          {:ok, sslmode} <- sslmode(params, connection.sslmode),
          {:ok, secret} <- secret(params, connection.secret) do
-      {:ok,
-       %{
-         connection
-         | host: host,
-           database: database,
-           username: username,
-           port: port,
-           sslmode: sslmode,
-           secret: secret
-       }}
+      %{
+        connection
+        | host: host,
+          database: database,
+          username: username,
+          port: port,
+          sslmode: sslmode,
+          secret: secret
+      }
+      |> with_lake(params)
     end
+  end
+
+  @doc """
+  The S3 secret of a DuckLake connection's storage, opened, or `nil` when it
+  has none. Like `connection_string/1`, the only path back to a cleartext:
+  `Smolquery.Federation` passes it straight into a `CREATE SECRET`.
+  """
+  @spec storage_secret(t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def storage_secret(%__MODULE__{storage_secret: nil}), do: {:ok, nil}
+  def storage_secret(%__MODULE__{storage_secret: sealed}), do: Secrets.open(sealed)
+
+  @doc """
+  What `Smolquery.Catalog` stores beside the columns every kind shares: the
+  data path and the storage settings that are not secret, as JSON-ready data.
+  """
+  @spec options(t()) :: map()
+  def options(%__MODULE__{data_path: nil, storage: storage}) when map_size(storage) == 0,
+    do: %{}
+
+  def options(%__MODULE__{} = connection) do
+    connection.storage
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    |> Map.put("data_path", connection.data_path)
+  end
+
+  @doc """
+  The kind-specific fields `options/1` stored, and the sealed storage secret,
+  put back on a connection read from the catalog.
+  """
+  @spec with_options(t(), map(), String.t() | nil) :: t()
+  def with_options(%__MODULE__{} = connection, options, storage_secret) do
+    storage =
+      for {_param, key} <- @storage_fields,
+          value = Map.get(options, Atom.to_string(key)),
+          is_binary(value),
+          into: %{},
+          do: {key, value}
+
+    %{
+      connection
+      | data_path: Map.get(options, "data_path"),
+        storage: storage,
+        storage_secret: storage_secret
+    }
   end
 
   @doc """
@@ -180,9 +276,102 @@ defmodule Smolquery.Catalog.Connection do
       "database" => connection.database,
       "username" => connection.username,
       "sslmode" => connection.sslmode,
+      "kind" => connection.kind,
       "createdAt" => connection.created_at,
       "updatedAt" => connection.updated_at
     }
+    |> Map.merge(lake_json(connection))
+  end
+
+  defp lake_json(%__MODULE__{kind: "ducklake"} = connection) do
+    %{
+      "dataPath" => connection.data_path,
+      "s3" =>
+        connection.storage
+        |> Map.new(fn {key, value} -> {json_key(key), value} end)
+        |> Map.put("hasSecret", connection.storage_secret != nil)
+    }
+  end
+
+  defp lake_json(_connection), do: %{}
+
+  defp json_key(:key_id), do: "keyId"
+  defp json_key(:url_style), do: "urlStyle"
+  defp json_key(key), do: Atom.to_string(key)
+
+  defp with_lake(%__MODULE__{kind: "postgres"} = connection, _params), do: {:ok, connection}
+
+  defp with_lake(%__MODULE__{kind: "ducklake"} = connection, params) do
+    with {:ok, data_path} <- data_path(params, connection.data_path),
+         {:ok, storage} <- storage(params, connection.storage),
+         {:ok, storage_secret} <- storage_secret_param(params, connection.storage_secret),
+         :ok <- paired(storage, storage_secret) do
+      {:ok,
+       %{connection | data_path: data_path, storage: storage, storage_secret: storage_secret}}
+    end
+  end
+
+  defp kind(params) do
+    case Map.get(params, "kind", "postgres") do
+      kind when kind in @kinds -> {:ok, kind}
+      _invalid -> {:error, {:invalid_param, "kind"}}
+    end
+  end
+
+  defp data_path(params, current) do
+    case Map.get(params, "data_path", current) do
+      "s3://" <> rest = path when rest != "" -> {:ok, path}
+      path when is_binary(path) and path != "" -> local_path(path)
+      _missing -> {:error, {:missing_field, "data_path"}}
+    end
+  end
+
+  defp local_path(path) do
+    expanded = Path.expand(path)
+
+    if Enum.any?(local_roots(), &within?(expanded, Path.expand(&1))),
+      do: {:ok, path},
+      else: {:error, {:invalid_param, "data_path"}}
+  end
+
+  defp within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
+  defp local_roots do
+    :smolquery |> Application.get_env(Smolquery.Federation, []) |> Keyword.get(:local_roots, [])
+  end
+
+  defp storage(params, current) do
+    Enum.reduce_while(@storage_fields, {:ok, current}, fn {param, key}, {:ok, storage} ->
+      case Map.fetch(params, param) do
+        :error -> {:cont, {:ok, storage}}
+        {:ok, value} when value in [nil, ""] -> {:cont, {:ok, Map.delete(storage, key)}}
+        {:ok, value} -> storage_value(key, value, storage)
+      end
+    end)
+  end
+
+  defp storage_value(:url_style, value, _storage) when value not in @url_styles,
+    do: {:halt, {:error, {:invalid_param, "s3_url_style"}}}
+
+  defp storage_value(key, value, storage) when is_binary(value),
+    do: {:cont, {:ok, Map.put(storage, key, value)}}
+
+  defp storage_value(key, _value, _storage),
+    do: {:halt, {:error, {:invalid_param, "s3_" <> Atom.to_string(key)}}}
+
+  defp storage_secret_param(params, current) do
+    case Map.fetch(params, "s3_secret") do
+      :error -> {:ok, current}
+      {:ok, value} when value in [nil, ""] -> {:ok, nil}
+      {:ok, value} when is_binary(value) -> Secrets.seal(value)
+      {:ok, _invalid} -> {:error, {:invalid_param, "s3_secret"}}
+    end
+  end
+
+  defp paired(storage, secret) do
+    if Map.has_key?(storage, :key_id) == (secret != nil),
+      do: :ok,
+      else: {:error, {:invalid_param, "s3_secret"}}
   end
 
   defp quote_value(value) do

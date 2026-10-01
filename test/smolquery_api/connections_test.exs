@@ -70,6 +70,33 @@ defmodule SmolqueryApi.ConnectionControllerTest do
       assert body(response)["sslmode"] == "require"
     end
 
+    test "registers a DuckLake connection, never returning its S3 secret (T-610)", %{name: name} do
+      lake =
+        valid(%{
+          "name" => "sales",
+          "kind" => "ducklake",
+          "data_path" => "s3://lakes/sales/",
+          "s3_key_id" => "AKIA1",
+          "s3_secret" => "s3cret"
+        })
+
+      response = send_json(name, :post, "/v1/connections", lake)
+
+      assert response.status == 201
+      assert body(response)["kind"] == "ducklake"
+      assert body(response)["dataPath"] == "s3://lakes/sales/"
+      assert body(response)["s3"] == %{"keyId" => "AKIA1", "hasSecret" => true}
+      refute response.resp_body =~ "s3cret"
+    end
+
+    test "a DuckLake connection without a data path is a 400 naming it", %{name: name} do
+      response =
+        send_json(name, :post, "/v1/connections", valid(%{"kind" => "ducklake"}))
+
+      assert response.status == 400
+      assert response.resp_body =~ "data_path"
+    end
+
     test "never returns the password or the sealed secret", %{name: name} do
       response = send_json(name, :post, "/v1/connections", valid())
 

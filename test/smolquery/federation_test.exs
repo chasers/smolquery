@@ -47,6 +47,87 @@ defmodule Smolquery.FederationTest do
     connection
   end
 
+  describe "a DuckLake connection (T-610)" do
+    defp lake(overrides \\ %{}) do
+      {:ok, connection} =
+        Connection.new(
+          Map.merge(
+            %{
+              "name" => "sales",
+              "kind" => "ducklake",
+              "host" => "catalog.internal",
+              "database" => "lake",
+              "username" => "reader",
+              "password" => "hunter2",
+              "sslmode" => "disable",
+              "data_path" => "s3://lakes/sales/"
+            },
+            overrides
+          )
+        )
+
+      connection
+    end
+
+    test "attaches the lake through its Postgres metadata, read-only, at its data path" do
+      assert {:ok, statement} = Federation.attach_statement(lake())
+
+      assert statement =~ "ATTACH 'ducklake:postgres:dbname=lake host=catalog.internal"
+      assert statement =~ ~s|AS "sales" (READ_ONLY, DATA_PATH 's3://lakes/sales/')|
+    end
+
+    test "statements/1 opens with an S3 secret scoped to the data path, when it has one" do
+      assert {:ok, [attach]} = Federation.statements(lake())
+      assert attach =~ "ATTACH"
+
+      with_secret =
+        lake(%{
+          "s3_key_id" => "AKIA1",
+          "s3_secret" => "s3cret",
+          "s3_region" => "eu-west-1",
+          "s3_endpoint" => "http://minio:9000"
+        })
+
+      assert {:ok, [secret, _attach]} = Federation.statements(with_secret)
+      assert secret =~ ~s|CREATE OR REPLACE TEMPORARY SECRET "federated_sales" (TYPE s3|
+      assert secret =~ "KEY_ID 'AKIA1', SECRET 's3cret'"
+      assert secret =~ "SCOPE 's3://lakes/sales/'"
+      assert secret =~ "REGION 'eu-west-1'"
+      assert secret =~ "ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false"
+    end
+
+    test "extensions/1 adds ducklake to postgres" do
+      assert Federation.extensions(lake()) == [:postgres, :ducklake]
+      assert Federation.extensions(connection()) == [:postgres]
+    end
+
+    test "redact_statement/2 strips the metadata password and the S3 secret" do
+      with_secret = lake(%{"s3_key_id" => "AKIA1", "s3_secret" => "s3cret"})
+      {:ok, [secret, attach]} = Federation.statements(with_secret)
+
+      refute Federation.redact_statement({:failed, "quoted s3cret"}, secret) =~ "s3cret"
+
+      {:ok, string} = Connection.connection_string(with_secret)
+
+      refute Federation.redact_statement({:failed, "unable to connect: #{string}"}, attach) =~
+               "hunter2"
+    end
+
+    test "scrub/2 strips the S3 secret too" do
+      with_secret = lake(%{"s3_key_id" => "AKIA1", "s3_secret" => "s3cret"})
+
+      assert {:federation_error, "sales", reason} =
+               Federation.scrub({:failed, "s3cret and hunter2"}, with_secret)
+
+      refute reason =~ "s3cret"
+    end
+
+    test "table_query/2 reads the first rows of a table" do
+      assert Federation.table_query("sales", {"main", "orders"}) ==
+               ~s|select *\nfrom "sales"."main"."orders"\nlimit 100;\n|
+    end
+  end
+
   describe "attach_statement/1" do
     test "attaches under the connection's own name, read-only" do
       assert {:ok, statement} = Federation.attach_statement(connection())
