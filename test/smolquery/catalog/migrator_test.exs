@@ -17,7 +17,7 @@ defmodule Smolquery.Catalog.MigratorTest do
   alias Smolquery.Engine
   alias Smolquery.Test.Postgres
 
-  @versions [20_260_930_110_000, 20_260_930_120_000]
+  @versions [20_260_930_110_000, 20_260_930_120_000, 20_261_001_100_000]
   @tables ~w(smolquery_clustering smolquery_connections smolquery_materialized
              smolquery_partitions smolquery_required_columns smolquery_retention
              smolquery_ring_config)
@@ -42,10 +42,11 @@ defmodule Smolquery.Catalog.MigratorTest do
     end
   end
 
-  test "migrations/0 lists the tables, then the indexes on DuckLake's" do
+  test "migrations/0 lists the tables, the indexes on DuckLake's, then connection kinds" do
     assert Migrator.migrations() == [
              {20_260_930_110_000, Migrations.SmolqueryTables},
-             {20_260_930_120_000, Migrations.DucklakeReadIndexes}
+             {20_260_930_120_000, Migrations.DucklakeReadIndexes},
+             {20_261_001_100_000, Migrations.ConnectionKinds}
            ]
   end
 

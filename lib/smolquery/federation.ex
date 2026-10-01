@@ -1,6 +1,7 @@
 defmodule Smolquery.Federation do
   @moduledoc """
-  The DuckDB side of a federated Postgres connection (T-322, T-324).
+  The DuckDB side of a federated connection: a Postgres database (T-322,
+  T-324) or another DuckLake (T-610).
 
   One place builds the `ATTACH` a registered connection becomes, and one place
   scrubs what its failures say. Both the API's connectivity check and the query
@@ -13,6 +14,35 @@ defmodule Smolquery.Federation do
   no DML should ever reach an attached database. `READ_ONLY` on the attachment
   is the second lock, in the engine rather than the parser: a gap in the first
   one cannot become a write to somebody's production database.
+
+  ## A DuckLake connection
+
+  A DuckLake connection attaches the other lake through its Postgres metadata
+  database, read-only, with the connection's `data_path`:
+
+      ATTACH 'ducklake:postgres:<libpq>' AS "<name>" (READ_ONLY, DATA_PATH '<data_path>')
+
+  DuckLake accepts its own data path on an existing lake and refuses any
+  other, so a wrong path fails the attach, at `probe/1` and at query time,
+  rather than reading somewhere unexpected. When the connection has S3
+  credentials, a `CREATE TEMPORARY SECRET` scoped to the data path comes
+  first: it serves that prefix and nothing else, so it can never answer for
+  the sealed tier's bucket.
+
+  ## A DuckLake connection trusts that lake's catalog
+
+  The query engine's lockdown (`Smolquery.QueryService.Runner`) is unchanged
+  by a DuckLake connection and needs no widening: DuckLake reads an attached
+  lake's files itself, and `allowed_directories` does not apply to those
+  reads (measured: after lockdown a query through the attached lake reads,
+  while `read_parquet` of the same files is refused). The flip side is the
+  boundary to know: the files a query reads are the ones the remote catalog
+  lists, wherever they are, and `data_path` does not confine a catalog whose
+  entries are absolute paths. Whoever controls a registered lake's catalog
+  can therefore have the node read any Parquet file it can open, the node's
+  own included. Registering a connection takes the credential key, as it
+  does for Postgres; register only lakes whose catalog you trust as you trust
+  this deployment's.
 
   ## Failures are scrubbed before anyone sees them
 
@@ -28,13 +58,21 @@ defmodule Smolquery.Federation do
   alias Smolquery.Engine
   alias Smolquery.Identifier
 
-  @probe_extensions [:postgres]
   @probe_timeout_ms 10_000
 
   @doc """
   The `ATTACH` that makes `connection` reachable under its own name.
   """
   @spec attach_statement(Connection.t()) :: {:ok, String.t()} | {:error, term()}
+  def attach_statement(%Connection{kind: "ducklake"} = connection) do
+    with {:ok, string} <- Connection.connection_string(connection) do
+      {:ok,
+       "ATTACH #{Identifier.sql_string("ducklake:postgres:" <> string)} AS " <>
+         "#{Identifier.quote_name!(connection.name)} " <>
+         "(READ_ONLY, DATA_PATH #{Identifier.sql_string(connection.data_path)})"}
+    end
+  end
+
   def attach_statement(%Connection{} = connection) do
     with {:ok, string} <- Connection.connection_string(connection) do
       {:ok,
@@ -42,6 +80,71 @@ defmodule Smolquery.Federation do
          "#{Identifier.quote_name!(connection.name)} (TYPE postgres, READ_ONLY)"}
     end
   end
+
+  @doc """
+  Every statement a job runs to reach `connection`, in order: for a DuckLake
+  connection with S3 credentials, the storage secret, then the attach.
+  """
+  @spec statements(Connection.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def statements(%Connection{} = connection) do
+    with {:ok, secret} <- secret_statements(connection),
+         {:ok, attach} <- attach_statement(connection) do
+      {:ok, secret ++ [attach]}
+    end
+  end
+
+  @doc """
+  The DuckDB extensions a job loads before `statements/1` will run:
+  `postgres` for every kind, since a DuckLake's metadata is Postgres, and
+  `ducklake` for a DuckLake.
+  """
+  @spec extensions(Connection.t()) :: [atom()]
+  def extensions(%Connection{kind: "ducklake"}), do: [:postgres, :ducklake]
+  def extensions(%Connection{}), do: [:postgres]
+
+  defp secret_statements(%Connection{kind: "ducklake", storage: %{key_id: key_id}} = connection) do
+    with {:ok, secret} <- Connection.storage_secret(connection) do
+      options =
+        [
+          "TYPE s3",
+          "KEY_ID #{Identifier.sql_string(key_id)}",
+          "SECRET #{Identifier.sql_string(secret)}",
+          "SCOPE #{Identifier.sql_string(connection.data_path)}"
+        ] ++ region_option(connection.storage) ++ endpoint_options(connection.storage)
+
+      name = Identifier.quote_name!("federated_" <> connection.name)
+      body = Enum.join(options, ", ")
+
+      {:ok, ["CREATE OR REPLACE TEMPORARY SECRET #{name} (#{body})"]}
+    end
+  end
+
+  defp secret_statements(_connection), do: {:ok, []}
+
+  defp region_option(%{region: region}), do: ["REGION #{Identifier.sql_string(region)}"]
+  defp region_option(_storage), do: []
+
+  defp endpoint_options(%{endpoint: endpoint} = storage) do
+    uri = URI.parse(endpoint)
+
+    {host, ssl} =
+      case uri do
+        %URI{scheme: scheme, host: host, port: port} when scheme in ["http", "https"] ->
+          {if(port, do: "#{host}:#{port}", else: host), scheme == "https"}
+
+        _bare ->
+          {endpoint, true}
+      end
+
+    [
+      "ENDPOINT #{Identifier.sql_string(host)}",
+      "URL_STYLE #{Identifier.sql_string(Map.get(storage, :url_style, "path"))}",
+      "USE_SSL #{ssl}"
+    ]
+  end
+
+  defp endpoint_options(%{url_style: style}), do: ["URL_STYLE #{Identifier.sql_string(style)}"]
+  defp endpoint_options(_storage), do: []
 
   @doc """
   Whether `connection` opens: attaches it in a throwaway engine and reads one
@@ -56,13 +159,27 @@ defmodule Smolquery.Federation do
   """
   @spec probe(Connection.t()) :: :ok | {:error, term()}
   def probe(%Connection{} = connection) do
-    with {:ok, statement} <- attach_statement(connection) do
+    with {:ok, _tables} <- in_probe_engine(connection, &run_probe(&1, connection)), do: :ok
+  end
+
+  @doc """
+  A DuckLake connection's tables, as `{schema, table}`, read by attaching it
+  in a throwaway engine as `probe/1` does. The connections page opens the
+  editor on the first: a lake's catalog is not readable through the planner
+  the way a Postgres database's `pg_catalog` is.
+  """
+  @spec tables(Connection.t()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def tables(%Connection{kind: "ducklake"} = connection),
+    do: in_probe_engine(connection, &lake_tables(&1, connection))
+
+  defp in_probe_engine(connection, run) do
+    with {:ok, statements} <- statements(connection) do
       name = :"federation_probe_#{:erlang.unique_integer([:positive])}"
 
-      case Engine.start_link(name: name, extensions: @probe_extensions) do
+      case Engine.start_link(name: name, extensions: probe_extensions(connection)) do
         {:ok, pid} ->
           try do
-            run_probe(name, statement, connection)
+            with :ok <- run_statements(name, statements, connection), do: run.(name)
           after
             Supervisor.stop(pid, :normal)
           end
@@ -71,6 +188,20 @@ defmodule Smolquery.Federation do
           {:error, scrub(reason, connection)}
       end
     end
+  end
+
+  defp probe_extensions(%Connection{kind: "ducklake"} = connection),
+    do: extensions(connection) ++ [:httpfs]
+
+  defp probe_extensions(connection), do: extensions(connection)
+
+  defp run_statements(name, statements, connection) do
+    Enum.reduce_while(statements, :ok, fn statement, :ok ->
+      case Engine.try_query(name, statement, [], @probe_timeout_ms) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, scrub(reason, connection)}}
+      end
+    end)
   end
 
   @doc """
@@ -83,13 +214,22 @@ defmodule Smolquery.Federation do
   runs through the planner like any federated query.
   """
   @spec discovery_query(String.t()) :: String.t()
-  def discovery_query(name) do
+  def discovery_query(name) when is_binary(name) do
     """
     select schemaname, relname, n_live_tup
     from #{Identifier.quote_name!(name)}.pg_catalog.pg_stat_user_tables
     order by n_live_tup desc
     limit 10;
     """
+  end
+
+  @doc """
+  The SQL that reads the first rows of a DuckLake connection's `table`.
+  """
+  @spec table_query(String.t(), {String.t(), String.t()}) :: String.t()
+  def table_query(name, {schema, table}) do
+    "select *\nfrom #{Identifier.quote_name!(name)}.#{Identifier.quote_name!(schema)}." <>
+      "#{Identifier.quote_name!(table)}\nlimit 100;\n"
   end
 
   @doc """
@@ -103,11 +243,16 @@ defmodule Smolquery.Federation do
   """
   @spec scrub(term(), Connection.t()) :: term()
   def scrub(reason, %Connection{} = connection) do
-    case Connection.connection_string(connection) do
-      {:ok, string} -> {:federation_error, connection.name, redact(reason, string)}
+    with {:ok, string} <- Connection.connection_string(connection),
+         {:ok, secret} <- Connection.storage_secret(connection) do
+      {:federation_error, connection.name, reason |> redact(string) |> redact_secret(secret)}
+    else
       {:error, _unopenable} -> {:federation_error, connection.name, :unavailable}
     end
   end
+
+  defp redact_secret(reason, nil), do: reason
+  defp redact_secret(reason, secret), do: String.replace(reason, secret, "<redacted>")
 
   @doc """
   Redacts an `ATTACH`'s own connection string out of the error it produced.
@@ -121,8 +266,23 @@ defmodule Smolquery.Federation do
   @spec redact_statement(term(), String.t()) :: term()
   def redact_statement(reason, "ATTACH '" <> rest) do
     case literal(rest, "") do
-      {:ok, string} -> redact(reason, string)
-      :error -> reason
+      {:ok, "ducklake:postgres:" <> string} ->
+        redact(reason, string)
+
+      {:ok, string} ->
+        redact(reason, string)
+
+      :error ->
+        reason
+    end
+  end
+
+  def redact_statement(reason, "CREATE OR REPLACE TEMPORARY SECRET " <> rest) do
+    with [_before, after_secret] <- String.split(rest, ", SECRET '", parts: 2),
+         {:ok, secret} <- literal(after_secret, "") do
+      redact(reason, secret)
+    else
+      _no_secret -> reason
     end
   end
 
@@ -144,17 +304,47 @@ defmodule Smolquery.Federation do
     |> String.replace(string, "<redacted>")
   end
 
-  defp run_probe(name, statement, connection) do
-    with {:ok, _attached} <- Engine.try_query(name, statement, [], @probe_timeout_ms),
-         {:ok, _row} <-
-           Engine.try_query(
-             name,
-             "SELECT 1 FROM #{Identifier.quote_name!(connection.name)}.information_schema.schemata LIMIT 1",
-             [],
-             @probe_timeout_ms
-           ) do
-      :ok
-    else
+  defp run_probe(name, %Connection{kind: "ducklake"} = connection) do
+    with {:ok, tables} <- lake_tables(name, connection) do
+      case tables do
+        [] -> {:ok, []}
+        [first | _rest] -> read_first(name, connection, first)
+      end
+    end
+  end
+
+  defp run_probe(name, connection) do
+    case Engine.try_query(
+           name,
+           "SELECT 1 FROM #{Identifier.quote_name!(connection.name)}.information_schema.schemata LIMIT 1",
+           [],
+           @probe_timeout_ms
+         ) do
+      {:ok, _row} -> {:ok, []}
+      {:error, reason} -> {:error, scrub(reason, connection)}
+    end
+  end
+
+  defp lake_tables(name, connection) do
+    case Engine.try_query(
+           name,
+           "SELECT schema_name, table_name FROM duckdb_tables() " <>
+             "WHERE database_name = $1 ORDER BY schema_name, table_name",
+           [connection.name],
+           @probe_timeout_ms
+         ) do
+      {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, &List.to_tuple/1)}
+      {:error, reason} -> {:error, scrub(reason, connection)}
+    end
+  end
+
+  defp read_first(name, connection, {schema, table} = first) do
+    sql =
+      "SELECT * FROM #{Identifier.quote_name!(connection.name)}.#{Identifier.quote_name!(schema)}." <>
+        "#{Identifier.quote_name!(table)} LIMIT 1"
+
+    case Engine.try_query(name, sql, [], @probe_timeout_ms) do
+      {:ok, _row} -> {:ok, [first]}
       {:error, reason} -> {:error, scrub(reason, connection)}
     end
   end

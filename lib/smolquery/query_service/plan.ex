@@ -44,9 +44,11 @@ defmodule Smolquery.QueryService.Plan do
   SQL; an engine error message can still quote a bound value.
 
   `federated` says whether `statements` opens with `ATTACH`es for registered
-  Postgres connections (T-324). The runner reads it to decide whether the job
-  engine needs DuckDB's `postgres` extension — loading that extension is not
-  free, and on a SQLite-metadata deployment nothing else would pull it in.
+  connections (T-324). The runner reads `federated_extensions`, the DuckDB
+  extensions those attaches need (`postgres`, and `ducklake` for a DuckLake
+  connection, T-610), to load them before it locks the engine down —
+  loading an extension is not free, and on a SQLite-metadata deployment
+  nothing else would pull `postgres` in.
   """
 
   alias Smolquery.BufferService.HotClient
@@ -66,6 +68,7 @@ defmodule Smolquery.QueryService.Plan do
     schemas: %{},
     non_null: :unknown,
     federated: false,
+    federated_extensions: [],
     params: []
   ]
 
@@ -81,6 +84,7 @@ defmodule Smolquery.QueryService.Plan do
           non_null: [boolean()] | :unknown,
           statistics: Statistics.t() | nil,
           federated: boolean(),
+          federated_extensions: [atom()],
           params: [term()]
         }
 end

@@ -117,6 +117,41 @@ defmodule SmolqueryWeb.ConnectionLiveTest do
       assert stored.host == "db.internal"
     end
 
+    test "registers a DuckLake connection once its kind is chosen (T-610)", %{conn: conn} do
+      runtime = start_web!()
+
+      {:ok, lv, _html} = live(conn, ~p"/connections")
+      open_new(lv)
+      refute has_element?(lv, "input[name='connection[data_path]']")
+
+      lv
+      |> form("#connection-form", connection: %{"kind" => "ducklake"})
+      |> render_change()
+
+      assert has_element?(lv, "input[name='connection[data_path]']")
+
+      html =
+        lv
+        |> form("#connection-form",
+          connection:
+            form_params(%{
+              "name" => "sales",
+              "kind" => "ducklake",
+              "data_path" => "s3://lakes/sales/",
+              "s3_key_id" => "AKIA1",
+              "s3_secret" => "s3cret"
+            })
+        )
+        |> render_submit()
+
+      assert html =~ "Connection sales saved"
+      refute html =~ "s3cret"
+      assert {:ok, stored} = Catalog.connection(runtime.catalog, "sales")
+      assert stored.kind == "ducklake"
+      assert stored.data_path == "s3://lakes/sales/"
+      assert has_element?(lv, "button[phx-click=query][phx-value-name=sales]")
+    end
+
     test "the form is closed until New connection opens it", %{conn: conn} do
       start_web!()
 

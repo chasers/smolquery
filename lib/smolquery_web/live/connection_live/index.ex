@@ -1,6 +1,7 @@
 defmodule SmolqueryWeb.ConnectionLive.Index do
   @moduledoc """
-  Federated Postgres connections, managed (T-325).
+  Federated connections, managed: Postgres databases (T-325) and other
+  DuckLakes (T-610).
 
   Lists the registered connections, registers and edits them, removes them,
   tests one without leaving the page, and opens the editor on one. Reads and
@@ -32,10 +33,20 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   a connection cancels its probe, so a verdict never lands for a row that is
   gone or changed.
 
-  ## Query is a link
+  ## Query
 
-  The Query button opens the editor on `Smolquery.Federation.discovery_query/1`
-  — the connection's user tables ranked by live rows (PL-59 D1).
+  For a Postgres connection the Query button is a link: it opens the editor
+  on `Smolquery.Federation.discovery_query/1`, the connection's user tables
+  ranked by live rows (PL-59 D1). A DuckLake's catalog is not readable through
+  the planner that way, so for a DuckLake connection the button lists its
+  tables off the LiveView process (`Smolquery.Federation.tables/1`, the
+  probe's attach) and opens the editor on the first.
+
+  ## The S3 secret is write-only too
+
+  A DuckLake connection's S3 secret follows the password's rule: the field
+  renders empty, and a blank one keeps the stored secret, unless the key id is
+  blank too, which removes the credentials.
   """
 
   use SmolqueryWeb, :live_view
@@ -55,6 +66,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       |> assign(:page_title, "Connections")
       |> assign(:runtime, runtime)
       |> assign(:sslmodes, Connection.sslmodes())
+      |> assign(:kinds, Connection.kinds())
       |> assign(:editing, nil)
       |> assign(:form, blank_form())
       |> assign(:form_open, false)
@@ -130,7 +142,33 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
     {:noreply, test(socket, name)}
   end
 
+  def handle_event("query", %{"name" => name}, socket) do
+    {:noreply, list_tables(socket, name)}
+  end
+
   @impl Phoenix.LiveView
+  def handle_async({:tables, name}, {:ok, {:ok, [first | _rest]}}, socket) do
+    {:noreply,
+     socket
+     |> finish_test(name)
+     |> push_navigate(to: ~p"/query?#{[sql: Federation.table_query(name, first)]}")}
+  end
+
+  def handle_async({:tables, name}, {:ok, {:ok, []}}, socket) do
+    {:noreply, socket |> finish_test(name) |> put_flash(:info, "#{name} has no tables")}
+  end
+
+  def handle_async({:tables, name}, {:ok, {:error, reason}}, socket) do
+    {:noreply, socket |> finish_test(name) |> put_flash(:error, message(reason))}
+  end
+
+  def handle_async({:tables, name}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> finish_test(name)
+     |> put_flash(:error, message({:federation_error, name, :unavailable}))}
+  end
+
   def handle_async({:test, name}, {:ok, :ok}, socket) do
     {:noreply, socket |> finish_test(name) |> put_flash(:info, "#{name} answered")}
   end
@@ -163,6 +201,18 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
 
       {:error, reason} ->
         put_flash(socket, :error, message(reason))
+    end
+  end
+
+  defp list_tables(socket, name) do
+    with false <- MapSet.member?(socket.assigns.busy, name),
+         {:ok, connection} <- Catalog.connection(socket.assigns.runtime.catalog, name) do
+      socket
+      |> update(:busy, &MapSet.put(&1, name))
+      |> start_async({:tables, name}, fn -> Federation.tables(connection) end)
+    else
+      true -> socket
+      {:error, reason} -> put_flash(socket, :error, message(reason))
     end
   end
 
@@ -216,7 +266,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   @spec normalize(map()) :: {:ok, map()} | {:error, term()}
   def normalize(params) do
     with {:ok, params} <- port(params) do
-      {:ok, strip_blank_password(params)}
+      {:ok, params |> strip_blank_password() |> blank_storage_secret()}
     end
   end
 
@@ -231,6 +281,13 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
 
   defp strip_blank_password(%{"password" => ""} = params), do: Map.delete(params, "password")
   defp strip_blank_password(params), do: params
+
+  defp blank_storage_secret(%{"s3_secret" => "", "s3_key_id" => key_id} = params)
+       when key_id not in [nil, ""],
+       do: Map.delete(params, "s3_secret")
+
+  defp blank_storage_secret(%{"s3_secret" => ""} = params), do: params
+  defp blank_storage_secret(params), do: params
 
   defp load_connections(socket) do
     case Catalog.list_connections(socket.assigns.runtime.catalog) do
@@ -252,7 +309,14 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       "database" => connection.database,
       "username" => connection.username,
       "password" => "",
-      "sslmode" => connection.sslmode
+      "sslmode" => connection.sslmode,
+      "kind" => connection.kind,
+      "data_path" => connection.data_path || "",
+      "s3_key_id" => Map.get(connection.storage, :key_id, ""),
+      "s3_secret" => "",
+      "s3_region" => Map.get(connection.storage, :region, ""),
+      "s3_endpoint" => Map.get(connection.storage, :endpoint, ""),
+      "s3_url_style" => Map.get(connection.storage, :url_style, "")
     }
   end
 
@@ -264,7 +328,14 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       "database" => "",
       "username" => "",
       "password" => "",
-      "sslmode" => "require"
+      "sslmode" => "require",
+      "kind" => "postgres",
+      "data_path" => "",
+      "s3_key_id" => "",
+      "s3_secret" => "",
+      "s3_region" => "",
+      "s3_endpoint" => "",
+      "s3_url_style" => ""
     }
   end
 
@@ -279,6 +350,13 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
 
   defp message({:unknown_connection, name}), do: "Connection #{name} does not exist"
   defp message({:missing_field, field}), do: "#{field} is required"
+
+  defp message({:invalid_param, "data_path"}),
+    do: "data path must be an s3:// URL, or a local path under a configured root"
+
+  defp message({:invalid_param, "s3_secret"}),
+    do: "S3 key id and secret go together: give both, or neither"
+
   defp message({:invalid_param, param}), do: "#{param} is not valid"
 
   defp message({:invalid_identifier, name}),
@@ -306,7 +384,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       </div>
 
       <div :if={@connections == []} class="text-sm opacity-70">
-        No connections yet — register one to join a Postgres database in a query.
+        No connections yet — register one to join a Postgres database or another DuckLake in a query.
       </div>
 
       <div :if={@connections != []} class="card bg-base-200 border border-base-300">
@@ -315,6 +393,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Kind</th>
                 <th>Host</th>
                 <th>Database</th>
                 <th>User</th>
@@ -325,17 +404,29 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
             <tbody>
               <tr :for={connection <- @connections}>
                 <td class="font-mono">{connection.name}</td>
+                <td class="font-mono" title={connection.data_path}>{connection.kind}</td>
                 <td class="font-mono">{connection.host}:{connection.port}</td>
                 <td class="font-mono">{connection.database}</td>
                 <td class="font-mono">{connection.username}</td>
                 <td class="font-mono">{connection.sslmode}</td>
                 <td class="flex gap-2 justify-end">
                   <.link
+                    :if={connection.kind == "postgres"}
                     navigate={~p"/query?#{[sql: Federation.discovery_query(connection.name)]}"}
                     class="btn btn-ghost btn-xs"
                   >
                     Query
                   </.link>
+                  <button
+                    :if={connection.kind == "ducklake"}
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    phx-click="query"
+                    phx-value-name={connection.name}
+                    disabled={MapSet.member?(@busy, connection.name)}
+                  >
+                    Query
+                  </button>
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs"
@@ -378,6 +469,17 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
       >
         <form id="connection-form" phx-change="form_changed" phx-submit="save" class="space-y-2">
           <div class="grid gap-2 md:grid-cols-2">
+            <select
+              name="connection[kind]"
+              disabled={@editing != nil}
+              class="select select-bordered select-sm font-mono md:col-span-2"
+            >
+              <option :for={kind <- @kinds} value={kind} selected={@form["kind"] == kind}>
+                {if kind == "ducklake",
+                  do: "DuckLake — another lake's catalog (Postgres) and files",
+                  else: "Postgres database"}
+              </option>
+            </select>
             <input
               type="text"
               name="connection[name]"
@@ -426,6 +528,46 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
                 {mode}
               </option>
             </select>
+          </div>
+
+          <div :if={@form["kind"] == "ducklake"} class="grid gap-2 md:grid-cols-2">
+            <input
+              type="text"
+              name="connection[data_path]"
+              value={@form["data_path"]}
+              placeholder="data path — s3://bucket/lake/"
+              class="input input-bordered input-sm font-mono md:col-span-2"
+            />
+            <input
+              type="text"
+              name="connection[s3_key_id]"
+              value={@form["s3_key_id"]}
+              placeholder="S3 key id (optional)"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="password"
+              name="connection[s3_secret]"
+              value={@form["s3_secret"]}
+              placeholder={
+                if @editing, do: "S3 secret — blank keeps the stored one", else: "S3 secret"
+              }
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="text"
+              name="connection[s3_region]"
+              value={@form["s3_region"]}
+              placeholder="S3 region (optional)"
+              class="input input-bordered input-sm font-mono"
+            />
+            <input
+              type="text"
+              name="connection[s3_endpoint]"
+              value={@form["s3_endpoint"]}
+              placeholder="S3 endpoint, e.g. https://minio:9000 (optional)"
+              class="input input-bordered input-sm font-mono"
+            />
           </div>
 
           <div class="flex gap-2">
