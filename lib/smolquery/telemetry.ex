@@ -302,7 +302,7 @@ defmodule Smolquery.Telemetry do
     "smolquery_api_requests_total" => "HTTP requests answered, by status class.",
     "smolquery_api_request_microseconds_bucket" =>
       "HTTP requests by duration, by route, cumulative in le at 5 ms, 25 ms, 100 ms, 250 ms, " <>
-        "500 ms, 1 s, 2.5 s and 10 s, and for route=query at 50 ms to 30 s (T-625); counters, " <>
+        "500 ms, 1 s, 2.5 s and 10 s, and for route=query at 50 ms to 60 s (T-625); counters, " <>
         "not a histogram. le=\"+Inf\" is the route's request count, so _microseconds_total " <>
         "over it is the route's mean (T-546).",
     "smolquery_clickhouse_requests_total" =>
@@ -585,9 +585,11 @@ defmodule Smolquery.Telemetry do
 
   # Bounds for the query series of the same families: the API's `query`
   # route and the ClickHouse and VictoriaMetrics edges' `query` kind (T-625).
-  # A query runs up to `max_query_duration_ms` (30 s), and with only 2.5 s
-  # and 10 s between 1 s and the cap, `histogram_quantile` read every tail
-  # past 2.5 s as about 9.7 s and none past 10 s at all.
+  # With only 2.5 s and 10 s above 1 s, `histogram_quantile` read every query
+  # tail past 2.5 s as about 9.7 s and none past 10 s at all. The top bounds
+  # follow the caps: the VictoriaMetrics edge stops a query at
+  # `max_query_duration_ms` (30 s), and an API query runs to its `timeoutMs`,
+  # 60 s by default. A ClickHouse query past 60 s counts only in `+Inf`.
   @query_latency_buckets [
     50_000,
     100_000,
@@ -603,7 +605,8 @@ defmodule Smolquery.Telemetry do
     10_000_000,
     15_000_000,
     20_000_000,
-    30_000_000
+    30_000_000,
+    60_000_000
   ]
 
   # The API's routes by the controller that serves them: a closed set, so a
