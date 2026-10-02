@@ -127,6 +127,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: query latency buckets reach 30 s (T-625)
+
+The query series of the HTTP edges' latency counters now use their own `le` bounds: `smolquery_api_request_microseconds_bucket{route="query"}` and the ClickHouse and VictoriaMetrics `..._request_microseconds_bucket{kind="query"}`. The bounds are 50, 100, 250, 500 and 750 ms, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20 and 30 s.
+
+- **Why:** the old bounds had only 2.5 s and 10 s above 1 s, so `histogram_quantile(0.99, ...)` read any query tail past 2.5 s as about 9.7 s, and nothing past 10 s at all. Queries run up to `max_query_duration_ms` (30 s).
+- **Series:** each query series gains 7 `le` values (15 bounds instead of 8). Every other route and kind keeps 5 ms to 10 s.
+- **Dashboards:** `histogram_quantile` over `sum by (le)` keeps working. While old and new pods both report, and for one rate window after the last old pod is gone, a `sum by (le)` mixes the two bound sets, and a quantile over it is rough.
+
 ### 0.22.0: sockets to a replaced pod close in seconds (T-613, T-614)
 
 - **gen_rpc:** a node's clients to a peer are killed when distribution reports the peer down, and a channel that times out is probed and redialed if it is dead (T-613). Nothing to configure.
