@@ -30,6 +30,7 @@ defmodule Smolquery.ClusterTest do
     assert [
              {Elixir.Cluster.Supervisor, [topologies, opts]},
              Smolquery.Cluster.Membership,
+             Smolquery.Cluster.RpcClients,
              %{id: :pg, start: {:pg, :start_link, [pg_scope]}}
            ] = Cluster.children()
 
