@@ -57,6 +57,25 @@ defmodule Smolquery.Cluster.KindClusterTest do
   end
 
   describe "the fleet" do
+    test "every role's pod runs with the keepalive sysctls (T-614)" do
+      for pod <- ["smolquery-api-0", "smolquery-buffer-0", "smolquery-storage-0"] do
+        timers =
+          Kind.kubectl!([
+            "exec",
+            pod,
+            "-c",
+            "smolquery",
+            "--",
+            "cat",
+            "/proc/sys/net/ipv4/tcp_keepalive_time",
+            "/proc/sys/net/ipv4/tcp_keepalive_intvl",
+            "/proc/sys/net/ipv4/tcp_keepalive_probes"
+          ])
+
+        assert String.split(timers) == ["5", "5", "2"], "#{pod} keepalive timers: #{timers}"
+      end
+    end
+
     test "answers a query whose tables two different buffer nodes own", context do
       %{dataset: dataset, first: first, second: second, tables: tables} = context
 
