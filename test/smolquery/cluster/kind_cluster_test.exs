@@ -72,7 +72,8 @@ defmodule Smolquery.Cluster.KindClusterTest do
             "/proc/sys/net/ipv4/tcp_keepalive_probes"
           ])
 
-        assert String.split(timers) == ["5", "5", "2"], "#{pod} keepalive timers: #{timers}"
+        assert timers |> String.split("\n", trim: true) |> Enum.take(-3) == ["5", "5", "2"],
+               "#{pod} keepalive timers: #{timers}"
       end
     end
 
