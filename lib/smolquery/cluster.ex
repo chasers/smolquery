@@ -32,6 +32,7 @@ defmodule Smolquery.Cluster do
   """
 
   alias Smolquery.Cluster.Membership
+  alias Smolquery.Cluster.RpcClients
 
   @pg_scope :smolquery
 
@@ -44,6 +45,7 @@ defmodule Smolquery.Cluster do
       [
         {Cluster.Supervisor, [topologies(), [name: __MODULE__.Supervisor]]},
         Membership,
+        RpcClients,
         %{id: :pg, start: {:pg, :start_link, [@pg_scope]}}
       ]
     else
