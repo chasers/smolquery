@@ -37,9 +37,12 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   A peer outside `Node.list/0` is refused before any connect attempt. Every
   transport failure becomes `{:error, {:worker_unreachable, peer, reason}}`,
-  which `Smolquery.QueryService.Scatter` turns into a fallback.
+  which `Smolquery.QueryService.Scatter` turns into a fallback. A timeout
+  also hands the destination to `Smolquery.Cluster.RpcClients.check/2`, so a
+  channel whose socket went dead is redialed instead of reused (T-613).
   """
 
+  alias Smolquery.Cluster.RpcClients
   alias Smolquery.QueryService.PartialWorker
 
   @rpc_margin_ms 5_000
@@ -88,9 +91,18 @@ defmodule Smolquery.QueryService.WorkerTransport do
     destination = destination(peer, job_id)
 
     case :gen_rpc.call(destination, PartialWorker, :run, [name, request], deadline(timeout_ms)) do
-      {:badrpc, reason} -> {:error, {:worker_unreachable, peer, {:badrpc, reason}}}
-      {:badtcp, reason} -> {:error, {:worker_unreachable, peer, {:badtcp, reason}}}
-      result -> result
+      {:badrpc, :timeout} ->
+        RpcClients.check(destination)
+        {:error, {:worker_unreachable, peer, {:badrpc, :timeout}}}
+
+      {:badrpc, reason} ->
+        {:error, {:worker_unreachable, peer, {:badrpc, reason}}}
+
+      {:badtcp, reason} ->
+        {:error, {:worker_unreachable, peer, {:badtcp, reason}}}
+
+      result ->
+        result
     end
   end
 

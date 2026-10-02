@@ -17,7 +17,7 @@ defmodule Smolquery.Cluster.RpcClientsTest do
 
     {os_pid, node} = start_peer(@peer_port)
     name = :"rpc_clients_#{:erlang.unique_integer([:positive])}"
-    {:ok, _pid} = RpcClients.start_link(name: name)
+    {:ok, _pid} = RpcClients.start_link(name: name, probe_timeout_ms: 200)
 
     %{name: name, node: node, os_pid: os_pid}
   end
@@ -77,6 +77,69 @@ defmodule Smolquery.Cluster.RpcClientsTest do
     assert System.monotonic_time(:millisecond) - started < 2_000
   end
 
+  test "check/2 kills a channel whose probe goes unanswered and leaves the others",
+       %{name: name, node: node, os_pid: os_pid} do
+    open_channels(node)
+    control = client({node, :control})
+
+    freeze(os_pid)
+    on_exit(fn -> thaw(os_pid) end)
+
+    assert RpcClients.check({node, :control}, name) == :ok
+
+    assert Eventually.until(fn -> client({node, :control}) == :undefined end)
+    refute Process.alive?(control)
+    assert is_pid(client({node, {:bulk, 1}}))
+    assert is_pid(client({node, {:scatter, 1}}))
+  end
+
+  test "check/2 keeps a channel busy with a slow call", %{name: name, node: node} do
+    open_channels(node)
+    control = client({node, :control})
+
+    slow = Task.async(fn -> :gen_rpc.call({node, :control}, :timer, :sleep, [3_000], 10_000) end)
+
+    assert Eventually.until(fn -> sleeping?(node) end)
+
+    assert RpcClients.check({node, :control}, name) == :ok
+
+    assert Eventually.until(fn -> :sys.get_state(name).probes == %{} end)
+    assert Task.yield(slow, 0) == nil
+    assert client({node, :control}) == control
+    assert Task.await(slow, 10_000) == :ok
+  end
+
+  test "check/2 never dials a destination with no client", %{name: name, node: node} do
+    assert RpcClients.check({node, {:bulk, 9}}, name) == :ok
+
+    assert Eventually.until(fn -> :sys.get_state(name).probes == %{} end)
+    assert client({node, {:bulk, 9}}) == :undefined
+  end
+
+  test "check/2 runs one probe per destination at a time",
+       %{name: name, node: node, os_pid: os_pid} do
+    open_channels(node)
+    freeze(os_pid)
+    on_exit(fn -> thaw(os_pid) end)
+
+    RpcClients.check({node, :control}, name)
+    RpcClients.check({node, :control}, name)
+    RpcClients.check({node, {:bulk, 1}}, name)
+
+    assert map_size(:sys.get_state(name).probes) == 2
+  end
+
+  defp sleeping?(node) do
+    node
+    |> :erpc.call(:erlang, :processes, [])
+    |> Enum.any?(fn pid ->
+      :erpc.call(node, :erlang, :process_info, [pid, :current_function]) ==
+        {:current_function, {:timer, :sleep, 1}}
+    end)
+  end
+
+  defp client(destination), do: :gen_rpc_registry.whereis_name({:client, destination})
+
   defp open_channels(node) do
     for key <- [:control, {:bulk, 1}, {:scatter, 1}] do
       assert {:ok, ^node} = remote_node(node, key)
@@ -120,7 +183,7 @@ defmodule Smolquery.Cluster.RpcClientsTest do
           tcp_server_port: port,
           tcp_client_port: port,
           rpc_module_control: :whitelist,
-          rpc_module_list: [:erlang]
+          rpc_module_list: [:erlang, :timer, Smolquery.Cluster.RpcProbe]
         ] do
       :peer.call(peer, :application, :set_env, [:gen_rpc, key, value, [persistent: true]])
     end

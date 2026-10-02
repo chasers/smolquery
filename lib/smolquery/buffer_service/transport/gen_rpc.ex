@@ -25,6 +25,14 @@ defmodule Smolquery.BufferService.Transport.GenRpc do
   gen_rpc would only wait `connect_timeout` on, then leave a dead client
   process behind for.
 
+  ## A dead socket is dropped, not waited out
+
+  A client whose peer vanished without closing the socket sends into it
+  until the kernel gives up, about 15 minutes. `Smolquery.Cluster.RpcClients`
+  stops a node's clients when distribution sees it leave or rejoin, and this
+  module hands it every destination a call timed out on, so a channel that
+  no longer answers a probe is redialed rather than reused (T-613).
+
   ## Errors
 
   gen_rpc reports transport failures in-band, and returns a bare value on
@@ -75,6 +83,7 @@ defmodule Smolquery.BufferService.Transport.GenRpc do
   @behaviour Smolquery.BufferService.Transport
 
   alias Smolquery.BufferService.Transport
+  alias Smolquery.Cluster.RpcClients
 
   @rpc_margin_ms 5_000
   @default_bulk_channels 4
@@ -112,9 +121,18 @@ defmodule Smolquery.BufferService.Transport.GenRpc do
 
   defp call(destination, function, args, timeout) do
     case :gen_rpc.call(destination, Transport.endpoint(), function, args, deadline(timeout)) do
-      {:badrpc, reason} -> {:error, {:badrpc, reason}}
-      {:badtcp, reason} -> {:error, {:badtcp, reason}}
-      result -> result
+      {:badrpc, :timeout} ->
+        RpcClients.check(destination)
+        {:error, {:badrpc, :timeout}}
+
+      {:badrpc, reason} ->
+        {:error, {:badrpc, reason}}
+
+      {:badtcp, reason} ->
+        {:error, {:badtcp, reason}}
+
+      result ->
+        result
     end
   end
 
