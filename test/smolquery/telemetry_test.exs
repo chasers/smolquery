@@ -176,7 +176,7 @@ defmodule Smolquery.TelemetryTest do
       assert value("smolquery_api_requests_total", ~s({class="2xx"})) == before_class + 3
     end
 
-    test "query series take the query bounds, between 1 s and 30 s; the others keep theirs (T-625)" do
+    test "query series take the query bounds, 50 ms to 60 s; the others keep theirs (T-625)" do
       query_bounds = [
         50_000,
         100_000,
@@ -192,7 +192,8 @@ defmodule Smolquery.TelemetryTest do
         10_000_000,
         15_000_000,
         20_000_000,
-        30_000_000
+        30_000_000,
+        60_000_000
       ]
 
       cases = [
