@@ -28,7 +28,7 @@ defmodule Smolquery.Cluster.RpcClientsTest do
     assert [_control, _bulk, _scatter] = RpcClients.clients(node)
   end
 
-  test "drop/1 stops a node's clients and leaves other nodes' alone", %{node: node} do
+  test "drop/1 kills a node's clients and leaves other nodes' alone", %{node: node} do
     {_os_pid, other} = start_peer(@other_port)
     open_channels(node)
     open_channels(other)
@@ -36,22 +36,24 @@ defmodule Smolquery.Cluster.RpcClientsTest do
     pids = RpcClients.clients(node)
 
     assert RpcClients.drop(node) == 3
-    assert RpcClients.clients(node) == []
     refute Enum.any?(pids, &Process.alive?/1)
+    assert Eventually.until(fn -> RpcClients.clients(node) == [] end)
     assert [_control, _bulk, _scatter] = RpcClients.clients(other)
     assert {:ok, _node} = remote_node(other, :control)
   end
 
-  test "drops a node's clients on nodeup", %{name: name, node: node} do
+  test "keeps a node's clients on nodeup", %{name: name, node: node} do
     open_channels(node)
+    pids = Enum.sort(RpcClients.clients(node))
 
     send(name, {:nodeup, node, []})
+    :sys.get_state(name)
 
-    assert Eventually.until(fn -> RpcClients.clients(node) == [] end)
-    assert {:ok, ^node} = remote_node(node, :control)
+    assert Enum.sort(RpcClients.clients(node)) == pids
+    assert Enum.all?(pids, &Process.alive?/1)
   end
 
-  test "a frozen peer's stale client is dropped on nodedown and the next call after nodeup dials fresh",
+  test "a frozen peer's stale client is dropped on nodedown and the next call after reconnect dials fresh",
        %{node: node, os_pid: os_pid} do
     open_channels(node)
     [stale | _rest] = RpcClients.clients(node)
@@ -71,7 +73,7 @@ defmodule Smolquery.Cluster.RpcClientsTest do
     true = Node.connect(node)
 
     started = System.monotonic_time(:millisecond)
-    assert Eventually.until(fn -> remote_node(node, :control) == {:ok, node} end)
+    assert Eventually.until(fn -> remote_node(node, :control) == {:ok, node} end, 200, 10)
     assert System.monotonic_time(:millisecond) - started < 2_000
   end
 
