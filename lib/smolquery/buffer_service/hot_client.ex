@@ -14,8 +14,19 @@ defmodule Smolquery.BufferService.HotClient do
   `HotServer` listens is the caller's configuration (`buffer_base_url` on the
   storage and query runtimes) — honest for a single node; a cluster resolves
   it from the ownership ring instead, which arrives with Milestone 8.
+
+  ## Connections to a replaced pod
+
+  Requests go through a pooled connection with `Smolquery.PeerSocket`'s
+  keepalive and `TCP_USER_TIMEOUT` (T-614). A buffer pod killed without
+  closing its sockets leaves pooled connections to its old IP. Without those
+  bounds each one stayed in the pool until a request drew it and waited out
+  the whole receive timeout, one failed seal per stale connection. With them,
+  the kernel closes an idle dead socket in about 15 s and the pool drops it,
+  and a request already in flight on one fails after 20 s.
   """
 
+  alias Smolquery.PeerSocket
   alias Smolquery.Segments.Store
 
   @default_timeout_ms 30_000
@@ -128,7 +139,14 @@ defmodule Smolquery.BufferService.HotClient do
 
   defp fetch(url, scope, timeout_ms) do
     headers = [{Smolquery.InternalSecret.header(), Smolquery.InternalSecret.value()}]
-    common = [url: url, headers: headers, receive_timeout: timeout_ms, retry: false]
+
+    common = [
+      url: url,
+      headers: headers,
+      receive_timeout: timeout_ms,
+      retry: false,
+      connect_options: [transport_opts: PeerSocket.tcp_options()]
+    ]
 
     request =
       if scope, do: [method: :post, json: scope] ++ common, else: [method: :get] ++ common
