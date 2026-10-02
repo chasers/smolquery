@@ -31,6 +31,19 @@ spec:
       # smolquery-api Service) into every pod, shadowing the real config var.
       enableServiceLinks: false
       terminationGracePeriodSeconds: 60
+      # T-614: Kubernetes-safe sysctls (kubelet 1.29 or newer). They set the
+      # pod's keepalive timers, so a socket with SO_KEEPALIVE that sits idle
+      # after its peer died closes in about 15 s instead of 2 h. gen_rpc's
+      # client sockets take no per-socket timers; this is their only bound
+      # below T-613's membership drop.
+      securityContext:
+        sysctls:
+          - name: net.ipv4.tcp_keepalive_time
+            value: "5"
+          - name: net.ipv4.tcp_keepalive_intvl
+            value: "5"
+          - name: net.ipv4.tcp_keepalive_probes
+            value: "2"
       serviceAccountName: smolquery-api
       initContainers:
         - name: wait-for-postgres
