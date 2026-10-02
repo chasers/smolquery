@@ -825,7 +825,12 @@ end
 if seconds = System.get_env("SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S") do
   config :smolquery, Smolquery.PeerSocket,
     keepalive_idle_s:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S", seconds)
+      Smolquery.RuntimeConfig.integer_in_range!(
+        "SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S",
+        seconds,
+        1,
+        32_767
+      )
 end
 
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do

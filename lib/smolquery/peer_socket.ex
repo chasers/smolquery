@@ -5,50 +5,48 @@ defmodule Smolquery.PeerSocket do
 
   A pod killed without closing its sockets leaves every connection to it
   pointed at an IP that no longer answers. Linux keeps such a socket until it
-  gives up retransmitting, `tcp_retries2` = 15, about 15.4 minutes, and an idle
-  socket with no keepalive is never checked at all. A pooled HTTP connection
-  in that state stays in its pool, and each request that draws it waits out
-  its whole receive timeout before the pool lets it go. On the sandbox on
-  2026-10-02 that was a failed seal about once a minute after a buffer pod
-  was replaced, one per stale connection.
+  gives up retransmitting, `tcp_retries2` = 15, about 15.4 minutes. Finch
+  turns `SO_KEEPALIVE` on for every pooled socket, but with Linux's default
+  timers an idle socket is first probed after two hours. A pooled HTTP
+  connection to a dead peer therefore stays in its pool, and each request
+  that draws it waits out its whole receive timeout before the pool lets it
+  go. On the sandbox on 2026-10-02 that was a failed seal about once a minute
+  after a buffer pod was replaced, one per stale connection.
 
-  `tcp_options/0` sets two bounds:
+  `tcp_options/0` sets one bound, `user_timeout_ms` (15,000), through two
+  socket options:
 
-    * **Keepalive** probes an idle socket after `keepalive_idle_s` (5) and
-      every `keepalive_interval_s` (5) after that, and the kernel closes it
-      after `keepalive_count` (2) unanswered probes: about 15 s, the
-      timers gen_rpc already sets on the sockets it accepts. A closed idle
-      socket leaves its pool before a request can draw it.
     * **`TCP_USER_TIMEOUT`** closes a socket whose sent data has gone
-      unacknowledged for `user_timeout_ms` (20,000). A request already
-      in flight on a dead socket fails then, not after its receive timeout.
+      unacknowledged that long. A request already in flight on a dead
+      socket fails then, not after its receive timeout.
+    * **Keepalive** probes an idle socket after `keepalive_idle_s` (5) and
+      every `keepalive_interval_s` (5) after that. On Linux the user timeout
+      also governs keepalive: the kernel closes an idle socket at the first
+      unanswered probe at or after `user_timeout_ms`, and the probe count
+      plays no part. At the defaults that is 15 s. A closed idle socket
+      leaves its pool before a request can draw it.
+
+  So `user_timeout_ms` is the bound for both cases, and the keepalive timers
+  only set how often an idle socket is checked against it.
 
   Both act only on a peer that has stopped answering at the TCP level. A slow
-  peer still ACKs, so neither bound cuts a slow response short.
+  peer still ACKs data and probes, so neither cuts a slow response short.
 
-  The keepalive timers and the user timeout are Linux socket options set
-  through `{:raw, ...}`. Elsewhere only `keepalive: true` is set, with the
-  operating system's own timers.
+  The timers are Linux socket options set through `{:raw, ...}`. Elsewhere only
+  `keepalive: true` is set, with the operating system's own timers.
 
       config :smolquery, Smolquery.PeerSocket,
-        user_timeout_ms: 20_000,
+        user_timeout_ms: 15_000,
         keepalive_idle_s: 5,
-        keepalive_interval_s: 5,
-        keepalive_count: 2
+        keepalive_interval_s: 5
   """
 
   @ipproto_tcp 6
   @tcp_keepidle 4
   @tcp_keepintvl 5
-  @tcp_keepcnt 6
   @tcp_user_timeout 18
 
-  @defaults [
-    user_timeout_ms: 20_000,
-    keepalive_idle_s: 5,
-    keepalive_interval_s: 5,
-    keepalive_count: 2
-  ]
+  @defaults [user_timeout_ms: 15_000, keepalive_idle_s: 5, keepalive_interval_s: 5]
 
   @doc """
   The `:gen_tcp` options for a socket to a peer node, from this node's
@@ -67,7 +65,6 @@ defmodule Smolquery.PeerSocket do
       keepalive: true,
       raw: {@ipproto_tcp, @tcp_keepidle, int(config[:keepalive_idle_s])},
       raw: {@ipproto_tcp, @tcp_keepintvl, int(config[:keepalive_interval_s])},
-      raw: {@ipproto_tcp, @tcp_keepcnt, int(config[:keepalive_count])},
       raw: {@ipproto_tcp, @tcp_user_timeout, int(config[:user_timeout_ms])}
     ]
   end

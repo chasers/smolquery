@@ -18,12 +18,12 @@ defmodule Smolquery.BufferService.HotClient do
   ## Connections to a replaced pod
 
   Requests go through a pooled connection with `Smolquery.PeerSocket`'s
-  keepalive and `TCP_USER_TIMEOUT` (T-614). A buffer pod killed without
-  closing its sockets leaves pooled connections to its old IP. Without those
-  bounds each one stayed in the pool until a request drew it and waited out
-  the whole receive timeout, one failed seal per stale connection. With them,
-  the kernel closes an idle dead socket in about 15 s and the pool drops it,
-  and a request already in flight on one fails after 20 s.
+  keepalive timers and `TCP_USER_TIMEOUT` (T-614). A buffer pod killed
+  without closing its sockets leaves pooled connections to its old IP.
+  Without those bounds each one stayed in the pool until a request drew it
+  and waited out the whole receive timeout, one failed seal per stale
+  connection. With them, the kernel closes a dead socket after 15 s, idle or
+  in flight, and the pool drops it.
   """
 
   alias Smolquery.PeerSocket
