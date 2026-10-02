@@ -176,6 +176,80 @@ defmodule Smolquery.TelemetryTest do
       assert value("smolquery_api_requests_total", ~s({class="2xx"})) == before_class + 3
     end
 
+    test "query series take the query bounds, between 1 s and 30 s; the others keep theirs (T-625)" do
+      query_bounds = [
+        50_000,
+        100_000,
+        250_000,
+        500_000,
+        750_000,
+        1_000_000,
+        1_500_000,
+        2_000_000,
+        3_000_000,
+        5_000_000,
+        7_500_000,
+        10_000_000,
+        15_000_000,
+        20_000_000,
+        30_000_000
+      ]
+
+      cases = [
+        {[:smolquery, :api, :stop], %{phoenix_controller: SmolqueryApi.QueryController},
+         "smolquery_api_request_microseconds_bucket", ~s(route="query")},
+        {[:smolquery, :clickhouse, :stop], %{smolquery_clickhouse_kind: :query},
+         "smolquery_clickhouse_request_microseconds_bucket", ~s(kind="query")},
+        {[:smolquery, :victoriametrics, :stop], %{smolquery_victoriametrics_kind: :query},
+         "smolquery_victoriametrics_request_microseconds_bucket", ~s(kind="query")}
+      ]
+
+      for {event, private, family, label} <- cases do
+        series = fn le -> "{#{label},le=\"#{le}\"}" end
+        before = Map.new(query_bounds ++ ["+Inf"], &{&1, value(family, series.(&1))})
+
+        stopped(event, private, 200, 3_400_000)
+
+        moved = Map.new(before, fn {le, was} -> {le, value(family, series.(le)) - was} end)
+
+        assert moved ==
+                 Map.new(
+                   query_bounds ++ ["+Inf"],
+                   &{&1, if(&1 == "+Inf" or &1 >= 5_000_000, do: 1, else: 0)}
+                 ),
+               family
+
+        refute Telemetry.render() =~ "#{family}#{series.(2_500_000)}", family
+      end
+
+      insert = ~s({route="insert",le="2500000"})
+      was = value("smolquery_api_request_microseconds_bucket", insert)
+
+      stopped(
+        [:smolquery, :api, :stop],
+        %{phoenix_controller: SmolqueryApi.InsertController},
+        200,
+        2_000_000
+      )
+
+      assert value("smolquery_api_request_microseconds_bucket", insert) == was + 1
+
+      refute Telemetry.render() =~
+               ~s(smolquery_api_request_microseconds_bucket{route="insert",le="3000000"})
+
+      write = ~s({kind="write",le="2500000"})
+      was = value("smolquery_victoriametrics_request_microseconds_bucket", write)
+
+      stopped(
+        [:smolquery, :victoriametrics, :stop],
+        %{smolquery_victoriametrics_kind: :write},
+        204,
+        2_000_000
+      )
+
+      assert value("smolquery_victoriametrics_request_microseconds_bucket", write) == was + 1
+    end
+
     test "a route is its controller's, a closed set: a path is never a label" do
       inf = fn route -> ~s({route="#{route}",le="+Inf"}) end
       family = "smolquery_api_request_microseconds_bucket"

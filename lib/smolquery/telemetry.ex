@@ -302,8 +302,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_api_requests_total" => "HTTP requests answered, by status class.",
     "smolquery_api_request_microseconds_bucket" =>
       "HTTP requests by duration, by route, cumulative in le at 5 ms, 25 ms, 100 ms, 250 ms, " <>
-        "500 ms, 1 s, 2.5 s and 10 s; counters, not a histogram. le=\"+Inf\" is the route's " <>
-        "request count, so _microseconds_total over it is the route's mean (T-546).",
+        "500 ms, 1 s, 2.5 s and 10 s, and for route=query at 50 ms to 30 s (T-625); counters, " <>
+        "not a histogram. le=\"+Inf\" is the route's request count, so _microseconds_total " <>
+        "over it is the route's mean (T-546).",
     "smolquery_clickhouse_requests_total" =>
       "ClickHouse HTTP edge requests answered, by status class.",
     "smolquery_clickhouse_request_microseconds_total" =>
@@ -311,7 +312,8 @@ defmodule Smolquery.Telemetry do
         "other (T-546).",
     "smolquery_clickhouse_request_microseconds_bucket" =>
       "ClickHouse HTTP edge requests by duration, by kind, cumulative in le at the API's " <>
-        "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count (T-546).",
+        "bounds, the query bounds for kind=query (T-625); counters, not a histogram. " <>
+        "le=\"+Inf\" is the kind's request count (T-546).",
     "smolquery_clickhouse_unanswered_total" =>
       "Statements the ClickHouse HTTP edge could not answer for a reason that is the dialect's, by ClickHouse error code.",
     "smolquery_clickhouse_catalog_refreshes_total" =>
@@ -327,7 +329,8 @@ defmodule Smolquery.Telemetry do
       "Time spent answering VictoriaMetrics edge requests, by kind: write, query, labels, health or other.",
     "smolquery_victoriametrics_request_microseconds_bucket" =>
       "VictoriaMetrics edge requests by duration, by kind, cumulative in le at the API's " <>
-        "bounds; counters, not a histogram. le=\"+Inf\" is the kind's request count.",
+        "bounds, the query bounds for kind=query (T-625); counters, not a histogram. " <>
+        "le=\"+Inf\" is the kind's request count.",
     "smolquery_victoriametrics_samples_total" =>
       "Remote-write samples by result: written, or dropped as nan, histogram or exemplar, " <>
         "or refused with the block that carried them (PL-70).",
@@ -580,6 +583,29 @@ defmodule Smolquery.Telemetry do
     10_000_000
   ]
 
+  # Bounds for the query series of the same families: the API's `query`
+  # route and the ClickHouse and VictoriaMetrics edges' `query` kind (T-625).
+  # A query runs up to `max_query_duration_ms` (30 s), and with only 2.5 s
+  # and 10 s between 1 s and the cap, `histogram_quantile` read every tail
+  # past 2.5 s as about 9.7 s and none past 10 s at all.
+  @query_latency_buckets [
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    750_000,
+    1_000_000,
+    1_500_000,
+    2_000_000,
+    3_000_000,
+    5_000_000,
+    7_500_000,
+    10_000_000,
+    15_000_000,
+    20_000_000,
+    30_000_000
+  ]
+
   # The API's routes by the controller that serves them: a closed set, so a
   # path parameter can never become a label. A controller not listed is
   # `other`, and so is a request no route matched.
@@ -757,16 +783,26 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :api, :stop], measurements, %{conn: conn}, nil) do
     bump({"smolquery_api_requests_total", [class: status_class(conn.status)]}, 1)
 
-    timed("smolquery_api_request_microseconds", [route: api_route(conn)], measurements)
+    route = api_route(conn)
+
+    timed(
+      "smolquery_api_request_microseconds",
+      [route: route],
+      measurements,
+      latency_buckets(route)
+    )
   end
 
   def handle_event([:smolquery, :clickhouse, :stop], measurements, %{conn: conn}, nil) do
     bump({"smolquery_clickhouse_requests_total", [class: status_class(conn.status)]}, 1)
 
+    kind = clickhouse_kind(conn)
+
     timed(
       "smolquery_clickhouse_request_microseconds",
-      [kind: clickhouse_kind(conn)],
-      measurements
+      [kind: kind],
+      measurements,
+      latency_buckets(kind)
     )
   end
 
@@ -788,10 +824,13 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :victoriametrics, :stop], measurements, %{conn: conn}, nil) do
     bump({"smolquery_victoriametrics_requests_total", [class: status_class(conn.status)]}, 1)
 
+    kind = victoriametrics_kind(conn)
+
     timed(
       "smolquery_victoriametrics_request_microseconds",
-      [kind: victoriametrics_kind(conn)],
-      measurements
+      [kind: kind],
+      measurements,
+      latency_buckets(kind)
     )
   end
 
@@ -1143,13 +1182,16 @@ defmodule Smolquery.Telemetry do
 
   # Plug.Telemetry measures in native units; the counters are microseconds so
   # they divide against the other spans without a unit lookup at read time.
-  defp timed(family, labels, measurements) do
+  defp timed(family, labels, measurements, bounds) do
     duration_us =
       System.convert_time_unit(Map.get(measurements, :duration, 0), :native, :microsecond)
 
     bump({family <> "_total", labels}, duration_us)
-    bucket(family <> "_bucket", labels, @http_latency_buckets, duration_us)
+    bucket(family <> "_bucket", labels, bounds, duration_us)
   end
+
+  defp latency_buckets(:query), do: @query_latency_buckets
+  defp latency_buckets(_route_or_kind), do: @http_latency_buckets
 
   defp api_route(%{private: %{phoenix_controller: controller}}) when is_atom(controller) do
     Map.get(@api_routes, controller |> Module.split() |> List.last(), :other)
