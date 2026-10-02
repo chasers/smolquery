@@ -10,6 +10,7 @@ defmodule Smolquery.BufferService.HotClientTest do
   @moduletag :tmp_dir
 
   @table {"analytics", "events"}
+  @linux match?({:unix, :linux}, :os.type())
 
   defp batch(range) do
     %{schema: Schema.new!([{"id", :int64}]), rows: for(i <- range, do: %{"id" => i})}
@@ -165,6 +166,7 @@ defmodule Smolquery.BufferService.HotClientTest do
   end
 
   describe "connections (T-614)" do
+    @tag skip: not @linux and "Linux socket options"
     test "the pooled socket to a buffer node carries PeerSocket's bounds", context do
       buffer = start_buffer(context)
       base_url = HotServer.base_url(buffer)
@@ -174,9 +176,17 @@ defmodule Smolquery.BufferService.HotClientTest do
 
       [socket | _rest] = sockets_to(port)
 
-      {:ok, options} = :inet.getopts(socket, [:keepalive, {:raw, 6, 18, 4}])
+      {:ok, options} =
+        :inet.getopts(socket, [:keepalive] ++ for(o <- [4, 5, 18], do: {:raw, 6, o, 4}))
+
       assert {:keepalive, true} in options
-      assert {:raw, 6, 18, <<20_000::32-native>>} in options
+
+      assert for(
+               {:raw, 6, option, <<value::32-native>>} <- options,
+               into: %{},
+               do: {option, value}
+             ) ==
+               %{4 => 5, 5 => 5, 18 => 15_000}
     end
   end
 

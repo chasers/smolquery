@@ -111,8 +111,8 @@ Each connection between nodes now has its own bound:
 |---|---|---|
 | gen_rpc, buffer writes and replication (`:control`, `{:bulk, _}`) and scatter partials (`{:scatter, _}`) | Every client to a node is killed when distribution reports it down (T-613). A call that times out probes its channel and kills the client if the probe is unanswered (T-613). | none for the drop; the probe waits 10 s |
 | gen_rpc sockets this node accepts | gen_rpc's own kernel keepalive: idle 5 s, interval 5 s, 2 probes | `config :gen_rpc, socket_keepalive_*` |
-| gen_rpc sockets this node dials | Nothing at the TCP level: gen_rpc 3.6.1 does not let an application set keepalive or `TCP_USER_TIMEOUT` on a client socket. The two rows above cover it. | none |
-| `HotClient` HTTP: the storage sealer and the query planner reading a buffer node's manifest | Kernel keepalive (idle 5 s, interval 5 s, 2 probes) closes an idle socket to a dead peer in about 15 s, and the pool drops it. `TCP_USER_TIMEOUT` fails a request in flight on one after 20 s (T-614). | `SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS`, `SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S`, `config :smolquery, Smolquery.PeerSocket` |
+| gen_rpc sockets this node dials | `SO_KEEPALIVE` is on, with Linux's default timers: first probe after 2 h. gen_rpc 3.6.1 does not let an application set the timers or `TCP_USER_TIMEOUT` on a client socket. The first row covers it. The pod sysctls `net.ipv4.tcp_keepalive_time`, `_intvl` and `_probes` (Kubernetes safe sysctls) would shorten those timers for every socket in the pod. | none in smolquery |
+| `HotClient` HTTP: the storage sealer and the query planner reading a buffer node's manifest | `TCP_USER_TIMEOUT` closes a socket to a dead peer after 15 s, and the pool drops it (T-614). Keepalive probes an idle socket every 5 s after 5 s idle, so an idle socket is checked against the same 15 s; on Linux the user timeout, not the probe count, decides when keepalive gives up. | `SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS`, `SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S`, `config :smolquery, Smolquery.PeerSocket` |
 | Erlang distribution | The net tick: a silent node is down after `net_ticktime`, 60 s by default. On 2026-10-02 it reconnected in seconds. | `-kernel net_ticktime` |
 | DuckDB `httpfs` reading hot segments from a buffer node | DuckDB's own `http_timeout`. Not bounded by smolquery. | none |
 
@@ -130,7 +130,7 @@ One note per release, newest first.
 ### 0.22.0: sockets to a replaced pod close in seconds (T-613, T-614)
 
 - **gen_rpc:** a node's clients to a peer are killed when distribution reports the peer down, and a channel that times out is probed and redialed if it is dead (T-613). Nothing to configure.
-- **Buffer manifest reads (`HotClient`)** use TCP keepalive (5 s idle, 5 s interval, 2 probes) and a 20 s `TCP_USER_TIMEOUT`. Before, a pooled connection to a replaced buffer pod stayed in the pool and failed one seal per connection, each after the full 30 s receive timeout, about once a minute. Tune with `SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS` and `SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S`.
+- **Buffer manifest reads (`HotClient`)** close a socket to a dead peer after 15 s: a 15 s `TCP_USER_TIMEOUT`, with keepalive probing an idle socket every 5 s after 5 s idle. Before, a pooled connection to a replaced buffer pod stayed in the pool and failed one seal per connection, each after the full 30 s receive timeout, about once a minute. Tune with `SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS` and `SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S`.
 - See [When a peer dies without closing its sockets](#when-a-peer-dies-without-closing-its-sockets) for every connection's bound.
 
 ### 0.21.0: federated DuckLake connections (T-610)
