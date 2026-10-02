@@ -163,4 +163,27 @@ defmodule Smolquery.BufferService.HotClientTest do
                {:error, {:invalid_identifier, "../etc"}}
     end
   end
+
+  describe "connections (T-614)" do
+    test "the pooled socket to a buffer node carries PeerSocket's bounds", context do
+      buffer = start_buffer(context)
+      base_url = HotServer.base_url(buffer)
+      port = base_url |> URI.parse() |> Map.fetch!(:port)
+
+      assert {:ok, []} = HotClient.manifest(base_url, @table)
+
+      [socket | _rest] = sockets_to(port)
+
+      {:ok, options} = :inet.getopts(socket, [:keepalive, {:raw, 6, 18, 4}])
+      assert {:keepalive, true} in options
+      assert {:raw, 6, 18, <<20_000::32-native>>} in options
+    end
+  end
+
+  defp sockets_to(port) do
+    for socket <- Port.list(),
+        Port.info(socket, :name) == {:name, ~c"tcp_inet"},
+        match?({:ok, {_address, ^port}}, :inet.peername(socket)),
+        do: socket
+  end
 end

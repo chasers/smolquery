@@ -815,6 +815,19 @@ if channels = System.get_env("GEN_RPC_SCATTER_CHANNELS") do
     channels: Smolquery.RuntimeConfig.positive_integer!("GEN_RPC_SCATTER_CHANNELS", channels)
 end
 
+# T-614: how long a socket to a peer node may outlive the peer.
+if ms = System.get_env("SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS") do
+  config :smolquery, Smolquery.PeerSocket,
+    user_timeout_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_PEER_TCP_USER_TIMEOUT_MS", ms)
+end
+
+if seconds = System.get_env("SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S") do
+  config :smolquery, Smolquery.PeerSocket,
+    keepalive_idle_s:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_PEER_TCP_KEEPALIVE_IDLE_S", seconds)
+end
+
 if catalog_database_url = System.get_env("CATALOG_DATABASE_URL") do
   db = Smolquery.DatabaseUrl.parse!(catalog_database_url)
 
