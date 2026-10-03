@@ -67,7 +67,7 @@ defmodule Smolquery.QueryService.Supervisor do
            child_spec: DynamicSupervisor, name: Runtime.runners(runtime.name)}
         ] ++
         history(runtime) ++
-        expected_nodes(runtime) ++ file_cache(runtime) ++ [{EnginePool, runtime}]
+        expected_nodes(runtime) ++ [{EnginePool, runtime}] ++ file_cache(runtime)
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
