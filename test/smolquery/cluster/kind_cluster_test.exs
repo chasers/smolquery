@@ -97,6 +97,30 @@ defmodule Smolquery.Cluster.KindClusterTest do
       assert Kind.total_rows(dataset, tables) == {:ok, 400}
     end
 
+    test "a sealed read through the query node fills its shared file cache (T-626)", context do
+      %{dataset: dataset, tables: tables} = context
+
+      assert Eventually.until(fn -> Kind.sealed_object(dataset) != nil end, 60, 3_000),
+             "no sealed segment appeared in MinIO within 180s"
+
+      assert Kind.total_rows(dataset, tables) == {:ok, 400}
+
+      blocks =
+        Kind.kubectl!([
+          "exec",
+          "smolquery-api-0",
+          "-c",
+          "smolquery",
+          "--",
+          "sh",
+          "-c",
+          "ls /data/file-cache | wc -l"
+        ])
+
+      assert blocks |> String.split("\n", trim: true) |> List.last() |> String.to_integer() > 0,
+             "the query node cached no sealed-tier blocks: #{blocks}"
+    end
+
     test "never double-merges a table, with two storage replicas holding the ring", context do
       %{dataset: dataset, tables: tables} = context
 

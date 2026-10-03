@@ -19,7 +19,7 @@ COPY config/runtime.exs config/
 RUN mix compile
 RUN mix run --no-start -e 'name = Smolquery.DockerSmoke; {:ok, _pid} = Smolquery.Engine.start_link(name: name, extensions: []); version = Smolquery.Engine.version(name); expected = "v" <> Smolquery.DuckDB.version(); if version != expected, do: raise("expected DuckDB #{expected}, got #{version}"); IO.puts("DuckDB #{version}")'
 ENV SMOLQUERY_EXTENSION_DIRECTORY=/app/duckdb-extensions
-RUN mix run --no-start -e '{:ok, _pid} = Smolquery.Engine.start_link(name: Smolquery.DockerExtensions, extensions: [:httpfs, :json, :ducklake, :aws, :postgres]); IO.puts("installed: " <> Enum.join(File.ls!(hd(Path.wildcard("/app/duckdb-extensions/*/*"))), " "))'
+RUN mix run --no-start -e '{:ok, _pid} = Smolquery.Engine.start_link(name: Smolquery.DockerExtensions, extensions: [:httpfs, :json, :ducklake, :aws, :postgres, {:cache_httpfs, :community}]); IO.puts("installed: " <> Enum.join(File.ls!(hd(Path.wildcard("/app/duckdb-extensions/*/*"))), " "))'
 COPY assets assets
 COPY priv/static priv/static
 COPY priv/pg_catalog priv/pg_catalog

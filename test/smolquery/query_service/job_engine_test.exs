@@ -10,6 +10,7 @@ defmodule Smolquery.QueryService.JobEngineTest do
 
   use ExUnit.Case, async: false
 
+  alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Test.FixedCatalog
@@ -47,6 +48,63 @@ defmodule Smolquery.QueryService.JobEngineTest do
     assert Keyword.keys(options) == [:extensions, :settings, :statements, :max_rows]
     assert options[:settings] == [memory_limit: runtime.job_memory_limit]
     assert options[:max_rows] == :infinity
+  end
+
+  test "options/1 loads no cache unless the runtime names a file cache directory", %{
+    runtime: runtime
+  } do
+    options = JobEngine.options(runtime)
+
+    refute {:cache_httpfs, :community} in options[:extensions]
+    refute Enum.any?(options[:statements], &String.contains?(&1, "cache_httpfs"))
+  end
+
+  test "options/1 loads cache_httpfs last and points it at the file cache (T-626)", %{
+    runtime: runtime
+  } do
+    cached = %{runtime | file_cache: %{directory: "/tmp/it's cache", max_bytes: 1_000}}
+    options = JobEngine.options(cached)
+
+    assert List.last(options[:extensions]) == {:cache_httpfs, :community}
+
+    assert Enum.take(options[:statements], 4) == [
+             "SET cache_httpfs_type = 'on_disk'",
+             "SET cache_httpfs_cache_directory = '/tmp/it''s cache'",
+             "SET cache_httpfs_disk_cache_reader_enable_memory_cache = false",
+             "SELECT cache_httpfs_add_exclusion_regex('^https?://')"
+           ]
+  end
+
+  @tag :integration
+  @tag :tmp_dir
+  test "an engine with the file cache installs cache_httpfs from community and configures it",
+       %{runtime: runtime, tmp_dir: dir} do
+    cached = %{
+      runtime
+      | engine_extensions: [:httpfs],
+        file_cache: %{directory: dir, max_bytes: 1_000_000}
+    }
+
+    {:ok, engine} = JobEngine.start(JobEngine.options(cached))
+    on_exit(fn -> JobEngine.stop(engine) end)
+
+    {:ok, setting} =
+      Connection.query(
+        engine.connection,
+        "SELECT current_setting('cache_httpfs_cache_directory') AS d",
+        []
+      )
+
+    assert setting.rows == [[dir]]
+
+    {:ok, excluded} =
+      Connection.query(
+        engine.connection,
+        "SELECT * FROM cache_httpfs_list_exclusion_regex()",
+        []
+      )
+
+    assert excluded.rows == [["^https?://"]]
   end
 
   test "start/1 links both processes to the caller; unlink/1 and link/1 move them", %{

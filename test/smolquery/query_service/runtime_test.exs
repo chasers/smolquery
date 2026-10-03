@@ -6,6 +6,22 @@ defmodule Smolquery.QueryService.RuntimeTest do
   alias Smolquery.Test.StubCatalog
 
   describe "new/1" do
+    test "the file cache is off by default, and its directory joins allowed_directories (T-626)" do
+      off = Runtime.new(name: :"file_cache_off_#{System.unique_integer([:positive])}")
+
+      assert off.file_cache == %{directory: nil, max_bytes: 2_147_483_648}
+
+      on =
+        Runtime.new(
+          name: :"file_cache_on_#{System.unique_integer([:positive])}",
+          allowed_directories: ["/data"],
+          file_cache: [directory: "/cache", max_bytes: 1_024]
+        )
+
+      assert on.file_cache == %{directory: "/cache", max_bytes: 1_024}
+      assert on.allowed_directories == ["/data", "/cache"]
+    end
+
     test "warm_probe is the lake's current snapshot when the catalog names a lake, SELECT 1 otherwise" do
       lake =
         Runtime.new(
