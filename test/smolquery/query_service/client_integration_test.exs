@@ -140,4 +140,78 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
     assert DataFrame.to_columns(first)["n"] == [4]
     assert DataFrame.to_columns(second)["n"] == [2]
   end
+
+  describe "the file cache (T-629)" do
+    defp cached_query(context, bypass_bytes) do
+      name = :"client_int_cached_#{:erlang.unique_integer([:positive])}"
+      metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
+
+      start_supervised!(
+        {QueryService.Supervisor,
+         name: name,
+         catalog: context.catalog,
+         buffer_base_url: HotServer.base_url(context.buffer),
+         engine_extensions: [:httpfs],
+         allowed_directories: [context.tmp_dir],
+         warm_engines: 0,
+         file_cache: [directory: Path.join(context.tmp_dir, "cache"), bypass_bytes: bypass_bytes],
+         job_bootstrap: [
+           DuckLake.attach_statement(
+             DuckLake.default_catalog(),
+             metadata,
+             Path.join(context.tmp_dir, "data")
+           )
+         ]},
+        id: name
+      )
+
+      on_exit(fn -> QueryService.Runtime.delete(name) end)
+
+      name
+    end
+
+    defp seal!(catalog, tmp) do
+      rows = for i <- 1..2, do: %{"id" => i, "name" => "sealed-#{i}"}
+
+      {:ok, segment} =
+        SegmentFixture.write(rows, schema(), store: Local.new(dir: Path.join(tmp, "seg")))
+
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+    end
+
+    test "a small scan reads through the cache, and file_cache: false turns it off", context do
+      seal!(context.catalog, context.tmp_dir)
+      query = cached_query(context, 536_870_912)
+      sql = "SELECT count(*) AS n FROM analytics.events"
+
+      assert {:ok, used, frame} = Client.query(query, sql)
+      assert used.file_cache == :used
+      assert DataFrame.to_columns(frame)["n"] == [2]
+
+      assert {:ok, off, frame} = Client.query(query, sql, file_cache: false)
+      assert off.file_cache == :off
+      assert DataFrame.to_columns(frame)["n"] == [2]
+    end
+
+    test "a cold scan over the threshold bypasses the cache unless the job forces it",
+         context do
+      seal!(context.catalog, context.tmp_dir)
+      query = cached_query(context, 0)
+      sql = "SELECT count(*) AS n FROM analytics.events"
+
+      assert {:ok, bypassed, frame} = Client.query(query, sql)
+      assert bypassed.file_cache == :bypassed
+      assert DataFrame.to_columns(frame)["n"] == [2]
+
+      assert {:ok, forced, _frame} = Client.query(query, sql, file_cache: true)
+      assert forced.file_cache == :used
+    end
+
+    test "a node without a file cache reports no decision", context do
+      assert {:ok, job, _frame} =
+               Client.query(context.query, "SELECT count(*) AS n FROM analytics.events")
+
+      assert job.file_cache == nil
+    end
+  end
 end

@@ -127,6 +127,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: a cold large scan skips the file cache, and each job can choose (T-629)
+
+With the T-626 cache on, the first read of a large table waited on writing every cache block to the node's local disk. On the sandbox, `onebrc_v6` (1.26 GB, 7 sealed files) took 41 s cold through the cache and 15.5 s with no cache; its warm rerun took 1.7-4.5 s. Larger blocks and more fan-out made the cold read slower, not faster.
+
+- **When the cache is bypassed:** a job whose scan has more than `SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES` (512 MiB) of sealed bytes not yet cached reads the object store directly, at the no-cache speed. Every other job reads through the cache. "Not yet cached" comes from an index the janitor rebuilds every 30 s, so a just-warmed table may bypass once more.
+- **How a large table gets warmed:** run it once with `"fileCache": true` (the API) or File cache **on** (the query page). That run pays the cold cost and fills the cache; later runs read through it.
+- **Per job:** `"fileCache": true | false` on `POST /v1/queries` and `POST /v1/jobs`, and the File cache select (auto, on, off) on the query page. The job reports `fileCache`: `used`, `bypassed` or `off`, and the page shows it as a badge. Scatter shards follow the job's decision.
+- **Metrics:** `smolquery_query_file_cache_jobs_total{decision}`.
+
 ### 0.22.0: quiet tables are compacted every minute (T-627)
 
 A table that seals on age, not size, leaves one sealed file per seal. On the sandbox `logs.cluster` (about 110 rows a minute, three write partitions) sealed two or three files a minute of 1-30 rows each. Compaction swept every 5 minutes, so a dozen of them sat in the current hour, and every query over recent data opened each one over S3: a 60-minute histogram ending now cost about 5x one ending 15 minutes ago, on the same row count.

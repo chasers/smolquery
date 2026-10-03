@@ -44,6 +44,7 @@ defmodule Smolquery.QueryService.Client do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
+          | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
           | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
@@ -56,6 +57,7 @@ defmodule Smolquery.QueryService.Client do
     :describe,
     :trace,
     :distributed,
+    :file_cache,
     :snapshot,
     :hot_before_ms,
     :hot_ids,
@@ -92,6 +94,10 @@ defmodule Smolquery.QueryService.Client do
   `distributed: true | false` overrides the runtime's distributed default
   for this job only (PL-49); a distributed answer settles with the shard
   count on `job.scatter`, and a refusal or failure falls back silently.
+  `file_cache: true | false` forces the node's sealed-tier read cache on or
+  off for this job (T-629); unset, a cold scan over the runtime's
+  `bypass_bytes` skips it. The job settles with what it did on
+  `job.file_cache` (`Smolquery.QueryService.FileCache`).
   `snapshot:` pins the sealed tier at that catalog version instead of the
   current one; `hot_ids:` pins each named table's hot tier to exactly
   those micro-segment ids; and `hot_before_ms:` excludes micro-segments

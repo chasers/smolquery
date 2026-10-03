@@ -134,6 +134,7 @@ defmodule SmolqueryApi.JobController do
       "explain" => job.explain,
       "trace" => trace_json(job.trace),
       "scatter" => scatter_json(job.scatter),
+      "fileCache" => job.file_cache && Atom.to_string(job.file_cache),
       "statementType" => statement_type(job),
       "ddl" => ddl_json(job.ddl),
       "error" => error_json(job.error),
@@ -259,16 +260,18 @@ defmodule SmolqueryApi.JobController do
 
   `timeoutMs` bounds the job; `explain` (`"plan"` or `"analyze"`) asks for
   the engine's plan instead of rows; `trace` (boolean, default false)
-  collects the job's phase spans onto the response. Any other `explain` or
-  `trace` value is refused — silently running the query a caller asked to
+  collects the job's phase spans onto the response; `distributed` and
+  `fileCache` (booleans) override the deployment for this job. Any other
+  `explain`, `trace`, `distributed` or `fileCache` value is refused — silently running the query a caller asked to
   explain would be the worst possible reading of a typo.
   """
   @spec submit_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_param, String.t()}}
   def submit_opts(body) do
     with {:ok, explain} <- explain_opt(body),
          {:ok, trace} <- trace_opt(body),
-         {:ok, distributed} <- distributed_opt(body) do
-      {:ok, timeout_opt(body) ++ explain ++ trace ++ distributed}
+         {:ok, distributed} <- distributed_opt(body),
+         {:ok, file_cache} <- file_cache_opt(body) do
+      {:ok, timeout_opt(body) ++ explain ++ trace ++ distributed ++ file_cache}
     end
   end
 
@@ -294,6 +297,13 @@ defmodule SmolqueryApi.JobController do
   defp distributed_opt(%{"distributed" => nil}), do: {:ok, []}
   defp distributed_opt(%{"distributed" => _other}), do: {:error, {:invalid_param, "distributed"}}
   defp distributed_opt(_body), do: {:ok, []}
+
+  defp file_cache_opt(%{"fileCache" => value}) when is_boolean(value),
+    do: {:ok, [file_cache: value]}
+
+  defp file_cache_opt(%{"fileCache" => nil}), do: {:ok, []}
+  defp file_cache_opt(%{"fileCache" => _other}), do: {:error, {:invalid_param, "fileCache"}}
+  defp file_cache_opt(_body), do: {:ok, []}
 
   @doc """
   The body's `query` field.

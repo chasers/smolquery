@@ -273,6 +273,7 @@ defmodule Smolquery.QueryService.Scatter do
           schema: schema,
           files: files,
           partial_sql: decomposition.partial_sql,
+          file_cache: runtime.file_cache.decision,
           params: decomposition.params,
           allowed_paths:
             files |> Enum.map(& &1["url"]) |> Enum.filter(&String.starts_with?(&1, "http")),

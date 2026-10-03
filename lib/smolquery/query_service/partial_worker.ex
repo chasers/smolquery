@@ -46,6 +46,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
   alias Smolquery.QueryService.ClickHouseFunctions
+  alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
@@ -58,6 +59,7 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:partial_sql) => String.t(),
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
+          optional(:file_cache) => FileCache.decision(),
           optional(:params) => [term()]
         }
 
@@ -96,7 +98,9 @@ defmodule Smolquery.QueryService.PartialWorker do
                :ok <-
                  apply_statements(
                    engine.connection,
-                   view(request, files) ++ lockdown(runtime, path, request.allowed_paths)
+                   view(request, files) ++
+                     FileCache.statements(Map.get(request, :file_cache)) ++
+                     lockdown(runtime, path, request.allowed_paths)
                  ) do
             copy_out(
               engine.connection,

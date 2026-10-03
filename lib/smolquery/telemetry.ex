@@ -160,6 +160,9 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold | :failed}
                                           — one per job or shard engine acquired (PL-50)
+      [:smolquery, :query, :file_cache, :decision]  %{sealed_bytes, cached_bytes}, meta
+                                          %{decision: :used | :bypassed | :off} — one per job
+                                          on a node with a file cache (T-629)
       [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per
                                           FileCache sweep of the shared read cache (T-626)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
@@ -293,6 +296,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :scatter],
     [:smolquery, :query, :engine],
     [:smolquery, :query, :file_cache, :sweep],
+    [:smolquery, :query, :file_cache, :decision],
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
@@ -472,6 +476,9 @@ defmodule Smolquery.Telemetry do
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean.",
+    "smolquery_query_file_cache_jobs_total" =>
+      "Query jobs on a node with a file cache, by decision: used, bypassed (a cold scan over " <>
+        "the bypass threshold) or off (the job asked) (T-629).",
     "smolquery_query_file_cache_evicted_bytes_total" =>
       "Bytes the shared sealed-tier read cache deleted to stay under its cap (T-626).",
     "smolquery_query_file_cache_evicted_files_total" =>
@@ -1080,6 +1087,10 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
   end
 
+  def handle_event([:smolquery, :query, :file_cache, :decision], _measurements, meta, nil) do
+    bump({"smolquery_query_file_cache_jobs_total", [decision: cache_decision(meta)]}, 1)
+  end
+
   def handle_event([:smolquery, :query, :file_cache, :sweep], measurements, _meta, nil) do
     bump(
       {"smolquery_query_file_cache_evicted_bytes_total", []},
@@ -1273,6 +1284,11 @@ defmodule Smolquery.Telemetry do
 
   defp compact_level(%{level: level}) when level in [:hour, :span, :fresh], do: level
   defp compact_level(_meta), do: :hour
+
+  defp cache_decision(%{decision: decision}) when decision in [:used, :bypassed, :off],
+    do: decision
+
+  defp cache_decision(_meta), do: :unknown
 
   defp span_paused_reason(%{reason: reason}) when reason in [:abandoned_spill, :spill_floor],
     do: reason
