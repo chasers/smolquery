@@ -71,7 +71,8 @@ defmodule Smolquery.StorageService.SchedulerTest do
           compact_max_bytes: 16_777_216,
           compact_interval_ms: 3_600_000,
           compact_backoff_base_ms: 0,
-          compact_target_bytes: nil
+          compact_target_bytes: nil,
+          compact_fresh_interval_ms: 0
         ]
         |> Keyword.merge(opts)
       )
@@ -311,10 +312,35 @@ defmodule Smolquery.StorageService.SchedulerTest do
       assert {:ok, [_, _, _]} = Catalog.segments(context.catalog, @table, :current)
 
       send(Runtime.scheduler(context.storage), :fresh)
-      _state = :sys.get_state(Runtime.scheduler(context.storage))
+      _state = :sys.get_state(Runtime.scheduler(context.storage), 60_000)
 
       assert {:ok, [_merged]} = Catalog.segments(context.catalog, @table, :current)
       assert lake_rows(context.storage) == 30
+    end
+
+    test "merges only the small seals, leaving a file over the fresh floor for the sweep",
+         context do
+      runtime =
+        start_scheduler(context,
+          compact_fresh_interval_ms: 3_600_000,
+          compact_fresh_below_bytes: 20_000
+        )
+
+      big = seal_now(runtime, context.catalog, 1, 1..20_000)
+      assert File.stat!(big.path).size >= 20_000
+
+      seal_now(runtime, context.catalog, 2, 20_001..20_010)
+      seal_now(runtime, context.catalog, 3, 20_011..20_020)
+
+      scheduler = Runtime.scheduler(context.storage)
+      :sys.replace_state(scheduler, &%{&1 | fresh: MapSet.new([@table])})
+      send(scheduler, :fresh)
+      _state = :sys.get_state(scheduler, 60_000)
+
+      assert {:ok, segments} = Catalog.segments(context.catalog, @table, :current)
+      assert [_, _] = segments
+      assert big.path in segments
+      assert lake_rows(context.storage) == 20_020
     end
 
     test "leaves a table out of the fresh set when its recent files are not small", context do
