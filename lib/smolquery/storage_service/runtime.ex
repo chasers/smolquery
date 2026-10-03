@@ -173,6 +173,16 @@ defmodule Smolquery.StorageService.Runtime do
   `compact_target_bytes` of `nil` does, while keeping the settled files out
   of the hour level.
 
+  `compact_fresh_interval_ms` (60 s, T-627) runs the hour level again between
+  sweeps for a quiet table: one whose newest files, in the current or the
+  previous `compact_bucket_ms`, include one under `compact_fresh_below_bytes`
+  (4 MiB). A table that seals on age rather than size leaves a file per seal,
+  two or three a minute, and a sweep every `compact_interval_ms` let a dozen
+  pile up in the current hour, each one a file every recent query opens. The
+  fresh tick merges them a minute later instead of five. `0` turns it off.
+  It lists only the quiet tables the last sweep found, so a busy table pays
+  nothing; see `Smolquery.StorageService.Scheduler`.
+
   Compaction runs on its own engine, `compact_engine/1` (T-259).
   `compact_engine_memory_limit` sizes it the way `engine_memory_limit` sizes
   the merge engine, one rung down: explicit knob, else a quarter of the
@@ -322,6 +332,8 @@ defmodule Smolquery.StorageService.Runtime do
     compact_target_bytes: 1_073_741_824,
     compact_span_ms: 86_400_000,
     compact_span_budget_ms: 120_000,
+    compact_fresh_interval_ms: 60_000,
+    compact_fresh_below_bytes: 4_194_304,
     compact_engine_memory_limit: nil,
     compact_engine_mib_per_thread: 256,
     compact_span_decoded_bytes: 8_589_934_592,
@@ -369,6 +381,8 @@ defmodule Smolquery.StorageService.Runtime do
           compact_target_bytes: pos_integer() | nil,
           compact_span_ms: pos_integer(),
           compact_span_budget_ms: non_neg_integer(),
+          compact_fresh_interval_ms: non_neg_integer(),
+          compact_fresh_below_bytes: pos_integer(),
           compact_engine_memory_limit: String.t() | nil,
           compact_engine_mib_per_thread: pos_integer(),
           compact_span_decoded_bytes: pos_integer(),
@@ -411,6 +425,8 @@ defmodule Smolquery.StorageService.Runtime do
     :compact_target_bytes,
     :compact_span_ms,
     :compact_span_budget_ms,
+    :compact_fresh_interval_ms,
+    :compact_fresh_below_bytes,
     :compact_engine_memory_limit,
     :compact_engine_mib_per_thread,
     :compact_span_decoded_bytes,

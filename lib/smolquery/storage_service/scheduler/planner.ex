@@ -233,6 +233,35 @@ defmodule Smolquery.StorageService.Scheduler.Planner do
   end
 
   @doc """
+  The tables of `listings` the fresh tick re-runs the hour level for (T-627):
+  each one with a file in the current or the previous `compact_bucket_ms`
+  under `compact_fresh_below_bytes`. A table whose recent files all fill by
+  size is not one; none is when `compact_fresh_interval_ms` is `0`.
+  """
+  @spec fresh_tables(%{Catalog.table_ref() => [map()]}, Runtime.t(), integer()) ::
+          MapSet.t(Catalog.table_ref())
+  def fresh_tables(listings, runtime, now_ms \\ System.os_time(:millisecond))
+
+  def fresh_tables(_listings, %Runtime{compact_fresh_interval_ms: 0}, _now_ms), do: MapSet.new()
+
+  def fresh_tables(listings, runtime, now_ms) do
+    since = div(now_ms, runtime.compact_bucket_ms) - 1
+
+    for {table_ref, files} <- listings,
+        Enum.any?(files, &small_since?(&1, runtime, since)),
+        into: MapSet.new(),
+        do: table_ref
+  end
+
+  defp small_since?(%{path: path, bytes: bytes}, runtime, since) do
+    bytes < runtime.compact_fresh_below_bytes and
+      case bucket(path, runtime.compact_bucket_ms) do
+        :error -> false
+        hour -> hour >= since
+      end
+  end
+
+  @doc """
   `tables` in the order the span lane takes them: most span candidates first
   (settled files under half of `compact_target_bytes` in the table's
   listing; a recent file is the hour lane's), then by name (T-603). The

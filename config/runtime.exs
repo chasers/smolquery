@@ -578,6 +578,20 @@ if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_BUDGET_MS") do
       Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_SPAN_BUDGET_MS", ms)
 end
 
+# T-627: how often the hour level runs again for a quiet table between
+# sweeps; 0 turns it off.
+if ms = System.get_env("SMOLQUERY_COMPACT_FRESH_INTERVAL_MS") do
+  config :smolquery, Smolquery.StorageService,
+    compact_fresh_interval_ms:
+      Smolquery.RuntimeConfig.non_negative_integer!("SMOLQUERY_COMPACT_FRESH_INTERVAL_MS", ms)
+end
+
+if bytes = System.get_env("SMOLQUERY_COMPACT_FRESH_BELOW_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    compact_fresh_below_bytes:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_FRESH_BELOW_BYTES", bytes)
+end
+
 if ms = System.get_env("SMOLQUERY_COMPACT_SPAN_MS") do
   config :smolquery, Smolquery.StorageService,
     compact_span_ms: Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_COMPACT_SPAN_MS", ms)

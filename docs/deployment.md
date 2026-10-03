@@ -127,6 +127,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: quiet tables are compacted every minute (T-627)
+
+A table that seals on age, not size, leaves one sealed file per seal. On the sandbox `logs.cluster` (about 110 rows a minute, three write partitions) sealed two or three files a minute of 1-30 rows each. Compaction swept every 5 minutes, so a dozen of them sat in the current hour, and every query over recent data opened each one over S3: a 60-minute histogram ending now cost about 5x one ending 15 minutes ago, on the same row count.
+
+- **What changed:** between sweeps, every `SMOLQUERY_COMPACT_FRESH_INTERVAL_MS` (60 s), each storage node runs the hour level again for the quiet tables its last sweep found. A quiet table has a file in the current or previous hour under `SMOLQUERY_COMPACT_FRESH_BELOW_BYTES` (4 MiB). A busy table, whose seals fill by size, is not listed on the tick.
+- **Cost:** one catalog listing per quiet table per minute, and up to one small merge and swap each. A quiet table's current-hour file is rewritten each minute; it is small by definition.
+- **Watch:** each swap can conflict with a seal of the same table (T-573). `smolquery_compaction_conflicts_total` counts them; `smolquery_compactions_total{result}` and `smolquery_compaction_lane_microseconds_total{lane="fresh"}` show the tick's work.
+- **Off:** set `SMOLQUERY_COMPACT_FRESH_INTERVAL_MS=0`.
+
 ### 0.22.0: an optional shared read cache for query engines (T-626)
 
 Each query job runs on its own DuckDB engine, which stops when the job ends, and DuckDB's caches stop with it. So every job read again from S3 the files and Parquet footers the previous job had just read. A dashboard's second query was as cold as its first. On the sandbox, a HyperDX page spent 1,981 ms in DuckDB with a fresh engine per query and 548 ms with the caches kept.
