@@ -160,7 +160,7 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold | :failed}
                                           — one per job or shard engine acquired (PL-50)
-      [:smolquery, :query, :file_cache, :decision]  %{sealed_bytes, cached_bytes}, meta
+      [:smolquery, :query, :file_cache, :decision]  %{uncached_bytes}, meta
                                           %{decision: :used | :bypassed | :off} — one per job
                                           on a node with a file cache (T-629)
       [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per

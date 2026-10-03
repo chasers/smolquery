@@ -94,29 +94,27 @@ defmodule Smolquery.QueryService.FileCacheTest do
   describe "which jobs use the cache (T-629)" do
     @auto %{directory: "/cache", mode: :auto, bypass_bytes: 1_000}
 
-    test "decide/3: no directory is no decision; a forced job does as it says" do
-      assert FileCache.decide(%{@auto | directory: nil}, 5_000, 0) == nil
-      assert FileCache.decide(%{@auto | mode: true}, 5_000, 0) == :used
-      assert FileCache.decide(%{@auto | mode: false}, 10, 10) == :off
+    test "decide/2: no directory is no decision; a forced job does as it says" do
+      assert FileCache.decide(%{@auto | directory: nil}, 5_000) == nil
+      assert FileCache.decide(%{@auto | mode: true}, 5_000) == :used
+      assert FileCache.decide(%{@auto | mode: false}, 0) == :off
     end
 
-    test "decide/3: auto skips only a scan whose uncached bytes pass the threshold" do
-      assert FileCache.decide(@auto, 1_000, 0) == :used
-      assert FileCache.decide(@auto, 1_001, 0) == :bypassed
-      assert FileCache.decide(@auto, 5_000, 4_500) == :used
+    test "decide/2: auto skips only a scan whose never-cached files pass the threshold" do
+      assert FileCache.decide(@auto, 1_000) == :used
+      assert FileCache.decide(@auto, 1_001) == :bypassed
+      assert FileCache.decide(@auto, 0) == :used
     end
 
-    test "decision/2 reads the plan's sealed bytes, and an unsized plan counts as none" do
-      sized = %Smolquery.QueryService.Plan{
+    test "decision/2 reads the plan's uncached bytes" do
+      plan = %Smolquery.QueryService.Plan{
         sql: "SELECT 1",
         snapshot: 1,
-        statistics: %{sealed: %{bytes_scanned: 5_000}},
-        sealed_cached_bytes: 0
+        sealed_uncached_bytes: 5_000
       }
 
-      assert FileCache.decision(@auto, sized) == :bypassed
-      assert FileCache.decision(@auto, %{sized | sealed_cached_bytes: 4_500}) == :used
-      assert FileCache.decision(@auto, %{sized | statistics: nil}) == :used
+      assert FileCache.decision(@auto, plan) == :bypassed
+      assert FileCache.decision(@auto, %{plan | sealed_uncached_bytes: 10}) == :used
     end
 
     test "statements/1 switches the cache off for a skipped job only" do
@@ -153,6 +151,8 @@ defmodule Smolquery.QueryService.FileCacheTest do
       assert FileCache.cached_bytes(name, MapSet.new(["01ABC.parquet", "01DEF.parquet"])) == 550
       assert FileCache.cached_bytes(name, ["01XYZ.parquet"]) == 0
       assert FileCache.cached_bytes(:no_such_instance, ["01ABC.parquet"]) == 0
+      assert FileCache.cached?(name, "01ABC.parquet")
+      refute FileCache.cached?(name, "01XYZ.parquet")
     end
   end
 end

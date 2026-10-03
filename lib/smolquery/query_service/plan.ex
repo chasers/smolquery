@@ -23,10 +23,12 @@ defmodule Smolquery.QueryService.Plan do
   decisions counted (`Smolquery.QueryService.Statistics`) — what the plan
   reads, per tier, reported out with the finished job; `nil` when the
   catalog could not answer the sizes, because statistics are reporting and
-  must not fail a query that would have run. `sealed_cached_bytes` is how
-  many of the sealed files' bytes the node's file cache already holds
-  (`Smolquery.QueryService.FileCache`, T-629); the runner weighs it against
-  `statistics` to decide whether the job reads through the cache. `canonical_sql` is the
+  must not fail a query that would have run. `sealed_uncached_bytes` is the
+  size of the live sealed files the node's file cache has never read
+  (`Smolquery.QueryService.FileCache`, T-629); the runner weighs it to
+  decide whether the job reads through the cache. It is `0` without a
+  cache, for a job that forced the cache on or off, and for a scan too
+  small to matter. `canonical_sql` is the
   statement's text as DuckDB's parser re-emits it — no comments, no
   trailing semicolon — which is what makes the runner's result-budget wrap
   safe to parenthesize.
@@ -64,7 +66,7 @@ defmodule Smolquery.QueryService.Plan do
     :canonical_sql,
     :snapshot,
     :statistics,
-    sealed_cached_bytes: 0,
+    sealed_uncached_bytes: 0,
     tables: [],
     statements: [],
     hot: %{},
@@ -87,7 +89,7 @@ defmodule Smolquery.QueryService.Plan do
           schemas: %{Catalog.table_ref() => Smolquery.Schema.t()},
           non_null: [boolean()] | :unknown,
           statistics: Statistics.t() | nil,
-          sealed_cached_bytes: non_neg_integer(),
+          sealed_uncached_bytes: non_neg_integer(),
           federated: boolean(),
           federated_extensions: [atom()],
           params: [term()]
