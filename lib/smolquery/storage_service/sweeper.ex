@@ -15,7 +15,27 @@ defmodule Smolquery.StorageService.Sweeper do
   before the `use`. A sweeper that carries state across sweeps returns
   `{:ok, report, state}` or `{:error, reason, state}` instead; the two-tuple
   forms keep the state unchanged.
+
+  A sweeper with a second timer defines two optional callbacks:
+  `on_start/1` takes the initial state and returns it with the timer
+  scheduled, and `handle_tick/2` takes every message other than `:sweep`,
+  answering as `handle_info/2` would. The compactor's fresh tick (T-627) is
+  the one such timer.
   """
+
+  @doc false
+  @spec started(module(), state) :: state when state: var
+  def started(module, state) do
+    if function_exported?(module, :on_start, 1), do: module.on_start(state), else: state
+  end
+
+  @doc false
+  @spec tick(module(), term(), state) :: {:noreply, state} when state: var
+  def tick(module, message, state) do
+    if function_exported?(module, :handle_tick, 2),
+      do: module.handle_tick(message, state),
+      else: {:noreply, state}
+  end
 
   @doc false
   @spec split_result(term(), state) :: {term(), state} when state: var
@@ -35,7 +55,7 @@ defmodule Smolquery.StorageService.Sweeper do
 
       @impl GenServer
       def init(%Smolquery.StorageService.Runtime{} = runtime) do
-        {:ok, schedule(%__MODULE__{runtime: runtime})}
+        {:ok, schedule(Sweeper.started(__MODULE__, %__MODULE__{runtime: runtime}))}
       end
 
       @impl GenServer
@@ -60,7 +80,7 @@ defmodule Smolquery.StorageService.Sweeper do
       end
 
       @impl GenServer
-      def handle_info(_message, state), do: {:noreply, state}
+      def handle_info(message, state), do: Sweeper.tick(__MODULE__, message, state)
 
       defp schedule(state) do
         Process.send_after(self(), :sweep, Map.fetch!(state.runtime, unquote(interval)))

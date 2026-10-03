@@ -107,6 +107,24 @@ defmodule Smolquery.StorageService.Scheduler do
   (T-601), the span lane does not run at all, so its cooldowns keep their
   count instead of being cleared by plans that could not happen.
 
+  ## A fresh tick between sweeps for quiet tables (T-627)
+
+  A table that seals on age, not size, leaves one file per seal: about
+  110 rows a minute over three write partitions was two or three files a
+  minute of 1-30 rows each, and a sweep every `compact_interval_ms` let a
+  dozen pile up in the current hour. Every query over recent data opened
+  each one over S3: a 60-minute histogram ending now cost about 5x one
+  ending 15 minutes ago, on the same row count.
+
+  So every `compact_fresh_interval_ms` (60 s) this process runs the hour
+  lane again for the tables the last sweep found quiet
+  (`Smolquery.StorageService.Scheduler.Planner.fresh_tables/3`): a recent
+  file under `compact_fresh_below_bytes`. It lists and plans only those, so
+  a busy table costs nothing extra, and it runs in this process, so it can
+  never race a sweep over the same files. Its outcomes feed the row caps,
+  the quarantine and the backoff as a sweep's do; a table whose listing is
+  no longer quiet leaves the set until the next sweep adds it back.
+
   ## The parts
 
     * `Smolquery.StorageService.Scheduler.Planner`: which files of a table to
@@ -143,7 +161,8 @@ defmodule Smolquery.StorageService.Scheduler do
     quarantined_groups: MapSet.new(),
     cooldowns: %{},
     span_cooldowns: %{},
-    span_widths: %{}
+    span_widths: %{},
+    fresh: MapSet.new()
   ]
 
   use Smolquery.StorageService.Sweeper, interval: :compact_interval_ms
@@ -277,9 +296,67 @@ defmodule Smolquery.StorageService.Scheduler do
            quarantined_groups: quarantined_groups,
            cooldowns: cooldowns,
            span_cooldowns: span_cooldowns,
-           span_widths: span_widths
+           span_widths: span_widths,
+           fresh: Planner.fresh_tables(listings, runtime)
        }}
     end
+  end
+
+  @doc false
+  @spec on_start(%__MODULE__{}) :: %__MODULE__{}
+  def on_start(state), do: schedule_fresh(state)
+
+  @doc false
+  @spec handle_tick(term(), %__MODULE__{}) :: {:noreply, %__MODULE__{}}
+  def handle_tick(:fresh, state), do: {:noreply, state |> fresh_run() |> schedule_fresh()}
+  def handle_tick(_message, state), do: {:noreply, state}
+
+  defp schedule_fresh(%__MODULE__{runtime: %Runtime{compact_fresh_interval_ms: 0}} = state),
+    do: state
+
+  defp schedule_fresh(%__MODULE__{runtime: runtime} = state) do
+    Process.send_after(self(), :fresh, runtime.compact_fresh_interval_ms)
+
+    state
+  end
+
+  defp fresh_run(%__MODULE__{fresh: fresh} = state) do
+    runtime = spill_gated(state.runtime, spill_free())
+
+    tables =
+      fresh
+      |> Enum.sort()
+      |> Enum.reject(&Backoff.cooling_down?(state.cooldowns, &1))
+
+    {hour, listings, deferred, _stopped} =
+      timed(:fresh, fn -> hour_lane(runtime, state, tables) end)
+
+    swept = tables -- deferred
+
+    {quarantine, quarantined_groups} =
+      Quarantine.adjusted_quarantine(
+        state.quarantine,
+        state.quarantined_groups,
+        hour,
+        Quarantine.threshold()
+      )
+
+    still_fresh = Planner.fresh_tables(listings, runtime)
+
+    gone =
+      for table_ref <- Map.keys(listings),
+          not MapSet.member?(still_fresh, table_ref),
+          do: table_ref
+
+    %{
+      state
+      | row_caps: Caps.adjusted_row_caps(state.row_caps, hour, runtime.compact_max_rows),
+        quarantine: quarantine,
+        quarantined_groups: quarantined_groups,
+        cooldowns:
+          Backoff.adjusted_cooldowns(state.cooldowns, swept, hour, runtime, state.row_caps),
+        fresh: MapSet.difference(fresh, MapSet.new(gone))
+    }
   end
 
   defp timed(lane, run) do

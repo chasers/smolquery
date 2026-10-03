@@ -284,6 +284,53 @@ defmodule Smolquery.StorageService.SchedulerTest do
     |> Map.fetch!(:rows)
   end
 
+  describe "the fresh tick (T-627)" do
+    defp seal_now(runtime, catalog, offset, range) do
+      {:ok, prefix} = Store.prefix(@table)
+
+      {:ok, segment} =
+        SegmentFixture.write(Enum.map(range, &%{"id" => &1}), schema(),
+          store: runtime.store,
+          prefix: prefix,
+          id: Id.generate(System.os_time(:millisecond) - 60_000 + offset)
+        )
+
+      {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+      segment
+    end
+
+    test "merges a quiet table's new seals between sweeps", context do
+      runtime = start_scheduler(context, compact_fresh_interval_ms: 3_600_000)
+      seal_now(runtime, context.catalog, 1, 1..10)
+
+      assert {:ok, %{compacted: []}} = Scheduler.sweep(context.storage)
+      assert MapSet.member?(:sys.get_state(Runtime.scheduler(context.storage)).fresh, @table)
+
+      seal_now(runtime, context.catalog, 2, 11..20)
+      seal_now(runtime, context.catalog, 3, 21..30)
+      assert {:ok, [_, _, _]} = Catalog.segments(context.catalog, @table, :current)
+
+      send(Runtime.scheduler(context.storage), :fresh)
+      _state = :sys.get_state(Runtime.scheduler(context.storage))
+
+      assert {:ok, [_merged]} = Catalog.segments(context.catalog, @table, :current)
+      assert lake_rows(context.storage) == 30
+    end
+
+    test "leaves a table out of the fresh set when its recent files are not small", context do
+      runtime =
+        start_scheduler(context,
+          compact_fresh_interval_ms: 3_600_000,
+          compact_fresh_below_bytes: 1
+        )
+
+      seal_now(runtime, context.catalog, 1, 1..10)
+
+      assert {:ok, _report} = Scheduler.sweep(context.storage)
+      assert :sys.get_state(Runtime.scheduler(context.storage)).fresh == MapSet.new()
+    end
+  end
+
   test "readers pinned before the swap still see the inputs", context do
     runtime = start_scheduler(context, [])
     a = seal(runtime, context.catalog, 1, 1..10)

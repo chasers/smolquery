@@ -97,8 +97,9 @@ defmodule Smolquery.Telemetry do
                                           — a table whose swap lost its catalog commit to a
                                           concurrent write, left out for one sweep interval;
                                           conflicts counts them in a row (T-595)
-      [:smolquery, :compact, :lane]       %{duration_us}, meta %{lane: :hour | :span}
-                                          — one per lane per compaction sweep (T-603)
+      [:smolquery, :compact, :lane]       %{duration_us}, meta %{lane: :hour | :span | :fresh}
+                                          — one per lane per compaction sweep (T-603), and one
+                                          per fresh tick (T-627)
       [:smolquery, :compact, :span_paused] %{count}, meta %{reason: :abandoned_spill |
                                           :spill_floor}
                                           — a sweep that ran its hour level only, because
@@ -397,7 +398,7 @@ defmodule Smolquery.Telemetry do
         "abandoned_spill (a recycled engine's merge still spills) or spill_floor (the spill " <>
         "filesystem is below compact_spill_floor_bytes) (T-601).",
     "smolquery_compaction_lane_microseconds_total" =>
-      "Time each compaction lane of a sweep took, by lane (hour or span), listing, sizing " <>
+      "Time each compaction lane took, by lane (hour or span per sweep, fresh per fresh tick), listing, sizing " <>
         "and planning included; rate over wall time is each lane's share of a node (T-603).",
     "smolquery_compaction_conflicts_total" =>
       "Compactions of a table that lost the catalog commit to a concurrent write, after the " <>
@@ -1270,7 +1271,7 @@ defmodule Smolquery.Telemetry do
 
   defp catalog_kind(_meta), do: :unknown
 
-  defp compact_level(%{level: level}) when level in [:hour, :span], do: level
+  defp compact_level(%{level: level}) when level in [:hour, :span, :fresh], do: level
   defp compact_level(_meta), do: :hour
 
   defp span_paused_reason(%{reason: reason}) when reason in [:abandoned_spill, :spill_floor],
