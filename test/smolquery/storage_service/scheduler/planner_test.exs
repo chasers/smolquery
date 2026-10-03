@@ -20,7 +20,7 @@ defmodule Smolquery.StorageService.Scheduler.PlannerTest do
 
   describe "fresh_tables/3 (T-627)" do
     test "is the tables with a small file in the current or the previous bucket" do
-      runtime = Runtime.new(name: __MODULE__.Fresh)
+      runtime = Runtime.new(name: __MODULE__.Fresh, compact_fresh_interval_ms: 60_000)
       hour = runtime.compact_bucket_ms
       quiet = {"logs", "cluster"}
       last_hour = {"logs", "last_hour"}

@@ -42,7 +42,7 @@ config :smolquery, Smolquery.BufferService,
   encode_concurrency: 1,
   commit_siblings: 0
 
-config :smolquery, Smolquery.StorageService, engine_extensions: []
+config :smolquery, Smolquery.StorageService, engine_extensions: [], compact_fresh_interval_ms: 0
 
 config :smolquery, Smolquery.QueryService, engine_extensions: []
 

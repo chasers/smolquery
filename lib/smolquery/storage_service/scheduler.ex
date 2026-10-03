@@ -125,6 +125,18 @@ defmodule Smolquery.StorageService.Scheduler do
   the quarantine and the backoff as a sweep's do; a table whose listing is
   no longer quiet leaves the set until the next sweep adds it back.
 
+  The tick merges only files under `compact_fresh_below_bytes`, not
+  `compact_below_bytes`: a quiet table's current-hour file grows with every
+  merge, and without the lower floor the tick would rewrite it every minute
+  up to 32 MiB. Past 4 MiB it waits for the sweep, as before. The tick
+  plans with the un-gated runtime, so it takes recent files only and never
+  reports the span level paused; with no quiet table it does nothing.
+
+  What a node learns advances per tick as well as per sweep: a row cap's
+  patience and the quarantine's threshold count ticks too, and a lost
+  commit parks the table for `compact_interval_ms`, skipping its ticks
+  until then.
+
   ## The parts
 
     * `Smolquery.StorageService.Scheduler.Planner`: which files of a table to
@@ -321,12 +333,18 @@ defmodule Smolquery.StorageService.Scheduler do
   end
 
   defp fresh_run(%__MODULE__{fresh: fresh} = state) do
-    runtime = spill_gated(state.runtime, spill_free())
+    case fresh |> Enum.sort() |> Enum.reject(&Backoff.cooling_down?(state.cooldowns, &1)) do
+      [] -> state
+      tables -> fresh_run(state, tables)
+    end
+  end
 
-    tables =
-      fresh
-      |> Enum.sort()
-      |> Enum.reject(&Backoff.cooling_down?(state.cooldowns, &1))
+  defp fresh_run(%__MODULE__{fresh: fresh} = state, tables) do
+    runtime = %{
+      state.runtime
+      | compact_below_bytes:
+          min(state.runtime.compact_below_bytes, state.runtime.compact_fresh_below_bytes)
+    }
 
     {hour, listings, deferred, _stopped} =
       timed(:fresh, fn -> hour_lane(runtime, state, tables) end)
@@ -403,7 +421,7 @@ defmodule Smolquery.StorageService.Scheduler do
     if stops_sweep?(outcome) do
       Logger.warning(fn ->
         "compaction sweep stopped after a call exited on #{inspect(table_ref)}: " <>
-          "#{length(rest)} table(s) deferred to the next sweep"
+          "#{length(rest)} table(s) deferred to the next sweep or fresh tick"
       end)
 
       {[outcome], %{}, rest, true}
