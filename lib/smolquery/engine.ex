@@ -92,7 +92,7 @@ defmodule Smolquery.Engine do
   @type option ::
           {:name, atom()}
           | {:path, String.t()}
-          | {:extensions, [atom() | String.t()]}
+          | {:extensions, [Smolquery.Engine.Connection.extension()]}
           | {:statements, [String.t()]}
           | {:memory_limit, String.t()}
           | {:threads, pos_integer()}

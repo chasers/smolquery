@@ -31,11 +31,23 @@ defmodule Smolquery.QueryService.JobEngine do
   Postgres — 230 to 440 ms on the sandbox, the floor under every query
   (T-548). The pool runs it instead, on build and on its recycle tick, off
   the request path; `[:smolquery, :query, :engine_probe]` reports each one.
+
+  ## The shared file cache (T-626)
+
+  An engine dies with its job, and DuckDB's caches die with it, so each job
+  used to read every byte and footer the previous one had just read from
+  S3 again. With the runtime's `file_cache` directory set, the engine loads
+  `cache_httpfs` last and points its on-disk cache at that directory, which
+  every engine on the node shares. The hot tier's `http(s)://` reads are
+  excluded; the cache reader's process-wide memory cache is off, so nothing
+  outlives the engine in memory. `Smolquery.QueryService.FileCache` bounds
+  the directory.
   """
 
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
+  alias Smolquery.Identifier
   alias Smolquery.QueryService.EnginePool
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Telemetry
@@ -55,7 +67,7 @@ defmodule Smolquery.QueryService.JobEngine do
     [
       extensions: extensions(runtime),
       settings: settings(runtime),
-      statements: secrets(runtime) ++ runtime.job_bootstrap,
+      statements: file_cache(runtime) ++ secrets(runtime) ++ runtime.job_bootstrap,
       max_rows: :infinity
     ]
   end
@@ -199,11 +211,27 @@ defmodule Smolquery.QueryService.JobEngine do
     end
   end
 
-  defp extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
+  defp extensions(%Runtime{} = runtime), do: base_extensions(runtime) ++ cache_extension(runtime)
+
+  defp base_extensions(%Runtime{job_bootstrap: [], engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, extensions)
 
-  defp extensions(%Runtime{engine_extensions: extensions} = runtime),
+  defp base_extensions(%Runtime{engine_extensions: extensions} = runtime),
     do: EngineSecrets.sealed_tier_extensions(runtime.store, Enum.uniq([:ducklake | extensions]))
+
+  defp cache_extension(%Runtime{file_cache: %{directory: nil}}), do: []
+  defp cache_extension(%Runtime{}), do: [{:cache_httpfs, :community}]
+
+  defp file_cache(%Runtime{file_cache: %{directory: nil}}), do: []
+
+  defp file_cache(%Runtime{file_cache: %{directory: directory}}) do
+    [
+      "SET cache_httpfs_type = 'on_disk'",
+      "SET cache_httpfs_cache_directory = #{Identifier.sql_string(directory)}",
+      "SET cache_httpfs_disk_cache_reader_enable_memory_cache = false",
+      "SELECT cache_httpfs_add_exclusion_regex('^https?://')"
+    ]
+  end
 
   defp settings(%Runtime{read_engine_threads: nil} = runtime),
     do: [memory_limit: runtime.job_memory_limit]

@@ -109,12 +109,18 @@ defmodule Smolquery.Engine.Connection do
   @type option ::
           {:database, GenServer.server()}
           | {:name, GenServer.name()}
-          | {:extensions, [atom() | String.t()]}
+          | {:extensions, [extension()]}
           | {:settings, keyword()}
           | {:statements, [String.t()]}
           | {:max_rows, pos_integer() | :infinity}
           | {:temp_directory, Path.t()}
           | {:max_temp_directory_size, String.t() | (-> String.t() | nil)}
+
+  @typedoc """
+  A DuckDB extension: a core one by name, or `{name, :community}` for one
+  `INSTALL`ed `FROM community`.
+  """
+  @type extension :: atom() | String.t() | {atom() | String.t(), :community}
 
   @typedoc "A transaction statement: SQL, or SQL labelled with the kind its span reports."
   @type statement :: String.t() | {atom(), String.t()}
@@ -126,7 +132,8 @@ defmodule Smolquery.Engine.Connection do
 
     * `:database` (required) — the `Adbc.Database` process to connect to
     * `:name` — process name to register under
-    * `:extensions` — DuckDB extensions to `INSTALL` and `LOAD`
+    * `:extensions` — DuckDB extensions to `INSTALL` and `LOAD`; `{name, :community}`
+      installs from the community repository
     * `:settings` — `SET key = value` pairs applied to the session, after
       `TimeZone = 'UTC'`, which every session gets (see below)
     * `:statements` — SQL run after extensions and settings, in order
@@ -450,17 +457,20 @@ defmodule Smolquery.Engine.Connection do
 
   defp load_extensions(adbc, extensions) do
     bootstrap(extensions, fn extension ->
-      name = to_string(extension)
+      {name, source} = extension_source(extension)
 
-      case install_and_load(adbc, name) do
+      case install_and_load(adbc, name, source) do
         :ok -> :ok
         {:error, reason} -> {:error, {:extension_failed, name, reason}}
       end
     end)
   end
 
-  defp install_and_load(adbc, name) do
-    with {:ok, _installed} <- Adbc.Connection.query(adbc, "INSTALL #{name}"),
+  defp extension_source({extension, :community}), do: {to_string(extension), " FROM community"}
+  defp extension_source(extension), do: {to_string(extension), ""}
+
+  defp install_and_load(adbc, name, source) do
+    with {:ok, _installed} <- Adbc.Connection.query(adbc, "INSTALL #{name}#{source}"),
          {:ok, _loaded} <- Adbc.Connection.query(adbc, "LOAD #{name}") do
       :ok
     end

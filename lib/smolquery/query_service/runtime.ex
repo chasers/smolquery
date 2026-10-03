@@ -109,6 +109,17 @@ defmodule Smolquery.QueryService.Runtime do
   segments live elsewhere on disk must say so here, or its queries will
   honestly fail to read them.
 
+  `file_cache` (T-626) is the node's shared on-disk cache of sealed-tier
+  reads, off by default. With `directory:` set, every job and shard engine
+  loads the `cache_httpfs` extension and caches the object-store byte
+  ranges it reads in that directory, so a job reading the files the
+  previous job read finds them on local disk, not in S3. Each engine is
+  still a fresh DuckDB instance; only the cached bytes outlive it. The
+  hot tier (`http(s)://`) is never cached. `Smolquery.QueryService.FileCache`
+  keeps the directory under `max_bytes` (2 GiB), oldest blocks first. The
+  directory joins `allowed_directories`, so the cache keeps working under
+  lockdown.
+
   `warm_engines` (PL-50) is how many job engines
   `Smolquery.QueryService.EnginePool` keeps bootstrapped ahead of demand —
   `2` by default, `0` to start every engine cold on the request path. A
@@ -208,6 +219,7 @@ defmodule Smolquery.QueryService.Runtime do
     top_n_probe_rows: 1_000_000,
     hot_pin_max_age_ms: 300_000,
     hot_manifest_page: 1_024,
+    file_cache: %{directory: nil, max_bytes: 2_147_483_648},
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -247,6 +259,7 @@ defmodule Smolquery.QueryService.Runtime do
           hot_pin_max_age_ms: pos_integer(),
           hot_manifest_page: pos_integer(),
           store: Store.t() | nil,
+          file_cache: %{directory: String.t() | nil, max_bytes: pos_integer()},
           distributed: %{
             enabled: boolean(),
             min_files: pos_integer(),
@@ -294,6 +307,8 @@ defmodule Smolquery.QueryService.Runtime do
     {catalog, catalog_opts} =
       Catalog.DuckLake.resolve(Keyword.get(config, :catalog), catalog_engine(name))
 
+    file_cache = file_cache(Keyword.get(config, :file_cache, []))
+
     %__MODULE__{
       name: name,
       catalog: catalog,
@@ -303,7 +318,9 @@ defmodule Smolquery.QueryService.Runtime do
       history_metadata:
         Keyword.get_lazy(config, :history_metadata, fn -> history_metadata(catalog_opts) end),
       allowed_directories:
-        Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end),
+        Keyword.get_lazy(config, :allowed_directories, fn -> allowed_directories(catalog_opts) end) ++
+          List.wrap(file_cache.directory),
+      file_cache: file_cache,
       warm_probe: Keyword.get_lazy(config, :warm_probe, fn -> warm_probe(catalog_opts) end),
       distributed: distributed(Keyword.get(config, :distributed, []))
     }
@@ -336,6 +353,13 @@ defmodule Smolquery.QueryService.Runtime do
     else
       "SELECT 1"
     end
+  end
+
+  defp file_cache(opts) do
+    %{
+      directory: Keyword.get(opts, :directory),
+      max_bytes: Keyword.get(opts, :max_bytes, 2_147_483_648)
+    }
   end
 
   defp distributed(opts) do

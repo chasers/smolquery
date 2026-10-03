@@ -691,6 +691,20 @@ if directory = System.get_env("SMOLQUERY_EXTENSION_DIRECTORY") do
   config :smolquery, :extension_directory, directory
 end
 
+# T-626: a node-local on-disk cache of sealed-tier reads, shared by every job
+# engine. Off unless a directory is set.
+if directory = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_DIR") do
+  config :smolquery, Smolquery.QueryService, file_cache: [directory: directory]
+end
+
+if bytes = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_MAX_BYTES") do
+  config :smolquery, Smolquery.QueryService,
+    file_cache: [
+      max_bytes:
+        Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_QUERY_FILE_CACHE_MAX_BYTES", bytes)
+    ]
+end
+
 # `SMOLQUERY_WARM_ENGINES` (PL-50) is how many job engines the query service
 # keeps bootstrapped ahead of demand; `0` starts every engine cold.
 if count = System.get_env("SMOLQUERY_WARM_ENGINES") do

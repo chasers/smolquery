@@ -159,6 +159,8 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :query, :job]          %{duration_ms}, meta %{state: :done | :failed | :cancelled}
       [:smolquery, :query, :engine]       %{duration_us}, meta %{source: :warm | :cold | :failed}
                                           — one per job or shard engine acquired (PL-50)
+      [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per
+                                          FileCache sweep of the shared read cache (T-626)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
                                           — one per Smolquery.Catalog call; op is the callback (T-549)
       [:smolquery, :catalog, :statement]  %{duration_us}, meta %{kind: :query | :transaction |
@@ -289,6 +291,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :job],
     [:smolquery, :query, :scatter],
     [:smolquery, :query, :engine],
+    [:smolquery, :query, :file_cache, :sweep],
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
@@ -468,6 +471,10 @@ defmodule Smolquery.Telemetry do
       "Lifecycle events this node broadcast over PubSub, by kind (T-295).",
     "smolquery_query_job_milliseconds_total" =>
       "Time query jobs ran; divide by jobs for the mean.",
+    "smolquery_query_file_cache_evicted_bytes_total" =>
+      "Bytes the shared sealed-tier read cache deleted to stay under its cap (T-626).",
+    "smolquery_query_file_cache_evicted_files_total" =>
+      "Cache blocks the shared sealed-tier read cache deleted to stay under its cap (T-626).",
     "smolquery_query_engines_total" =>
       "Job engines acquired, by source: warm from the pool, started cold, or failed to start (PL-50).",
     "smolquery_query_engine_microseconds_total" =>
@@ -667,6 +674,8 @@ defmodule Smolquery.Telemetry do
       "Bytes of unsealed micro-segments this buffer node holds across every table (T-457).",
     "smolquery_buffer_unsealed_entries_limit" =>
       "The unsealed entry count at which this buffer node refuses commits (T-457).",
+    "smolquery_query_file_cache_bytes" =>
+      "Bytes in the shared sealed-tier read cache after its last sweep (T-626).",
     "smolquery_compaction_listed_files" =>
       "Live files across the tables the compaction scheduler listed in its last sweep (T-603).",
     "smolquery_compaction_listed_files_max" =>
@@ -1068,6 +1077,18 @@ defmodule Smolquery.Telemetry do
   def handle_event([:smolquery, :query, :job], measurements, meta, nil) do
     bump({"smolquery_query_jobs_total", [state: Map.get(meta, :state, :unknown)]}, 1)
     bump({"smolquery_query_job_milliseconds_total", []}, Map.get(measurements, :duration_ms, 0))
+  end
+
+  def handle_event([:smolquery, :query, :file_cache, :sweep], measurements, _meta, nil) do
+    bump(
+      {"smolquery_query_file_cache_evicted_bytes_total", []},
+      Map.get(measurements, :evicted_bytes, 0)
+    )
+
+    bump(
+      {"smolquery_query_file_cache_evicted_files_total", []},
+      Map.get(measurements, :evicted_files, 0)
+    )
   end
 
   def handle_event([:smolquery, :query, :engine], measurements, meta, nil) do

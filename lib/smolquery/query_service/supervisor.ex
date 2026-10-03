@@ -37,6 +37,7 @@ defmodule Smolquery.QueryService.Supervisor do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.QueryService.EnginePool
+  alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Runtime
 
@@ -64,10 +65,15 @@ defmodule Smolquery.QueryService.Supervisor do
           {Registry, keys: :unique, name: Runtime.registry(runtime.name)},
           {PartitionSupervisor,
            child_spec: DynamicSupervisor, name: Runtime.runners(runtime.name)}
-        ] ++ history(runtime) ++ expected_nodes(runtime) ++ [{EnginePool, runtime}]
+        ] ++
+        history(runtime) ++
+        expected_nodes(runtime) ++ file_cache(runtime) ++ [{EnginePool, runtime}]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
+
+  defp file_cache(%Runtime{file_cache: %{directory: nil}}), do: []
+  defp file_cache(%Runtime{file_cache: file_cache}), do: [{FileCache, file_cache}]
 
   defp history(%Runtime{history_metadata: nil}), do: []
   defp history(%Runtime{} = runtime), do: [{History, runtime}]

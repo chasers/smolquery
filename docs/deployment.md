@@ -127,6 +127,17 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: an optional shared read cache for query engines (T-626)
+
+Each query job runs on its own DuckDB engine, which stops when the job ends, and DuckDB's caches stop with it. So every job read again from S3 the files and Parquet footers the previous job had just read. A dashboard's second query was as cold as its first. On the sandbox, a HyperDX page spent 1,981 ms in DuckDB with a fresh engine per query and 548 ms with the caches kept.
+
+- **What it is:** `SMOLQUERY_QUERY_FILE_CACHE_DIR` turns on a node-local on-disk cache. Every job and shard engine loads the `cache_httpfs` DuckDB extension and caches sealed-tier byte ranges in that directory. The engines stay private; only the cached bytes are shared. The hot tier is never cached.
+- **Off by default.** Turn it on per deployment. The kind overlay turns it on.
+- **The bound:** `Smolquery.QueryService.FileCache` keeps the directory under `SMOLQUERY_QUERY_FILE_CACHE_MAX_BYTES` (2 GiB), deleting the oldest blocks every 30 s. The extension itself bounds the cache only by free disk space, which on an `emptyDir` is the node's disk. Give the cache its own volume, for example an `emptyDir` with a `sizeLimit` above the cap, so a sweep's 30 s lag cannot fill `/data`.
+- **The extension** is a DuckDB community extension. The image installs it at build time, so no pod downloads it. A deployment that builds its own image must install it too, or switch the cache off.
+- **Cold reads:** the extension splits a read into 512 KiB block requests, so the first read of a file can make more S3 requests than it did before. Measure a dashboard's first and second query before and after turning it on.
+- **Metrics:** `smolquery_query_file_cache_bytes`, `smolquery_query_file_cache_evicted_bytes_total`, `smolquery_query_file_cache_evicted_files_total`.
+
 ### 0.22.0: query latency buckets reach 60 s (T-625)
 
 The query series of the HTTP edges' latency counters now use their own `le` bounds: `smolquery_api_request_microseconds_bucket{route="query"}` and the ClickHouse and VictoriaMetrics `..._request_microseconds_bucket{kind="query"}`. The bounds are 50, 100, 250, 500 and 750 ms, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20, 30 and 60 s.
