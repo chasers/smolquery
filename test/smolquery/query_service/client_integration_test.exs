@@ -142,7 +142,17 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
   end
 
   describe "the file cache (T-629)" do
-    defp cached_query(context, bypass_bytes) do
+    defp cached_query(context, bypass_bytes, warmed \\ []) do
+      cache = Path.join(context.tmp_dir, "cache")
+      File.mkdir_p!(cache)
+
+      for file_name <- warmed,
+          do:
+            File.write!(
+              Path.join(cache, "#{String.duplicate("ab", 32)}-#{file_name}-0-524288"),
+              "x"
+            )
+
       name = :"client_int_cached_#{:erlang.unique_integer([:positive])}"
       metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
 
@@ -177,6 +187,7 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
         SegmentFixture.write(rows, schema(), store: Local.new(dir: Path.join(tmp, "seg")))
 
       {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+      Path.basename(segment.path)
     end
 
     test "a small scan reads through the cache, and file_cache: false turns it off", context do
@@ -205,6 +216,27 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
 
       assert {:ok, forced, _frame} = Client.query(query, sql, file_cache: true)
       assert forced.file_cache == :used
+    end
+
+    test "a table whose live files the cache has read is used, not bypassed, at any size",
+         context do
+      file_name = seal!(context.catalog, context.tmp_dir)
+      query = cached_query(context, 0, [file_name])
+
+      assert {:ok, job, _frame} =
+               Client.query(query, "SELECT count(*) AS n FROM analytics.events")
+
+      assert job.file_cache == :used
+    end
+
+    test "a retired file's blocks do not make a live file look warm", context do
+      seal!(context.catalog, context.tmp_dir)
+      query = cached_query(context, 0, ["01RETIRED0000000000000000.parquet"])
+
+      assert {:ok, job, _frame} =
+               Client.query(query, "SELECT count(*) AS n FROM analytics.events")
+
+      assert job.file_cache == :bypassed
     end
 
     test "a node without a file cache reports no decision", context do

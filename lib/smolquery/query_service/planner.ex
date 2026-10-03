@@ -335,7 +335,7 @@ defmodule Smolquery.QueryService.Planner do
        Trace.span(:build, fn ->
          query
          |> build(snapshot, refs, tables, members, hot, {connections, attaches}, page)
-         |> Map.put(:sealed_cached_bytes, sealed_cached_bytes(runtime, tables))
+         |> Map.put(:sealed_uncached_bytes, sealed_uncached_bytes(runtime, tables, snapshot))
        end)}
     end
   end
@@ -867,13 +867,34 @@ defmodule Smolquery.QueryService.Planner do
 
   defp gathered(pages), do: pages |> Enum.reverse() |> Enum.concat()
 
-  defp sealed_cached_bytes(%Runtime{file_cache: %{directory: nil}}, _tables), do: 0
+  defp sealed_uncached_bytes(%Runtime{file_cache: %{directory: nil}}, _tables, _snapshot), do: 0
 
-  defp sealed_cached_bytes(runtime, tables) do
-    tables
-    |> Map.values()
-    |> Enum.sum_by(&FileCache.cached_bytes(runtime.name, &1.sealed))
+  defp sealed_uncached_bytes(%Runtime{file_cache: %{mode: forced}}, _tables, _snapshot)
+       when is_boolean(forced),
+       do: 0
+
+  defp sealed_uncached_bytes(runtime, tables, snapshot) do
+    if tables |> Map.values() |> Enum.sum_by(&live_bytes/1) <= runtime.file_cache.bypass_bytes do
+      0
+    else
+      Enum.sum_by(tables, fn {ref, table} -> uncached_bytes(runtime, ref, table, snapshot) end)
+    end
   end
+
+  defp uncached_bytes(runtime, ref, table, snapshot) do
+    case Catalog.segment_files(runtime.catalog, ref, snapshot) do
+      {:ok, files} ->
+        files
+        |> Enum.reject(&FileCache.cached?(runtime.name, Path.basename(&1.path)))
+        |> Enum.sum_by(& &1.bytes)
+
+      {:error, _reason} ->
+        live_bytes(table)
+    end
+  end
+
+  defp live_bytes(%{stats: %{bytes: bytes}}), do: bytes
+  defp live_bytes(_table), do: 0
 
   defp build(query, snapshot, refs, tables, members, hot, {connections, attaches}, page) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)

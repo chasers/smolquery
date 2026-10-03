@@ -92,15 +92,17 @@ defmodule Smolquery.QueryService.PartialWorker do
     case JobEngine.acquire(runtime) do
       {:ok, engine, _source} ->
         try do
-          with :ok <- apply_statements(engine.connection, settings(runtime)),
+          with :ok <-
+                 apply_statements(
+                   engine.connection,
+                   settings(runtime) ++ cache_statements(runtime, request)
+                 ),
                :ok <- apply_statements(engine.connection, functions(runtime, request.partial_sql)),
                {:ok, files} <- described(engine.connection, request.files),
                :ok <-
                  apply_statements(
                    engine.connection,
-                   view(request, files) ++
-                     FileCache.statements(Map.get(request, :file_cache)) ++
-                     lockdown(runtime, path, request.allowed_paths)
+                   view(request, files) ++ lockdown(runtime, path, request.allowed_paths)
                  ) do
             copy_out(
               engine.connection,
@@ -170,6 +172,11 @@ defmodule Smolquery.QueryService.PartialWorker do
 
     file |> Map.put("field_ids", ids) |> Map.put("columns", columns)
   end
+
+  defp cache_statements(%Runtime{file_cache: %{directory: nil}}, _request), do: []
+
+  defp cache_statements(_runtime, request),
+    do: FileCache.statements(Map.get(request, :file_cache))
 
   defp settings(%Runtime{} = runtime) do
     memory_limit = runtime.distributed.worker_memory_limit || runtime.job_memory_limit

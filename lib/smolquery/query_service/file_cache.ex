@@ -38,10 +38,14 @@ defmodule Smolquery.QueryService.FileCache do
   sweep this process also indexes the directory by sealed file: a block is
   named `<sha256 of the path>-<file name>-<offset>-<size>`, and the index
   keeps each file name's cached bytes in an ETS table
-  (`Smolquery.QueryService.Runtime.file_cache_index/1`). `decide/3` reads
-  it through the plan: a job whose sealed bytes not yet cached pass
-  `bypass_bytes` skips the cache (`:bypassed`), and every other job uses it
-  (`:used`). A job can force it with its `file_cache:` option (`true` uses
+  (`Smolquery.QueryService.Runtime.file_cache_index/1`). The planner sums
+  the sizes of the live sealed files with no block in it, files the cache
+  has never read, and `decide/2` skips the cache for a job where that sum
+  passes `bypass_bytes` (`:bypassed`); every other job uses it (`:used`).
+  It counts files, not bytes: the cache holds only the columns a query
+  read, so a wide table warmed by a narrow query is never fully cached by
+  bytes, and a retired file's blocks must not make its replacement look
+  warm. A job can force it with its `file_cache:` option (`true` uses
   it, and so fills it for the next run; `false` is `:off`). A skipped job
   runs `statements/1`, which switches its engine's `cache_httpfs` to
   `noop` before lockdown: the engine then reads like plain `httpfs`. The
@@ -104,32 +108,30 @@ defmodule Smolquery.QueryService.FileCache do
   end
 
   @doc """
-  What a job reading `sealed_bytes` of sealed files, `cached_bytes` of
-  which the cache holds, does with `file_cache` (the job's runtime field).
+  Whether instance `name` has cached any block of the sealed file named
+  `file_name`: whether the file has been read through the cache.
   """
-  @spec decide(map(), non_neg_integer(), non_neg_integer()) :: decision()
-  def decide(%{directory: nil}, _sealed_bytes, _cached_bytes), do: nil
-  def decide(%{mode: true}, _sealed_bytes, _cached_bytes), do: :used
-  def decide(%{mode: false}, _sealed_bytes, _cached_bytes), do: :off
-
-  def decide(%{bypass_bytes: bypass_bytes}, sealed_bytes, cached_bytes) do
-    if sealed_bytes - cached_bytes > bypass_bytes, do: :bypassed, else: :used
-  end
+  @spec cached?(atom(), String.t()) :: boolean()
+  def cached?(name, file_name), do: cached_bytes(name, [file_name]) > 0
 
   @doc """
-  What a job with `plan` does with `file_cache` (the job's runtime field):
-  `decide/3` over the plan's sealed bytes and the part of them cached.
+  What a job with `uncached_bytes` of live sealed files the cache has never
+  read does with `file_cache` (the job's runtime field).
+  """
+  @spec decide(map(), non_neg_integer()) :: decision()
+  def decide(%{directory: nil}, _uncached_bytes), do: nil
+  def decide(%{mode: true}, _uncached_bytes), do: :used
+  def decide(%{mode: false}, _uncached_bytes), do: :off
+
+  def decide(%{bypass_bytes: bypass_bytes}, uncached_bytes),
+    do: if(uncached_bytes > bypass_bytes, do: :bypassed, else: :used)
+
+  @doc """
+  What a job with `plan` does with `file_cache`: `decide/2` over the plan's
+  `sealed_uncached_bytes`.
   """
   @spec decision(map(), Smolquery.QueryService.Plan.t()) :: decision()
-  def decision(file_cache, plan),
-    do: decide(file_cache, sealed_bytes(plan), plan.sealed_cached_bytes)
-
-  @doc """
-  The sealed bytes `plan` scans, `0` when the catalog could not size them.
-  """
-  @spec sealed_bytes(Smolquery.QueryService.Plan.t()) :: non_neg_integer()
-  def sealed_bytes(%{statistics: %{sealed: %{bytes_scanned: bytes}}}), do: bytes
-  def sealed_bytes(_plan), do: 0
+  def decision(file_cache, plan), do: decide(file_cache, plan.sealed_uncached_bytes)
 
   @doc """
   The statements a job's engine runs, before lockdown, for `decision`: a

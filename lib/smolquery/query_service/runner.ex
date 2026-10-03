@@ -207,7 +207,7 @@ defmodule Smolquery.QueryService.Runner do
     if decision do
       :telemetry.execute(
         [:smolquery, :query, :file_cache, :decision],
-        %{sealed_bytes: FileCache.sealed_bytes(plan), cached_bytes: plan.sealed_cached_bytes},
+        %{uncached_bytes: plan.sealed_uncached_bytes},
         %{decision: decision}
       )
     end
