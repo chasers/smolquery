@@ -67,10 +67,13 @@ defmodule Smolquery.QueryService.JobEngineTest do
 
     assert List.last(options[:extensions]) == {:cache_httpfs, :community}
 
-    assert Enum.take(options[:statements], 4) == [
+    assert Enum.take(options[:statements], 7) == [
              "SET cache_httpfs_type = 'on_disk'",
              "SET cache_httpfs_cache_directory = '/tmp/it''s cache'",
              "SET cache_httpfs_disk_cache_reader_enable_memory_cache = false",
+             "SET cache_httpfs_max_fanout_subrequest = 8",
+             "SET cache_httpfs_min_disk_bytes_for_cache = 1073741824",
+             "SET enable_external_file_cache = true",
              "SELECT cache_httpfs_add_exclusion_regex('^https?://')"
            ]
   end
@@ -96,6 +99,15 @@ defmodule Smolquery.QueryService.JobEngineTest do
       )
 
     assert setting.rows == [[dir]]
+
+    {:ok, file_cache} =
+      Connection.query(
+        engine.connection,
+        "SELECT current_setting('enable_external_file_cache') AS on",
+        []
+      )
+
+    assert file_cache.rows == [[true]]
 
     {:ok, excluded} =
       Connection.query(

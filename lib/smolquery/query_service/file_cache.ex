@@ -10,15 +10,25 @@ defmodule Smolquery.QueryService.FileCache do
   bound instead.
 
   Every `@sweep_interval_ms` it totals the directory. Over `max_bytes`, it
-  deletes the oldest blocks by modification time until the directory is
-  back under 90% of the cap. A block younger than `@min_age_ms` is never
-  deleted, so a block an engine is still writing survives. Deleting a block
-  costs a later read one cache miss, never a wrong answer: sealed files are
-  immutable, so a block is either present and right or absent.
+  deletes the blocks with the oldest modification time until the directory
+  is back under 90% of the cap. The extension touches a block every time it
+  reads it, so that order is least recently read first. A block read or
+  written in the last `@min_age_ms` is never deleted, so a scan touching
+  every block at once can hold the directory over the cap until it ends.
 
-  A sweep reads one directory listing and one `stat` per block, at most
+  The extension writes each block to a temporary file and renames it into
+  place, so a visible block is always complete. Deleting one costs a later
+  read one cache miss, never a wrong answer: sealed files are immutable, so
+  a block is either present and right or absent, and a reader that finds it
+  gone reads the object store. A temporary file left by a killed engine is
+  counted and, once old, deleted with the rest.
+
+  A sweep reads one directory listing and one `stat` per entry, about
   `max_bytes / 512 KiB` blocks at the extension's default block size: about
   4,000 at the 2 GiB default.
+
+  A directory it cannot create is logged and left alone: the janitor stops,
+  and the query service runs without it rather than failing to boot.
 
   `smolquery_query_file_cache_bytes` reports the directory's size after each
   sweep, and `smolquery_query_file_cache_evicted_bytes_total` and
@@ -28,6 +38,8 @@ defmodule Smolquery.QueryService.FileCache do
   use GenServer
 
   alias Smolquery.Telemetry
+
+  require Logger
 
   @sweep_interval_ms 30_000
   @min_age_ms 10_000
@@ -68,10 +80,19 @@ defmodule Smolquery.QueryService.FileCache do
 
   @impl GenServer
   def init(%{directory: directory} = file_cache) do
-    File.mkdir_p!(directory)
-    send(self(), :sweep)
+    case File.mkdir_p(directory) do
+      :ok ->
+        send(self(), :sweep)
+        {:ok, file_cache}
 
-    {:ok, file_cache}
+      {:error, reason} ->
+        Logger.error(
+          "file cache directory #{inspect(directory)} cannot be created (#{inspect(reason)}); " <>
+            "nothing bounds it"
+        )
+
+        :ignore
+    end
   end
 
   @impl GenServer

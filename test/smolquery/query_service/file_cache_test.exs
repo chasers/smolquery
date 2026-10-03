@@ -53,6 +53,18 @@ defmodule Smolquery.QueryService.FileCacheTest do
     assert FileCache.sweep(Path.join(dir, "absent"), 1_000).bytes == 0
   end
 
+  test "a directory it cannot create leaves the janitor stopped, not the service", %{
+    tmp_dir: dir
+  } do
+    blocker = Path.join(dir, "a-file")
+    File.write!(blocker, "")
+
+    assert {:ok, :undefined} =
+             start_supervised(
+               {FileCache, %{directory: Path.join(blocker, "cache"), max_bytes: 1}}
+             )
+  end
+
   test "the process creates the directory, sweeps it, and reports its size", %{tmp_dir: dir} do
     directory = Path.join(dir, "cache")
     parent = self()

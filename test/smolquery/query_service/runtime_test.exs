@@ -20,6 +20,14 @@ defmodule Smolquery.QueryService.RuntimeTest do
 
       assert on.file_cache == %{directory: "/cache", max_bytes: 1_024}
       assert on.allowed_directories == ["/data", "/cache"]
+
+      empty =
+        Runtime.new(
+          name: :"file_cache_empty_#{System.unique_integer([:positive])}",
+          file_cache: [directory: ""]
+        )
+
+      assert empty.file_cache.directory == nil
     end
 
     test "warm_probe is the lake's current snapshot when the catalog names a lake, SELECT 1 otherwise" do

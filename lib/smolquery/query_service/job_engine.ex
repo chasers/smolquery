@@ -39,9 +39,19 @@ defmodule Smolquery.QueryService.JobEngine do
   S3 again. With the runtime's `file_cache` directory set, the engine loads
   `cache_httpfs` last and points its on-disk cache at that directory, which
   every engine on the node shares. The hot tier's `http(s)://` reads are
-  excluded; the cache reader's process-wide memory cache is off, so nothing
-  outlives the engine in memory. `Smolquery.QueryService.FileCache` bounds
-  the directory.
+  excluded. Nothing of the extension outlives the engine but the blocks on
+  disk: its settings and caches are per DuckDB instance, and its reader's
+  own memory cache is off, so a hit is served from the page cache.
+
+  Three settings keep it inside the engine's budget. A cold read is split
+  into 512 KiB block requests, each fetched on a thread of its own, so
+  `cache_httpfs_max_fanout_subrequest` caps them per read, or a read would
+  bypass the request ceiling `read_engine_threads` sets. The extension's
+  disk guard is a share of the filesystem's free space, which on an
+  `emptyDir` is the node's disk, so `cache_httpfs_min_disk_bytes_for_cache`
+  makes it an absolute floor; `Smolquery.QueryService.FileCache` is the real
+  bound. And `LOAD` switches DuckDB's own external file cache off for the
+  whole engine, the hot tier included, so it is switched back on.
   """
 
   alias Smolquery.DuckDB
@@ -53,6 +63,8 @@ defmodule Smolquery.QueryService.JobEngine do
   alias Smolquery.Telemetry
 
   @probe_timeout_ms 5_000
+  @cache_fanout 8
+  @cache_min_disk_bytes 1_073_741_824
 
   @type t :: %{database: pid(), connection: pid()}
   @type source :: :warm | :cold
@@ -229,6 +241,9 @@ defmodule Smolquery.QueryService.JobEngine do
       "SET cache_httpfs_type = 'on_disk'",
       "SET cache_httpfs_cache_directory = #{Identifier.sql_string(directory)}",
       "SET cache_httpfs_disk_cache_reader_enable_memory_cache = false",
+      "SET cache_httpfs_max_fanout_subrequest = #{@cache_fanout}",
+      "SET cache_httpfs_min_disk_bytes_for_cache = #{@cache_min_disk_bytes}",
+      "SET enable_external_file_cache = true",
       "SELECT cache_httpfs_add_exclusion_regex('^https?://')"
     ]
   end

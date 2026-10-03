@@ -134,8 +134,9 @@ Each query job runs on its own DuckDB engine, which stops when the job ends, and
 - **What it is:** `SMOLQUERY_QUERY_FILE_CACHE_DIR` turns on a node-local on-disk cache. Every job and shard engine loads the `cache_httpfs` DuckDB extension and caches sealed-tier byte ranges in that directory. The engines stay private; only the cached bytes are shared. The hot tier is never cached.
 - **Off by default.** Turn it on per deployment. The kind overlay turns it on.
 - **The bound:** `Smolquery.QueryService.FileCache` keeps the directory under `SMOLQUERY_QUERY_FILE_CACHE_MAX_BYTES` (2 GiB), deleting the oldest blocks every 30 s. The extension itself bounds the cache only by free disk space, which on an `emptyDir` is the node's disk. Give the cache its own volume, for example an `emptyDir` with a `sizeLimit` above the cap, so a sweep's 30 s lag cannot fill `/data`.
-- **The extension** is a DuckDB community extension. The image installs it at build time, so no pod downloads it. A deployment that builds its own image must install it too, or switch the cache off.
-- **Cold reads:** the extension splits a read into 512 KiB block requests, so the first read of a file can make more S3 requests than it did before. Measure a dashboard's first and second query before and after turning it on.
+- **The extension** is a DuckDB community extension. The image installs it at build time, so no pod downloads it. The image pins the DuckDB version, not the extension's build: a rebuild takes whatever the community repository built for that version. A deployment that builds its own image must install it too, or switch the cache off.
+- **Cold reads:** the extension splits a read into 512 KiB block requests, at most 8 at once per read, so the first read of a file can make about 3x the S3 requests it did before. Measure a dashboard's first and second query before and after turning it on.
+- **Memory:** cache hits are served through the kernel's page cache. When you watch a query pod's memory, read `smolquery_memory_cgroup_bytes{kind="file"}` (reclaimable) apart from `kind="anon"`.
 - **Metrics:** `smolquery_query_file_cache_bytes`, `smolquery_query_file_cache_evicted_bytes_total`, `smolquery_query_file_cache_evicted_files_total`.
 
 ### 0.22.0: query latency buckets reach 60 s (T-625)

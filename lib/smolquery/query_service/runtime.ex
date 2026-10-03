@@ -357,7 +357,11 @@ defmodule Smolquery.QueryService.Runtime do
 
   defp file_cache(opts) do
     %{
-      directory: Keyword.get(opts, :directory),
+      directory:
+        case Keyword.get(opts, :directory) do
+          "" -> nil
+          directory -> directory
+        end,
       max_bytes: Keyword.get(opts, :max_bytes, 2_147_483_648)
     }
   end
