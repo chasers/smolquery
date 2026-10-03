@@ -9,7 +9,8 @@ defmodule Smolquery.QueryService.RuntimeTest do
     test "the file cache is off by default, and its directory joins allowed_directories (T-626)" do
       off = Runtime.new(name: :"file_cache_off_#{System.unique_integer([:positive])}")
 
-      assert off.file_cache == %{directory: nil, max_bytes: 2_147_483_648}
+      assert %{directory: nil, max_bytes: 2_147_483_648, bypass_bytes: 536_870_912, mode: :auto} =
+               off.file_cache
 
       on =
         Runtime.new(
@@ -18,7 +19,7 @@ defmodule Smolquery.QueryService.RuntimeTest do
           file_cache: [directory: "/cache", max_bytes: 1_024]
         )
 
-      assert on.file_cache == %{directory: "/cache", max_bytes: 1_024}
+      assert %{directory: "/cache", max_bytes: 1_024} = on.file_cache
       assert on.allowed_directories == ["/data", "/cache"]
 
       empty =

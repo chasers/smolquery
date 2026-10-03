@@ -20,8 +20,13 @@ defmodule SmolqueryWeb.QueryLive.Index do
   a shard badge from `job.scatter`; no badge means the ordinary scan
   answered, including every silent fallback.
 
+  The File cache select (T-629) submits `file_cache: true` for On and
+  `false` for Off, and nothing for Auto, where a cold scan too large to fill
+  the node's read cache on the way skips it. A badge shows what the job
+  did: cached, cache bypassed, or cache off.
+
   The editor's state lives in the URL. Each change patches `sql`, `trace`,
-  and `distributed` into the query string, so a reload, a restored tab, or
+  `distributed` and `file_cache` into the query string, so a reload, a restored tab, or
   a pasted link brings the editor back with the same SQL. The patch replaces the history entry
   rather than pushing one, so Back leaves the page instead of walking the
   keystrokes.
@@ -55,6 +60,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:sql, "")
       |> assign(:trace, true)
       |> assign(:distributed, true)
+      |> assign(:file_cache, "auto")
       |> assign(:sql_in_url, true)
       |> assign(:job, nil)
       |> assign(:frame, nil)
@@ -73,6 +79,10 @@ defmodule SmolqueryWeb.QueryLive.Index do
      |> assign(:sql, Map.get(params, "sql", socket.assigns.sql))
      |> assign(:trace, params_flag(params, "trace", socket.assigns.trace))
      |> assign(:distributed, params_flag(params, "distributed", socket.assigns.distributed))
+     |> assign(
+       :file_cache,
+       cache_choice(Map.get(params, "file_cache"), socket.assigns.file_cache)
+     )
      |> assign_sql_in_url()}
   end
 
@@ -123,8 +133,16 @@ defmodule SmolqueryWeb.QueryLive.Index do
     |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
     |> assign(:trace, Map.get(query, "trace") == "true")
     |> assign(:distributed, Map.get(query, "distributed") == "true")
+    |> assign(:file_cache, cache_choice(Map.get(query, "file_cache"), socket.assigns.file_cache))
     |> assign_sql_in_url()
   end
+
+  defp cache_choice(choice, _current) when choice in ["auto", "on", "off"], do: choice
+  defp cache_choice(_absent_or_other, current), do: current
+
+  defp cache_opt("on"), do: [file_cache: true]
+  defp cache_opt("off"), do: [file_cache: false]
+  defp cache_opt(_auto), do: []
 
   defp params_flag(params, name, current) do
     case Map.fetch(params, name) do
@@ -151,9 +169,14 @@ defmodule SmolqueryWeb.QueryLive.Index do
          sql: sql,
          trace: trace,
          distributed: distributed,
+         file_cache: file_cache,
          sql_in_url: sql_in_url
        }) do
-    flag_params = [trace: to_string(trace), distributed: to_string(distributed)]
+    flag_params = [
+      trace: to_string(trace),
+      distributed: to_string(distributed),
+      file_cache: file_cache
+    ]
 
     if sql == "" or not sql_in_url do
       flag_params
@@ -161,6 +184,10 @@ defmodule SmolqueryWeb.QueryLive.Index do
       [{:sql, sql} | flag_params]
     end
   end
+
+  defp cache_badge(:used), do: "cached"
+  defp cache_badge(:bypassed), do: "cache bypassed"
+  defp cache_badge(:off), do: "cache off"
 
   defp explain_mode("analyze"), do: :analyze
   defp explain_mode(_mode), do: :plan
@@ -179,7 +206,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
   end
 
   defp submit(socket, opts) do
-    opts = [{:distributed, socket.assigns.distributed} | opts]
+    opts =
+      [{:distributed, socket.assigns.distributed} | cache_opt(socket.assigns.file_cache)] ++ opts
+
     opts = if socket.assigns.trace, do: [{:trace, true} | opts], else: opts
 
     case QueryService.Client.submit(socket.assigns.runtime.query_name, socket.assigns.sql, opts) do
@@ -325,6 +354,18 @@ defmodule SmolqueryWeb.QueryLive.Index do
               class="checkbox checkbox-sm"
             /> Distribute
           </label>
+          <label class="label gap-1 text-sm">
+            File cache
+            <select name="query[file_cache]" class="select select-xs">
+              <option
+                :for={choice <- ["auto", "on", "off"]}
+                value={choice}
+                selected={choice == @file_cache}
+              >
+                {choice}
+              </option>
+            </select>
+          </label>
           <button
             :if={running?(@job)}
             type="button"
@@ -336,6 +377,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
           <span :if={@job} class={["badge", state_badge(@job.state)]}>{@job.state}</span>
           <span :if={@job && @job.scatter} class="badge badge-accent">
             scattered × {@job.scatter.shards}
+          </span>
+          <span :if={@job && @job.file_cache} class="badge badge-ghost">
+            {cache_badge(@job.file_cache)}
           </span>
           <span :if={@job && @job.duration_ms} class="text-sm opacity-70">
             {@job.duration_ms} ms

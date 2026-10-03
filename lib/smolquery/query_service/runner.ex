@@ -93,6 +93,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.EngineSecrets
   alias Smolquery.Federation
   alias Smolquery.QueryService.ClickHouseFunctions
+  alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.History
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.JobEngine
@@ -108,6 +109,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
+          | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
           | {:hot_ids, %{Smolquery.Catalog.table_ref() => [String.t()]}}
@@ -165,6 +167,7 @@ defmodule Smolquery.QueryService.Runner do
       runtime:
         runtime
         |> override_distributed(Keyword.get(opts, :distributed))
+        |> override_file_cache(Keyword.get(opts, :file_cache))
         |> override_result_max_rows(Keyword.get(opts, :result_max_rows)),
       timeout_ms: timeout_ms,
       job: job,
@@ -192,6 +195,25 @@ defmodule Smolquery.QueryService.Runner do
 
   defp override_distributed(%Runtime{} = runtime, enabled) when is_boolean(enabled),
     do: %{runtime | distributed: %{runtime.distributed | enabled: enabled}}
+
+  defp override_file_cache(runtime, nil), do: runtime
+
+  defp override_file_cache(%Runtime{} = runtime, use?) when is_boolean(use?),
+    do: %{runtime | file_cache: %{runtime.file_cache | mode: use?}}
+
+  defp with_cache_decision(%Runtime{file_cache: file_cache} = runtime, plan) do
+    decision = FileCache.decision(file_cache, plan)
+
+    if decision do
+      :telemetry.execute(
+        [:smolquery, :query, :file_cache, :decision],
+        %{sealed_bytes: FileCache.sealed_bytes(plan), cached_bytes: plan.sealed_cached_bytes},
+        %{decision: decision}
+      )
+    end
+
+    %{runtime | file_cache: %{file_cache | decision: decision}}
+  end
 
   defp mode(opts) do
     if Keyword.get(opts, :describe, false), do: :describe, else: Keyword.get(opts, :explain)
@@ -326,6 +348,7 @@ defmodule Smolquery.QueryService.Runner do
           {%{
              job
              | scatter: done.scatter,
+               file_cache: done.file_cache,
                json_columns: done.json_columns,
                non_null_columns: done.non_null,
                hot_members: done.hot_members
@@ -379,10 +402,17 @@ defmodule Smolquery.QueryService.Runner do
 
     with :ok <- define_functions(runtime, connection, sql),
          {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
+         runtime = with_cache_decision(runtime, plan),
          :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
-             run_statements(connection, plan, plan.statements ++ lockdown(runtime, plan, job_id))
+             run_statements(
+               connection,
+               plan,
+               plan.statements ++
+                 FileCache.statements(runtime.file_cache.decision) ++
+                 lockdown(runtime, plan, job_id)
+             )
            end),
          {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
@@ -407,7 +437,8 @@ defmodule Smolquery.QueryService.Runner do
          snapshot: plan.snapshot,
          hot_members: plan.hot_members,
          duration_ms: duration,
-         statistics: plan.statistics
+         statistics: plan.statistics,
+         file_cache: runtime.file_cache.decision
        }}
     end
   end

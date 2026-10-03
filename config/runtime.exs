@@ -711,6 +711,17 @@ if directory = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_DIR") do
   config :smolquery, Smolquery.QueryService, file_cache: [directory: directory]
 end
 
+if bytes = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES") do
+  config :smolquery, Smolquery.QueryService,
+    file_cache: [
+      bypass_bytes:
+        Smolquery.RuntimeConfig.non_negative_integer!(
+          "SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES",
+          bytes
+        )
+    ]
+end
+
 if bytes = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_MAX_BYTES") do
   config :smolquery, Smolquery.QueryService,
     file_cache: [

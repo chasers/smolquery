@@ -61,7 +61,8 @@ defmodule Smolquery.QueryService.FileCacheTest do
 
     assert {:ok, :undefined} =
              start_supervised(
-               {FileCache, %{directory: Path.join(blocker, "cache"), max_bytes: 1}}
+               {FileCache,
+                {:file_cache_unwritable, %{directory: Path.join(blocker, "cache"), max_bytes: 1}}}
              )
   end
 
@@ -79,10 +80,79 @@ defmodule Smolquery.QueryService.FileCacheTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
 
-    start_supervised!({FileCache, %{directory: directory, max_bytes: 1_000}})
+    start_supervised!(
+      {FileCache,
+       {:"file_cache_#{System.unique_integer([:positive])}",
+        %{directory: directory, max_bytes: 1_000}}}
+    )
 
     assert_receive {:swept, %{evicted_bytes: 0, evicted_files: 0}}
     assert File.dir?(directory)
     assert Telemetry.render() =~ "smolquery_query_file_cache_bytes 0"
+  end
+
+  describe "which jobs use the cache (T-629)" do
+    @auto %{directory: "/cache", mode: :auto, bypass_bytes: 1_000}
+
+    test "decide/3: no directory is no decision; a forced job does as it says" do
+      assert FileCache.decide(%{@auto | directory: nil}, 5_000, 0) == nil
+      assert FileCache.decide(%{@auto | mode: true}, 5_000, 0) == :used
+      assert FileCache.decide(%{@auto | mode: false}, 10, 10) == :off
+    end
+
+    test "decide/3: auto skips only a scan whose uncached bytes pass the threshold" do
+      assert FileCache.decide(@auto, 1_000, 0) == :used
+      assert FileCache.decide(@auto, 1_001, 0) == :bypassed
+      assert FileCache.decide(@auto, 5_000, 4_500) == :used
+    end
+
+    test "decision/2 reads the plan's sealed bytes, and an unsized plan counts as none" do
+      sized = %Smolquery.QueryService.Plan{
+        sql: "SELECT 1",
+        snapshot: 1,
+        statistics: %{sealed: %{bytes_scanned: 5_000}},
+        sealed_cached_bytes: 0
+      }
+
+      assert FileCache.decision(@auto, sized) == :bypassed
+      assert FileCache.decision(@auto, %{sized | sealed_cached_bytes: 4_500}) == :used
+      assert FileCache.decision(@auto, %{sized | statistics: nil}) == :used
+    end
+
+    test "statements/1 switches the cache off for a skipped job only" do
+      assert FileCache.statements(:bypassed) == ["SET cache_httpfs_type = 'noop'"]
+      assert FileCache.statements(:off) == ["SET cache_httpfs_type = 'noop'"]
+      assert FileCache.statements(:used) == []
+      assert FileCache.statements(nil) == []
+    end
+
+    test "the sweep indexes cached bytes by sealed file name", %{tmp_dir: dir} do
+      name = :"file_cache_index_#{System.unique_integer([:positive])}"
+      hash = String.duplicate("ab", 32)
+      block!(dir, "#{hash}-01ABC.parquet-0-524288", 300, 100)
+      block!(dir, "#{hash}-01ABC.parquet-524288-524288", 200, 100)
+      block!(dir, "#{String.duplicate("cd", 32)}-01DEF.parquet-0-524288", 50, 100)
+      block!(dir, "#{hash}-01ABC.parquet-0-524288.0f3a.httpfs_local_cache", 999, 100)
+
+      parent = self()
+      handler = "file-cache-index-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :query, :file_cache, :sweep],
+        fn _event, _measurements, _meta, _config -> send(parent, :swept) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      start_supervised!({FileCache, {name, %{directory: dir, max_bytes: 1_000_000}}})
+      assert_receive :swept
+
+      assert FileCache.cached_bytes(name, ["01ABC.parquet"]) == 500
+      assert FileCache.cached_bytes(name, MapSet.new(["01ABC.parquet", "01DEF.parquet"])) == 550
+      assert FileCache.cached_bytes(name, ["01XYZ.parquet"]) == 0
+      assert FileCache.cached_bytes(:no_such_instance, ["01ABC.parquet"]) == 0
+    end
   end
 end

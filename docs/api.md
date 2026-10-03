@@ -184,6 +184,8 @@ Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `
 
 `"distributed": true | false` overrides the deployment's `SMOLQUERY_DISTRIBUTED_QUERY` default (on) for this job only. `POST /v1/queries` and `POST /v1/jobs` both take it. A distributed answer carries a **`scatter`** object on the job — `{"shards": 3, "partialBytes": 41210}` — and `"scatter": null` means the ordinary single-engine scan answered, including every fallback. A query that does not decompose, or any distributed failure, falls back silently and answers the same rows. A bare `SELECT count(*) FROM t` never scatters: the engine answers it from file metadata without a scan, and distribution only added the fixed costs (T-448). History does not persist `scatter`. A non-boolean `distributed` value is a 400.
 
+`"fileCache": true | false` controls the node's sealed-tier read cache for this job only (T-629), where the deployment runs one (`SMOLQUERY_QUERY_FILE_CACHE_DIR`). Unset, a scan with more than `SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES` (512 MiB) of sealed bytes not yet cached skips the cache and reads the object store directly; every other scan reads through it. `true` reads through it whatever the size, which fills it for the next run; `false` skips it. The job reports what it did as **`fileCache`**: `"used"`, `"bypassed"`, `"off"`, or `null` when the node has no cache. A non-boolean `fileCache` value is a 400.
+
 ## Query statistics
 
 A finished job carries a **`statistics`** object. It appears on the `job` in a `POST /v1/queries` response. It also appears on `GET /v1/jobs/:id` while the runner holds the job. History does not persist it, so an expired job answers `"statistics": null`:

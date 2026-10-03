@@ -31,6 +31,11 @@ defmodule Smolquery.QueryService.Job do
   `scatter`: history does not persist it, and nothing in the metadata
   database records it.
 
+  `file_cache` says what the job did with the node's sealed-tier read cache
+  (T-629): `:used`, `:bypassed` (its cold scan was too large to fill the
+  cache on the way), `:off` (the job asked), or `nil` (no cache on this
+  node). In-memory only, like `scatter`.
+
   `ddl` says the job was an `ALTER TABLE` (`Smolquery.Ddl`), and what it did:
   the operation, the table, the column, and whether anything changed. A DDL
   job finishes `:done` with no `row_count`, no `snapshot`, and no result
@@ -57,6 +62,7 @@ defmodule Smolquery.QueryService.Job do
     :explain,
     :trace,
     :scatter,
+    :file_cache,
     :ddl,
     :error,
     json_columns: [],
@@ -79,6 +85,7 @@ defmodule Smolquery.QueryService.Job do
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
           scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
+          file_cache: Smolquery.QueryService.FileCache.decision(),
           ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),
           json_columns: [String.t()],

@@ -73,7 +73,9 @@ defmodule Smolquery.QueryService.Supervisor do
   end
 
   defp file_cache(%Runtime{file_cache: %{directory: nil}}), do: []
-  defp file_cache(%Runtime{file_cache: file_cache}), do: [{FileCache, file_cache}]
+
+  defp file_cache(%Runtime{file_cache: file_cache} = runtime),
+    do: [{FileCache, {runtime.name, file_cache}}]
 
   defp history(%Runtime{history_metadata: nil}), do: []
   defp history(%Runtime{} = runtime), do: [{History, runtime}]

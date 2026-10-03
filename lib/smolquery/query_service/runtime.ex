@@ -115,7 +115,12 @@ defmodule Smolquery.QueryService.Runtime do
   ranges it reads in that directory, so a job reading the files the
   previous job read finds them on local disk, not in S3. Each engine is
   still a fresh DuckDB instance; only the cached bytes outlive it. The
-  hot tier (`http(s)://`) is never cached. `Smolquery.QueryService.FileCache`
+  hot tier (`http(s)://`) is never cached. A job whose scan has more than
+  `bypass_bytes` (512 MiB) of sealed bytes not yet cached skips the cache
+  and reads S3 directly (T-629): filling the cache costs a cold scan a write
+  of every block to local disk, and on the sandbox's disk that made a
+  1.26 GB scan 41 s instead of 15.5 s. A job's `file_cache:` option forces
+  the cache on or off; `mode` and `decision` are that job's. `Smolquery.QueryService.FileCache`
   keeps the directory under `max_bytes` (2 GiB), oldest blocks first. The
   directory joins `allowed_directories`, so the cache keeps working under
   lockdown.
@@ -219,7 +224,13 @@ defmodule Smolquery.QueryService.Runtime do
     top_n_probe_rows: 1_000_000,
     hot_pin_max_age_ms: 300_000,
     hot_manifest_page: 1_024,
-    file_cache: %{directory: nil, max_bytes: 2_147_483_648},
+    file_cache: %{
+      directory: nil,
+      max_bytes: 2_147_483_648,
+      bypass_bytes: 536_870_912,
+      mode: :auto,
+      decision: nil
+    },
     distributed: %{
       enabled: true,
       min_files: 8,
@@ -259,7 +270,13 @@ defmodule Smolquery.QueryService.Runtime do
           hot_pin_max_age_ms: pos_integer(),
           hot_manifest_page: pos_integer(),
           store: Store.t() | nil,
-          file_cache: %{directory: String.t() | nil, max_bytes: pos_integer()},
+          file_cache: %{
+            directory: String.t() | nil,
+            max_bytes: pos_integer(),
+            bypass_bytes: non_neg_integer(),
+            mode: :auto | boolean(),
+            decision: Smolquery.QueryService.FileCache.decision()
+          },
           distributed: %{
             enabled: boolean(),
             min_files: pos_integer(),
@@ -362,7 +379,10 @@ defmodule Smolquery.QueryService.Runtime do
           "" -> nil
           directory -> directory
         end,
-      max_bytes: Keyword.get(opts, :max_bytes, 2_147_483_648)
+      max_bytes: Keyword.get(opts, :max_bytes, 2_147_483_648),
+      bypass_bytes: Keyword.get(opts, :bypass_bytes, 536_870_912),
+      mode: :auto,
+      decision: nil
     }
   end
 
@@ -427,6 +447,13 @@ defmodule Smolquery.QueryService.Runtime do
   """
   @spec engine_pool(atom()) :: atom()
   def engine_pool(name), do: Module.concat(name, "EnginePool")
+
+  @doc """
+  The ETS table `Smolquery.QueryService.FileCache` keeps its index of cached
+  bytes per sealed file in, for instance `name` (T-629).
+  """
+  @spec file_cache_index(atom()) :: atom()
+  def file_cache_index(name), do: Module.concat(name, "FileCacheIndex")
 
   defp bootstrap(nil), do: []
 

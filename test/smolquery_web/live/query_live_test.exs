@@ -61,6 +61,20 @@ defmodule SmolqueryWeb.QueryLiveTest do
       refute html =~ "checked"
     end
 
+    test "the file_cache param picks the File cache choice and survives a change", %{conn: conn} do
+      start_web!()
+
+      {:ok, lv, html} = live(conn, ~p"/query?#{[file_cache: "off"]}")
+
+      assert html =~ ~s(<option value="off" selected)
+
+      render_change(lv, "sql_changed", %{
+        "query" => %{"sql" => "SELECT 1", "trace" => "true", "file_cache" => "on"}
+      })
+
+      assert assert_patch(lv) =~ "file_cache=on"
+    end
+
     test "typing patches the sql into the URL", %{conn: conn} do
       start_web!()
 
@@ -71,7 +85,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
       })
 
       assert assert_patch(lv) ==
-               ~p"/query?#{[sql: "SELECT 1", trace: "true", distributed: "true"]}"
+               ~p"/query?#{[sql: "SELECT 1", trace: "true", distributed: "true", file_cache: "auto"]}"
     end
 
     test "clearing the editor drops the sql from the URL", %{conn: conn} do
@@ -83,7 +97,8 @@ defmodule SmolqueryWeb.QueryLiveTest do
         "query" => %{"sql" => "", "trace" => "true", "distributed" => "true"}
       })
 
-      assert assert_patch(lv) == ~p"/query?#{[trace: "true", distributed: "true"]}"
+      assert assert_patch(lv) ==
+               ~p"/query?#{[trace: "true", distributed: "true", file_cache: "auto"]}"
     end
 
     test "a query too long for the link stays out of it and says so", %{conn: conn} do
@@ -98,7 +113,9 @@ defmodule SmolqueryWeb.QueryLiveTest do
           "query" => %{"sql" => long, "trace" => "true", "distributed" => "true"}
         })
 
-      assert assert_patch(lv) == ~p"/query?#{[trace: "true", distributed: "true"]}"
+      assert assert_patch(lv) ==
+               ~p"/query?#{[trace: "true", distributed: "true", file_cache: "auto"]}"
+
       assert html =~ "too long for the link"
     end
   end

@@ -183,6 +183,22 @@ defmodule SmolqueryApi.JobControllerTest do
                JSON.decode!(response.resp_body)
     end
 
+    test "fileCache takes a boolean, and the job reports no decision on a node without a cache",
+         %{name: name} do
+      response =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "fileCache" => false})
+
+      assert response.status == 200
+      assert %{"job" => %{"fileCache" => nil}} = JSON.decode!(response.resp_body)
+
+      refused =
+        post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "fileCache" => "off"})
+
+      assert refused.status == 400
+      assert %{"error" => %{"message" => message}} = JSON.decode!(refused.resp_body)
+      assert message =~ "fileCache"
+    end
+
     test "a non-boolean trace is refused", %{name: name} do
       response =
         post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "trace" => "yes"})

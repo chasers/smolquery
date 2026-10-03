@@ -264,6 +264,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.Identifier
   alias Smolquery.Partitions
   alias Smolquery.QueryService.AnyN
+  alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.Fold
   alias Smolquery.QueryService.Nullability
   alias Smolquery.QueryService.Plan
@@ -332,7 +333,9 @@ defmodule Smolquery.QueryService.Planner do
 
       {:ok,
        Trace.span(:build, fn ->
-         build(query, snapshot, refs, tables, members, hot, {connections, attaches}, page)
+         query
+         |> build(snapshot, refs, tables, members, hot, {connections, attaches}, page)
+         |> Map.put(:sealed_cached_bytes, sealed_cached_bytes(runtime, tables))
        end)}
     end
   end
@@ -863,6 +866,14 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp gathered(pages), do: pages |> Enum.reverse() |> Enum.concat()
+
+  defp sealed_cached_bytes(%Runtime{file_cache: %{directory: nil}}, _tables), do: 0
+
+  defp sealed_cached_bytes(runtime, tables) do
+    tables
+    |> Map.values()
+    |> Enum.sum_by(&FileCache.cached_bytes(runtime.name, &1.sealed))
+  end
 
   defp build(query, snapshot, refs, tables, members, hot, {connections, attaches}, page) do
     statements = Enum.flat_map(refs, fn ref -> view(ref, snapshot, tables[ref], hot[ref]) end)
