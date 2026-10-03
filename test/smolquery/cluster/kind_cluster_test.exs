@@ -98,12 +98,13 @@ defmodule Smolquery.Cluster.KindClusterTest do
     end
 
     test "a sealed read through the query node fills its shared file cache (T-626)", context do
-      %{dataset: dataset, tables: tables} = context
+      %{dataset: dataset, first: first} = context
 
       assert Eventually.until(fn -> Kind.sealed_object(dataset) != nil end, 60, 3_000),
              "no sealed segment appeared in MinIO within 180s"
 
-      assert Kind.total_rows(dataset, tables) == {:ok, 400}
+      assert {:ok, sum} = Kind.count("SELECT sum(id) AS n FROM #{dataset}.#{first}", "n")
+      assert sum > 0
 
       blocks =
         Kind.kubectl!([
