@@ -201,8 +201,11 @@ defmodule Smolquery.QueryService.Runner do
   defp override_file_cache(%Runtime{} = runtime, use?) when is_boolean(use?),
     do: %{runtime | file_cache: %{runtime.file_cache | mode: use?}}
 
-  defp with_cache_decision(%Runtime{file_cache: file_cache} = runtime, plan) do
-    decision = FileCache.decision(file_cache, plan)
+  defp with_cache_decision(%Runtime{file_cache: file_cache} = runtime, plan),
+    do: %{runtime | file_cache: %{file_cache | decision: FileCache.decision(file_cache, plan)}}
+
+  defp served_from_cache(runtime, plan, scatter) do
+    decision = scattered_cache(scatter, runtime.file_cache.decision)
 
     if decision do
       :telemetry.execute(
@@ -212,8 +215,11 @@ defmodule Smolquery.QueryService.Runner do
       )
     end
 
-    %{runtime | file_cache: %{file_cache | decision: decision}}
+    decision
   end
+
+  defp scattered_cache(%{file_cache: decision}, _planned), do: decision
+  defp scattered_cache(_single_engine, planned), do: planned
 
   defp mode(opts) do
     if Keyword.get(opts, :describe, false), do: :describe, else: Keyword.get(opts, :explain)
@@ -438,7 +444,7 @@ defmodule Smolquery.QueryService.Runner do
          hot_members: plan.hot_members,
          duration_ms: duration,
          statistics: plan.statistics,
-         file_cache: runtime.file_cache.decision
+         file_cache: served_from_cache(runtime, plan, scatter)
        }}
     end
   end

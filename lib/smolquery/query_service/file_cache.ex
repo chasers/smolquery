@@ -52,6 +52,15 @@ defmodule Smolquery.QueryService.FileCache do
   index is up to `@sweep_interval_ms` old, which only delays a just-warmed
   table's first cached run.
 
+  ## Scattered jobs (T-630)
+
+  A scattered job's shards read on other nodes, into those nodes' caches,
+  so the coordinator's index cannot say what they hold: judged by it, a
+  table warmed through its shards bypassed the cache on every auto run.
+  Each shard therefore decides for itself (`shard_decision/4`) against its
+  own node's index, from the job's mode, and the job reports what its
+  shards did (`combined/1`).
+
   `smolquery_query_file_cache_bytes` reports the directory's size after each
   sweep, and `smolquery_query_file_cache_evicted_bytes_total` and
   `smolquery_query_file_cache_evicted_files_total` count what it deleted.
@@ -132,6 +141,37 @@ defmodule Smolquery.QueryService.FileCache do
   """
   @spec decision(map(), Smolquery.QueryService.Plan.t()) :: decision()
   def decision(file_cache, plan), do: decide(file_cache, plan.sealed_uncached_bytes)
+
+  @doc """
+  What one shard of a scattered job does with instance `name`'s cache:
+  `decide/2` over the bytes of the shard's sealed `files` that this node's
+  cache has never read. The shard is one of `node_shards` the job runs on
+  this node, which all fill the same directory, so the shard's cold bytes
+  count that many times: about what the whole node writes for the job. A
+  sealed file carries `"bytes"`; a hot-tier file has none and is never
+  cached. `file_cache` carries the job's `mode`.
+  """
+  @spec shard_decision(atom(), map(), [map()], pos_integer()) :: decision()
+  def shard_decision(name, %{mode: :auto, directory: directory} = file_cache, files, node_shards)
+      when is_binary(directory) do
+    uncached =
+      files
+      |> Enum.filter(&is_integer(&1["bytes"]))
+      |> Enum.reject(&cached?(name, Path.basename(&1["url"])))
+      |> Enum.sum_by(& &1["bytes"])
+
+    decide(file_cache, uncached * node_shards)
+  end
+
+  def shard_decision(_name, file_cache, _files, _node_shards), do: decide(file_cache, 0)
+
+  @doc """
+  What a scattered job did with the cache, from its shards' `decisions`:
+  `:used` when any shard read through it, otherwise `:bypassed` or `:off`
+  when any shard did that, and `nil` when no shard had a cache.
+  """
+  @spec combined([decision()]) :: decision()
+  def combined(decisions), do: Enum.find([:used, :bypassed, :off], &(&1 in decisions))
 
   @doc """
   The statements a job's engine runs, before lockdown, for `decision`: a

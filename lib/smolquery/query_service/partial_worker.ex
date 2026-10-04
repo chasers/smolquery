@@ -30,6 +30,17 @@ defmodule Smolquery.QueryService.PartialWorker do
   Polars — DuckDB intermittently fails to read Polars-written parquet
   (PL-48) — and returns to the coordinator as the file's bytes.
 
+  ## File cache
+
+  The shard decides whether to read through this node's file cache itself
+  (T-630): the request carries the job's `file_cache_mode` and how many of
+  the job's shards run on this node (`node_shards`), and
+  `Smolquery.QueryService.FileCache.shard_decision/4` weighs the shard's
+  files against this node's own index, which is where its blocks land. The
+  reply carries the decision. A request from a coordinator older than
+  T-630 has no mode, only that coordinator's own verdict as `file_cache`,
+  and the shard follows it.
+
   ## Lockdown
 
   The partial SQL derives from user SQL, so the engine is confined the way
@@ -60,6 +71,8 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
           optional(:file_cache) => FileCache.decision(),
+          optional(:file_cache_mode) => :auto | boolean(),
+          optional(:node_shards) => pos_integer(),
           optional(:params) => [term()]
         }
 
@@ -71,10 +84,12 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   @doc """
   Runs `request`'s partial query over its shard and returns the result as
-  parquet bytes with its row count.
+  parquet bytes with its row count and what the shard did with the file
+  cache.
   """
   @spec run(atom(), request()) ::
-          {:ok, %{parquet: binary(), rows: non_neg_integer()}} | {:error, term()}
+          {:ok, %{parquet: binary(), rows: non_neg_integer(), file_cache: FileCache.decision()}}
+          | {:error, term()}
   def run(name, request) do
     case Runtime.fetch(name) do
       {:ok, runtime} -> with_engine(runtime, request)
@@ -89,13 +104,15 @@ defmodule Smolquery.QueryService.PartialWorker do
         "smolquery-partial-#{System.unique_integer([:positive])}.parquet"
       )
 
+    decision = cache_decision(runtime, request)
+
     case JobEngine.acquire(runtime) do
       {:ok, engine, _source} ->
         try do
           with :ok <-
                  apply_statements(
                    engine.connection,
-                   settings(runtime) ++ cache_statements(runtime, request)
+                   settings(runtime) ++ FileCache.statements(decision)
                  ),
                :ok <- apply_statements(engine.connection, functions(runtime, request.partial_sql)),
                {:ok, files} <- described(engine.connection, request.files),
@@ -103,14 +120,16 @@ defmodule Smolquery.QueryService.PartialWorker do
                  apply_statements(
                    engine.connection,
                    view(request, files) ++ lockdown(runtime, path, request.allowed_paths)
+                 ),
+               {:ok, partial} <-
+                 copy_out(
+                   engine.connection,
+                   request.partial_sql,
+                   Map.get(request, :params, []),
+                   path,
+                   Map.get(request, :timeout_ms, :infinity)
                  ) do
-            copy_out(
-              engine.connection,
-              request.partial_sql,
-              Map.get(request, :params, []),
-              path,
-              Map.get(request, :timeout_ms, :infinity)
-            )
+            {:ok, Map.put(partial, :file_cache, decision)}
           end
         after
           JobEngine.stop(engine)
@@ -173,10 +192,23 @@ defmodule Smolquery.QueryService.PartialWorker do
     file |> Map.put("field_ids", ids) |> Map.put("columns", columns)
   end
 
-  defp cache_statements(%Runtime{file_cache: %{directory: nil}}, _request), do: []
+  defp cache_decision(%Runtime{file_cache: %{directory: nil}}, _request), do: nil
 
-  defp cache_statements(_runtime, request),
-    do: FileCache.statements(Map.get(request, :file_cache))
+  defp cache_decision(%Runtime{} = runtime, %{file_cache_mode: mode} = request) do
+    decision =
+      FileCache.shard_decision(
+        runtime.name,
+        %{runtime.file_cache | mode: mode},
+        request.files,
+        Map.get(request, :node_shards, 1)
+      )
+
+    :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{decision: decision})
+
+    decision
+  end
+
+  defp cache_decision(_runtime, request), do: Map.get(request, :file_cache)
 
   defp settings(%Runtime{} = runtime) do
     memory_limit = runtime.distributed.worker_memory_limit || runtime.job_memory_limit

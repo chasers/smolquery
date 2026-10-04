@@ -32,7 +32,14 @@ defmodule Smolquery.QueryService.Scatter do
      `Smolquery.QueryService.WorkerTransport`: a direct call for this node,
      gen_rpc on its own sockets for a peer (T-364), each call bounded by
      the job's own deadline.
-  4. Each worker's parquet bytes land in the job's partials directory —
+  4. Each shard decides for itself whether to read through its node's file
+     cache (T-630): the request carries the job's cache mode, not the
+     coordinator's verdict, because the shard's blocks land in its own
+     node's cache, which the coordinator's index cannot see. A sealed unit
+     carries its `"bytes"` for that decision. The answer carries
+     `file_cache`, the shards' decisions combined
+     (`Smolquery.QueryService.FileCache.combined/1`).
+  5. Each worker's parquet bytes land in the job's partials directory —
      `Runner` put it inside `allowed_directories` before lockdown — and the
      final query reads them back with `read_parquet` on the job's own
      engine, inside the same result bound as any other query.
@@ -60,6 +67,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.Decomposer
+  alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
@@ -89,8 +97,9 @@ defmodule Smolquery.QueryService.Scatter do
   `:fallback` is not an error: the flag is off, the query does not
   decompose, the scan is too small, or something along the distributed
   path failed and was logged. The caller runs the normal path. A
-  distributed answer carries its shard count and merged partial bytes, so
-  the job can say how it was served.
+  distributed answer carries its shard count, merged partial bytes, and
+  what its shards did with the file cache, so the job can say how it was
+  served.
   """
   @spec execute(
           Runtime.t(),
@@ -101,7 +110,11 @@ defmodule Smolquery.QueryService.Scatter do
           [VariantResults.column()] | nil
         ) ::
           {:ok, Explorer.DataFrame.t(),
-           %{shards: pos_integer(), partial_bytes: non_neg_integer()}}
+           %{
+             shards: pos_integer(),
+             partial_bytes: non_neg_integer(),
+             file_cache: FileCache.decision()
+           }}
           | :fallback
   def execute(runtime, connection, plan, job_id, timeout_ms, outputs \\ nil)
 
@@ -192,7 +205,10 @@ defmodule Smolquery.QueryService.Scatter do
   defp units(runtime, plan, ref) do
     with {:ok, sealed} <- Catalog.segment_files(runtime.catalog, ref, plan.snapshot) do
       hot = plan.hot |> Map.get(ref, []) |> Enum.map(&Map.take(&1, ["url", "field_ids"]))
-      units = Enum.map(sealed, &%{"url" => &1.path, "snapshot" => &1.snapshot}) ++ hot
+
+      units =
+        Enum.map(sealed, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}) ++
+          hot
 
       if length(units) >= runtime.distributed.min_files do
         {:ok, units}
@@ -234,8 +250,9 @@ defmodule Smolquery.QueryService.Scatter do
     File.mkdir_p!(partials_dir)
 
     try do
-      with {:ok, paths} <-
+      with {:ok, partials} <-
              gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms),
+           paths = Enum.map(partials, &elem(&1, 0)),
            {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
         measurements = %{
           shards: length(shards),
@@ -248,7 +265,12 @@ defmodule Smolquery.QueryService.Scatter do
           %{workers: shards |> Enum.map(fn {peer, _files} -> peer end) |> Enum.uniq()}
         )
 
-        {:ok, frame, measurements}
+        {:ok, frame,
+         Map.put(
+           measurements,
+           :file_cache,
+           partials |> Enum.map(&elem(&1, 1)) |> FileCache.combined()
+         )}
       else
         {:error, reason} ->
           Logger.warning("distributed query fell back: #{inspect(reason)}")
@@ -274,6 +296,8 @@ defmodule Smolquery.QueryService.Scatter do
           files: files,
           partial_sql: decomposition.partial_sql,
           file_cache: runtime.file_cache.decision,
+          file_cache_mode: runtime.file_cache.mode,
+          node_shards: Enum.count(shards, &(elem(&1, 0) == peer)),
           params: decomposition.params,
           allowed_paths:
             files |> Enum.map(& &1["url"]) |> Enum.filter(&String.starts_with?(&1, "http")),
@@ -287,11 +311,11 @@ defmodule Smolquery.QueryService.Scatter do
       timeout: :infinity
     )
     |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {index, {:ok, %{parquet: parquet}}}}, {:ok, paths} ->
+      {:ok, {index, {:ok, %{parquet: parquet} = reply}}}, {:ok, partials} ->
         path = Path.join(partials_dir, "partial-#{index}.parquet")
         File.write!(path, parquet)
 
-        {:cont, {:ok, [path | paths]}}
+        {:cont, {:ok, [{path, Map.get(reply, :file_cache)} | partials]}}
 
       {:ok, {_index, {:error, reason}}}, _acc ->
         {:halt, {:error, reason}}
@@ -300,7 +324,7 @@ defmodule Smolquery.QueryService.Scatter do
         {:halt, {:error, reason}}
     end)
     |> case do
-      {:ok, paths} -> {:ok, Enum.reverse(paths)}
+      {:ok, partials} -> {:ok, Enum.reverse(partials)}
       {:error, reason} -> {:error, reason}
     end
   end

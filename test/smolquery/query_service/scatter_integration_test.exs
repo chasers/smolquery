@@ -24,6 +24,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   the catalog's five attempts. What such a test proves is how files sealed
   before the change read after it, on every shard, and that does not depend on
   which side of the services' start the change was made.
+
+  A test that gives the distributed instance a file cache does it as
+  `@tag file_cache:` too (T-630): the janitor indexes the cache directory
+  when it starts, so `warm: true` writes a block for every sealed file
+  before then.
   """
 
   use ExUnit.Case, async: false
@@ -35,6 +40,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
+  alias Smolquery.QueryService.PartialWorker
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store.Local
@@ -100,7 +106,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              [enabled: true, min_files: 4, local_workers: 3],
              Map.get(context, :distributed, [])
            )
-       ] ++ shared},
+       ] ++ file_cache(context, catalog) ++ shared},
       id: distributed
     )
 
@@ -113,6 +119,41 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     %{control: control, distributed: distributed, catalog: catalog}
   end
+
+  defp file_cache(%{file_cache: opts, tmp_dir: tmp_dir}, catalog) do
+    directory = Path.join(tmp_dir, "cache")
+    File.mkdir_p!(directory)
+
+    if Keyword.get(opts, :warm, false) do
+      {:ok, files} = Catalog.segment_files(catalog, @table, :current)
+
+      for file <- files do
+        name = "#{String.duplicate("ab", 32)}-#{Path.basename(file.path)}-0-524288"
+        File.write!(Path.join(directory, name), "x")
+      end
+    end
+
+    [file_cache: [directory: directory, bypass_bytes: Keyword.fetch!(opts, :bypass_bytes)]]
+  end
+
+  defp file_cache(_context, _catalog), do: []
+
+  defp attach_shard_decisions do
+    parent = self()
+    handler = "scatter-shard-cache-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :query, :file_cache, :shard],
+      fn _event, _measurements, meta, _config -> send(parent, {:shard_cache, meta.decision}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp shard_decisions(count),
+    do: for(_shard <- 1..count, do: assert_receive({:shard_cache, decision}) && decision)
 
   defp schema do
     Schema.new!([{"id", :int64, nullable: false}, {"name", :string}])
@@ -376,6 +417,64 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     assert %{shards: 3} = job.scatter
     assert DataFrame.to_columns(frame) == %{"late" => [0], "n" => [15]}
+  end
+
+  @tag file_cache: [bypass_bytes: 0]
+  test "a cold cache is bypassed by every shard, and the job says so (T-630)", %{
+    distributed: distributed
+  } do
+    attach_shard_decisions()
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events")
+
+    assert %{shards: 3, file_cache: :bypassed} = job.scatter
+    assert job.file_cache == :bypassed
+    assert shard_decisions(3) == [:bypassed, :bypassed, :bypassed]
+  end
+
+  @tag file_cache: [bypass_bytes: 0, warm: true]
+  test "each shard reads through a cache that holds its files (T-630)", %{
+    distributed: distributed
+  } do
+    attach_shard_decisions()
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events")
+
+    assert %{shards: 3, file_cache: :used} = job.scatter
+    assert job.file_cache == :used
+    assert shard_decisions(3) == [:used, :used, :used]
+
+    assert {:ok, %{state: :done} = off, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events",
+               file_cache: false
+             )
+
+    assert off.file_cache == :off
+    assert shard_decisions(3) == [:off, :off, :off]
+  end
+
+  @tag file_cache: [bypass_bytes: 0, warm: true]
+  test "a shard decides against its own node's cache, not the coordinator's verdict (T-630)",
+       %{distributed: distributed, catalog: catalog} do
+    {:ok, files} = Catalog.segment_files(catalog, @table, :current)
+    {:ok, schema} = Catalog.table_schema(catalog, @table)
+
+    request = %{
+      table_ref: @table,
+      schema: schema,
+      files:
+        Enum.map(files, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}),
+      partial_sql: "SELECT sum(id) AS s FROM analytics.events",
+      allowed_paths: [],
+      file_cache: :bypassed
+    }
+
+    assert {:ok, %{rows: 1, file_cache: :used}} =
+             PartialWorker.run(distributed, Map.put(request, :file_cache_mode, :auto))
+
+    assert {:ok, %{rows: 1, file_cache: :bypassed}} = PartialWorker.run(distributed, request)
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do
