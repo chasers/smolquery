@@ -132,6 +132,16 @@ defmodule Smolquery.RuntimeConfigTest do
     )
   end
 
+  test "SMOLQUERY_JOB_MEMORY_LIMIT sizes each query job engine (T-631)" do
+    read = fn ->
+      "config/runtime.exs"
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> get_in([:smolquery, Smolquery.QueryService, :job_memory_limit])
+    end
+
+    with_env(%{"SMOLQUERY_JOB_MEMORY_LIMIT" => "4GB"}, fn -> assert read.() == "4GB" end)
+  end
+
   test "runtime config reports the actual replication and port bounds" do
     with_env(%{"SMOLQUERY_BUFFER_REPLICATION" => "1"}, fn ->
       assert_raise ArgumentError, ~r/SMOLQUERY_BUFFER_REPLICATION.*at least 2/, fn ->
