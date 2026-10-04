@@ -162,11 +162,14 @@ defmodule Smolquery.Telemetry do
                                           — one per job or shard engine acquired (PL-50)
       [:smolquery, :query, :file_cache, :decision]  %{uncached_bytes}, meta
                                           %{decision: :used | :bypassed | :off} — one per job
-                                          on a node with a file cache (T-629); a scattered
-                                          job reports its shards' combined decision (T-630)
+                                          that ran, done or failed, on a node with a file
+                                          cache (T-629); a scattered job reports its shards'
+                                          combined decision, without the coordinator's
+                                          uncached_bytes (T-630)
       [:smolquery, :query, :file_cache, :shard]  %{}, meta %{decision: :used | :bypassed |
-                                          :off} — one per scatter shard on a node with a file
-                                          cache, decided against that node's index (T-630)
+                                          :off} — one per scatter shard that answered on a
+                                          node with a file cache, decided against that
+                                          node's index (T-630)
       [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per
                                           FileCache sweep of the shared read cache (T-626)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}

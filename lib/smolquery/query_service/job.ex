@@ -86,13 +86,7 @@ defmodule Smolquery.QueryService.Job do
           statistics: Statistics.t() | nil,
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
-          scatter:
-            %{
-              shards: pos_integer(),
-              partial_bytes: non_neg_integer(),
-              file_cache: Smolquery.QueryService.FileCache.decision()
-            }
-            | nil,
+          scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
           file_cache: Smolquery.QueryService.FileCache.decision(),
           ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),

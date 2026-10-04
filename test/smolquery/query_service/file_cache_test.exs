@@ -3,6 +3,7 @@ defmodule Smolquery.QueryService.FileCacheTest do
 
   alias Smolquery.QueryService.FileCache
   alias Smolquery.Telemetry
+  alias Smolquery.Test.FileCacheFixture
 
   @moduletag :tmp_dir
 
@@ -163,10 +164,10 @@ defmodule Smolquery.QueryService.FileCacheTest do
       assert FileCache.combined([nil, nil]) == nil
     end
 
-    test "shard_decision/4 weighs the shard's sealed files against this node's index",
+    test "shard_decision/3 weighs the node's sealed files against this node's index",
          %{tmp_dir: dir} do
       name = :"file_cache_shard_#{System.unique_integer([:positive])}"
-      block!(dir, "#{String.duplicate("ab", 32)}-01WARM.parquet-0-524288", 10, 100)
+      block!(dir, FileCacheFixture.block_name("01WARM.parquet"), 10, 100)
 
       parent = self()
       handler = "file-cache-shard-#{System.unique_integer([:positive])}"
@@ -184,20 +185,17 @@ defmodule Smolquery.QueryService.FileCacheTest do
       assert_receive :swept
 
       auto = %{directory: dir, mode: :auto, bypass_bytes: 1_000}
-      warm = %{"url" => "s3://lake/t/01WARM.parquet", "snapshot" => 1, "bytes" => 5_000}
-      cold = %{"url" => "s3://lake/t/01COLD.parquet", "snapshot" => 1, "bytes" => 600}
-      hot = %{"url" => "http://buffer/segments/01HOT.parquet"}
+      warm = %{"url" => "s3://lake/t/01WARM.parquet", "bytes" => 5_000}
+      cold = %{"url" => "s3://lake/t/01COLD.parquet", "bytes" => 600}
+      colder = %{"url" => "s3://lake/t/01COLDER.parquet", "bytes" => 500}
 
-      assert FileCache.shard_decision(name, auto, [warm, hot], 1) == :used
-      assert FileCache.shard_decision(name, auto, [warm, cold], 1) == :used
-      assert FileCache.shard_decision(name, auto, [warm, cold], 2) == :bypassed
-
-      assert FileCache.shard_decision(name, auto, [cold, %{cold | "bytes" => 500}], 1) ==
-               :bypassed
-
-      assert FileCache.shard_decision(name, %{auto | mode: true}, [cold], 4) == :used
-      assert FileCache.shard_decision(name, %{auto | mode: false}, [warm], 1) == :off
-      assert FileCache.shard_decision(name, %{auto | directory: nil}, [cold], 4) == nil
+      assert FileCache.shard_decision(name, auto, [warm]) == :used
+      assert FileCache.shard_decision(name, auto, [warm, cold]) == :used
+      assert FileCache.shard_decision(name, auto, [warm, cold, colder]) == :bypassed
+      assert FileCache.shard_decision(name, auto, []) == :used
+      assert FileCache.shard_decision(name, %{auto | mode: true}, [cold, colder]) == :used
+      assert FileCache.shard_decision(name, %{auto | mode: false}, [warm]) == :off
+      assert FileCache.shard_decision(name, %{auto | directory: nil}, [cold, colder]) == nil
     end
   end
 end

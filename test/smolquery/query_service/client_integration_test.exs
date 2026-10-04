@@ -18,6 +18,7 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
   alias Smolquery.Schema
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.Eventually
+  alias Smolquery.Test.FileCacheFixture
   alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
@@ -147,11 +148,7 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
       File.mkdir_p!(cache)
 
       for file_name <- warmed,
-          do:
-            File.write!(
-              Path.join(cache, "#{String.duplicate("ab", 32)}-#{file_name}-0-524288"),
-              "x"
-            )
+          do: File.write!(Path.join(cache, FileCacheFixture.block_name(file_name)), "x")
 
       name = :"client_int_cached_#{:erlang.unique_integer([:positive])}"
       metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
@@ -237,6 +234,31 @@ defmodule Smolquery.QueryService.ClientIntegrationTest do
                Client.query(query, "SELECT count(*) AS n FROM analytics.events")
 
       assert job.file_cache == :bypassed
+    end
+
+    test "a job that fails after planning still counts its decision (T-630)", context do
+      seal!(context.catalog, context.tmp_dir)
+      query = cached_query(context, 0)
+
+      parent = self()
+      handler = "client-int-cache-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :query, :file_cache, :decision],
+        fn _event, measurements, meta, _config ->
+          send(parent, {:cache_decision, measurements, meta})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, %{state: :error}, nil} =
+               Client.query(query, "SELECT CAST(name AS INTEGER) AS n FROM analytics.events")
+
+      assert_receive {:cache_decision, %{uncached_bytes: bytes}, %{decision: :bypassed}}
+      assert bytes > 0
     end
 
     test "a node without a file cache reports no decision", context do
