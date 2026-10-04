@@ -99,6 +99,17 @@ defmodule Smolquery.RuntimeConfigTest do
     end
   end
 
+  test "accepts a size string and refuses what can never be one" do
+    for size <- ["4GB", "512 MiB", "1.5GB", "1000000"],
+        do: assert(RuntimeConfig.size!("LIMIT", size) == size)
+
+    for bad <- ["", "  ", "lots", "-1GB", "GB"] do
+      assert_raise ArgumentError, ~r/LIMIT.*a size such as 4GB/, fn ->
+        RuntimeConfig.size!("LIMIT", bad)
+      end
+    end
+  end
+
   test "parses bounded node names without creating atoms" do
     assert RuntimeConfig.node_names!(
              "NODES",
@@ -140,6 +151,10 @@ defmodule Smolquery.RuntimeConfigTest do
     end
 
     with_env(%{"SMOLQUERY_JOB_MEMORY_LIMIT" => "4GB"}, fn -> assert read.() == "4GB" end)
+
+    with_env(%{"SMOLQUERY_JOB_MEMORY_LIMIT" => ""}, fn ->
+      assert_raise ArgumentError, ~r/SMOLQUERY_JOB_MEMORY_LIMIT/, read
+    end)
   end
 
   test "runtime config reports the actual replication and port bounds" do

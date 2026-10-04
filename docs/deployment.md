@@ -134,6 +134,7 @@ Each query job engine's DuckDB `memory_limit` was set only in compiled config, a
 - **Unset:** nothing changes. Job engines keep `1GB`.
 - **Budget:** a node can run up to `max_concurrent_jobs` jobs at once, each with this limit, plus its scatter workers.
 - **Scatter workers:** they take this value too, unless `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` is set.
+- **Bad values:** the boot refuses a value that is not a number and an optional unit, such as an empty one.
 
 ### 0.22.0: each scatter shard decides the file cache against its own node (T-630)
 

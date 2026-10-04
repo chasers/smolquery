@@ -700,10 +700,11 @@ end
 # `SMOLQUERY_JOB_MEMORY_LIMIT` (T-631) is each query job engine's DuckDB
 # `memory_limit` (`1GB` unset). Jobs in flight multiply it, up to
 # `max_concurrent_jobs`, and a scatter worker inherits it whole unless
-# `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` says otherwise. A size string
-# has its own grammar, so it passes through as given.
+# `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` says otherwise. The boot
+# refuses a value that is not a number and a unit; DuckDB checks the unit.
 if limit = System.get_env("SMOLQUERY_JOB_MEMORY_LIMIT") do
-  config :smolquery, Smolquery.QueryService, job_memory_limit: limit
+  config :smolquery, Smolquery.QueryService,
+    job_memory_limit: Smolquery.RuntimeConfig.size!("SMOLQUERY_JOB_MEMORY_LIMIT", limit)
 end
 
 # `SMOLQUERY_EXTENSION_DIRECTORY` (PL-50) is where DuckDB finds and installs

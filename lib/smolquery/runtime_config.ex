@@ -69,6 +69,20 @@ defmodule Smolquery.RuntimeConfig do
   def boolean!(name, value), do: invalid!(name, value, "true, 1, false, or 0")
 
   @doc """
+  Checks the shape of a DuckDB size string, such as `4GB`, `512 MiB` or
+  `1.5GB`: a number and an optional unit. DuckDB owns the unit grammar and
+  still has the last word; this refuses only what can never be a size, an
+  empty value from an unfilled template or a word, so the node fails at
+  boot instead of at every engine start.
+  """
+  @spec size!(String.t(), String.t()) :: String.t()
+  def size!(name, value) do
+    if Regex.match?(~r/^\s*\d+(\.\d+)?\s*[A-Za-z%]*\s*$/, value),
+      do: value,
+      else: invalid!(name, value, "a size such as 4GB or 512MiB")
+  end
+
+  @doc """
   Maps a string through a finite set of accepted values without creating atoms.
   """
   @spec enum!(String.t(), String.t(), [{String.t(), term()}]) :: term()
