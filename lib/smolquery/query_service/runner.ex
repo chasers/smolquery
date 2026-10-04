@@ -204,22 +204,33 @@ defmodule Smolquery.QueryService.Runner do
   defp with_cache_decision(%Runtime{file_cache: file_cache} = runtime, plan),
     do: %{runtime | file_cache: %{file_cache | decision: FileCache.decision(file_cache, plan)}}
 
-  defp served_from_cache(runtime, plan, scatter) do
-    decision = scattered_cache(scatter, runtime.file_cache.decision)
+  defp count_cache_decision(_runtime, _plan, {:ok, %{scatter: %{}, file_cache: decision}}),
+    do: emit_cache_decision(decision, %{})
 
-    if decision do
-      :telemetry.execute(
-        [:smolquery, :query, :file_cache, :decision],
-        %{uncached_bytes: plan.sealed_uncached_bytes},
-        %{decision: decision}
-      )
-    end
+  defp count_cache_decision(_runtime, plan, {:ok, %{file_cache: decision}}),
+    do: emit_cache_decision(decision, %{uncached_bytes: plan.sealed_uncached_bytes})
 
-    decision
+  defp count_cache_decision(runtime, plan, _failed),
+    do:
+      emit_cache_decision(runtime.file_cache.decision, %{
+        uncached_bytes: plan.sealed_uncached_bytes
+      })
+
+  defp emit_cache_decision(nil, _measurements), do: :ok
+
+  defp emit_cache_decision(decision, measurements),
+    do:
+      :telemetry.execute([:smolquery, :query, :file_cache, :decision], measurements, %{
+        decision: decision
+      })
+
+  defp scatter_cache(nil, planned), do: {nil, planned}
+
+  defp scatter_cache(scatter, _planned) do
+    {decision, measurements} = Map.pop(scatter, :file_cache)
+
+    {measurements, decision}
   end
-
-  defp scattered_cache(%{file_cache: decision}, _planned), do: decision
-  defp scattered_cache(_single_engine, planned), do: planned
 
   defp mode(opts) do
     if Keyword.get(opts, :describe, false), do: :describe, else: Keyword.get(opts, :explain)
@@ -407,9 +418,17 @@ defmodule Smolquery.QueryService.Runner do
     started = System.monotonic_time(:millisecond)
 
     with :ok <- define_functions(runtime, connection, sql),
-         {:ok, plan} <- Planner.plan(runtime, connection, sql, opts),
-         runtime = with_cache_decision(runtime, plan),
-         :ok <- federated_extension(connection, plan),
+         {:ok, plan} <- Planner.plan(runtime, connection, sql, opts) do
+      runtime = with_cache_decision(runtime, plan)
+      executed = execute_plan(runtime, connection, plan, explain, job_id, timeout_ms, started)
+      count_cache_decision(runtime, plan, executed)
+
+      executed
+    end
+  end
+
+  defp execute_plan(runtime, connection, plan, explain, job_id, timeout_ms, started) do
+    with :ok <- federated_extension(connection, plan),
          :ok <-
            Trace.span(:statements, fn ->
              run_statements(
@@ -433,6 +452,7 @@ defmodule Smolquery.QueryService.Runner do
              )
            end) do
       duration = System.monotonic_time(:millisecond) - started
+      {scatter, file_cache} = scatter_cache(scatter, runtime.file_cache.decision)
 
       {:ok,
        %{
@@ -444,7 +464,7 @@ defmodule Smolquery.QueryService.Runner do
          hot_members: plan.hot_members,
          duration_ms: duration,
          statistics: plan.statistics,
-         file_cache: served_from_cache(runtime, plan, scatter)
+         file_cache: file_cache
        }}
     end
   end

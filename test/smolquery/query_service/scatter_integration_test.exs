@@ -44,6 +44,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store.Local
+  alias Smolquery.Test.FileCacheFixture
   alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
@@ -127,10 +128,12 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     if Keyword.get(opts, :warm, false) do
       {:ok, files} = Catalog.segment_files(catalog, @table, :current)
 
-      for file <- files do
-        name = "#{String.duplicate("ab", 32)}-#{Path.basename(file.path)}-0-524288"
-        File.write!(Path.join(directory, name), "x")
-      end
+      for file <- files,
+          do:
+            File.write!(
+              Path.join(directory, FileCacheFixture.block_name(Path.basename(file.path))),
+              "x"
+            )
     end
 
     [file_cache: [directory: directory, bypass_bytes: Keyword.fetch!(opts, :bypass_bytes)]]
@@ -428,7 +431,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events")
 
-    assert %{shards: 3, file_cache: :bypassed} = job.scatter
+    assert %{shards: 3} = job.scatter
     assert job.file_cache == :bypassed
     assert shard_decisions(3) == [:bypassed, :bypassed, :bypassed]
   end
@@ -442,7 +445,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events")
 
-    assert %{shards: 3, file_cache: :used} = job.scatter
+    assert %{shards: 3} = job.scatter
     assert job.file_cache == :used
     assert shard_decisions(3) == [:used, :used, :used]
 
@@ -453,6 +456,19 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     assert off.file_cache == :off
     assert shard_decisions(3) == [:off, :off, :off]
+  end
+
+  @tag file_cache: [bypass_bytes: 1_000_000_000]
+  test "a cold cache under the threshold for the node's files is used by every shard (T-630)",
+       %{distributed: distributed} do
+    attach_shard_decisions()
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events")
+
+    assert %{shards: 3} = job.scatter
+    assert job.file_cache == :used
+    assert shard_decisions(3) == [:used, :used, :used]
   end
 
   @tag file_cache: [bypass_bytes: 0, warm: true]
@@ -466,6 +482,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       schema: schema,
       files:
         Enum.map(files, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}),
+      node_files: Enum.map(files, &%{"url" => &1.path, "bytes" => &1.bytes}),
       partial_sql: "SELECT sum(id) AS s FROM analytics.events",
       allowed_paths: [],
       file_cache: :bypassed

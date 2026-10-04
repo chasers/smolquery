@@ -33,13 +33,14 @@ defmodule Smolquery.QueryService.PartialWorker do
   ## File cache
 
   The shard decides whether to read through this node's file cache itself
-  (T-630): the request carries the job's `file_cache_mode` and how many of
-  the job's shards run on this node (`node_shards`), and
-  `Smolquery.QueryService.FileCache.shard_decision/4` weighs the shard's
-  files against this node's own index, which is where its blocks land. The
-  reply carries the decision. A request from a coordinator older than
-  T-630 has no mode, only that coordinator's own verdict as `file_cache`,
-  and the shard follows it.
+  (T-630): the request carries the job's `file_cache_mode` and the sealed
+  files of every shard the job runs on this node (`node_files`), and
+  `Smolquery.QueryService.FileCache.shard_decision/3` weighs them against
+  this node's own index, which is where their blocks land. The reply
+  carries the decision, and a shard that answered counts it in
+  `[:smolquery, :query, :file_cache, :shard]`. A request from a
+  coordinator older than T-630 has no mode, only that coordinator's own
+  verdict as `file_cache`, and the shard follows it.
 
   ## Lockdown
 
@@ -72,7 +73,7 @@ defmodule Smolquery.QueryService.PartialWorker do
           optional(:timeout_ms) => timeout(),
           optional(:file_cache) => FileCache.decision(),
           optional(:file_cache_mode) => :auto | boolean(),
-          optional(:node_shards) => pos_integer(),
+          optional(:node_files) => [map()],
           optional(:params) => [term()]
         }
 
@@ -129,6 +130,12 @@ defmodule Smolquery.QueryService.PartialWorker do
                    path,
                    Map.get(request, :timeout_ms, :infinity)
                  ) do
+            if decision do
+              :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
+                decision: decision
+              })
+            end
+
             {:ok, Map.put(partial, :file_cache, decision)}
           end
         after
@@ -194,19 +201,8 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   defp cache_decision(%Runtime{file_cache: %{directory: nil}}, _request), do: nil
 
-  defp cache_decision(%Runtime{} = runtime, %{file_cache_mode: mode} = request) do
-    decision =
-      FileCache.shard_decision(
-        runtime.name,
-        %{runtime.file_cache | mode: mode},
-        request.files,
-        Map.get(request, :node_shards, 1)
-      )
-
-    :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{decision: decision})
-
-    decision
-  end
+  defp cache_decision(%Runtime{} = runtime, %{file_cache_mode: mode, node_files: node_files}),
+    do: FileCache.shard_decision(runtime.name, %{runtime.file_cache | mode: mode}, node_files)
 
   defp cache_decision(_runtime, request), do: Map.get(request, :file_cache)
 

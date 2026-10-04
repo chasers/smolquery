@@ -35,10 +35,13 @@ defmodule Smolquery.QueryService.Scatter do
   4. Each shard decides for itself whether to read through its node's file
      cache (T-630): the request carries the job's cache mode, not the
      coordinator's verdict, because the shard's blocks land in its own
-     node's cache, which the coordinator's index cannot see. A sealed unit
-     carries its `"bytes"` for that decision. The answer carries
-     `file_cache`, the shards' decisions combined
-     (`Smolquery.QueryService.FileCache.combined/1`).
+     node's cache, which the coordinator's index cannot see. It also
+     carries the sealed files, with their `"bytes"`, of every shard on the
+     same node, which all fill one cache. The answer carries `file_cache`,
+     the shards' decisions combined
+     (`Smolquery.QueryService.FileCache.combined/1`); a shard on a node
+     older than T-630 reports none and counts as the coordinator's verdict,
+     which is what it followed.
   5. Each worker's parquet bytes land in the job's partials directory —
      `Runner` put it inside `allowed_directories` before lockdown — and the
      final query reads them back with `read_parquet` on the job's own
@@ -286,6 +289,8 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms) do
+    node_files = node_files(shards)
+
     shards
     |> Enum.with_index()
     |> Task.async_stream(
@@ -297,7 +302,7 @@ defmodule Smolquery.QueryService.Scatter do
           partial_sql: decomposition.partial_sql,
           file_cache: runtime.file_cache.decision,
           file_cache_mode: runtime.file_cache.mode,
-          node_shards: Enum.count(shards, &(elem(&1, 0) == peer)),
+          node_files: Map.fetch!(node_files, peer),
           params: decomposition.params,
           allowed_paths:
             files |> Enum.map(& &1["url"]) |> Enum.filter(&String.starts_with?(&1, "http")),
@@ -315,7 +320,9 @@ defmodule Smolquery.QueryService.Scatter do
         path = Path.join(partials_dir, "partial-#{index}.parquet")
         File.write!(path, parquet)
 
-        {:cont, {:ok, [{path, Map.get(reply, :file_cache)} | partials]}}
+        decision = Map.get(reply, :file_cache, runtime.file_cache.decision)
+
+        {:cont, {:ok, [{path, decision} | partials]}}
 
       {:ok, {_index, {:error, reason}}}, _acc ->
         {:halt, {:error, reason}}
@@ -327,6 +334,14 @@ defmodule Smolquery.QueryService.Scatter do
       {:ok, partials} -> {:ok, Enum.reverse(partials)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp node_files(shards) do
+    shards
+    |> Enum.group_by(&elem(&1, 0), fn {_peer, files} ->
+      for %{"bytes" => bytes, "url" => url} <- files, do: %{"url" => url, "bytes" => bytes}
+    end)
+    |> Map.new(fn {peer, sealed} -> {peer, Enum.concat(sealed)} end)
   end
 
   defp bounded(final, :infinity), do: final

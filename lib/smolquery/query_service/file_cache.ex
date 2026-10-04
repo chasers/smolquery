@@ -57,7 +57,7 @@ defmodule Smolquery.QueryService.FileCache do
   A scattered job's shards read on other nodes, into those nodes' caches,
   so the coordinator's index cannot say what they hold: judged by it, a
   table warmed through its shards bypassed the cache on every auto run.
-  Each shard therefore decides for itself (`shard_decision/4`) against its
+  Each shard therefore decides for itself (`shard_decision/3`) against its
   own node's index, from the job's mode, and the job reports what its
   shards did (`combined/1`).
 
@@ -143,27 +143,27 @@ defmodule Smolquery.QueryService.FileCache do
   def decision(file_cache, plan), do: decide(file_cache, plan.sealed_uncached_bytes)
 
   @doc """
-  What one shard of a scattered job does with instance `name`'s cache:
-  `decide/2` over the bytes of the shard's sealed `files` that this node's
-  cache has never read. The shard is one of `node_shards` the job runs on
-  this node, which all fill the same directory, so the shard's cold bytes
-  count that many times: about what the whole node writes for the job. A
-  sealed file carries `"bytes"`; a hot-tier file has none and is never
-  cached. `file_cache` carries the job's `mode`.
+  What a shard of a scattered job does with instance `name`'s cache:
+  `decide/2` over the bytes of `node_files` that this node's cache has
+  never read. `node_files` are the sealed files (`"url"` and `"bytes"`)
+  of every shard the job runs on this node, since they all fill the same
+  directory, so every shard on a node reaches the same decision, and a
+  node whose files add up to no more than `bypass_bytes` always uses the
+  cache, as a single-engine job does. `file_cache` carries the job's
+  `mode`.
   """
-  @spec shard_decision(atom(), map(), [map()], pos_integer()) :: decision()
-  def shard_decision(name, %{mode: :auto, directory: directory} = file_cache, files, node_shards)
+  @spec shard_decision(atom(), map(), [map()]) :: decision()
+  def shard_decision(name, %{mode: :auto, directory: directory} = file_cache, node_files)
       when is_binary(directory) do
     uncached =
-      files
-      |> Enum.filter(&is_integer(&1["bytes"]))
+      node_files
       |> Enum.reject(&cached?(name, Path.basename(&1["url"])))
       |> Enum.sum_by(& &1["bytes"])
 
-    decide(file_cache, uncached * node_shards)
+    decide(file_cache, uncached)
   end
 
-  def shard_decision(_name, file_cache, _files, _node_shards), do: decide(file_cache, 0)
+  def shard_decision(_name, file_cache, _node_files), do: decide(file_cache, 0)
 
   @doc """
   What a scattered job did with the cache, from its shards' `decisions`:
