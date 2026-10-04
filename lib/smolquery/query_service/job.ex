@@ -34,7 +34,9 @@ defmodule Smolquery.QueryService.Job do
   `file_cache` says what the job did with the node's sealed-tier read cache
   (T-629): `:used`, `:bypassed` (its cold scan was too large to fill the
   cache on the way), `:off` (the job asked), or `nil` (no cache on this
-  node). In-memory only, like `scatter`.
+  node). A scattered job reports what its shards did, each against its own
+  node's cache (T-630): `:used` when any shard read through it. In-memory
+  only, like `scatter`.
 
   `ddl` says the job was an `ALTER TABLE` (`Smolquery.Ddl`), and what it did:
   the operation, the table, the column, and whether anything changed. A DDL
@@ -84,7 +86,13 @@ defmodule Smolquery.QueryService.Job do
           statistics: Statistics.t() | nil,
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
-          scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
+          scatter:
+            %{
+              shards: pos_integer(),
+              partial_bytes: non_neg_integer(),
+              file_cache: Smolquery.QueryService.FileCache.decision()
+            }
+            | nil,
           file_cache: Smolquery.QueryService.FileCache.decision(),
           ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),

@@ -127,13 +127,22 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: each scatter shard decides the file cache against its own node (T-630)
+
+With T-629, the coordinator decided for every shard of a scattered query, using only its own node's cache. The shards read on other nodes, so their blocks land in those nodes' caches. The coordinator never saw them, so a warmed table still counted as cold, and every auto run bypassed the cache again.
+
+- **Now:** the coordinator sends the job's mode (auto, on, off). Each shard checks its own files against its own node's cache, and bypasses only when its own cold bytes pass `SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES`. Shards that share a node count together.
+- **What the job reports:** a scattered job's `fileCache` is `used` when any shard read through its cache, otherwise `bypassed` or `off`.
+- **Metrics:** `smolquery_query_file_cache_shards_total{decision}` counts each shard's decision. `smolquery_query_file_cache_jobs_total` counts a scattered job by its shards' combined decision.
+- **During the roll:** a shard on an older node follows the coordinator's verdict, as before. A shard on a new node that gets a request from an older coordinator does the same.
+
 ### 0.22.0: a cold large scan skips the file cache, and each job can choose (T-629)
 
 With the T-626 cache on, the first read of a large table waited on writing every cache block to the node's local disk. On the sandbox, `onebrc_v6` (1.26 GB, 7 sealed files) took 41 s cold through the cache and 15.5 s with no cache; its warm rerun took 1.7-4.5 s. Larger blocks and more fan-out made the cold read slower, not faster.
 
 - **When the cache is bypassed:** a job whose live sealed files the cache has never read add up to more than `SMOLQUERY_QUERY_FILE_CACHE_BYPASS_BYTES` (512 MiB) reads the object store directly, at the no-cache speed. Every other job reads through the cache. A file counts as read once any block of it is cached, because the cache holds only the columns a query read; a file retired by compaction does not count for its replacement. The index the janitor rebuilds every 30 s says which files are cached, so a just-warmed table may bypass once more.
 - **How a large table gets warmed:** run it once with `"fileCache": true` (the API) or File cache **on** (the query page). That run pays the cold cost and fills the cache; later runs read through it.
-- **Per job:** `"fileCache": true | false` on `POST /v1/queries` and `POST /v1/jobs`, and the File cache select (auto, on, off) on the query page. The job reports `fileCache`: `used`, `bypassed` or `off`, and the page shows it as a badge. Scatter shards follow the job's decision.
+- **Per job:** `"fileCache": true | false` on `POST /v1/queries` and `POST /v1/jobs`, and the File cache select (auto, on, off) on the query page. The job reports `fileCache`: `used`, `bypassed` or `off`, and the page shows it as a badge. Scatter shards decide for themselves (T-630, above).
 - **Metrics:** `smolquery_query_file_cache_jobs_total{decision}`.
 
 ### 0.22.0: quiet tables are compacted every minute (T-627)

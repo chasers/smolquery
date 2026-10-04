@@ -162,7 +162,11 @@ defmodule Smolquery.Telemetry do
                                           — one per job or shard engine acquired (PL-50)
       [:smolquery, :query, :file_cache, :decision]  %{uncached_bytes}, meta
                                           %{decision: :used | :bypassed | :off} — one per job
-                                          on a node with a file cache (T-629)
+                                          on a node with a file cache (T-629); a scattered
+                                          job reports its shards' combined decision (T-630)
+      [:smolquery, :query, :file_cache, :shard]  %{}, meta %{decision: :used | :bypassed |
+                                          :off} — one per scatter shard on a node with a file
+                                          cache, decided against that node's index (T-630)
       [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per
                                           FileCache sweep of the shared read cache (T-626)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
@@ -297,6 +301,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :engine],
     [:smolquery, :query, :file_cache, :sweep],
     [:smolquery, :query, :file_cache, :decision],
+    [:smolquery, :query, :file_cache, :shard],
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
@@ -478,7 +483,11 @@ defmodule Smolquery.Telemetry do
       "Time query jobs ran; divide by jobs for the mean.",
     "smolquery_query_file_cache_jobs_total" =>
       "Query jobs on a node with a file cache, by decision: used, bypassed (a cold scan over " <>
-        "the bypass threshold) or off (the job asked) (T-629).",
+        "the bypass threshold) or off (the job asked) (T-629). A scattered job counts its " <>
+        "shards' combined decision: used when any shard read through its cache (T-630).",
+    "smolquery_query_file_cache_shards_total" =>
+      "Scatter shards on a node with a file cache, by the decision the shard made against " <>
+        "its own node's cache: used, bypassed or off (T-630).",
     "smolquery_query_file_cache_evicted_bytes_total" =>
       "Bytes the shared sealed-tier read cache deleted to stay under its cap (T-626).",
     "smolquery_query_file_cache_evicted_files_total" =>
@@ -1089,6 +1098,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :query, :file_cache, :decision], _measurements, meta, nil) do
     bump({"smolquery_query_file_cache_jobs_total", [decision: cache_decision(meta)]}, 1)
+  end
+
+  def handle_event([:smolquery, :query, :file_cache, :shard], _measurements, meta, nil) do
+    bump({"smolquery_query_file_cache_shards_total", [decision: cache_decision(meta)]}, 1)
   end
 
   def handle_event([:smolquery, :query, :file_cache, :sweep], measurements, _meta, nil) do
