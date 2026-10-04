@@ -95,7 +95,7 @@ that forwarding step first.
 Size the worker engines with `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`
 and `SMOLQUERY_DISTRIBUTED_WORKER_THREADS`. A scattered query's declared
 budget on one node is the worker count `×` the worker limit, on top of the
-job engine's own `job_memory_limit`.
+job engine's own limit, `SMOLQUERY_JOB_MEMORY_LIMIT` (`1GB`).
 
 ## When a peer dies without closing its sockets
 
@@ -126,6 +126,14 @@ answers nothing at the TCP level.
 ## Upgrade notes
 
 One note per release, newest first.
+
+### 0.22.0: `SMOLQUERY_JOB_MEMORY_LIMIT` sizes query job engines (T-631)
+
+Each query job engine's DuckDB `memory_limit` was set only in compiled config, at `1GB`. `SMOLQUERY_JOB_MEMORY_LIMIT` now sets it from the environment.
+
+- **Unset:** nothing changes. Job engines keep `1GB`.
+- **Budget:** a node can run up to `max_concurrent_jobs` jobs at once, each with this limit, plus its scatter workers.
+- **Scatter workers:** they take this value too, unless `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` is set.
 
 ### 0.22.0: each scatter shard decides the file cache against its own node (T-630)
 

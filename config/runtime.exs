@@ -697,6 +697,15 @@ if threads = System.get_env("SMOLQUERY_READ_ENGINE_THREADS") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_READ_ENGINE_THREADS", threads)
 end
 
+# `SMOLQUERY_JOB_MEMORY_LIMIT` (T-631) is each query job engine's DuckDB
+# `memory_limit` (`1GB` unset). Jobs in flight multiply it, up to
+# `max_concurrent_jobs`, and a scatter worker inherits it whole unless
+# `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` says otherwise. A size string
+# has its own grammar, so it passes through as given.
+if limit = System.get_env("SMOLQUERY_JOB_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.QueryService, job_memory_limit: limit
+end
+
 # `SMOLQUERY_EXTENSION_DIRECTORY` (PL-50) is where DuckDB finds and installs
 # its extensions. The image sets it to a directory it ships pre-installed —
 # off `/data`, which is an emptyDir that a pod roll wipes, so a fresh pod
@@ -779,7 +788,7 @@ end
 # `SMOLQUERY_DISTRIBUTED_MIN_FILES` shardable files, or one that does not
 # decompose, runs the normal single-engine path; so does any distributed
 # failure. Each worker engine takes `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`
-# (default: the job memory limit, whole) and
+# (default: `SMOLQUERY_JOB_MEMORY_LIMIT`, whole) and
 # `SMOLQUERY_DISTRIBUTED_WORKER_THREADS` (default: the read engine threads) —
 # a node's declared scatter budget is workers x that limit on top of the job
 # engine's own, and nothing divides a size string for you.
