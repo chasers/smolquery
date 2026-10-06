@@ -102,8 +102,12 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       assert %Pushdown{rollup: "present_over_time", window_ms: 900_000} =
                plan!("sum(present_over_time(m[15m]))")
 
-      assert plan("sum(present_over_time(m[1d]))") == :none
-      assert plan("sum(rate(m[1h]))") == :none
+      assert %Pushdown{
+               rollup: "present_over_time",
+               window_ms: 86_400_000,
+               read_from_ms: -86_700_000
+             } =
+               plan!("sum(present_over_time(m[1d]))")
     end
 
     test "offset moves the grid and the read back, and the answer forward again" do
@@ -159,10 +163,13 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       assert Pushdown.plan(%{expr | args: [%{call | args: [rollup]}]}, @context) == :none
     end
 
-    test "a rollup other than the last sample is pushed only up to 32 steps of window" do
+    test "a rollup over a window whole is pushed only up to 32 steps; one off its edges at any window" do
       assert %Pushdown{window_ms: 960_000} = plan!("sum(sum_over_time(m[16m]))")
       assert plan("sum(sum_over_time(m[16m1s]))") == :none
       assert plan("avg(avg_over_time(m[1d]))") == :none
+      assert plan("sum(stddev_over_time(m[1d]))") == :none
+      assert %Pushdown{window_ms: 86_400_000} = plan!("sum(rate(m[1d]))")
+      assert %Pushdown{window_ms: 86_400_000} = plan!("sum(irate(m[1d]))")
       assert %Pushdown{window_ms: 86_400_000} = plan!("sum(last_over_time(m[1d]))")
       assert %Pushdown{window_ms: 86_400_000} = plan!("sum(m[1d])")
     end
@@ -408,6 +415,13 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       "sum by (job) (rate(c[2m] offset -15s))",
       "sum(up offset 1m)",
       "sum(rate(c[5m]))",
+      "sum by (job) (rate(c[10m]))",
+      "sum by (job) (rate(c[1h]))",
+      "sum by (job) (delta(c[1h]))",
+      "max by (job) (increase(c[9m]))",
+      "sum by (job) (irate(c[10m]))",
+      "sum by (job) (idelta(c[10m]))",
+      "count by (job) (first_over_time(c[10m]))",
       "count(rate(c[1m]))",
       "sum without (job) (up)",
       "avg without (instance, job) (gauge)",

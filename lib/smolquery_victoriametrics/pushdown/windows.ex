@@ -26,24 +26,32 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       before its window a sample still counts as the window's `prev_value`,
       and, for the functions `Rollup.may_adjust_window?/1` names with no
       window written, the window itself when it is longer than the step;
-    * each sample carries `frame`, the samples within one window before it
-      (a `RANGE` frame of the per-series window, sorted by index), and
-      `before`, the last sample older than that. A sample is the window's
-      last at the grid points `[ts, min(next_ts, ts + w))`, and is unnested
-      into them (`held`); at such a point the window holds the samples of
-      `frame` up to this one with `ts > t - w` (`items`), the first of them
-      is the window's first, the one before it in `frame` (or `before`) is
-      the sample before the window, and the one before the last's timestamp
-      group is `irate`'s `earlier`;
+    * a sample is the window's last at the grid points
+      `[ts, min(next_ts, ts + w))`, and is unnested into them (`held`);
     * a sample is also the sample before an empty window at the points
       `[ts + w, min(next_ts, ts + w + max_prev))`, and is unnested into
       them too (not `held`) for the functions that read `prev_value`, which
-      is how `rate` answers `0` there.
+      is how `rate` answers `0` there;
+    * at a held point `t`, the window's first sample is the first of the
+      timestamp groups (`f`) with `ts > t - w`, found by an `ASOF` join;
+      the window holds the samples from it to the last, the sample before
+      it is the sample before the window, the one after it is what
+      `delta` reads beside it, and the sample before the last's timestamp
+      group is `irate`'s `earlier` when it is in the window.
 
-  One row per series and point, no join. A rollup here is pushed only while
-  the window is at most 32 steps (`SmolqueryVictoriaMetrics.Pushdown`),
-  since a sample's `frame` holds a window of samples and the sample unnests
-  into up to a window of points.
+  One row per series and point, and no row carries a window of samples, so
+  the cost is samples plus series x points whatever the window (T-632):
+  `rate(m[1h])` over 7 d at a 600 s step had cost each sample a list of its
+  hour of samples: 30.7 s and 10 GiB on the sandbox for 2.8 M samples. On
+  2.8 M synthetic samples it took 22.3 s, and takes 1.9 s here.
+
+  The rollups of `SmolqueryVictoriaMetrics.Pushdown.Whole` fold every
+  sample of the window, so for them each sample carries `frame`, the
+  samples within one window before it (a `RANGE` frame of the per-series
+  window, sorted by index), and `before`, the last sample older than that;
+  at a held point the window holds the samples of `frame` up to this one
+  with `ts > t - w` (`items`). Those are pushed only while the window is at
+  most 32 steps (`SmolqueryVictoriaMetrics.Pushdown`).
 
   A division by zero answers the IEEE result whatever the engine's
   `ieee_floating_point_ops` setting, since `SmolqueryVictoriaMetrics.Eval.Value`
@@ -73,7 +81,6 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
   @spec stages(String.t(), map(), [String.t()], boolean(), boolean()) :: iodata()
   def stages(rollup, refs, keys, instant?, adjust_window?) do
     columns = Enum.map(keys, &[", ", &1])
-    scalar = Map.get(refs, :scalar)
 
     [
       "o AS (SELECT *, row_number() OVER win AS idx, count(*) OVER (PARTITION BY series) AS n, ",
@@ -84,6 +91,42 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       max_prev(refs, instant?),
       " AS max_prev FROM o GROUP BY series), ",
       "mw AS (SELECT series, max_prev, #{window(refs, adjust_window?)} AS win FROM m), ",
+      descriptor(rollup, refs, columns),
+      "dp AS (SELECT *, prev_ts IS NOT NULL AND prev_ts > t - win - max_prev AS has_prev FROM d), ",
+      "e AS (SELECT *, #{expression(rollup, Map.get(refs, :scalar))} AS v FROM dp), "
+    ]
+  end
+
+  defp descriptor(rollup, refs, columns) when rollup in @functions do
+    [
+      "w0 AS (SELECT r.*, mw.max_prev, mw.win, lead(r.cv) OVER sr AS next_v, lag(r.cv) OVER sr AS lag_v ",
+      "FROM r JOIN mw USING (series) ",
+      "WINDOW sr AS (PARTITION BY r.series ORDER BY r.idx)), ",
+      "w AS (SELECT *, first_value(idx) OVER gr AS group_first, first_value(prev_ts) OVER gr AS e_ts, ",
+      "first_value(lag_v) OVER gr AS e_v FROM w0 WINDOW gr AS (PARTITION BY series, ts_ms ORDER BY idx)), ",
+      "f AS (SELECT series, ts_ms, idx, cv, next_v, prev_ts, lag_v FROM w WHERE idx = group_first), ",
+      unnested(rollup, refs),
+      "d0 AS (SELECT series",
+      columns,
+      ", k, #{refs.start} + k * #{refs.step} AS t, held, idx, ts_ms, cv, lag_v, group_first, ",
+      "e_ts, e_v, max_prev, win FROM u), ",
+      "d1 AS (SELECT d0.*, f.idx AS f_idx, f.ts_ms AS f_ts, f.cv AS f_v, f.next_v AS f_next_v, ",
+      "f.prev_ts AS b_ts, f.lag_v AS b_v FROM d0 ASOF LEFT JOIN f ",
+      "ON d0.series = f.series AND d0.t - d0.win < f.ts_ms), ",
+      "d AS (SELECT series",
+      columns,
+      ", k, t, max_prev, win, CASE WHEN held THEN idx - f_idx + 1 ELSE 0 END AS cnt, ",
+      "CASE WHEN held THEN b_ts ELSE ts_ms END AS prev_ts, CASE WHEN held THEN b_v ELSE cv END AS prev_v, ",
+      "CASE WHEN held THEN f_ts END AS f_ts, CASE WHEN held THEN f_v END AS f_v, ",
+      "CASE WHEN held THEN f_next_v END AS f_next_v, ts_ms AS l_ts, cv AS l_v, ",
+      "CASE WHEN held AND idx > f_idx THEN lag_v END AS l_lag_v, ",
+      "CASE WHEN held AND group_first > f_idx THEN e_v END AS e_v, ",
+      "CASE WHEN held AND group_first > f_idx THEN e_ts END AS e_ts FROM d1), "
+    ]
+  end
+
+  defp descriptor(rollup, refs, columns) do
+    [
       "w AS (SELECT r.*, mw.max_prev, mw.win, lead(r.cv) OVER (PARTITION BY r.series ORDER BY r.idx) AS next_v, ",
       "max(r.idx) OVER (PARTITION BY r.series, r.ts_ms) AS group_last, ",
       "min(r.idx) OVER (PARTITION BY r.series, r.ts_ms) AS group_first, ",
@@ -93,12 +136,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       "WINDOW fr AS (PARTITION BY r.series ORDER BY r.ts_ms RANGE BETWEEN mw.win PRECEDING AND CURRENT ROW)",
       before_window(rollup),
       "), ",
-      "u AS (SELECT w.*, true AS held, unnest(generate_series(",
-      "greatest(0, CAST(ceil((w.ts_ms - #{refs.start}) / #{refs.step}) AS BIGINT)), ",
-      "least(#{refs.points} - 1, CAST(floor((w.ts_ms + w.win - 1 - #{refs.start}) / #{refs.step}) AS BIGINT), ",
-      "CAST(floor((coalesce(w.next_ts, w.ts_ms + w.win) - 1 - #{refs.start}) / #{refs.step}) AS BIGINT)))) AS k FROM w",
-      empty_windows(rollup, refs),
-      "), ",
+      unnested(rollup, refs),
       "d0 AS (SELECT series",
       columns,
       ", k, #{refs.start} + k * #{refs.step} AS t, held, idx, ts_ms, cv, next_v, ",
@@ -114,9 +152,18 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       "items[1].ts AS f_ts, items[1].v AS f_v, ",
       "CASE WHEN len(items) > 1 THEN items[2].v ELSE next_v END AS f_next_v, ",
       "ts_ms AS l_ts, cv AS l_v, items[-2].v AS l_lag_v, ",
-      "items[group_first - items[1].idx].v AS e_v, items[group_first - items[1].idx].ts AS e_ts FROM d2), ",
-      "dp AS (SELECT *, prev_ts IS NOT NULL AND prev_ts > t - win - max_prev AS has_prev FROM d), ",
-      "e AS (SELECT *, #{expression(rollup, scalar)} AS v FROM dp), "
+      "items[group_first - items[1].idx].v AS e_v, items[group_first - items[1].idx].ts AS e_ts FROM d2), "
+    ]
+  end
+
+  defp unnested(rollup, refs) do
+    [
+      "u AS (SELECT w.*, true AS held, unnest(generate_series(",
+      "greatest(0, CAST(ceil((w.ts_ms - #{refs.start}) / #{refs.step}) AS BIGINT)), ",
+      "least(#{refs.points} - 1, CAST(floor((w.ts_ms + w.win - 1 - #{refs.start}) / #{refs.step}) AS BIGINT), ",
+      "CAST(floor((coalesce(w.next_ts, w.ts_ms + w.win) - 1 - #{refs.start}) / #{refs.step}) AS BIGINT)))) AS k FROM w",
+      empty_windows(rollup, refs),
+      "), "
     ]
   end
 
