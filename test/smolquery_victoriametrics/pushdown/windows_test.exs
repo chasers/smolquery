@@ -12,7 +12,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WindowsTest do
   end
 
   describe "stages/5" do
-    test "orders each series by (ts, value), removes counter resets, and carries each window as a list" do
+    test "orders each series by (ts, value), removes counter resets, and finds each window's first sample by an ASOF join" do
       sql = IO.iodata_to_binary(Windows.stages("rate", @refs, ["k0"], false, false))
 
       assert sql =~ "o AS (SELECT *, row_number() OVER win AS idx"
@@ -26,17 +26,33 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WindowsTest do
       assert sql =~ "0.6 * (len(q) - 1) AS rank"
       assert sql =~ "WHEN i <= 2000 THEN i + 4 * i"
       assert sql =~ "mw AS (SELECT series, max_prev, $6 AS win FROM m)"
+      assert sql =~ "lead(r.cv) OVER sr AS next_v, lag(r.cv) OVER sr AS lag_v"
+
+      assert sql =~
+               "f AS (SELECT series, ts_ms, idx, cv, next_v, prev_ts, lag_v FROM w WHERE idx = group_first)"
+
+      assert sql =~ "UNION ALL SELECT w.*, false AS held, unnest(generate_series("
+      assert sql =~ "d0 AS (SELECT series, k0, k, $4 + k * $5 AS t"
+      assert sql =~ "FROM d0 ASOF LEFT JOIN f ON d0.series = f.series AND d0.t - d0.win < f.ts_ms"
+      assert sql =~ "CASE WHEN held THEN idx - f_idx + 1 ELSE 0 END AS cnt"
+      assert sql =~ "prev_ts IS NOT NULL AND prev_ts > t - win - max_prev AS has_prev"
+      refute sql =~ "OVER fr"
+      refute sql =~ "items"
+      refute sql =~ "group_last"
+      assert sql =~ "e AS (SELECT *, " <> Windows.value("rate") <> " AS v FROM dp), "
+    end
+
+    test "a rollup over a window whole carries each window as a list" do
+      sql = IO.iodata_to_binary(Windows.stages("changes", @refs, [], false, false))
+
       assert sql =~ "RANGE BETWEEN mw.win PRECEDING AND CURRENT ROW"
       assert sql =~ "max({'idx': r.idx, 'ts': r.ts_ms, 'v': r.cv}) OVER bf AS before"
       assert sql =~ "RANGE BETWEEN UNBOUNDED PRECEDING AND mw.win + 1 PRECEDING"
       assert sql =~ "UNION ALL SELECT w.*, false AS held, unnest(generate_series("
-      assert sql =~ "d0 AS (SELECT series, k0, k, $4 + k * $5 AS t"
       assert sql =~ "frame[1:len(frame) - (group_last - idx)] AS mine"
       assert sql =~ "list_filter(mine, x -> x.ts <= t - win) AS older"
       assert sql =~ "mine[len(older) + 1:] AS items"
-      assert sql =~ "prev_ts IS NOT NULL AND prev_ts > t - win - max_prev AS has_prev"
-      refute sql =~ "JOIN l"
-      assert sql =~ "e AS (SELECT *, " <> Windows.value("rate") <> " AS v FROM dp), "
+      refute sql =~ "ASOF"
     end
 
     test "a gauge rollup keeps the raw values; an instant query's max_prev is the step; an unwritten window widens" do
@@ -49,12 +65,14 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WindowsTest do
       assert sql =~ "d0 AS (SELECT series, k, $4 + k * $5 AS t"
     end
 
-    test "a rollup that reads no previous sample skips the sample before the frame and the empty windows" do
+    test "a rollup that reads no previous sample skips the empty windows" do
       sql = IO.iodata_to_binary(Windows.stages("first_over_time", @refs, [], false, false))
-
-      refute sql =~ "OVER bf"
       refute sql =~ "UNION ALL"
-      assert sql =~ "NULL::STRUCT(idx BIGINT, ts BIGINT, v DOUBLE) AS before"
+
+      folded = IO.iodata_to_binary(Windows.stages("sum2_over_time", @refs, [], false, false))
+      refute folded =~ "OVER bf"
+      refute folded =~ "UNION ALL"
+      assert folded =~ "NULL::STRUCT(idx BIGINT, ts BIGINT, v DOUBLE) AS before"
     end
   end
 

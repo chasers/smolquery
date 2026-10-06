@@ -127,6 +127,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: `rate` and its family cost the same at any window (T-632)
+
+A pushed `rate`, `increase`, `delta`, `irate` and the rest of the rollups read off a window's edges gave every sample a list of its window's samples. A long window paid twice: more samples, and a longer list per sample. `sum(rate(m[1h]))` over 7 d took 30 s and 10 GiB.
+
+- **Now:** each point finds its window's first sample by an ASOF join. The cost is samples plus series × points, whatever the window. On 2.8 M samples, `rate(m[1h])` went from 22.3 s to 1.9 s.
+- **More is pushed:** these rollups are now pushed at any window. Before, a window over 32 steps (`rate(m[1d])` at a 15 s step) ran in Elixir.
+- **Unchanged:** the answers, and the rollups that read a whole window (`stddev_over_time`, `changes`, ...), which keep the 32-step limit.
+
 ### 0.22.0: `SMOLQUERY_JOB_MEMORY_LIMIT` sizes query job engines (T-631)
 
 Each query job engine's DuckDB `memory_limit` was set only in compiled config, at `1GB`. `SMOLQUERY_JOB_MEMORY_LIMIT` now sets it from the environment.

@@ -105,12 +105,16 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   which would cost a distinct count over every sample for a number nothing
   acts on.
 
-  A rollup other than the last sample is pushed only while the window is at
-  most 32 steps: each sample unnests into `window / step` rows, where the
+  A rollup other than the last sample or one read off a window's edges is
+  pushed only while the window is at most 32 steps: each sample unnests
+  into `window / step` rows, or carries a window of samples, where the
   sweep in `SmolqueryVictoriaMetrics.Rollup` passes over each sample once
   however many points the grid has, so `sum_over_time(m[1d])` at a 15 s
   step stays in Elixir. The last-sample rollups are bounded by the next
-  sample and stay at one row per series and point.
+  sample and stay at one row per series and point; the edge rollups
+  (`rate` and its family, T-632) unnest each sample only into the points
+  before the next one, and find each window's first sample by an ASOF join,
+  so they cost samples plus series x points at any window.
   """
 
   alias Explorer.DataFrame
@@ -263,7 +267,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
 
   defp read_back(%{window_ms: window}, _context), do: window
 
-  defp bounded(%{name: rollup}, _context) when rollup in @last, do: :ok
+  defp bounded(%{name: rollup}, _context) when rollup in @last or rollup in @windows, do: :ok
 
   defp bounded(%{window_ms: window}, context) do
     if window <= @max_window_steps * context.step_ms, do: :ok, else: :none
