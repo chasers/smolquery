@@ -30,6 +30,7 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
     assert runtime.max_samples_per_query == 10_000_000
     assert runtime.max_points_per_series == 30_000
     assert runtime.max_query_duration_ms == 30_000
+    assert runtime.max_concurrent_fetches == 4
     assert runtime.max_decoded_bytes == 33_554_432
     assert runtime.max_query_bytes == 16_384
     assert runtime.ingest_name == Smolquery.IngestService
@@ -45,12 +46,14 @@ defmodule SmolqueryVictoriaMetrics.RuntimeTest do
         max_samples: 50,
         max_samples_per_query: 70,
         max_points_per_series: 500,
-        max_query_duration_ms: 900
+        max_query_duration_ms: 900,
+        max_concurrent_fetches: 2
       )
 
     assert {runtime.max_series, runtime.max_samples, runtime.max_samples_per_query,
-            runtime.max_points_per_series, runtime.max_query_duration_ms} ==
-             {5, 50, 70, 500, 900}
+            runtime.max_points_per_series, runtime.max_query_duration_ms,
+            runtime.max_concurrent_fetches} ==
+             {5, 50, 70, 500, 900, 2}
   end
 
   test "takes the decoded-body bound" do

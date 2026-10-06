@@ -68,19 +68,23 @@ defmodule SmolqueryVictoriaMetrics.Query do
   `%{series: n, samples: n, duration_us: n, fetch_us: n}`: what it read into
   the node, which `Smolquery.Telemetry` counts so the ceilings can be sized
   from production numbers, and how long it took. `fetch_us` is the time
-  spent in `SmolqueryVictoriaMetrics.Samples.select/4`, summed over the
-  query's selectors: the grouped query and copying its lists into the
-  node. The rest of `duration_us` is parsing, the rollup sweep and
+  spent reading, summed over the query's reads: each job, and copying what
+  it answered into the node. Up to `max_concurrent_fetches` jobs run at
+  once (`SmolqueryVictoriaMetrics.Prefetch`), so `fetch_us` can pass
+  `duration_us`. The rest of `duration_us` is parsing, the rollup sweep and
   evaluation; rendering the JSON comes after it and is not counted.
   """
 
   import Plug.Conn
 
+  alias Explorer.DataFrame
   alias Smolquery.QueryService.Client
   alias SmolqueryVictoriaMetrics.Errors
   alias SmolqueryVictoriaMetrics.Eval
   alias SmolqueryVictoriaMetrics.MetricsQL
+  alias SmolqueryVictoriaMetrics.MetricsQL.Ast.MetricExpr
   alias SmolqueryVictoriaMetrics.Params
+  alias SmolqueryVictoriaMetrics.Prefetch
   alias SmolqueryVictoriaMetrics.Pushdown
   alias SmolqueryVictoriaMetrics.Response
   alias SmolqueryVictoriaMetrics.Runtime
@@ -112,15 +116,17 @@ defmodule SmolqueryVictoriaMetrics.Query do
          {:ok, expr} <- parse(query) do
       deadline = System.monotonic_time(:millisecond) + timeout
 
-      context =
-        Map.merge(grid, %{
-          lookback_ms: runtime.lookback_ms,
-          max_points: runtime.max_points_per_series,
-          fetch: timed(fetch_us, fetcher(runtime, deadline)),
-          aggregate: timed_aggregate(fetch_us, aggregator(runtime, deadline))
-        })
+      evaluate = &evaluate(kind, expr, &1, started)
 
-      kind |> evaluate(expr, context, started) |> answer(conn, fetch_us)
+      grid
+      |> Map.merge(%{lookback_ms: runtime.lookback_ms, max_points: runtime.max_points_per_series})
+      |> Prefetch.context(
+        stages(runtime, deadline, fetch_us),
+        [max_concurrency: runtime.max_concurrent_fetches, retry?: &unavailable?/1],
+        evaluate
+      )
+      |> evaluate.()
+      |> answer(conn, fetch_us)
     else
       {:error, reason} -> refuse(conn, reason)
     end
@@ -179,10 +185,23 @@ defmodule SmolqueryVictoriaMetrics.Query do
     end
   end
 
-  defp timed(counter, fetch),
-    do: fn selector, range -> measure(counter, fn -> fetch.(selector, range) end) end
+  defp stages(runtime, deadline, fetch_us) do
+    %{
+      fetch:
+        {timed(fetch_us, reader(runtime, deadline)), timed(fetch_us, &{:ok, Samples.copy(&1)})},
+      aggregate:
+        {timed(fetch_us, pushed_frame(runtime, deadline)),
+         timed(fetch_us, fn {frame, plan} -> Pushdown.series(frame, plan, runtime.max_series) end)}
+    }
+  end
 
-  defp timed_aggregate(counter, run), do: fn plan -> measure(counter, fn -> run.(plan) end) end
+  defp timed(counter, read) when is_function(read, 2),
+    do: fn selector, range -> measure(counter, fn -> read.(selector, range) end) end
+
+  defp timed(counter, read) when is_function(read, 1),
+    do: fn arg -> measure(counter, fn -> read.(arg) end) end
+
+  defp unavailable?(reason), do: match?({503, "unavailable", _message, _retry}, failure(reason))
 
   defp measure(counter, fun) do
     started = System.monotonic_time(:microsecond)
@@ -192,46 +211,65 @@ defmodule SmolqueryVictoriaMetrics.Query do
   end
 
   @doc """
-  How a query reads its selectors: `SmolqueryVictoriaMetrics.Samples.select/4`
+  How a query starts reading a selector: `SmolqueryVictoriaMetrics.Samples.read/4`
   under the request's one `deadline` (monotonic milliseconds) and its one
-  sample budget. Each read is given the time left, and refused with
-  `:timeout` once none is; each is held to `max_samples` or to what is left
-  of `max_samples_per_query`, whichever is less, and a read that would pass
-  the latter is `{:too_many_samples_per_query, max}`.
+  sample budget, answering the job's frame with nothing copied into the
+  process. Each read is given the time left, and refused with `:timeout`
+  once none is; each is held to `max_samples` or to what is left of
+  `max_samples_per_query`, whichever is less. Reads start concurrently
+  (`SmolqueryVictoriaMetrics.Prefetch`), so each charges the budget with
+  its frame's samples as its job answers, and the read that takes the
+  budget past `max_samples_per_query` is `{:too_many_samples_per_query,
+  max}`, before its samples are copied. A read started once and taken twice
+  is charged once, and a read whose job answered before the deadline is
+  taken after it.
   """
-  @spec fetcher(Runtime.t(), integer()) :: Eval.fetch()
-  def fetcher(%Runtime{} = runtime, deadline) do
-    read = :counters.new(1, [])
+  @spec reader(Runtime.t(), integer()) ::
+          (MetricExpr.t(), {integer(), integer()} ->
+             {:ok, DataFrame.t() | nil} | {:error, term()})
+  def reader(%Runtime{} = runtime, deadline) do
+    charged = :atomics.new(1, signed: true)
     per_selector = runtime.max_samples
     per_query = runtime.max_samples_per_query
 
     fn selector, range ->
-      limit = min(per_selector, per_query - :counters.get(read, 1))
+      limit = max(min(per_selector, per_query - :atomics.get(charged, 1)), 0)
 
       with {:ok, left} <- time_left(deadline),
-           {:ok, series} <-
+           {:ok, frame} <-
              budgeted(
-               Samples.select(runtime, selector, range, max_samples: limit, timeout_ms: left),
+               Samples.read(runtime, selector, range, max_samples: limit, timeout_ms: left),
                limit < per_selector,
                per_query
-             ) do
-        :counters.add(read, 1, Enum.reduce(series, 0, &(length(&1.timestamps) + &2)))
-        {:ok, series}
-      end
+             ),
+           do: charge(charged, frame, per_query)
     end
   end
 
+  defp charge(charged, frame, per_query) do
+    if :atomics.add_get(charged, 1, Samples.samples(frame)) > per_query,
+      do: {:error, {:too_many_samples_per_query, per_query}},
+      else: {:ok, frame}
+  end
+
   @doc """
-  How a query runs an aggregate in SQL (`SmolqueryVictoriaMetrics.Pushdown`,
-  T-568) under the request's `deadline`. A pushed aggregate reads no
-  samples into the node, so the sample budget above does not apply to it;
-  `max_series` bounds its output.
+  How a query reads its selectors one at a time: `reader/2`, and the frame
+  copied into the process (`SmolqueryVictoriaMetrics.Samples.copy/1`).
   """
-  @spec aggregator(Runtime.t(), integer()) :: Eval.aggregate()
-  def aggregator(%Runtime{} = runtime, deadline) do
+  @spec fetcher(Runtime.t(), integer()) :: Eval.fetch()
+  def fetcher(%Runtime{} = runtime, deadline) do
+    read = reader(runtime, deadline)
+
+    fn selector, range ->
+      with {:ok, frame} <- read.(selector, range), do: {:ok, Samples.copy(frame)}
+    end
+  end
+
+  defp pushed_frame(runtime, deadline) do
     fn plan ->
       with {:ok, left} <- time_left(deadline),
-           do: Pushdown.run(runtime, plan, timeout_ms: left)
+           {:ok, frame} <- Pushdown.frame(runtime, plan, timeout_ms: left),
+           do: {:ok, {frame, plan}}
     end
   end
 

@@ -203,7 +203,8 @@ ported from v1.152.0's `app/vmselect/promql`:
 |---|---|---|
 | `SMOLQUERY_VICTORIAMETRICS_MAX_SERIES` | `10000` | series one selector, or one `/api/v1/series`, may match |
 | `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES` | `5000000` | raw samples one selector may read into the node, about 50 bytes each while the query runs |
-| `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY` | `10000000` | raw samples all of one query's selectors may read between them (`a / b + c` is three) |
+| `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY` | `10000000` | raw samples all of one query's selectors may read between them (`a / b + c` is three; one selector written twice over one range is read once) |
+| `SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES` | `4` | reads of one query run at once (`a / b` reads both sides together) |
 | `SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES` | `30000` | points in a `query_range` grid (`-search.maxPointsPerTimeseries`); Grafana asks for about 1,000 |
 
 Size them from `smolquery_victoriametrics_query_series_total` and
