@@ -555,13 +555,20 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   """
   @spec run(Runtime.t(), t(), keyword()) :: {:ok, [Series.t()], stats()} | {:error, term()}
   def run(%Runtime{} = runtime, %__MODULE__{} = plan, opts \\ []) do
-    max = runtime.max_series
-    rows = max * length(plan.timestamps) + 1
+    with {:ok, frame} <- frame(runtime, plan, opts),
+         do: series(frame, plan, runtime.max_series)
+  end
+
+  @doc """
+  `run/3` up to the frame: the job run, with nothing copied into the
+  process yet; `nil` when the table does not exist. `series/3` reads it.
+  """
+  @spec frame(Runtime.t(), t(), keyword()) :: {:ok, DataFrame.t() | nil} | {:error, term()}
+  def frame(%Runtime{} = runtime, %__MODULE__{} = plan, opts \\ []) do
+    rows = runtime.max_series * length(plan.timestamps) + 1
 
     with {:ok, sql, params} <- sql(plan, runtime),
-         {:ok, frame} <- job(runtime, sql, params, Keyword.put(opts, :result_max_rows, rows)) do
-      series(frame, plan, max)
-    end
+         do: job(runtime, sql, params, Keyword.put(opts, :result_max_rows, rows))
   end
 
   defp job(runtime, sql, params, opts) do

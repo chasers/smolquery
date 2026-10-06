@@ -127,6 +127,16 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: a MetricsQL query's reads run concurrently (T-633)
+
+A query with several selectors, `a / b` or `a or b or c`, read them one after another, so a Grafana panel took the sum of its reads.
+
+- **Now:** the edge finds every read a query needs, then runs them at once, up to `SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES` (default `4`). A query takes about as long as its slowest read.
+- **Answers:** unchanged. A read that depends on data, such as an `@` taken from a series, still runs when the evaluation reaches it.
+- **Job slots:** each read is a query service job, and the service refuses jobs past `max_concurrent_jobs` (`8`). A read refused that way runs again once the query's other reads finish. Dashboards that refresh many panels at once see higher peaks of jobs in flight.
+- **Sample budget:** a selector written twice over the same range is now read once, and counted once against `SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY`.
+- **Memory:** a query holds its reads' result frames until it answers, about 16 bytes a sample, at most about 160 MB at the default budget.
+
 ### 0.22.0: `rate` and its family cost the same at any window (T-632)
 
 A pushed `rate`, `increase`, `delta`, `irate` and the rest of the rollups read off a window's edges gave every sample a list of its window's samples. A long window paid twice: more samples, and a longer list per sample. `sum(rate(m[1h]))` over 7 d took 30 s and 10 GiB.

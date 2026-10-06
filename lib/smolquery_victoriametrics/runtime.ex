@@ -21,6 +21,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         max_samples_per_query: 10_000_000,
         max_points_per_series: 30_000,
         max_query_duration_ms: 30_000,
+        max_concurrent_fetches: 4,
         max_decoded_bytes: 33_554_432,
         max_query_bytes: 16_384
 
@@ -51,11 +52,11 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   `_MAX_SAMPLES_PER_QUERY`, `_MAX_POINTS_PER_SERIES`; `10_000`,
   `5_000_000`, `10_000_000`, `30_000`): the series one selector may match,
   the raw samples one selector may read into the BEAM, the raw samples all
-  of a query's selectors may read between them (`a / b + c` reads three),
-  and the points of one query's step grid, which is VictoriaMetrics'
-  `-search.maxPointsPerTimeseries`. A query past any of them is refused
-  rather than run (`SmolqueryVictoriaMetrics.Query`). A sample read costs
-  about 50 bytes in the process that evaluates the query
+  of a query's selectors may read between them (`a / b + c` reads three,
+  `a / a` one), and the points of one query's step grid, which is
+  VictoriaMetrics' `-search.maxPointsPerTimeseries`. A query past any of
+  them is refused rather than run (`SmolqueryVictoriaMetrics.Query`). A
+  sample read costs about 50 bytes in the process that evaluates the query
   (`SmolqueryVictoriaMetrics.Samples`), so the defaults hold one query to
   about 500 MB.
 
@@ -63,6 +64,17 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
   (`SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_DURATION_MS`, `30_000`),
   VictoriaMetrics' `-search.maxQueryDuration`: a request's `timeout` is held
   to it, and one past it answers 503 `timeout`.
+
+  `max_concurrent_fetches` is how many of one query's reads run at once
+  (`SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES`, `4`): the selectors
+  and pushed aggregates of `a / b` or `a or b or c` run together, each a
+  query service job (`SmolqueryVictoriaMetrics.Prefetch`). The query
+  service refuses a job past its `max_concurrent_jobs`, `8` by default, so
+  the default leaves room for a second query at its widest; a read refused
+  that way starts again when the evaluation reaches it, once the query's
+  other reads are done. A query holds no more job-time than before, over a
+  shorter span, so dashboards that refresh many panels at once see higher
+  peaks of jobs in flight.
 
   `max_query_bytes` is the longest MetricsQL text a request may carry, in
   `query` or in each `match[]` (`SMOLQUERY_VICTORIAMETRICS_MAX_QUERY_BYTES`,
@@ -114,6 +126,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
     max_samples_per_query: 10_000_000,
     max_points_per_series: 30_000,
     max_query_duration_ms: 30_000,
+    max_concurrent_fetches: 4,
     ip: {127, 0, 0, 1},
     port: 8428
   ]
@@ -136,6 +149,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
           max_samples_per_query: pos_integer(),
           max_points_per_series: pos_integer(),
           max_query_duration_ms: pos_integer(),
+          max_concurrent_fetches: pos_integer(),
           ip: :inet.ip_address(),
           port: :inet.port_number()
         }
@@ -189,6 +203,7 @@ defmodule SmolqueryVictoriaMetrics.Runtime do
         :max_samples_per_query,
         :max_points_per_series,
         :max_query_duration_ms,
+        :max_concurrent_fetches,
         :max_decoded_bytes,
         :max_query_bytes,
         :ip,

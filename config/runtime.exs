@@ -207,6 +207,16 @@ if victoriametrics_max_duration =
       )
 end
 
+if victoriametrics_max_fetches =
+     System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES") do
+  config :smolquery, SmolqueryVictoriaMetrics,
+    max_concurrent_fetches:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES",
+        victoriametrics_max_fetches
+      )
+end
+
 if victoriametrics_max_points =
      System.get_env("SMOLQUERY_VICTORIAMETRICS_MAX_POINTS_PER_SERIES") do
   config :smolquery, SmolqueryVictoriaMetrics,

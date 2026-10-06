@@ -157,6 +157,22 @@ defmodule Smolquery.RuntimeConfigTest do
     end)
   end
 
+  test "SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES bounds one query's concurrent reads (T-633)" do
+    read = fn ->
+      "config/runtime.exs"
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> get_in([:smolquery, SmolqueryVictoriaMetrics, :max_concurrent_fetches])
+    end
+
+    with_env(%{"SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES" => "2"}, fn ->
+      assert read.() == 2
+    end)
+
+    with_env(%{"SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES" => "0"}, fn ->
+      assert_raise ArgumentError, ~r/SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES/, read
+    end)
+  end
+
   test "runtime config reports the actual replication and port bounds" do
     with_env(%{"SMOLQUERY_BUFFER_REPLICATION" => "1"}, fn ->
       assert_raise ArgumentError, ~r/SMOLQUERY_BUFFER_REPLICATION.*at least 2/, fn ->

@@ -43,7 +43,16 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   regrouping. At the default `max_samples` of 5,000,000 a selector holds
   about 250 MB while its rollup runs, and a query past
   `max_samples_per_query` (`SmolqueryVictoriaMetrics.Runtime`) is refused
-  before its selectors hold more than that between them.
+  before its selectors hold more than that between them. A query's reads
+  start concurrently (`SmolqueryVictoriaMetrics.Prefetch`) and hold their
+  frames, columnar and off the process heap, until the query answers; the
+  evaluation copies them one at a time with `copy/1`. A frame costs about
+  16 bytes a sample, so a query holds at most about 160 MB of frames at
+  the default `max_samples_per_query`, charged from each frame (`read/4`,
+  `samples/1`) so a read past it is refused before it is copied. Reads
+  started together are each held only to what was left when they started,
+  so up to `max_concurrent_fetches` x `max_samples` samples of frames,
+  about 320 MB at the defaults, can be in flight before one is refused.
 
   `series_query/3` stays for `/api/v1/series`, which reads names and labels
   only.
@@ -226,6 +235,18 @@ defmodule SmolqueryVictoriaMetrics.Samples do
   @spec select(Runtime.t(), MetricExpr.t(), {integer(), integer()}, keyword()) ::
           {:ok, [series()]} | {:error, reason()}
   def select(%Runtime{} = runtime, %MetricExpr{} = expr, range, opts \\ []) do
+    with {:ok, frame} <- read(runtime, expr, range, opts), do: {:ok, copy(frame)}
+  end
+
+  @doc """
+  `select/4` up to the frame: the job run and its frame checked against
+  `max_series` and `max_samples`, with no sample copied into the process
+  yet; `nil` when the table does not exist. `copy/1` copies it, and
+  `samples/1` says how many samples that will be.
+  """
+  @spec read(Runtime.t(), MetricExpr.t(), {integer(), integer()}, keyword()) ::
+          {:ok, DataFrame.t() | nil} | {:error, reason()}
+  def read(%Runtime{} = runtime, %MetricExpr{} = expr, range, opts \\ []) do
     {max_samples, opts} = Keyword.pop(opts, :max_samples, runtime.max_samples)
     max_series = runtime.max_series
 
@@ -233,13 +254,23 @@ defmodule SmolqueryVictoriaMetrics.Samples do
          {:ok, frame} <-
            run(runtime, sql, params, Keyword.put(opts, :result_max_rows, max_series + 1)) do
       cond do
-        frame == nil -> {:ok, []}
+        frame == nil -> {:ok, nil}
         DataFrame.n_rows(frame) > max_series -> {:error, {:too_many_series, max_series}}
         total(frame) > max_samples -> {:error, {:too_many_samples, max_samples}}
-        true -> {:ok, grouped(frame)}
+        true -> {:ok, frame}
       end
     end
   end
+
+  @doc "The samples a frame `read/4` answered holds."
+  @spec samples(DataFrame.t() | nil) :: non_neg_integer()
+  def samples(nil), do: 0
+  def samples(%DataFrame{} = frame), do: total(frame)
+
+  @doc "The series of a frame `read/4` answered, copied into the process in fingerprint order."
+  @spec copy(DataFrame.t() | nil) :: [series()]
+  def copy(nil), do: []
+  def copy(%DataFrame{} = frame), do: grouped(frame)
 
   defp total(frame) do
     case DataFrame.n_rows(frame) do

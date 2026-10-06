@@ -493,6 +493,25 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       end
     end
 
+    test "frame/3 is run/3 up to the frame series/3 reads", %{stack: stack} do
+      {:ok, expr} = MetricsQL.parse("sum by (job) (rate(c[1m]))")
+      timestamps = Enum.to_list((@t0_ms + 60_000)..(@t0_ms + 240_000)//60_000)
+
+      context = %{
+        start_ms: @t0_ms + 60_000,
+        end_ms: @t0_ms + 240_000,
+        step_ms: 60_000,
+        lookback_ms: 300_000,
+        timestamps: timestamps
+      }
+
+      {:ok, plan} = Pushdown.plan(Constants.prepare(expr), context)
+      {:ok, frame} = Pushdown.frame(stack.runtime, plan)
+
+      assert Pushdown.series(frame, plan, stack.runtime.max_series) ==
+               Pushdown.run(stack.runtime, plan)
+    end
+
     test "past max_series is 422", %{stack: stack} do
       one = limited(stack, max_series: 1)
 

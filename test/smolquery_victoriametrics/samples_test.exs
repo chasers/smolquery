@@ -177,6 +177,21 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
                infos |> Enum.sort() |> Enum.map(fn {_id, info} -> info.labels["job"] end)
     end
 
+    test "read/4 answers the frame select/4 copies, and how many samples it holds", %{
+      stack: stack
+    } do
+      range = {@from, @from + @hour}
+      {:ok, frame} = Samples.read(stack.runtime, selector("up"), range)
+
+      assert Samples.samples(frame) == 8
+      assert {:ok, Samples.copy(frame)} == Samples.select(stack.runtime, selector("up"), range)
+
+      assert Samples.read(stack.runtime, selector("up"), range, max_samples: 7) ==
+               {:error, {:too_many_samples, 7}}
+
+      assert {Samples.samples(nil), Samples.copy(nil)} == {0, []}
+    end
+
     test "two samples at one timestamp arrive in value order", %{stack: stack} do
       :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "tie"}, [{@from, 9.0}]}])
       :ok = VictoriaMetricsStack.write(stack, [{%{"__name__" => "tie"}, [{@from, 2.0}]}])

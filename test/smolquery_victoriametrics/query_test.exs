@@ -330,9 +330,23 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
       assert body(response)["error"] =~ "more than 1 series"
     end
 
-    test "past max_samples is 422, per selector and summed over the query", %{stack: stack} do
+    test "past max_samples is 422, per selector and summed over the query's reads", %{
+      stack: stack
+    } do
       one_selector = %{"query" => "up", "time" => "#{@t0 + 300}"}
-      three_selectors = %{"query" => "up + up + up", "time" => "#{@t0 + 300}"}
+
+      three_selectors = %{
+        "query" => ~s|up + up{job="a"} + up{job="b"}|,
+        "time" => "#{@t0 + 300}"
+      }
+
+      once = %{"query" => "up + up + up", "time" => "#{@t0 + 300}"}
+
+      assert get(
+               limited(stack, max_samples: 42, max_samples_per_query: 42),
+               "/api/v1/query",
+               once
+             ).status == 200
 
       small = limited(stack, max_samples: 42, max_samples_per_query: 1_000)
       assert get(small, "/api/v1/query", one_selector).status == 200
@@ -342,13 +356,13 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
       assert response.status == 422
       assert body(response)["error"] =~ "more than 41 samples"
 
-      budget = limited(stack, max_samples: 42, max_samples_per_query: 126)
+      budget = limited(stack, max_samples: 42, max_samples_per_query: 84)
       assert get(budget, "/api/v1/query", three_selectors).status == 200
 
-      budget = limited(stack, max_samples: 42, max_samples_per_query: 125)
+      budget = limited(stack, max_samples: 42, max_samples_per_query: 83)
       response = get(budget, "/api/v1/query", three_selectors)
       assert response.status == 422
-      assert body(response)["error"] =~ "more than 125 samples between them"
+      assert body(response)["error"] =~ "more than 83 samples between them"
       assert body(response)["error"] =~ "SMOLQUERY_VICTORIAMETRICS_MAX_SAMPLES_PER_QUERY"
     end
 
@@ -362,8 +376,8 @@ defmodule SmolqueryVictoriaMetrics.QueryTest do
         assert response.status == 200, timeout
       end
 
-      many = Enum.map_join(1..12, " + ", fn _one -> "up" end)
-      short = limited(stack, max_query_duration_ms: 250)
+      many = Enum.map_join(1..12, " + ", &~s|up{job!="#{&1}"}|)
+      short = limited(stack, max_query_duration_ms: 250, max_concurrent_fetches: 1)
 
       response =
         get(short, "/api/v1/query", %{"query" => many, "time" => "#{@t0}", "timeout" => "1h"})
