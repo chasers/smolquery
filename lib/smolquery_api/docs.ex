@@ -14,7 +14,7 @@ defmodule SmolqueryApi.Docs do
   real" posture — the operator publishes the surface on purpose.
   """
 
-  @repository "https://github.com/chasers/smolquery"
+  @repository "https://github.com/smolquery/smolquery"
 
   @spec spec() :: map()
   def spec do

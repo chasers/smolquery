@@ -22,7 +22,7 @@ The pipeline runs in this order:
    workflows gate the merge. Branch protection keeps the pull request
    current with `main`. Thus CI already saw the merged tree.
 2. The Release workflow runs on the merge push to `main`. It publishes a
-   multi-architecture `ghcr.io/chasers/smolquery` image tagged with the
+   multi-architecture `ghcr.io/smolquery/smolquery` image tagged with the
    commit (`sha-<commit>`).
 3. When the commit bumps the version, the run aliases that image as
    `vX.Y.Z`. The run also creates the GitHub release.
@@ -126,6 +126,10 @@ answers nothing at the TCP level.
 ## Upgrade notes
 
 One note per release, newest first.
+
+### The repository and image move to the `smolquery` organization
+
+The repository is now `github.com/smolquery/smolquery`; the old URL redirects. Releases after 0.22.0 publish `ghcr.io/smolquery/smolquery`. 0.22.0 and earlier stay at `ghcr.io/chasers/smolquery`, so pinned deployments keep pulling. Point new deployments, and any image automation, at the new name.
 
 ### 0.22.0: only the boot step migrates the catalog format, and the swap checks it (T-638, T-639)
 

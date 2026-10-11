@@ -342,7 +342,7 @@ defmodule SmolqueryWeb.TableLive.Index do
             MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
             pruning on a key, NDJSON loads only.
             <a
-              href="https://github.com/chasers/smolquery/blob/main/docs/api.md#schema-types"
+              href="https://github.com/smolquery/smolquery/blob/main/docs/api.md#schema-types"
               target="_blank"
               class="link"
             >

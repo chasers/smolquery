@@ -24,7 +24,7 @@ defmodule SmolqueryApi.DocsTest do
 
     body = JSON.decode!(response.resp_body)
     assert body["name"] == "smolquery HTTP API"
-    assert body["repository"] == "https://github.com/chasers/smolquery"
+    assert body["repository"] == "https://github.com/smolquery/smolquery"
     assert is_list(body["routes"])
   end
 

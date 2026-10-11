@@ -61,7 +61,7 @@ defmodule SmolqueryWeb.Layouts do
           </li>
           <li>
             <a
-              href="https://github.com/chasers/smolquery"
+              href="https://github.com/smolquery/smolquery"
               class="btn btn-ghost"
               target="_blank"
               rel="noopener"

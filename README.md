@@ -8,8 +8,8 @@
 > async query jobs over an HTTP API, and a Postgres wire listener, in one
 > self-hostable BEAM release.
 
-[![CI](https://github.com/chasers/smolquery/actions/workflows/ci.yml/badge.svg)](https://github.com/chasers/smolquery/actions/workflows/ci.yml)
-[![Cluster](https://github.com/chasers/smolquery/actions/workflows/cluster.yml/badge.svg)](https://github.com/chasers/smolquery/actions/workflows/cluster.yml)
+[![CI](https://github.com/smolquery/smolquery/actions/workflows/ci.yml/badge.svg)](https://github.com/smolquery/smolquery/actions/workflows/ci.yml)
+[![Cluster](https://github.com/smolquery/smolquery/actions/workflows/cluster.yml/badge.svg)](https://github.com/smolquery/smolquery/actions/workflows/cluster.yml)
 [![Elixir](https://img.shields.io/badge/elixir-~%3E%201.20-4B275F.svg)](https://elixir-lang.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)
@@ -80,7 +80,7 @@ there, at `/connections`. A table's page and every connection have a
 Releases are created automatically for a merged stable `mix.exs` version bump
 only after the successful main-push Kind workflow and the exact-SHA CI run. The
 release publishes a multi-architecture image to GHCR and attaches both a
-`ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
+`ghcr.io/smolquery/smolquery@sha256:...` reference and an image-pinned base
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
 discovery, and the sealed-store dependencies before deploying. The Secret must

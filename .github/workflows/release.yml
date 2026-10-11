@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GHCR_IMAGE: ghcr.io/chasers/smolquery
+  GHCR_IMAGE: ghcr.io/smolquery/smolquery
 
 jobs:
   prepare:
