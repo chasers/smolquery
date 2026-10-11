@@ -433,8 +433,9 @@ defmodule Smolquery.Catalog.DuckLake do
       so an extension carrying a newer DuckLake catalog version migrates the
       metadata database on attach instead of refusing to boot. Off by
       default: a migration rewrites the shared catalog one way, and a node
-      still running the old extension cannot read the result, so the
-      operator picks the moment (`SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`).
+      still running the old extension cannot read the result. Only
+      `Smolquery.Catalog.Migrator` passes it, at boot under its lock, when
+      the operator sets `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` (T-639).
   """
   @spec attach_statement(String.t(), String.t(), String.t(), keyword()) :: String.t()
   def attach_statement(catalog, metadata, data_path, opts \\ []) do

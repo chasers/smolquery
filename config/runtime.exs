@@ -984,7 +984,7 @@ if size = System.get_env("SMOLQUERY_CATALOG_READER_POOL_SIZE") do
 end
 
 if migrate = System.get_env("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION") do
-  config :smolquery, Smolquery.Catalog.DuckLake,
+  config :smolquery, Smolquery.Catalog.Migrator,
     automatic_migration:
       Smolquery.RuntimeConfig.boolean!("SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION", migrate)
 end

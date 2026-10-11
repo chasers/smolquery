@@ -175,6 +175,60 @@ defmodule Smolquery.Catalog.MigratorTest do
              )
     end
 
+    test "migrates an older DuckLake format only when allowed (T-639)", context do
+      :ok = Migrator.prepare(context.config)
+      log_info()
+      set_format!(context.connection, "0.4")
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:attach_failed, _refused}} = Migrator.prepare(context.config)
+        end)
+
+      assert log =~ "could not be prepared"
+      assert format(context.connection) == "0.4"
+
+      log =
+        capture_log(fn ->
+          assert Migrator.prepare(context.config ++ [automatic_migration: true]) == :ok
+        end)
+
+      assert log =~ "catalog DuckLake format migrated from 0.4 to 1.0"
+      assert format(context.connection) == "1.0"
+    end
+
+    test "nodes booting together migrate the format once, under the lock (T-639)", context do
+      :ok = Migrator.prepare(context.config)
+      log_info()
+      set_format!(context.connection, "0.4")
+      config = context.config ++ [automatic_migration: true]
+
+      log =
+        capture_log(fn ->
+          results =
+            1..3
+            |> Enum.map(fn _node -> Task.async(fn -> Migrator.prepare(config) end) end)
+            |> Task.await_many(60_000)
+
+          assert results == [:ok, :ok, :ok]
+        end)
+
+      assert [_before, _after] = String.split(log, "format migrated from 0.4 to 1.0")
+      assert format(context.connection) == "1.0"
+    end
+
+    test "a catalog newer than this release fails the boot and is left as it is", context do
+      :ok = Migrator.prepare(context.config)
+      set_format!(context.connection, "1.1-dev1")
+
+      for config <- [context.config, context.config ++ [automatic_migration: true]] do
+        log = capture_log(fn -> assert {:error, _refused} = Migrator.prepare(config) end)
+        assert log =~ "could not be prepared"
+      end
+
+      assert format(context.connection) == "1.1-dev1"
+    end
+
     test "logs a step that cannot run and answers the error", context do
       config =
         Keyword.update!(
@@ -187,6 +241,38 @@ defmodule Smolquery.Catalog.MigratorTest do
 
       assert log =~ "could not be prepared"
     end
+  end
+
+  describe "a lake the step does not prepare" do
+    @describetag :integration
+    @describetag :tmp_dir
+
+    test "is attached once to migrate its format, only when allowed", context do
+      metadata = Path.join(context.tmp_dir, "catalog.sqlite")
+      config = [metadata: "sqlite:" <> metadata, data_path: Path.join(context.tmp_dir, "data")]
+
+      assert Migrator.prepare(config) == :ok
+      refute File.exists?(metadata)
+
+      assert Migrator.prepare(config ++ [automatic_migration: true]) == :ok
+      assert File.exists?(metadata)
+    end
+  end
+
+  defp log_info do
+    Logger.put_module_level(Migrator, :info)
+    on_exit(fn -> Logger.delete_module_level(Migrator) end)
+  end
+
+  defp set_format!(connection, version),
+    do:
+      sql!(connection, "UPDATE ducklake_metadata SET value = '#{version}' WHERE key = 'version'")
+
+  defp format(connection) do
+    %{rows: [[version]]} =
+      sql!(connection, "SELECT value FROM ducklake_metadata WHERE key = 'version'")
+
+    version
   end
 
   defp old_bootstrap!(context) do

@@ -15,17 +15,45 @@ defmodule Smolquery.Catalog.Migrator do
 
   ## The step
 
-  `prepare/1` first reads which migrations the database has recorded, on one
-  plain connection, and when none is pending it is done: a node booting into
-  a migrated database takes no lock and attaches nothing. Otherwise, holding
-  a session advisory lock so nodes booting together take turns, it:
+  `prepare/1` first reads which migrations the database has recorded, and
+  the catalog's DuckLake format, on one plain connection. When none is
+  pending and the format is the one this release's SQL against DuckLake's
+  tables is written for (`Smolquery.Catalog.DuckLake.Format`), it is done: a
+  node booting into a migrated database takes no lock and attaches nothing.
+  Otherwise, holding a session advisory lock so nodes booting together take
+  turns, it:
 
-    1. **Attaches** the lake with a throwaway engine, as every role does, so
-       DuckLake creates its tables on a fresh database, and migrates its own
-       format when `automatic_migration` allows it
-       (`Smolquery.Catalog.DuckLake.attach_statement/4`).
+    1. **Attaches** the lake with a throwaway engine, so DuckLake creates its
+       tables on a fresh database. When the catalog is at another format and
+       `automatic_migration` is set (`SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`),
+       the attach carries `AUTOMATIC_MIGRATION TRUE` and DuckLake migrates
+       the format, in the attach's one metadata transaction.
     2. **Migrates**, through a `Smolquery.Catalog.Repo` started for the run,
        recording versions in `smolquery_schema_migrations`.
+    3. **Checks** the format again, and fails the boot unless it is
+       `Smolquery.Catalog.DuckLake.Format.version/0`.
+
+  ## Only this step migrates the DuckLake format
+
+  No other engine attaches with `AUTOMATIC_MIGRATION` (T-639). Before, every
+  engine did when the flag was on, the catalog engine and every query job,
+  and the step attached only when one of smolquery's migrations was pending:
+  so the format migration ran in whichever engine attached first, on any
+  node, outside the lock. Now it runs here, once, with every other booting
+  node waiting on the lock, and an engine attached to the old format stops
+  its compaction swaps at the new one
+  (`Smolquery.Catalog.DuckLake.Format`'s guard).
+
+  DuckLake 1.5's `AUTOMATIC_MIGRATION` migrates to its own newest format,
+  which is `Smolquery.Catalog.DuckLake.Format.version/0`. An extension whose
+  newest format is past it would migrate past it, and that is not undone, so
+  a driver bump that brings one must pin the target with the attach's
+  `DUCKLAKE_VERSION` (DuckLake 2.0) along with raising `Format.version/0`.
+
+  The indexes `Smolquery.Catalog.Migrations.DucklakeReadIndexes` puts on
+  DuckLake's tables survive a format migration: DuckLake's migrations add
+  columns and tables, and rename columns only in its inlined-data tables,
+  which carry no index of ours.
 
   The outer lock is what serializes the attach, and the creation of the
   version table: Ecto creates that with `CREATE TABLE IF NOT EXISTS` before
@@ -53,7 +81,9 @@ defmodule Smolquery.Catalog.Migrator do
   which metadata that is. Such a lake's engines skip the side-table
   bootstrap. Any other lake, SQLite, a string Postgrex cannot use, or a
   service's own `catalog:` override, keeps the bootstrap
-  `CREATE TABLE IF NOT EXISTS` statements it always had.
+  `CREATE TABLE IF NOT EXISTS` statements it always had. For the configured
+  one, with `automatic_migration` set, the step attaches it once with
+  `AUTOMATIC_MIGRATION TRUE` and no lock: SQLite metadata is one node's file.
 
   When clustering is on, the step also applies the tables migration to the
   database `Smolquery.Cluster` connects to, which holds the ring
@@ -68,6 +98,7 @@ defmodule Smolquery.Catalog.Migrator do
   require Logger
 
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Catalog.DuckLake.Format
   alias Smolquery.Catalog.DuckLake.Reader
   alias Smolquery.Catalog.Migrations
   alias Smolquery.Catalog.Repo
@@ -101,24 +132,33 @@ defmodule Smolquery.Catalog.Migrator do
   """
   @spec start_link() :: :ignore | {:error, term()}
   def start_link do
-    with :ok <- prepare(Application.get_env(:smolquery, DuckLake, [])),
+    lake =
+      Keyword.merge(
+        Application.get_env(:smolquery, DuckLake, []),
+        Keyword.take(Application.get_env(:smolquery, __MODULE__, []), [:automatic_migration])
+      )
+
+    with :ok <- prepare(lake),
          :ok <- prepare_cluster(Application.get_env(:smolquery, Smolquery.Cluster, [])) do
       :ignore
     end
   end
 
   @doc """
-  Attaches the lake `config` names and applies every pending migration,
-  under the fleet-wide lock; `:ok` at once when nothing is pending or its
-  metadata is not one this step prepares. `config` holds `:metadata`,
+  Attaches the lake `config` names, migrating its DuckLake format when
+  allowed, and applies every pending migration, under the fleet-wide lock;
+  `:ok` at once when nothing is pending and the catalog is at
+  `Smolquery.Catalog.DuckLake.Format.version/0`. A lake whose metadata this
+  step does not prepare is only attached, to migrate its format, and only
+  when `:automatic_migration` is set. `config` holds `:metadata`,
   `:data_path` and optionally `:catalog` and `:automatic_migration`, as
   `Smolquery.Catalog.DuckLake.start_link/1` takes them.
   """
   @spec prepare(keyword()) :: :ok | {:error, term()}
   def prepare(config) do
     case options(Keyword.get(config, :metadata)) do
-      {:ok, options} -> ready(options, migrations(), fn -> attach(config) end)
-      :none -> :ok
+      {:ok, options} -> prepare_lake(options, config)
+      :none -> migrate_unprepared(config)
     end
   end
 
@@ -131,7 +171,7 @@ defmodule Smolquery.Catalog.Migrator do
   def prepare_cluster(config) do
     with true <- Keyword.get(config, :enabled, false),
          [_ | _] = postgres <- Keyword.get(config, :postgres) do
-      ready(repo_options(postgres), Enum.take(migrations(), 1), fn -> :ok end)
+      prepare_tables(repo_options(postgres), Enum.take(migrations(), 1))
     else
       _off -> :ok
     end
@@ -192,38 +232,84 @@ defmodule Smolquery.Catalog.Migrator do
   defp repo_options(connection),
     do: connection ++ [pool_size: 2, parameters: [search_path: "public"], log: false]
 
-  defp ready(options, migrations, before) do
-    case pending(options, migrations) do
-      {:ok, []} ->
-        :ok
+  defp prepare_tables(options, migrations) do
+    if with_connection(options, &pending(&1, migrations)) == {:ok, []},
+      do: :ok,
+      else: locked(options, fn _conn -> migrated(options, migrations) end)
+  end
 
-      _pending_or_unknown ->
-        locked(options, fn -> apply_pending(options, migrations, before) end)
+  defp prepare_lake(options, config) do
+    current = with_connection(options, &lake_state/1)
+
+    if current == {:ok, {[], Format.version()}},
+      do: :ok,
+      else: locked(options, &upgrade(&1, options, config))
+  end
+
+  defp lake_state(conn) do
+    with {:ok, pending} <- pending(conn, migrations()),
+         {:ok, format} <- format_version(conn) do
+      {:ok, {pending, format}}
     end
   end
 
-  defp apply_pending(options, migrations, before) do
-    with :ok <- before.(),
-         {:ok, versions} <- migrate(options, migrations) do
+  defp upgrade(conn, options, config) do
+    with {:ok, before} <- format_version(conn),
+         :ok <- attach(config, migrate_format?(before, config)),
+         :ok <- migrated(options, migrations()),
+         {:ok, now} <- format_version(conn),
+         :ok <- Format.check(now) do
+      if before not in [nil, now],
+        do: Logger.info("catalog DuckLake format migrated from #{before} to #{now}")
+
+      :ok
+    end
+  end
+
+  defp migrate_format?(nil, _config), do: false
+
+  defp migrate_format?(format, config),
+    do: format != Format.version() and Keyword.get(config, :automatic_migration, false)
+
+  defp migrate_unprepared(config) do
+    if Keyword.get(config, :automatic_migration, false) and
+         Keyword.has_key?(config, :metadata) and Keyword.has_key?(config, :data_path),
+       do: config |> attach(true) |> tap(&log_failure/1),
+       else: :ok
+  end
+
+  defp migrated(options, migrations) do
+    with {:ok, versions} <- migrate(options, migrations) do
       unless versions == [], do: Logger.info("catalog migrations applied: #{inspect(versions)}")
       :ok
     end
   end
 
-  defp pending(options, migrations) do
-    with_connection(options, fn conn ->
-      case Postgrex.query(conn, "SELECT version FROM public.smolquery_schema_migrations", []) do
-        {:ok, %{rows: rows}} ->
-          applied = MapSet.new(rows, &hd/1)
-          {:ok, for({version, _module} <- migrations, version not in applied, do: version)}
+  defp pending(conn, migrations) do
+    case Postgrex.query(conn, "SELECT version FROM public.smolquery_schema_migrations", []) do
+      {:ok, %{rows: rows}} ->
+        applied = MapSet.new(rows, &hd/1)
+        {:ok, for({version, _module} <- migrations, version not in applied, do: version)}
 
-        {:error, %Postgrex.Error{postgres: %{code: :undefined_table}}} ->
-          {:ok, Enum.map(migrations, &elem(&1, 0))}
+      {:error, %Postgrex.Error{postgres: %{code: :undefined_table}}} ->
+        {:ok, Enum.map(migrations, &elem(&1, 0))}
 
-        {:error, error} ->
-          {:error, error}
-      end
-    end)
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp format_version(conn) do
+    case Postgrex.query(conn, Format.version_sql("public"), []) do
+      {:ok, %{rows: rows}} ->
+        {:ok, Enum.find_value(rows, fn [version] -> version end)}
+
+      {:error, %Postgrex.Error{postgres: %{code: :undefined_table}}} ->
+        {:ok, nil}
+
+      {:error, error} ->
+        {:error, error}
+    end
   end
 
   defp run(repo, migrations) do
@@ -234,25 +320,32 @@ defmodule Smolquery.Catalog.Migrator do
     Supervisor.stop(repo)
   end
 
-  defp attach(config) do
+  defp attach(config, automatic_migration) do
     lake = Module.concat(__MODULE__, "Lake#{System.unique_integer([:positive])}")
 
     lake_config =
-      [name: lake] ++
-        Keyword.take(config, [:metadata, :data_path, :catalog, :automatic_migration])
+      [name: lake, automatic_migration: automatic_migration] ++
+        Keyword.take(config, [:metadata, :data_path, :catalog])
 
-    case DuckLake.start_link(lake_config) do
-      {:ok, pid} -> Supervisor.stop(pid)
-      {:error, reason} -> {:error, {:attach_failed, reason}}
+    {pid, ref} =
+      spawn_monitor(fn ->
+        Process.flag(:trap_exit, true)
+        exit({:attached, attached(DuckLake.start_link(lake_config))})
+      end)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, {:attached, result}} -> result
+      {:DOWN, ^ref, :process, ^pid, reason} -> {:error, {:attach_failed, reason}}
     end
-  catch
-    :exit, reason -> {:error, {:attach_failed, reason}}
   end
+
+  defp attached({:ok, pid}), do: Supervisor.stop(pid)
+  defp attached({:error, reason}), do: {:error, {:attach_failed, reason}}
 
   defp locked(options, fun) do
     with_connection(options, fn conn ->
       await_lock(conn, 1)
-      fun.()
+      fun.(conn)
     end)
     |> tap(&log_failure/1)
   end
@@ -288,6 +381,14 @@ defmodule Smolquery.Catalog.Migrator do
   end
 
   defp log_failure(:ok), do: :ok
+
+  defp log_failure({:error, {:catalog_format, found, expected}}) do
+    Logger.error(
+      "the catalog metadata database could not be prepared: its DuckLake catalog format is " <>
+        "#{inspect(found)}, and this release is written for #{expected}; run a release " <>
+        "written for #{inspect(found)}"
+    )
+  end
 
   defp log_failure({:error, reason}) do
     Logger.error("the catalog metadata database could not be prepared: #{inspect(reason)}")

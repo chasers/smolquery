@@ -127,6 +127,17 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.22.0: only the boot step migrates the catalog format, and the swap checks it (T-638, T-639)
+
+**TL;DR.** `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` now acts only in the boot step, under its lock. A compaction swap refuses a catalog at a format it was not written for. Nothing changes on a catalog at DuckLake 1.0, the format DuckDB 1.5.3 writes.
+
+- **Before:** with the flag on, every engine attached with `AUTOMATIC_MIGRATION TRUE`: the catalog engine and every query job, on every node. A format migration ran in whichever engine attached first, outside the boot step's lock.
+- **Now:** only `Smolquery.Catalog.Migrator` attaches with it, once, holding the lock, and only when the catalog's format is not the one this release is written for. See [Catalog format upgrades](#catalog-format-upgrades).
+- **Boot check:** every boot reads the catalog's format along with the pending migrations. A catalog at another format takes the lock and attaches. If the format is still another after that, the boot fails with "its DuckLake catalog format is …".
+- **Swap guard:** the compaction swap writes DuckLake's rows itself, so its metadata transaction now checks the format first. On Postgres it holds the version row `FOR SHARE`, so a migration in flight makes it wait. On a mismatch the swap writes nothing and answers `{:error, {:catalog_format, found, "1.0"}}`.
+- **Reader check:** the Postgrex reader's boot check also reads the format, and logs an error on a mismatch.
+- **Config:** the flag is now read as `config :smolquery, Smolquery.Catalog.Migrator, automatic_migration: …`. The environment variable is unchanged. If you set it in a config file under `Smolquery.Catalog.DuckLake`, move it.
+
 ### 0.22.0: a MetricsQL query's reads run concurrently (T-633)
 
 A query with several selectors, `a / b` or `a or b or c`, read them one after another, so a Grafana panel took the sum of its reads.
@@ -650,16 +661,29 @@ A rolling upgrade cannot run nodes on both sides of that barrier.
 ### The migration flag
 
 `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION=true` turns the refusal into a
-migration. The first node with the new extension that attaches rewrites the
-shared catalog to its format, in place. The migration is **one-way**.
+migration. Only the boot step migrates (`Smolquery.Catalog.Migrator`,
+T-639). The first node with the new image takes the step's advisory lock
+and attaches once with `AUTOMATIC_MIGRATION TRUE`. That rewrites the shared
+catalog to its format, in place, in one metadata transaction. Nodes booting
+at the same time wait on the lock, then find the catalog migrated. The
+catalog engines and query jobs never attach with the flag. The migration is
+**one-way**.
 
-From that instant, every pod with the old extension fails its catalog
-operations: queries, seals, and commits. The failures continue until the
-rollout replaces the pod. That window is an availability gap, not
-corruption.
+From that instant, old pods lose the catalog:
 
-The old pods' statements fail against tables they no longer understand.
-DuckLake's metadata operations stay transactional throughout.
+- An old pod that boots or attaches a new engine is refused at the attach.
+- An old pod's compaction swap refuses the new format and writes nothing
+  (`{:error, {:catalog_format, found, "1.0"}}`). The swap writes DuckLake's
+  rows itself, so it checks the format inside its own transaction and waits
+  on a migration that is in flight (T-638).
+- Engines attached before the migration keep running DuckLake's own
+  statements (seals, queries, retention) as the old extension writes them.
+  Neither DuckLake nor smolquery checks the format on those. Replace old
+  pods promptly.
+
+The step also checks the format after it attaches. A node whose code is
+written for another format fails its boot with "its DuckLake catalog format
+is …", whether or not its extension could attach the catalog.
 
 The flag defaults to `false` because the failure modes are not symmetric.
 With the flag off, an accidental format-bumping upgrade costs a redeploy.
@@ -682,12 +706,16 @@ Use this procedure for a format-bumping upgrade on a deployment with data:
    deliberate trade: self-healing rollouts instead of the interlock. Keep
    the interlock when a catalog restore is costly.
 
-### Known boundary
+### Known boundaries
 
-Parallel StatefulSet rollouts can attach several stale-catalog pods at the
-same moment. Each pod requests the migration. DuckLake runs the migration
-inside the attach's transaction. However, this codebase has no test that
-pins concurrent migration of one catalog.
-
-If a failed first boot is not acceptable, roll one pod first. Let that pod
-migrate alone.
+- **Postgres metadata only, for the lock.** The step prepares Postgres
+  metadata that Postgrex can connect to (see the 0.21.0 note). For SQLite
+  metadata, or a Postgres string it cannot prepare, the step attaches once
+  with the flag and takes no lock. SQLite metadata is one node's file. A
+  service's own `catalog:` override is never migrated.
+- **The target is the extension's newest format.** DuckLake 1.5's
+  `AUTOMATIC_MIGRATION` migrates to its newest format, 1.0, which is the
+  format this release is written for. DuckDB 2.0's newest is `1.1-dev1`. The
+  release that moves to 2.0 must pin the target with the attach's
+  `DUCKLAKE_VERSION` option, or the step would migrate past the code's
+  format and then refuse to boot on the result.
