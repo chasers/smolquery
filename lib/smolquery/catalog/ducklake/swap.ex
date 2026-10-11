@@ -50,6 +50,10 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
   Staged files an interrupted swap left behind are retired in the same
   transaction once older than the caller's cutoff.
 
+  `Smolquery.Catalog.DuckLake` runs `Smolquery.Catalog.DuckLake.Format`'s
+  guard ahead of these statements, so the rows written here only ever land
+  in a catalog at the format they copy (T-638).
+
   When the key collides, `rebase?/3` reads what committed since `L`: inserts
   anywhere, and anything naming another table, leave every read but the
   latest snapshot and `next_row_id` valid, so only those are read again, the

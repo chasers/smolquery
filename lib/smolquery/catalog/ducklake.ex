@@ -170,6 +170,12 @@ defmodule Smolquery.Catalog.DuckLake do
 
   Only `replace_segments/4` swaps this way. `drop_segments/3` (retention)
   still retires through `DELETE`.
+
+  Since the move writes DuckLake's rows itself, its transaction first checks
+  that the catalog is at the format those rows are written for
+  (`Smolquery.Catalog.DuckLake.Format`), and a swap against any other
+  refuses with `{:error, {:catalog_format, found, expected}}`, writing
+  nothing (T-638).
   """
 
   @behaviour Smolquery.Catalog
@@ -180,6 +186,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
+  alias Smolquery.Catalog.DuckLake.Format
   alias Smolquery.Catalog.DuckLake.Reader
   alias Smolquery.Catalog.DuckLake.Swap
   alias Smolquery.Catalog.Migrator
@@ -1148,10 +1155,17 @@ defmodule Smolquery.Catalog.DuckLake do
         {:ok, :committed}
 
       {:error, error} ->
-        if Swap.lost_snapshot?(error) and attempts > 1,
-          do: rebase_move(config, plan, error, attempts),
-          else: {:error, error}
+        case Format.mismatch(error) do
+          {:ok, mismatch} -> {:error, mismatch}
+          :error -> lost_move(config, plan, error, attempts)
+        end
     end
+  end
+
+  defp lost_move(config, plan, error, attempts) do
+    if Swap.lost_snapshot?(error) and attempts > 1,
+      do: rebase_move(config, plan, error, attempts),
+      else: {:error, error}
   end
 
   defp rebase_move(config, plan, error, attempts) do
@@ -1180,7 +1194,13 @@ defmodule Smolquery.Catalog.DuckLake do
   defp move_statements(config, plan) do
     case metadata_type(config) do
       "postgres" ->
-        batch = plan |> Swap.statements(~s("public")) |> Enum.join(";\n")
+        prefix = ~s("public")
+
+        batch =
+          Enum.join(
+            Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
+            ";\n"
+          )
 
         [
           {:move,
@@ -1189,7 +1209,8 @@ defmodule Smolquery.Catalog.DuckLake do
         ]
 
       _through_duckdb ->
-        Enum.map(Swap.statements(plan, metadata_schema(config.catalog)), &{:move, &1})
+        prefix = metadata_schema(config.catalog)
+        Enum.map(Format.guard_statements(prefix) ++ Swap.statements(plan, prefix), &{:move, &1})
     end
   end
 

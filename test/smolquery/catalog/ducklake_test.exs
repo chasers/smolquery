@@ -871,6 +871,31 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert Catalog.segments(catalog, @table, :current) == {:ok, [segment.path]}
       assert row_count() == 10
     end
+
+    test "refuses a catalog at another format and moves nothing (T-638)", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      merged = write_merged(dir, [{1, 10}])
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+      set_format("1.1-dev1")
+
+      assert Catalog.replace_segments(catalog, @table, [merged], [a.path]) ==
+               {:error, {:catalog_format, "1.1-dev1", "1.0"}}
+
+      set_format("1.0")
+      assert Catalog.segments(catalog, @table, :current) == {:ok, [a.path]}
+      assert row_count() == 10
+    end
+  end
+
+  defp set_format(version) do
+    Engine.query!(
+      @engine,
+      ~s|UPDATE "__ducklake_metadata_lake".ducklake_metadata SET value = '#{version}' | <>
+        ~s|WHERE key = 'version'|
+    )
   end
 
   describe "retention policy" do

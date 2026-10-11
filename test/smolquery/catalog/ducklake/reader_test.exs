@@ -207,6 +207,24 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       assert log =~ "SMOLQUERY_CATALOG_READER=false"
     end
 
+    test "check/1 logs a catalog at a format the reads are not written for (T-638)" do
+      pool = Reader.pool(@engine)
+
+      Postgrex.query!(
+        pool,
+        "UPDATE ducklake_metadata SET value = '1.1-dev1' WHERE key = 'version'",
+        []
+      )
+
+      log =
+        capture_log(fn ->
+          assert Reader.check(pool) == {:error, {:catalog_format, "1.1-dev1", "1.0"}}
+        end)
+
+      assert log =~ ~s|found DuckLake catalog format "1.1-dev1"|
+      assert log =~ "written for 1.0"
+    end
+
     test "a relative path DuckLake wrote itself is refused on both paths", context do
       %{catalog: catalog, duckdb: duckdb} = context
       :ok = Catalog.create_dataset(catalog, "analytics")

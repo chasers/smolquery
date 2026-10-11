@@ -58,7 +58,9 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   So that a misconfigured connection shows at deploy rather than as failed
   plans, `Smolquery.Catalog.DuckLake.children/2` starts `check/1` after the
   pool: one read of the latest snapshot through it, logged as an error when
-  it fails.
+  it fails. It also reads the catalog's format, and logs an error when the
+  format is not the one the reads here are written for
+  (`Smolquery.Catalog.DuckLake.Format`, T-638).
 
   ## Indexes
 
@@ -72,6 +74,8 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   """
 
   require Logger
+
+  alias Smolquery.Catalog.DuckLake.Format
 
   @default_pool_size 4
   @queue_target_ms 10_000
@@ -231,20 +235,23 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
     do: Supervisor.child_spec({Task, fn -> check(pool) end}, id: {__MODULE__, :check, pool})
 
   @doc """
-  Reads the latest snapshot through `pool`, logging an error when it cannot:
-  the reader's boot-time check that it connects to the database DuckLake uses
-  and finds DuckLake's tables there.
+  Reads the latest snapshot and the catalog's format through `pool`, logging
+  an error when it cannot, or when the format is not the one the reads here
+  are written for (`Smolquery.Catalog.DuckLake.Format`): the reader's
+  boot-time check that it connects to the database DuckLake uses and can
+  read DuckLake's tables there.
   """
   @spec check(atom()) :: :ok | {:error, term()}
   def check(pool) do
-    case query(
-           pool,
-           "SELECT snapshot_id FROM ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1",
-           []
-         ) do
-      {:ok, _result} ->
-        :ok
-
+    with {:ok, _result} <-
+           query(
+             pool,
+             "SELECT snapshot_id FROM ducklake_snapshot ORDER BY snapshot_id DESC LIMIT 1",
+             []
+           ),
+         {:ok, %{rows: rows}} <- query(pool, Format.version_sql("public"), []) do
+      check_format(pool, rows)
+    else
       {:error, reason} ->
         Logger.error(
           "catalog reader #{inspect(pool)} cannot read the catalog, so every catalog read " <>
@@ -253,6 +260,20 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
         )
 
         {:error, reason}
+    end
+  end
+
+  defp check_format(pool, rows) do
+    found = Enum.find_value(rows, fn [version] -> version end)
+
+    with {:error, {:catalog_format, found, expected}} = mismatch <- Format.check(found) do
+      Logger.error(
+        "catalog reader #{inspect(pool)} found DuckLake catalog format #{inspect(found)}, " <>
+          "but its reads are written for #{expected}, so they may misread the catalog; " <>
+          "run a smolquery release written for that format"
+      )
+
+      mismatch
     end
   end
 

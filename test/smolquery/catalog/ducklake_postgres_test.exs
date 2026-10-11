@@ -183,6 +183,57 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     assert row_count() == 6
   end
 
+  test "a swap waits for a format change in flight, then refuses the new format (T-638)", %{
+    catalog: catalog,
+    segments_dir: segments_dir
+  } do
+    a = write_segment(segments_dir, 2)
+    merged = write_segment(segments_dir, 2)
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [a])
+    {:ok, migration} = Postgrex.start_link(postgres_connection())
+    {:ok, watcher} = Postgrex.start_link(postgres_connection())
+
+    Postgrex.query!(migration, "BEGIN", [])
+
+    Postgrex.query!(
+      migration,
+      "UPDATE ducklake_metadata SET value = '1.1-dev1' WHERE key = 'version'",
+      []
+    )
+
+    swap = Task.async(fn -> Catalog.replace_segments(catalog, @table, [merged], [a.path]) end)
+    await_lock_wait(watcher, 200)
+    Postgrex.query!(migration, "COMMIT", [])
+
+    assert Task.await(swap, 30_000) == {:error, {:catalog_format, "1.1-dev1", "1.0"}}
+
+    Postgrex.query!(
+      migration,
+      "UPDATE ducklake_metadata SET value = '1.0' WHERE key = 'version'",
+      []
+    )
+
+    assert Catalog.segments(catalog, @table, :current) == {:ok, [a.path]}
+    assert row_count() == 2
+  end
+
+  defp await_lock_wait(_watcher, 0), do: flunk("the swap never waited on the version row")
+
+  defp await_lock_wait(watcher, attempts) do
+    %{rows: [[waiting]]} =
+      Postgrex.query!(
+        watcher,
+        "SELECT count(*) FROM pg_stat_activity " <>
+          "WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        []
+      )
+
+    if waiting == 0 do
+      Process.sleep(50)
+      await_lock_wait(watcher, attempts - 1)
+    end
+  end
+
   defp schema do
     Schema.new!([{"id", :int64, nullable: false}])
   end
