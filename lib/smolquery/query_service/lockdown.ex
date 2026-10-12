@@ -1,11 +1,11 @@
 defmodule Smolquery.QueryService.Lockdown do
   @moduledoc """
   The statements that confine an engine about to run SQL derived from a
-  user's — a job engine (`Smolquery.QueryService.Runner`) or a partial
+  user's statement — a job engine (`Smolquery.QueryService.Runner`) or a partial
   worker (`Smolquery.QueryService.PartialWorker`) — in the one order that
   works.
 
-  The lists came first: `allowed_directories` and `allowed_paths` say what
+  The lists come first: `allowed_directories` and `allowed_paths` say what
   the engine may still read once external access closes. External access
   then closes, unless the caller keeps it (a partial worker's `COPY ... TO`
   needs it, and the two lists bound what it can reach). Then `allowed_configs`

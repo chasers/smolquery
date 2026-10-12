@@ -218,7 +218,7 @@ defmodule Smolquery.QueryService.Planner do
   `refs/1` collects `BASE_TABLE` nodes. A FROM-clause table function is not
   one: `postgres_scan(...)` serializes as a `TABLE_FUNCTION` wrapping a
   `FUNCTION`, so it was never collected, never classified, and never refused.
-  `Runner.lockdown/2` is what caught the rest — `SET enable_external_access =
+  `Runner.lockdown/3` is what caught the rest — `SET enable_external_access =
   false` stops `read_csv('/etc/passwd')` at execution, which is why the gap
   went unnoticed.
 

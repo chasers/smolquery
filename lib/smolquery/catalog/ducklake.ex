@@ -486,6 +486,11 @@ defmodule Smolquery.Catalog.DuckLake do
   "Current transaction is aborted". Listing the three under `allowed_configs`
   exempts them from the lock; none of them reaches outside the engine, and
   the list itself locks with everything else.
+
+  The three are the ones the DuckLake build for DuckDB 2.0.0-alpha38195 sets.
+  Another build may set another; DuckDB refuses `allowed_configs` and
+  `lock_configuration` themselves in the list, so it cannot unlock anything
+  else.
   """
   @spec allowed_configs_statement() :: String.t()
   def allowed_configs_statement do
