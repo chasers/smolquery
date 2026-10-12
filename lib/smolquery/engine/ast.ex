@@ -9,6 +9,26 @@ defmodule Smolquery.Engine.Ast do
   column gates, for column references and node classes.
   """
 
+  @unreadable "DuckDB's parse of this statement is not valid JSON; a number past ~3.4e38 " <>
+                "written as a literal is one cause, and CAST('1e308' AS DOUBLE) avoids it"
+
+  @doc """
+  The tree `json_serialize_sql` answered, decoded, or
+  `{:error, {:invalid_query, message}}` when it is not JSON.
+
+  DuckDB 2.0 writes a DOUBLE literal past ~3.4e38 as a bare `Infinity`,
+  which no JSON reader takes. Decoding leniently would read the literal as
+  an infinity the statement never wrote, so the statement is refused, by
+  name (T-653).
+  """
+  @spec decode(String.t()) :: {:ok, term()} | {:error, {:invalid_query, String.t()}}
+  def decode(json) do
+    case JSON.decode(json) do
+      {:ok, tree} -> {:ok, tree}
+      {:error, _reason} -> {:error, {:invalid_query, @unreadable}}
+    end
+  end
+
   @doc """
   `node` without where it was written or what it was called: its
   `query_location` and `alias` taken off, all the way down.

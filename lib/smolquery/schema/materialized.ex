@@ -137,11 +137,12 @@ defmodule Smolquery.Schema.Materialized do
                "CASE WHEN json_extract_string(json_serialize_sql(#{quoted}), '$.error') = 'false' " <>
                "THEN json_deserialize_sql(json_serialize_sql(#{quoted})) END"
            ),
-         {:ok, ast} <- JSON.decode(json),
+         {:ok, ast} <- Ast.decode(json),
          {:ok, node} <- one_expression(ast) do
       {:ok, ast, node, String.replace_prefix(canonical, "SELECT ", "")}
     else
       {:error, {:invalid_materialized, _detail} = refusal} -> {:error, refusal}
+      {:error, {:invalid_query, message}} -> refuse({:unparseable, message})
       {:error, error} -> refuse({:unparseable, Exception.message(error)})
       other -> refuse({:unparseable, inspect(other)})
     end

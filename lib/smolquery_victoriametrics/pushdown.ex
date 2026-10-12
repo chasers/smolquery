@@ -88,7 +88,11 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   `-Inf` is NaN in DuckDB as `SmolqueryVictoriaMetrics.Eval.Value` makes it
   `nil`; the aggregate skips NaN as VictoriaMetrics does and answers NULL,
   read back as `nil`, when nothing is left; an infinity in the answer reads
-  back as the stored bound. `__name__` is a group key only when `by` lists
+  back as the stored bound. The bound is written as
+  `CAST('1.7976931348623157e308' AS DOUBLE)`, not as a literal: DuckDB
+  2.0's `json_serialize_sql` writes a DOUBLE literal past ~3.4e38 as a bare
+  `Infinity`, which is not JSON, so the planner could not read the
+  statement (T-653). `__name__` is a group key only when `by` lists
   it and the rollup keeps it (`keep_metric_names`, or one of
   `SmolqueryVictoriaMetrics.Rollup.keeps_metric_name?/1`); a label a series
   lacks is NULL, and absent from that group's labels, as `by` reads it.
@@ -149,7 +153,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
   @whole Whole.functions()
   @rollups @last ++ Map.keys(@inner) ++ @windows ++ @whole
   @max_window_steps 32
-  @inf "1.7976931348623157e308"
+  @inf "CAST('1.7976931348623157e308' AS DOUBLE)"
 
   @enforce_keys [
     :selector,

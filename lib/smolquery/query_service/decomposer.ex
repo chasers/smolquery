@@ -492,7 +492,7 @@ defmodule Smolquery.QueryService.Decomposer do
     with {:ok, result} <-
            Connection.query(connection, "SELECT json_serialize_sql(#{quoted})", [], :infinity),
          [[json]] <- result.rows,
-         {:ok, ast} <- JSON.decode(json) do
+         {:ok, ast} <- Ast.decode(json) do
       case ast do
         %{"error" => false, "statements" => [%{"node" => %{"type" => "SELECT_NODE"} = node}]} ->
           {:ok, node}

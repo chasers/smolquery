@@ -3,6 +3,17 @@ defmodule Smolquery.Engine.AstTest do
 
   alias Smolquery.Engine.Ast
 
+  test "decode/1 reads the tree, and refuses by name the bare Infinity DuckDB 2.0 writes (T-653)" do
+    assert Ast.decode(~s({"error": false, "statements": []})) ==
+             {:ok, %{"error" => false, "statements" => []}}
+
+    assert {:error, {:invalid_query, message}} =
+             Ast.decode(~s({"class": "CONSTANT", "value": Infinity}))
+
+    assert message =~ "not valid JSON"
+    assert message =~ "CAST('1e308' AS DOUBLE)"
+  end
+
   test "shape/1 is an expression without where it was written or what it was called" do
     written = %{
       "class" => "FUNCTION",

@@ -571,7 +571,7 @@ defmodule Smolquery.QueryService.Planner do
                "THEN json_deserialize_sql(json_serialize_sql(#{quoted})) END"
            ),
          [[json, canonical]] <- result.rows,
-         {:ok, ast} <- JSON.decode(json) do
+         {:ok, ast} <- Ast.decode(json) do
       {:ok, ast, canonical}
     else
       {:error, reason} -> {:error, reason}
