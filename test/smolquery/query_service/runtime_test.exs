@@ -50,6 +50,22 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert Runtime.new(name: __MODULE__.Named, warm_probe: "SELECT 2").warm_probe == "SELECT 2"
     end
 
+    test "a job engine attaches the lake without automatic migration, even when asked (T-651)" do
+      runtime =
+        Runtime.new(
+          name: __MODULE__.Migrating,
+          catalog: [
+            metadata: "sqlite:/nowhere/catalog.sqlite",
+            data_path: "/nowhere/data",
+            automatic_migration: true
+          ]
+        )
+
+      assert [attach] = runtime.job_bootstrap
+      assert attach =~ "ATTACH IF NOT EXISTS 'ducklake:sqlite:/nowhere/catalog.sqlite'"
+      refute attach =~ "AUTOMATIC_MIGRATION"
+    end
+
     test "opts override application config" do
       runtime = Runtime.new(name: __MODULE__.Overridden, max_concurrent_jobs: 3)
 

@@ -175,7 +175,12 @@ defmodule Smolquery.Catalog.DuckLake do
   that the catalog is at the format those rows are written for
   (`Smolquery.Catalog.DuckLake.Format`), and a swap against any other
   refuses with `{:error, {:catalog_format, found, expected}}`, writing
-  nothing (T-638).
+  nothing (T-638). On Postgres metadata the move runs in one
+  `postgres_execute` batch that also locks the version row. The swap knows
+  the metadata is Postgres by the lake's own `path` in `duckdb_databases()`,
+  not by DuckLake's `__ducklake_metadata_` database there, which DuckDB 2.0
+  no longer lists: read that way, every swap took the batch for DuckDB's and
+  skipped the lock (T-651).
   """
 
   @behaviour Smolquery.Catalog
@@ -272,7 +277,10 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:data_path` (required) — where DuckLake writes files it owns. smolquery
       registers segments from outside this directory, but DuckLake requires it.
     * `:catalog` — attached catalog name. Defaults to `#{inspect(@default_catalog)}`.
-    * `:automatic_migration` — passed to `attach_statement/4`
+    * `:automatic_migration` — passed to `attach_statement/4`, from `opts`
+      only: one left under this module's application environment, where it
+      lived before 0.22.0, is ignored, since every engine reads that and
+      only `Smolquery.Catalog.Migrator` migrates the format (T-651)
     * `:store` — the sealed-tier store; a credential-chain S3 store adds
       the extensions its `CREATE SECRET` statement needs
     * any `Smolquery.Engine` option — `:extensions` is extended with
@@ -281,7 +289,12 @@ defmodule Smolquery.Catalog.DuckLake do
   """
   @spec start_link([option()]) :: Supervisor.on_start()
   def start_link(opts) do
-    config = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
+    config =
+      :smolquery
+      |> Application.get_env(__MODULE__, [])
+      |> Keyword.delete(:automatic_migration)
+      |> Keyword.merge(opts)
+
     {catalog, config} = Keyword.pop(config, :catalog, @default_catalog)
     {metadata, config} = Keyword.pop!(config, :metadata)
     {data_path, config} = Keyword.pop!(config, :data_path)
@@ -1193,33 +1206,31 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp move_statements(config, plan) do
-    case metadata_type(config) do
-      "postgres" ->
-        prefix = ~s("public")
+    if postgres_metadata?(metadata_path(config)) do
+      prefix = ~s("public")
 
-        batch =
-          Enum.join(
-            Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
-            ";\n"
-          )
+      batch =
+        Enum.join(
+          Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
+          ";\n"
+        )
 
-        [
-          {:move,
-           "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
-             "#{Identifier.sql_string(batch)})"}
-        ]
-
-      _through_duckdb ->
-        prefix = metadata_schema(config.catalog)
-        Enum.map(Format.guard_statements(prefix) ++ Swap.statements(plan, prefix), &{:move, &1})
+      [
+        {:move,
+         "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
+           "#{Identifier.sql_string(batch)})"}
+      ]
+    else
+      prefix = metadata_schema(config.catalog)
+      Enum.map(Format.guard_statements(prefix) ++ Swap.statements(plan, prefix), &{:move, &1})
     end
   end
 
-  defp metadata_type(config) do
-    sql = "SELECT type FROM duckdb_databases() WHERE database_name = $1"
+  defp metadata_path(config) do
+    sql = "SELECT path FROM duckdb_databases() WHERE database_name = $1"
 
-    case query(config, sql, ["__ducklake_metadata_" <> config.catalog]) do
-      {:ok, %{rows: [[type]]}} -> type
+    case query(config, sql, [config.catalog]) do
+      {:ok, %{rows: [[path]]}} when is_binary(path) -> path
       _unknown -> nil
     end
   end

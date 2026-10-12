@@ -67,6 +67,33 @@ defmodule Smolquery.Catalog.MigratorTest do
     refute Migrator.prepared?("postgres:dbname=smolquery")
   end
 
+  test "lake_config/0 takes the flag from the Migrator, and drops one left under DuckLake (T-651)" do
+    previous =
+      {Application.get_env(:smolquery, DuckLake), Application.get_env(:smolquery, Migrator)}
+
+    lake = [metadata: "postgres:dbname=smolquery host=db user=smol", data_path: "/lake"]
+
+    on_exit(fn ->
+      for {key, value} <- Enum.zip([DuckLake, Migrator], Tuple.to_list(previous)) do
+        if value,
+          do: Application.put_env(:smolquery, key, value),
+          else: Application.delete_env(:smolquery, key)
+      end
+    end)
+
+    Application.put_env(:smolquery, DuckLake, lake)
+    Application.put_env(:smolquery, Migrator, automatic_migration: true)
+    assert Migrator.lake_config() == lake ++ [automatic_migration: true]
+
+    Application.put_env(:smolquery, DuckLake, lake ++ [automatic_migration: true])
+    Application.delete_env(:smolquery, Migrator)
+
+    log = capture_log(fn -> assert Migrator.lake_config() == lake end)
+
+    assert log =~
+             "ignoring :automatic_migration under config :smolquery, Smolquery.Catalog.DuckLake"
+  end
+
   test "prepare_cluster/1 has nothing to do without clustering" do
     assert Migrator.prepare_cluster(enabled: false) == :ok
     assert Migrator.prepare_cluster([]) == :ok
@@ -182,10 +209,10 @@ defmodule Smolquery.Catalog.MigratorTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:attach_failed, _refused}} = Migrator.prepare(context.config)
+          assert Migrator.prepare(context.config) == {:error, {:catalog_format, "0.4", "1.0"}}
         end)
 
-      assert log =~ "could not be prepared"
+      assert log =~ ~s(its DuckLake catalog format is "0.4")
       assert format(context.connection) == "0.4"
 
       log =
@@ -221,10 +248,21 @@ defmodule Smolquery.Catalog.MigratorTest do
       :ok = Migrator.prepare(context.config)
       set_format!(context.connection, "1.1-dev1")
 
-      for config <- [context.config, context.config ++ [automatic_migration: true]] do
-        log = capture_log(fn -> assert {:error, _refused} = Migrator.prepare(config) end)
-        assert log =~ "could not be prepared"
-      end
+      log =
+        capture_log(fn ->
+          assert Migrator.prepare(context.config) ==
+                   {:error, {:catalog_format, "1.1-dev1", "1.0"}}
+        end)
+
+      assert log =~ ~s(its DuckLake catalog format is "1.1-dev1")
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:attach_failed, _refused}} =
+                   Migrator.prepare(context.config ++ [automatic_migration: true])
+        end)
+
+      assert log =~ "could not be prepared"
 
       assert format(context.connection) == "1.1-dev1"
     end

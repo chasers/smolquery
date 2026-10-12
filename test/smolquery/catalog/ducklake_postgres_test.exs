@@ -224,7 +224,8 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
       Postgrex.query!(
         watcher,
         "SELECT count(*) FROM pg_stat_activity " <>
-          "WHERE datname = current_database() AND wait_event_type = 'Lock'",
+          "WHERE datname = current_database() AND wait_event_type = 'Lock' " <>
+          "AND query LIKE '%ducklake_metadata WHERE key = ''version'' FOR SHARE%'",
         []
       )
 
