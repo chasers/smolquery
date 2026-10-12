@@ -30,10 +30,8 @@ defmodule Smolquery.Engine.Ast do
     end
   end
 
-  defp at({_kind, offset}) when is_integer(offset), do: breaks_at(offset)
-  defp at({_kind, offset, _found}) when is_integer(offset), do: breaks_at(offset)
-
-  defp at(_reason), do: ""
+  defp at({_kind, offset}), do: breaks_at(offset)
+  defp at({_kind, offset, _found}), do: breaks_at(offset)
 
   defp breaks_at(offset), do: " (the JSON breaks at byte #{offset})"
 
