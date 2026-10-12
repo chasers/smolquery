@@ -80,7 +80,7 @@ defmodule Smolquery.Schema.Materialized do
           sources: [pos_integer()]
         }
 
-  @allowed_classes ~w(FUNCTION OPERATOR CAST COMPARISON CONJUNCTION CASE BETWEEN CONSTANT COLUMN_REF)
+  @allowed_classes ~w(FUNCTION OPERATOR CAST COMPARISON CONJUNCTION CASE BETWEEN CONSTANT COLUMN_REF TYPE)
   @denied_functions ~w(current_setting getvariable current_localtime current_localtimestamp
     to_timestamp timezone make_timestamptz version current_database current_schema
     current_schemas current_query current_user current_role session_user user)
@@ -205,8 +205,11 @@ defmodule Smolquery.Schema.Materialized do
 
   defp unzoned(nodes) do
     nodes
-    |> Enum.filter(&(&1["class"] == "CAST"))
-    |> Enum.map(&get_in(&1, ["cast_type", "id"]))
+    |> Enum.flat_map(fn
+      %{"class" => "CAST"} = cast -> Ast.cast_types(cast)
+      %{"class" => "TYPE"} = type -> [Ast.type_name(type)]
+      _node -> []
+    end)
     |> Enum.find(&(&1 in @zoned_types))
     |> case do
       nil -> :ok
@@ -224,9 +227,11 @@ defmodule Smolquery.Schema.Materialized do
       &(&1["class"] == "FUNCTION" and &1["function_name"] in ~w(strptime try_strptime))
     )
     |> Enum.flat_map(
-      &Ast.collect(&1, fn
-        %{"class" => "CONSTANT", "value" => %{"value" => value}} -> [value]
-        _node -> []
+      &Ast.collect(&1, fn node ->
+        case Ast.constant(node) do
+          {:ok, {_type, value}} -> [value]
+          _not_a_value -> []
+        end
       end)
     )
     |> Enum.find(&(is_binary(&1) and String.contains?(&1, ["%Z", "%z"])))
@@ -343,7 +348,7 @@ defmodule Smolquery.Schema.Materialized do
       arguments =
         for call <- calls,
             call["function_name"] in taking,
-            argument <- call["children"],
+            argument <- Ast.arguments(call),
             do: {call["function_name"], argument}
 
       Enum.reduce_while(arguments, :ok, &not_variant(engine, ast, regular, &1, &2))

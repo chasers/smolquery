@@ -127,6 +127,19 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Ready for DuckDB 2.0, still on 1.5.3 (T-652 to T-656)
+
+**TL;DR.** The engine is still DuckDB 1.5.3. These changes make the code work on 2.0 as well, so the 2.0 bump can change the pin and little else. Two things are new for a client.
+
+- **A number past ~3.4e38 written as a literal.** DuckDB 2.0's parser can't write one into the parse JSON smolquery reads, so on 2.0 such a statement fails with "DuckDB's parse of this statement is not valid JSON …". Before, it failed with a JSON decoder error. Writing `CAST('1e308' AS DOUBLE)` works on both. On 1.5.3 nothing changes.
+- **A percent `LIMIT` under scatter.** `LIMIT 10%` is now refused as `:percent_limit` on both versions. Before, 1.5.3 called it an unsupported modifier.
+
+Internal, and nothing to configure:
+
+- SQL that smolquery writes uses `lambda x: …`. 2.0 refuses `x -> …`.
+- A locked-down query engine lets DuckLake run its own metadata `SET`s (`allowed_configs`), and `EXPLAIN ANALYZE` switches profiling on first. On 2.0, both are needed for lake reads and for analyzed plans.
+- The readers of DuckDB's parse tree take the 1.5.3 shapes and the 2.0 ones, checked on 2.0.0-alpha38195 and alpha46516.
+
 ### The boot step names the catalog's format before it attaches, and a stale flag is ignored (T-651)
 
 **TL;DR.** Follow-ups to the 0.22.0 note below. Nothing changes on a catalog at DuckLake 1.0 with the flag set as that note says.

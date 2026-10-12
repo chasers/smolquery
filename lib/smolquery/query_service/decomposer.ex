@@ -334,7 +334,7 @@ defmodule Smolquery.QueryService.Decomposer do
   defp sampled(%{"cte_map" => %{"map" => [%{"key" => name, "value" => cte}]}} = node) do
     with %{"type" => "BASE_TABLE", "schema_name" => "", "table_name" => ^name} = from <-
            node["from_table"],
-         %{"query" => %{"node" => %{"type" => "SELECT_NODE"} = inner}} <- cte do
+         %{"type" => "SELECT_NODE"} = inner <- Ast.cte_node(cte) do
       {:ok, %{name: name, inner: inner, reference: from, renamed: cte["aliases"] != []}}
     else
       _another_shape -> :error
@@ -436,13 +436,9 @@ defmodule Smolquery.QueryService.Decomposer do
   end
 
   defp sample_limit(%{"modifiers" => [%{"type" => "LIMIT_MODIFIER", "offset" => nil} = modifier]}) do
-    case modifier["limit"] do
-      %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => limit}}
-      when is_integer(limit) and limit > 0 ->
-        {:ok, limit}
-
-      _expression ->
-        {:error, :unsupported_limit}
+    case Ast.integer(modifier["limit"]) do
+      {:ok, limit} when limit > 0 -> {:ok, limit}
+      _expression -> {:error, :unsupported_limit}
     end
   end
 
@@ -495,7 +491,7 @@ defmodule Smolquery.QueryService.Decomposer do
          {:ok, ast} <- Ast.decode(json) do
       case ast do
         %{"error" => false, "statements" => [%{"node" => %{"type" => "SELECT_NODE"} = node}]} ->
-          {:ok, node}
+          {:ok, Ast.portable(node)}
 
         _refused ->
           {:error, :not_a_single_select}
@@ -542,10 +538,23 @@ defmodule Smolquery.QueryService.Decomposer do
   defp gate_modifiers(modifiers) do
     Enum.reduce_while(modifiers, :ok, fn modifier, :ok ->
       case modifier do
-        %{"type" => "ORDER_MODIFIER"} -> {:cont, :ok}
-        %{"type" => "LIMIT_MODIFIER", "offset" => nil} -> {:cont, :ok}
-        %{"type" => "LIMIT_MODIFIER"} -> {:halt, {:error, :offset}}
-        %{"type" => other} -> {:halt, {:error, {:unsupported_modifier, other}}}
+        %{"type" => "ORDER_MODIFIER"} ->
+          {:cont, :ok}
+
+        %{"type" => "LIMIT_PERCENT_MODIFIER"} ->
+          {:halt, {:error, :percent_limit}}
+
+        %{"type" => "LIMIT_MODIFIER", "limit_type" => "PERCENTAGE"} ->
+          {:halt, {:error, :percent_limit}}
+
+        %{"type" => "LIMIT_MODIFIER", "offset" => nil} ->
+          {:cont, :ok}
+
+        %{"type" => "LIMIT_MODIFIER"} ->
+          {:halt, {:error, :offset}}
+
+        %{"type" => other} ->
+          {:halt, {:error, {:unsupported_modifier, other}}}
       end
     end)
   end
@@ -711,7 +720,7 @@ defmodule Smolquery.QueryService.Decomposer do
       item["order_bys"]["orders"] != [] ->
         {:error, {:ordered_aggregate, name}}
 
-      nested_aggregate?([item["filter"] | item["children"]]) ->
+      nested_aggregate?([item["filter"] | Ast.arguments(item)]) ->
         {:error, {:nested_aggregate, name}}
 
       true ->
@@ -763,16 +772,15 @@ defmodule Smolquery.QueryService.Decomposer do
   defp arguments?(kind, [_value]) when kind in [:any, :count_distinct], do: true
   defp arguments?(kind, [_value]) when is_atom(kind), do: true
 
-  defp arguments?(kind, [_value, %{"class" => "CONSTANT", "value" => %{"value" => n}}])
-       when kind in [:list, :distinct_list, :flat_distinct_list] and is_integer(n) and n > 0,
-       do: true
+  defp arguments?(kind, [_value, n]) when kind in [:list, :distinct_list, :flat_distinct_list],
+    do: match?({:ok, count} when count > 0, Ast.integer(n))
 
   defp arguments?(_kind, _children), do: false
 
   defp constant?(node) do
     node
     |> Ast.collect(fn
-      %{"class" => class} when class in ["CONSTANT", "CAST"] -> []
+      %{"class" => class} when class in ["CONSTANT", "CAST", "TYPE"] -> []
       %{"class" => "FUNCTION", "function_name" => "list_value"} -> []
       %{"class" => class} -> [class]
       _not_an_expression -> []
@@ -1119,8 +1127,12 @@ defmodule Smolquery.QueryService.Decomposer do
 
   defp flat(position), do: "flatten(list(#{quoted("#{@prefix}a#{position}")}))"
 
-  defp sliced(list, %{"children" => [_value, %{"value" => %{"value" => n}}]}),
-    do: "list_slice(#{list}, 1, #{n})"
+  defp sliced(list, %{"children" => [_value, n]}) do
+    case Ast.integer(n) do
+      {:ok, count} -> "list_slice(#{list}, 1, #{count})"
+      :error -> list
+    end
+  end
 
   defp sliced(list, _item), do: list
 
@@ -1327,17 +1339,12 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => nil}, _outputs), do: {:ok, ""}
+
   defp render_modifier(%{"type" => "LIMIT_MODIFIER", "limit" => limit}, _outputs) do
-    case limit do
-      %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => count}}
-      when is_integer(count) and count >= 0 ->
-        {:ok, "LIMIT #{count}"}
-
-      nil ->
-        {:ok, ""}
-
-      _expression ->
-        {:error, :unsupported_limit}
+    case Ast.integer(limit) do
+      {:ok, count} when count >= 0 -> {:ok, "LIMIT #{count}"}
+      _not_a_count -> {:error, :unsupported_limit}
     end
   end
 

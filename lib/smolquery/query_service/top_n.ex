@@ -455,12 +455,15 @@ defmodule Smolquery.QueryService.TopN do
       "alias" => "",
       "query_location" => 0,
       "value" => %{
-        "type" => %{"id" => "BIGINT", "type_info" => nil},
+        "type" => %{"id" => integer_type(value), "type_info" => nil},
         "is_null" => false,
         "value" => value
       }
     }
   end
+
+  defp integer_type(value) when value in -2_147_483_648..2_147_483_647, do: "INTEGER"
+  defp integer_type(_value), do: "BIGINT"
 
   defp edge(entry, column, direction) do
     entry |> Map.get("stats", %{}) |> Entry.decode_stats() |> Map.get(column) |> edge(direction)

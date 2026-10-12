@@ -67,6 +67,7 @@ defmodule Smolquery.QueryService.AnyNTest do
       assert spec("SELECT * FROM analytics.events") == nil
       assert spec("SELECT * FROM analytics.events LIMIT 2 + 3") == nil
       assert spec("SELECT * FROM analytics.events LIMIT 10%") == nil
+      assert spec("SELECT * FROM analytics.events LIMIT 2.5") == nil
       assert spec("SELECT * FROM analytics.events LIMIT 0") == nil
     end
 

@@ -213,13 +213,13 @@ defmodule Smolquery.QueryService.Pruner do
   defp selects(_another_node), do: []
 
   defp uncorrelated(node),
-    do: [node["left"], node["right"], whole_from(node["from_table"]) | cte_bodies(node)]
+    do: Ast.set_operands(node) ++ [whole_from(node["from_table"]) | cte_bodies(node)]
 
   defp cte_bodies(node) do
     node
     |> get_in(["cte_map", "map"])
     |> List.wrap()
-    |> Enum.map(&get_in(&1, ["value", "query", "node"]))
+    |> Enum.map(&Ast.cte_node(&1["value"]))
   end
 
   defp whole_from(%{"type" => "SUBQUERY", "subquery" => %{"node" => node}}), do: node
@@ -406,21 +406,23 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp column(_node, _aliases), do: :error
 
-  defp literal(%{"class" => "CONSTANT", "value" => %{"is_null" => false} = value}, _params),
-    do: constant(value)
+  defp literal(%{"class" => "CONSTANT"} = node, _params) do
+    case Ast.constant(node) do
+      {:ok, {type, value}} -> constant(type, value)
+      _null_or_unreadable -> :error
+    end
+  end
 
-  defp literal(
-         %{
-           "class" => "CAST",
-           "cast_type" => %{"id" => cast},
-           "child" => %{"class" => "CONSTANT", "value" => %{"is_null" => false, "value" => text}}
-         },
-         _params
-       )
-       when cast in ["TIMESTAMP", "DATE"] and is_binary(text) do
-    case cast do
-      "TIMESTAMP" -> text |> String.replace(" ", "T") |> naive()
-      "DATE" -> date(text)
+  defp literal(%{"class" => "CAST", "child" => %{"class" => "CONSTANT"} = child} = node, _params) do
+    case {Ast.cast_type(node), Ast.constant(child)} do
+      {"TIMESTAMP", {:ok, {_type, text}}} when is_binary(text) ->
+        text |> String.replace(" ", "T") |> naive()
+
+      {"DATE", {:ok, {_type, text}}} when is_binary(text) ->
+        date(text)
+
+      _other_cast ->
+        :error
     end
   end
 
@@ -434,17 +436,12 @@ defmodule Smolquery.QueryService.Pruner do
   end
 
   defp literal(
-         %{
-           "class" => "FUNCTION",
-           "catalog" => "",
-           "schema" => "",
-           "function_name" => name,
-           "children" => [argument]
-         },
+         %{"class" => "FUNCTION", "catalog" => "", "schema" => "", "function_name" => name} = node,
          params
        )
        when is_map_key(@epoch_functions, name) do
-    with {:ok, n} <- integer(argument, params),
+    with [argument] <- Ast.arguments(node),
+         {:ok, n} <- integer(argument, params),
          microseconds = n * Map.fetch!(@epoch_functions, name),
          true <- abs(microseconds) <= @max_epoch_microseconds do
       {:ok, NaiveDateTime.add(@epoch, microseconds, :microsecond)}
@@ -455,9 +452,11 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp literal(_node, _params), do: :error
 
-  defp integer(%{"class" => "CAST", "cast_type" => %{"id" => id}, "child" => child}, params)
-       when id in ["INTEGER", "BIGINT", "UBIGINT", "HUGEINT"],
-       do: integer(child, params)
+  defp integer(%{"class" => "CAST", "child" => child} = node, params) do
+    if Ast.cast_type(node) in ["INTEGER", "BIGINT", "UBIGINT", "HUGEINT"],
+      do: integer(child, params),
+      else: :error
+  end
 
   defp integer(%{"class" => class} = node, params) when class in ["CONSTANT", "PARAMETER"] do
     case literal(node, params) do
@@ -477,15 +476,13 @@ defmodule Smolquery.QueryService.Pruner do
 
   defp bound(_opaque), do: :error
 
-  defp constant(%{"type" => %{"id" => id}, "value" => value})
-       when id in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"] and
+  defp constant(type, value)
+       when type in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE"] and
               is_number(value),
        do: {:ok, value}
 
-  defp constant(%{"type" => %{"id" => "VARCHAR"}, "value" => value}) when is_binary(value),
-    do: {:ok, value}
-
-  defp constant(_value), do: :error
+  defp constant("VARCHAR", value) when is_binary(value), do: {:ok, value}
+  defp constant(_type, _value), do: :error
 
   defp naive(text) do
     case NaiveDateTime.from_iso8601(text) do
