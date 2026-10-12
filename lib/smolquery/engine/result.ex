@@ -20,6 +20,8 @@ defmodule Smolquery.Engine.Result do
   a conversion over `:max_result_rows` with `Smolquery.Engine.ResultTooLarge`.
   """
 
+  alias Smolquery.Engine.UntypedResult
+
   defstruct columns: [], rows: [], num_rows: 0
 
   @type t :: %__MODULE__{
@@ -33,21 +35,18 @@ defmodule Smolquery.Engine.Result do
 
   A column DuckDB exports as Arrow's null type — a bare `NULL` in a select
   list, from 2.0 on — arrives with no type, data or length. It reads as nils,
-  as many as the batch's other columns hold. A batch of nothing but such
-  columns has no row count anywhere (the driver leaves `num_rows` nil for a
-  select), and rather than read it as empty this raises; `from_adbc/2`
-  answers `{:error, :unsized_batch}`. Casting one column (`NULL::INTEGER`)
-  gives the batch a length.
+  as many as the batch's other columns hold. Two shapes cannot be read, and
+  raise `Smolquery.Engine.UntypedResult`: a batch of nothing but such
+  columns, which has no row count anywhere (the driver leaves `num_rows` nil
+  for a select), and an untyped NULL inside a list, struct or map, whose
+  values adbc cannot decode. `from_adbc/2` answers
+  `{:error, {:untyped, reason}}` for either.
   """
   @spec from_adbc(Adbc.Result.t()) :: t()
   def from_adbc(%Adbc.Result{} = result) do
     case from_adbc(result, :infinity) do
-      {:ok, converted} ->
-        converted
-
-      {:error, :unsized_batch} ->
-        raise ArgumentError,
-              "a result of only untyped NULL columns carries no row count; cast one column"
+      {:ok, converted} -> converted
+      {:error, {:untyped, reason}} -> raise UntypedResult, reason: reason
     end
   end
 
@@ -66,7 +65,7 @@ defmodule Smolquery.Engine.Result do
   `:infinity` converts whatever came back.
   """
   @spec from_adbc(Adbc.Result.t(), pos_integer() | :infinity) ::
-          {:ok, t()} | {:error, :too_many_rows | :unsized_batch}
+          {:ok, t()} | {:error, :too_many_rows | {:untyped, UntypedResult.reason()}}
   def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}, _max_rows) do
     {:ok, %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}}
   end
@@ -75,8 +74,8 @@ defmodule Smolquery.Engine.Result do
     batches
     |> Enum.reduce_while({0, []}, fn batch, {count, acc} ->
       case batch_to_rows(batch) do
-        :unsized ->
-          {:halt, :unsized_batch}
+        {:untyped, _reason} = untyped ->
+          {:halt, untyped}
 
         rows when max_rows != :infinity and count + length(rows) > max_rows ->
           {:halt, :too_many_rows}
@@ -89,8 +88,8 @@ defmodule Smolquery.Engine.Result do
       :too_many_rows ->
         {:error, :too_many_rows}
 
-      :unsized_batch ->
-        {:error, :unsized_batch}
+      {:untyped, _reason} = untyped ->
+        {:error, untyped}
 
       {count, acc} ->
         rows = acc |> Enum.reverse() |> Enum.concat()
@@ -127,11 +126,14 @@ defmodule Smolquery.Engine.Result do
   defp batch_to_rows(batch) do
     columns = Enum.map(batch, &column_values/1)
 
-    case Enum.find(columns, &is_list/1) do
-      nil ->
-        :unsized
+    case {Enum.find(columns, &match?({:nested, _column}, &1)), Enum.find(columns, &is_list/1)} do
+      {{:nested, _column} = nested, _sized} ->
+        {:untyped, nested}
 
-      sized ->
+      {nil, nil} ->
+        {:untyped, :unsized}
+
+      {nil, sized} ->
         columns
         |> Enum.map(fn
           :untyped_nulls -> List.duplicate(nil, length(sized))
@@ -142,5 +144,16 @@ defmodule Smolquery.Engine.Result do
   end
 
   defp column_values(%Adbc.Column{field: %{type: nil}, data: nil}), do: :untyped_nulls
-  defp column_values(column), do: Adbc.Column.to_list(column)
+
+  defp column_values(%Adbc.Column{field: field} = column) do
+    if untyped?(field.type),
+      do: {:nested, field.name},
+      else: Adbc.Column.to_list(column)
+  end
+
+  defp untyped?(%Adbc.Field{type: nil}), do: true
+  defp untyped?(%Adbc.Field{type: type}), do: untyped?(type)
+  defp untyped?(type) when is_tuple(type), do: type |> Tuple.to_list() |> Enum.any?(&untyped?/1)
+  defp untyped?(fields) when is_list(fields), do: Enum.any?(fields, &untyped?/1)
+  defp untyped?(_scalar), do: false
 end

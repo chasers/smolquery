@@ -2,6 +2,10 @@ defmodule Smolquery.Engine.ResultTest do
   use ExUnit.Case, async: true
 
   alias Smolquery.Engine.Result
+  alias Smolquery.Engine.UntypedResult
+
+  defp untyped,
+    do: %Adbc.Column{field: %Adbc.Field{name: "NULL", type: nil}, data: nil, size: nil}
 
   defp batch do
     [
@@ -33,18 +37,46 @@ defmodule Smolquery.Engine.ResultTest do
       assert result.num_rows == 2
     end
 
-    test "reads an untyped null column as nils, as many as its neighbours hold" do
-      untyped = %Adbc.Column{field: %Adbc.Field{name: "NULL", type: nil}, data: nil, size: nil}
-      result = Result.from_adbc(%Adbc.Result{data: [[hd(batch()), untyped]], num_rows: nil})
+    test "reads an untyped null column as nils, as many as its neighbours hold (T-654)" do
+      result = Result.from_adbc(%Adbc.Result{data: [[hd(batch()), untyped()]], num_rows: nil})
 
       assert result.columns == ["id", "NULL"]
       assert result.rows == [[1, nil], [2, nil]]
 
-      assert Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil}, :infinity) ==
-               {:error, :unsized_batch}
+      empty = [Adbc.Column.s64([], name: "id"), untyped()]
+      assert Result.from_adbc(%Adbc.Result{data: [empty], num_rows: nil}).rows == []
 
-      assert_raise ArgumentError, ~r/no row count/, fn ->
-        Result.from_adbc(%Adbc.Result{data: [[untyped]], num_rows: nil})
+      twice =
+        Result.from_adbc(%Adbc.Result{data: [[hd(batch()), untyped()], [hd(batch()), untyped()]]})
+
+      assert twice.rows == [[1, nil], [2, nil], [1, nil], [2, nil]]
+      assert twice.num_rows == 4
+
+      assert Result.from_adbc(%Adbc.Result{data: [[hd(batch()), untyped()]]}, 1) ==
+               {:error, :too_many_rows}
+    end
+
+    test "refuses a batch of only untyped columns, and an untyped NULL inside a list, struct or map (T-654)" do
+      assert Result.from_adbc(%Adbc.Result{data: [[untyped()]], num_rows: nil}, :infinity) ==
+               {:error, {:untyped, :unsized}}
+
+      assert_raise UntypedResult, ~r/no row count/, fn ->
+        Result.from_adbc(%Adbc.Result{data: [[untyped()]], num_rows: nil})
+      end
+
+      item = %Adbc.Field{name: "item", type: nil}
+
+      for {name, type} <- [
+            {"l", {:list, item}},
+            {"s", {:struct, [%Adbc.Field{name: "k", type: nil}]}},
+            {"m",
+             {:map, %Adbc.Field{name: "key", type: :string},
+              %Adbc.Field{name: "value", type: nil}}}
+          ] do
+        nested = %Adbc.Column{field: %Adbc.Field{name: name, type: type}, data: [], size: nil}
+
+        assert Result.from_adbc(%Adbc.Result{data: [[hd(batch()), nested]]}, :infinity) ==
+                 {:error, {:untyped, {:nested, name}}}
       end
     end
 
