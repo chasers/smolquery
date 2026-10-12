@@ -57,6 +57,18 @@ defmodule SmolqueryPg.PgCatalog do
   last shape, and the next query tries again. An empty `pg_class` would be
   a wrong answer a client acts on, not a failure it can retry.
 
+  ## The engine is locked down
+
+  A statement this module classifies as a catalog read runs here, not in a
+  job engine, and the classification only asks which base tables it names:
+  any statement that mentions `version(` or `pg_` and reads no table
+  qualifies, so a table function in its FROM (`read_text('/etc/passwd')`,
+  `read_csv`, `glob`) reached this engine too. So once the fixtures, macros
+  and views are in place, the engine turns external access and extension
+  autoloading off and locks its configuration, as
+  `SmolqueryClickHouse.SystemCatalog`'s engine does. A refresh only
+  inserts rows, which the lock leaves alone (T-657).
+
   All calls take the edge's instance name; the server and its engine derive
   from it (`SmolqueryPg.Runtime.pg_catalog/1`).
   """
@@ -73,6 +85,12 @@ defmodule SmolqueryPg.PgCatalog do
   alias SmolqueryPg.Session
 
   @refresh_ttl_ms 1_000
+  @lockdown [
+    "SET autoinstall_known_extensions = false",
+    "SET autoload_known_extensions = false",
+    "SET enable_external_access = false",
+    "SET lock_configuration = true"
+  ]
   @call_timeout_ms 30_000
   @namespace_base 16_000
   @relation_base 100_000
@@ -165,6 +183,7 @@ defmodule SmolqueryPg.PgCatalog do
     create_macros(engine)
     create_static_rows(engine)
     create_static_views(engine)
+    Enum.each(@lockdown, &Engine.query!(engine, &1))
 
     {:ok, %{runtime: runtime, engine: engine, refreshed_at: 0}}
   end

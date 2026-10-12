@@ -130,6 +130,30 @@ defmodule SmolqueryPg.CatalogWireTest do
              )
   end
 
+  @tag :tmp_dir
+  test "a catalog-looking statement cannot read a file through the catalog engine (T-657)", %{
+    socket: socket,
+    tmp_dir: tmp_dir
+  } do
+    secret = Path.join(tmp_dir, "secret.txt")
+    File.write!(secret, "not-for-clients")
+
+    for sql <- [
+          "SELECT version(), content FROM read_text('#{secret}')",
+          "SELECT current_setting('server_version'), * FROM read_csv('#{secret}')"
+        ] do
+      answer = PgClient.query(socket, sql)
+
+      refute inspect(answer.results) =~ "not-for-clients"
+      assert [_error | _more] = answer.errors
+    end
+
+    assert %{errors: [], results: [%{rows: [[version]]}]} =
+             PgClient.query(socket, "SELECT version()")
+
+    assert version =~ "PostgreSQL"
+  end
+
   test "pg_settings and current_setting answer the same value (T-426)", %{socket: socket} do
     assert %{errors: [], results: [%{rows: [["public", "public"]]}]} =
              PgClient.query(
