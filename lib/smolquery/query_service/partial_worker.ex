@@ -48,7 +48,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   a job engine is: `allowed_directories` is exactly this shard's output
   directory, the node's own allowed data directories, and the sealed
   store's prefix; `allowed_paths` is the shard's hot URLs; and
-  `lock_configuration = true` seals it. `enable_external_access` stays on —
+  `Smolquery.QueryService.Lockdown` orders the rest, DuckLake's exempted
+  options before the lock. `enable_external_access` stays on —
   `COPY ... TO` needs it — but the directory and path lists bound what it
   can reach, honoring the runtime's `lockdown` flag the same way `Runner`
   does.
@@ -60,6 +61,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.JobEngine
+  alias Smolquery.QueryService.Lockdown
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
   alias Smolquery.Segments.FieldIds
@@ -235,15 +237,7 @@ defmodule Smolquery.QueryService.PartialWorker do
       [Path.dirname(path) | runtime.allowed_directories] ++
         EngineSecrets.sealed_prefixes(runtime.store)
 
-    [
-      "SET allowed_directories = #{sql_list(directories)}",
-      "SET allowed_paths = #{sql_list(allowed_paths)}",
-      "SET lock_configuration = true"
-    ]
-  end
-
-  defp sql_list(values) do
-    "[" <> Enum.map_join(values, ", ", &Identifier.sql_string/1) <> "]"
+    Lockdown.statements(directories, allowed_paths, external_access: true)
   end
 
   defp copy_out(connection, partial_sql, params, path, timeout_ms) do

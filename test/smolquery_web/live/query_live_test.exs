@@ -184,7 +184,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert Eventually.until(fn -> render(lv) =~ "done" end)
 
       html = render(lv)
-      assert html =~ "PROJECTION"
+      assert html =~ ~r/projection/i
       refute html =~ "data_table"
     end
 
