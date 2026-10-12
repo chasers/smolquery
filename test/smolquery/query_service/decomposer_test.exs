@@ -730,6 +730,15 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :percent_limit = refused("SELECT count(*) FROM analytics.events LIMIT 10%")
     end
 
+    test "a percent LIMIT on sampled rows, never read as that many rows (T-656)" do
+      for sql <- [
+            "WITH s AS (SELECT id FROM analytics.events LIMIT 10%) SELECT count(*) FROM s",
+            "SELECT count(*) FROM (SELECT id FROM analytics.events LIMIT 10%)"
+          ] do
+        assert :percent_limit = refused(sql, describe(sql))
+      end
+    end
+
     test "a DECIMAL LIMIT, whose serialized value is unscaled" do
       sql = "SELECT name, count(*) FROM analytics.events GROUP BY name LIMIT 1.5"
 

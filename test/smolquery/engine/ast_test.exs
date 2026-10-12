@@ -207,7 +207,14 @@ defmodule Smolquery.Engine.AstTest do
       assert Ast.constant(literal("INTEGER", "12345678901234")) ==
                {:ok, {"BIGINT", 12_345_678_901_234}}
 
-      assert Ast.constant(literal("NUMERIC", "-1.5")) == {:ok, {"DECIMAL", -1.5}}
+      assert Ast.constant(literal("NUMERIC", "-1.5")) == {:ok, {"DECIMAL", -15}}
+      assert Ast.constant(literal("NUMERIC", ".5")) == {:ok, {"DECIMAL", 5}}
+      assert Ast.constant(literal("NUMERIC", "1e5")) == {:ok, {"DOUBLE", 1.0e5}}
+      assert Ast.constant(literal("NUMERIC", ".5e1")) == {:ok, {"DOUBLE", 5.0}}
+
+      assert Ast.constant(literal("INTEGER", "170141183460469231731687303715884105728")) ==
+               {:ok, {"HUGEINT", 170_141_183_460_469_231_731_687_303_715_884_105_728}}
+
       assert Ast.constant(literal("STRING", "x")) == {:ok, {"VARCHAR", "x"}}
       assert Ast.constant(literal("BOOLEAN", "true")) == {:ok, {"BOOLEAN", true}}
       assert Ast.constant(literal("NULL_LITERAL", "")) == {:ok, :null}
@@ -232,6 +239,7 @@ defmodule Smolquery.Engine.AstTest do
       assert Ast.integer(typed.("INTEGER", 5)) == {:ok, 5}
       assert Ast.integer(typed.("UBIGINT", 7)) == {:ok, 7}
       assert Ast.integer(literal("INTEGER", "12")) == {:ok, 12}
+      assert Ast.integer(literal("INTEGER", "170141183460469231731687303715884105728")) == :error
       assert Ast.integer(typed.("DECIMAL", 15)) == :error
       assert Ast.integer(typed.("VARCHAR", "5")) == :error
       assert Ast.integer(%{"class" => "CONSTANT", "value" => %{"is_null" => true}}) == :error
@@ -243,13 +251,18 @@ defmodule Smolquery.Engine.AstTest do
       start_supervised!({Smolquery.Engine, name: __MODULE__.Engine, extensions: [:json]})
 
       sql =
-        "SELECT CAST(a AS TIMESTAMPTZ), lower(b, 2), 5 FROM t WHERE ts > TIMESTAMP '2026-01-01' LIMIT 10%"
+        "SELECT CAST(a AS TIMESTAMPTZ), lower(b, 2), 5, 1.5, 1e5, CAST(a AS INT8) " <>
+          "FROM t WHERE ts > TIMESTAMP '2026-01-01' LIMIT 10%"
 
       %{rows: [[json]]} =
         Smolquery.Engine.query!(__MODULE__.Engine, "SELECT json_serialize_sql($1::VARCHAR)", [sql])
 
       %{"statements" => [%{"node" => node}]} = JSON.decode!(json)
-      [cast, lower, five] = node["select_list"]
+      [cast, lower, five, decimal, double, int8] = node["select_list"]
+
+      assert Ast.constant(decimal) == {:ok, {"DECIMAL", 15}}
+      assert Ast.constant(double) == {:ok, {"DOUBLE", 1.0e5}}
+      assert Ast.cast_type(int8) == "BIGINT"
 
       assert Ast.cast_type(cast) == "TIMESTAMP WITH TIME ZONE"
       assert {:ok, {integer, 5}} = Ast.constant(five)

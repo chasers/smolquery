@@ -41,8 +41,30 @@ defmodule Smolquery.Engine.Ast do
   @type_aliases %{
     "TIMESTAMPTZ" => "TIMESTAMP WITH TIME ZONE",
     "TIMETZ" => "TIME WITH TIME ZONE",
-    "DATETIME" => "TIMESTAMP"
+    "DATETIME" => "TIMESTAMP",
+    "INT" => "INTEGER",
+    "INT4" => "INTEGER",
+    "SIGNED" => "INTEGER",
+    "INT8" => "BIGINT",
+    "LONG" => "BIGINT",
+    "INT2" => "SMALLINT",
+    "SHORT" => "SMALLINT",
+    "INT1" => "TINYINT",
+    "FLOAT8" => "DOUBLE",
+    "DOUBLE PRECISION" => "DOUBLE",
+    "FLOAT4" => "FLOAT",
+    "REAL" => "FLOAT",
+    "TEXT" => "VARCHAR",
+    "STRING" => "VARCHAR",
+    "CHAR" => "VARCHAR",
+    "BPCHAR" => "VARCHAR",
+    "DEC" => "DECIMAL",
+    "NUMERIC" => "DECIMAL",
+    "BOOL" => "BOOLEAN",
+    "LOGICAL" => "BOOLEAN"
   }
+
+  @int64 -9_223_372_036_854_775_808..9_223_372_036_854_775_807
 
   @integer_types ~w(TINYINT SMALLINT INTEGER BIGINT HUGEINT UTINYINT USMALLINT UINTEGER UBIGINT UHUGEINT)
 
@@ -113,9 +135,11 @@ defmodule Smolquery.Engine.Ast do
   defp collect(_leaf, _fun, acc), do: acc
 
   @doc """
-  The name a TYPE node carries, upper-cased and with DuckDB's aliases for the
-  zoned and datetime types expanded (`TIMESTAMPTZ` reads as
-  `TIMESTAMP WITH TIME ZONE`, as 1.5 resolved it), or `nil` for any other node.
+  The name a TYPE node carries, upper-cased and with DuckDB's documented
+  aliases expanded to the names 1.5 resolved them to (`TIMESTAMPTZ` reads as
+  `TIMESTAMP WITH TIME ZONE`, `INT8` as `BIGINT`, `TEXT` as `VARCHAR`), or
+  `nil` for any other node. 2.0 resolves some aliases itself and leaves
+  others as written.
 
   A composite target (`STRUCT(a TIMESTAMPTZ)`, `TIMESTAMPTZ[]`) is a TYPE node
   with TYPE children, so a reader that wants every type named in a cast
@@ -165,12 +189,15 @@ defmodule Smolquery.Engine.Ast do
 
   @doc """
   A CONSTANT node's value as `{:ok, {type, value}}` — the type DuckDB gave a
-  resolved constant, or the one its literal kind implies (`INTEGER` text is a
-  `BIGINT`, `NUMERIC` a `DECIMAL`, `STRING` a `VARCHAR`) — `{:ok, :null}` for
+  resolved constant, or the one its literal kind implies — `{:ok, :null}` for
   a NULL, and `:error` for any other node.
 
-  A resolved DECIMAL's value is DuckDB's unscaled integer (`1.5` at scale 1 is
-  `15`), so a reader that needs a whole number asks `integer/1`.
+  A literal reads as 1.5 resolves the same text: `INTEGER` text is a
+  `BIGINT` (a `HUGEINT` past 64 bits), `STRING` a `VARCHAR`, and `NUMERIC`
+  text a `DOUBLE` when it carries an exponent (`1e5`) and a `DECIMAL`
+  otherwise. A DECIMAL's value is the unscaled integer either way (`1.5` is
+  `15`, `.5` is `5`), so a reader that needs a whole number asks
+  `integer/1`.
   """
   @spec constant(term()) :: {:ok, constant()} | :error
   def constant(%{"class" => "CONSTANT", "value" => %{"is_null" => true}}), do: {:ok, :null}
@@ -192,29 +219,47 @@ defmodule Smolquery.Engine.Ast do
 
   defp literal("INTEGER", text) do
     case Integer.parse(text) do
-      {value, ""} -> {:ok, {"BIGINT", value}}
+      {value, ""} when value in @int64 -> {:ok, {"BIGINT", value}}
+      {value, ""} -> {:ok, {"HUGEINT", value}}
       _not_an_integer -> :error
     end
   end
 
   defp literal("NUMERIC", text) do
-    case Float.parse(text) do
-      {value, ""} -> {:ok, {"DECIMAL", value}}
-      _not_a_number -> :error
-    end
+    if String.contains?(text, ["e", "E"]), do: double(text), else: decimal(text)
   end
 
   defp literal(_kind, _text), do: :error
 
+  defp double(text) do
+    normalized =
+      text
+      |> String.replace(~r/\A(-?)\./, "\\g{1}0.")
+      |> String.replace(~r/\.(?=[eE])/, ".0")
+
+    case Float.parse(normalized) do
+      {value, ""} -> {:ok, {"DOUBLE", value}}
+      _not_a_number -> :error
+    end
+  end
+
+  defp decimal(text) do
+    case Integer.parse(String.replace(text, ".", "", global: false)) do
+      {unscaled, ""} -> {:ok, {"DECIMAL", unscaled}}
+      _not_a_number -> :error
+    end
+  end
+
   @doc """
   A CONSTANT node's value as `{:ok, integer}` when its type is one of DuckDB's
-  integer types, and `:error` otherwise — a DECIMAL `1.5` is not `15`, and a
-  string is not a number however it reads.
+  integer types and it fits 64 bits, and `:error` otherwise — a DECIMAL
+  `1.5` is not `15`, a string is not a number however it reads, and a
+  HUGEINT is no LIMIT DuckDB takes.
   """
   @spec integer(term()) :: {:ok, integer()} | :error
   def integer(node) do
     case constant(node) do
-      {:ok, {type, value}} when type in @integer_types and is_integer(value) -> {:ok, value}
+      {:ok, {type, value}} when type in @integer_types and value in @int64 -> {:ok, value}
       _not_a_whole_number -> :error
     end
   end

@@ -435,6 +435,12 @@ defmodule Smolquery.QueryService.Decomposer do
     end
   end
 
+  defp sample_limit(%{"modifiers" => [%{"type" => "LIMIT_PERCENT_MODIFIER"}]}),
+    do: {:error, :percent_limit}
+
+  defp sample_limit(%{"modifiers" => [%{"limit_type" => "PERCENTAGE"}]}),
+    do: {:error, :percent_limit}
+
   defp sample_limit(%{"modifiers" => [%{"type" => "LIMIT_MODIFIER", "offset" => nil} = modifier]}) do
     case Ast.integer(modifier["limit"]) do
       {:ok, limit} when limit > 0 -> {:ok, limit}
@@ -1128,10 +1134,8 @@ defmodule Smolquery.QueryService.Decomposer do
   defp flat(position), do: "flatten(list(#{quoted("#{@prefix}a#{position}")}))"
 
   defp sliced(list, %{"children" => [_value, n]}) do
-    case Ast.integer(n) do
-      {:ok, count} -> "list_slice(#{list}, 1, #{count})"
-      :error -> list
-    end
+    {:ok, count} = Ast.integer(n)
+    "list_slice(#{list}, 1, #{count})"
   end
 
   defp sliced(list, _item), do: list
