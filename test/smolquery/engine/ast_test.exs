@@ -12,6 +12,7 @@ defmodule Smolquery.Engine.AstTest do
 
     assert message =~ "not valid JSON"
     assert message =~ "CAST('1e308' AS DOUBLE)"
+    assert message =~ "the JSON breaks at byte 31"
   end
 
   test "shape/1 is an expression without where it was written or what it was called" do

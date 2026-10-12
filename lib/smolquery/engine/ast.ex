@@ -14,7 +14,8 @@ defmodule Smolquery.Engine.Ast do
 
   @doc """
   The tree `json_serialize_sql` answered, decoded, or
-  `{:error, {:invalid_query, message}}` when it is not JSON.
+  `{:error, {:invalid_query, message}}` when it is not JSON, the message
+  naming the byte where it breaks.
 
   DuckDB 2.0 writes a DOUBLE literal past ~3.4e38 as a bare `Infinity`,
   which no JSON reader takes. Decoding leniently would read the literal as
@@ -25,9 +26,14 @@ defmodule Smolquery.Engine.Ast do
   def decode(json) do
     case JSON.decode(json) do
       {:ok, tree} -> {:ok, tree}
-      {:error, _reason} -> {:error, {:invalid_query, @unreadable}}
+      {:error, reason} -> {:error, {:invalid_query, @unreadable <> at(reason)}}
     end
   end
+
+  defp at(reason) when is_tuple(reason) and is_integer(elem(reason, 1)),
+    do: " (the JSON breaks at byte #{elem(reason, 1)})"
+
+  defp at(_reason), do: ""
 
   @doc """
   `node` without where it was written or what it was called: its
