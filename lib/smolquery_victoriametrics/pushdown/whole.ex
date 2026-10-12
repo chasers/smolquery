@@ -49,8 +49,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   @spec reads_prev?(String.t()) :: boolean()
   def reads_prev?(name), do: name in @reads_prev
 
-  @vals "list_transform(items, x -> x.v)"
-  @sum "list_reduce(list_prepend(0.0::DOUBLE, #{@vals}), (a, b) -> a + b)"
+  @vals "list_transform(items, lambda x: x.v)"
+  @sum "list_reduce(list_prepend(0.0::DOUBLE, #{@vals}), lambda a, b: a + b)"
 
   @doc """
   Welford's mean and sum of squared deviations over the doubles of the
@@ -59,8 +59,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   """
   @spec welford(String.t()) :: String.t()
   def welford(values) do
-    "list_reduce(list_transform(#{values}, x -> {'n': 1, 'avg': x, 'q': 0.0::DOUBLE}), " <>
-      "(a, b) -> {'n': a.n + 1, 'avg': a.avg + (b.avg - a.avg) / (a.n + 1), " <>
+    "list_reduce(list_transform(#{values}, lambda x: {'n': 1, 'avg': x, 'q': 0.0::DOUBLE}), " <>
+      "lambda a, b: {'n': a.n + 1, 'avg': a.avg + (b.avg - a.avg) / (a.n + 1), " <>
       "'q': a.q + (b.avg - a.avg) * (b.avg - (a.avg + (b.avg - a.avg) / (a.n + 1)))})"
   end
 
@@ -84,7 +84,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   def value("sum2_over_time", _scalar),
     do:
       held(
-        "list_reduce(list_prepend(0.0::DOUBLE, list_transform(items, x -> x.v * x.v)), (a, b) -> a + b)"
+        "list_reduce(list_prepend(0.0::DOUBLE, list_transform(items, lambda x: x.v * x.v)), lambda a, b: a + b)"
       )
 
   def value("range_over_time", _scalar),
@@ -93,14 +93,14 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   def value("distinct_over_time", _scalar),
     do:
       held(
-        "CAST(len(list_distinct(list_transform(items, x -> CASE WHEN x.v = 0 THEN 0.0::DOUBLE ELSE x.v END))) AS DOUBLE)"
+        "CAST(len(list_distinct(list_transform(items, lambda x: CASE WHEN x.v = 0 THEN 0.0::DOUBLE ELSE x.v END))) AS DOUBLE)"
       )
 
   def value("tmin_over_time", _scalar),
-    do: held("list_reduce(items, (a, b) -> CASE WHEN b.v <= a.v THEN b ELSE a END).ts / 1000")
+    do: held("list_reduce(items, lambda a, b: CASE WHEN b.v <= a.v THEN b ELSE a END).ts / 1000")
 
   def value("tmax_over_time", _scalar),
-    do: held("list_reduce(items, (a, b) -> CASE WHEN b.v >= a.v THEN b ELSE a END).ts / 1000")
+    do: held("list_reduce(items, lambda a, b: CASE WHEN b.v >= a.v THEN b ELSE a END).ts / 1000")
 
   def value("timestamp", _scalar), do: held("l_ts / 1000")
 
@@ -117,7 +117,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   end
 
   def value("geomean_over_time", _scalar),
-    do: held("pow(list_reduce(list_prepend(1.0::DOUBLE, #{@vals}), (a, b) -> a * b), 1.0 / cnt)")
+    do:
+      held("pow(list_reduce(list_prepend(1.0::DOUBLE, #{@vals}), lambda a, b: a * b), 1.0 / cnt)")
 
   def value("rate_over_sum", _scalar), do: held("#{@sum} / (win / 1000)")
 
@@ -163,7 +164,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
   defp held(expression), do: "CASE WHEN cnt > 0 THEN #{expression} END"
 
   defp counted(predicate),
-    do: held("CAST(len(list_filter(#{@vals}, x -> #{predicate})) AS DOUBLE)")
+    do: held("CAST(len(list_filter(#{@vals}, lambda x: #{predicate})) AS DOUBLE)")
 
   defp stdvar, do: "#{welford(@vals)}.q / cnt"
 
@@ -171,8 +172,8 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Whole do
     "list_reduce(list_prepend(" <>
       "CASE WHEN #{unseeded} THEN #{counter("items[1].v", first_n)} " <>
       "ELSE #{counter("prev_v", "0.0::DOUBLE")} END, " <>
-      "list_transform(CASE WHEN #{unseeded} THEN items[2:] ELSE items END, x -> " <>
-      "#{counter("x.v", "0.0::DOUBLE")})), (a, b) -> #{step})"
+      "list_transform(CASE WHEN #{unseeded} THEN items[2:] ELSE items END, lambda x: " <>
+      "#{counter("x.v", "0.0::DOUBLE")})), lambda a, b: #{step})"
   end
 
   defp counter(previous, count), do: "{'p': #{previous}, 'n': #{count}}"

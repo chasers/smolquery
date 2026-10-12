@@ -423,7 +423,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown do
 
         _some ->
           dropped = Enum.map_join(1..length(names)//1, ", ", &"$#{bound + &1}")
-          "list_filter(map_entries(labels), e -> e.key NOT IN (#{dropped}))"
+          "list_filter(map_entries(labels), lambda e: e.key NOT IN (#{dropped}))"
       end
 
     {[{"kw", "map_from_entries(#{entries})"}], params ++ names}

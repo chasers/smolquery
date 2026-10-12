@@ -80,7 +80,7 @@ defmodule Smolquery.Schema.MaterializedTest do
                validate("$1", :int64)
 
       assert {:error, {:invalid_materialized, {:unsupported_expression, "LAMBDA"}}} =
-               validate("list_transform([ts_int], x -> x + 1)[1]", :int64)
+               validate("list_transform([ts_int], lambda x: x + 1)[1]", :int64)
     end
 
     test "a column must be a regular column of this table, named without a qualifier" do

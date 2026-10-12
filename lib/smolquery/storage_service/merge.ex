@@ -541,7 +541,7 @@ defmodule Smolquery.StorageService.Merge do
     COPY (
       SELECT rows.*,
              CASE WHEN rows.#{lead} IS NULL THEN len(bounds.b)
-                  ELSE len(list_filter(bounds.b, bound -> bound < rows.#{lead})) END
+                  ELSE len(list_filter(bounds.b, lambda bound: bound < rows.#{lead})) END
                AS #{@window_column}
       FROM read_parquet($1) AS rows, #{bounds} AS bounds
     ) TO $2 (#{@scratch_options}, PARTITION_BY (#{@window_column}))

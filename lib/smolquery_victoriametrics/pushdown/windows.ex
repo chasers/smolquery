@@ -142,7 +142,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.Windows do
       ", k, #{refs.start} + k * #{refs.step} AS t, held, idx, ts_ms, cv, next_v, ",
       "frame[1:len(frame) - (group_last - idx)] AS mine, group_first, ",
       "#{before_column(rollup)} AS before, max_prev, win FROM u), ",
-      "d1 AS (SELECT *, list_filter(mine, x -> x.ts <= t - win) AS older FROM d0), ",
+      "d1 AS (SELECT *, list_filter(mine, lambda x: x.ts <= t - win) AS older FROM d0), ",
       "d2 AS (SELECT *, mine[len(older) + 1:] AS items FROM d1), ",
       "d AS (SELECT series",
       columns,
