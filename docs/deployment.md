@@ -131,8 +131,8 @@ One note per release, newest first.
 
 **TL;DR.** Follow-ups to the 0.22.0 note below. Nothing changes on a catalog at DuckLake 1.0 with the flag set as that note says.
 
-- **Boot error:** with the flag off, a catalog at another format now fails the boot with "its DuckLake catalog format is …" before attaching. Before, the attach went first, and DuckLake's refusal, logged as `attach_failed`, did not name the format.
-- **Stale flag:** `automatic_migration` under `config :smolquery, Smolquery.Catalog.DuckLake` is now ignored, with one warning at boot. In 0.22.0 it still made every engine attach with `AUTOMATIC_MIGRATION TRUE`. Set it under `Smolquery.Catalog.Migrator`, or use `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`.
+- **Boot error:** for Postgres metadata the step prepares, with the flag off, a catalog at another format now fails the boot with "its DuckLake catalog format is …" before attaching. Before, the attach went first, and DuckLake's refusal, logged as `attach_failed`, did not name the format.
+- **Stale flag:** `automatic_migration` under `config :smolquery, Smolquery.Catalog.DuckLake` is now ignored, with one warning at boot. In 0.22.0 it still made every catalog engine attach with `AUTOMATIC_MIGRATION TRUE`. Set it under `Smolquery.Catalog.Migrator`, or use `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`.
 - **Swap lock on DuckDB 2.0:** the swap found Postgres metadata by DuckLake's metadata database in `duckdb_databases()`, which DuckDB 2.0 no longer lists. It now reads the lake's own path. On 1.5.3 nothing changes; on 2.0 the swap would have skipped the version-row lock.
 
 ### 0.22.0: only the boot step migrates the catalog format, and the swap checks it (T-638, T-639)
@@ -689,12 +689,13 @@ From that instant, old pods lose the catalog:
   Neither DuckLake nor smolquery checks the format on those. Replace old
   pods promptly.
 
-The step checks the format before it attaches and again after. With the
-flag off, a node whose code is written for another format fails its boot
-with "its DuckLake catalog format is …" without attaching. With the flag
-on, it fails the same way when the migration did not reach the code's
-format. A catalog newer than the extension is refused at the attach, and
-the boot fails with DuckLake's own message (`attach_failed`).
+For metadata it prepares, the step checks the format before it attaches
+and again after. With the flag off, a node whose code is written for
+another format fails its boot with "its DuckLake catalog format is …"
+without attaching. With the flag on, it fails the same way when the
+migration did not reach the code's format. A catalog newer than the
+extension is refused at the attach, and the boot fails with DuckLake's own
+message (`attach_failed`).
 
 The flag defaults to `false` because the failure modes are not symmetric.
 With the flag off, an accidental format-bumping upgrade costs a redeploy.
@@ -725,7 +726,9 @@ Use this procedure for a format-bumping upgrade on a deployment with data:
   with the flag and takes no lock. SQLite metadata is one node's file. For
   such a Postgres string, nodes booting together each attach to migrate,
   so set the flag on one node at a time, or write the string so the step
-  can prepare it. A service's own `catalog:` override is never migrated.
+  can prepare it. Such a lake gets no format check from the step either:
+  with the flag off, its first engine fails at the attach with DuckLake's
+  own message. A service's own `catalog:` override is never migrated.
 - **The target is the extension's newest format.** DuckLake 1.5's
   `AUTOMATIC_MIGRATION` migrates to its newest format, 1.0, which is the
   format this release is written for. DuckDB 2.0's newest is `1.1-dev1`. The

@@ -220,6 +220,7 @@ defmodule Smolquery.Catalog.DuckLake do
     :engine,
     :catalog,
     reader: nil,
+    metadata: nil,
     prepared: false,
     swap_timeout_ms: @default_swap_timeout_ms
   ]
@@ -228,6 +229,7 @@ defmodule Smolquery.Catalog.DuckLake do
           engine: Engine.handle(),
           catalog: String.t(),
           reader: atom() | nil,
+          metadata: String.t() | nil,
           prepared: boolean(),
           swap_timeout_ms: timeout()
         }
@@ -341,6 +343,10 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:prepared` — whether the boot step made this lake's smolquery tables
       (`Smolquery.Catalog.Migrator.prepared?/1`), so retention need not
       create its table on first use. `resolve/2` sets it.
+    * `:metadata` — the lake's metadata string, which tells a compaction
+      swap whether to run as one locked `postgres_execute` batch. Without it
+      the swap reads the lake's path from `duckdb_databases()`, and logs a
+      warning when that does not answer. `resolve/2` sets it.
 
   """
   @spec new(keyword()) :: Catalog.t()
@@ -349,6 +355,7 @@ defmodule Smolquery.Catalog.DuckLake do
       engine: Keyword.get(opts, :engine, __MODULE__),
       catalog: Keyword.get(opts, :catalog, @default_catalog),
       reader: Keyword.get(opts, :reader),
+      metadata: Keyword.get(opts, :metadata),
       prepared: Keyword.get(opts, :prepared, false),
       swap_timeout_ms: Keyword.get(opts, :swap_timeout_ms, @default_swap_timeout_ms)
     }
@@ -398,7 +405,7 @@ defmodule Smolquery.Catalog.DuckLake do
       end
 
     handle =
-      [engine: engine, reader: reader, prepared: Migrator.prepared?(metadata)] ++
+      [engine: engine, reader: reader, metadata: metadata, prepared: Migrator.prepared?(metadata)] ++
         Keyword.take(opts, [:catalog, :swap_timeout_ms])
 
     {new(handle), opts}
@@ -1206,7 +1213,7 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp move_statements(config, plan) do
-    if postgres_metadata?(metadata_path(config)) do
+    if postgres_metadata?(config.metadata || metadata_path(config)) do
       prefix = ~s("public")
 
       batch =
@@ -1230,8 +1237,16 @@ defmodule Smolquery.Catalog.DuckLake do
     sql = "SELECT path FROM duckdb_databases() WHERE database_name = $1"
 
     case query(config, sql, [config.catalog]) do
-      {:ok, %{rows: [[path]]}} when is_binary(path) -> path
-      _unknown -> nil
+      {:ok, %{rows: [[path]]}} when is_binary(path) ->
+        path
+
+      unknown ->
+        Logger.warning(
+          "could not tell the metadata database of lake #{inspect(config.catalog)} " <>
+            "(#{inspect(unknown)}); its compaction swap runs without the version-row lock"
+        )
+
+        nil
     end
   end
 

@@ -1511,6 +1511,16 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  test "resolve/2 carries the metadata string on the handle, which the swap branches on (T-651)" do
+    metadata = "postgres:dbname=lake host=db user=smol"
+
+    {catalog, _opts} =
+      DuckLake.resolve([metadata: metadata, data_path: "/lake"], __MODULE__.Resolved)
+
+    assert catalog.config.metadata == metadata
+    assert DuckLake.new(engine: __MODULE__.Bare).config.metadata == nil
+  end
+
   describe "attach_statement/3" do
     test "quotes the catalog name and escapes the literals" do
       statement = DuckLake.attach_statement("lake", "sqlite:/data/it's.sqlite", "/data/seg")
