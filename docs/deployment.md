@@ -24,6 +24,8 @@ The pipeline runs in this order:
 2. The Release workflow runs on the merge push to `main`. It publishes a
    multi-architecture `ghcr.io/chasers/smolquery` image tagged with the
    commit (`sha-<commit>`).
+   It then dispatches a [bench-matrix](benchmarks.md#continuous-benchmarks)
+   run for that commit.
 3. When the commit bumps the version, the run aliases that image as
    `vX.Y.Z`. The run also creates the GitHub release.
 
