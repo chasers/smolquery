@@ -358,7 +358,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
         error
     end
   after
-    Enum.each(paths, &File.rm/1)
+    Enum.each(paths, &discard/1)
   end
 
   # A `COPY` writes a NULL into a column that must not hold one without
@@ -442,7 +442,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       {:error, _reason} = error -> error
     end
   after
-    Enum.each(Path.wildcard(Path.join(runtime.spool_dir, "#{id}-*-valid.ndjson")), &File.rm/1)
+    Enum.each(Path.wildcard(Path.join(runtime.spool_dir, "#{id}-*-valid.ndjson")), &discard/1)
   end
 
   # Nothing left to write means every body in the commit was bad, so the callers
@@ -494,7 +494,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     probe = Path.join(runtime.spool_dir, "#{id}-#{index}-probe.ndjson")
     bisected = refused_by_duckdb(engine, commit.schema, probe, indexed_valid(valid, errors))
-    File.rm(probe)
+    discard(probe)
 
     with {:ok, kept, refused} <- bisected do
       refusals = Enum.sort_by(errors ++ refused, & &1.index)
@@ -525,7 +525,7 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp refused_by_duckdb(_engine, _schema, _probe, []), do: {:ok, [], []}
 
   defp refused_by_duckdb(engine, schema, probe, indexed) do
-    File.write!(probe, ndjson_iodata(Enum.map(indexed, &elem(&1, 1))))
+    File.write!(probe, ndjson_iodata(Enum.map(indexed, &elem(&1, 1))), [:raw])
 
     case {Writer.ndjson_problem(engine, probe, schema), indexed} do
       {:ok, _rows} ->
@@ -573,12 +573,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
   defp respool(runtime, id, index, rows) do
     path = Path.join(runtime.spool_dir, "#{id}-#{index}-valid.ndjson")
 
-    File.write!(path, ndjson_iodata(rows))
+    File.write!(path, ndjson_iodata(rows), [:raw])
 
     [path]
   end
 
   defp ndjson_iodata(rows), do: Enum.map(rows, &[JSON.encode_to_iodata!(&1), "\n"])
+
+  defp discard(path), do: :file.delete(path, [:raw])
 
   defp spool(runtime, id, chunks) do
     File.mkdir_p!(runtime.spool_dir)
@@ -588,14 +590,14 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
       |> Enum.with_index()
       |> Enum.map(fn {chunk, index} ->
         path = Path.join(runtime.spool_dir, "#{id}-#{index}.ndjson")
-        File.write!(path, chunk_bytes(chunk))
+        File.write!(path, chunk_bytes(chunk), [:raw])
         path
       end)
 
     {:ok, paths}
   rescue
     error in [ArgumentError, ErlangError, Protocol.UndefinedError] ->
-      Enum.each(Path.wildcard(Path.join(runtime.spool_dir, "#{id}-*.ndjson")), &File.rm/1)
+      Enum.each(Path.wildcard(Path.join(runtime.spool_dir, "#{id}-*.ndjson")), &discard/1)
       {:error, {:invalid_rows, Exception.message(error)}}
   end
 
