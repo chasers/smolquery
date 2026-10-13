@@ -121,14 +121,19 @@ defmodule Smolquery.RuntimeConfigTest do
     end
   end
 
-  test "parses comma-separated absolute paths" do
-    assert RuntimeConfig.absolute_paths!("ROOTS", "/data/ducklake, /srv/lakes,") ==
+  test "parses comma-separated directory roots" do
+    assert RuntimeConfig.directory_roots!("ROOTS", "/data/ducklake, /srv/lakes,") ==
              ["/data/ducklake", "/srv/lakes"]
 
-    assert RuntimeConfig.absolute_paths!("ROOTS", "") == []
+    assert RuntimeConfig.directory_roots!("ROOTS", "") == []
+    assert RuntimeConfig.directory_roots!("ROOTS", " , ") == []
 
-    assert_raise ArgumentError, ~r/ROOTS.*relative\/lake.*absolute paths/, fn ->
-      RuntimeConfig.absolute_paths!("ROOTS", "/data/ducklake,relative/lake")
+    assert_raise ArgumentError, ~r/ROOTS.*relative\/lake.*absolute directories/, fn ->
+      RuntimeConfig.directory_roots!("ROOTS", "/data/ducklake,relative/lake")
+    end
+
+    assert_raise ArgumentError, ~r|ROOTS.*"/".*below /|, fn ->
+      RuntimeConfig.directory_roots!("ROOTS", "/data/ducklake,/")
     end
   end
 
@@ -197,7 +202,7 @@ defmodule Smolquery.RuntimeConfigTest do
 
     with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => ""}, fn -> assert read.() == [] end)
 
-    with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => "data/ducklake"}, fn ->
+    with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => "/"}, fn ->
       assert_raise ArgumentError, ~r/SMOLQUERY_FEDERATION_LOCAL_ROOTS/, read
     end)
   end

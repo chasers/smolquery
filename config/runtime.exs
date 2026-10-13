@@ -349,7 +349,7 @@ end
 if roots = System.get_env("SMOLQUERY_FEDERATION_LOCAL_ROOTS") do
   config :smolquery, Smolquery.Federation,
     local_roots:
-      Smolquery.RuntimeConfig.absolute_paths!("SMOLQUERY_FEDERATION_LOCAL_ROOTS", roots)
+      Smolquery.RuntimeConfig.directory_roots!("SMOLQUERY_FEDERATION_LOCAL_ROOTS", roots)
 end
 
 if buffer_dir = System.get_env("SMOLQUERY_BUFFER_DIR") do

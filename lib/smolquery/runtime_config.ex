@@ -94,20 +94,20 @@ defmodule Smolquery.RuntimeConfig do
   end
 
   @doc """
-  Parses a comma-separated list of absolute directories. Entries are trimmed,
-  empty entries are dropped, and an empty value is `[]`.
-  """
-  @spec absolute_paths!(String.t(), String.t()) :: [String.t()]
-  def absolute_paths!(name, value) do
-    paths =
-      value
-      |> String.split(",", trim: true)
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
+  Parses a comma-separated list of directories that bound other paths.
 
-    if Enum.all?(paths, &(Path.type(&1) == :absolute)),
-      do: paths,
-      else: invalid!(name, value, "comma-separated absolute paths such as /data/ducklake")
+  Entries are trimmed and empty entries dropped, so an empty value is `[]`.
+  Each must be absolute, since the paths it bounds are expanded against the
+  working directory. `/` bounds nothing and is refused.
+  """
+  @spec directory_roots!(String.t(), String.t()) :: [String.t()]
+  def directory_roots!(name, value) do
+    roots = value |> comma_list() |> Enum.reject(&(&1 == ""))
+
+    case Enum.find(roots, &(&1 == "/" or Path.type(&1) != :absolute)) do
+      nil -> roots
+      root -> invalid!(name, root, "absolute directories below /, such as /data/ducklake")
+    end
   end
 
   @doc """
@@ -115,7 +115,7 @@ defmodule Smolquery.RuntimeConfig do
   """
   @spec node_names!(String.t(), String.t()) :: [String.t()]
   def node_names!(name, value) do
-    nodes = value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+    nodes = comma_list(value)
 
     if Enum.count_until(nodes, 257) == 257 do
       invalid!(name, value, "at most 256 comma-separated Erlang node names")
@@ -138,6 +138,8 @@ defmodule Smolquery.RuntimeConfig do
         )
     end
   end
+
+  defp comma_list(value), do: value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 
   defp parse_integer!(name, value, minimum, :infinity) when is_binary(value) do
     case Integer.parse(value) do

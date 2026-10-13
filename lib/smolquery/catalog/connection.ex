@@ -33,14 +33,17 @@ defmodule Smolquery.Catalog.Connection do
 
     * `data_path`, where the lake's files live, required: an `s3://` URL, or a
       local path under one of `Smolquery.Federation`'s `:local_roots`, which
-      are none by default. The check is lexical (symlinks are not resolved),
-      and it guards against a mistaken path, not a hostile catalog: the files
-      a lake's catalog lists are read wherever they are (see
-      `Smolquery.Federation`).
+      are none by default and which a release names with
+      `SMOLQUERY_FEDERATION_LOCAL_ROOTS`. The check is lexical (symlinks are
+      not resolved), and it guards against a mistaken path, not a hostile
+      catalog: the files a lake's catalog lists are read wherever they are
+      (see `Smolquery.Federation`).
     * optional S3 credentials for it, `s3_key_id` and `s3_secret`, both or
       neither, with `s3_region`, `s3_endpoint` and `s3_url_style`. The secret
       is sealed like the password, into `:storage_secret`, and like it is
-      never returned.
+      never returned. They go into a secret scoped to the data path, so a
+      local data path takes none of them: a lake under a local root whose
+      files are on S3 is read with the node's own S3 secret.
 
   The kind is fixed at registration: `update/2` does not change it.
 
@@ -307,7 +310,8 @@ defmodule Smolquery.Catalog.Connection do
     with {:ok, data_path} <- data_path(params, connection.data_path),
          {:ok, storage} <- storage(params, connection.storage),
          {:ok, storage_secret} <- storage_secret_param(params, connection.storage_secret),
-         :ok <- paired(storage, storage_secret) do
+         :ok <- paired(storage, storage_secret),
+         :ok <- scoped(data_path, storage) do
       {:ok,
        %{connection | data_path: data_path, storage: storage, storage_secret: storage_secret}}
     end
@@ -360,7 +364,7 @@ defmodule Smolquery.Catalog.Connection do
     do: {:cont, {:ok, Map.put(storage, key, value)}}
 
   defp storage_value(key, _value, _storage),
-    do: {:halt, {:error, {:invalid_param, "s3_" <> Atom.to_string(key)}}}
+    do: {:halt, {:error, {:invalid_param, storage_param(key)}}}
 
   defp storage_secret_param(params, current) do
     case Map.fetch(params, "s3_secret") do
@@ -376,6 +380,16 @@ defmodule Smolquery.Catalog.Connection do
       do: :ok,
       else: {:error, {:invalid_param, "s3_secret"}}
   end
+
+  defp scoped("s3://" <> _rest, _storage), do: :ok
+  defp scoped(_local_path, storage) when map_size(storage) == 0, do: :ok
+
+  defp scoped(_local_path, storage) do
+    {key, _value} = Enum.min_by(storage, fn {key, _value} -> storage_param(key) end)
+    {:error, {:invalid_param, storage_param(key)}}
+  end
+
+  defp storage_param(key), do: "s3_" <> Atom.to_string(key)
 
   defp quote_value(value) do
     if String.contains?(value, [" ", "'", "\\"]) do

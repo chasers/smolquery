@@ -210,6 +210,33 @@ defmodule Smolquery.Catalog.ConnectionTest do
       assert {:ok, _connection} = Connection.new(lake(%{"data_path" => "/data/lake/"}))
     end
 
+    test "takes no S3 fields with a local data path, since the secret is scoped to it" do
+      previous = Application.get_env(:smolquery, Smolquery.Federation)
+      on_exit(fn -> restore_federation(previous) end)
+      Application.put_env(:smolquery, Smolquery.Federation, local_roots: ["/srv/lakes"])
+
+      local = %{"data_path" => "/srv/lakes/sales/"}
+
+      assert Connection.new(lake(Map.merge(local, %{"s3_key_id" => "AKIA1", "s3_secret" => "s"}))) ==
+               {:error, {:invalid_param, "s3_key_id"}}
+
+      assert Connection.new(lake(Map.merge(local, %{"s3_region" => "eu-west-1"}))) ==
+               {:error, {:invalid_param, "s3_region"}}
+
+      assert {:ok, connection} =
+               Connection.new(lake(%{"s3_key_id" => "AKIA1", "s3_secret" => "s"}))
+
+      assert Connection.update(connection, local) == {:error, {:invalid_param, "s3_key_id"}}
+
+      assert {:ok, moved} =
+               Connection.update(
+                 connection,
+                 Map.merge(local, %{"s3_key_id" => "", "s3_secret" => ""})
+               )
+
+      assert moved.storage == %{}
+    end
+
     test "seals the S3 secret, needs the key id beside it, and never returns it" do
       assert {:ok, connection} =
                Connection.new(

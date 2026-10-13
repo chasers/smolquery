@@ -101,7 +101,7 @@ received value, and the accepted shape.
 | `SMOLQUERY_S3_REGION` | The S3 region (`us-east-1`) |
 | `SMOLQUERY_S3_URL_STYLE` | `path` or `vhost` (`path` when an endpoint is set) |
 | `SMOLQUERY_S3_STAGING_DIR` | The local scratch directory for segments before upload (`<data dir>/sealed-staging`) |
-| `SMOLQUERY_FEDERATION_LOCAL_ROOTS` | The local directories a `kind: ducklake` connection's `data_path` may lie under, comma-separated (none, T-650). A smolquery deployment's lake stores its data path as `<data dir>/ducklake`, so a second deployment that attaches it sets this to that path (`/data/ducklake` in the image) and reads the lake's files from their absolute `s3://` locations through its own `SMOLQUERY_S3_*` secret. `s3://` data paths need no root |
+| `SMOLQUERY_FEDERATION_LOCAL_ROOTS` | The local directories a `kind: ducklake` connection's `data_path` may lie under, comma-separated (none, T-650). A smolquery deployment's lake stores its data path as `<data dir>/ducklake`, so a second deployment that attaches it sets this to that path (`/data/ducklake` in the image) and reads the lake's files from their absolute `s3://` locations through its own `SMOLQUERY_S3_*` secret. The connection's `s3_*` fields are scoped to the data path, so a local data path refuses them. `s3://` data paths need no root. Set the writer's path exactly: `/` is refused, since it would allow every path |
 
 ### Engine and the write path
 
