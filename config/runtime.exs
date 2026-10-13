@@ -343,6 +343,15 @@ if data_dir = System.get_env("SMOLQUERY_DATA_DIR") do
   config :smolquery, Smolquery.StorageService, dir: Path.join(data_dir, "sealed")
 end
 
+# T-650: a second deployment attaching this one's lake as a `kind: ducklake`
+# connection must register the data path the lake stores, `<data dir>/ducklake`,
+# which is local even when its files live on S3.
+if roots = System.get_env("SMOLQUERY_FEDERATION_LOCAL_ROOTS") do
+  config :smolquery, Smolquery.Federation,
+    local_roots:
+      Smolquery.RuntimeConfig.absolute_paths!("SMOLQUERY_FEDERATION_LOCAL_ROOTS", roots)
+end
+
 if buffer_dir = System.get_env("SMOLQUERY_BUFFER_DIR") do
   config :smolquery, Smolquery.BufferService, dir: buffer_dir
 end

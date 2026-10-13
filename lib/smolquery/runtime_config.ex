@@ -94,6 +94,23 @@ defmodule Smolquery.RuntimeConfig do
   end
 
   @doc """
+  Parses a comma-separated list of absolute directories. Entries are trimmed,
+  empty entries are dropped, and an empty value is `[]`.
+  """
+  @spec absolute_paths!(String.t(), String.t()) :: [String.t()]
+  def absolute_paths!(name, value) do
+    paths =
+      value
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    if Enum.all?(paths, &(Path.type(&1) == :absolute)),
+      do: paths,
+      else: invalid!(name, value, "comma-separated absolute paths such as /data/ducklake")
+  end
+
+  @doc """
   Parses a bounded comma-separated list of Erlang node names.
   """
   @spec node_names!(String.t(), String.t()) :: [String.t()]

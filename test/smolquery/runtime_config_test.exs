@@ -121,6 +121,17 @@ defmodule Smolquery.RuntimeConfigTest do
     end
   end
 
+  test "parses comma-separated absolute paths" do
+    assert RuntimeConfig.absolute_paths!("ROOTS", "/data/ducklake, /srv/lakes,") ==
+             ["/data/ducklake", "/srv/lakes"]
+
+    assert RuntimeConfig.absolute_paths!("ROOTS", "") == []
+
+    assert_raise ArgumentError, ~r/ROOTS.*relative\/lake.*absolute paths/, fn ->
+      RuntimeConfig.absolute_paths!("ROOTS", "/data/ducklake,relative/lake")
+    end
+  end
+
   test "runtime config applies parsed values without creating node atoms" do
     with_env(
       %{
@@ -170,6 +181,24 @@ defmodule Smolquery.RuntimeConfigTest do
 
     with_env(%{"SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES" => "0"}, fn ->
       assert_raise ArgumentError, ~r/SMOLQUERY_VICTORIAMETRICS_MAX_CONCURRENT_FETCHES/, read
+    end)
+  end
+
+  test "SMOLQUERY_FEDERATION_LOCAL_ROOTS names the local DuckLake data roots (T-650)" do
+    read = fn ->
+      "config/runtime.exs"
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> get_in([:smolquery, Smolquery.Federation, :local_roots])
+    end
+
+    with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => "/data/ducklake, /srv/lakes"}, fn ->
+      assert read.() == ["/data/ducklake", "/srv/lakes"]
+    end)
+
+    with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => ""}, fn -> assert read.() == [] end)
+
+    with_env(%{"SMOLQUERY_FEDERATION_LOCAL_ROOTS" => "data/ducklake"}, fn ->
+      assert_raise ArgumentError, ~r/SMOLQUERY_FEDERATION_LOCAL_ROOTS/, read
     end)
   end
 

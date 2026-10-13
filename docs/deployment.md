@@ -252,7 +252,7 @@ You can register another DuckLake as a connection and query it: `"kind": "duckla
 
 - **The catalog migration `20261001100000`** adds `kind`, `options` and `storage_secret` to `smolquery_connections` (`ADD COLUMN IF NOT EXISTS`). The boot step below applies it. A lake the step doesn't prepare (SQLite, or the cases listed below) gets the same columns from its bootstrap.
 - **Mixed versions:** create and edit DuckLake connections only after every pod runs 0.21.0. A pre-0.21 pod reads a DuckLake connection as a Postgres one, so a query it plans against one fails, and an edit made through it resets the kind. Postgres connections work on both versions throughout.
-- **Local data paths** are refused unless they sit under a root in `config :smolquery, Smolquery.Federation, local_roots: [...]`, which is empty by default. `s3://` paths always work.
+- **Local data paths** are refused unless they sit under a root in `config :smolquery, Smolquery.Federation, local_roots: [...]`, which is empty by default; a release sets it with `SMOLQUERY_FEDERATION_LOCAL_ROOTS` (T-650). `s3://` paths always work.
 - **Trust:** DuckLake reads an attached lake's files itself, and the query engine's lockdown doesn't restrict those reads. A lake's catalog decides which files a query reads, and an entry can be an absolute path anywhere the node can open. Register only lakes whose catalog you trust as you trust this deployment. Registering one takes the credential key, as it does for Postgres.
 
 ### 0.21.0: catalog reads over Postgrex, and a boot step that migrates the catalog database (T-608, T-609)
