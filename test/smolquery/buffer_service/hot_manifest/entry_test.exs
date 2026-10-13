@@ -92,6 +92,44 @@ defmodule Smolquery.BufferService.HotManifest.EntryTest do
       assert NaiveDateTime.compare(decoded.stats["ts"].min, ~N[2026-07-31 12:00:02]) == :lt
     end
 
+    test "keep timestamp and date bounds past year 9999" do
+      wide = %{
+        "ts" => %{
+          min: ~N[2026-07-31 12:00:01.000000],
+          max: NaiveDateTime.new!(10_000, 1, 1, 0, 0, 0, {0, 6}),
+          null_count: 0
+        },
+        "day" => %{min: ~D[2026-08-01], max: Date.new!(10_000, 1, 1), null_count: 0}
+      }
+
+      entry = Entry.from_segment(%{segment() | stats: wide}, 1)
+
+      assert round_trip(entry) == entry
+
+      manifest = entry |> Entry.to_manifest(stats: true) |> JSON.encode!() |> JSON.decode!()
+      assert Entry.decode_stats(manifest["stats"]) == wide
+    end
+
+    test "read a timestamp logged before years past 9999 were bounded as it was read then" do
+      for value <- ["2026-07-31T12:00:01.000000", "1960-06-01T00:00:00.500000"] do
+        stats = %{
+          "ts" => %{
+            "min" => %{"type" => "naive_datetime", "value" => value},
+            "max" => %{"type" => "date", "value" => "2026-08-04"},
+            "null_count" => 0
+          }
+        }
+
+        {:ok, datetime} = NaiveDateTime.from_iso8601(value)
+
+        assert Entry.decode_stats(stats)["ts"] == %{
+                 min: datetime,
+                 max: ~D[2026-08-04],
+                 null_count: 0
+               }
+      end
+    end
+
     test "keep numeric bounds and null counts" do
       decoded = segment() |> Entry.from_segment(1) |> round_trip()
 

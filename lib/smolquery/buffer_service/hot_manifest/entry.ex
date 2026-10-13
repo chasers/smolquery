@@ -19,9 +19,17 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   than a string that no longer compares against anything. Losing stats would not
   corrupt a query — it would silently stop pruning after every restart, which is
   worse than a crash for being invisible.
+
+  A tagged bound is read back with `Smolquery.StatText`, not
+  `NaiveDateTime.from_iso8601/1`, because the writer bounds years past 9999
+  (`10000-01-01T00:00:00.000000`), which the ISO readers refuse. A timestamp
+  comes back at microsecond precision, as the writer produced it; a value
+  `Smolquery.StatText` cannot read, such as a negative year, comes back
+  `nil`, an unknown bound.
   """
 
   alias Smolquery.Segments.Segment
+  alias Smolquery.StatText
 
   @enforce_keys [:id, :key, :row_count, :byte_size, :added_at]
   defstruct [
@@ -222,19 +230,10 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
 
   defp encode_bound(value), do: value
 
-  defp decode_bound(%{"type" => "naive_datetime", "value" => value}) do
-    case NaiveDateTime.from_iso8601(value) do
-      {:ok, datetime} -> datetime
-      {:error, _reason} -> nil
-    end
-  end
+  defp decode_bound(%{"type" => "naive_datetime", "value" => value}),
+    do: StatText.naive_datetime(value, :floor)
 
-  defp decode_bound(%{"type" => "date", "value" => value}) do
-    case Date.from_iso8601(value) do
-      {:ok, date} -> date
-      {:error, _reason} -> nil
-    end
-  end
+  defp decode_bound(%{"type" => "date", "value" => value}), do: StatText.date(value)
 
   defp decode_bound(value), do: value
 end

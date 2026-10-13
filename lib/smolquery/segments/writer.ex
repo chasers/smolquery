@@ -4,8 +4,10 @@ defmodule Smolquery.Segments.Writer do
   NDJSON bodies of a group commit.
 
   DuckDB reads the bodies, sorts on the clustering key, and writes the Parquet;
-  the row count and the stats are read off the staged file before the store
-  moves it. No row becomes an Elixir term, and every type the catalog declares
+  the row count and the stats come back from that same `COPY` (see "Stats
+  from the write" below), and one read of the file's footer checks the file
+  before the store moves it. No row becomes an
+  Elixir term, and every type the catalog declares
   is written here, `MAP(STRING, STRING)` and `VARIANT` included — this is the
   one writer since PL-57. Tests and benches that need a segment from rows use
   `Smolquery.Test.SegmentFixture`, which lives outside `lib/`.
@@ -36,13 +38,60 @@ defmodule Smolquery.Segments.Writer do
   (`Smolquery.Schema.computed_select/2`) evaluates its expression over the
   body's regular columns, wrapped in `TRY`, so the file carries the value
   and a row whose values the expression cannot take stores `NULL` rather
-  than failing the batch. The stats are read off
-  the written file, so a materialized column is bounded like any other.
+  than failing the batch. The `COPY` reports stats for every column it
+  wrote, computed ones included, so a materialized column is bounded like any
+  other.
   `readable_ndjson?/3` reads the regular columns only, as the `COPY` does.
+
+  ## Stats from the write
+
+  The `COPY` runs with `RETURN_STATS`, so DuckDB answers with the file's row
+  count and, per column, the min, max and null count its Parquet writer
+  gathered while encoding: the data pages are never read back to learn them.
+  The stats come keyed by the quoted column name (`"ts"`), every value as
+  text, and each is turned back into the type the manifest holds. A bound
+  that text does not give, or does not give soundly, is `nil` (unknown),
+  never a guess, since a bound narrower than the data would prune a segment
+  that holds a match:
+
+    * `INT64` and `DECIMAL` parse exactly. `DATE` and `TIMESTAMP` parse
+      exactly through `Smolquery.StatText`, years past 9999 included;
+      `infinity` and `(BC)` values have no `Date`/`NaiveDateTime` form there
+      and give `nil`.
+    * `DOUBLE` prints the shortest text that reads back as the same float,
+      and `inf`/`-inf` become `:infinity`/`:neg_infinity`. Parquet stats
+      leave NaN out of min and max and say `has_nan` instead; DuckDB orders
+      NaN above every number, so a column holding one gets `:nan` as its
+      max, and as its min too when it holds nothing else.
+    * `VARCHAR` bounds are taken as DuckDB gives them, cut or not. DuckDB
+      cuts a string stat to 256 bytes, and either way the bound stays sound
+      for a byte-wise comparison: a cut min is a prefix of the true min, so
+      it sorts below every value; a cut max is a prefix with its last
+      raisable ASCII byte incremented, so it sorts above every value, also
+      when DuckDB shortened it further to stop before a multi-byte
+      character. A column DuckDB could not cut that way gets no bounds at
+      all, `nil` on both sides. A bound that is not valid UTF-8 is `nil`
+      too, as the manifest log is JSON. Every string column is bounded, not
+      only the sorted one (T-179).
+    * A column the `COPY` reports no top-level stats for — a `MAP` is only
+      described by its key and value leaves, whose null counts do not tell a
+      null map from an empty one — is counted with one scan of those columns
+      alone, as every column was before.
+
+  ## The footer is the readability gate
+
+  Before the stats are trusted, the footer of the staged file is read once
+  (`parquet_file_metadata`) and its row count must equal the one the `COPY`
+  reported, or the write fails. That read is a gate, never the source of a
+  bound: a micro-segment DuckDB cannot read after the ack would wedge the
+  claim that holds it, since the merge skips only the inputs the manifest
+  dropped (`Smolquery.StorageService.Merge`). A footer DuckDB parses is the
+  check that the file is one it can open; the data pages are not read back.
 
   ## Nanosecond bounds
 
-  A `TIMESTAMP_NS` column's bounds are read as `epoch_ns` integers and rounded
+  A `TIMESTAMP_NS` column's bounds keep every digit in the `COPY`'s text
+  (and in the text of `min`/`max` where a column is scanned) and are rounded
   outward to microseconds, the minimum down and the maximum up (T-475). The
   manifest holds a `NaiveDateTime`, which has no nanoseconds, and ADBC's own
   conversion truncates toward zero, which rounds a pre-1970 minimum up past
@@ -68,6 +117,7 @@ defmodule Smolquery.Segments.Writer do
   alias Smolquery.Segments.Id
   alias Smolquery.Segments.Segment
   alias Smolquery.Segments.Store
+  alias Smolquery.StatText
 
   @type row :: %{optional(String.t()) => term()}
 
@@ -78,8 +128,8 @@ defmodule Smolquery.Segments.Writer do
 
   Needs `:engine` and a store whose staging path is a local file — DuckDB's
   `COPY` writes to a filesystem path, not to an object store. The row count
-  and the stats are read off that staged file inside the encoder and come
-  back as the put's `meta`, so the store's own location never has to be
+  and the stats come back from the `COPY` that writes that staged file and
+  are the put's `meta`, so the store's own location never has to be
   readable by DuckDB (a `memory://` test store is one; an `s3://` one is not
   read back either). Carries no
   per-row validation, so a value the schema cannot take fails the whole batch
@@ -95,7 +145,6 @@ defmodule Smolquery.Segments.Writer do
           | {:compression, atom() | {atom(), integer() | nil}}
 
   @orderable [:int64, :float64, :timestamp, :timestamp_ns, :date]
-  @epoch ~N[1970-01-01 00:00:00.000000]
 
   @doc """
   Writes the spooled NDJSON `paths` as one segment in `:store`, returning the
@@ -248,10 +297,10 @@ defmodule Smolquery.Segments.Writer do
   defp problem({:engine_failed, _message} = failed), do: {:error, failed}
 
   defp encode_ndjson(engine, paths, staged, schema, compression) do
-    with :ok <- copy_ndjson(engine, paths, staged, schema, compression),
-         {:ok, row_count} <- footer_rows(engine, staged),
-         {:ok, stats} <- ndjson_stats(engine, staged, schema) do
-      {:ok, %{row_count: row_count, stats: stats}}
+    with {:ok, written} <- copy_ndjson(engine, paths, staged, schema, compression),
+         :ok <- footer_agrees(engine, staged, written.rows),
+         {:ok, stats} <- written_stats(engine, staged, schema, written.columns) do
+      {:ok, %{row_count: written.rows, stats: stats}}
     end
   end
 
@@ -276,31 +325,118 @@ defmodule Smolquery.Segments.Writer do
     COPY (
       #{Schema.computed_select(schema, String.trim_trailing(spooled), :inserted)}#{order_clause(schema)}
     )
-    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)}#{field_ids_option(schema)})
+    TO $#{count + 1} (FORMAT PARQUET, COMPRESSION #{codec(compression)}#{field_ids_option(schema)}, RETURN_STATS true)
     """
 
     case Engine.query(engine, sql, paths ++ [staged]) do
-      {:ok, _result} -> :ok
+      {:ok, result} -> written(result, staged)
       {:error, error} -> {:error, classify(error, :ndjson_copy_failed)}
     end
   end
 
-  # The footer, not the data: `parquet_file_metadata` reads the tail of the file,
-  # so the authoritative row count costs no pass over the rows. Trusting a count
-  # the caller sent instead would let a miscounted body scale the ack.
-  defp footer_rows(engine, path) do
-    case Engine.query(engine, "SELECT num_rows FROM parquet_file_metadata($1)", [path]) do
-      {:ok, %{rows: [[rows] | _rest]}} -> {:ok, rows}
-      {:ok, _other} -> {:error, {:segment_facts_failed, "no parquet footer at #{path}"}}
-      {:error, error} -> {:error, {:segment_facts_failed, Exception.message(error)}}
+  defp written(%{columns: names, rows: [values]}, staged) do
+    case Map.new(Enum.zip(names, values)) do
+      %{"count" => rows, "column_statistics" => columns}
+      when is_integer(rows) and is_map(columns) ->
+        {:ok, %{rows: rows, columns: columns}}
+
+      _other ->
+        {:error, {:segment_facts_failed, "no write statistics for #{staged}"}}
     end
   end
 
-  # The manifest's stats, computed by DuckDB over the file just written — one
-  # pass over a local file still in the page cache. Unlike Explorer's fixture writer this
-  # bounds every string column rather than only the sorted one, since DuckDB
-  # compares text natively where `Explorer.Series.min/1` refuses it (T-179).
-  defp ndjson_stats(engine, path, %Schema{fields: fields}) do
+  defp written(_result, staged),
+    do: {:error, {:segment_facts_failed, "no write statistics for #{staged}"}}
+
+  defp footer_agrees(engine, path, rows) do
+    case Engine.query(engine, "SELECT num_rows FROM parquet_file_metadata($1)", [path]) do
+      {:ok, %{rows: [[^rows] | _rest]}} ->
+        :ok
+
+      {:ok, %{rows: [[other] | _rest]}} ->
+        {:error,
+         {:segment_facts_failed,
+          "footer of #{path} holds #{other} rows, the COPY reported #{rows}"}}
+
+      {:ok, _result} ->
+        {:error, {:segment_facts_failed, "no parquet footer at #{path}"}}
+
+      {:error, error} ->
+        {:error, {:segment_facts_failed, Exception.message(error)}}
+    end
+  end
+
+  defp written_stats(engine, path, %Schema{fields: fields}, columns) do
+    {described, scanned} =
+      Enum.reduce(fields, {%{}, []}, fn %Field{} = field, {described, scanned} ->
+        column = Map.get(columns, Identifier.quote_name!(field.name))
+
+        case described_stats(field.type, column) do
+          {:ok, stats} -> {Map.put(described, field.name, stats), scanned}
+          :error -> {described, [field | scanned]}
+        end
+      end)
+
+    with {:ok, scanned} <- scanned_stats(engine, path, Enum.reverse(scanned)) do
+      {:ok, Map.merge(described, scanned)}
+    end
+  end
+
+  defp described_stats(type, %{"null_count" => nulls} = column) do
+    case Integer.parse(nulls) do
+      {null_count, ""} ->
+        {min, max} = described_bounds(type, column)
+        {:ok, column_stats(min, max, null_count)}
+
+      _invalid ->
+        :error
+    end
+  end
+
+  defp described_stats(_type, _column), do: :error
+
+  defp described_bounds(:float64, %{"has_nan" => "true"} = column),
+    do: {parsed(:float64, column["min"], :floor) || :nan, :nan}
+
+  defp described_bounds(:float64, %{"has_nan" => "false"} = column),
+    do: {parsed(:float64, column["min"], :floor), parsed(:float64, column["max"], :ceil)}
+
+  defp described_bounds(:float64, _column), do: {nil, nil}
+
+  defp described_bounds(:string, column),
+    do: {text_bound(column["min"]), text_bound(column["max"])}
+
+  defp described_bounds(type, column) do
+    if ndjson_bounded?(type),
+      do: {parsed(type, column["min"], :floor), parsed(type, column["max"], :ceil)},
+      else: {nil, nil}
+  end
+
+  defp text_bound(text) when is_binary(text), do: if(String.valid?(text), do: text, else: nil)
+  defp text_bound(_text), do: nil
+
+  defp parsed(_type, nil, _direction), do: nil
+  defp parsed(:int64, text, _direction), do: whole(Integer.parse(text))
+  defp parsed(:float64, "inf", _direction), do: :infinity
+  defp parsed(:float64, "-inf", _direction), do: :neg_infinity
+  defp parsed(:float64, text, _direction), do: whole(Float.parse(text))
+
+  defp parsed({:numeric, precision, _scale}, text, _direction),
+    do: whole(Decimal.parse(text, max_digits: precision))
+
+  defp parsed(:date, text, _direction), do: StatText.date(text)
+
+  defp parsed(type, text, direction) when type in [:timestamp, :timestamp_ns],
+    do: StatText.naive_datetime(text, direction)
+
+  defp parsed(_type, _text, _direction), do: nil
+
+  defp whole({value, ""}), do: value
+  defp whole(_partial), do: nil
+
+  defp scanned_stats(_engine, _path, []), do: {:ok, %{}}
+
+  defp scanned_stats(engine, path, fields) do
     selects =
       Enum.map_join(fields, ", ", fn %Field{} = field ->
         stats_select(field.type, Identifier.quote_name!(field.name))
@@ -328,7 +464,9 @@ defmodule Smolquery.Segments.Writer do
     do: %{min: min, max: max, null_count: null_count}
 
   defp stats_select(:timestamp_ns, name),
-    do: "epoch_ns(min(#{name})), epoch_ns(max(#{name})), count(*) - count(#{name})"
+    do:
+      "CAST(min(#{name}) AS VARCHAR), CAST(max(#{name}) AS VARCHAR), " <>
+        "count(*) - count(#{name})"
 
   defp stats_select(type, name) do
     if ndjson_bounded?(type),
@@ -336,13 +474,10 @@ defmodule Smolquery.Segments.Writer do
       else: "NULL, NULL, count(*) - count(#{name})"
   end
 
-  defp bound(:timestamp_ns, ns, direction) when is_integer(ns),
-    do: NaiveDateTime.add(@epoch, micros(ns, direction), :microsecond)
+  defp bound(:timestamp_ns, text, direction) when is_binary(text),
+    do: StatText.naive_datetime(text, direction)
 
   defp bound(_type, value, _direction), do: value
-
-  defp micros(ns, :floor), do: Integer.floor_div(ns, 1_000)
-  defp micros(ns, :ceil), do: -Integer.floor_div(-ns, 1_000)
 
   defp ndjson_bounded?({:numeric, _precision, _scale}), do: true
   defp ndjson_bounded?(:string), do: true
