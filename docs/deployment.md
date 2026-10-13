@@ -129,6 +129,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### A release names the local DuckLake data roots, for a separate read cluster (T-650)
+
+**TL;DR.** `SMOLQUERY_FEDERATION_LOCAL_ROOTS` lets a second smolquery deployment attach a running deployment's lake as a `kind: ducklake` connection. A read cluster set up this way sees sealed data only, so it trails the writer by the writer's seal interval. Nothing changes for a deployment that sets no roots.
+
+- **Why it was refused before:** a deployment's DuckLake stores its data path as `<data dir>/ducklake`, a local path, even when every sealed file is on S3. DuckLake refuses an attach at any other data path, and a release had no way to allow a local one, so `POST /v1/connections` answered 400 `invalid parameter: data_path`.
+- **The setting:** a comma-separated list of absolute directories a `kind: ducklake` connection's local `data_path` may lie under. `/` is refused. The connection's own `s3_*` fields are refused beside a local data path, since the secret they make is scoped to that path and would never match an `s3://` file; the reader reads the files with its own `SMOLQUERY_S3_*` secret.
+- **A separate read cluster:** run `api,query,web` with `SMOLQUERY_S3_*` for the writer's bucket and `SMOLQUERY_FEDERATION_LOCAL_ROOTS=/data/ducklake`, then register `{"kind": "ducklake", "host": "<writer postgres>", "database": "smolquery", "sslmode": "disable", "data_path": "/data/ducklake"}`. The reader's job engines read the writer's sealed files from S3 directly.
+- **The lag:** the reader sees the writer's data as of the writer's latest seal commit. The writer's hot tier, rows acknowledged but not yet sealed, lives on its buffer nodes and is read only by the writer's own query service, so a query on the reader never sees it. On a quiet table that is about the seal interval, a minute or so; it grows whenever the writer's sealing backs up. Compaction does not shorten it, since compaction rewrites files that are already sealed. A query that needs the newest rows runs on the writer. Covering the hot tier from a reader is T-658.
+
 ### The repository and image move to the `smolquery` organization
 
 The repository is now `github.com/smolquery/smolquery`; the old URL redirects. Releases after 0.22.0 publish `ghcr.io/smolquery/smolquery`. 0.22.0 and earlier stay at `ghcr.io/chasers/smolquery`, so pinned deployments keep pulling. Point new deployments, and any image automation, at the new name.
@@ -248,7 +257,7 @@ The query series of the HTTP edges' latency counters now use their own `le` boun
 
 ### 0.21.0: federated DuckLake connections (T-610)
 
-You can register another DuckLake as a connection and query it: `"kind": "ducklake"` on `POST /v1/connections`, or the kind selector on the connections page. It takes the lake's Postgres metadata database, its data path and optional S3 credentials, sealed like a password. The lake attaches read-only at its data path, and a query reads it as `name.schema.table`, alone or joined with smolquery tables. See [api.md](api.md).
+You can register another DuckLake as a connection and query it: `"kind": "ducklake"` on `POST /v1/connections`, or the kind selector on the connections page. It takes the lake's Postgres metadata database, its data path and optional S3 credentials, sealed like a password. The lake attaches read-only at its data path, and a query reads it as `name.schema.table`, alone or joined with smolquery tables. See [api.md](api.md). A lake is its sealed files: another smolquery deployment attached this way is read as of its latest seal, never its hot tier, so it trails that deployment by its seal interval (T-650, T-658).
 
 - **The catalog migration `20261001100000`** adds `kind`, `options` and `storage_secret` to `smolquery_connections` (`ADD COLUMN IF NOT EXISTS`). The boot step below applies it. A lake the step doesn't prepare (SQLite, or the cases listed below) gets the same columns from its bootstrap.
 - **Mixed versions:** create and edit DuckLake connections only after every pod runs 0.21.0. A pre-0.21 pod reads a DuckLake connection as a Postgres one, so a query it plans against one fails, and an edit made through it resets the kind. Postgres connections work on both versions throughout.
