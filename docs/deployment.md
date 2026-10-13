@@ -129,7 +129,7 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### A release names the local DuckLake data roots, for a separate read cluster (T-650)
+### 0.23.0: a release names the local DuckLake data roots, for a separate read cluster (T-650)
 
 **TL;DR.** `SMOLQUERY_FEDERATION_LOCAL_ROOTS` lets a second smolquery deployment attach a running deployment's lake as a `kind: ducklake` connection. A read cluster set up this way sees sealed data only, so it trails the writer by the writer's seal interval. Nothing changes for a deployment that sets no roots.
 
@@ -138,11 +138,11 @@ One note per release, newest first.
 - **A separate read cluster:** run `api,query,web` with `SMOLQUERY_S3_*` for the writer's bucket and `SMOLQUERY_FEDERATION_LOCAL_ROOTS=/data/ducklake`, then register `{"kind": "ducklake", "host": "<writer postgres>", "database": "smolquery", "sslmode": "disable", "data_path": "/data/ducklake"}`. The reader's job engines read the writer's sealed files from S3 directly.
 - **The lag:** the reader sees the writer's data as of the writer's latest seal commit. The writer's hot tier, rows acknowledged but not yet sealed, lives on its buffer nodes and is read only by the writer's own query service, so a query on the reader never sees it. On a quiet table that is about the seal interval, a minute or so; it grows whenever the writer's sealing backs up. Compaction does not shorten it, since compaction rewrites files that are already sealed. A query that needs the newest rows runs on the writer. Covering the hot tier from a reader is T-658.
 
-### The repository and image move to the `smolquery` organization
+### 0.23.0: the repository and image move to the `smolquery` organization
 
 The repository is now `github.com/smolquery/smolquery`; the old URL redirects. Releases after 0.22.0 publish `ghcr.io/smolquery/smolquery`. 0.22.0 and earlier stay at `ghcr.io/chasers/smolquery`, so pinned deployments keep pulling. Point new deployments, and any image automation, at the new name.
 
-### Ready for DuckDB 2.0, still on 1.5.3 (T-652 to T-656)
+### 0.23.0: ready for DuckDB 2.0, still on 1.5.3 (T-652 to T-656)
 
 **TL;DR.** The engine is still DuckDB 1.5.3. These changes make the code work on 2.0 as well, so the 2.0 bump can change the pin and little else. Two things are new for a client.
 
@@ -155,7 +155,7 @@ Internal, and nothing to configure:
 - A locked-down query engine lets DuckLake run its own metadata `SET`s (`allowed_configs`), and `EXPLAIN ANALYZE` switches profiling on first. On 2.0, both are needed for lake reads and for analyzed plans.
 - The readers of DuckDB's parse tree take the 1.5.3 shapes and the 2.0 ones, checked on 2.0.0-alpha38195 and alpha46516.
 
-### The boot step names the catalog's format before it attaches, and a stale flag is ignored (T-651)
+### 0.23.0: the boot step names the catalog's format before it attaches, and a stale flag is ignored (T-651)
 
 **TL;DR.** Follow-ups to the 0.22.0 note below. Nothing changes on a catalog at DuckLake 1.0 with the flag set as that note says.
 
