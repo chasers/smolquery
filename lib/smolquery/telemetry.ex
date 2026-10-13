@@ -53,8 +53,10 @@ defmodule Smolquery.Telemetry do
       [:smolquery, :ingest, :insert]      %{accepted, rejected, parse_us, write_us}
       [:smolquery, :buffer, :commit]      %{rows, bytes, duration_us, accumulate_us,
                                             queue_us, encode_us, manifest_us,
-                                            replicate_us},
+                                            replicate_us, scanned_columns},
                                           meta %{result: :ok | :error, table_ref: ref}
+                                          — scanned_columns: columns the writer counted
+                                          with a scan because its COPY gave no stats
       [:smolquery, :buffer, :flush_trigger] %{rows, bytes},
                                           meta %{reason: :rows | :bytes | :interval | :idle |
                                           :schema | :flush | :drain | :shutdown,
@@ -550,6 +552,9 @@ defmodule Smolquery.Telemetry do
       "Partial-result bytes scattered queries merged; the network bill once workers are remote.",
     "smolquery_buffer_commit_bytes_total" =>
       "Wire bytes in committed group commits; what flush_max_bytes gates on (T-333).",
+    "smolquery_buffer_commit_scanned_columns_total" =>
+      "Columns a group commit's writer counted with a scan of the file it wrote, as the " <>
+        "COPY reported no stats for them; MAP columns are expected here, others are not.",
     "smolquery_buffer_commit_rows_bucket" =>
       "Committed group commits by row count, cumulative in le; counters, not a histogram.",
     "smolquery_buffer_flush_trigger_total" =>
@@ -907,6 +912,12 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_buffer_commits_total", [result: result(meta)]}, 1)
     bump({"smolquery_buffer_rows_committed_total", []}, committed_rows(measurements, meta))
     bump({"smolquery_buffer_commit_bytes_total", []}, committed_bytes(measurements, meta))
+
+    bump(
+      {"smolquery_buffer_commit_scanned_columns_total", []},
+      Map.get(measurements, :scanned_columns, 0)
+    )
+
     bucket_commit_rows(measurements, meta)
 
     bump(

@@ -477,6 +477,90 @@ defmodule Smolquery.Segments.WriterStatsTest do
     end
   end
 
+  describe "columns counted by a scan" do
+    test "every type but MAP is described by the COPY; each MAP is scanned", %{tmp_dir: dir} do
+      rows = [full_row(1, "b", 2.5, "2024-05-01 10:00:00.5", "2024-05-01 10:00:00"), %{"id" => 2}]
+      schema = full_schema(true)
+
+      without_maps = %{
+        schema
+        | fields: Enum.reject(schema.fields, &match?({:map, _, _}, &1.type))
+      }
+
+      two_maps =
+        Schema.new!([{"m", {:map, :string, :string}}, {"n", {:map, :string, :string}}])
+
+      {:ok, segment} = write(dir, without_maps, rows)
+      assert segment.scanned_columns == 0
+      assert Enum.any?(without_maps.fields, &(&1.type == :bool))
+      assert Enum.any?(without_maps.fields, &(&1.type == :variant))
+
+      {:ok, segment} = write(dir, schema, rows)
+      assert segment.scanned_columns == 1
+
+      {:ok, segment} = write(dir, two_maps, [%{"m" => %{"a" => "1"}}, %{"n" => %{}}])
+      assert segment.scanned_columns == 2
+    end
+
+    test "a null_count that is not text sends the column to the scan, not the write down",
+         %{tmp_dir: dir} do
+      schema = Schema.new!([{"i", :int64}, {"s", :string}])
+      rows = [%{"i" => 7, "s" => "a"}, %{"i" => -3}, %{"s" => "b"}]
+
+      engine =
+        rewriting_engine(fn stats ->
+          Map.update!(stats, ~s("i"), &Map.put(&1, "null_count", 1))
+        end)
+
+      {:ok, segment} = write(dir, schema, rows, engine)
+
+      assert segment.scanned_columns == 1
+      assert segment.stats["i"] == %{min: -3, max: 7, null_count: 1}
+      assert segment.stats["s"] == %{min: "a", max: "b", null_count: 1}
+    end
+
+    test "a scanned TIMESTAMP or DATE is read as text: pre-1970 fractions encode in the manifest",
+         %{tmp_dir: dir} do
+      schema = Schema.new!([{"t", :timestamp}, {"d", :date}, {"n", :timestamp_ns}])
+
+      rows = [
+        %{"t" => "1960-06-01 00:00:00.5", "d" => "1960-06-01", "n" => "1960-06-01 00:00:00.5"},
+        %{"t" => "1969-12-31 23:59:59.999", "d" => "10000-01-01", "n" => nil}
+      ]
+
+      engine = rewriting_engine(fn stats -> Map.drop(stats, [~s("t"), ~s("d"), ~s("n")]) end)
+
+      {:ok, described} = write(dir, schema, rows)
+      {:ok, segment} = write(dir, schema, rows, engine)
+
+      assert described.scanned_columns == 0
+      assert segment.scanned_columns == 3
+      assert segment.stats == described.stats
+
+      assert segment.stats["t"] == %{
+               min: ~N[1960-06-01 00:00:00.500000],
+               max: ~N[1969-12-31 23:59:59.999000],
+               null_count: 0
+             }
+
+      assert segment.stats["d"] == %{
+               min: ~D[1960-06-01],
+               max: Date.new!(10_000, 1, 1),
+               null_count: 0
+             }
+
+      {:ok, entry} =
+        segment
+        |> Entry.from_segment(0)
+        |> Entry.to_record()
+        |> JSON.encode!()
+        |> JSON.decode!()
+        |> Entry.from_record()
+
+      assert entry.stats == segment.stats
+    end
+  end
+
   describe "how the file is written" do
     test "materialized columns are bounded under their own names, with or without field ids",
          %{tmp_dir: dir} do
@@ -531,15 +615,46 @@ defmodule Smolquery.Segments.WriterStatsTest do
     end
   end
 
-  defp write(dir, schema, rows) do
+  defp write(dir, schema, rows, engine \\ @engine) do
     name = "w#{System.unique_integer([:positive])}"
     path = Path.join(dir, name <> ".ndjson")
     File.write!(path, Enum.map_join(rows, "", &(JSON.encode!(&1) <> "\n")))
 
     Writer.write({:ndjson, [path]}, schema,
       store: Store.Local.new(dir: Path.join(dir, name)),
-      engine: @engine
+      engine: engine
     )
+  end
+
+  defp rewriting_engine(rewrite) do
+    name = Module.concat(@engine, "Rewriting#{System.unique_integer([:positive])}")
+    relay = spawn_link(fn -> relay(Engine.connection_name(@engine), rewrite) end)
+    Process.register(relay, Engine.connection_name(name))
+    name
+  end
+
+  defp relay(connection, rewrite) do
+    receive do
+      {:"$gen_call", from, {:query, sql, _params} = call} ->
+        reply = GenServer.call(connection, call)
+
+        GenServer.reply(
+          from,
+          if(sql =~ "RETURN_STATS", do: rewritten(reply, rewrite), else: reply)
+        )
+
+        relay(connection, rewrite)
+    end
+  end
+
+  defp rewritten({:ok, %{columns: columns, rows: [values]} = result}, rewrite) do
+    values =
+      Enum.zip_with(columns, values, fn
+        "column_statistics", stats -> rewrite.(stats)
+        _column, value -> value
+      end)
+
+    {:ok, %{result | rows: [values]}}
   end
 
   defp full_schema(ids?) do

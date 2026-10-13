@@ -76,7 +76,10 @@ defmodule Smolquery.Segments.Writer do
     * A column the `COPY` reports no top-level stats for — a `MAP` is only
       described by its key and value leaves, whose null counts do not tell a
       null map from an empty one — is counted with one scan of those columns
-      alone, as every column was before.
+      alone, as every column was before. So is a column whose `null_count`
+      is not an integer in text. The segment's `scanned_columns` says how
+      many columns took that scan, so a type that starts falling back to it
+      shows up in the commit metrics rather than only in the flush time.
 
   ## The footer is the readability gate
 
@@ -91,12 +94,16 @@ defmodule Smolquery.Segments.Writer do
   ## Nanosecond bounds
 
   A `TIMESTAMP_NS` column's bounds keep every digit in the `COPY`'s text
-  (and in the text of `min`/`max` where a column is scanned) and are rounded
-  outward to microseconds, the minimum down and the maximum up (T-475). The
-  manifest holds a `NaiveDateTime`, which has no nanoseconds, and ADBC's own
-  conversion truncates toward zero, which rounds a pre-1970 minimum up past
-  the data. A bound a microsecond wide of the data never prunes a segment that
-  holds a match.
+  and are rounded outward to microseconds, the minimum down and the maximum
+  up (T-475). The manifest holds a `NaiveDateTime`, which has no
+  nanoseconds, and ADBC's own conversion truncates toward zero, which rounds
+  a pre-1970 minimum up past the data. A bound a microsecond wide of the
+  data never prunes a segment that holds a match.
+
+  A scanned `TIMESTAMP`, `TIMESTAMP_NS` or `DATE` column is read the same
+  way: its `min`/`max` are cast to text and parsed by `Smolquery.StatText`,
+  not taken as ADBC's structs, since ADBC gives a pre-1970 `TIMESTAMP` with
+  a fraction a negative microsecond that the manifest cannot encode.
 
   ## Usage
 
@@ -145,6 +152,7 @@ defmodule Smolquery.Segments.Writer do
           | {:compression, atom() | {atom(), integer() | nil}}
 
   @orderable [:int64, :float64, :timestamp, :timestamp_ns, :date]
+  @text_bounded [:timestamp, :timestamp_ns, :date]
 
   @doc """
   Writes the spooled NDJSON `paths` as one segment in `:store`, returning the
@@ -171,7 +179,7 @@ defmodule Smolquery.Segments.Writer do
 
     with :ok <- some_paths(paths),
          {:ok, key} <- Store.key(prefix, id),
-         {:ok, %{meta: %{row_count: row_count, stats: stats}} = put} <-
+         {:ok, %{meta: %{row_count: row_count, stats: stats, scanned_columns: scanned}} = put} <-
            Store.put(store, key, &encode_ndjson(engine, paths, &1, schema, compression)) do
       {:ok,
        %Segment{
@@ -181,7 +189,8 @@ defmodule Smolquery.Segments.Writer do
          row_count: row_count,
          byte_size: put.byte_size,
          field_ids: Schema.field_ids(schema),
-         stats: stats
+         stats: stats,
+         scanned_columns: scanned
        }}
     end
   end
@@ -299,8 +308,8 @@ defmodule Smolquery.Segments.Writer do
   defp encode_ndjson(engine, paths, staged, schema, compression) do
     with {:ok, written} <- copy_ndjson(engine, paths, staged, schema, compression),
          :ok <- footer_agrees(engine, staged, written.rows),
-         {:ok, stats} <- written_stats(engine, staged, schema, written.columns) do
-      {:ok, %{row_count: written.rows, stats: stats}}
+         {:ok, stats, scanned} <- written_stats(engine, staged, schema, written.columns) do
+      {:ok, %{row_count: written.rows, stats: stats, scanned_columns: scanned}}
     end
   end
 
@@ -377,12 +386,12 @@ defmodule Smolquery.Segments.Writer do
         end
       end)
 
-    with {:ok, scanned} <- scanned_stats(engine, path, Enum.reverse(scanned)) do
-      {:ok, Map.merge(described, scanned)}
+    with {:ok, scanned_stats} <- scanned_stats(engine, path, Enum.reverse(scanned)) do
+      {:ok, Map.merge(described, scanned_stats), length(scanned)}
     end
   end
 
-  defp described_stats(type, %{"null_count" => nulls} = column) do
+  defp described_stats(type, %{"null_count" => nulls} = column) when is_binary(nulls) do
     case Integer.parse(nulls) do
       {null_count, ""} ->
         {min, max} = described_bounds(type, column)
@@ -463,7 +472,7 @@ defmodule Smolquery.Segments.Writer do
   defp column_stats(min, max, null_count),
     do: %{min: min, max: max, null_count: null_count}
 
-  defp stats_select(:timestamp_ns, name),
+  defp stats_select(type, name) when type in @text_bounded,
     do:
       "CAST(min(#{name}) AS VARCHAR), CAST(max(#{name}) AS VARCHAR), " <>
         "count(*) - count(#{name})"
@@ -474,8 +483,8 @@ defmodule Smolquery.Segments.Writer do
       else: "NULL, NULL, count(*) - count(#{name})"
   end
 
-  defp bound(:timestamp_ns, text, direction) when is_binary(text),
-    do: StatText.naive_datetime(text, direction)
+  defp bound(type, text, direction) when type in @text_bounded and is_binary(text),
+    do: parsed(type, text, direction)
 
   defp bound(_type, value, _direction), do: value
 

@@ -606,6 +606,24 @@ defmodule Smolquery.TelemetryTest do
     assert deltas["+Inf"] >= 2
   end
 
+  test "counts the columns a commit's writer had to scan for stats" do
+    before = value("smolquery_buffer_commit_scanned_columns_total")
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: 4, bytes: 100, duration_us: 10, scanned_columns: 2},
+      %{result: :ok}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :buffer, :commit],
+      %{rows: 4, bytes: 100, duration_us: 10},
+      %{result: :ok}
+    )
+
+    assert value("smolquery_buffer_commit_scanned_columns_total") == before + 2
+  end
+
   test "a failed commit is neither bucketed nor counted in bytes" do
     before_bytes = value("smolquery_buffer_commit_bytes_total")
     before_inf = value("smolquery_buffer_commit_rows_bucket", le("+Inf"))

@@ -86,5 +86,26 @@ defmodule Smolquery.BufferService.MapColumnTest do
 
       assert hosts(runtime) == [[1, "h1"], [2, "h2"], [3, nil]]
     end
+
+    test "the commit reports the map as the one column counted by a scan", context do
+      handler = "scanned-columns-#{:erlang.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :buffer, :commit],
+        fn _event, measurements, meta, _config ->
+          send(test, {:commit, meta.table_ref, meta.result, measurements})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {name, _runtime} = start_buffer(context)
+      assert {:ok, _ack} = Client.write_batch(name, @table, ndjson_batch())
+
+      assert_receive {:commit, @table, :ok, %{scanned_columns: 1}}, 1_000
+    end
   end
 end

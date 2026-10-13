@@ -25,7 +25,10 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   (`10000-01-01T00:00:00.000000`), which the ISO readers refuse. A timestamp
   comes back at microsecond precision, as the writer produced it; a value
   `Smolquery.StatText` cannot read, such as a negative year, comes back
-  `nil`, an unknown bound.
+  `nil`, an unknown bound. A fraction finer than a microsecond, which the
+  writer never logs, is rounded outward as the writer would have: a `min`
+  down and a `max` up, so a replayed bound is never narrower than the one
+  written.
   """
 
   alias Smolquery.Segments.Segment
@@ -215,8 +218,8 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
     Map.new(stats, fn {column, column_stats} ->
       {column,
        %{
-         min: decode_bound(column_stats["min"]),
-         max: decode_bound(column_stats["max"]),
+         min: decode_bound(column_stats["min"], :floor),
+         max: decode_bound(column_stats["max"], :ceil),
          null_count: column_stats["null_count"]
        }}
     end)
@@ -230,10 +233,10 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
 
   defp encode_bound(value), do: value
 
-  defp decode_bound(%{"type" => "naive_datetime", "value" => value}),
-    do: StatText.naive_datetime(value, :floor)
+  defp decode_bound(%{"type" => "naive_datetime", "value" => value}, direction),
+    do: StatText.naive_datetime(value, direction)
 
-  defp decode_bound(%{"type" => "date", "value" => value}), do: StatText.date(value)
+  defp decode_bound(%{"type" => "date", "value" => value}, _direction), do: StatText.date(value)
 
-  defp decode_bound(value), do: value
+  defp decode_bound(value, _direction), do: value
 end

@@ -637,7 +637,8 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
         queue_us: span(commit[:handed_off_at], started),
         encode_us: encoded_at - started,
         manifest_us: added_at - encoded_at,
-        replicate_us: done_at - added_at
+        replicate_us: done_at - added_at,
+        scanned_columns: scanned_columns(encoded)
       },
       %{
         result: if(match?({:ok, _ack}, result), do: :ok, else: :error),
@@ -655,6 +656,9 @@ defmodule Smolquery.BufferService.TableBuffer.Committer do
 
     state
   end
+
+  defp scanned_columns({:ok, %Segment{scanned_columns: scanned}}), do: scanned
+  defp scanned_columns(_encoded), do: 0
 
   defp inserts(pending), do: Enum.count(pending, fn {_from, kind} -> kind != :flush end)
 

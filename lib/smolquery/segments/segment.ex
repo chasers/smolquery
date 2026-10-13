@@ -12,10 +12,16 @@ defmodule Smolquery.Segments.Segment do
   delete or list it. `path` is where a reader opens it, which the store derives
   from the key: an absolute filesystem path on local disk, an `s3://` URL in an
   object store. The catalog registers `path`; the hot manifest holds both.
+
+  `scanned_columns` is how many of the file's columns
+  `Smolquery.Segments.Writer` had to count with a scan of the written file
+  because its `COPY` reported no stats for them. It is a fact about the
+  write, not the file: the hot manifest does not keep it, and a segment
+  written any other way says `0`.
   """
 
   @enforce_keys [:id, :key, :path, :row_count, :byte_size]
-  defstruct [:id, :key, :path, :row_count, :byte_size, :field_ids, stats: %{}]
+  defstruct [:id, :key, :path, :row_count, :byte_size, :field_ids, stats: %{}, scanned_columns: 0]
 
   @type column_stats :: %{
           min: term(),
@@ -37,7 +43,8 @@ defmodule Smolquery.Segments.Segment do
           row_count: non_neg_integer(),
           byte_size: non_neg_integer(),
           field_ids: field_ids(),
-          stats: %{optional(String.t()) => column_stats()}
+          stats: %{optional(String.t()) => column_stats()},
+          scanned_columns: non_neg_integer()
         }
 
   @doc """

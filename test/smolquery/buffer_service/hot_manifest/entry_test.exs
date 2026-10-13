@@ -130,6 +130,36 @@ defmodule Smolquery.BufferService.HotManifest.EntryTest do
       end
     end
 
+    test "round a sub-microsecond timestamp outward: the min down, the max up" do
+      tagged = %{"type" => "naive_datetime", "value" => "2026-07-31T00:00:00.1234567"}
+      exact = %{"type" => "naive_datetime", "value" => "2026-07-31T00:00:00.123456"}
+
+      record =
+        segment()
+        |> Entry.from_segment(1)
+        |> Entry.to_record()
+        |> JSON.encode!()
+        |> JSON.decode!()
+        |> put_in(["stats", "ts"], %{"min" => tagged, "max" => tagged, "null_count" => 0})
+        |> put_in(["stats", "exact"], %{"min" => exact, "max" => exact, "null_count" => 0})
+
+      {:ok, entry} = Entry.from_record(record)
+
+      assert entry.stats["ts"] == %{
+               min: ~N[2026-07-31 00:00:00.123456],
+               max: ~N[2026-07-31 00:00:00.123457],
+               null_count: 0
+             }
+
+      assert entry.stats["exact"] == %{
+               min: ~N[2026-07-31 00:00:00.123456],
+               max: ~N[2026-07-31 00:00:00.123456],
+               null_count: 0
+             }
+
+      assert Entry.decode_stats(record["stats"]) == entry.stats
+    end
+
     test "keep numeric bounds and null counts" do
       decoded = segment() |> Entry.from_segment(1) |> round_trip()
 
