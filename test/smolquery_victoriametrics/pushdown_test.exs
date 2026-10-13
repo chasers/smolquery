@@ -225,6 +225,17 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
       refute sql =~ "r AS"
     end
 
+    test "the stored infinity is a cast from text, which DuckDB 2.0's parser keeps as JSON (T-653)" do
+      runtime = Runtime.new(name: :pushdown_sql_inf_test, password: "pw")
+      assert {:ok, sql, _params} = Pushdown.sql(plan!("sum(m)"), runtime)
+
+      assert sql =~
+               "CASE WHEN value >= CAST('1.7976931348623157e308' AS DOUBLE) THEN 'infinity'::DOUBLE " <>
+                 "WHEN value <= -CAST('1.7976931348623157e308' AS DOUBLE) THEN '-infinity'::DOUBLE"
+
+      refute sql =~ ~r/[=<>] -?1\.7976931348623157e308/
+    end
+
     test "a rollup other than the last sample is unnested to its window alone" do
       runtime = Runtime.new(name: :pushdown_sql_window_test, password: "pw")
       assert {:ok, sql, _params} = Pushdown.sql(plan!("avg(avg_over_time(m[1m]))"), runtime)

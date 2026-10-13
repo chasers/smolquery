@@ -175,7 +175,12 @@ defmodule Smolquery.Catalog.DuckLake do
   that the catalog is at the format those rows are written for
   (`Smolquery.Catalog.DuckLake.Format`), and a swap against any other
   refuses with `{:error, {:catalog_format, found, expected}}`, writing
-  nothing (T-638).
+  nothing (T-638). On Postgres metadata the move runs in one
+  `postgres_execute` batch that also locks the version row. The swap knows
+  the metadata is Postgres by the lake's own `path` in `duckdb_databases()`,
+  not by DuckLake's `__ducklake_metadata_` database there, which DuckDB 2.0
+  no longer lists: read that way, every swap took the batch for DuckDB's and
+  skipped the lock (T-651).
   """
 
   @behaviour Smolquery.Catalog
@@ -215,6 +220,7 @@ defmodule Smolquery.Catalog.DuckLake do
     :engine,
     :catalog,
     reader: nil,
+    metadata: nil,
     prepared: false,
     swap_timeout_ms: @default_swap_timeout_ms
   ]
@@ -223,6 +229,7 @@ defmodule Smolquery.Catalog.DuckLake do
           engine: Engine.handle(),
           catalog: String.t(),
           reader: atom() | nil,
+          metadata: String.t() | nil,
           prepared: boolean(),
           swap_timeout_ms: timeout()
         }
@@ -237,6 +244,7 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:swap_timeout_ms, timeout()}
 
   @default_catalog "lake"
+  @metadata_configs ~w(pg_experimental_filter_pushdown sqlite_disable_multithreaded_scans current_transaction_invalidation_policy)
   @commit_attempts 5
   @move_attempts 10
   @stage_abandon_ms 3_600_000
@@ -272,7 +280,10 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:data_path` (required) — where DuckLake writes files it owns. smolquery
       registers segments from outside this directory, but DuckLake requires it.
     * `:catalog` — attached catalog name. Defaults to `#{inspect(@default_catalog)}`.
-    * `:automatic_migration` — passed to `attach_statement/4`
+    * `:automatic_migration` — passed to `attach_statement/4`, from `opts`
+      only: one left under this module's application environment, where it
+      lived before 0.22.0, is ignored, since every engine reads that and
+      only `Smolquery.Catalog.Migrator` migrates the format (T-651)
     * `:store` — the sealed-tier store; a credential-chain S3 store adds
       the extensions its `CREATE SECRET` statement needs
     * any `Smolquery.Engine` option — `:extensions` is extended with
@@ -281,7 +292,12 @@ defmodule Smolquery.Catalog.DuckLake do
   """
   @spec start_link([option()]) :: Supervisor.on_start()
   def start_link(opts) do
-    config = Keyword.merge(Application.get_env(:smolquery, __MODULE__, []), opts)
+    config =
+      :smolquery
+      |> Application.get_env(__MODULE__, [])
+      |> Keyword.delete(:automatic_migration)
+      |> Keyword.merge(opts)
+
     {catalog, config} = Keyword.pop(config, :catalog, @default_catalog)
     {metadata, config} = Keyword.pop!(config, :metadata)
     {data_path, config} = Keyword.pop!(config, :data_path)
@@ -328,6 +344,10 @@ defmodule Smolquery.Catalog.DuckLake do
     * `:prepared` — whether the boot step made this lake's smolquery tables
       (`Smolquery.Catalog.Migrator.prepared?/1`), so retention need not
       create its table on first use. `resolve/2` sets it.
+    * `:metadata` — the lake's metadata string, which tells a compaction
+      swap whether to run as one locked `postgres_execute` batch. Without it
+      the swap reads the lake's path from `duckdb_databases()`, and logs a
+      warning when that does not answer. `resolve/2` sets it.
 
   """
   @spec new(keyword()) :: Catalog.t()
@@ -336,6 +356,7 @@ defmodule Smolquery.Catalog.DuckLake do
       engine: Keyword.get(opts, :engine, __MODULE__),
       catalog: Keyword.get(opts, :catalog, @default_catalog),
       reader: Keyword.get(opts, :reader),
+      metadata: Keyword.get(opts, :metadata),
       prepared: Keyword.get(opts, :prepared, false),
       swap_timeout_ms: Keyword.get(opts, :swap_timeout_ms, @default_swap_timeout_ms)
     }
@@ -385,7 +406,7 @@ defmodule Smolquery.Catalog.DuckLake do
       end
 
     handle =
-      [engine: engine, reader: reader, prepared: Migrator.prepared?(metadata)] ++
+      [engine: engine, reader: reader, metadata: metadata, prepared: Migrator.prepared?(metadata)] ++
         Keyword.take(opts, [:catalog, :swap_timeout_ms])
 
     {new(handle), opts}
@@ -450,6 +471,30 @@ defmodule Smolquery.Catalog.DuckLake do
       "AS #{Identifier.quote_name!(catalog)} " <>
       "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0" <>
       "#{migration})"
+  end
+
+  @doc """
+  The `SET allowed_configs` a locked-down engine needs before
+  `lock_configuration`, so that DuckLake can still read the lake.
+
+  On every transaction DuckLake sets three options on its metadata connection:
+  `pg_experimental_filter_pushdown` off for a Postgres catalog,
+  `sqlite_disable_multithreaded_scans` on for a SQLite one, and
+  `current_transaction_invalidation_policy` after it begins the transaction.
+  A locked configuration refuses each, and the refused SET after the begin
+  invalidates the transaction, so every metadata query then fails with
+  "Current transaction is aborted". Listing the three under `allowed_configs`
+  exempts them from the lock; none of them reaches outside the engine, and
+  the list itself locks with everything else.
+
+  The three are the ones the DuckLake build for DuckDB 2.0.0-alpha38195 sets.
+  Another build may set another; DuckDB refuses `allowed_configs` and
+  `lock_configuration` themselves in the list, so it cannot unlock anything
+  else.
+  """
+  @spec allowed_configs_statement() :: String.t()
+  def allowed_configs_statement do
+    "SET allowed_configs = " <> Identifier.sql_list(@metadata_configs)
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))
@@ -1193,34 +1238,40 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   defp move_statements(config, plan) do
-    case metadata_type(config) do
-      "postgres" ->
-        prefix = ~s("public")
+    if postgres_metadata?(config.metadata || metadata_path(config)) do
+      prefix = ~s("public")
 
-        batch =
-          Enum.join(
-            Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
-            ";\n"
-          )
+      batch =
+        Enum.join(
+          Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
+          ";\n"
+        )
 
-        [
-          {:move,
-           "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
-             "#{Identifier.sql_string(batch)})"}
-        ]
-
-      _through_duckdb ->
-        prefix = metadata_schema(config.catalog)
-        Enum.map(Format.guard_statements(prefix) ++ Swap.statements(plan, prefix), &{:move, &1})
+      [
+        {:move,
+         "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
+           "#{Identifier.sql_string(batch)})"}
+      ]
+    else
+      prefix = metadata_schema(config.catalog)
+      Enum.map(Format.guard_statements(prefix) ++ Swap.statements(plan, prefix), &{:move, &1})
     end
   end
 
-  defp metadata_type(config) do
-    sql = "SELECT type FROM duckdb_databases() WHERE database_name = $1"
+  defp metadata_path(config) do
+    sql = "SELECT path FROM duckdb_databases() WHERE database_name = $1"
 
-    case query(config, sql, ["__ducklake_metadata_" <> config.catalog]) do
-      {:ok, %{rows: [[type]]}} -> type
-      _unknown -> nil
+    case query(config, sql, [config.catalog]) do
+      {:ok, %{rows: [[path]]}} when is_binary(path) ->
+        path
+
+      unknown ->
+        Logger.warning(
+          "could not tell the metadata database of lake #{inspect(config.catalog)} " <>
+            "(#{inspect(unknown)}); its compaction swap runs without the version-row lock"
+        )
+
+        nil
     end
   end
 

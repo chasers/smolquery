@@ -1,6 +1,7 @@
 defmodule Smolquery.Catalog.DuckLake.FormatTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Catalog.DuckLake.Format
   alias Smolquery.Engine
 
@@ -11,6 +12,31 @@ defmodule Smolquery.Catalog.DuckLake.FormatTest do
   test "version_sql/1 reads the version key under the prefix" do
     assert Format.version_sql("m") ==
              "SELECT value FROM m.ducklake_metadata WHERE key = 'version'"
+  end
+
+  test "version_in/1 reads the version out of version_sql/1's rows" do
+    assert Format.version_in([["1.0"]]) == "1.0"
+    assert Format.version_in([]) == nil
+  end
+
+  describe "the DuckLake extension" do
+    @describetag :integration
+    @describetag :tmp_dir
+
+    test "creates a catalog at version/0, the format a driver bump must keep (T-651)", context do
+      engine = Module.concat(__MODULE__, "Lake#{System.unique_integer([:positive])}")
+
+      start_supervised!(
+        {DuckLake,
+         name: engine,
+         metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
+         data_path: Path.join(context.tmp_dir, "data")}
+      )
+
+      result = Engine.query!(engine, Format.version_sql(~s("__ducklake_metadata_lake")))
+
+      assert Format.version_in(result.rows) == Format.version()
+    end
   end
 
   test "check/1 accepts only the version, naming both otherwise" do

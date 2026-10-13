@@ -91,6 +91,7 @@ defmodule Smolquery.QueryService.TopNTest do
     test "a LIMIT that is not a constant, or a percentage, does not qualify" do
       assert is_nil(spec("SELECT id FROM analytics.events ORDER BY ts DESC LIMIT 1 + 1"))
       assert is_nil(spec("SELECT id FROM analytics.events ORDER BY ts DESC LIMIT 10%"))
+      assert is_nil(spec("SELECT id FROM analytics.events ORDER BY ts DESC LIMIT 2.5"))
       assert is_nil(spec("SELECT id FROM analytics.events ORDER BY ts DESC LIMIT 0"))
     end
 

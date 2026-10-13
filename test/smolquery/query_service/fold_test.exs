@@ -87,7 +87,7 @@ defmodule Smolquery.QueryService.FoldTest do
             "SELECT * FROM analytics.events WHERE ts >= other_ts - INTERVAL 1 HOUR",
             "SELECT * FROM analytics.events WHERE id > (SELECT max(id) FROM analytics.events) - 5",
             "SELECT * FROM analytics.events WHERE id > $1 + 5",
-            "SELECT * FROM analytics.events WHERE id > list_sum(list_transform([1, 2], x -> x + 1))"
+            "SELECT * FROM analytics.events WHERE id > list_sum(list_transform([1, 2], lambda x: x + 1))"
           ] do
         assert {_ast, %{} = none} = folded(sql)
         assert none == %{}, sql

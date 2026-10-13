@@ -890,6 +890,30 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  test "start_link/1 takes automatic_migration from its options, never its app env (T-651)",
+       context do
+    set_format("0.4")
+    stop_supervised!(@engine)
+    previous = Application.get_env(:smolquery, DuckLake)
+    Application.put_env(:smolquery, DuckLake, automatic_migration: true)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:smolquery, DuckLake, previous),
+        else: Application.delete_env(:smolquery, DuckLake)
+    end)
+
+    lake = [
+      name: __MODULE__.Again,
+      metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
+      data_path: Path.join(context.tmp_dir, "data")
+    ]
+
+    Process.flag(:trap_exit, true)
+    assert {:error, _refused} = DuckLake.start_link(lake)
+    assert {:ok, _engine} = DuckLake.start_link(lake ++ [automatic_migration: true])
+  end
+
   defp set_format(version) do
     Engine.query!(
       @engine,
@@ -1408,6 +1432,11 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   end
 
   describe "query path" do
+    setup do
+      Engine.query!(@engine, "SET enable_profiling = 'no_output'")
+      :ok
+    end
+
     test "prunes segments by the stats DuckLake derived from the footers", %{
       catalog: catalog,
       segments_dir: dir
@@ -1487,6 +1516,16 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  test "resolve/2 carries the metadata string on the handle, which the swap branches on (T-651)" do
+    metadata = "postgres:dbname=lake host=db user=smol"
+
+    {catalog, _opts} =
+      DuckLake.resolve([metadata: metadata, data_path: "/lake"], __MODULE__.Resolved)
+
+    assert catalog.config.metadata == metadata
+    assert DuckLake.new(engine: __MODULE__.Bare).config.metadata == nil
+  end
+
   describe "attach_statement/3" do
     test "quotes the catalog name and escapes the literals" do
       statement = DuckLake.attach_statement("lake", "sqlite:/data/it's.sqlite", "/data/seg")
@@ -1550,6 +1589,14 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert :ok = Catalog.create_table(catalog, {"analytics", "varied"}, schema)
       assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "varied"})
       assert anonymous(read) == schema
+    end
+  end
+
+  describe "allowed_configs_statement/0" do
+    test "names the three options DuckLake sets on its metadata connection, as one SET" do
+      assert DuckLake.allowed_configs_statement() ==
+               "SET allowed_configs = ['pg_experimental_filter_pushdown', " <>
+                 "'sqlite_disable_multithreaded_scans', 'current_transaction_invalidation_policy']"
     end
   end
 end

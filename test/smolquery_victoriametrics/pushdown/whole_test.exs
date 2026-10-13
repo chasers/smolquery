@@ -15,7 +15,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WholeTest do
 
   test "welford/1 folds from the first value with Value.stdvar's steps" do
     sql = Whole.welford("vals")
-    assert sql =~ "list_transform(vals, x -> {'n': 1, 'avg': x, 'q': 0.0::DOUBLE})"
+    assert sql =~ "list_transform(vals, lambda x: {'n': 1, 'avg': x, 'q': 0.0::DOUBLE})"
     assert sql =~ "'avg': a.avg + (b.avg - a.avg) / (a.n + 1)"
     assert sql =~ "'q': a.q + (b.avg - a.avg) * (b.avg - (a.avg + (b.avg - a.avg) / (a.n + 1)))"
   end
@@ -36,7 +36,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WholeTest do
 
     test "sums start at 0.0 and fold in order; the timestamp of a tie is the later one" do
       assert Whole.value("sum2_over_time", nil) =~
-               "list_reduce(list_prepend(0.0::DOUBLE, list_transform(items, x -> x.v * x.v)), (a, b) -> a + b)"
+               "list_reduce(list_prepend(0.0::DOUBLE, list_transform(items, lambda x: x.v * x.v)), lambda a, b: a + b)"
 
       assert Whole.value("tmin_over_time", nil) =~
                "CASE WHEN b.v <= a.v THEN b ELSE a END).ts / 1000"
@@ -47,7 +47,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WholeTest do
       assert Whole.value("rate_over_sum", nil) =~ "/ (win / 1000)"
 
       assert Whole.value("count_gt_over_time", "$9") =~
-               "list_filter(list_transform(items, x -> x.v), x -> x > $9)"
+               "list_filter(list_transform(items, lambda x: x.v), lambda x: x > $9)"
 
       assert Whole.value("quantile_over_time", "$9") =~ "WHEN $9 < 0 THEN '-infinity'::DOUBLE"
     end

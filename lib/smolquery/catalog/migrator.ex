@@ -27,7 +27,10 @@ defmodule Smolquery.Catalog.Migrator do
        tables on a fresh database. When the catalog is at another format and
        `automatic_migration` is set (`SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`),
        the attach carries `AUTOMATIC_MIGRATION TRUE` and DuckLake migrates
-       the format, in the attach's one metadata transaction.
+       the format, in the attach's one metadata transaction. When it is not
+       set, the step fails the boot on the format it read, without
+       attaching: the extension would refuse the catalog, and its refusal
+       does not name the format.
     2. **Migrates**, through a `Smolquery.Catalog.Repo` started for the run,
        recording versions in `smolquery_schema_migrations`.
     3. **Checks** the format again, and fails the boot unless it is
@@ -84,6 +87,11 @@ defmodule Smolquery.Catalog.Migrator do
   `CREATE TABLE IF NOT EXISTS` statements it always had. For the configured
   one, with `automatic_migration` set, the step attaches it once with
   `AUTOMATIC_MIGRATION TRUE` and no lock: SQLite metadata is one node's file.
+  A `postgres:` string Postgrex cannot use gets the same attach, also without
+  the lock, since the step has no connection to take it on: nodes booting
+  together onto such a catalog each attach to migrate it, so either set the
+  flag on one node at a time or write the string so
+  `Smolquery.Catalog.DuckLake.Reader.libpq_options/1` accepts it.
 
   When clustering is on, the step also applies the tables migration to the
   database `Smolquery.Cluster` connects to, which holds the ring
@@ -132,16 +140,35 @@ defmodule Smolquery.Catalog.Migrator do
   """
   @spec start_link() :: :ignore | {:error, term()}
   def start_link do
-    lake =
-      Keyword.merge(
-        Application.get_env(:smolquery, DuckLake, []),
-        Keyword.take(Application.get_env(:smolquery, __MODULE__, []), [:automatic_migration])
-      )
-
-    with :ok <- prepare(lake),
+    with :ok <- prepare(lake_config()),
          :ok <- prepare_cluster(Application.get_env(:smolquery, Smolquery.Cluster, [])) do
       :ignore
     end
+  end
+
+  @doc """
+  The lake `start_link/0` prepares: `Smolquery.Catalog.DuckLake`'s
+  application environment, with `:automatic_migration` from this module's.
+  The flag under `Smolquery.Catalog.DuckLake`, where it lived before 0.22.0,
+  is dropped with a warning, as every engine drops it.
+  """
+  @spec lake_config() :: keyword()
+  def lake_config do
+    lake = Application.get_env(:smolquery, DuckLake, [])
+
+    if Keyword.has_key?(lake, :automatic_migration) do
+      Logger.warning(
+        "ignoring :automatic_migration under config :smolquery, Smolquery.Catalog.DuckLake; " <>
+          "since 0.22.0 it is read from Smolquery.Catalog.Migrator " <>
+          "(SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION)"
+      )
+    end
+
+    lake
+    |> Keyword.delete(:automatic_migration)
+    |> Keyword.merge(
+      Keyword.take(Application.get_env(:smolquery, __MODULE__, []), [:automatic_migration])
+    )
   end
 
   @doc """
@@ -255,7 +282,9 @@ defmodule Smolquery.Catalog.Migrator do
 
   defp upgrade(conn, options, config) do
     with {:ok, before} <- format_version(conn),
-         :ok <- attach(config, migrate_format?(before, config)),
+         migrate? = migrate_format?(before, config),
+         :ok <- attachable(before, migrate?),
+         :ok <- attach(config, migrate?),
          :ok <- migrated(options, migrations()),
          {:ok, now} <- format_version(conn),
          :ok <- Format.check(now) do
@@ -265,6 +294,10 @@ defmodule Smolquery.Catalog.Migrator do
       :ok
     end
   end
+
+  defp attachable(nil, _migrate?), do: :ok
+  defp attachable(_format, true), do: :ok
+  defp attachable(format, false), do: Format.check(format)
 
   defp migrate_format?(nil, _config), do: false
 
@@ -302,7 +335,7 @@ defmodule Smolquery.Catalog.Migrator do
   defp format_version(conn) do
     case Postgrex.query(conn, Format.version_sql("public"), []) do
       {:ok, %{rows: rows}} ->
-        {:ok, Enum.find_value(rows, fn [version] -> version end)}
+        {:ok, Format.version_in(rows)}
 
       {:error, %Postgrex.Error{postgres: %{code: :undefined_table}}} ->
         {:ok, nil}
@@ -386,7 +419,8 @@ defmodule Smolquery.Catalog.Migrator do
     Logger.error(
       "the catalog metadata database could not be prepared: its DuckLake catalog format is " <>
         "#{inspect(found)}, and this release is written for #{expected}; run a release " <>
-        "written for #{inspect(found)}"
+        "written for #{inspect(found)}, or, if #{inspect(found)} is the older format, set " <>
+        "SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION to migrate it"
     )
   end
 

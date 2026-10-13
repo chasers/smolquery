@@ -264,9 +264,8 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   end
 
   defp check_format(pool, rows) do
-    found = Enum.find_value(rows, fn [version] -> version end)
-
-    with {:error, {:catalog_format, found, expected}} = mismatch <- Format.check(found) do
+    with {:error, {:catalog_format, found, expected}} = mismatch <-
+           rows |> Format.version_in() |> Format.check() do
       Logger.error(
         "catalog reader #{inspect(pool)} found DuckLake catalog format #{inspect(found)}, " <>
           "but its reads are written for #{expected}, so they may misread the catalog; " <>

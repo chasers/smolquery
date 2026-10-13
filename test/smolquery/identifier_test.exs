@@ -51,6 +51,13 @@ defmodule Smolquery.IdentifierTest do
     end
   end
 
+  describe "sql_list/1" do
+    test "renders a list of quoted strings, empty included" do
+      assert Identifier.sql_list(["/a", "it's"]) == "['/a', 'it''s']"
+      assert Identifier.sql_list([]) == "[]"
+    end
+  end
+
   describe "sql_string/1" do
     test "single-quotes a literal" do
       assert Identifier.sql_string("/data/seg.parquet") == "'/data/seg.parquet'"

@@ -32,6 +32,19 @@ WRITERS=8,32 RATE=40000 mix run bench/otel_logs.exs 2>/dev/null   # a different 
 WRITERS=32 SECONDS=20 mix run bench/profile.exs 2>/dev/null       # profile at a saturating writer count
 ```
 
+## Continuous benchmarks
+
+[smolquery/bench-matrix](https://github.com/smolquery/bench-matrix) benchmarks
+every commit on `main`. After the Release workflow pushes the commit's image, it
+dispatches a bench-matrix run. That run loads 10M ClickBench rows into one node
+with a Postgres catalog and a RustFS sealed tier, then runs the 43 ClickBench
+queries. The run commits its results to bench-matrix, so the history stays in
+git. The dispatch needs the `BENCH_MATRIX_TOKEN` secret: a token that can write
+the contents of `smolquery/bench-matrix`. Without the secret, the step logs a
+skip.
+
+## Component benchmarks
+
 Each script's `@moduledoc` records what the script measures and what it
 concluded. [`bench/results/`](../bench/results/) holds the last recorded run of
 each script: the tables verbatim, the machine the run came from, and the

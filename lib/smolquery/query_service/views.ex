@@ -32,7 +32,7 @@ defmodule Smolquery.QueryService.Views do
   """
   @spec read_parquet([String.t()], union_by_name: boolean()) :: String.t()
   def read_parquet(sources, opts \\ []) do
-    list = "[" <> Enum.map_join(sources, ", ", &Identifier.sql_string/1) <> "]"
+    list = Identifier.sql_list(sources)
 
     if Keyword.get(opts, :union_by_name, false),
       do: "read_parquet(#{list}, union_by_name := true)",

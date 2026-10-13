@@ -14,6 +14,7 @@ defmodule Smolquery.CatalogEmulation do
 
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.Engine.Ast
   alias Smolquery.Engine.CallExited
   alias Smolquery.Identifier
   alias Smolquery.Schema
@@ -34,7 +35,7 @@ defmodule Smolquery.CatalogEmulation do
                "THEN json_deserialize_sql(json_serialize_sql(#{quoted})) END"
            ),
          [[json, canonical]] <- result.rows,
-         {:ok, %{"error" => false} = ast} <- JSON.decode(json) do
+         {:ok, %{"error" => false} = ast} <- Ast.decode(json) do
       {:ok, ast, canonical}
     else
       {:ok, %{"error" => true} = ast} ->

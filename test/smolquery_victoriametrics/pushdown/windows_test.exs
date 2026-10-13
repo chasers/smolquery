@@ -50,7 +50,7 @@ defmodule SmolqueryVictoriaMetrics.Pushdown.WindowsTest do
       assert sql =~ "RANGE BETWEEN UNBOUNDED PRECEDING AND mw.win + 1 PRECEDING"
       assert sql =~ "UNION ALL SELECT w.*, false AS held, unnest(generate_series("
       assert sql =~ "frame[1:len(frame) - (group_last - idx)] AS mine"
-      assert sql =~ "list_filter(mine, x -> x.ts <= t - win) AS older"
+      assert sql =~ "list_filter(mine, lambda x: x.ts <= t - win) AS older"
       assert sql =~ "mine[len(older) + 1:] AS items"
       refute sql =~ "ASOF"
     end

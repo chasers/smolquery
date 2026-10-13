@@ -24,6 +24,8 @@ The pipeline runs in this order:
 2. The Release workflow runs on the merge push to `main`. It publishes a
    multi-architecture `ghcr.io/smolquery/smolquery` image tagged with the
    commit (`sha-<commit>`).
+   It then dispatches a [bench-matrix](benchmarks.md#continuous-benchmarks)
+   run for that commit.
 3. When the commit bumps the version, the run aliases that image as
    `vX.Y.Z`. The run also creates the GitHub release.
 
@@ -130,6 +132,27 @@ One note per release, newest first.
 ### The repository and image move to the `smolquery` organization
 
 The repository is now `github.com/smolquery/smolquery`; the old URL redirects. Releases after 0.22.0 publish `ghcr.io/smolquery/smolquery`. 0.22.0 and earlier stay at `ghcr.io/chasers/smolquery`, so pinned deployments keep pulling. Point new deployments, and any image automation, at the new name.
+
+### Ready for DuckDB 2.0, still on 1.5.3 (T-652 to T-656)
+
+**TL;DR.** The engine is still DuckDB 1.5.3. These changes make the code work on 2.0 as well, so the 2.0 bump can change the pin and little else. Two things are new for a client.
+
+- **A number past ~3.4e38 written as a literal.** DuckDB 2.0's parser can't write one into the parse JSON smolquery reads, so on 2.0 such a statement fails with "DuckDB's parse of this statement is not valid JSON …". Before, it failed with a JSON decoder error. Writing `CAST('1e308' AS DOUBLE)` works on both. On 1.5.3 nothing changes.
+- **A percent `LIMIT` under scatter.** `LIMIT 10%` is now refused as `:percent_limit` on both versions. Before, 1.5.3 called it an unsupported modifier.
+
+Internal, and nothing to configure:
+
+- SQL that smolquery writes uses `lambda x: …`. 2.0 refuses `x -> …`.
+- A locked-down query engine lets DuckLake run its own metadata `SET`s (`allowed_configs`), and `EXPLAIN ANALYZE` switches profiling on first. On 2.0, both are needed for lake reads and for analyzed plans.
+- The readers of DuckDB's parse tree take the 1.5.3 shapes and the 2.0 ones, checked on 2.0.0-alpha38195 and alpha46516.
+
+### The boot step names the catalog's format before it attaches, and a stale flag is ignored (T-651)
+
+**TL;DR.** Follow-ups to the 0.22.0 note below. Nothing changes on a catalog at DuckLake 1.0 with the flag set as that note says.
+
+- **Boot error:** for Postgres metadata the step prepares, with the flag off, a catalog at another format now fails the boot with "its DuckLake catalog format is …" before attaching. Before, the attach went first, and DuckLake's refusal, logged as `attach_failed`, did not name the format.
+- **Stale flag:** `automatic_migration` under `config :smolquery, Smolquery.Catalog.DuckLake` is now ignored, with one warning at boot. In 0.22.0 it still made every catalog engine attach with `AUTOMATIC_MIGRATION TRUE`. Set it under `Smolquery.Catalog.Migrator`, or use `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION`.
+- **Swap lock on DuckDB 2.0:** the swap found Postgres metadata by DuckLake's metadata database in `duckdb_databases()`, which DuckDB 2.0 no longer lists. It now reads the lake's own path. On 1.5.3 nothing changes; on 2.0 the swap would have skipped the version-row lock.
 
 ### 0.22.0: only the boot step migrates the catalog format, and the swap checks it (T-638, T-639)
 
@@ -685,9 +708,13 @@ From that instant, old pods lose the catalog:
   Neither DuckLake nor smolquery checks the format on those. Replace old
   pods promptly.
 
-The step also checks the format after it attaches. A node whose code is
-written for another format fails its boot with "its DuckLake catalog format
-is …", whether or not its extension could attach the catalog.
+For metadata it prepares, the step checks the format before it attaches
+and again after. With the flag off, a node whose code is written for
+another format fails its boot with "its DuckLake catalog format is …"
+without attaching. With the flag on, it fails the same way when the
+migration did not reach the code's format. A catalog newer than the
+extension is refused at the attach, and the boot fails with DuckLake's own
+message (`attach_failed`).
 
 The flag defaults to `false` because the failure modes are not symmetric.
 With the flag off, an accidental format-bumping upgrade costs a redeploy.
@@ -715,8 +742,12 @@ Use this procedure for a format-bumping upgrade on a deployment with data:
 - **Postgres metadata only, for the lock.** The step prepares Postgres
   metadata that Postgrex can connect to (see the 0.21.0 note). For SQLite
   metadata, or a Postgres string it cannot prepare, the step attaches once
-  with the flag and takes no lock. SQLite metadata is one node's file. A
-  service's own `catalog:` override is never migrated.
+  with the flag and takes no lock. SQLite metadata is one node's file. For
+  such a Postgres string, nodes booting together each attach to migrate,
+  so set the flag on one node at a time, or write the string so the step
+  can prepare it. Such a lake gets no format check from the step either:
+  with the flag off, its first engine fails at the attach with DuckLake's
+  own message. A service's own `catalog:` override is never migrated.
 - **The target is the extension's newest format.** DuckLake 1.5's
   `AUTOMATIC_MIGRATION` migrates to its newest format, 1.0, which is the
   format this release is written for. DuckDB 2.0's newest is `1.1-dev1`. The

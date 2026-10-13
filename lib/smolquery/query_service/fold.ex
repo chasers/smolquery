@@ -24,8 +24,8 @@ defmodule Smolquery.QueryService.Fold do
 
   ## What is folded
 
-  An expression built of constants, casts, operators and function calls
-  only: no column, parameter, subquery, window, star or lambda anywhere in
+  An expression built of constants, casts (with the TYPE node DuckDB 2.0
+  writes a cast's target as), operators and function calls only: no column, parameter, subquery, window, star or lambda anywhere in
   it, so it reads no table and no row. The shapes the pruner reads by itself
   never arrive, so a statement whose bounds are all of those — every search
   and chart HyperDX generates — costs no round trip here. At most
@@ -91,7 +91,7 @@ defmodule Smolquery.QueryService.Fold do
 
   @max_expressions 16
   @timeout_ms 5_000
-  @foldable_classes ~w(CONSTANT CAST OPERATOR FUNCTION)
+  @foldable_classes ~w(CONSTANT CAST TYPE OPERATOR FUNCTION)
   @clock_macros ~w(now64)
   @rising_over_first ~w(todatetime todatetime64)
   @utc ~w(UTC Etc/UTC)
@@ -226,8 +226,8 @@ defmodule Smolquery.QueryService.Fold do
 
   defp rising?(%{"class" => "CAST", "child" => child}, clock), do: rising?(child, clock)
 
-  defp rising?(%{"class" => "FUNCTION", "function_name" => name, "children" => children}, clock) do
-    case {String.downcase(name), children} do
+  defp rising?(%{"class" => "FUNCTION", "function_name" => name} = call, clock) do
+    case {String.downcase(name), Ast.arguments(call)} do
       {"+", [left, right]} ->
         rises_over?(left, right, clock) or rises_over?(right, left, clock)
 

@@ -80,7 +80,7 @@ defmodule Smolquery.Schema.MaterializedTest do
                validate("$1", :int64)
 
       assert {:error, {:invalid_materialized, {:unsupported_expression, "LAMBDA"}}} =
-               validate("list_transform([ts_int], x -> x + 1)[1]", :int64)
+               validate("list_transform([ts_int], lambda x: x + 1)[1]", :int64)
     end
 
     test "a column must be a regular column of this table, named without a qualifier" do
@@ -159,6 +159,15 @@ defmodule Smolquery.Schema.MaterializedTest do
     test "a time-zone-dependent value is refused: a cast to TIMESTAMPTZ, or a function that yields one" do
       assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
                validate("CAST(epoch_ms(ts_int) AS TIMESTAMPTZ)::VARCHAR", :string)
+
+      assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
+               validate(
+                 "hour(CAST(struct_pack(a := epoch_ms(ts_int)) AS STRUCT(a TIMESTAMPTZ)).a)",
+                 :int64
+               )
+
+      assert {:error, {:invalid_materialized, {:zoned_type, "TIMESTAMP WITH TIME ZONE"}}} =
+               validate("hour(CAST([epoch_ms(ts_int)] AS TIMESTAMPTZ[])[1])", :int64)
 
       assert {:error, {:invalid_materialized, {:unsupported_function, "to_timestamp"}}} =
                validate("to_timestamp(ts_int)")

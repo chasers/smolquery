@@ -48,6 +48,7 @@ defmodule Smolquery.QueryService.Nullability do
   uses it only when its length is the result's width.
   """
 
+  alias Smolquery.Engine.Ast
   alias Smolquery.Schema
 
   @null_preserving ~w(
@@ -124,7 +125,7 @@ defmodule Smolquery.QueryService.Nullability do
 
   defp ctes(%{"cte_map" => %{"map" => entries}}, schemas, outer) when is_list(entries) do
     Enum.reduce(entries, %{}, fn %{"key" => name} = entry, known ->
-      inner = get_in(entry, ["value", "query", "node"])
+      inner = Ast.cte_node(entry["value"])
 
       columns =
         inner |> outputs(schemas, Map.merge(outer, known)) |> renamed(entry["value"]["aliases"])
@@ -243,10 +244,8 @@ defmodule Smolquery.QueryService.Nullability do
     end
   end
 
-  defp non_null?(%{"class" => "CONSTANT", "value" => %{"is_null" => true}}, _scope, _grouped),
-    do: false
-
-  defp non_null?(%{"class" => "CONSTANT"}, _scope, _grouped), do: true
+  defp non_null?(%{"class" => "CONSTANT"} = constant, _scope, _grouped),
+    do: Ast.constant(constant) != {:ok, :null}
 
   defp non_null?(%{"class" => "COLUMN_REF", "column_names" => names}, scope, _grouped),
     do: resolved(Enum.map(names, &String.downcase/1), scope)
@@ -296,7 +295,7 @@ defmodule Smolquery.QueryService.Nullability do
   defp non_null?(_other, _scope, _grouped), do: false
 
   defp arguments_non_null?(call, scope, grouped),
-    do: Enum.all?(call["children"] || [], &non_null?(&1, scope, grouped))
+    do: call |> Ast.arguments() |> Enum.all?(&non_null?(&1, scope, grouped))
 
   defp resolved([column], scope) do
     case for(%{columns: columns} <- scope, is_list(columns), {^column, flag} <- columns, do: flag) do

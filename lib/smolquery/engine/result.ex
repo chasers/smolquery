@@ -20,6 +20,8 @@ defmodule Smolquery.Engine.Result do
   a conversion over `:max_result_rows` with `Smolquery.Engine.ResultTooLarge`.
   """
 
+  alias Smolquery.Engine.UntypedResult
+
   defstruct columns: [], rows: [], num_rows: 0
 
   @type t :: %__MODULE__{
@@ -30,16 +32,22 @@ defmodule Smolquery.Engine.Result do
 
   @doc """
   Builds a result from an `Adbc.Result`, flattening its record batches.
+
+  A column DuckDB exports as Arrow's null type — a bare `NULL` in a select
+  list, from 2.0 on — arrives with no type, data or length. It reads as nils,
+  as many as the batch's other columns hold. Two shapes cannot be read, and
+  raise `Smolquery.Engine.UntypedResult`: a batch of nothing but such
+  columns, which has no row count anywhere (the driver leaves `num_rows` nil
+  for a select), and an untyped NULL inside a list, struct or map, whose
+  values adbc cannot decode. `from_adbc/2` answers
+  `{:error, {:untyped, reason}}` for either.
   """
   @spec from_adbc(Adbc.Result.t()) :: t()
-  def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}) do
-    %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}
-  end
-
-  def from_adbc(%Adbc.Result{data: batches}) do
-    rows = Enum.flat_map(batches, &batch_to_rows/1)
-
-    %__MODULE__{columns: column_names(batches), rows: rows, num_rows: length(rows)}
+  def from_adbc(%Adbc.Result{} = result) do
+    case from_adbc(result, :infinity) do
+      {:ok, converted} -> converted
+      {:error, {:untyped, reason}} -> raise UntypedResult, reason: reason
+    end
   end
 
   @doc """
@@ -57,9 +65,7 @@ defmodule Smolquery.Engine.Result do
   `:infinity` converts whatever came back.
   """
   @spec from_adbc(Adbc.Result.t(), pos_integer() | :infinity) ::
-          {:ok, t()} | {:error, :too_many_rows}
-  def from_adbc(%Adbc.Result{} = result, :infinity), do: {:ok, from_adbc(result)}
-
+          {:ok, t()} | {:error, :too_many_rows | {:untyped, UntypedResult.reason()}}
   def from_adbc(%Adbc.Result{data: nil, num_rows: num_rows}, _max_rows) do
     {:ok, %__MODULE__{columns: [], rows: [], num_rows: num_rows || 0}}
   end
@@ -67,18 +73,23 @@ defmodule Smolquery.Engine.Result do
   def from_adbc(%Adbc.Result{data: batches}, max_rows) do
     batches
     |> Enum.reduce_while({0, []}, fn batch, {count, acc} ->
-      rows = batch_to_rows(batch)
-      total = count + length(rows)
+      case batch_to_rows(batch) do
+        {:untyped, _reason} = untyped ->
+          {:halt, untyped}
 
-      if total > max_rows do
-        {:halt, :too_many_rows}
-      else
-        {:cont, {total, [rows | acc]}}
+        rows when max_rows != :infinity and count + length(rows) > max_rows ->
+          {:halt, :too_many_rows}
+
+        rows ->
+          {:cont, {count + length(rows), [rows | acc]}}
       end
     end)
     |> case do
       :too_many_rows ->
         {:error, :too_many_rows}
+
+      {:untyped, _reason} = untyped ->
+        {:error, untyped}
 
       {count, acc} ->
         rows = acc |> Enum.reverse() |> Enum.concat()
@@ -113,8 +124,36 @@ defmodule Smolquery.Engine.Result do
   defp batch_to_rows([]), do: []
 
   defp batch_to_rows(batch) do
-    batch
-    |> Enum.map(&Adbc.Column.to_list/1)
-    |> Enum.zip_with(& &1)
+    columns = Enum.map(batch, &column_values/1)
+
+    case {Enum.find(columns, &match?({:nested, _column}, &1)), Enum.find(columns, &is_list/1)} do
+      {{:nested, _column} = nested, _sized} ->
+        {:untyped, nested}
+
+      {nil, nil} ->
+        {:untyped, :unsized}
+
+      {nil, sized} ->
+        columns
+        |> Enum.map(fn
+          :untyped_nulls -> List.duplicate(nil, length(sized))
+          values -> values
+        end)
+        |> Enum.zip_with(& &1)
+    end
   end
+
+  defp column_values(%Adbc.Column{field: %{type: nil}, data: nil}), do: :untyped_nulls
+
+  defp column_values(%Adbc.Column{field: field} = column) do
+    if untyped?(field.type),
+      do: {:nested, field.name},
+      else: Adbc.Column.to_list(column)
+  end
+
+  defp untyped?(%Adbc.Field{type: nil}), do: true
+  defp untyped?(%Adbc.Field{type: type}), do: untyped?(type)
+  defp untyped?(type) when is_tuple(type), do: type |> Tuple.to_list() |> Enum.any?(&untyped?/1)
+  defp untyped?(fields) when is_list(fields), do: Enum.any?(fields, &untyped?/1)
+  defp untyped?(_scalar), do: false
 end

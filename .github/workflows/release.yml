@@ -264,6 +264,22 @@ jobs:
           }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      - name: Start the bench-matrix run
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.BENCH_MATRIX_TOKEN }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "BENCH_MATRIX_TOKEN is not set; skipping the bench-matrix dispatch"
+            exit 0
+          fi
+          jq -n --arg sha "$SHA" '{event_type: "smolquery-main", client_payload: {sha: $sha}}' |
+            gh api repos/smolquery/bench-matrix/dispatches --input -
+          echo "dispatched bench-matrix for $SHA"
+
       - name: Alias the version image tag
         if: needs.prepare.outputs.changed == 'true'
         env:
