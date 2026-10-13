@@ -1314,9 +1314,10 @@ the group commit needs both, and a mean answers neither on its own.
   counters, not a histogram family.
 - `smolquery_buffer_commit_bytes_total` is the unit `flush_max_bytes` gates on.
   Row width varies by table, so rows do not substitute for bytes.
-- `smolquery_buffer_commit_scanned_columns_total` counts columns whose stats
-  the writer had to take from a scan of the staged file, because the `COPY`'s
-  `RETURN_STATS` gave none. Only `MAP` columns are expected there. A rise on a
+- `smolquery_buffer_commit_scanned_columns_total` counts columns of committed
+  group commits whose stats the writer had to take from a scan of the staged
+  file, because the `COPY`'s `RETURN_STATS` gave none or gave text it could not
+  read. Only `MAP` columns are expected there. A rise on a
   table without maps means a type has started falling back, which costs a
   read of the file on every flush.
 - `smolquery_seal_segment_bytes_total` is compressed Parquet as written, which

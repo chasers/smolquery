@@ -624,18 +624,20 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_buffer_commit_scanned_columns_total") == before + 2
   end
 
-  test "a failed commit is neither bucketed nor counted in bytes" do
+  test "a failed commit is neither bucketed nor counted in bytes or scanned columns" do
     before_bytes = value("smolquery_buffer_commit_bytes_total")
     before_inf = value("smolquery_buffer_commit_rows_bucket", le("+Inf"))
+    before_scanned = value("smolquery_buffer_commit_scanned_columns_total")
 
     :telemetry.execute(
       [:smolquery, :buffer, :commit],
-      %{rows: 7, bytes: 10, duration_us: 3},
+      %{rows: 7, bytes: 10, duration_us: 3, scanned_columns: 2},
       %{result: :error}
     )
 
     assert value("smolquery_buffer_commit_bytes_total") == before_bytes
     assert value("smolquery_buffer_commit_rows_bucket", le("+Inf")) == before_inf
+    assert value("smolquery_buffer_commit_scanned_columns_total") == before_scanned
   end
 
   test "names which threshold closed a group-commit window (T-333)" do

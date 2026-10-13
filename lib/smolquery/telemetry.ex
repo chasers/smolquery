@@ -553,8 +553,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_buffer_commit_bytes_total" =>
       "Wire bytes in committed group commits; what flush_max_bytes gates on (T-333).",
     "smolquery_buffer_commit_scanned_columns_total" =>
-      "Columns a group commit's writer counted with a scan of the file it wrote, as the " <>
-        "COPY reported no stats for them; MAP columns are expected here, others are not.",
+      "Columns a committed group commit's writer counted with a scan of the file it wrote, " <>
+        "as the COPY's stats for them were missing or unreadable; MAP columns are expected " <>
+        "here, others are not.",
     "smolquery_buffer_commit_rows_bucket" =>
       "Committed group commits by row count, cumulative in le; counters, not a histogram.",
     "smolquery_buffer_flush_trigger_total" =>
@@ -910,12 +911,12 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :buffer, :commit], measurements, meta, nil) do
     bump({"smolquery_buffer_commits_total", [result: result(meta)]}, 1)
-    bump({"smolquery_buffer_rows_committed_total", []}, committed_rows(measurements, meta))
-    bump({"smolquery_buffer_commit_bytes_total", []}, committed_bytes(measurements, meta))
+    bump({"smolquery_buffer_rows_committed_total", []}, committed(measurements, :rows, meta))
+    bump({"smolquery_buffer_commit_bytes_total", []}, committed(measurements, :bytes, meta))
 
     bump(
       {"smolquery_buffer_commit_scanned_columns_total", []},
-      Map.get(measurements, :scanned_columns, 0)
+      committed(measurements, :scanned_columns, meta)
     )
 
     bucket_commit_rows(measurements, meta)
@@ -1219,11 +1220,8 @@ defmodule Smolquery.Telemetry do
     :ok
   end
 
-  defp committed_rows(measurements, %{result: :ok}), do: Map.get(measurements, :rows, 0)
-  defp committed_rows(_measurements, _meta), do: 0
-
-  defp committed_bytes(measurements, %{result: :ok}), do: Map.get(measurements, :bytes, 0)
-  defp committed_bytes(_measurements, _meta), do: 0
+  defp committed(measurements, key, %{result: :ok}), do: Map.get(measurements, key, 0)
+  defp committed(_measurements, _key, _meta), do: 0
 
   # Cumulative buckets, the Prometheus `le` convention, but each series is a
   # plain counter rather than a histogram family: there is no `_sum`/`_count`
@@ -1237,7 +1235,7 @@ defmodule Smolquery.Telemetry do
       "smolquery_buffer_commit_rows_bucket",
       [],
       @commit_row_buckets,
-      committed_rows(measurements, meta)
+      committed(measurements, :rows, meta)
     )
   end
 

@@ -57,7 +57,7 @@ defmodule Smolquery.Segments.Writer do
     * `INT64` and `DECIMAL` parse exactly. `DATE` and `TIMESTAMP` parse
       exactly through `Smolquery.StatText`, years past 9999 included;
       `infinity` and `(BC)` values have no `Date`/`NaiveDateTime` form there
-      and give `nil`.
+      and give `nil`, the same answer a scan would give.
     * `DOUBLE` prints the shortest text that reads back as the same float,
       and `inf`/`-inf` become `:infinity`/`:neg_infinity`. Parquet stats
       leave NaN out of min and max and say `has_nan` instead; DuckDB orders
@@ -70,14 +70,19 @@ defmodule Smolquery.Segments.Writer do
       raisable ASCII byte incremented, so it sorts above every value, also
       when DuckDB shortened it further to stop before a multi-byte
       character. A column DuckDB could not cut that way gets no bounds at
-      all, `nil` on both sides. A bound that is not valid UTF-8 is `nil`
-      too, as the manifest log is JSON. Every string column is bounded, not
-      only the sorted one (T-179).
+      all, `nil` on both sides. Every string column is bounded, not only the
+      sorted one (T-179).
+    * A column whose values are all null gets `nil` bounds from its
+      `null_count` alone, before any bound text is read; a zero-row write
+      is such a case, and its `DOUBLE` columns carry no `has_nan`.
     * A column the `COPY` reports no top-level stats for — a `MAP` is only
       described by its key and value leaves, whose null counts do not tell a
       null map from an empty one — is counted with one scan of those columns
       alone, as every column was before. So is a column whose `null_count`
-      is not an integer in text. The segment's `scanned_columns` says how
+      is not an integer in text, whose bound text is present but does not
+      parse (or, for a string, is not valid UTF-8, as the manifest log is
+      JSON), and a `DOUBLE` column with values but no `has_nan`. The
+      segment's `scanned_columns` says how
       many columns took that scan, so a type that starts falling back to it
       shows up in the commit metrics rather than only in the flush time.
 
@@ -308,8 +313,8 @@ defmodule Smolquery.Segments.Writer do
   defp encode_ndjson(engine, paths, staged, schema, compression) do
     with {:ok, written} <- copy_ndjson(engine, paths, staged, schema, compression),
          :ok <- footer_agrees(engine, staged, written.rows),
-         {:ok, stats, scanned} <- written_stats(engine, staged, schema, written.columns) do
-      {:ok, %{row_count: written.rows, stats: stats, scanned_columns: scanned}}
+         {:ok, facts} <- written_stats(engine, staged, schema, written) do
+      {:ok, Map.put(facts, :row_count, written.rows)}
     end
   end
 
@@ -375,56 +380,76 @@ defmodule Smolquery.Segments.Writer do
     end
   end
 
-  defp written_stats(engine, path, %Schema{fields: fields}, columns) do
+  defp written_stats(engine, path, %Schema{fields: fields}, %{rows: rows, columns: columns}) do
     {described, scanned} =
       Enum.reduce(fields, {%{}, []}, fn %Field{} = field, {described, scanned} ->
         column = Map.get(columns, Identifier.quote_name!(field.name))
 
-        case described_stats(field.type, column) do
+        case described_stats(field.type, column, rows) do
           {:ok, stats} -> {Map.put(described, field.name, stats), scanned}
           :error -> {described, [field | scanned]}
         end
       end)
 
     with {:ok, scanned_stats} <- scanned_stats(engine, path, Enum.reverse(scanned)) do
-      {:ok, Map.merge(described, scanned_stats), length(scanned)}
+      {:ok, %{stats: Map.merge(described, scanned_stats), scanned_columns: length(scanned)}}
     end
   end
 
-  defp described_stats(type, %{"null_count" => nulls} = column) when is_binary(nulls) do
+  defp described_stats(type, %{"null_count" => nulls} = column, rows) when is_binary(nulls) do
     case Integer.parse(nulls) do
+      {^rows, ""} ->
+        {:ok, column_stats(nil, nil, rows)}
+
       {null_count, ""} ->
-        {min, max} = described_bounds(type, column)
-        {:ok, column_stats(min, max, null_count)}
+        with {:ok, {min, max}} <- described_bounds(type, column),
+             do: {:ok, column_stats(min, max, null_count)}
 
       _invalid ->
         :error
     end
   end
 
-  defp described_stats(_type, _column), do: :error
+  defp described_stats(_type, _column, _rows), do: :error
 
-  defp described_bounds(:float64, %{"has_nan" => "true"} = column),
-    do: {parsed(:float64, column["min"], :floor) || :nan, :nan}
+  defp described_bounds(:float64, %{"has_nan" => "true"} = column) do
+    with {:ok, min} <- described_bound(:float64, column["min"], :floor),
+         do: {:ok, {min || :nan, :nan}}
+  end
 
   defp described_bounds(:float64, %{"has_nan" => "false"} = column),
-    do: {parsed(:float64, column["min"], :floor), parsed(:float64, column["max"], :ceil)}
+    do: described_pair(:float64, column)
 
-  defp described_bounds(:float64, _column), do: {nil, nil}
-
-  defp described_bounds(:string, column),
-    do: {text_bound(column["min"]), text_bound(column["max"])}
+  defp described_bounds(:float64, _column), do: :error
 
   defp described_bounds(type, column) do
     if ndjson_bounded?(type),
-      do: {parsed(type, column["min"], :floor), parsed(type, column["max"], :ceil)},
-      else: {nil, nil}
+      do: described_pair(type, column),
+      else: {:ok, {nil, nil}}
   end
 
-  defp text_bound(text) when is_binary(text), do: if(String.valid?(text), do: text, else: nil)
-  defp text_bound(_text), do: nil
+  defp described_pair(type, column) do
+    with {:ok, min} <- described_bound(type, column["min"], :floor),
+         {:ok, max} <- described_bound(type, column["max"], :ceil),
+         do: {:ok, {min, max}}
+  end
 
-  defp parsed(_type, nil, _direction), do: nil
+  defp described_bound(_type, nil, _direction), do: {:ok, nil}
+  defp described_bound(_type, text, _direction) when not is_binary(text), do: :error
+
+  defp described_bound(:string, text, _direction),
+    do: if(String.valid?(text), do: {:ok, text}, else: :error)
+
+  defp described_bound(type, text, direction) do
+    case parsed(type, text, direction) do
+      nil -> if type in @text_bounded and beyond_elixir?(text), do: {:ok, nil}, else: :error
+      bound -> {:ok, bound}
+    end
+  end
+
+  defp beyond_elixir?(text),
+    do: text in ["infinity", "-infinity"] or String.contains?(text, "(BC)")
+
   defp parsed(:int64, text, _direction), do: whole(Integer.parse(text))
   defp parsed(:float64, "inf", _direction), do: :infinity
   defp parsed(:float64, "-inf", _direction), do: :neg_infinity

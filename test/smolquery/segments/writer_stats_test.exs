@@ -363,6 +363,7 @@ defmodule Smolquery.Segments.WriterStatsTest do
 
       {:ok, segment} = write(dir, schema, rows)
 
+      assert segment.scanned_columns == 0
       assert segment.stats["t"] == %{min: nil, max: nil, null_count: 0}
       assert segment.stats["d"] == %{min: nil, max: ~D[2024-01-01], null_count: 0}
       assert segment.stats["n"] == %{min: ~N[2024-01-01 00:00:00.000000], max: nil, null_count: 0}
@@ -517,6 +518,48 @@ defmodule Smolquery.Segments.WriterStatsTest do
       assert segment.scanned_columns == 1
       assert segment.stats["i"] == %{min: -3, max: 7, null_count: 1}
       assert segment.stats["s"] == %{min: "a", max: "b", null_count: 1}
+    end
+
+    test "bound text that does not parse sends the column to the scan, not to nil",
+         %{tmp_dir: dir} do
+      schema = Schema.new!([{"t", :timestamp}, {"f", :float64}, {"g", :float64}])
+
+      rows = [
+        %{"t" => "2024-01-01 00:00:00", "f" => 1.5, "g" => "NaN"},
+        %{"t" => "2024-01-02 00:00:00", "f" => -2.0, "g" => 0.25}
+      ]
+
+      engine =
+        rewriting_engine(fn stats ->
+          stats
+          |> Map.update!(~s("t"), &Map.put(&1, "max", "2024-01-02 00:00:00+00"))
+          |> Map.update!(~s("f"), &Map.delete(&1, "has_nan"))
+          |> Map.update!(~s("g"), &Map.put(&1, "min", "0.25x"))
+        end)
+
+      {:ok, described} = write(dir, schema, rows)
+      {:ok, segment} = write(dir, schema, rows, engine)
+
+      assert described.scanned_columns == 0
+      assert segment.scanned_columns == 3
+      assert segment.stats == described.stats
+      assert segment.stats["g"] == %{min: 0.25, max: :nan, null_count: 0}
+    end
+
+    test "an all-null column needs no bound text, so a missing has_nan is not scanned",
+         %{tmp_dir: dir} do
+      schema = Schema.new!([{"f", :float64}, {"s", :string}])
+      rows = [%{"s" => "a"}, %{"s" => "b"}]
+
+      engine =
+        rewriting_engine(fn stats ->
+          Map.update!(stats, ~s("f"), &Map.drop(&1, ["has_nan", "min", "max"]))
+        end)
+
+      {:ok, segment} = write(dir, schema, rows, engine)
+
+      assert segment.scanned_columns == 0
+      assert segment.stats["f"] == %{min: nil, max: nil, null_count: 2}
     end
 
     test "a scanned TIMESTAMP or DATE is read as text: pre-1970 fractions encode in the manifest",
