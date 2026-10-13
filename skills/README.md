@@ -32,6 +32,10 @@ ln -s "$PWD/skills/smolquery-pm" ~/.claude/skills/smolquery-pm    # global
 - **`smolquery-pm`** — project tracker (projects · plans · tasks) for this
   repo, stored in a dedicated smolsqls DB on the alpha deployment. Where plans
   live now — coordination happens through this database, not local markdown.
+- **`pr-review`** — how we review a pull request and post the findings as PR
+  comments: one inline comment per finding, each starting with 🤖 and written
+  in simple technical English for readers with ADHD, plus a short summary.
+  Builds on the `code-review` skill for finding the problems.
 
 `query-db` is an Elixir tool, so we query in Elixir. It's self-contained via
 `Mix.install` (needs `elixir` on `PATH`; the first run fetches Req).
