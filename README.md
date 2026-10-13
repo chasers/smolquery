@@ -80,7 +80,7 @@ there, at `/connections`. A table's page and every connection have a
 Releases are created automatically for a merged stable `mix.exs` version bump
 only after the successful main-push Kind workflow and the exact-SHA CI run. The
 release publishes a multi-architecture image to GHCR and attaches both a
-`ghcr.io/chasers/smolquery@sha256:...` reference and an image-pinned base
+`ghcr.io/smolquery/smolquery@sha256:...` reference and an image-pinned base
 manifest. `release-manifest.yaml` is not a standalone production deployment:
 integrate it with, and provide, the `smolquery-env` Secret, Postgres catalog and
 discovery, and the sealed-store dependencies before deploying. The Secret must

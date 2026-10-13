@@ -22,7 +22,7 @@ The pipeline runs in this order:
    workflows gate the merge. Branch protection keeps the pull request
    current with `main`. Thus CI already saw the merged tree.
 2. The Release workflow runs on the merge push to `main`. It publishes a
-   multi-architecture `ghcr.io/chasers/smolquery` image tagged with the
+   multi-architecture `ghcr.io/smolquery/smolquery` image tagged with the
    commit (`sha-<commit>`).
    It then dispatches a [bench-matrix](benchmarks.md#continuous-benchmarks)
    run for that commit.
@@ -53,6 +53,10 @@ Each release attaches two files:
 - `release-image.txt` — the immutable digest reference for the image.
 - `release-manifest.yaml` — the `deploy/base` manifest with every smolquery
   image pinned to that digest.
+
+Images are published to `ghcr.io/smolquery/smolquery`. Images for commits up
+to `df8fe23` (0.22.0) stay at `ghcr.io/chasers/smolquery`, the namespace from
+before the repository moved to the `smolquery` organization.
 
 The manifest is **not** a standalone production deployment. Provide these
 items before you deploy it:
