@@ -26,9 +26,12 @@ defmodule SmolqueryClickHouse.Rewrite do
     asks for `groupUniqArray(20)(x)` and its charts for `quantile(0.95)(x)`.
     The parameters move behind the arguments, `f(args, params)`, which is
     the shape a macro or the engine's own function takes. `quantile` is the
-    engine's `quantile_cont`, since ClickHouse's interpolates. Only the
-    names in `@parametric` are read this way: `f(a)(b)` means nothing else
-    to either dialect.
+    engine's `quantile_cont`, since ClickHouse's interpolates, and
+    `quantiles(0.5, 0.95, 0.99)(x)`, the service map's three percentiles in
+    one call, is `quantile_cont(x, [0.5, 0.95, 0.99])`, which answers them
+    as one `Array(Float64)` the way ClickHouse does (T-501). Only the names
+    in `@parametric` are read this way: `f(a)(b)` means nothing else to
+    either dialect.
   - **`LIKE` with a backslash in its pattern.** ClickHouse's `LIKE` escapes
     with a backslash, and HyperDX writes `LIKE lower('%user\_id%')` for a
     term with an underscore. The engine's `LIKE` has no escape character
@@ -84,7 +87,9 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   @parametric %{
     "quantile" => "quantile_cont",
+    "quantiles" => {"quantile_cont", :list},
     "quantileexact" => "quantile_disc",
+    "quantilesexact" => {"quantile_disc", :list},
     "quantileif" => "quantileIf",
     "median" => "median",
     "groupuniqarray" => "groupUniqArray",
@@ -394,12 +399,14 @@ defmodule SmolqueryClickHouse.Rewrite do
        when is_map_key(@parametric, lower) do
     with {:ok, params, [:open | after_params]} <- group(rest),
          {:ok, args, after_args} <- group(after_params) do
+      {name, shape} = parametric(Map.fetch!(@parametric, lower))
+
       call = [
-        Map.fetch!(@parametric, lower),
+        name,
         "(",
         walk(args, inner(state), []),
         ", ",
-        walk(params, inner(state), []),
+        parameters(shape, walk(params, inner(state), [])),
         ")"
       ]
 
@@ -498,6 +505,12 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp quantifier?(_name, _acc), do: false
 
   defp inner(state), do: %{state | depth: state.depth + 1, last: nil}
+
+  defp parametric({name, :list}), do: {name, :list}
+  defp parametric(name), do: {name, :each}
+
+  defp parameters(:list, params), do: ["[", params, "]"]
+  defp parameters(:each, params), do: params
 
   defp value_and_type(arguments) do
     {type, value} = arguments |> Enum.reverse() |> Enum.split_while(&(&1 != :comma))

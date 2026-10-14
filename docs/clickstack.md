@@ -25,11 +25,15 @@ This page is the recipe, and the list of what works.
 
 - **In:** HyperDX reading logs. Its Search page: the results table, the histogram, a
   search term, and field filters.
+- **In:** HyperDX reading traces (section 5): search in trace mode, the trace
+  waterfall, the latency charts and the service map, over a table shaped like
+  `otel_traces` without its `Events.*` and `Links.*` columns.
 - **Out, for now:** ClickStack's OpenTelemetry collector. It speaks ClickHouse's
   `Native` format and runs ClickHouse DDL at start, and smolquery answers neither
   (T-497, T-498, T-499). Rows reach smolquery through its own ingest instead.
-- **Out, later:** traces, sessions and metrics (T-501). Their tables have `Array`
-  columns with dotted names, which smolquery has no type or identifier for.
+- **Out, later:** span events and links, sessions and metrics (T-501). Those tables
+  have `Array` columns with dotted names, which smolquery has no type or identifier
+  for.
 
 ## 1. Run smolquery where HyperDX can reach it
 
@@ -130,8 +134,70 @@ services:
 - **`defaultTableSelectExpression`** may name its columns (`ServiceName as service`), as
   the source HyperDX auto-creates from its form does. HyperDX then sends ClickHouse's
   `WITH (expr) AS alias`, which the edge rewrites.
-- **No `metadataMaterializedViews`, trace, session or metric source.** HyperDX's stock
-  defaults name rollup tables and three more sources; leave them out.
+- **No `metadataMaterializedViews`, session or metric source.** HyperDX's stock defaults
+  name rollup tables and two more sources; leave them out. A trace source is section 5.
+
+## 5. Traces
+
+HyperDX's stock trace source reads these columns. The OpenTelemetry exporter's
+`otel_traces` also has `Events.*` and `Links.*`, `Array` columns with dotted names,
+which smolquery cannot create; HyperDX's stock source leaves its
+`spanEventsValueExpression` unset, so nothing it sends reads them. `Duration` is in
+nanoseconds, which the source's `durationPrecision: 9` says.
+
+```sh
+curl -H "$auth" -H "$json" -d '{"id": "otel_traces", "schema": [
+      {"name": "Timestamp", "type": "TIMESTAMP_NS", "nullable": false},
+      {"name": "TraceId", "type": "STRING"},
+      {"name": "SpanId", "type": "STRING"},
+      {"name": "ParentSpanId", "type": "STRING"},
+      {"name": "TraceState", "type": "STRING"},
+      {"name": "SpanName", "type": "STRING"},
+      {"name": "SpanKind", "type": "STRING"},
+      {"name": "ServiceName", "type": "STRING"},
+      {"name": "ResourceAttributes", "type": "MAP(STRING, STRING)"},
+      {"name": "ScopeName", "type": "STRING"},
+      {"name": "ScopeVersion", "type": "STRING"},
+      {"name": "SpanAttributes", "type": "MAP(STRING, STRING)"},
+      {"name": "Duration", "type": "INT64"},
+      {"name": "StatusCode", "type": "STRING"},
+      {"name": "StatusMessage", "type": "STRING"}
+    ]}' $api/v1/datasets/default/tables
+curl -X PATCH -H "$auth" -H "$json" -d '{"clustering": ["ServiceName", "SpanName", "Timestamp"]}' \
+     $api/v1/datasets/default/tables/otel_traces
+```
+
+Add the source beside the log source in `DEFAULT_SOURCES`. It is HyperDX's stock
+`Traces` source without `metadataMaterializedViews`:
+
+```json
+{"name":"Traces","kind":"trace","connection":"smolquery",
+ "from":{"databaseName":"default","tableName":"otel_traces"},
+ "timestampValueExpression":"Timestamp",
+ "displayedTimestampValueExpression":"Timestamp",
+ "implicitColumnExpression":"SpanName",
+ "serviceNameExpression":"ServiceName",
+ "eventAttributesExpression":"SpanAttributes",
+ "resourceAttributesExpression":"ResourceAttributes",
+ "defaultTableSelectExpression":"Timestamp,ServiceName,StatusCode,round(Duration/1e6),SpanName",
+ "traceIdExpression":"TraceId","spanIdExpression":"SpanId",
+ "durationExpression":"Duration","durationPrecision":9,
+ "parentSpanIdExpression":"ParentSpanId","spanNameExpression":"SpanName",
+ "spanKindExpression":"SpanKind","statusCodeExpression":"StatusCode",
+ "statusMessageExpression":"StatusMessage"}
+```
+
+Set `logSourceId` and `traceSourceId` on the two sources in HyperDX's source
+settings afterwards (`DEFAULT_SOURCES` takes names there, as the stock file does), so
+the waterfall shows a trace's log lines and a log's trace.
+
+Checked with HyperDX 2.41.0's own query code against the edge: the columns and
+sorting key, the field list and `SpanAttributes` keys, trace search by term
+(`checkout`), phrase, `StatusCode:Error`, `SpanKind:Server`,
+`SpanAttributes.http.method:POST` and a `Duration` range, the histogram
+by `StatusCode`, p95 `Duration` by `ServiceName`, a filtered `avg`, the filters
+sidebar's values, the waterfall's span list for one trace, and the service map's two-CTE join with `GROUPING SETS`, `GROUPING()`,
+`countIf`, `cityHash64` and `quantiles(0.5, 0.95, 0.99)(duration)`.
 
 ## What works
 
@@ -152,7 +218,9 @@ services:
 | Row click (the side panel) | Works: HyperDX finds the row by the values it was shown. A `TIMESTAMP_NS` answers all nine digits and a map keeps its stored key order, so both match when sent back; `JSONExtract(s, 'Map(String, String)')`, `isNull` and the `MD5` of a long string are rewritten |
 | A source whose select uses `x as y` | Works: `WITH (expr) AS alias` is rewritten |
 | Alert sample rows | `CSV` output answers; alerts themselves have not been run |
-| Traces, service map, sessions, metrics | **Not yet** (T-501) |
+| Traces: search in trace mode, the waterfall, latency charts | Works, over the table in section 5 |
+| Service map | Works: its `quantiles(0.5, 0.95, 0.99)(x)` is rewritten to one `quantile_cont` over a list and answers as `Array(Float64)` |
+| Span events and links, sessions, metrics | **Not yet** (T-501) |
 | ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
 
 ## What differs from ClickHouse underneath

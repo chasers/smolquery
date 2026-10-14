@@ -107,6 +107,14 @@ defmodule SmolqueryClickHouse.RewriteTest do
                "SELECT quantileIf(d, (s = 'a') AND d IS NOT NULL, 0.5) FROM t"
     end
 
+    test "quantiles takes its levels as one list, the service map's three in one call (T-501)" do
+      assert Rewrite.call("SELECT quantiles(0.5, 0.95, 0.99)(ServerSpans.duration) as quantiles") ==
+               "SELECT quantile_cont(ServerSpans.duration, [0.5, 0.95, 0.99]) as quantiles"
+
+      assert Rewrite.call("SELECT quantilesExact(0.5, 0.9)(d) FROM t") ==
+               "SELECT quantile_disc(d, [0.5, 0.9]) FROM t"
+    end
+
     test "rewrites what its arguments hold, too" do
       assert Rewrite.call("SELECT groupUniqArray(5)(CAST(x, 'String')) FROM t") ==
                "SELECT groupUniqArray(CAST(x AS VARCHAR), 5) FROM t"
