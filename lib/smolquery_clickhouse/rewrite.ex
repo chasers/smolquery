@@ -29,9 +29,9 @@ defmodule SmolqueryClickHouse.Rewrite do
     engine's `quantile_cont`, since ClickHouse's interpolates, and
     `quantiles(0.5, 0.95, 0.99)(x)`, the service map's three percentiles in
     one call, is `quantile_cont(x, [0.5, 0.95, 0.99])`, which answers them
-    as one `Array(Float64)` the way ClickHouse does (T-501). Only the names
-    in `@parametric` are read this way: `f(a)(b)` means nothing else to
-    either dialect.
+    as one array the way ClickHouse does, `quantilesIf` the same through
+    the `quantileIf` macro (T-501). Only the names in `@parametric` are read
+    this way: `f(a)(b)` means nothing else to either dialect.
   - **`LIKE` with a backslash in its pattern.** ClickHouse's `LIKE` escapes
     with a backslash, and HyperDX writes `LIKE lower('%user\_id%')` for a
     term with an underscore. The engine's `LIKE` has no escape character
@@ -85,12 +85,15 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   @clause_ends ~w(having limit union window qualify settings format intersect except offset fetch)
 
+  @list_parametric ~w(quantiles quantilesexact quantilesif)
+
   @parametric %{
     "quantile" => "quantile_cont",
-    "quantiles" => {"quantile_cont", :list},
+    "quantiles" => "quantile_cont",
     "quantileexact" => "quantile_disc",
-    "quantilesexact" => {"quantile_disc", :list},
+    "quantilesexact" => "quantile_disc",
     "quantileif" => "quantileIf",
+    "quantilesif" => "quantileIf",
     "median" => "median",
     "groupuniqarray" => "groupUniqArray",
     "groupuniqarrayif" => "groupUniqArrayIf",
@@ -399,14 +402,12 @@ defmodule SmolqueryClickHouse.Rewrite do
        when is_map_key(@parametric, lower) do
     with {:ok, params, [:open | after_params]} <- group(rest),
          {:ok, args, after_args} <- group(after_params) do
-      {name, shape} = parametric(Map.fetch!(@parametric, lower))
-
       call = [
-        name,
+        Map.fetch!(@parametric, lower),
         "(",
         walk(args, inner(state), []),
         ", ",
-        parameters(shape, walk(params, inner(state), [])),
+        parameters(lower, walk(params, inner(state), [])),
         ")"
       ]
 
@@ -506,11 +507,8 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   defp inner(state), do: %{state | depth: state.depth + 1, last: nil}
 
-  defp parametric({name, :list}), do: {name, :list}
-  defp parametric(name), do: {name, :each}
-
-  defp parameters(:list, params), do: ["[", params, "]"]
-  defp parameters(:each, params), do: params
+  defp parameters(lower, params) when lower in @list_parametric, do: ["[", params, "]"]
+  defp parameters(_lower, params), do: params
 
   defp value_and_type(arguments) do
     {type, value} = arguments |> Enum.reverse() |> Enum.split_while(&(&1 != :comma))

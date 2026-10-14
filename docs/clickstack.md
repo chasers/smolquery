@@ -219,7 +219,7 @@ sidebar's values, the waterfall's span list for one trace, and the service map's
 | A source whose select uses `x as y` | Works: `WITH (expr) AS alias` is rewritten |
 | Alert sample rows | `CSV` output answers; alerts themselves have not been run |
 | Traces: search in trace mode, the waterfall, latency charts | Works, over the table in section 5 |
-| Service map | Works: its `quantiles(0.5, 0.95, 0.99)(x)` is rewritten to one `quantile_cont` over a list and answers as `Array(Float64)` |
+| Service map | Works: its `quantiles(0.5, 0.95, 0.99)(x)` is rewritten to one `quantile_cont` over a list and answers as `Array(Nullable(Float64))`, the three percentiles in order. Over no rows it answers `[]` where ClickHouse answers `[nan, nan, nan]`; the service map never groups an empty set |
 | Span events and links, sessions, metrics | **Not yet** (T-501) |
 | ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
 

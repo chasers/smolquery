@@ -113,6 +113,9 @@ defmodule SmolqueryClickHouse.RewriteTest do
 
       assert Rewrite.call("SELECT quantilesExact(0.5, 0.9)(d) FROM t") ==
                "SELECT quantile_disc(d, [0.5, 0.9]) FROM t"
+
+      assert Rewrite.call("SELECT quantilesIf(0.5, 0.9)(d, s = 'a') FROM t") ==
+               "SELECT quantileIf(d, s = 'a', [0.5, 0.9]) FROM t"
     end
 
     test "rewrites what its arguments hold, too" do

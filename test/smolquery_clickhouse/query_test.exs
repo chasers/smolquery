@@ -47,6 +47,33 @@ defmodule SmolqueryClickHouse.QueryTest do
 
   defp exception_code(response), do: get_resp_header(response, "x-clickhouse-exception-code")
 
+  test "quantiles(p...)(x) answers every level in one array, and an empty one over no rows (T-501)",
+       %{
+         name: name
+       } do
+    rows = "(SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4)"
+
+    response =
+      post(
+        name,
+        "SELECT quantiles(0.5, 0.9)(n) AS q, quantilesIf(0.5)(n, n > 1) AS qi FROM #{rows} FORMAT JSON"
+      )
+
+    assert response.status == 200
+    body = JSON.decode!(response.resp_body)
+
+    assert Enum.map(body["meta"], &{&1["name"], &1["type"]}) == [
+             {"q", "Array(Nullable(Float64))"},
+             {"qi", "Array(Nullable(Float64))"}
+           ]
+
+    assert body["data"] == [%{"q" => [2.5, 3.7], "qi" => [3.0]}]
+
+    empty = post(name, "SELECT quantiles(0.5, 0.9)(n) AS q FROM #{rows} WHERE n > 10 FORMAT JSON")
+
+    assert JSON.decode!(empty.resp_body)["data"] == [%{"q" => []}]
+  end
+
   test "a statement in the body answers TabSeparated by default", %{name: name} do
     response = post(name, "SELECT 1 + 1 AS n, 'a\tb' AS s")
 

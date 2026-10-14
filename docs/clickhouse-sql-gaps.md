@@ -74,7 +74,8 @@ The Postgres edge solved the same problem for its clients with an emulated
 | `FINAL` | **Silently accepted** | `FROM t FINAL` parses with `FINAL` read as the table's *alias*, so the query runs and any `t.column` reference then fails. After an explicit alias it is a parse error. There are no merge semantics here to skip, so accepting and dropping it is the right fix |
 | Backtick-quoted identifiers | Works (T-481) | Rewritten to double quotes on the edge |
 | Backslash escapes in literals (`'it\'s'`) | Works (T-481) | Rewritten to the characters they stand for. `LIKE '%a\_b%'` keeps its backslash, and the edge adds `ESCAPE '\'` so it means what it does in ClickHouse (T-496) |
-| Parametric aggregates: `quantile(0.5)(x)`, `quantileIf`, `groupUniqArray(20)(x)`, `groupUniqArrayArray`, `groupArray` | Works (T-496) | Rewritten to `f(args, params)`; `quantile` is the engine's interpolating `quantile_cont`. `topK(1)(x)`, `quantiles(...)(x)` and `histogram(n)(x)` are still parse errors |
+| Parametric aggregates: `quantile(0.5)(x)`, `quantileIf`, `groupUniqArray(20)(x)`, `groupUniqArrayArray`, `groupArray` | Works (T-496) | Rewritten to `f(args, params)`; `quantile` is the engine's interpolating `quantile_cont`. `topK(1)(x)` and `histogram(n)(x)` are still parse errors |
+| `quantiles(0.5, 0.95, 0.99)(x)`, `quantilesExact`, `quantilesIf` | Works (T-501) | The levels become one list, `quantile_cont(x, [...])`, and the answer is one `Array(Nullable(Float64))` in level order. Over no rows it is `[]`, where ClickHouse answers an array of `nan`. `quantilesTDigest`, `quantilesTiming` and the other sketch variants do not resolve |
 | `any(x)`, `isNull(x)`, `isNotNull(x)` | Works (T-496) | Words of the parser's own; renamed to `any_value` and to macros |
 | `WITH (expr) AS alias` | Works (T-496) | The alias is written as its expression wherever it is read; a common table expression beside it stays. `WITH expr AS alias` without parentheses is still a parse error |
 | `JSONExtract(json, 'Type')` | Works (T-496) | A cast of the JSON to the type, for scalars, `Map(K, V)` and `Array(T)`. The forms with a path do not resolve |
@@ -92,11 +93,11 @@ function a shim would call.
 | Date/time | `toYYYYMM`, `formatDateTime`, `dateDiff`, `toIntervalSecond`. **Resolve since T-485:** `toStartOfInterval`, the `toStartOf*` family, `toDate`, `toDateTime`, `toDateTime64`, `fromUnixTimestamp*`, `toUnixTimestamp*`, `now64`, `parseDateTime64BestEffort` | `date_trunc`, `time_bucket`, `strftime`, `epoch_ns`, casts |
 | Arrays | `hasAny`, `arrayExists`, `arrayMap`, `arrayFilter`, `arrayJoin`. **Resolve since T-485 and T-496:** `has`, `groupArray`, `groupUniqArray`, `groupUniqArrayArray` | `list_contains`, `list_has_any`, `list_filter`, `list_transform`, `unnest`, `list()` |
 | Aggregate combinators | `-Array`, `-State`, `-Merge`, and `-If` beyond `countIf`, `sumIf`, `avgIf`, `minIf`, `maxIf`, which resolve (T-485) | `sum(x) FILTER (WHERE …)`; `-State`/`-Merge` have no equivalent |
-| Approximate aggregates | `uniqCombined`, `quantiles`, `quantileTDigest`, `topK`. **Resolve since T-485, exactly:** `uniq`, `uniqExact` | `approx_count_distinct`, `count(DISTINCT …)`, `quantile_cont`, `approx_top_k` |
+| Approximate aggregates | `uniqCombined`, `quantileTDigest`, `topK`. **Resolve since T-485, exactly:** `uniq`, `uniqExact`. **Resolve since T-501:** `quantiles`, `quantilesExact`, `quantilesIf` | `approx_count_distinct`, `count(DISTINCT …)`, `quantile_cont`, `approx_top_k` |
 | Strings/regex | `splitByChar`, `extractAll`, `positionCaseInsensitive`, `multiSearchAny`. **Resolve since T-485:** `match`, `hasToken`, `startsWith`, `endsWith`, `notEmpty`, `empty` | `regexp_matches`, `str_split`, `regexp_extract_all`, `position(… IN …)` |
 | Conditional | `multiIf` | `CASE` |
 | JSON | `JSONExtract*`, `simpleJSONExtract*`, `visitParamExtract*` | `json_extract` family, `VARIANT` |
-| Hashes | `cityHash64`, `sipHash64`, `xxHash64` | `hash`; values will not match ClickHouse's |
+| Hashes | `sipHash64`, `xxHash64`. **Resolves since T-526:** `cityHash64`, as a macro over `hash` | `hash`; values will not match ClickHouse's |
 | Dictionaries | `dictGet*` | **No equivalent**; out of scope |
 | Type helpers | `toTypeName`, `assumeNotNull`, `intDiv`. **Resolve since T-485 and T-496:** `isNull`, `isNotNull`, `toString`, `toInt64`, `toUInt64`, `toFloat64` and their `-OrZero`/`-OrNull` forms, `toFloat64OrDefault` | casts, `typeof`, `//` |
 | Maps and hints | **Resolve since T-485:** `mapContains`, `mapKeys`, `mapValues`, `indexHint` (always true) | `map_contains`, `map_keys`, `map_values` |
