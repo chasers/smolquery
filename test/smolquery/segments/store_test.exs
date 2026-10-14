@@ -10,6 +10,19 @@ defmodule Smolquery.Segments.StoreTest do
 
   @id "01KYWPEEGAM8FQVQS5S2QF26SV"
 
+  describe "from_config/1" do
+    test "builds the store a configuration names" do
+      assert %Store{impl: Store.Local} = Store.from_config({Store.Local, dir: "/tmp/sealed"})
+    end
+
+    test "passes a built store and nil through" do
+      store = Store.Local.new(dir: "/tmp/sealed")
+
+      assert Store.from_config(store) == store
+      assert Store.from_config(nil) == nil
+    end
+  end
+
   describe "prefix/1" do
     test "joins a validated dataset and table" do
       assert Store.prefix({"analytics", "events"}) == {:ok, "analytics/events"}

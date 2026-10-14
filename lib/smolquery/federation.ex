@@ -46,6 +46,20 @@ defmodule Smolquery.Federation do
   does for Postgres; register only lakes whose catalog you trust as you trust
   this deployment's.
 
+  ## The probe reads as a query job reads
+
+  A query job's engine holds the node's sealed-tier secret, the one
+  `SMOLQUERY_S3_*` names, before it attaches any connection. That is how a
+  separate read cluster reaches a writer's files through a DuckLake
+  connection registered at a local data path (T-650): the connection
+  carries no S3 fields of its own, and the files are in the bucket the
+  node's credential already covers. The probe behind `POST
+  /v1/connections/:name/test` and the connections page is a throwaway
+  engine, and until T-659 it started with the connection's statements only,
+  so it answered 422 for the very lake every query read. `probe_bootstrap/2`
+  gives the probe the same secret and extensions a job gets, from the same
+  `Smolquery.EngineSecrets`, so a probe and a query see the same files.
+
   ## Failures are scrubbed before anyone sees them
 
   DuckDB reports a failed `ATTACH` by quoting the connection string back, and
@@ -58,7 +72,9 @@ defmodule Smolquery.Federation do
 
   alias Smolquery.Catalog.Connection
   alias Smolquery.Engine
+  alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
+  alias Smolquery.Segments.Store
 
   @probe_timeout_ms 10_000
 
@@ -184,26 +200,63 @@ defmodule Smolquery.Federation do
   `ATTACH` statement, password and all, so it must reach `scrub/2` rather
   than a crash report.
   """
-  @spec probe(Connection.t()) :: :ok | {:error, term()}
-  def probe(%Connection{} = connection) do
-    with {:ok, _tables} <- in_probe_engine(connection, &run_probe(&1, connection)), do: :ok
+  @spec probe(Connection.t(), Store.t() | nil) :: :ok | {:error, term()}
+  def probe(%Connection{} = connection, store \\ sealed_store()) do
+    with {:ok, _tables} <- in_probe_engine(connection, store, &run_probe(&1, connection)),
+         do: :ok
   end
 
   @doc """
   A DuckLake connection's tables, as `{schema, table}`, read by attaching it
-  in a throwaway engine as `probe/1` does. The connections page opens the
+  in a throwaway engine as `probe/2` does. The connections page opens the
   editor on the first: a lake's catalog is not readable through the planner
   the way a Postgres database's `pg_catalog` is.
   """
-  @spec tables(Connection.t()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def tables(%Connection{kind: "ducklake"} = connection),
-    do: in_probe_engine(connection, &lake_tables(&1, connection))
+  @spec tables(Connection.t(), Store.t() | nil) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def tables(%Connection{kind: "ducklake"} = connection, store \\ sealed_store()),
+    do: in_probe_engine(connection, store, &lake_tables(&1, connection))
 
-  defp in_probe_engine(connection, run) do
+  @doc """
+  What the probe engine for `connection` loads and runs before the probe
+  itself: its extensions, and its bootstrap statements in order.
+
+  For a DuckLake, the node's sealed-tier secret and the extensions it needs
+  come first, exactly as a query job gets them from `Smolquery.EngineSecrets`
+  with the same `store`, and the connection's own statements follow. A
+  Postgres connection reads no files, so it takes nothing from the store.
+  """
+  @spec probe_bootstrap(Connection.t(), Store.t() | nil) ::
+          {:ok, %{extensions: [Engine.Connection.extension()], statements: [String.t()]}}
+          | {:error, term()}
+  def probe_bootstrap(%Connection{kind: "ducklake"} = connection, store) do
     with {:ok, statements} <- statements(connection) do
+      {:ok,
+       %{
+         extensions: EngineSecrets.sealed_tier_extensions(store, probe_extensions(connection)),
+         statements: EngineSecrets.sealed_tier(store) ++ statements
+       }}
+    end
+  end
+
+  def probe_bootstrap(%Connection{} = connection, _store) do
+    with {:ok, statements} <- statements(connection),
+         do: {:ok, %{extensions: probe_extensions(connection), statements: statements}}
+  end
+
+  defp sealed_store do
+    :smolquery
+    |> Application.get_env(Smolquery.QueryService, [])
+    |> Keyword.get(:store)
+    |> Store.from_config()
+  end
+
+  defp in_probe_engine(connection, store, run) do
+    with {:ok, %{extensions: extensions, statements: statements}} <-
+           probe_bootstrap(connection, store) do
       name = :"federation_probe_#{:erlang.unique_integer([:positive])}"
 
-      case Engine.start_link(name: name, extensions: probe_extensions(connection)) do
+      case Engine.start_link(name: name, extensions: extensions) do
         {:ok, pid} ->
           try do
             with :ok <- run_statements(name, statements, connection), do: run.(name)

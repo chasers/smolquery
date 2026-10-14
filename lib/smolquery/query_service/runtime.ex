@@ -410,13 +410,7 @@ defmodule Smolquery.QueryService.Runtime do
     }
   end
 
-  defp build_store(config) do
-    case Keyword.get(config, :store) do
-      nil -> nil
-      {impl, opts} -> impl.new(opts)
-      %Store{} = store -> store
-    end
-  end
+  defp build_store(config), do: config |> Keyword.get(:store) |> Store.from_config()
 
   use Smolquery.Runtime
 

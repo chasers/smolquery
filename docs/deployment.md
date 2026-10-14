@@ -137,6 +137,14 @@ One note per release, newest first.
 - **Where:** the API and web endpoints (`http_2_options: [enabled: false]` in their `http:` config), the ClickHouse edge, the VictoriaMetrics edge, the buffer nodes' hot server and the metrics listener.
 - **To undo:** when bandit releases the fix, bump it, drop `--ignore-advisory-ids` from the `ci` alias and `ignore_advisories` from the `hex` key in `mix.exs`, and remove the six `http_2_options` lines if HTTP/2 is wanted back.
 
+### A connection test reads a lake with the node's own credential (T-659)
+
+**TL;DR.** `POST /v1/connections/:name/test` and the connections page's Test button now read a DuckLake connection the way a query job does: with the node's `SMOLQUERY_S3_*` secret loaded first. A read cluster set up as the T-650 note says no longer gets `422 connection <name> could not be opened` from the test while its queries work.
+
+- **Before:** the probe engine held only the connection's own `s3_*` secret. A connection at a local data path has none, so the one-row read of its first table failed on the `s3://` file.
+- **Now:** the probe loads the sealed tier's secret and extensions from the same place a job engine does, then the connection's own statements. A connection with its own `s3_*` fields still uses them: DuckDB picks the secret whose scope is the longest prefix of the file.
+- **Postgres connections:** unchanged. They read no files.
+
 ### 0.23.0: a release names the local DuckLake data roots, for a separate read cluster (T-650)
 
 **TL;DR.** `SMOLQUERY_FEDERATION_LOCAL_ROOTS` lets a second smolquery deployment attach a running deployment's lake as a `kind: ducklake` connection. A read cluster set up this way sees sealed data only, so it trails the writer by the writer's seal interval. Nothing changes for a deployment that sets no roots.

@@ -12,6 +12,7 @@ defmodule Smolquery.FederationTest do
 
   alias Smolquery.Catalog.Connection
   alias Smolquery.Federation
+  alias Smolquery.Segments.Store
   alias Smolquery.Test.Postgres
 
   setup do
@@ -99,6 +100,44 @@ defmodule Smolquery.FederationTest do
     test "extensions/1 adds ducklake to postgres" do
       assert Federation.extensions(lake()) == [:postgres, :ducklake]
       assert Federation.extensions(connection()) == [:postgres]
+    end
+
+    test "probe_bootstrap/2 gives a lake's probe the node's sealed-tier secret first (T-659)" do
+      sealed =
+        Store.S3.new(
+          bucket: "sealed",
+          access_key_id: "id",
+          secret_access_key: "secret",
+          staging_dir: "/tmp/staging"
+        )
+
+      assert {:ok, %{extensions: extensions, statements: [secret, attach]}} =
+               Federation.probe_bootstrap(lake(), sealed)
+
+      assert extensions == [:postgres, :ducklake, :httpfs]
+      assert secret =~ "CREATE SECRET IF NOT EXISTS smolquery_sealed_tier"
+      assert attach =~ "ATTACH"
+
+      chain = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      assert {:ok, %{extensions: [:postgres, :ducklake, :httpfs, :aws]}} =
+               Federation.probe_bootstrap(lake(), chain)
+    end
+
+    test "probe_bootstrap/2 without a sealed store is the connection's own bootstrap" do
+      assert {:ok, %{extensions: [:postgres, :ducklake, :httpfs], statements: [attach]}} =
+               Federation.probe_bootstrap(lake(), nil)
+
+      assert attach =~ "ATTACH"
+    end
+
+    test "probe_bootstrap/2 takes nothing from the store for a Postgres connection" do
+      sealed = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+
+      assert {:ok, %{extensions: [:postgres], statements: [attach]}} =
+               Federation.probe_bootstrap(connection(), sealed)
+
+      assert attach =~ "ATTACH"
     end
 
     test "redact_statement/2 strips the metadata password and the S3 secret" do

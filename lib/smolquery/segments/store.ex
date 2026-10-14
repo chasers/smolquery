@@ -64,6 +64,27 @@ defmodule Smolquery.Segments.Store do
   @type t :: %__MODULE__{impl: module(), config: term()}
 
   @typedoc """
+  How a store is configured: an implementation and its options, as
+  `config/runtime.exs` writes `{Smolquery.Segments.Store.S3, s3_options}`,
+  a built store, or nothing.
+  """
+  @type configured :: {module(), keyword()} | t() | nil
+
+  @doc """
+  The store a configuration names, built; a built store or `nil` as given.
+
+      iex> %Smolquery.Segments.Store{impl: Smolquery.Segments.Store.Local} =
+      ...>   Smolquery.Segments.Store.from_config({Smolquery.Segments.Store.Local, dir: "/tmp/sealed"})
+      iex> Smolquery.Segments.Store.from_config(nil)
+      nil
+
+  """
+  @spec from_config(configured()) :: t() | nil
+  def from_config(nil), do: nil
+  def from_config({impl, opts}) when is_atom(impl), do: impl.new(opts)
+  def from_config(%__MODULE__{} = store), do: store
+
+  @typedoc """
   A segment's name within a store — `"<dataset>/<table>/<ulid>.parquet"`.
 
   Keys are store-agnostic on purpose: the same key names a path under
