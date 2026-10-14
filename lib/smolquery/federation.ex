@@ -23,7 +23,7 @@ defmodule Smolquery.Federation do
       ATTACH 'ducklake:postgres:<libpq>' AS "<name>" (READ_ONLY, DATA_PATH '<data_path>')
 
   DuckLake accepts its own data path on an existing lake and refuses any
-  other, so a wrong path fails the attach, at `probe/1` and at query time,
+  other, so a wrong path fails the attach, at `probe/2` and at query time,
   rather than reading somewhere unexpected. When the connection has S3
   credentials, a `CREATE TEMPORARY SECRET` scoped to the data path comes
   first. DuckDB answers an `s3://` read with the secret whose scope is the
@@ -58,7 +58,11 @@ defmodule Smolquery.Federation do
   engine, and until T-659 it started with the connection's statements only,
   so it answered 422 for the very lake every query read. `probe_bootstrap/2`
   gives the probe the same secret and extensions a job gets, from the same
-  `Smolquery.EngineSecrets`, so a probe and a query see the same files.
+  `Smolquery.EngineSecrets`, so a probe and a query see the same files, and
+  the probe runs `check/2` first, as the planner does, so a lake in the
+  sealed tier's own bucket is refused by both. The node's secret runs
+  through the probe as a statement, so a failure's text is scrubbed of it
+  as it is of the connection's own.
 
   ## Failures are scrubbed before anyone sees them
 
@@ -199,22 +203,29 @@ defmodule Smolquery.Federation do
   times out is caught for the same reason: the exit reason carries the
   `ATTACH` statement, password and all, so it must reach `scrub/2` rather
   than a crash report.
+
+  `store` is the sealed-tier store this node's query jobs read with, which
+  `Smolquery.QueryService.Client.sealed_store/1` answers, or `nil` on a node
+  that runs no query service. The probe reads with it as a job would, and it
+  refuses with `check/2` what the planner refuses, so a connection that
+  probes `:ok` is one a query can use.
   """
   @spec probe(Connection.t(), Store.t() | nil) :: :ok | {:error, term()}
-  def probe(%Connection{} = connection, store \\ sealed_store()) do
+  def probe(%Connection{} = connection, store) do
     with {:ok, _tables} <- in_probe_engine(connection, store, &run_probe(&1, connection)),
          do: :ok
   end
 
   @doc """
   A DuckLake connection's tables, as `{schema, table}`, read by attaching it
-  in a throwaway engine as `probe/2` does. The connections page opens the
-  editor on the first: a lake's catalog is not readable through the planner
-  the way a Postgres database's `pg_catalog` is.
+  in a throwaway engine as `probe/2` does, with the same `store`. The
+  connections page opens the editor on the first: a lake's catalog is not
+  readable through the planner the way a Postgres database's `pg_catalog`
+  is.
   """
   @spec tables(Connection.t(), Store.t() | nil) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def tables(%Connection{kind: "ducklake"} = connection, store \\ sealed_store()),
+  def tables(%Connection{kind: "ducklake"} = connection, store),
     do: in_probe_engine(connection, store, &lake_tables(&1, connection))
 
   @doc """
@@ -244,28 +255,22 @@ defmodule Smolquery.Federation do
          do: {:ok, %{extensions: probe_extensions(connection), statements: statements}}
   end
 
-  defp sealed_store do
-    :smolquery
-    |> Application.get_env(Smolquery.QueryService, [])
-    |> Keyword.get(:store)
-    |> Store.from_config()
-  end
-
   defp in_probe_engine(connection, store, run) do
-    with {:ok, %{extensions: extensions, statements: statements}} <-
+    with :ok <- check(connection, EngineSecrets.sealed_prefixes(store)),
+         {:ok, %{extensions: extensions, statements: statements}} <-
            probe_bootstrap(connection, store) do
       name = :"federation_probe_#{:erlang.unique_integer([:positive])}"
 
       case Engine.start_link(name: name, extensions: extensions) do
         {:ok, pid} ->
           try do
-            with :ok <- run_statements(name, statements, connection), do: run.(name)
+            with :ok <- run_statements(name, statements, connection, store), do: run.(name)
           after
             Supervisor.stop(pid, :normal)
           end
 
         {:error, reason} ->
-          {:error, scrub(reason, connection)}
+          {:error, scrubbed(reason, connection, store)}
       end
     end
   end
@@ -275,14 +280,30 @@ defmodule Smolquery.Federation do
 
   defp probe_extensions(connection), do: extensions(connection)
 
-  defp run_statements(name, statements, connection) do
+  defp run_statements(name, statements, connection, store) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->
       case Engine.try_query(name, statement, [], @probe_timeout_ms) do
         {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, scrub(reason, connection)}}
+        {:error, reason} -> {:halt, {:error, scrubbed(reason, connection, store)}}
       end
     end)
   end
+
+  defp scrubbed(reason, connection, store) do
+    case scrub(reason, connection) do
+      {:federation_error, name, text} when is_binary(text) ->
+        {:federation_error, name, redact_secret(text, store_secret(store))}
+
+      unopenable ->
+        unopenable
+    end
+  end
+
+  defp store_secret(%Store{impl: Store.S3, config: %Store.S3{secret_access_key: key}})
+       when is_binary(key),
+       do: key
+
+  defp store_secret(_store), do: nil
 
   @doc """
   The SQL that ranks a connection's user tables by live rows, ten at most.

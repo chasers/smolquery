@@ -54,6 +54,7 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
   alias Smolquery.Federation
+  alias Smolquery.QueryService
   alias Smolquery.Secrets
   alias SmolqueryWeb.Runtime
 
@@ -139,12 +140,17 @@ defmodule SmolqueryWeb.ConnectionLive.Index do
   end
 
   def handle_event("test", %{"name" => name}, socket) do
-    {:noreply, run_async(socket, :test, name, &Federation.probe/1)}
+    store = sealed_store(socket)
+    {:noreply, run_async(socket, :test, name, &Federation.probe(&1, store))}
   end
 
   def handle_event("query", %{"name" => name}, socket) do
-    {:noreply, run_async(socket, :tables, name, &Federation.tables/1)}
+    store = sealed_store(socket)
+    {:noreply, run_async(socket, :tables, name, &Federation.tables(&1, store))}
   end
+
+  defp sealed_store(socket),
+    do: QueryService.Client.sealed_store(socket.assigns.runtime.query_name)
 
   @impl Phoenix.LiveView
   def handle_async({tag, name}, {:ok, outcome}, socket) do

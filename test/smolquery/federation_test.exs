@@ -140,6 +140,17 @@ defmodule Smolquery.FederationTest do
       assert attach =~ "ATTACH"
     end
 
+    test "probe/2 and tables/2 refuse a lake in the sealed bucket before any engine starts" do
+      sealed = Store.S3.new(bucket: "lakes", staging_dir: "/tmp/staging")
+      in_bucket = lake(%{"data_path" => "s3://lakes/sales/"})
+
+      assert Federation.probe(in_bucket, sealed) ==
+               {:error, {:federated_path_in_sealed_bucket, "sales"}}
+
+      assert Federation.tables(in_bucket, sealed) ==
+               {:error, {:federated_path_in_sealed_bucket, "sales"}}
+    end
+
     test "redact_statement/2 strips the metadata password and the S3 secret" do
       with_secret = lake(%{"s3_key_id" => "AKIA1", "s3_secret" => "s3cret"})
       {:ok, [secret, attach]} = Federation.statements(with_secret)

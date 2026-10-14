@@ -5,6 +5,7 @@ defmodule Smolquery.QueryService.ClientTest do
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.Segments.Store
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
 
@@ -28,6 +29,16 @@ defmodule Smolquery.QueryService.ClientTest do
     on_exit(fn -> Runtime.delete(name) end)
 
     name
+  end
+
+  describe "sealed_store/1 (T-659)" do
+    test "answers the running service's store, and nil for a service that is not here" do
+      store = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+      name = start_service(store: store)
+
+      assert Client.sealed_store(name) == store
+      assert Client.sealed_store(:no_such_query_service) == nil
+    end
   end
 
   describe "query/3 (sync)" do

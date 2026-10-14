@@ -37,6 +37,7 @@ defmodule Smolquery.QueryService.Client do
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Runner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.Segments.Store
 
   @type option ::
           {:timeout_ms, pos_integer()}
@@ -222,6 +223,20 @@ defmodule Smolquery.QueryService.Client do
     end
   catch
     :exit, _reason -> :ok
+  end
+
+  @doc """
+  The sealed-tier store the query service `name` reads with, for a caller
+  that must read as a job does, such as a federated connection's probe
+  (`Smolquery.Federation.probe/2`). `nil` when the service is not running
+  here or its sealed tier is local disk, which needs no credential.
+  """
+  @spec sealed_store(atom()) :: Store.t() | nil
+  def sealed_store(name) do
+    case runtime(name) do
+      {:ok, runtime} -> runtime.store
+      {:error, :query_service_unavailable} -> nil
+    end
   end
 
   @doc """

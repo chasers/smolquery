@@ -995,10 +995,7 @@ defmodule Smolquery.StorageService.Runtime do
   end
 
   defp build_store(config) do
-    case Keyword.get(config, :store) do
-      nil -> Store.Local.new(dir: Keyword.get(config, :dir, @default_dir))
-      {impl, opts} -> impl.new(opts)
-      %Store{} = store -> store
-    end
+    Store.from_config(Keyword.get(config, :store)) ||
+      Store.Local.new(dir: Keyword.get(config, :dir, @default_dir))
   end
 end

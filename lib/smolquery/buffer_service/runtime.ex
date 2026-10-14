@@ -872,10 +872,7 @@ defmodule Smolquery.BufferService.Runtime do
     do: {:via, Registry, {committer_registry(name), table_ref}}
 
   defp build_store(config, dir) do
-    case Keyword.get(config, :store) do
-      nil -> Store.Local.new(dir: Path.join(dir, "segments"))
-      {impl, opts} -> impl.new(opts)
-      %Store{} = store -> store
-    end
+    Store.from_config(Keyword.get(config, :store)) ||
+      Store.Local.new(dir: Path.join(dir, "segments"))
   end
 end

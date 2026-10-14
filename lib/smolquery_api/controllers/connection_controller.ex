@@ -32,9 +32,11 @@ defmodule SmolqueryApi.ConnectionController do
   alias Smolquery.Catalog
   alias Smolquery.Catalog.Connection
   alias Smolquery.Federation
+  alias Smolquery.QueryService
   alias SmolqueryApi.DatasetController
   alias SmolqueryApi.Errors
   alias SmolqueryApi.Json
+  alias SmolqueryApi.Runtime
 
   @doc """
   Every registered connection, by name.
@@ -117,8 +119,10 @@ defmodule SmolqueryApi.ConnectionController do
   """
   @spec test(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def test(conn, %{"name" => name}) do
-    with {:ok, connection} <- Catalog.connection(DatasetController.catalog(conn), name),
-         :ok <- Federation.probe(connection) do
+    {:ok, runtime} = Runtime.fetch(conn.private.smolquery_api)
+
+    with {:ok, connection} <- Catalog.connection(runtime.catalog, name),
+         :ok <- Federation.probe(connection, QueryService.Client.sealed_store(runtime.query_name)) do
       Json.send_json(conn, 200, %{"name" => name, "ok" => true})
     else
       {:error, reason} -> Errors.from_reason(conn, reason)
