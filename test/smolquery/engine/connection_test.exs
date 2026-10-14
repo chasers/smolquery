@@ -227,32 +227,6 @@ defmodule Smolquery.Engine.ConnectionTest do
     end
   end
 
-  describe "extension loads are serialized per node (T-415)" do
-    setup do
-      lock = {Connection.extension_lock(), self()}
-      true = :global.set_lock(lock, [node()])
-      on_exit(fn -> :global.del_lock(lock, [node()]) end)
-      %{lock: lock}
-    end
-
-    test "a connection that loads an extension waits for the node's lock, then starts", %{
-      lock: lock
-    } do
-      start =
-        Task.async(fn -> Connection.start_link(database: @database, extensions: [:sqlite]) end)
-
-      assert Task.yield(start, 300) == nil
-      true = :global.del_lock(lock, [node()])
-      assert {:ok, conn} = Task.await(start, 10_000)
-      assert {:ok, _loaded} = Connection.query(conn, "SELECT 1")
-    end
-
-    test "a connection with no extensions does not wait" do
-      assert {:ok, conn} = Connection.start_link(database: @database, extensions: [])
-      assert {:ok, _answered} = Connection.query(conn, "SELECT 1")
-    end
-  end
-
   describe "extensions" do
     @tag :integration
     test "fails to start on an unknown extension" do

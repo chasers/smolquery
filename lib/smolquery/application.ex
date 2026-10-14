@@ -34,6 +34,7 @@ defmodule Smolquery.Application do
     children =
       [
         Smolquery.Telemetry,
+        Smolquery.Engine.ExtensionLoader,
         Smolquery.MetricsServer,
         Smolquery.MemoryMetrics,
         Smolquery.Allocator,

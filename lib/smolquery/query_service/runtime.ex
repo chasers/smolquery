@@ -342,8 +342,21 @@ defmodule Smolquery.QueryService.Runtime do
       distributed: distributed(Keyword.get(config, :distributed, []))
     }
     |> struct!(Keyword.take(config, @limits))
+    |> with_metadata_driver(catalog_opts)
     |> validate_hot_manifest_page()
   end
+
+  defp with_metadata_driver(%__MODULE__{} = runtime, nil), do: runtime
+
+  defp with_metadata_driver(%__MODULE__{} = runtime, catalog_opts) do
+    driver =
+      catalog_opts |> lake() |> Keyword.get(:metadata) |> Catalog.DuckLake.metadata_extensions()
+
+    %{runtime | engine_extensions: Enum.uniq(runtime.engine_extensions ++ driver)}
+  end
+
+  defp lake(catalog_opts),
+    do: Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts || [])
 
   # A page of zero entries would trip `HotClient.newest/4`'s guard inside
   # every preview's fetch task, and the plan would report the buffer node
@@ -360,8 +373,7 @@ defmodule Smolquery.QueryService.Runtime do
   defp warm_probe(nil), do: "SELECT 1"
 
   defp warm_probe(catalog_opts) do
-    merged =
-      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
+    merged = lake(catalog_opts)
 
     if Keyword.has_key?(merged, :metadata) and Keyword.has_key?(merged, :data_path) do
       lake = Keyword.get(merged, :catalog, Catalog.DuckLake.default_catalog())
@@ -458,8 +470,7 @@ defmodule Smolquery.QueryService.Runtime do
   defp bootstrap(nil), do: []
 
   defp bootstrap(catalog_opts) do
-    merged =
-      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
+    merged = lake(catalog_opts)
 
     with {:ok, metadata} <- Keyword.fetch(merged, :metadata),
          {:ok, data_path} <- Keyword.fetch(merged, :data_path) do
@@ -474,18 +485,14 @@ defmodule Smolquery.QueryService.Runtime do
   defp history_metadata(nil), do: nil
 
   defp history_metadata(catalog_opts) do
-    merged =
-      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts)
-
-    case Keyword.get(merged, :metadata) do
+    case Keyword.get(lake(catalog_opts), :metadata) do
       "sqlite:" <> _path = metadata -> metadata
       _absent_or_not_sqlite -> nil
     end
   end
 
   defp allowed_directories(catalog_opts) do
-    merged =
-      Keyword.merge(Application.get_env(:smolquery, Catalog.DuckLake, []), catalog_opts || [])
+    merged = lake(catalog_opts)
 
     [
       Application.get_env(:smolquery, :data_dir),

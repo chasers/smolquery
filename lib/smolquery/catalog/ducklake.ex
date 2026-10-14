@@ -307,7 +307,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
     {store, config} = Keyword.pop(config, :store)
     statements = Keyword.get(config, :statements, [])
-    required = if postgres_metadata?(metadata), do: [:postgres, :ducklake], else: [:ducklake]
+    required = metadata_extensions(metadata) ++ [:ducklake]
 
     extensions =
       config
@@ -434,6 +434,27 @@ defmodule Smolquery.Catalog.DuckLake do
     pool = Reader.pool(engine)
     [{Reader, {pool, reader}}, Reader.check_child(pool)]
   end
+
+  @doc """
+  The extension DuckLake drives a lake's `metadata` database with, which an
+  engine lists so that its attach does not autoload it: `postgres` for a
+  Postgres metadata string, `sqlite` for a SQLite one, nothing for any
+  other or none. An autoload at first use runs DuckDB's signature check
+  outside `Smolquery.Engine.ExtensionLoader`'s queue, which two engines
+  starting together must not do (T-415).
+
+      iex> Smolquery.Catalog.DuckLake.metadata_extensions("postgres:dbname=smolquery")
+      [:postgres]
+      iex> Smolquery.Catalog.DuckLake.metadata_extensions("sqlite:/data/catalog.sqlite")
+      [:sqlite]
+      iex> Smolquery.Catalog.DuckLake.metadata_extensions(nil)
+      []
+
+  """
+  @spec metadata_extensions(String.t() | nil) :: [:postgres | :sqlite]
+  def metadata_extensions("postgres:" <> _rest), do: [:postgres]
+  def metadata_extensions("sqlite:" <> _rest), do: [:sqlite]
+  def metadata_extensions(_other), do: []
 
   @doc """
   The `ATTACH` statement that binds a metadata database and data path to a

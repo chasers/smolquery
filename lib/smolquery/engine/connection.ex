@@ -95,18 +95,19 @@ defmodule Smolquery.Engine.Connection do
   instances at once against the same extension directory: a burst of job
   engines starting together threw a C++ exception inside it, which ended in
   `std::terminate` and took the whole VM down, every job with it (T-415).
-  So a connection takes a node-wide lock around its `INSTALL` and `LOAD`
-  statements, and releases it before its settings and statements run. A
-  load is milliseconds once the file is on disk, so the wait is short; what
-  the lock buys is that no two connections on this node are ever inside the
-  signature check at the same time. The lock is `:global`'s, held on this
-  node only: it needs no process of its own and nothing of a cluster.
+  So every `INSTALL` and `LOAD` a connection runs, the `:extensions` list
+  at its start and `load_extensions/2` later, goes through
+  `Smolquery.Engine.ExtensionLoader`, one connection at a time on this
+  node, and the settings and statements that follow run outside it. What
+  the loader does not see is an extension DuckDB autoloads at first use on
+  an engine that did not list it, so an engine lists what it uses.
   """
 
   use GenServer
 
   require Logger
 
+  alias Smolquery.Engine.ExtensionLoader
   alias Smolquery.Engine.Params
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
@@ -120,7 +121,6 @@ defmodule Smolquery.Engine.Connection do
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
   @session [TimeZone: "UTC"]
-  @extension_lock {__MODULE__, :extensions}
 
   @type option ::
           {:database, GenServer.server()}
@@ -171,6 +171,16 @@ defmodule Smolquery.Engine.Connection do
     {name, opts} = Keyword.pop(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
+
+  @doc """
+  Installs and loads `extensions` on a running connection, through the
+  node's `Smolquery.Engine.ExtensionLoader` as the start did: for a
+  federated query's `postgres` or `ducklake`, loaded after planning and
+  before lockdown. `:ok`, or `{:error, {:extension_failed, name, reason}}`.
+  """
+  @spec load_extensions(GenServer.server(), [extension()]) :: :ok | {:error, term()}
+  def load_extensions(conn, extensions),
+    do: GenServer.call(conn, {:load_extensions, extensions}, :infinity)
 
   @doc """
   Runs `statements` one after another with no parameters and no timeout,
@@ -337,7 +347,7 @@ defmodule Smolquery.Engine.Connection do
 
     with {:ok, adbc} <- Adbc.Connection.start_link(database: database),
          :ok <- apply_settings(adbc, extension_directory()),
-         :ok <- load_extensions(adbc, extensions),
+         :ok <- ExtensionLoader.load(adbc, extensions),
          :ok <- apply_settings(adbc, settings),
          :ok <- run_statements(adbc, statements) do
       {:ok, %{adbc: adbc, database: database, max_rows: max_rows}}
@@ -383,6 +393,11 @@ defmodule Smolquery.Engine.Connection do
   @impl true
   def handle_call(:adbc_connection, _from, state) do
     {:reply, state.adbc, state}
+  end
+
+  @impl true
+  def handle_call({:load_extensions, extensions}, _from, state) do
+    {:reply, ExtensionLoader.load(state.adbc, extensions), state}
   end
 
   defp shaped({:ok, frame} = answer, adbc, sql, params) do
@@ -469,43 +484,6 @@ defmodule Smolquery.Engine.Connection do
       {:ok, converted} -> {:ok, converted}
       {:error, :too_many_rows} -> {:error, %ResultTooLarge{max: max_rows}}
       {:error, {:untyped, reason}} -> {:error, %UntypedResult{reason: reason}}
-    end
-  end
-
-  defp load_extensions(_adbc, []), do: :ok
-
-  defp load_extensions(adbc, extensions) do
-    case :global.trans({@extension_lock, self()}, fn -> load_each(adbc, extensions) end, [node()]) do
-      :aborted -> {:error, :extension_lock_unavailable}
-      result -> result
-    end
-  end
-
-  @doc """
-  The resource every connection on this node locks while it loads its
-  extensions, so a test or an operator can hold it and watch a start wait.
-  """
-  @spec extension_lock() :: {module(), :extensions}
-  def extension_lock, do: @extension_lock
-
-  defp load_each(adbc, extensions) do
-    bootstrap(extensions, fn extension ->
-      {name, source} = extension_source(extension)
-
-      case install_and_load(adbc, name, source) do
-        :ok -> :ok
-        {:error, reason} -> {:error, {:extension_failed, name, reason}}
-      end
-    end)
-  end
-
-  defp extension_source({extension, :community}), do: {to_string(extension), " FROM community"}
-  defp extension_source(extension), do: {to_string(extension), ""}
-
-  defp install_and_load(adbc, name, source) do
-    with {:ok, _installed} <- Adbc.Connection.query(adbc, "INSTALL #{name}#{source}"),
-         {:ok, _loaded} <- Adbc.Connection.query(adbc, "LOAD #{name}") do
-      :ok
     end
   end
 

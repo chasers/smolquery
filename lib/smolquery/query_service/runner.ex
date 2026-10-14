@@ -596,11 +596,7 @@ defmodule Smolquery.QueryService.Runner do
   def federated_extension(_connection, %{federated: false}), do: :ok
 
   def federated_extension(connection, %{federated: true, federated_extensions: extensions}),
-    do:
-      Connection.query_each(
-        connection,
-        Enum.flat_map(extensions, &["INSTALL #{&1}", "LOAD #{&1}"])
-      )
+    do: Connection.load_extensions(connection, extensions)
 
   defp lockdown(%Runtime{lockdown: false}, _plan, _job_id), do: []
 

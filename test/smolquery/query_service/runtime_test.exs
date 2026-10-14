@@ -50,6 +50,28 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert Runtime.new(name: __MODULE__.Named, warm_probe: "SELECT 2").warm_probe == "SELECT 2"
     end
 
+    test "a job engine lists its lake's metadata driver, so the attach autoloads nothing (T-415)" do
+      sqlite =
+        Runtime.new(
+          name: __MODULE__.SqliteDriver,
+          catalog: [metadata: "sqlite:/nowhere/catalog.sqlite", data_path: "/nowhere/data"]
+        )
+
+      postgres =
+        Runtime.new(
+          name: __MODULE__.PostgresDriver,
+          catalog: [metadata: "postgres:dbname=lake", data_path: "/nowhere/data"]
+        )
+
+      assert :sqlite in sqlite.engine_extensions
+      assert :postgres in postgres.engine_extensions
+      refute :postgres in sqlite.engine_extensions
+
+      no_lake = Runtime.new(name: __MODULE__.NoDriver, catalog: StubCatalog.new(self()))
+      refute :sqlite in no_lake.engine_extensions
+      refute :postgres in no_lake.engine_extensions
+    end
+
     test "a job engine attaches the lake without automatic migration, even when asked (T-651)" do
       runtime =
         Runtime.new(

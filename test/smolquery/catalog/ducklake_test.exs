@@ -28,6 +28,8 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   @moduletag :integration
   @moduletag :tmp_dir
 
+  doctest DuckLake, only: [metadata_extensions: 1]
+
   @engine __MODULE__.Lake
   @table {"analytics", "events"}
 
