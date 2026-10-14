@@ -13,6 +13,7 @@ defmodule Smolquery.MixProject do
       listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
+      hex: [ignore_advisories: ["EEF-CVE-2026-105659"]],
       dialyzer: [
         plt_local_path: "priv/plts",
         plt_core_path: "priv/plts",
