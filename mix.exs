@@ -107,7 +107,7 @@ defmodule Smolquery.MixProject do
         "deps.unlock --check-unused",
         "format --check-formatted",
         "credo --strict",
-        "deps.audit",
+        "deps.audit --ignore-advisory-ids EEF-CVE-2026-105659",
         "ex_dna",
         "reach.check --arch --smells --strict --baseline .reach.baseline.json"
       ]

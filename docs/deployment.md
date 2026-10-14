@@ -129,6 +129,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### HTTP/2 is off on every listener while bandit's advisory stands
+
+**TL;DR.** Bandit 1.12.5 has a HIGH advisory, EEF-CVE-2026-105659: on HTTP/2, a client that trickles `WINDOW_UPDATE` frames can pin a stream process forever. Bandit fixed it on its main branch on 2026-10-12 and has not released. Until it does, every listener here refuses HTTP/2, and `mix ci`'s `deps.audit` ignores that one advisory id.
+
+- **What changes for a client:** nothing on HTTP/1.1, which is what every documented client uses. Bandit served HTTP/2 on cleartext to a client that sent the `PRI` preface; now it does not. No edge terminates TLS, so there was no ALPN HTTP/2 either.
+- **Where:** the API and web endpoints (`http_2_options: [enabled: false]` in their `http:` config), the ClickHouse edge, the VictoriaMetrics edge, the buffer nodes' hot server and the metrics listener.
+- **To undo:** when bandit releases the fix, bump it, drop `--ignore-advisory-ids` from the `ci` alias in `mix.exs`, and remove the six `http_2_options` lines if HTTP/2 is wanted back.
+
 ### 0.23.0: a release names the local DuckLake data roots, for a separate read cluster (T-650)
 
 **TL;DR.** `SMOLQUERY_FEDERATION_LOCAL_ROOTS` lets a second smolquery deployment attach a running deployment's lake as a `kind: ducklake` connection. A read cluster set up this way sees sealed data only, so it trails the writer by the writer's seal interval. Nothing changes for a deployment that sets no roots.

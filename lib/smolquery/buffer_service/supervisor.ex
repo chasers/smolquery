@@ -123,7 +123,8 @@ defmodule Smolquery.BufferService.Supervisor do
              plug: {HotServer, runtime.name},
              ip: runtime.hot_server_ip,
              port: runtime.hot_server_port,
-             startup_log: false},
+             startup_log: false,
+             http_2_options: [enabled: false]},
             id: Runtime.hot_server(runtime.name)
           ),
           write_pool(runtime),

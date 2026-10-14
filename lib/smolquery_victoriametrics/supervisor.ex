@@ -47,6 +47,7 @@ defmodule SmolqueryVictoriaMetrics.Supervisor do
            ip: runtime.ip,
            port: runtime.port,
            startup_log: false,
+           http_2_options: [enabled: false],
            thousand_island_options: [supervisor_options: [name: Runtime.listener(runtime.name)]]}
         ]
 

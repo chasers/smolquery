@@ -22,6 +22,23 @@ defmodule SmolqueryClickHouse.SupervisorTest do
     {name, "http://127.0.0.1:#{port}"}
   end
 
+  test "refuses HTTP/2 on cleartext: the preface gets no SETTINGS frame back (EEF-CVE-2026-105659)" do
+    {_name, "http://127.0.0.1:" <> port} = start_edge()
+
+    {:ok, socket} =
+      :gen_tcp.connect(~c"127.0.0.1", String.to_integer(port), [:binary, active: false])
+
+    :ok = :gen_tcp.send(socket, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+    case :gen_tcp.recv(socket, 0, 2_000) do
+      {:ok, reply} ->
+        refute match?(<<_length::24, 4, _rest::binary>>, reply), "an HTTP/2 SETTINGS frame"
+
+      {:error, :closed} ->
+        :ok
+    end
+  end
+
   test "serves the edge over a real listener" do
     {_name, base} = start_edge()
 

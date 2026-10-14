@@ -55,6 +55,7 @@ defmodule SmolqueryClickHouse.Supervisor do
            ip: runtime.ip,
            port: runtime.port,
            startup_log: false,
+           http_2_options: [enabled: false],
            http_1_options: [max_request_line_length: @max_request_line_bytes],
            thousand_island_options: [supervisor_options: [name: Runtime.listener(runtime.name)]]}
         ]

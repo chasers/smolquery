@@ -60,7 +60,7 @@ config :smolquery, Smolquery.MetricsServer, ip: {127, 0, 0, 1}, port: 4003
 
 config :smolquery, SmolqueryApi.Endpoint,
   adapter: Bandit.PhoenixAdapter,
-  http: [ip: {127, 0, 0, 1}, port: 4000],
+  http: [ip: {127, 0, 0, 1}, port: 4000, http_2_options: [enabled: false]],
   render_errors: [formats: [json: SmolqueryApi.ErrorJSON], layout: false],
   server: true
 
@@ -73,7 +73,7 @@ config :smolquery, SmolqueryVictoriaMetrics, ip: {127, 0, 0, 1}, port: 8428
 config :smolquery, SmolqueryWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
+  http: [ip: {127, 0, 0, 1}, port: 4002, http_2_options: [enabled: false]],
   render_errors: [
     formats: [html: SmolqueryWeb.ErrorHTML, json: SmolqueryWeb.ErrorJSON],
     layout: false

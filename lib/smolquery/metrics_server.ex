@@ -31,7 +31,8 @@ defmodule Smolquery.MetricsServer do
        plug: __MODULE__,
        ip: Keyword.get(config, :ip, {127, 0, 0, 1}),
        port: Keyword.get(config, :port, 4003),
-       startup_log: false},
+       startup_log: false,
+       http_2_options: [enabled: false]},
       id: __MODULE__
     )
   end
