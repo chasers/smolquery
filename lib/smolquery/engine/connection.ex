@@ -87,6 +87,20 @@ defmodule Smolquery.Engine.Connection do
   saw it; a developer's machine is not. So every connection sets
   `TimeZone = 'UTC'` first, here for the same reason spill isolation is
   here: it must hold for a job's connection too.
+
+  ## Extensions load one connection at a time per node
+
+  `LOAD` verifies an extension's signature, and DuckDB's
+  `ExtensionHelper::CheckExtensionSignature` is not safe to run from two
+  instances at once against the same extension directory: a burst of job
+  engines starting together threw a C++ exception inside it, which ended in
+  `std::terminate` and took the whole VM down, every job with it (T-415).
+  So a connection takes a node-wide lock around its `INSTALL` and `LOAD`
+  statements, and releases it before its settings and statements run. A
+  load is milliseconds once the file is on disk, so the wait is short; what
+  the lock buys is that no two connections on this node are ever inside the
+  signature check at the same time. The lock is `:global`'s, held on this
+  node only: it needs no process of its own and nothing of a cluster.
   """
 
   use GenServer
@@ -106,6 +120,7 @@ defmodule Smolquery.Engine.Connection do
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
   @session [TimeZone: "UTC"]
+  @extension_lock {__MODULE__, :extensions}
 
   @type option ::
           {:database, GenServer.server()}
@@ -457,7 +472,23 @@ defmodule Smolquery.Engine.Connection do
     end
   end
 
+  defp load_extensions(_adbc, []), do: :ok
+
   defp load_extensions(adbc, extensions) do
+    case :global.trans({@extension_lock, self()}, fn -> load_each(adbc, extensions) end, [node()]) do
+      :aborted -> {:error, :extension_lock_unavailable}
+      result -> result
+    end
+  end
+
+  @doc """
+  The resource every connection on this node locks while it loads its
+  extensions, so a test or an operator can hold it and watch a start wait.
+  """
+  @spec extension_lock() :: {module(), :extensions}
+  def extension_lock, do: @extension_lock
+
+  defp load_each(adbc, extensions) do
     bootstrap(extensions, fn extension ->
       {name, source} = extension_source(extension)
 
