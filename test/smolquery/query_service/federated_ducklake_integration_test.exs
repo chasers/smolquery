@@ -130,8 +130,8 @@ defmodule Smolquery.QueryService.FederatedDucklakeIntegrationTest do
   end
 
   test "probe/1 reads through the lake, and tables/1 lists it", %{connection: connection} do
-    assert Federation.probe(connection) == :ok
-    assert Federation.tables(connection) == {:ok, [{"sales", "orders"}]}
+    assert Federation.probe(connection, nil) == :ok
+    assert Federation.tables(connection, nil) == {:ok, [{"sales", "orders"}]}
   end
 
   test "a data path the lake does not live at fails the probe, and names only the connection",
@@ -140,7 +140,7 @@ defmodule Smolquery.QueryService.FederatedDucklakeIntegrationTest do
     File.mkdir_p!(elsewhere)
 
     assert {:ok, moved} = Connection.update(connection, %{"data_path" => elsewhere})
-    assert {:error, {:federation_error, "remote", reason}} = Federation.probe(moved)
+    assert {:error, {:federation_error, "remote", reason}} = Federation.probe(moved, nil)
     refute reason =~ "password=postgres"
   end
 

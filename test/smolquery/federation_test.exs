@@ -267,7 +267,7 @@ defmodule Smolquery.FederationTest do
     test "an unreachable host is an error that never quotes the password" do
       conn = connection(%{"host" => "127.0.0.1", "port" => 1, "password" => "sup3rsecret"})
 
-      assert {:error, {:federation_error, "warehouse", reason}} = Federation.probe(conn)
+      assert {:error, {:federation_error, "warehouse", reason}} = Federation.probe(conn, nil)
       refute inspect(reason) =~ "sup3rsecret"
     end
 
@@ -284,7 +284,7 @@ defmodule Smolquery.FederationTest do
           "password" => options[:password]
         })
 
-      assert Federation.probe(conn) == :ok
+      assert Federation.probe(conn, nil) == :ok
     end
   end
 end
