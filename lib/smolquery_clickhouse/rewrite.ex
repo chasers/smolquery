@@ -196,7 +196,7 @@ defmodule SmolqueryClickHouse.Rewrite do
   def call(statement) when is_binary(statement) do
     pieces = statement |> Sql.tokens() |> Enum.flat_map(&pieces/1) |> expression_aliases()
 
-    arrays = pieces |> array_aliases() |> Map.new(&{&1, true})
+    arrays = array_aliases(pieces)
 
     pieces
     |> walk(%{depth: 0, clauses: [], casts: [], last: nil, arrays: arrays}, [])
@@ -693,18 +693,18 @@ defmodule SmolqueryClickHouse.Rewrite do
     |> Enum.reverse()
   end
 
-  defp array_aliases(pieces), do: pieces |> select_items([]) |> array_names(MapSet.new())
+  defp array_aliases(pieces), do: pieces |> select_items([]) |> array_names(%{})
 
   defp array_names(items, known) do
     grown = Enum.reduce(items, known, &learned/2)
 
-    if MapSet.size(grown) == MapSet.size(known), do: grown, else: array_names(items, grown)
+    if map_size(grown) == map_size(known), do: grown, else: array_names(items, grown)
   end
 
   defp learned(item, names) do
     case aliased_item(item) do
       {:ok, name, expression} ->
-        if array_expression?(expression, names), do: MapSet.put(names, name), else: names
+        if array_expression?(expression, names), do: Map.put(names, name, true), else: names
 
       :error ->
         names
@@ -798,10 +798,10 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp array_expression?([{:other, text} | _rest], _names),
     do: String.starts_with?(String.trim_leading(text), "[")
 
-  defp array_expression?([{:word, _text, lower}], names), do: MapSet.member?(names, lower)
+  defp array_expression?([{:word, _text, lower}], names), do: is_map_key(names, lower)
 
   defp array_expression?([{:word, _left, left}, {:other, minus}, {:word, _right, right}], names),
-    do: String.trim(minus) == "-" and MapSet.member?(names, left) and MapSet.member?(names, right)
+    do: String.trim(minus) == "-" and is_map_key(names, left) and is_map_key(names, right)
 
   defp array_expression?(_expression, _names), do: false
 
