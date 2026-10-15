@@ -35,6 +35,7 @@ defmodule Smolquery.Application do
       [
         Smolquery.Telemetry,
         Smolquery.Engine.ExtensionLoader,
+        Smolquery.Tracing,
         Smolquery.MetricsServer,
         Smolquery.MemoryMetrics,
         Smolquery.Allocator,

@@ -192,6 +192,8 @@ mutual TLS: change both values to `true` before you apply the overlay.
 
 | variable | effect (default) |
 |---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Where traces go, over OTLP (unset: no traces are made). Naming either switches `Smolquery.Tracing` on: one span per request on the API, the ClickHouse edge and the VictoriaMetrics edge, and one per query job with its phases as children, parented to the request that submitted it. The OpenTelemetry SDK reads the endpoint itself and appends `/v1/traces` to the first form, as it reads the rest of its `OTEL_*` family: `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf`; `grpc` works too), `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (`parentbased_always_on`), `OTEL_BSP_*` for the batch processor. An incoming W3C `traceparent` header continues the caller's trace |
+| `OTEL_SERVICE_NAME` | The `service.name` on every span (`smolquery`). The resource also carries `smolquery.roles`. Set `OTEL_RESOURCE_ATTRIBUTES` for more |
 Memory needs no variable: `Smolquery.MemoryMetrics` runs on every node and publishes the cgroup's charge and its anon/file/slab split, the 60-second peak of that charge, the cgroup limit, the kernel's cumulative `max` and `oom_kill` counters, the resident set and the BEAM's split as `smolquery_memory_*` series on `GET /metrics` (T-451) — see [architecture.md](architecture.md). Sampling is every 250 ms (`config :smolquery, Smolquery.MemoryMetrics, interval_ms: 250`; `enabled: false` turns it off). Scrape it; the peak series is what catches a spike shorter than the scrape interval.
 
 Releases, artifacts, and upgrade procedures live in

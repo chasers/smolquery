@@ -129,6 +129,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Traces leave the node over OTLP when an endpoint is named (T-662)
+
+**TL;DR.** Set `OTEL_EXPORTER_OTLP_ENDPOINT` and every node exports OpenTelemetry traces there: one span per request on the API, the ClickHouse edge and the VictoriaMetrics edge, and one per query job with its phases as children. Unset, nothing changes and nothing is made.
+
+- **What a trace holds:** the request's method, matched route, path and status; the job's SQL (first 2,048 characters), id, state, row count, snapshot and file cache decision; each phase (`parse`, `prune`, `engine_start`, `execute`, ...) at its own time. A W3C `traceparent` on the request continues the caller's trace.
+- **Configuration:** the standard `OTEL_*` variables, listed in [configuration.md](configuration.md#diagnostics). Nothing is smolquery-specific.
+- **Into HyperDX:** ship the spans into an `otel_traces` table with your collector or Vector; the table and source are in [clickstack.md](clickstack.md). smolquery does not yet take OTLP in itself.
+- **Not traced yet:** buffer flushes, seals and scatter shards. A scattered query is one span on the coordinator.
+
 ### HTTP/2 is off on every listener while bandit's advisory stands
 
 **TL;DR.** Bandit 1.12.5 has a HIGH advisory, EEF-CVE-2026-105659: on HTTP/2, a client that trickles `WINDOW_UPDATE` frames can pin a stream process forever. Bandit fixed it on its main branch on 2026-10-12 and has not released. Until it does, every listener here refuses HTTP/2, and both audits `mix ci` runs ignore that one advisory id: `hex.audit` through `hex: [ignore_advisories: [...]]` in `mix.exs`, `deps.audit` through `--ignore-advisory-ids`.

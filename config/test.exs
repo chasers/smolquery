@@ -62,3 +62,6 @@ config :aws_credentials, credential_providers: [:aws_credentials_env]
 config :smolquery,
        :spill_dir,
        Path.join(System.tmp_dir!(), "smolquery-test-spill-#{System.pid()}")
+
+config :opentelemetry, traces_exporter: :none, processors: [otel_simple_processor: %{}]
+config :smolquery, Smolquery.Tracing, enabled: true

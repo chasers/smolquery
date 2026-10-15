@@ -157,4 +157,7 @@ config :smolquery, Smolquery.Catalog.DuckLake,
   metadata: "sqlite:priv/data/catalog.sqlite",
   data_path: "priv/data/ducklake"
 
+config :opentelemetry, traces_exporter: :none
+config :smolquery, Smolquery.Tracing, enabled: false
+
 import_config "#{config_env()}.exs"

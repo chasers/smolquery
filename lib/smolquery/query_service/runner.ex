@@ -108,6 +108,7 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.Scatter
   alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.VariantResults
+  alias Smolquery.Tracing
 
   @type option ::
           {:timeout_ms, pos_integer()}
@@ -181,6 +182,7 @@ defmodule Smolquery.QueryService.Runner do
       ddl: false,
       plan_opts: Keyword.take(opts, [:snapshot, :hot_before_ms, :hot_ids, :params]),
       trace: Keyword.get(opts, :trace, false),
+      trace_parent: Keyword.get(opts, :trace_parent),
       collector: nil,
       engine: nil,
       task: nil,
@@ -672,13 +674,20 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp collector(%{trace: true, job: job}), do: Trace.attach(job.id, self())
-  defp collector(_state), do: nil
 
-  defp traced(%{collector: nil}, job), do: job
-  defp traced(%{collector: collector}, job), do: %{job | trace: Trace.stop(collector)}
+  defp collector(%{job: job}) do
+    if Tracing.enabled?(), do: Trace.attach(job.id, self()), else: nil
+  end
+
+  defp collected(%{collector: nil}), do: []
+  defp collected(%{collector: collector}), do: Trace.stop(collector)
+
+  defp traced(%{trace: true}, job, spans), do: %{job | trace: spans}
+  defp traced(_state, job, _spans), do: job
 
   defp settle(state, job) do
-    job = traced(state, job)
+    spans = collected(state)
+    job = traced(state, job, spans)
     stop_engine(state.engine)
     remove_partials(state.runtime, job)
     if state.explain != :describe, do: record_history(state.runtime, job)
@@ -686,7 +695,7 @@ defmodule Smolquery.QueryService.Runner do
     :telemetry.execute(
       [:smolquery, :query, :job],
       %{duration_ms: job.duration_ms || 0},
-      %{state: job.state}
+      %{state: job.state, job: job, spans: spans, parent: state.trace_parent}
     )
 
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, job, state.result}))

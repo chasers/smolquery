@@ -1003,3 +1003,20 @@ if keep = System.get_env("SMOLQUERY_SNAPSHOT_KEEP_MS") do
     snapshot_keep_ms:
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SNAPSHOT_KEEP_MS", keep)
 end
+
+# Traces leave the node only when an OTLP endpoint is named. The SDK reads
+# every other OTEL_* variable itself: sampler, headers, protocol, timeouts.
+otlp_endpoint =
+  System.get_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") ||
+    System.get_env("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+if otlp_endpoint do
+  config :opentelemetry, traces_exporter: :otlp
+  config :smolquery, Smolquery.Tracing, enabled: true
+
+  config :opentelemetry,
+    resource: %{
+      "service.name" => System.get_env("OTEL_SERVICE_NAME", "smolquery"),
+      "smolquery.roles" => System.get_env("SMOLQUERY_ROLES", "all")
+    }
+end

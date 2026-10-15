@@ -38,6 +38,7 @@ defmodule Smolquery.QueryService.Client do
   alias Smolquery.QueryService.Runner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Segments.Store
+  alias Smolquery.Tracing
 
   @type option ::
           {:timeout_ms, pos_integer()}
@@ -148,7 +149,11 @@ defmodule Smolquery.QueryService.Client do
     with {:ok, runtime} <- runtime(name),
          :ok <- admit(runtime) do
       job = Job.new(sql)
-      spec = {Runner, {runtime, job, Keyword.take(opts, @submit_option_keys)}}
+
+      spec =
+        {Runner,
+         {runtime, job,
+          [{:trace_parent, Tracing.current_span()} | Keyword.take(opts, @submit_option_keys)]}}
 
       case DynamicSupervisor.start_child(
              {:via, PartitionSupervisor, {Runtime.runners(name), job.id}},
