@@ -137,6 +137,13 @@ defmodule Smolquery.QueryService.NullabilityTest do
         "GROUP BY ALL"
 
     assert columns(pivot) == [false, true, false]
+
+    assert columns("SELECT max(id) FROM logs.events GROUP BY ALL") == [false],
+           "a GROUP BY ALL with no plain column is one aggregate row, NULL on no input"
+
+    assert columns(
+             "SELECT id AS x, level AS y FROM logs.events UNION ALL BY NAME SELECT id AS y, level AS x FROM logs.events"
+           ) == :unknown
   end
 
   test "what it cannot rule out may be NULL" do

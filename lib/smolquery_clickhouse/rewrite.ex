@@ -95,20 +95,25 @@ defmodule SmolqueryClickHouse.Rewrite do
   - **`* EXCEPT (...)`** is the engine's `* EXCLUDE (...)`.
   - **`group`.** HyperDX names a histogram's packed group columns `group`,
     which the engine takes as the keyword wherever `BY` does not follow.
-    The name is quoted; `GROUP BY` is not.
+    The name is quoted; `GROUP BY` (a comment between the words included)
+    and `WITHIN GROUP` are not.
   - **`inf` and `nan`** are the doubles the engine spells `'infinity'` and
     `'nan'`.
   - **`CAST(x AS Array(Int64))`.** ClickHouse's type names inside the
-    standard cast form become the engine's, as they do in the function
-    form; a name this module does not know stays as written.
+    standard cast form and after `::` become the engine's, as they do in the
+    function form; a name this module does not know stays as written, and so
+    does `INT8`, which the engine reads as a `BIGINT` where ClickHouse's
+    `Int8` is a byte.
   - **`counts - prev_counts`.** ClickHouse subtracts two arrays element by
     element, and HyperDX's histogram quantile relies on it. The engine has
     no such operator, so the rewrite keeps a list of the names the
     statement binds to arrays — an alias of a `CAST(... AS Array(...))`, of
     an array function such as `arrayZip` or `sumForEach`, of a list literal,
     or of `any(...)`, `multiIf(...)` and their kin passed one — and writes
-    `a - b` between two of them as `clickhouse_arrayMinus(a, b)`. A minus
-    between any other two names is left alone.
+    `a - b` between two of them as `clickhouse_arrayMinus(a, b)`. The list
+    is statement-wide, not per scope, so a name bound as an array in one
+    place and as something else in another is ambiguous and left alone, as
+    is a minus between any other two names and one after a dot.
 
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
@@ -497,7 +502,7 @@ defmodule SmolqueryClickHouse.Rewrite do
          acc
        )
        when is_map_key(arrays, left_lower) and is_map_key(arrays, right_lower) do
-    if String.trim(minus) == "-",
+    if String.trim(minus) == "-" and not after_member?(acc),
       do:
         walk(rest, %{state | last: nil}, [
           ["clickhouse_arrayMinus(", left, ", ", right, ")"] | acc
@@ -627,7 +632,11 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp walk_word({:word, _word, lower}, text, rest, state, acc),
     do: walk(rest, %{state | last: lower}, [text | acc])
 
-  defp group_name(text, acc), do: if(after_member?(acc), do: text, else: ~s("group"))
+  defp group_name(text, acc),
+    do: if(after_member?(acc) or after_within?(acc), do: text, else: ~s("group"))
+
+  defp after_within?(acc),
+    do: acc |> leading_text() |> String.trim() |> String.downcase() |> String.ends_with?("within")
 
   defp after_member?(acc), do: String.ends_with?(String.trim_trailing(leading_text(acc)), ".")
 
@@ -654,7 +663,7 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp after_operand?(_acc), do: false
 
   defp cast_target(pieces) do
-    with [{:word, name, _lower} | rest] <- drop_space(pieces),
+    with [{:word, name, lower} | rest] when lower != "int8" <- drop_space(pieces),
          {:ok, written, after_type} <- type_text(name, rest),
          {:ok, type} <- engine_type(written) do
       {:ok, type, after_type}
@@ -693,7 +702,19 @@ defmodule SmolqueryClickHouse.Rewrite do
     |> Enum.reverse()
   end
 
-  defp array_aliases(pieces), do: pieces |> select_items([]) |> array_names(%{})
+  defp array_aliases(pieces) do
+    items = select_items(pieces, [])
+    arrays = array_names(items, %{})
+
+    Map.drop(arrays, scalar_names(items, arrays))
+  end
+
+  defp scalar_names(items, arrays) do
+    for item <- items,
+        {:ok, name, expression} <- [aliased_item(item)],
+        not array_expression?(expression, arrays),
+        do: name
+  end
 
   defp array_names(items, known) do
     grown = Enum.reduce(items, known, &learned/2)
@@ -779,9 +800,12 @@ defmodule SmolqueryClickHouse.Rewrite do
        do: true
 
   defp array_expression?([{:word, _text, "cast"} | _rest] = expression, _names) do
-    expression
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.any?(&match?([{:word, _array, "array"}, :open], &1))
+    typed =
+      expression
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.any?(&match?([{:word, _array, "array"}, :open], &1))
+
+    typed or Enum.any?(expression, &array_literal_type?/1)
   end
 
   defp array_expression?([{:word, _text, lower}, :open | rest], names)
@@ -804,6 +828,11 @@ defmodule SmolqueryClickHouse.Rewrite do
     do: String.trim(minus) == "-" and is_map_key(names, left) and is_map_key(names, right)
 
   defp array_expression?(_expression, _names), do: false
+
+  defp array_literal_type?({:string, literal}),
+    do: literal |> String.downcase() |> String.starts_with?("'array(")
+
+  defp array_literal_type?(_piece), do: false
 
   defp quote_unless_member({:word, text, _lower}, %{last: "."}), do: text
   defp quote_unless_member({:word, _text, _lower}, _state), do: ~s("default")
@@ -875,11 +904,14 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp enter_clause(%{depth: depth, clauses: clauses} = state),
     do: %{state | clauses: [depth | Enum.drop_while(clauses, &(&1 >= depth))], last: "by"}
 
-  defp by([{:other, space}, {:word, text, "by"} | rest]) do
-    if String.trim(space) == "", do: {:ok, space, text, rest}, else: :error
-  end
+  defp by(rest) do
+    {trivia, after_trivia} = Enum.split_while(rest, &trivia?/1)
 
-  defp by(_rest), do: :error
+    case after_trivia do
+      [{:word, text, "by"} | after_by] -> {:ok, Enum.map(trivia, &elem(&1, 1)), text, after_by}
+      _not_by -> :error
+    end
+  end
 
   defp aliased([{:other, space} | rest]) do
     if String.trim(space) == "", do: alias_name(rest), else: :error

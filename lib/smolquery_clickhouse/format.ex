@@ -76,8 +76,8 @@ defmodule SmolqueryClickHouse.Format do
   Text follows ClickHouse's defaults. In a tab-separated row a backslash, a
   tab, a newline, a carriage return, a NUL and a single quote are escaped
   with a backslash, and `NULL` is `\\N`. In JSON a 64-bit integer is a
-  quoted string (`output_format_json_quote_64bit_integers`), a decimal is a
-  bare number, and a non-finite float is `null`. A timestamp is
+  quoted string (`output_format_json_quote_64bit_integers`), and so is the
+  `Int128`; any other decimal is a bare number, and a non-finite float is `null`. A timestamp is
   `YYYY-MM-DD hh:mm:ss.ffffff` in both, or `YYYY-MM-DDThh:mm:ss.ffffffZ`
   under `date_time: :iso`, which is ClickHouse's
   `date_time_output_format = 'iso'`. A `DateTime64(9)` column given as its
@@ -610,6 +610,10 @@ defmodule SmolqueryClickHouse.Format do
   defp json(_dtype, false, value) when is_integer(value), do: Integer.to_string(value)
   defp json(_dtype, false, value) when value in [:nan, :infinity, :neg_infinity], do: "null"
   defp json(_dtype, false, value) when is_float(value), do: JSON.encode!(value)
+
+  defp json({:decimal, 38, 0}, false, %Decimal{} = value),
+    do: [?", Decimal.to_string(value, :normal), ?"]
+
   defp json(_dtype, false, %Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp json(_dtype, false, value) when is_binary(value), do: json_string(value)
 

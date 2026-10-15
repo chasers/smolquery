@@ -243,7 +243,9 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
       |> Router.call(context.name)
 
     assert response.status == 200, response.resp_body
-    assert [%{"total_rows" => 120}] = JSON.decode!(response.resp_body)["data"]
+
+    assert [%{"total_rows" => "120"}] = JSON.decode!(response.resp_body)["data"],
+           "a 128-bit sum is quoted, as ClickHouse quotes the UInt64 it answers here"
   end
 
   describe "total_rows is the statement's own (review of T-507)" do
@@ -287,7 +289,7 @@ defmodule SmolqueryClickHouse.HyperdxSearchTest do
             "1 = 1"
           ] do
         assert data(context, "SELECT sum(total_rows) AS n FROM system.tables WHERE #{where}") == [
-                 [120]
+                 ["120"]
                ],
                where
       end

@@ -74,6 +74,18 @@ defmodule SmolqueryClickHouse.QueryTest do
     assert JSON.decode!(empty.resp_body)["data"] == [%{"q" => []}]
   end
 
+  test "a 128-bit sum answers as a quoted Int128, as a 64-bit integer does (review of T-501)", %{
+    name: name
+  } do
+    response =
+      post(name, "SELECT sum(n) AS s FROM (SELECT 1 AS n UNION ALL SELECT 2) FORMAT JSON")
+
+    assert response.status == 200
+    body = JSON.decode!(response.resp_body)
+    assert Enum.map(body["meta"], & &1["type"]) == ["Nullable(Int128)"]
+    assert body["data"] == [%{"s" => "3"}]
+  end
+
   test "a statement in the body answers TabSeparated by default", %{name: name} do
     response = post(name, "SELECT 1 + 1 AS n, 'a\tb' AS s")
 

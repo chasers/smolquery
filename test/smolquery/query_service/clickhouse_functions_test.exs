@@ -259,6 +259,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert one(engine, "arrayResize([1, 2, 3], 2)") == [1, 2]
       assert one(engine, "arrayResize([1], 3)") == [1, 0, 0]
       assert one(engine, "arraySlice([1, 2, 3, 4], 2, 2)") == [2, 3]
+      assert one(engine, "arraySlice([1, 2, 3, 4], 2)") == [2, 3, 4]
+      assert one(engine, "arrayResize(['a'], 3, '')") == ["a", "", ""]
       assert one(engine, "emptyArrayInt64()") == []
       assert one(engine, "bitShiftLeft(1, 3) + bitShiftRight(16, 2)") == 12
       assert one(engine, "positiveModulo(-1, 5)") == 4

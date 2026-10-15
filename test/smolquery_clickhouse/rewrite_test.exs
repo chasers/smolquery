@@ -391,5 +391,32 @@ defmodule SmolqueryClickHouse.RewriteTest do
       assert Rewrite.call("SELECT a - b FROM (SELECT 1 AS a, 2 AS b)") ==
                "SELECT a - b FROM (SELECT 1 AS a, 2 AS b)"
     end
+
+    test "a minus after a dot, a name bound both ways, and the function-form cast (review of T-501)" do
+      assert Rewrite.call(
+               "SELECT s.counts - prev_counts FROM (SELECT CAST(x AS Array(Int64)) counts, any(counts) OVER w AS prev_counts FROM t) s"
+             ) ==
+               "SELECT s.counts - prev_counts FROM (SELECT CAST(x AS BIGINT[]) counts, any_value(counts) OVER w AS prev_counts FROM t) s"
+
+      ambiguous =
+        "SELECT a - b FROM (SELECT count(*) AS a, sum(x) AS b FROM t) UNION ALL SELECT 0 FROM (SELECT [1] AS a, [2] AS b)"
+
+      assert Rewrite.call(ambiguous) == ambiguous
+
+      assert Rewrite.call(
+               "SELECT counts - prev_counts FROM (SELECT CAST(x, 'Array(Int64)') counts, any(counts) OVER w AS prev_counts FROM t)"
+             ) ==
+               "SELECT clickhouse_arrayMinus(counts, prev_counts) FROM (SELECT CAST(x AS BIGINT[]) counts, any_value(counts) OVER w AS prev_counts FROM t)"
+    end
+
+    test "WITHIN GROUP, a commented BY, and INT8 are left as the engine reads them (review of T-501)" do
+      assert Rewrite.call(
+               "SELECT string_agg(x, ',') WITHIN GROUP (ORDER BY y) FROM t GROUP /* c */ BY z ORDER\n-- note\nBY z"
+             ) ==
+               "SELECT string_agg(x, ',') WITHIN GROUP (ORDER BY y) FROM t GROUP /* c */ BY z ORDER\n-- note\nBY z"
+
+      assert Rewrite.call("SELECT CAST(x AS INT8), x::INT8, CAST(x, 'Int8') FROM t") ==
+               "SELECT CAST(x AS INT8), x::INT8, CAST(x AS TINYINT) FROM t"
+    end
   end
 end

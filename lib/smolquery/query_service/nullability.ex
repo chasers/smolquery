@@ -101,7 +101,8 @@ defmodule Smolquery.QueryService.Nullability do
 
     grouped =
       node["group_expressions"] not in [nil, []] or
-        node["aggregate_handling"] == "FORCE_AGGREGATES"
+        (node["aggregate_handling"] == "FORCE_AGGREGATES" and
+           Enum.any?(node["select_list"], &plain_item?/1))
 
     plain =
       match?(sets when sets in [nil, []], node["group_sets"]) or
@@ -122,13 +123,17 @@ defmodule Smolquery.QueryService.Nullability do
     ctes = Map.merge(outer_ctes, ctes(node, schemas, outer_ctes))
     operands = node |> Ast.set_operands() |> Enum.map(&outputs(&1, schemas, ctes))
 
-    if operands != [] and Enum.all?(operands, &is_list/1) and
+    if node["setop_type"] in ["UNION", "EXCEPT", "INTERSECT"] and operands != [] and
+         Enum.all?(operands, &is_list/1) and
          operands |> Enum.map(&length/1) |> Enum.uniq() |> length() == 1,
        do: Enum.zip_with(operands, &combined/1),
        else: :unknown
   end
 
   defp outputs(_other_node, _schemas, _ctes), do: :unknown
+
+  defp plain_item?(%{"class" => class}), do: class in ["COLUMN_REF", "STAR"]
+  defp plain_item?(_item), do: false
 
   defp combined([{name, _flag} | _rest] = columns),
     do: {name, Enum.all?(columns, fn {_name, flag} -> flag end)}
