@@ -62,6 +62,8 @@ defmodule Smolquery.DdlTest do
             {"ARRAY<INT64>", {:array, :int64}},
             {"ARRAY < FLOAT64 >", {:array, :float64}},
             {"VARCHAR[]", {:array, :string}},
+            {"Array(Int64)", {:array, :int64}},
+            {"array(timestamp_ns)", {:array, :timestamp_ns}},
             {"VARIANT", :variant},
             {"JSON", :variant}
           ] do
@@ -128,8 +130,21 @@ defmodule Smolquery.DdlTest do
       assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN g GEOGRAPHY") ==
                {:error, {:unsupported_type, "GEOGRAPHY"}}
 
-      assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN c ARRAY<VARIANT>") ==
-               {:error, {:unsupported_type, "ARRAY<VARIANT>"}}
+      for {spelling, named} <- [
+            {"ARRAY<VARIANT>", "ARRAY<VARIANT>"},
+            {"ARRAY<NUMERIC(10,2)>", "ARRAY<NUMERIC(10,2)>"},
+            {"NUMERIC(10,2)[]", "ARRAY<NUMERIC(10,2)>"},
+            {"ARRAY<ARRAY<INT64>>", "ARRAY<ARRAY<INT64>>"},
+            {"Array(Map(String, String))", "ARRAY<MAP(STRING, STRING)>"},
+            {"ARRAY<GEOGRAPHY>", "GEOGRAPHY"}
+          ] do
+        assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN c #{spelling}") ==
+                 {:error, {:unsupported_type, named}},
+               spelling
+      end
+
+      assert {:error, {:invalid_ddl, "expected > after the element type"}} =
+               Ddl.parse("ALTER TABLE ds.t ADD COLUMN c ARRAY<INT64")
     end
 
     test "a bad identifier is the same refusal the API gives" do

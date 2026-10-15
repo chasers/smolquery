@@ -453,9 +453,9 @@ defmodule Smolquery.Schema do
   @doc """
   The Explorer dtype for a logical type.
 
-  A map has none — see "A map has no Explorer dtype" above — so this answers
-  `{:error, {:unsupported_type, _}}` for it, which is what the Explorer-side
-  paths fall back on.
+  A map, an array and a variant have none — see "A map has no Explorer
+  dtype" above — so this answers `{:error, {:unsupported_type, _}}` for
+  them, which is what the Explorer-side paths fall back on.
   """
   @spec explorer_dtype(logical_type()) :: {:ok, term()} | {:error, {:unsupported_type, term()}}
   def explorer_dtype({:numeric, precision, scale}), do: {:ok, {:decimal, precision, scale}}

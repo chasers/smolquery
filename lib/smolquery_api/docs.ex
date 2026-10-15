@@ -43,7 +43,10 @@ defmodule SmolqueryApi.Docs do
         "TIMESTAMP",
         "TIMESTAMP_NS",
         "DATE",
-        "NUMERIC(p,s)"
+        "NUMERIC(p,s)",
+        "MAP(STRING, STRING)",
+        "ARRAY<T>",
+        "VARIANT"
       ],
       "routes" => routes()
     }

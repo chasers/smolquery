@@ -49,7 +49,8 @@ defmodule Smolquery.RowBinary do
   | `Array(T)`, with `T` any scalar row above or its `Nullable` | `ARRAY<T>`, element for element |
   | `Nullable(T)`, `LowCardinality(T)` | as `T`; RowBinary writes `LowCardinality(T)` as `T` |
 
-  Anything else — a nested `Array`, `Tuple`, `Enum8`, `Int128`, `Decimal256`,
+  Anything else — a nested `Array`, a `Nullable(Array(T))`, which ClickHouse
+  cannot declare either, `Tuple`, `Enum8`, `Int128`, `Decimal256`,
   `JSON`, `Dynamic` — is refused at the header, naming the column.
 
   ## Errors
@@ -436,11 +437,13 @@ defmodule Smolquery.RowBinary do
     do: {:ok, uuid(<<high::64, low::64>>), rest}
 
   defp value({:map, key, entry}, _type, body) do
-    with {:ok, count, rest} <- varint(body), do: entries(key, entry, count, rest, [], nil)
+    with {:ok, count, rest} <- varint(body),
+         do: items(count, rest, &pair(key, entry, &1, &2), {?{, ?}}, [], nil)
   end
 
   defp value({:array, inner}, {:array, element}, body) do
-    with {:ok, count, rest} <- varint(body), do: elements(inner, element, count, rest, [], nil)
+    with {:ok, count, rest} <- varint(body),
+         do: items(count, rest, &part(inner, element, &1, &2), {?[, ?]}, [], nil)
   end
 
   defp value(_wire, _type, _body), do: truncated()
@@ -622,28 +625,20 @@ defmodule Smolquery.RowBinary do
   defp sign(n) when n < 0, do: ?-
   defp sign(_n), do: []
 
-  defp entries(_key, _entry, 0, rest, pairs, nil),
-    do: {:ok, [?{, Enum.intersperse(Enum.reverse(pairs), ?,), ?}], rest}
+  defp items(0, rest, _read, {open, close}, items, nil),
+    do: {:ok, [open, Enum.intersperse(Enum.reverse(items), ?,), close], rest}
 
-  defp entries(_key, _entry, 0, rest, _pairs, refused), do: {:refused, refused, rest}
+  defp items(0, rest, _read, _brackets, _items, refused), do: {:refused, refused, rest}
 
-  defp entries(key, entry, count, body, pairs, refused) do
-    with {:ok, name, rest, refused} <- entry_part(key, body, refused),
-         {:ok, text, rest, refused} <- entry_part(entry, rest, refused) do
-      entries(key, entry, count - 1, rest, [[name, ?:, text] | pairs], refused)
-    end
+  defp items(count, body, read, brackets, items, refused) do
+    with {:ok, text, rest, refused} <- read.(body, refused),
+         do: items(count - 1, rest, read, brackets, [text | items], refused)
   end
 
-  defp entry_part(wire, body, refused), do: part(wire, :string, body, refused)
-
-  defp elements(_inner, _element, 0, rest, items, nil),
-    do: {:ok, [?[, Enum.intersperse(Enum.reverse(items), ?,), ?]], rest}
-
-  defp elements(_inner, _element, 0, rest, _items, refused), do: {:refused, refused, rest}
-
-  defp elements(inner, element, count, body, items, refused) do
-    with {:ok, text, rest, refused} <- part(inner, element, body, refused),
-         do: elements(inner, element, count - 1, rest, [text | items], refused)
+  defp pair(key, entry, body, refused) do
+    with {:ok, name, rest, refused} <- part(key, :string, body, refused),
+         {:ok, text, rest, refused} <- part(entry, :string, rest, refused),
+         do: {:ok, [name, ?:, text], rest, refused}
   end
 
   defp part(wire, type, body, refused) do
@@ -726,9 +721,7 @@ defmodule Smolquery.RowBinary do
   defp wire({"Decimal64", [scale]}) when scale in 0..18, do: {:ok, {:decimal, 18, scale}}
   defp wire({"Decimal128", [scale]}) when scale in 0..38, do: {:ok, {:decimal, 38, scale}}
 
-  defp wire({"Nullable", [inner]}) do
-    with {:ok, wire} <- wire(inner), do: {:ok, {:nullable, wire}}
-  end
+  defp wire({"Nullable", [inner]}), do: wrapped(:nullable, inner)
 
   defp wire({"LowCardinality", [inner]}), do: wire(inner)
 
@@ -738,14 +731,14 @@ defmodule Smolquery.RowBinary do
          do: {:ok, {:map, key_wire, entry_wire}}
   end
 
-  defp wire({"Array", [inner]}) do
+  defp wire({"Array", [inner]}), do: wrapped(:array, inner)
+  defp wire(_node), do: :error
+
+  defp wrapped(tag, inner) do
     case wire(inner) do
       {:ok, {:array, _nested}} -> :error
-      {:ok, {:nullable, {:array, _nested}}} -> :error
-      {:ok, inner_wire} -> {:ok, {:array, inner_wire}}
+      {:ok, wire} -> {:ok, {tag, wire}}
       :error -> :error
     end
   end
-
-  defp wire(_node), do: :error
 end

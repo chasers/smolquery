@@ -153,6 +153,7 @@ API key can over HTTP.
 | `DATE` | `date` | `2026-08-01` |
 | `NUMERIC(p,s)` | `numeric(p,s)` | `12.50` |
 | `MAP(STRING, STRING)` | `jsonb` | `{"host":"a"}` |
+| `ARRAY<T>` | `jsonb` | `[1,2]` |
 | `VARIANT` | `jsonb` | the JSON value |
 
 A computed list or struct also arrives as `jsonb`. A smaller integer

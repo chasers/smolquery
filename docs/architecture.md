@@ -184,8 +184,8 @@ Properties worth knowing:
 
 One table in `Smolquery.Schema` maps the types: logical type ↔ Explorer
 dtype ↔ DuckDB type (`:int64`/`{:s, 64}`/`BIGINT`, `{:numeric, p, s}` ↔
-`DECIMAL(p,s)`, and so on). Two types have no Explorer dtype —
-`MAP(STRING, STRING)` and `VARIANT` — so only DuckDB writes them (the one
+`DECIMAL(p,s)`, and so on). Three types have no Explorer dtype —
+`MAP(STRING, STRING)`, `ARRAY<T>` and `VARIANT` — so only DuckDB writes them (the one
 flush writer since PL-57), and a variant is stored as `JSON` and cast to `VARIANT` in every table
 view, because DuckLake does not register DuckDB's variant Parquet encoding.
 The caller-facing limits of both are listed once, in the

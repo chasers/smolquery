@@ -39,8 +39,10 @@ defmodule Smolquery.Ddl do
   ## Types
 
   A column type is accepted in the API's vocabulary (`INT64`, `STRING`,
-  `NUMERIC(38,2)`, `ARRAY<INT64>`, ...) and in DuckDB's (`BIGINT`, `VARCHAR`,
-  `DECIMAL(38,2)`, `BIGINT[]`, ...), and always becomes a `Smolquery.Schema` logical
+  `NUMERIC(38,2)`, `ARRAY<INT64>`, ...), in DuckDB's (`BIGINT`, `VARCHAR`,
+  `DECIMAL(38,2)`, `BIGINT[]`, ...) and, for the two compound types the
+  ClickHouse edge's `DESCRIBE` names, in ClickHouse's (`Map(String, String)`,
+  `Array(Int64)`), and always becomes a `Smolquery.Schema` logical
   type — the vocabulary `POST .../columns` speaks, so a type that works in one
   place works in the other.
 
@@ -323,7 +325,41 @@ defmodule Smolquery.Ddl do
 
   defp column([]), do: {:error, {:invalid_ddl, "expected a column name"}}
 
-  defp type([
+  defp type([{:word, "array", _}, {:punct, "<"} | rest]), do: element_type(rest, ">")
+  defp type([{:word, "array", _}, {:punct, "("} | rest]), do: element_type(rest, ")")
+
+  defp type(tokens) do
+    with {:ok, type, rest} <- base_type(tokens), do: suffixed(type, rest)
+  end
+
+  defp suffixed(type, [{:punct, "["}, {:punct, "]"} | rest]), do: array_of(type, rest)
+  defp suffixed(type, rest), do: {:ok, type, rest}
+
+  defp element_type(tokens, closer) do
+    case type(tokens) do
+      {:ok, element, [{:punct, ^closer} | rest]} ->
+        array_of(element, rest)
+
+      {:ok, _element, _unclosed} ->
+        {:error, {:invalid_ddl, "expected #{closer} after the element type"}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp array_of(element, rest) do
+    case Schema.validate_type({:array, element}) do
+      {:ok, type} ->
+        {:ok, type, rest}
+
+      {:error, _not_an_element} ->
+        {:ok, api} = Schema.api_type(element)
+        {:error, {:unsupported_type, "ARRAY<#{api}>"}}
+    end
+  end
+
+  defp base_type([
          {:word, word, _},
          {:punct, "("},
          {:int, precision},
@@ -337,7 +373,7 @@ defmodule Smolquery.Ddl do
     end
   end
 
-  defp type([
+  defp base_type([
          {:word, "map", _},
          {:punct, "("},
          {:word, key, _},
@@ -349,18 +385,7 @@ defmodule Smolquery.Ddl do
     with {:ok, type} <- Schema.type_from_api("MAP(STRING, STRING)"), do: {:ok, type, rest}
   end
 
-  defp type([
-         {:word, "array", _},
-         {:punct, "<"},
-         {:word, element, original},
-         {:punct, ">"} | rest
-       ]),
-       do: array_type(element, original, rest)
-
-  defp type([{:word, element, original}, {:punct, "["}, {:punct, "]"} | rest]),
-    do: array_type(element, original, rest)
-
-  defp type([{:word, word, original} | rest]) do
+  defp base_type([{:word, word, original} | rest]) do
     case Map.fetch(@types, word) do
       {:ok, api} ->
         with {:ok, type} <- Schema.type_from_api(api), do: {:ok, type, rest}
@@ -370,16 +395,7 @@ defmodule Smolquery.Ddl do
     end
   end
 
-  defp type(_tokens), do: {:error, {:invalid_ddl, "expected a column type"}}
-
-  defp array_type(element, original, rest) do
-    with {:ok, api} <- Map.fetch(@types, element),
-         {:ok, type} <- Schema.type_from_api("ARRAY<#{api}>") do
-      {:ok, type, rest}
-    else
-      _unknown_or_not_an_element -> {:error, {:unsupported_type, "ARRAY<#{original}>"}}
-    end
-  end
+  defp base_type(_tokens), do: {:error, {:invalid_ddl, "expected a column type"}}
 
   defp tail([], _remainder), do: {:ok, nil, true}
 

@@ -112,8 +112,9 @@ without them refuses to boot.
   VictoriaMetrics' rollup rules — see
   [docs/victoriametrics.md](docs/victoriametrics.md).
 - **Attribute bags as columns.** `MAP(STRING, STRING)` (ClickHouse's
-  `Map(String, String)`) and `VARIANT` (typed, nested JSON) beside the BigQuery
-  scalars. Both have limits a caller must know — they are listed in
+  `Map(String, String)`), `ARRAY<T>` (a list of one scalar type) and `VARIANT`
+  (typed, nested JSON) beside the BigQuery scalars. All three have limits a
+  caller must know — they are listed in
   [docs/api.md](docs/api.md#schema-types).
 - **Columns that change, and columns that compute themselves.** Add or drop a
   column on a live table over the API or as `ALTER TABLE` SQL on either edge;

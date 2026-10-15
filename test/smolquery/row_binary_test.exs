@@ -333,12 +333,14 @@ defmodule Smolquery.RowBinaryTest do
       assert [%{index: 0, errors: [%{message: message}]}] = decoded.errors
       assert message =~ "counts (ARRAY<INT64>) cannot accept 18446744073709551615"
 
-      nested = header(["id", "counts"], ["Int64", "Array(Array(Int64))"])
+      for type <- ["Array(Array(Int64))", "Nullable(Array(Int64))"] do
+        nested = header(["id", "counts"], ["Int64", type])
 
-      assert {:error, {:invalid_rowbinary, refusal}} =
-               RowBinary.decode(array_schema(), nested, :with_names_and_types)
+        assert {:error, {:invalid_rowbinary, refusal}} =
+                 RowBinary.decode(array_schema(), nested, :with_names_and_types)
 
-      assert refusal =~ "Array(Array(Int64))"
+        assert refusal =~ type
+      end
     end
   end
 
@@ -554,6 +556,7 @@ defmodule Smolquery.RowBinaryTest do
     test "refuses types it cannot read and text that does not parse" do
       for text <- [
             "Array(Array(String))",
+            "Nullable(Array(String))",
             "Tuple(String)",
             "Int128",
             "Decimal(76, 2)",

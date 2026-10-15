@@ -84,7 +84,7 @@ Limitations:
 - **One element type, and a scalar.** `ARRAY<NUMERIC(p,s)>`, `ARRAY<MAP(...)>`, `ARRAY<VARIANT>` and an array of arrays are refused. An element may be `null`.
 - A value that is not a JSON array of the element type is rejected: `[1, "x"]` fails an `ARRAY<INT64>` column, as does `"1,2,3"`.
 - No stats pruning. A filter on an element reads every row of the table.
-- Only an NDJSON load can carry an array. A Parquet load into a table with an array column answers `400`. A CSV load works when the CSV has no array column.
+- An array arrives through the NDJSON insert only; Explorer's fixture writer refuses a schema that has one, as it does a map.
 - An array cannot be a clustering column: nothing prunes on it.
 - A `NULL` array reads back as `null`; an empty one as `[]`. The two are kept apart.
 

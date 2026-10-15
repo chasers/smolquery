@@ -28,6 +28,13 @@ defmodule SmolqueryWeb.TableLive.Index do
     "DATE",
     "NUMERIC(38,9)",
     "MAP(STRING, STRING)",
+    "ARRAY<INT64>",
+    "ARRAY<FLOAT64>",
+    "ARRAY<STRING>",
+    "ARRAY<BOOL>",
+    "ARRAY<TIMESTAMP>",
+    "ARRAY<TIMESTAMP_NS>",
+    "ARRAY<DATE>",
     "VARIANT"
   ]
 
@@ -339,8 +346,9 @@ defmodule SmolqueryWeb.TableLive.Index do
           </div>
 
           <p class="text-xs opacity-70">
-            MAP(STRING, STRING) and VARIANT have limits: string-only map values, no stats
-            pruning on a key, NDJSON loads only.
+            MAP(STRING, STRING), ARRAY&lt;T&gt; and VARIANT have limits: string-only map
+            values, one scalar element type, no stats pruning on a key or an element,
+            NDJSON inserts only.
             <a
               href="https://github.com/smolquery/smolquery/blob/main/docs/api.md#schema-types"
               target="_blank"
