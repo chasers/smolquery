@@ -116,7 +116,15 @@ defmodule Smolquery.QueryService.Trace do
   offsets rebased to the earliest span.
   """
   @spec stop(collector()) :: [span()]
-  def stop(%{id: id, table: table}) do
+  def stop(collector), do: collector |> collect() |> elem(1)
+
+  @doc """
+  `stop/1` with the origin the offsets are rebased to: the earliest span's
+  start as `System.monotonic_time/1` microseconds, or `nil` with no spans.
+  `Smolquery.Tracing` places the phases on the SDK's monotonic clock with it.
+  """
+  @spec collect(collector()) :: {integer() | nil, [span()]}
+  def collect(%{id: id, table: table}) do
     :telemetry.detach(id)
 
     spans = :ets.tab2list(table)
@@ -124,12 +132,13 @@ defmodule Smolquery.QueryService.Trace do
 
     case Enum.sort(spans) do
       [] ->
-        []
+        {nil, []}
 
       [{origin, _duration, _phase, _meta} | _rest] = ordered ->
-        for {started, duration, phase, meta} <- ordered do
-          %{name: phase, start_us: started - origin, duration_us: duration, meta: meta}
-        end
+        {origin,
+         for {started, duration, phase, meta} <- ordered do
+           %{name: phase, start_us: started - origin, duration_us: duration, meta: meta}
+         end}
     end
   end
 end

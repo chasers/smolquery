@@ -1010,7 +1010,7 @@ otlp_endpoint =
   System.get_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") ||
     System.get_env("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-if otlp_endpoint do
+if otlp_endpoint && System.get_env("OTEL_TRACES_EXPORTER", "otlp") != "none" do
   config :opentelemetry, traces_exporter: :otlp
   config :smolquery, Smolquery.Tracing, enabled: true
 

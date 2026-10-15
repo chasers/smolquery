@@ -115,6 +115,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:explain, :plan | :analyze}
           | {:describe, boolean()}
           | {:trace, boolean()}
+          | {:trace_parent, OpenTelemetry.span_ctx() | nil}
           | {:distributed, boolean()}
           | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
@@ -675,18 +676,20 @@ defmodule Smolquery.QueryService.Runner do
 
   defp collector(%{trace: true, job: job}), do: Trace.attach(job.id, self())
 
-  defp collector(%{job: job}) do
-    if Tracing.enabled?(), do: Trace.attach(job.id, self()), else: nil
+  defp collector(%{job: job, trace_parent: parent}) do
+    if Tracing.enabled?() and Tracing.sampled?(parent),
+      do: Trace.attach(job.id, self()),
+      else: nil
   end
 
-  defp collected(%{collector: nil}), do: []
-  defp collected(%{collector: collector}), do: Trace.stop(collector)
+  defp collected(%{collector: nil}), do: {nil, []}
+  defp collected(%{collector: collector}), do: Trace.collect(collector)
 
   defp traced(%{trace: true}, job, spans), do: %{job | trace: spans}
   defp traced(_state, job, _spans), do: job
 
   defp settle(state, job) do
-    spans = collected(state)
+    {origin_us, spans} = collected(state)
     job = traced(state, job, spans)
     stop_engine(state.engine)
     remove_partials(state.runtime, job)
@@ -695,7 +698,13 @@ defmodule Smolquery.QueryService.Runner do
     :telemetry.execute(
       [:smolquery, :query, :job],
       %{duration_ms: job.duration_ms || 0},
-      %{state: job.state, job: job, spans: spans, parent: state.trace_parent}
+      %{
+        state: job.state,
+        job: job,
+        spans: spans,
+        origin_us: origin_us,
+        parent: state.trace_parent
+      }
     )
 
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, job, state.result}))

@@ -6,9 +6,10 @@ defmodule Smolquery.Tracing do
   Nothing here is instrumentation: every span comes from a telemetry event
   the code already emits. `Smolquery.Telemetry` turns those events into
   counters and histograms; this module turns a subset into spans, and only
-  when `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) is set, which
-  `config/runtime.exs` reads into `enabled: true`. Off, the handlers are not
-  attached and nothing costs anything.
+  when `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) is set and
+  `OTEL_TRACES_EXPORTER` is not `none`, which `config/runtime.exs` reads
+  into `enabled: true`. Off, no handler is attached and nothing costs
+  anything.
 
   ## What becomes a span
 
@@ -17,17 +18,36 @@ defmodule Smolquery.Tracing do
       process and `:stop` closes it, named `METHOD route` once the router has
       matched (`GET /v1/datasets/:ds/tables/:t`), with
       `http.request.method`, `url.path` and `http.response.status_code`. An
-      incoming W3C `traceparent` header continues the caller's trace.
+      incoming W3C `traceparent` header continues the caller's trace. A
+      request that raises never reaches `:stop`, so Bandit's
+      `[:bandit, :request, :exception]` closes the span as an error instead;
+      without that the span would sit in the SDK's table for good.
     * **A query job**: the `[:smolquery, :query, :job]` event a job settles
-      with carries the job, its phase spans and the span that submitted it.
-      The job becomes a span named `query job`, child of that request, with
-      `db.query.text` and the job's id, state, row count and snapshot; each
-      phase (`parse`, `prune`, `engine_start`, `execute`, ...) becomes a
-      child at its own start and duration, so the waterfall HyperDX draws is
-      the one `trace: true` answers over the API. Phases are stamped from
-      the job's wall-clock `submitted_at`, and the job span ends at its
-      last phase's end when that is later than the millisecond
-      `finished_at`, so a child never leaves its parent.
+      with carries the job, its phase spans, their monotonic origin and the
+      span that submitted it. The job becomes a span named `query job`,
+      child of that request, with `db.query.text` and the job's id, state,
+      row count and snapshot; each phase (`parse`, `prune`, `engine_start`,
+      `execute`, ...) becomes a child at its own start and duration, so the
+      waterfall HyperDX draws is the one `trace: true` answers over the API.
+      The job starts at `submitted_at`, so the wait before its first phase
+      shows as the gap it is.
+
+  ## Clocks
+
+  The SDK stamps a span with `erlang:monotonic_time/0` and adds the time
+  offset on export. A job's `submitted_at` and `finished_at` are system
+  time in milliseconds and its phases are monotonic microseconds, so both
+  are brought to monotonic native units before they are handed over; a
+  system time given as a monotonic one would land decades away from the
+  request it belongs to.
+
+  ## Which jobs are collected
+
+  A job's phases are collected into its trace when the caller asked for
+  them (`trace: true`) or when tracing is on and the span that submitted
+  the job is recording, so a request the sampler dropped costs its jobs no
+  collector. A job with no parent is collected and the sampler decides at
+  the end.
 
   ## What stays out
 
@@ -41,20 +61,19 @@ defmodule Smolquery.Tracing do
   @handler_id "smolquery-tracing"
   @tracer_name :smolquery
   @query_text_limit 2_048
+  @context_key :"$__current_otel_ctx"
 
-  @requests for edge <- [:api, :clickhouse, :victoriametrics],
-                event <- [:start, :stop],
-                do: [:smolquery, edge, event]
-
+  @edges [:api, :clickhouse, :victoriametrics]
+  @requests for edge <- @edges, event <- [:start, :stop], do: [:smolquery, edge, event]
+  @exception [:bandit, :request, :exception]
   @job [:smolquery, :query, :job]
 
   @spec start_link(term()) :: GenServer.on_start()
   def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @doc """
-  Whether spans are made at all: `true` once an OTLP endpoint is named.
-  A runner reads it to decide whether to collect a job's phases for the
-  job span when the caller did not ask for them.
+  Whether spans are made at all: `true` once an OTLP endpoint is named and
+  the traces exporter is not `none`.
   """
   @spec enabled?() :: boolean()
   def enabled? do
@@ -63,23 +82,45 @@ defmodule Smolquery.Tracing do
 
   @doc """
   The span the calling process is in, to parent a job to the request that
-  submitted it, or `nil` outside any span.
+  submitted it, or `nil` outside any span. A `Task` does not inherit the
+  OpenTelemetry context, so a caller with none looks up the `$callers`
+  chain `Task` leaves behind: a job submitted from a request's task is
+  still the request's child.
   """
   @spec current_span() :: OpenTelemetry.span_ctx() | nil
   def current_span do
     case :otel_tracer.current_span_ctx() do
-      :undefined -> nil
+      :undefined -> Enum.find_value(Process.get(:"$callers", []), &caller_span/1)
       span_ctx -> span_ctx
+    end
+  end
+
+  @doc """
+  Whether a job under `parent` is worth collecting: `true` for no parent,
+  and for a parent that is recording.
+  """
+  @spec sampled?(OpenTelemetry.span_ctx() | nil) :: boolean()
+  def sampled?(nil), do: true
+  def sampled?(span_ctx), do: :otel_span.is_recording(span_ctx)
+
+  defp caller_span(pid) do
+    with {:dictionary, dictionary} <- Process.info(pid, :dictionary),
+         %{} = ctx <- Keyword.get(dictionary, @context_key),
+         span_ctx when span_ctx != :undefined <- :otel_tracer.current_span_ctx(ctx) do
+      span_ctx
+    else
+      _no_span -> nil
     end
   end
 
   @impl true
   def init(nil) do
+    Process.flag(:trap_exit, true)
     :telemetry.detach(@handler_id)
 
     if enabled?() do
-      :ok =
-        :telemetry.attach_many(@handler_id, [@job | @requests], &__MODULE__.handle_event/4, nil)
+      events = [@job, @exception | @requests]
+      :ok = :telemetry.attach_many(@handler_id, events, &__MODULE__.handle_event/4, nil)
     end
 
     {:ok, nil}
@@ -129,8 +170,19 @@ defmodule Smolquery.Tracing do
     :ok
   end
 
+  def handle_event(@exception, _measurements, meta, nil) do
+    for edge <- @edges, {token, span_ctx} <- List.wrap(Process.delete({__MODULE__, edge})) do
+      :otel_span.set_status(span_ctx, :opentelemetry.status(:error, exception_text(meta)))
+      :otel_span.end_span(span_ctx)
+      :otel_ctx.detach(token)
+    end
+
+    :ok
+  end
+
   def handle_event(@job, _measurements, %{job: job, spans: spans} = meta, nil) do
     ctx = parent_ctx(Map.get(meta, :parent))
+    origin = Map.get(meta, :origin_us)
     start = at(job.submitted_at)
 
     job_span =
@@ -141,34 +193,35 @@ defmodule Smolquery.Tracing do
       })
 
     job_ctx = :otel_tracer.set_current_span(ctx, job_span)
-    Enum.each(spans, &phase_span(job_ctx, start, &1))
+    Enum.each(spans, &phase_span(job_ctx, origin, &1))
 
     if job.state in [:error, :cancelled],
       do: :otel_span.set_status(job_span, :opentelemetry.status(:error, inspect(job.error)))
 
-    :otel_span.end_span(job_span, job_end(job, start, spans))
+    :otel_span.end_span(job_span, job_end(job, origin, spans))
 
     :ok
   end
 
   def handle_event(_event, _measurements, _meta, nil), do: :ok
 
-  defp job_end(job, start, spans) do
-    settled = at(job.finished_at || System.system_time(:millisecond))
-    last_phase = Enum.reduce(spans, 0, &max(&1.start_us + &1.duration_us, &2))
-
-    max(settled, start + us(last_phase))
-  end
-
-  defp phase_span(job_ctx, start, %{name: name, start_us: offset, duration_us: duration} = phase) do
+  defp phase_span(job_ctx, origin, %{name: name, start_us: offset, duration_us: duration} = phase) do
     span_ctx =
       :otel_tracer.start_span(job_ctx, tracer(), Atom.to_string(name), %{
-        start_time: start + us(offset),
+        start_time: us(origin + offset),
         kind: :internal,
         attributes: attributes("smolquery.", Map.get(phase, :meta, %{}))
       })
 
-    :otel_span.end_span(span_ctx, start + us(offset + duration))
+    :otel_span.end_span(span_ctx, us(origin + offset + duration))
+  end
+
+  defp job_end(job, _origin, []), do: at(job.finished_at || System.system_time(:millisecond))
+
+  defp job_end(job, origin, spans) do
+    last_phase = Enum.reduce(spans, 0, &max(&1.start_us + &1.duration_us, &2))
+
+    max(job_end(job, origin, []), us(origin + last_phase))
   end
 
   defp parent_ctx(nil), do: :otel_ctx.new()
@@ -180,6 +233,12 @@ defmodule Smolquery.Tracing do
       _unrouted -> method
     end
   end
+
+  defp exception_text(%{kind: kind, exception: exception}) when is_exception(exception),
+    do: "#{kind}: #{Exception.message(exception)}"
+
+  defp exception_text(%{kind: kind, reason: reason}), do: "#{kind}: #{inspect(reason)}"
+  defp exception_text(_meta), do: "request raised"
 
   defp job_attributes(job) do
     %{
@@ -202,8 +261,10 @@ defmodule Smolquery.Tracing do
   defp attribute(value) when is_atom(value), do: Atom.to_string(value)
   defp attribute(value), do: inspect(value, limit: 50, printable_limit: 256)
 
-  defp at(milliseconds), do: System.convert_time_unit(milliseconds, :millisecond, :native)
-  defp us(microseconds), do: System.convert_time_unit(microseconds, :microsecond, :native)
+  defp at(system_ms),
+    do: System.convert_time_unit(system_ms, :millisecond, :native) - :erlang.time_offset()
+
+  defp us(monotonic_us), do: System.convert_time_unit(monotonic_us, :microsecond, :native)
 
   defp tracer, do: :opentelemetry.get_tracer(@tracer_name)
 end
