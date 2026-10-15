@@ -13,7 +13,6 @@ defmodule Smolquery.MixProject do
       listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
-      hex: [ignore_advisories: ["EEF-CVE-2026-105659"]],
       dialyzer: [
         plt_local_path: "priv/plts",
         plt_core_path: "priv/plts",
@@ -111,7 +110,7 @@ defmodule Smolquery.MixProject do
         "deps.unlock --check-unused",
         "format --check-formatted",
         "credo --strict",
-        "deps.audit --ignore-advisory-ids EEF-CVE-2026-105659",
+        "deps.audit",
         "ex_dna",
         "reach.check --arch --smells --strict --baseline .reach.baseline.json"
       ]

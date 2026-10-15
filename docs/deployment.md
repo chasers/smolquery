@@ -145,6 +145,7 @@ One note per release, newest first.
 - **What changes for a client:** nothing on HTTP/1.1, which is what every documented client uses. Bandit served HTTP/2 on cleartext to a client that sent the `PRI` preface; now it does not. No edge terminates TLS, so there was no ALPN HTTP/2 either.
 - **Where:** the API and web endpoints (`http_2_options: [enabled: false]` in their `http:` config), the ClickHouse edge, the VictoriaMetrics edge, the buffer nodes' hot server and the metrics listener.
 - **To undo:** when bandit releases the fix, bump it, drop `--ignore-advisory-ids` from the `ci` alias and `ignore_advisories` from the `hex` key in `mix.exs`, and remove the six `http_2_options` lines if HTTP/2 is wanted back.
+- **Closed in 0.24.0:** bandit 1.13.0 (2026-10-15) fixes that advisory and a second one it carried, EEF-CVE-2026-105660 (MEDIUM: an HTTP/1 absolute-form request target could set `conn.host` and `conn.port` to anything). The bump is in, and both audits run with nothing ignored. HTTP/2 stays off: no documented client uses it, and the six lines are still the switch if it is wanted back.
 
 ### A connection test reads a lake with the node's own credential (T-659)
 
