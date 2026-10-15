@@ -337,6 +337,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   """
   @spec column_type(Field.t()) :: String.t()
   def column_type(%Field{type: {:map, :string, :string}}), do: "Map(String, String)"
+  def column_type(%Field{type: {:array, element}}), do: "Array(Nullable(#{base_type(element)}))"
   def column_type(%Field{type: :variant}), do: "JSON"
   def column_type(%Field{type: type, nullable: false}), do: base_type(type)
   def column_type(%Field{type: type}), do: "Nullable(" <> base_type(type) <> ")"

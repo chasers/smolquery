@@ -456,6 +456,10 @@ defmodule SmolqueryClickHouse.SystemCatalogTest do
              "Nullable(Decimal(38, 2))"
 
     assert SystemCatalog.column_type(%Field{name: "a", type: :variant}) == "JSON"
+
+    assert SystemCatalog.column_type(%Field{name: "a", type: {:array, :int64}, nullable: false}) ==
+             "Array(Nullable(Int64))"
+
     assert SystemCatalog.column_type(%Field{name: "a", type: :date}) == "Nullable(Date32)"
   end
 

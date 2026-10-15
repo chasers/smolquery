@@ -21,8 +21,9 @@ defmodule Smolquery.Ddl do
   SQL with (T-503): words, quoted identifiers, numbers and single
   characters, past whitespace and comments. This module had a scanner of its
   own while that lexer lived in an edge, which the query service may not
-  depend on (`.reach.exs`). The grammar uses four punctuation marks — `(`,
-  `)`, `,`, `.` — and refuses any other character by name, and a quoted
+  depend on (`.reach.exs`). The grammar uses the punctuation of a type —
+  `(`, `)`, `,`, `.`, and `<`, `>`, `[`, `]` for an array — and refuses
+  any other character by name, and a quoted
   identifier that never closes is refused, which the lexer by itself would
   read to the end of the statement. A comment between two words is skipped,
   as the lexer skips it everywhere. There are no string literals in the
@@ -38,8 +39,8 @@ defmodule Smolquery.Ddl do
   ## Types
 
   A column type is accepted in the API's vocabulary (`INT64`, `STRING`,
-  `NUMERIC(38,2)`, ...) and in DuckDB's (`BIGINT`, `VARCHAR`,
-  `DECIMAL(38,2)`, ...), and always becomes a `Smolquery.Schema` logical
+  `NUMERIC(38,2)`, `ARRAY<INT64>`, ...) and in DuckDB's (`BIGINT`, `VARCHAR`,
+  `DECIMAL(38,2)`, `BIGINT[]`, ...), and always becomes a `Smolquery.Schema` logical
   type — the vocabulary `POST .../columns` speaks, so a type that works in one
   place works in the other.
 
@@ -348,6 +349,17 @@ defmodule Smolquery.Ddl do
     with {:ok, type} <- Schema.type_from_api("MAP(STRING, STRING)"), do: {:ok, type, rest}
   end
 
+  defp type([
+         {:word, "array", _},
+         {:punct, "<"},
+         {:word, element, original},
+         {:punct, ">"} | rest
+       ]),
+       do: array_type(element, original, rest)
+
+  defp type([{:word, element, original}, {:punct, "["}, {:punct, "]"} | rest]),
+    do: array_type(element, original, rest)
+
   defp type([{:word, word, original} | rest]) do
     case Map.fetch(@types, word) do
       {:ok, api} ->
@@ -359,6 +371,15 @@ defmodule Smolquery.Ddl do
   end
 
   defp type(_tokens), do: {:error, {:invalid_ddl, "expected a column type"}}
+
+  defp array_type(element, original, rest) do
+    with {:ok, api} <- Map.fetch(@types, element),
+         {:ok, type} <- Schema.type_from_api("ARRAY<#{api}>") do
+      {:ok, type, rest}
+    else
+      _unknown_or_not_an_element -> {:error, {:unsupported_type, "ARRAY<#{original}>"}}
+    end
+  end
 
   defp tail([], _remainder), do: {:ok, nil, true}
 
@@ -434,8 +455,9 @@ defmodule Smolquery.Ddl do
       else: {:error, :multiple_statements}
   end
 
-  defp token({:symbol, punct, rest}, _text, acc) when punct in ["(", ")", ",", "."],
-    do: scan(Sql.skip_trivia(rest), [{:punct, punct} | acc])
+  defp token({:symbol, punct, rest}, _text, acc)
+       when punct in ["(", ")", ",", ".", "<", ">", "[", "]"],
+       do: scan(Sql.skip_trivia(rest), [{:punct, punct} | acc])
 
   defp token({:symbol, _byte, _rest}, <<char::utf8, _more::binary>>, _acc),
     do: {:error, {:invalid_ddl, "unexpected #{inspect(<<char::utf8>>)}"}}

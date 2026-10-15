@@ -185,6 +185,56 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
     end
   end
 
+  describe "an ARRAY<T> column (T-489)" do
+    defp array_schema do
+      Schema.new!([
+        {"id", :int64},
+        {"counts", {:array, :int64}},
+        {"bounds", {:array, :float64}}
+      ])
+    end
+
+    test "is written as a Parquet LIST that DuckDB reads by element, with a null count and no bounds",
+         %{tmp_dir: dir} do
+      path =
+        spool(dir, "array.ndjson", [
+          %{"id" => 1, "counts" => [1, 2, 3], "bounds" => [0.5, 1.5]},
+          %{"id" => 2, "counts" => [], "bounds" => nil},
+          %{"id" => 3, "counts" => [7, nil]}
+        ])
+
+      {:ok, segment} =
+        Writer.write({:ndjson, [path]}, array_schema(), store: store(dir), engine: @engine)
+
+      {:ok, %{rows: rows}} =
+        Engine.query(
+          @engine,
+          "SELECT id, counts, len(counts), counts[1], bounds, typeof(counts), typeof(bounds) " <>
+            "FROM read_parquet($1) ORDER BY id",
+          [segment.path]
+        )
+
+      assert rows == [
+               [1, [1, 2, 3], 3, 1, [0.5, 1.5], "BIGINT[]", "DOUBLE[]"],
+               [2, [], 0, nil, nil, "BIGINT[]", "DOUBLE[]"],
+               [3, [7, nil], 2, 7, nil, "BIGINT[]", "DOUBLE[]"]
+             ]
+
+      assert segment.stats["counts"] == %{min: nil, max: nil, null_count: 0}
+      assert segment.stats["bounds"] == %{min: nil, max: nil, null_count: 2}
+      assert segment.stats["id"] == %{min: 1, max: 3, null_count: 0}
+    end
+
+    test "refuses a value that is not an array of the element type as a failed flush", %{
+      tmp_dir: dir
+    } do
+      path = spool(dir, "array_bad.ndjson", [%{"id" => 1, "counts" => "1,2,3"}])
+
+      assert {:error, {:put_failed, _key, {:ndjson_copy_failed, _message}}} =
+               Writer.write({:ndjson, [path]}, array_schema(), store: store(dir), engine: @engine)
+    end
+  end
+
   describe "a VARIANT column" do
     defp variant_schema do
       Schema.new!([{"id", :int64}, {"attrs", :variant}])

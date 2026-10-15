@@ -9,6 +9,7 @@ defmodule SmolqueryApi.TableSchemaTest do
             {"ts", :timestamp},
             {"amount", {:numeric, 38, 2}},
             {"attrs", {:map, :string, :string}},
+            {"bounds", {:array, :float64}},
             {"doc", :variant}
           ])
 
@@ -17,6 +18,7 @@ defmodule SmolqueryApi.TableSchemaTest do
     %{"name" => "ts", "type" => "TIMESTAMP", "nullable" => true},
     %{"name" => "amount", "type" => "NUMERIC(38,2)", "nullable" => true},
     %{"name" => "attrs", "type" => "MAP(STRING, STRING)", "nullable" => true},
+    %{"name" => "bounds", "type" => "ARRAY<FLOAT64>", "nullable" => true},
     %{"name" => "doc", "type" => "VARIANT", "nullable" => true}
   ]
 

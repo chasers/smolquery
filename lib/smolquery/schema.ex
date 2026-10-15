@@ -19,6 +19,7 @@ defmodule Smolquery.Schema do
   | `:date` | `DATE` | `:date` | `DATE` |
   | `{:numeric, p, s}` | `NUMERIC(p,s)` | `{:decimal, p, s}` | `DECIMAL(p,s)` |
   | `{:map, :string, :string}` | `MAP(STRING, STRING)` | — | `MAP(VARCHAR, VARCHAR)` |
+  | `{:array, scalar}` | `ARRAY<T>` | — | `T[]` |
   | `:variant` | `VARIANT` | — | `JSON` stored, `VARIANT` queried |
 
   The API names are the BigQuery-flavored strings `SmolqueryApi` speaks in
@@ -91,15 +92,31 @@ defmodule Smolquery.Schema do
   decodes those columns into JSON values — a variant reaches the client as the
   nested JSON it was inserted as.
 
-  ## What a caller must know about a map or a variant
+  ## An array is a list of one scalar type
+
+  `ARRAY<INT64>` is `{:array, :int64}`: a list whose elements are all of one
+  scalar type, any of them `NULL`, the shape an OpenTelemetry histogram's
+  `BucketCounts` and `ExplicitBounds` arrive in (T-489). The element is one
+  of the scalar rows above; a `NUMERIC`, a map, a variant or another array
+  cannot be an element. DuckDB stores it as `T[]`, which is a Parquet `LIST`
+  that DuckLake registers as it is. A `COPY` reports no bounds for a list,
+  only its null count, so an array never prunes and cannot cluster. It is
+  written the way a map is: by DuckDB, from NDJSON, where a JSON array of
+  the element's values is the only form `value_from_json/2` takes. A
+  `NULL` array reads back as `NULL`; an empty one as `[]`.
+
+  ## What a caller must know about a map, an array or a variant
 
   The limits, in one list; `docs/api.md` carries the same list for API callers:
 
-    * neither has stats bounds, so nothing prunes on a key filter
+    * none has stats bounds, so nothing prunes on a key, an element or a
+      path filter
     * only DuckDB writes a segment holding them; Explorer's fixture writer
-      refuses the schema, and a CSV or Parquet load cannot carry either
+      refuses the schema, and a CSV or Parquet load cannot carry any of them
     * a map's values are strings — any other JSON value is stored as its text —
       and a `NULL` map reads back as `%{}`
+    * an array's elements are one scalar type, and a value that is not a JSON
+      array of that type is refused
     * a variant is JSON text on disk, parsed per scanned row per query; its
       casts are strict (`TRY_CAST` for a mixed key); a variant nested in a
       struct or list cannot be returned; a variant with no table behind it is
@@ -154,7 +171,10 @@ defmodule Smolquery.Schema do
           | :date
           | {:numeric, pos_integer(), non_neg_integer()}
           | {:map, :string, :string}
+          | {:array, scalar_type()}
           | :variant
+
+  @type scalar_type :: :int64 | :float64 | :string | :bool | :timestamp | :timestamp_ns | :date
 
   @type field_spec ::
           Field.t()
@@ -425,6 +445,7 @@ defmodule Smolquery.Schema do
   end
 
   def validate_type(@map_type), do: {:ok, @map_type}
+  def validate_type({:array, element} = type) when element in @scalar_types, do: {:ok, type}
   def validate_type(:variant), do: {:ok, :variant}
 
   def validate_type(type), do: {:error, {:unsupported_type, type}}
@@ -466,6 +487,10 @@ defmodule Smolquery.Schema do
   @spec duckdb_type(logical_type()) :: {:ok, String.t()} | {:error, {:unsupported_type, term()}}
   def duckdb_type({:numeric, precision, scale}), do: {:ok, "DECIMAL(#{precision},#{scale})"}
   def duckdb_type(@map_type), do: {:ok, @map_duckdb}
+
+  def duckdb_type({:array, element}) do
+    with {:ok, name} <- duckdb_type(element), do: {:ok, name <> "[]"}
+  end
 
   def duckdb_type(type) do
     case Map.fetch(@logical_to_duckdb, type) do
@@ -520,6 +545,10 @@ defmodule Smolquery.Schema do
   def api_type({:numeric, precision, scale}), do: {:ok, "NUMERIC(#{precision},#{scale})"}
   def api_type(@map_type), do: {:ok, @map_api}
 
+  def api_type({:array, element}) do
+    with {:ok, name} <- api_type(element), do: {:ok, "ARRAY<#{name}>"}
+  end
+
   def api_type(type) do
     case Map.fetch(@logical_to_api, type) do
       {:ok, name} -> {:ok, name}
@@ -557,6 +586,7 @@ defmodule Smolquery.Schema do
   | `:date` | ISO 8601 string | `Date` |
   | `{:numeric, p, s}` | string (preferred — floats round), integer, or number | `Decimal` |
   | `{:map, :string, :string}` | object; a non-string value becomes its JSON text | map of binaries |
+  | `{:array, element}` | array; each element as the element type takes it, or `null` | list |
   | `:variant` | any JSON value | the decoded term, unchanged |
 
   A map takes an object and nothing else — the passthrough path's `read_json`
@@ -656,6 +686,13 @@ defmodule Smolquery.Schema do
       else: invalid(@map_type, value)
   end
 
+  def value_from_json({:array, element} = type, value) when is_list(value) do
+    case map_fields(value, &value_from_json(element, &1)) do
+      {:ok, elements} -> {:ok, elements}
+      {:error, _reason} -> invalid(type, value)
+    end
+  end
+
   def value_from_json(:variant, value) when not is_struct(value), do: {:ok, value}
 
   def value_from_json(type, value), do: invalid(type, value)
@@ -711,11 +748,13 @@ defmodule Smolquery.Schema do
   @doc """
   Whether a column of this type can serve in a clustering key.
 
-  A map or a variant sorts, but no stats bound it, so the pruner could never
-  use the key — the sort would be a tax with no return. Refused up front.
+  A map, an array or a variant sorts, but no stats bound it, so the pruner
+  could never use the key — the sort would be a tax with no return. Refused
+  up front.
   """
   @spec clustering_type?(logical_type()) :: boolean()
   def clustering_type?(@map_type), do: false
+  def clustering_type?({:array, _element}), do: false
   def clustering_type?(:variant), do: false
   def clustering_type?(_type), do: true
 
@@ -869,6 +908,10 @@ defmodule Smolquery.Schema do
 
   def default_literal({:numeric, precision, scale}),
     do: {:ok, "CAST(0 AS DECIMAL(#{precision},#{scale}))"}
+
+  def default_literal({:array, _element} = type) do
+    with {:ok, duckdb} <- duckdb_type(type), do: {:ok, "CAST([] AS #{duckdb})"}
+  end
 
   def default_literal(_type), do: :error
 
@@ -1063,10 +1106,17 @@ defmodule Smolquery.Schema do
         [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
 
+      match = Regex.run(~r/^ARRAY\s*<\s*([A-Z0-9_]+)\s*>$/i, name) ->
+        [_match, element] = match
+        array_of(Map.fetch(@api_to_logical, String.upcase(element)), name)
+
       true ->
         {:error, {:unsupported_type, name}}
     end
   end
+
+  defp array_of({:ok, element}, _name), do: validate_type({:array, element})
+  defp array_of(:error, name), do: {:error, {:unsupported_type, name}}
 
   defp compound_from_duckdb(name) do
     name = String.trim(name)
@@ -1078,6 +1128,10 @@ defmodule Smolquery.Schema do
       match = Regex.run(~r/^DECIMAL\((\d+),\s*(\d+)\)$/i, name) ->
         [_match, precision, scale] = match
         validate_type({:numeric, String.to_integer(precision), String.to_integer(scale)})
+
+      match = Regex.run(~r/^([A-Z0-9_]+)\[\]$/i, name) ->
+        [_match, element] = match
+        array_of(Map.fetch(@duckdb_to_logical, String.upcase(element)), name)
 
       true ->
         {:error, {:unsupported_type, name}}

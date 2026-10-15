@@ -59,6 +59,9 @@ defmodule Smolquery.DdlTest do
             {"NUMERIC(10,3)", {:numeric, 10, 3}},
             {"MAP(STRING, STRING)", {:map, :string, :string}},
             {"MAP(VARCHAR, VARCHAR)", {:map, :string, :string}},
+            {"ARRAY<INT64>", {:array, :int64}},
+            {"ARRAY < FLOAT64 >", {:array, :float64}},
+            {"VARCHAR[]", {:array, :string}},
             {"VARIANT", :variant},
             {"JSON", :variant}
           ] do
@@ -124,6 +127,9 @@ defmodule Smolquery.DdlTest do
     test "an unknown type names the spelling it saw" do
       assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN g GEOGRAPHY") ==
                {:error, {:unsupported_type, "GEOGRAPHY"}}
+
+      assert Ddl.parse("ALTER TABLE ds.t ADD COLUMN c ARRAY<VARIANT>") ==
+               {:error, {:unsupported_type, "ARRAY<VARIANT>"}}
     end
 
     test "a bad identifier is the same refusal the API gives" do

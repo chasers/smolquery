@@ -14,10 +14,11 @@ defmodule Smolquery.SchemaTest do
     :date,
     {:numeric, 38, 2},
     {:map, :string, :string},
+    {:array, :int64},
     :variant
   ]
 
-  @explorer_types @logical_types -- [{:map, :string, :string}, :variant]
+  @explorer_types @logical_types -- [{:map, :string, :string}, {:array, :int64}, :variant]
 
   describe "new/1" do
     test "accepts tuples, tuples with options, and Field structs" do
@@ -461,7 +462,7 @@ defmodule Smolquery.SchemaTest do
     end
 
     test "every other type needs no cast in a view" do
-      for type <- @explorer_types ++ [{:map, :string, :string}] do
+      for type <- @explorer_types ++ [{:map, :string, :string}, {:array, :int64}] do
         assert Schema.view_cast(type) == :none
       end
     end
@@ -478,6 +479,36 @@ defmodule Smolquery.SchemaTest do
 
       assert Schema.logical_from_duckdb("MAP(VARCHAR, BIGINT)") ==
                {:error, {:unsupported_type, "MAP(VARCHAR, BIGINT)"}}
+    end
+
+    test "an array is a list of one scalar type, in every vocabulary (T-489)" do
+      assert Schema.validate_type({:array, :float64}) == {:ok, {:array, :float64}}
+
+      for element <- [{:numeric, 10, 2}, {:map, :string, :string}, :variant, {:array, :int64}] do
+        assert Schema.validate_type({:array, element}) ==
+                 {:error, {:unsupported_type, {:array, element}}}
+      end
+
+      assert Schema.explorer_dtype({:array, :int64}) ==
+               {:error, {:unsupported_type, {:array, :int64}}}
+
+      assert Schema.duckdb_type({:array, :timestamp_ns}) == {:ok, "TIMESTAMP_NS[]"}
+      assert Schema.logical_from_duckdb("double[]") == {:ok, {:array, :float64}}
+      assert Schema.api_type({:array, :string}) == {:ok, "ARRAY<STRING>"}
+      assert Schema.type_from_api("array<int64>") == {:ok, {:array, :int64}}
+      assert Schema.type_from_api("ARRAY< BOOL >") == {:ok, {:array, :bool}}
+
+      assert Schema.type_from_api("ARRAY<VARIANT>") ==
+               {:error, {:unsupported_type, {:array, :variant}}}
+
+      assert Schema.type_from_api("ARRAY<NUMERIC(10,2)>") ==
+               {:error, {:unsupported_type, "ARRAY<NUMERIC(10,2)>"}}
+
+      assert Schema.logical_from_duckdb("JSON[]") ==
+               {:error, {:unsupported_type, {:array, :variant}}}
+
+      refute Schema.clustering_type?({:array, :int64})
+      assert Schema.default_literal({:array, :int64}) == {:ok, "CAST([] AS BIGINT[])"}
     end
 
     test "round-trips every logical type through DuckDB type names" do
@@ -577,6 +608,21 @@ defmodule Smolquery.SchemaTest do
                 }}
 
       assert Schema.value_from_json(map, %{}) == {:ok, %{}}
+    end
+
+    test "an array takes a JSON array of its element type, with nulls, and nothing else" do
+      assert Schema.value_from_json({:array, :int64}, [1, "2", nil]) == {:ok, [1, 2, nil]}
+      assert Schema.value_from_json({:array, :int64}, []) == {:ok, []}
+
+      assert Schema.value_from_json({:array, :float64}, [0.5, 1]) == {:ok, [0.5, 1.0]}
+
+      assert Schema.value_from_json({:array, :timestamp_ns}, ["2026-10-15T00:00:00.123456789Z"]) ==
+               {:ok, ["2026-10-15 00:00:00.123456789"]}
+
+      for value <- [[1, "x"], %{"a" => 1}, "1,2", 1] do
+        assert Schema.value_from_json({:array, :int64}, value) ==
+                 {:error, {:invalid_value, {:array, :int64}, value}}
+      end
     end
 
     test "a variant takes any JSON value as it is" do

@@ -106,7 +106,8 @@ function a shim would call.
 
 | ClickHouse | Status |
 |---|---|
-| `Array(T)`, `Tuple(...)`, `Nested` | **Missing** as a column type — blocks Logflare's metrics and traces tables; `VARIANT` is the likely store. A computed list answers as `Array(Nullable(T))` (T-496) |
+| `Array(T)` of a scalar | Works (T-489): `ARRAY<T>` in the API, `Array(Nullable(T))` in `DESCRIBE`, `Array(T)` or `Array(Nullable(T))` in a RowBinary insert. A computed list answers as `Array(Nullable(T))` (T-496) |
+| `Array(Array(T))`, `Array(Map(...))`, `Tuple(...)`, `Nested` | **Missing** as a column type — the `Events.*` and `Links.*` columns of `otel_traces`, and `Exemplars.*` of the metrics tables, whose dotted names smolquery has no identifier for either |
 | `Enum8` / `Enum16` | **Missing** — decode as the integer, or map to the label |
 | `LowCardinality(T)` | Unwrapped on ingest; no read-side meaning |
 | `FixedString(N)` | Read as `STRING` on ingest |

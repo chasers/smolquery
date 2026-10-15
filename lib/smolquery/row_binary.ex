@@ -25,7 +25,8 @@ defmodule Smolquery.RowBinary do
   `Float64`, `String`, `Bool`, `DateTime64(6)`, `DateTime64(9)` for a `TIMESTAMP_NS`
   column, `Date32`, `Decimal(P, S)`, and
   `String` for a variant. A map is read as `Map(String, String)` whether or not
-  its column is nullable, because ClickHouse cannot declare a `Nullable(Map)`.
+  its column is nullable, because ClickHouse cannot declare a `Nullable(Map)`,
+  and an array as `Array(Nullable(T))` for the same reason.
   A producer whose column types differ must send the typed variant: RowBinary
   carries no framing, so a column read at the wrong width misreads every byte
   after it.
@@ -45,9 +46,10 @@ defmodule Smolquery.RowBinary do
   | `Date`, `Date32` | `DATE` |
   | `Decimal(P, S)`, `Decimal32/64/128(S)` | `NUMERIC(_, S)`, scale equal; a value past the column's precision is refused |
   | `Map(K, V)` with string keys and string or `Nullable` string values | `MAP(STRING, STRING)` |
+  | `Array(T)`, with `T` any scalar row above or its `Nullable` | `ARRAY<T>`, element for element |
   | `Nullable(T)`, `LowCardinality(T)` | as `T`; RowBinary writes `LowCardinality(T)` as `T` |
 
-  Anything else — `Array`, `Tuple`, `Enum8`, `Int128`, `Decimal256`,
+  Anything else — a nested `Array`, `Tuple`, `Enum8`, `Int128`, `Decimal256`,
   `JSON`, `Dynamic` — is refused at the header, naming the column.
 
   ## Errors
@@ -299,12 +301,17 @@ defmodule Smolquery.RowBinary do
   defp storable?({:map, key, entry}, {:map, :string, :string}),
     do: map_key?(key) and storable?(entry, :string)
 
+  defp storable?({:array, inner}, {:array, element}), do: storable?(inner, element)
   defp storable?(_wire, _type), do: false
 
   defp map_key?({:nullable, _inner}), do: false
   defp map_key?(key), do: storable?(key, :string)
 
   defp schema_wire(%Field{type: {:map, :string, :string}}), do: {:map, :string, :string}
+
+  defp schema_wire(%Field{type: {:array, element}}),
+    do: {:array, {:nullable, base_wire(element)}}
+
   defp schema_wire(%Field{type: type, nullable: true}), do: {:nullable, base_wire(type)}
   defp schema_wire(%Field{type: type}), do: base_wire(type)
 
@@ -430,6 +437,10 @@ defmodule Smolquery.RowBinary do
 
   defp value({:map, key, entry}, _type, body) do
     with {:ok, count, rest} <- varint(body), do: entries(key, entry, count, rest, [], nil)
+  end
+
+  defp value({:array, inner}, {:array, element}, body) do
+    with {:ok, count, rest} <- varint(body), do: elements(inner, element, count, rest, [], nil)
   end
 
   defp value(_wire, _type, _body), do: truncated()
@@ -623,8 +634,20 @@ defmodule Smolquery.RowBinary do
     end
   end
 
-  defp entry_part(wire, body, refused) do
-    case value(wire, :string, body) do
+  defp entry_part(wire, body, refused), do: part(wire, :string, body, refused)
+
+  defp elements(_inner, _element, 0, rest, items, nil),
+    do: {:ok, [?[, Enum.intersperse(Enum.reverse(items), ?,), ?]], rest}
+
+  defp elements(_inner, _element, 0, rest, _items, refused), do: {:refused, refused, rest}
+
+  defp elements(inner, element, count, body, items, refused) do
+    with {:ok, text, rest, refused} <- part(inner, element, body, refused),
+         do: elements(inner, element, count - 1, rest, [text | items], refused)
+  end
+
+  defp part(wire, type, body, refused) do
+    case value(wire, type, body) do
       {:ok, json, rest} -> {:ok, json, rest, refused}
       {:null, rest} -> {:ok, "null", rest, refused}
       {:refused, shown, rest} -> {:ok, [], rest, refused || shown}
@@ -713,6 +736,15 @@ defmodule Smolquery.RowBinary do
     with {:ok, key_wire} <- wire(key),
          {:ok, entry_wire} <- wire(entry),
          do: {:ok, {:map, key_wire, entry_wire}}
+  end
+
+  defp wire({"Array", [inner]}) do
+    case wire(inner) do
+      {:ok, {:array, _nested}} -> :error
+      {:ok, {:nullable, {:array, _nested}}} -> :error
+      {:ok, inner_wire} -> {:ok, {:array, inner_wire}}
+      :error -> :error
+    end
   end
 
   defp wire(_node), do: :error

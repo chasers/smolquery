@@ -290,6 +290,58 @@ defmodule Smolquery.RowBinaryTest do
     end
   end
 
+  describe "an Array(T) column (T-489)" do
+    defp array_schema do
+      Schema.new!([
+        {"id", :int64, nullable: false},
+        {"counts", {:array, :int64}},
+        {"tags", {:array, :string}}
+      ])
+    end
+
+    test "a typed body decodes Array(UInt64) and Array(Nullable(String)) element for element" do
+      body =
+        header(["id", "counts", "tags"], ["Int64", "Array(UInt64)", "Array(Nullable(String))"]) <>
+          <<1::little-64, 3, 5::little-64, 6::little-64, 7::little-64, 2, 0, 1, "a", 1>> <>
+          <<2::little-64, 0, 0>>
+
+      assert {:ok, decoded} = RowBinary.decode(array_schema(), body, :with_names_and_types)
+      assert decoded.errors == []
+
+      assert lines(decoded) == [
+               %{"id" => 1, "counts" => [5, 6, 7], "tags" => ["a", nil]},
+               %{"id" => 2, "counts" => [], "tags" => []}
+             ]
+    end
+
+    test "a plain body reads the column as Array(Nullable(T)), as DESCRIBE declares it" do
+      body = <<1::little-64, 2, 0, 5::little-64, 1, 1, 0, 2, "ok">>
+
+      assert {:ok, decoded} = RowBinary.decode(array_schema(), body, :row_binary)
+      assert lines(decoded) == [%{"id" => 1, "counts" => [5, nil], "tags" => ["ok"]}]
+    end
+
+    test "an element the column cannot hold refuses the row, and a nested array the request" do
+      body =
+        header(["id", "counts"], ["Int64", "Array(UInt64)"]) <>
+          <<1::little-64, 2, 1::little-64, 0xFFFFFFFFFFFFFFFF::little-64, 2::little-64, 1,
+            3::little-64>>
+
+      assert {:ok, decoded} = RowBinary.decode(array_schema(), body, :with_names_and_types)
+      assert lines(decoded) == [%{"id" => 2, "counts" => [3]}]
+
+      assert [%{index: 0, errors: [%{message: message}]}] = decoded.errors
+      assert message =~ "counts (ARRAY<INT64>) cannot accept 18446744073709551615"
+
+      nested = header(["id", "counts"], ["Int64", "Array(Array(Int64))"])
+
+      assert {:error, {:invalid_rowbinary, refusal}} =
+               RowBinary.decode(array_schema(), nested, :with_names_and_types)
+
+      assert refusal =~ "Array(Array(Int64))"
+    end
+  end
+
   describe "decode/3 refusing rows" do
     test "a value its column cannot hold refuses its row, and the rows after it still decode" do
       schema =
@@ -421,7 +473,7 @@ defmodule Smolquery.RowBinaryTest do
                {:error,
                 {:invalid_rowbinary,
                  "column id is INT64; ClickHouse type String cannot be written to it; " <>
-                   "column tags has ClickHouse type Array(String), which smolquery cannot store; " <>
+                   "column tags is STRING; ClickHouse type Array(String) cannot be written to it; " <>
                    "column amount is NUMERIC(18,2); ClickHouse type Decimal(18, 3) cannot be written to it; " <>
                    "column attrs is MAP(STRING, STRING); " <>
                    "ClickHouse type Map(Nullable(String), String) cannot be written to it"}}
@@ -487,6 +539,10 @@ defmodule Smolquery.RowBinaryTest do
                {:ok, {:nullable, {:datetime64, 3}}}
 
       assert RowBinary.parse_type("Decimal(18, 2)") == {:ok, {:decimal, 18, 2}}
+
+      assert RowBinary.parse_type("Array(Nullable(UInt64))") ==
+               {:ok, {:array, {:nullable, {:int, 64, :unsigned}}}}
+
       assert RowBinary.parse_type("Decimal128(4)") == {:ok, {:decimal, 38, 4}}
       assert RowBinary.parse_type("FixedString(16)") == {:ok, {:fixed_string, 16}}
       assert RowBinary.parse_type("Nullable(UUID)") == {:ok, {:nullable, :uuid}}
@@ -497,7 +553,8 @@ defmodule Smolquery.RowBinaryTest do
 
     test "refuses types it cannot read and text that does not parse" do
       for text <- [
-            "Array(String)",
+            "Array(Array(String))",
+            "Tuple(String)",
             "Int128",
             "Decimal(76, 2)",
             "Decimal256(2)",

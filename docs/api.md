@@ -56,9 +56,9 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 
 ## Schema types
 
-`INT64`, `FLOAT64`, `STRING`, `BOOL`, `TIMESTAMP`, `TIMESTAMP_NS`, `DATE`, `NUMERIC(p,s)`, `MAP(STRING, STRING)`, and `VARIANT`.
+`INT64`, `FLOAT64`, `STRING`, `BOOL`, `TIMESTAMP`, `TIMESTAMP_NS`, `DATE`, `NUMERIC(p,s)`, `MAP(STRING, STRING)`, `ARRAY<T>`, and `VARIANT`.
 
-The last two are semi-structured, and each has limits a caller must know. The limits are listed here, once. The sections on values and results below refer back here. There is no `JSON` type: `VARIANT` covers it, and `attrs::JSON` gives the text.
+The last three are compound, and each has limits a caller must know. The limits are listed here, once. The sections on values and results below refer back here. There is no `JSON` type: `VARIANT` covers it, and `attrs::JSON` gives the text.
 
 ### `MAP(STRING, STRING)`
 
@@ -74,6 +74,19 @@ Limitations:
 - A map cannot be a clustering column: nothing prunes on it.
 - In a result, a computed `LIST(STRUCT(key, value))` of strings arrives folded as an object, and a computed map with values that are not strings arrives as its entries. A stored map always arrives as an object.
 - A value that is not a string is stored as its JSON text as this node encodes it. The passthrough path keeps the client's bytes. The two can differ on a float's exponent form and on the key order of a nested object.
+
+### `ARRAY<T>`
+
+A list of one scalar type: `ARRAY<INT64>`, `ARRAY<FLOAT64>`, `ARRAY<STRING>`, `ARRAY<BOOL>`, `ARRAY<TIMESTAMP>`, `ARRAY<TIMESTAMP_NS>` or `ARRAY<DATE>`. It is ClickHouse's `Array(T)` and DuckDB's `T[]`, the shape an OpenTelemetry histogram's `BucketCounts` and `ExplicitBounds` arrive in. Query it with DuckDB's list functions: `counts[1]` (one-based; past the end is `NULL`), `len(counts)`, `list_contains(counts, 3)`, `list_sum(counts)`, `unnest(counts)`, and lambdas such as `list_transform(counts, x -> x * 2)`.
+
+Limitations:
+
+- **One element type, and a scalar.** `ARRAY<NUMERIC(p,s)>`, `ARRAY<MAP(...)>`, `ARRAY<VARIANT>` and an array of arrays are refused. An element may be `null`.
+- A value that is not a JSON array of the element type is rejected: `[1, "x"]` fails an `ARRAY<INT64>` column, as does `"1,2,3"`.
+- No stats pruning. A filter on an element reads every row of the table.
+- Only an NDJSON load can carry an array. A Parquet load into a table with an array column answers `400`. A CSV load works when the CSV has no array column.
+- An array cannot be a clustering column: nothing prunes on it.
+- A `NULL` array reads back as `null`; an empty one as `[]`. The two are kept apart.
 
 ### `VARIANT`
 
@@ -96,7 +109,7 @@ Limitations:
 - Only an NDJSON load can carry a variant; a Parquet load answers `400`; a CSV load works when the CSV has no variant column.
 - A variant cannot be a clustering column.
 
-Choose `MAP(STRING, STRING)` for ClickHouse parity and string-only attributes. Choose `VARIANT` when values must keep their types or nest.
+Choose `MAP(STRING, STRING)` for ClickHouse parity and string-only attributes. Choose `ARRAY<T>` for a list of one scalar type. Choose `VARIANT` when values must keep their types or nest.
 
 ### Materialized columns
 
@@ -123,11 +136,12 @@ Insert rows are JSON objects keyed by column name. Values coerce by the table's 
 - `TIMESTAMP_NS` takes the same strings with up to nine fractional digits and stores every one, from 1677-09-22 to 2262-04-11 23:47:16.854775806. Query results over HTTP and the Postgres wire carry microseconds; `CAST(ts AS VARCHAR)` shows all nine digits (T-475).
 - `NUMERIC` prefers strings; floats round.
 - `MAP(STRING, STRING)` takes a JSON object. Every value is stored as a string — see its limits under [Schema types](#schema-types).
+- `ARRAY<T>` takes a JSON array whose elements are what `T` takes, or `null`.
 - `VARIANT` takes any JSON value, unchanged.
 
 The ingest edge validates each row against a **cached schema** (`schema_cache_ttl_ms`). Create, read, update, and delete (CRUD) operations on the same node invalidate the cache. A column added or dropped — through the column routes or an `ALTER TABLE` — is broadcast cluster-wide (`Smolquery.Lifecycle`), and every node's cache drops the table as the broadcast lands, so the new schema is insertable everywhere within a message hop. The TTL is the backstop for a node the broadcast does not reach: until it expires there, an insert that carries a just-added column is rejected per row as an unknown column (in `insertErrors`, not silently), and one that carries a just-dropped column is accepted and the value discarded at the write. One case is exact rather than eventual: a name dropped and added again. The buffer that owns the table confirms every batch's column ids against the catalog before it writes them (one `schema_version` read per micro-segment — a number that moves only when a table's columns change — and the schema again only when it moved), so a stale cache cannot store a row under the old column; the ingest edge drops its cache and retries once, and if the columns are still moving the insert is a 409 `ABORTED` to retry — never a 200 for a row the new column will read as `NULL` (T-439). The edge forwards one request as one forward-batch. It never acknowledges from memory: the response returns when the rows are on the buffer node's disk and in its hot manifest.
 
-Query results page from the frame the runner holds until `result_ttl_ms`. Temporal values arrive as ISO 8601 strings; decimal values arrive as decimal strings; a map arrives as a JSON object; a variant arrives as the JSON value it holds. This mirrors what inserts accept. The limits of a map or variant in a result are under [Schema types](#schema-types). A result larger than `result_max_rows` (default 10,000, the same as the `maxResults` ceiling — see [configuration](configuration.md)) fails the query with `400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
+Query results page from the frame the runner holds until `result_ttl_ms`. Temporal values arrive as ISO 8601 strings; decimal values arrive as decimal strings; a map arrives as a JSON object; an array as a JSON array; a variant arrives as the JSON value it holds. This mirrors what inserts accept. The limits of a map, an array or a variant in a result are under [Schema types](#schema-types). A result larger than `result_max_rows` (default 10,000, the same as the `maxResults` ceiling — see [configuration](configuration.md)) fails the query with `400 RESULT_TOO_LARGE` instead of materializing: add a `LIMIT` or aggregate.
 
 ## DDL
 
