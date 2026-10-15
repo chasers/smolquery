@@ -8,9 +8,10 @@ This page is the recipe, and the list of what works.
 > **How this was checked.** Two ways, neither of them the browser.
 >
 > 1. HyperDX's own code was run against a smolquery node (2026-09-20,
->    `hyperdxio/hyperdx @ c42dda8`): its SQL generator, its metadata reader and its
+>    `hyperdxio/hyperdx @ c42dda8`; traces and metrics on 2026-10-14 and 2026-10-15,
+>    `@hyperdx/app@2.41.0`): its SQL generator, its metadata reader and its
 >    ClickHouse client wrapper, over the real `@clickhouse/client`. `scripts/hyperdx-probe/`
->    is that run, and says how to repeat it. It reads the source, lists fields and map
+>    is that run, one script per screen family, and says how to repeat it. It reads the source, lists fields and map
 >    keys, runs eleven Lucene searches, the histogram and the filters sidebar's values:
 >    17 of 17 answer. Five chart configurations through its chart builder answer too.
 > 2. The statements it sent are a fixture
@@ -31,9 +32,14 @@ This page is the recipe, and the list of what works.
 - **Out, for now:** ClickStack's OpenTelemetry collector. It speaks ClickHouse's
   `Native` format and runs ClickHouse DDL at start, and smolquery answers neither
   (T-497, T-498, T-499). Rows reach smolquery through its own ingest instead.
-- **Out, later:** span events and links, sessions and metrics (T-501). Those tables
-  have `Array` columns with dotted names, which smolquery has no type or identifier
-  for.
+- **In:** HyperDX reading metrics (section 6): the metric catalog, the chart
+  builder's gauge, sum and histogram charts, multi-series charts, ratios and
+  formulas, over tables shaped like `otel_metrics_gauge`, `otel_metrics_sum` and
+  `otel_metrics_histogram` without their `Exemplars.*` columns.
+- **Out, later:** span events and links, exponential histograms, and sessions
+  (T-501). The first two are `Array` columns with dotted names, which smolquery
+  has no identifier for; the exponential histogram's SQL also names an alias
+  before it defines it, which the engine cannot do.
 
 ## 1. Run smolquery where HyperDX can reach it
 
@@ -199,6 +205,88 @@ by `StatusCode`, p95 `Duration` by `ServiceName`, a filtered `avg`, the filters
 sidebar's values, the waterfall's span list for one trace, and the service map's two-CTE join with `GROUPING SETS`, `GROUPING()`,
 `countIf`, `cityHash64` and `quantiles(0.5, 0.95, 0.99)(duration)`.
 
+## 6. Metrics
+
+HyperDX's stock metric source names five tables, one per OpenTelemetry metric
+type. Create the three its charts read. Every column of the exporter's tables
+is here but `Exemplars.*`, an array of maps with dotted names, which HyperDX
+never reads. `TimeUnix` is a `TIMESTAMP` that must not be null, so the chart's
+time bucket answers as `DateTime64`, which HyperDX looks for in a chart's
+`meta`. `BucketCounts` and `ExplicitBounds` are `ARRAY<T>` columns (T-489).
+
+```sh
+common='{"name": "ResourceAttributes", "type": "MAP(STRING, STRING)"},
+      {"name": "ResourceSchemaUrl", "type": "STRING"},
+      {"name": "ScopeName", "type": "STRING"},
+      {"name": "ScopeVersion", "type": "STRING"},
+      {"name": "ScopeAttributes", "type": "MAP(STRING, STRING)"},
+      {"name": "ScopeDroppedAttrCount", "type": "INT64"},
+      {"name": "ScopeSchemaUrl", "type": "STRING"},
+      {"name": "ServiceName", "type": "STRING"},
+      {"name": "MetricName", "type": "STRING"},
+      {"name": "MetricDescription", "type": "STRING"},
+      {"name": "MetricUnit", "type": "STRING"},
+      {"name": "Attributes", "type": "MAP(STRING, STRING)"},
+      {"name": "StartTimeUnix", "type": "TIMESTAMP"},
+      {"name": "TimeUnix", "type": "TIMESTAMP", "nullable": false},
+      {"name": "Flags", "type": "INT64"}'
+
+create() {
+  curl -H "$auth" -H "$json" -d "{\"id\": \"$1\", \"schema\": [$common, $2]}" $api/v1/datasets/default/tables
+  curl -X PATCH -H "$auth" -H "$json" -d '{"clustering": ["ServiceName", "MetricName", "TimeUnix"]}' \
+       $api/v1/datasets/default/tables/$1
+}
+
+create otel_metrics_gauge '{"name": "Value", "type": "FLOAT64"}'
+create otel_metrics_sum '{"name": "Value", "type": "FLOAT64"},
+      {"name": "AggregationTemporality", "type": "INT64"}, {"name": "IsMonotonic", "type": "BOOL"}'
+create otel_metrics_histogram '{"name": "Count", "type": "INT64"}, {"name": "Sum", "type": "FLOAT64"},
+      {"name": "BucketCounts", "type": "ARRAY<INT64>"}, {"name": "ExplicitBounds", "type": "ARRAY<FLOAT64>"},
+      {"name": "Min", "type": "FLOAT64"}, {"name": "Max", "type": "FLOAT64"},
+      {"name": "AggregationTemporality", "type": "INT64"}'
+```
+
+A row is the exporter's row as NDJSON: `TimeUnix` as an ISO 8601 string, the
+attribute maps as objects, `BucketCounts` as a JSON array of integers and
+`ExplicitBounds` as a JSON array of numbers. `AggregationTemporality` is `1`
+for delta and `2` for cumulative, as in the protocol; HyperDX reads it to
+turn a cumulative counter or histogram into per-bucket increases.
+
+Add the source beside the others in `DEFAULT_SOURCES`. It is HyperDX's stock
+`Metrics` source without the two tables that are not created:
+
+```json
+{"name":"Metrics","kind":"metric","connection":"smolquery",
+ "from":{"databaseName":"default","tableName":""},
+ "timestampValueExpression":"TimeUnix",
+ "resourceAttributesExpression":"ResourceAttributes",
+ "metricTables":{"gauge":"otel_metrics_gauge","sum":"otel_metrics_sum",
+                 "histogram":"otel_metrics_histogram"}}
+```
+
+Checked with HyperDX 2.41.0's own query code against the edge, and kept as
+the fixture `test/support/fixtures/clickstack/hyperdx_metrics.json` that
+`test/smolquery_clickhouse/hyperdx_metrics_test.exs` runs over real rows: the
+three tables' columns and sorting keys; the metric catalog per table
+(`anyLast`); the metric name search (`positionCaseInsensitive`); a metric's
+unit and description, its distinct attribute maps, and one attribute's values;
+gauge charts (`avg` by `ServiceName`, `max` as a number, a filtered `avg`, a
+group by `Attributes['cpu']`, a delta with `argMax`); sum charts (the rate of
+a cumulative counter by service, `increase` with its top-20 groups, `increase`
+as a number, the last cumulative value, a delta-temporality counter);
+histogram charts (p95 by service, p50 as a number, the count per bucket, the
+count by service); and multi-series charts (a gauge and a sum pivoted per
+bucket, a ratio of two sums, a formula `A / B * 100`, a gauge beside a
+histogram with its packed group). Every one answers with the `meta` types
+HyperDX's chart code classifies: the time bucket as `DateTime64(6)`, values as
+`Float64` or `Int128`.
+
+Not answered: the exponential histogram's quantile. Its SQL names
+`normalized_scale` before the item that defines it, which ClickHouse allows and
+the engine does not, and it subtracts arrays whose names the rewrite cannot
+tell are arrays (section "What differs"). Its count chart answers. The
+`summary` type has no chart in HyperDX.
+
 ## What works
 
 | HyperDX | Status |
@@ -220,7 +308,10 @@ sidebar's values, the waterfall's span list for one trace, and the service map's
 | Alert sample rows | `CSV` output answers; alerts themselves have not been run |
 | Traces: search in trace mode, the waterfall, latency charts | Works, over the table in section 5 |
 | Service map | Works: its `quantiles(0.5, 0.95, 0.99)(x)` is rewritten to one `quantile_cont` over a list and answers as `Array(Nullable(Float64))`, the three percentiles in order. Over no rows it answers `[]` where ClickHouse answers `[nan, nan, nan]`; the service map never groups an empty set |
-| Span events and links, sessions, metrics | **Not yet** (T-501) |
+| Metrics: the catalog, name search, a metric's unit, attributes and values | Works, over the tables in section 6 |
+| Metrics: gauge, sum and histogram charts; multi-series, ratio and formula charts | Works: `last_value`, `lagInFrame`, `multiIf`, `sumForEach`, `arrayCumSum`, the lambda forms of `arrayExists` and `arrayFirstIndex`, a tuple's `.1`, `* EXCEPT`, `group` as a name and `counts - prev_counts` are rewritten or answered by macros. A count answers as `Int128`, since the engine's `sum` over an `Int64` is 128 bits wide |
+| Metrics: exponential histograms | **Not yet** (T-501): a quantile over one names an alias before defining it |
+| Span events and links, sessions | **Not yet** (T-501) |
 | ClickStack's collector writing to smolquery | **Out of scope** (T-497, T-498, T-499) |
 
 ## What differs from ClickHouse underneath

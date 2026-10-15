@@ -63,9 +63,18 @@ defmodule SmolqueryClickHouse.RewriteTest do
                "SELECT cast(a + f(b, c) AS UINTEGER)"
     end
 
-    test "the standard form, an unknown type and another function's literal are left alone" do
+    test "the standard form takes ClickHouse's type names too, and keeps the engine's (T-501)" do
+      assert Rewrite.call(
+               "SELECT CAST(x AS Array(Int64)) counts, CAST(y AS Nullable(UInt32)), CAST(z AS VARCHAR)"
+             ) ==
+               "SELECT CAST(x AS BIGINT[]) counts, CAST(y AS UINTEGER), CAST(z AS VARCHAR)"
+
+      assert Rewrite.call("SELECT 1 FROM t GROUP BY CAST(x AS String) AS s") ==
+               "SELECT 1 FROM t GROUP BY CAST(x AS VARCHAR)"
+    end
+
+    test "an unknown type and another function's literal are left alone" do
       for sql <- [
-            "SELECT CAST(x AS UInt32)",
             "SELECT CAST(x, 'Tuple(String, Int64)')",
             "SELECT concat(x, 'Float64')",
             "SELECT CAST(x, 'Float64', y)"
@@ -299,6 +308,88 @@ defmodule SmolqueryClickHouse.RewriteTest do
 
       assert Rewrite.engine_type("Nullable(Decimal(38, 2))") == {:ok, "DECIMAL(38, 2)"}
       assert Rewrite.engine_type("Map(String)") == :error
+    end
+  end
+
+  describe "what HyperDX's metrics screens send (T-501)" do
+    test "lagInFrame, leadInFrame and last_value are the engine's lag, lead and last" do
+      assert Rewrite.call(
+               "SELECT lagInFrame(toNullable(v), 1, NULL) OVER (ORDER BY t), last_value(Sum) FROM b"
+             ) ==
+               "SELECT lag(toNullable(v), 1, NULL) OVER (ORDER BY t), last(Sum) FROM b"
+    end
+
+    test "a lambda moves behind its array, and a predicate becomes a macro over the list it answers" do
+      assert Rewrite.call(
+               "SELECT arrayExists((x) -> x.2 < x.1, arrayZip(p, c)), arrayMap(x -> x * 2, a)"
+             ) ==
+               "SELECT clickhouse_arrayExists(list_transform(arrayZip(p, c), (x) -> x[2] < x[1])), list_transform(a, x -> x * 2)"
+
+      assert Rewrite.call(
+               "SELECT arrayFirstIndex(x -> if(x.1 > rank, 1, 0), point) AS i, arrayFilter(x -> x > 1, a)"
+             ) ==
+               "SELECT clickhouse_arrayFirstIndex(list_transform(point, x -> if(x[1] > rank, 1, 0))) AS i, list_filter(a, x -> x > 1)"
+
+      assert Rewrite.call("SELECT arrayExists(a)") == "SELECT arrayExists(a)"
+    end
+
+    test "a tuple's element reads by position" do
+      assert Rewrite.call(
+               "SELECT point[n].1 AS total, point[upper_idx - 1].2, t.1, 1.5, 0.95 * total"
+             ) ==
+               "SELECT point[n][1] AS total, point[upper_idx - 1][2], t[1], 1.5, 0.95 * total"
+    end
+
+    test "* EXCEPT is * EXCLUDE, and EXCEPT between two selects is left alone" do
+      assert Rewrite.call(
+               ~s|SELECT * EXCEPT ("__hdx_value", "__hdx_series_idx") FROM (SELECT 1) GROUP BY ALL|
+             ) ==
+               ~s|SELECT * EXCLUDE ("__hdx_value", "__hdx_series_idx") FROM (SELECT 1) GROUP BY ALL|
+
+      assert Rewrite.call("SELECT a FROM t EXCEPT SELECT a FROM u") ==
+               "SELECT a FROM t EXCEPT SELECT a FROM u"
+    end
+
+    test "group as a name is quoted, GROUP BY is not, and a member is left alone" do
+      assert Rewrite.call(
+               "SELECT [ServiceName] AS group, s.group FROM t GROUP BY __hdx_time_bucket, group, ExplicitBounds"
+             ) ==
+               ~s|SELECT [ServiceName] AS "group", s.group FROM t GROUP BY __hdx_time_bucket, "group", ExplicitBounds|
+
+      assert Rewrite.call(
+               "SELECT 1 FROM t WINDOW w AS (PARTITION BY group ORDER BY t) ORDER BY group"
+             ) ==
+               ~s|SELECT 1 FROM t WINDOW w AS (PARTITION BY "group" ORDER BY t) ORDER BY "group"|
+    end
+
+    test "inf and nan are doubles" do
+      assert Rewrite.call("SELECT ifNull(point[i].2, inf), -inf, nan, t.inf, inf(1)") ==
+               "SELECT ifNull(point[i][2], 'infinity'::DOUBLE), -'infinity'::DOUBLE, 'nan'::DOUBLE, t.inf, inf(1)"
+    end
+
+    test "a postfix cast takes ClickHouse's type names" do
+      assert Rewrite.call(
+               "SELECT a::Array(Int64), b::Nullable(Float64), c::BIGINT, d::UInt8 FROM t"
+             ) ==
+               "SELECT a::BIGINT[], b::DOUBLE, c::BIGINT, d::UTINYINT FROM t"
+    end
+
+    test "a minus between two names the statement binds to arrays subtracts element by element" do
+      sql =
+        "SELECT multiIf(first, arrayWithConstant(length(counts), toInt64(0)), reset, counts, counts - prev_counts) AS deltas, " <>
+          "rank - lower_count FROM (SELECT any(counts) OVER w AS prev_counts, counts, rank, lower_count FROM " <>
+          "(SELECT CAST(BucketCounts AS Array(Int64)) counts, 0.95 * total AS rank, c AS lower_count FROM h) WINDOW w AS (ORDER BY t))"
+
+      assert Rewrite.call(sql) ==
+               "SELECT multiIf(first, arrayWithConstant(length(counts), toInt64(0)), reset, counts, clickhouse_arrayMinus(counts, prev_counts)) AS deltas, " <>
+                 "rank - lower_count FROM (SELECT any_value(counts) OVER w AS prev_counts, counts, rank, lower_count FROM " <>
+                 "(SELECT CAST(BucketCounts AS BIGINT[]) counts, 0.95 * total AS rank, c AS lower_count FROM h) WINDOW w AS (ORDER BY t))"
+
+      assert Rewrite.call("SELECT a - b FROM (SELECT [1] AS a, sumForEach(d) AS b FROM t)") ==
+               "SELECT clickhouse_arrayMinus(a, b) FROM (SELECT [1] AS a, sumForEach(d) AS b FROM t)"
+
+      assert Rewrite.call("SELECT a - b FROM (SELECT 1 AS a, 2 AS b)") ==
+               "SELECT a - b FROM (SELECT 1 AS a, 2 AS b)"
     end
   end
 end

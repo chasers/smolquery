@@ -197,6 +197,75 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
     end
   end
 
+  describe "what HyperDX's metrics screens call (T-501)" do
+    test "sumForEach sums arrays element by element, padding the shorter", %{engine: engine} do
+      sql =
+        "SELECT g, sumForEach(a) AS s FROM (VALUES (1, [1, 2]), (1, [3, 4, 5]), (2, [7])) t(g, a) GROUP BY g ORDER BY g"
+
+      assert rows(engine, sql) == [%{"g" => 1, "s" => [4, 6, 5]}, %{"g" => 2, "s" => [7]}]
+    end
+
+    test "arrayCumSum, arrayZip, arrayZipUnaligned and arrayWithConstant keep ClickHouse's shapes",
+         %{engine: engine} do
+      assert one(engine, "arrayCumSum([1, 2, 3])") == [1, 3, 6]
+      assert one(engine, "arrayCumSum(CAST([] AS BIGINT[]))") == []
+      assert one(engine, "arrayZip([1, 2], [10, 20, 30])") == [%{"" => 10}, %{"" => 20}]
+      assert one(engine, "arrayZipUnaligned([1, 2], [10])") == [%{"" => 10}, %{"" => nil}]
+      assert one(engine, "arrayZip([1, 2], [10, 20])[2][1]") == 2
+      assert one(engine, "arrayWithConstant(3, toInt64(0))") == [0, 0, 0]
+    end
+
+    test "the macros the lambda rewrite calls, over the list the lambda answered", %{
+      engine: engine
+    } do
+      assert one(engine, "clickhouse_arrayExists([0, 1, 0])")
+      refute one(engine, "clickhouse_arrayExists(CAST([] AS BOOLEAN[]))")
+      assert one(engine, "clickhouse_arrayFirstIndex([0, 0, 1, 1])") == 3
+      assert one(engine, "clickhouse_arrayFirstIndex([false, false])") == 0
+      assert one(engine, "clickhouse_arrayAll([true, 1])")
+      assert one(engine, "clickhouse_arrayCount([1, 0, 1])") == 2
+      assert one(engine, "clickhouse_arrayMinus([5, 7], [1, 2])") == [4, 5]
+      assert one(engine, "clickhouse_arrayMinus([5, 7], CAST(NULL AS BIGINT[]))") == [5, 7]
+      assert one(engine, "clickhouse_arrayPlus([1], [2, 3])") == [3, 3]
+    end
+
+    test "multiIf, ifNull, tuple, toNullable and assumeNotNull", %{engine: engine} do
+      assert one(engine, "multiIf(false, 1, true, 2, 3)") == 2
+      assert one(engine, "multiIf(false, 1, false, 2, false, 3, true, 4, 5)") == 4
+      assert one(engine, "ifNull(NULL, 'infinity'::DOUBLE)") == :infinity
+      assert one(engine, "tuple('a')") == "a"
+      assert one(engine, "tuple('a', 1)") == %{"" => 1}
+      assert one(engine, "toNullable(5) + assumeNotNull(1)") == 6
+    end
+
+    test "anyLast, anyIf, anyOrNullIf and positionCaseInsensitive", %{engine: engine} do
+      assert rows(
+               engine,
+               "SELECT anyLast(n) AS l, anyIf(n, n = 3) AS i, anyOrNullIf(n, n > 500) AS o FROM logs"
+             ) ==
+               [%{"l" => 199, "i" => 3, "o" => nil}]
+
+      assert one(engine, "positionCaseInsensitive('node_uptime_seconds', 'UP')") == 6
+      assert one(engine, "positionCaseInsensitive('abc', 'z')") == 0
+    end
+
+    test "the array functions the exponential histogram names, where the engine has a shape for them",
+         %{engine: engine} do
+      assert one(engine, "arraySum([1, 2])") == 3
+      assert one(engine, "arraySum(CAST([] AS BIGINT[]))") == 0
+      assert one(engine, "arrayMin([3, 1]) + arrayMax([3, 1])") == 4
+      assert one(engine, "arrayReverse([1, 2])") == [2, 1]
+      assert one(engine, "arrayConcat([1], [2])") == [1, 2]
+      assert one(engine, "arrayResize([1, 2, 3], 2)") == [1, 2]
+      assert one(engine, "arrayResize([1], 3)") == [1, 0, 0]
+      assert one(engine, "arraySlice([1, 2, 3, 4], 2, 2)") == [2, 3]
+      assert one(engine, "emptyArrayInt64()") == []
+      assert one(engine, "bitShiftLeft(1, 3) + bitShiftRight(16, 2)") == 12
+      assert one(engine, "positiveModulo(-1, 5)") == 4
+      assert one(engine, "exp2(3)") == 8.0
+    end
+  end
+
   describe "statements_for/1" do
     test "answers the definitions of the functions a statement names, and no others" do
       sql =

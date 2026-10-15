@@ -85,7 +85,8 @@ defmodule Smolquery.QueryService.Nullability do
   def columns(%{"statements" => [%{"node" => node}]}, schemas), do: columns(node, schemas)
   def columns(%{"node" => %{} = node}, schemas), do: columns(node, schemas)
 
-  def columns(%{"type" => "SELECT_NODE"} = node, schemas) do
+  def columns(%{"type" => type} = node, schemas)
+      when type in ["SELECT_NODE", "SET_OPERATION_NODE"] do
     case outputs(node, schemas, %{}) do
       :unknown -> :unknown
       outputs -> Enum.map(outputs, fn {_name, non_null} -> non_null end)
@@ -97,7 +98,10 @@ defmodule Smolquery.QueryService.Nullability do
   defp outputs(%{"type" => "SELECT_NODE"} = node, schemas, outer_ctes) do
     ctes = Map.merge(outer_ctes, ctes(node, schemas, outer_ctes))
     scope = relations(node["from_table"], schemas, ctes)
-    grouped = node["group_expressions"] not in [nil, []]
+
+    grouped =
+      node["group_expressions"] not in [nil, []] or
+        node["aggregate_handling"] == "FORCE_AGGREGATES"
 
     plain =
       match?(sets when sets in [nil, []], node["group_sets"]) or
@@ -114,7 +118,20 @@ defmodule Smolquery.QueryService.Nullability do
     |> unless_sets(plain)
   end
 
-  defp outputs(_set_operation_or_other, _schemas, _ctes), do: :unknown
+  defp outputs(%{"type" => "SET_OPERATION_NODE"} = node, schemas, outer_ctes) do
+    ctes = Map.merge(outer_ctes, ctes(node, schemas, outer_ctes))
+    operands = node |> Ast.set_operands() |> Enum.map(&outputs(&1, schemas, ctes))
+
+    if operands != [] and Enum.all?(operands, &is_list/1) and
+         operands |> Enum.map(&length/1) |> Enum.uniq() |> length() == 1,
+       do: Enum.zip_with(operands, &combined/1),
+       else: :unknown
+  end
+
+  defp outputs(_other_node, _schemas, _ctes), do: :unknown
+
+  defp combined([{name, _flag} | _rest] = columns),
+    do: {name, Enum.all?(columns, fn {_name, flag} -> flag end)}
 
   defp in_order(:unknown), do: :unknown
   defp in_order(reversed), do: Enum.reverse(reversed)
@@ -136,14 +153,33 @@ defmodule Smolquery.QueryService.Nullability do
 
   defp ctes(_node, _schemas, _outer), do: %{}
 
-  defp laid_out(%{"class" => "STAR"} = star, scope, _grouped) do
-    if Map.get(star, "exclude_list", []) in [nil, []] and
-         Map.get(star, "replace_list", []) in [nil, []],
-       do: starred(star["relation_name"], scope),
-       else: :unknown
+  defp laid_out(%{"class" => "STAR"} = star, scope, grouped) do
+    with [] <- List.wrap(star["rename_list"]),
+         [] <- List.wrap(star["qualified_exclude_list"]),
+         columns when is_list(columns) <- starred(star["relation_name"], scope) do
+      excluded = star["exclude_list"] |> List.wrap() |> Enum.map(&String.downcase/1)
+
+      replaced =
+        star["replace_list"]
+        |> List.wrap()
+        |> Map.new(fn %{"key" => key, "value" => value} -> {String.downcase(key), value} end)
+
+      for {name, flag} <- columns,
+          name not in excluded,
+          do: replaced_column(name, flag, replaced, scope, grouped)
+    else
+      _renamed_qualified_or_unknown -> :unknown
+    end
   end
 
   defp laid_out(item, scope, grouped), do: [{output_name(item), non_null?(item, scope, grouped)}]
+
+  defp replaced_column(name, flag, replaced, scope, grouped) do
+    case Map.fetch(replaced, name) do
+      {:ok, expression} -> {name, non_null?(expression, scope, grouped)}
+      :error -> {name, flag}
+    end
+  end
 
   defp starred(relation, scope) when relation in [nil, ""] do
     if Enum.any?(scope, &(&1.columns == :unknown)),

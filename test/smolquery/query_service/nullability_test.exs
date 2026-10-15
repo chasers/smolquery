@@ -108,6 +108,37 @@ defmodule Smolquery.QueryService.NullabilityTest do
              [true, true]
   end
 
+  test "a star's exclude and replace lists, a set operation, and GROUP BY ALL (T-501)" do
+    assert columns("SELECT * EXCLUDE (level) FROM logs.events") == [true, false, true, false]
+
+    assert columns(
+             "SELECT * EXCLUDE (ts_int) REPLACE (coalesce(level, '') AS level) FROM logs.events"
+           ) == [true, true, false, true]
+
+    assert columns("SELECT id FROM logs.events UNION ALL SELECT 1") == [true]
+
+    assert columns("SELECT id, level FROM logs.events UNION ALL SELECT id, NULL FROM logs.events") ==
+             [true, false]
+
+    assert columns("SELECT id FROM logs.events UNION ALL SELECT ts_int FROM logs.events") == [
+             false
+           ]
+
+    assert columns("SELECT level, count(*), max(id) FROM logs.events GROUP BY ALL") == [
+             false,
+             true,
+             true
+           ]
+
+    pivot =
+      "SELECT max(v) FILTER (WHERE idx = 0) AS a, * EXCLUDE (v, idx) FROM " <>
+        "(SELECT * REPLACE (CAST(v AS DOUBLE) AS v), 0 AS idx FROM (SELECT id AS v, ts, level FROM logs.events) " <>
+        "UNION ALL SELECT * REPLACE (CAST(v AS DOUBLE) AS v), 1 AS idx FROM (SELECT ts_int AS v, ts, level FROM logs.events)) " <>
+        "GROUP BY ALL"
+
+    assert columns(pivot) == [false, true, false]
+  end
+
   test "what it cannot rule out may be NULL" do
     assert columns("SELECT e.id, o.id FROM logs.events e LEFT JOIN logs.events o ON e.id = o.id") ==
              [false, false]
@@ -125,8 +156,8 @@ defmodule Smolquery.QueryService.NullabilityTest do
 
     assert columns("SELECT id FROM logs.events GROUP BY ROLLUP (id)") == [false]
     assert columns("SELECT * FROM range(3)") == :unknown
-    assert columns("SELECT * EXCLUDE (level) FROM logs.events") == :unknown
-    assert columns("SELECT id FROM logs.events UNION ALL SELECT 1") == :unknown
+    assert columns("SELECT * RENAME (level AS l) FROM logs.events") == :unknown
+    assert columns("SELECT id FROM logs.events UNION ALL SELECT * FROM range(3)") == :unknown
     assert columns("SELECT id FROM other.table_unknown") == [false]
   end
 end

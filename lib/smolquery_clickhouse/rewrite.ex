@@ -74,6 +74,42 @@ defmodule SmolqueryClickHouse.Rewrite do
     the macro that answers the clock as a plain timestamp, to the
     microsecond where ClickHouse's `now()` stops at the second.
 
+  The rest is what HyperDX's metrics screens send (T-501), which read
+  arrays, windows and tuples where its logs and traces screens read none:
+
+  - **`lagInFrame`, `leadInFrame`, `last_value`.** Renamed to `lag`, `lead`
+    and `last`: the first two are the engine's window functions of the same
+    shape, and ClickHouse's `last_value` is an aggregate where the engine's
+    is a window function only, so it becomes the `last` aggregate, which
+    the engine also runs over a window.
+  - **A lambda before its array.** ClickHouse writes `arrayExists(x -> x > 1,
+    a)`; the engine writes `list_transform(a, x -> x > 1)`, and a lambda
+    cannot pass through a macro. The two arguments swap, and `arrayExists`,
+    `arrayAll`, `arrayFirstIndex` and `arrayCount` become a macro over the
+    list the lambda answers, `arrayMap` and `arrayFilter` the engine's
+    `list_transform` and `list_filter`. A form with a different arity is
+    left alone.
+  - **`t.1`, a tuple's element.** The engine's `list_zip` answers unnamed
+    structs that read by position, `t[1]`, and does not parse `.1` at all.
+    The dot form after a name, a `)` or a `]` becomes the bracket form.
+  - **`* EXCEPT (...)`** is the engine's `* EXCLUDE (...)`.
+  - **`group`.** HyperDX names a histogram's packed group columns `group`,
+    which the engine takes as the keyword wherever `BY` does not follow.
+    The name is quoted; `GROUP BY` is not.
+  - **`inf` and `nan`** are the doubles the engine spells `'infinity'` and
+    `'nan'`.
+  - **`CAST(x AS Array(Int64))`.** ClickHouse's type names inside the
+    standard cast form become the engine's, as they do in the function
+    form; a name this module does not know stays as written.
+  - **`counts - prev_counts`.** ClickHouse subtracts two arrays element by
+    element, and HyperDX's histogram quantile relies on it. The engine has
+    no such operator, so the rewrite keeps a list of the names the
+    statement binds to arrays — an alias of a `CAST(... AS Array(...))`, of
+    an array function such as `arrayZip` or `sumForEach`, of a list literal,
+    or of `any(...)`, `multiIf(...)` and their kin passed one — and writes
+    `a - b` between two of them as `clickhouse_arrayMinus(a, b)`. A minus
+    between any other two names is left alone.
+
   The statement's quoting is standard by the time it arrives
   (`Statement.standard_quoting/1`), so literals, quoted names and comments
   are whole tokens that are never read as code.
@@ -107,8 +143,31 @@ defmodule SmolqueryClickHouse.Rewrite do
     "isnotnull" => "clickhouse_isNotNull",
     "any" => "any_value",
     "md5" => "clickhouse_MD5",
-    "now" => "now64"
+    "now" => "now64",
+    "laginframe" => "lag",
+    "leadinframe" => "lead",
+    "last_value" => "last"
   }
+
+  @lambda_first %{
+    "arrayexists" => {:over, "clickhouse_arrayExists"},
+    "arrayall" => {:over, "clickhouse_arrayAll"},
+    "arrayfirstindex" => {:over, "clickhouse_arrayFirstIndex"},
+    "arraycount" => {:over, "clickhouse_arrayCount"},
+    "arraymap" => {:call, "list_transform"},
+    "arrayfilter" => {:call, "list_filter"}
+  }
+
+  @doubles %{"inf" => "'infinity'::DOUBLE", "nan" => "'nan'::DOUBLE"}
+
+  @array_valued ~w(arrayzip arrayzipunaligned arraycumsum sumforeach arraywithconstant arrayconcat
+                   arrayreverse arrayresize arrayslice arraymap arrayfilter range emptyarrayint64
+                   emptyarrayfloat64 emptyarraystring grouparray groupuniqarray groupuniqarrayarray
+                   clickhouse_arrayminus clickhouse_arrayplus)
+
+  @array_through ~w(any anylast tonullable assumenotnull if multiif ifnull coalesce)
+
+  @list_ends ~w(from union intersect where limit settings format)
 
   @types %{
     "int8" => "TINYINT",
@@ -135,11 +194,12 @@ defmodule SmolqueryClickHouse.Rewrite do
   """
   @spec call(String.t()) :: String.t()
   def call(statement) when is_binary(statement) do
-    statement
-    |> Sql.tokens()
-    |> Enum.flat_map(&pieces/1)
-    |> expression_aliases()
-    |> walk(%{depth: 0, clauses: [], casts: [], last: nil}, [])
+    pieces = statement |> Sql.tokens() |> Enum.flat_map(&pieces/1) |> expression_aliases()
+
+    arrays = pieces |> array_aliases() |> Map.new(&{&1, true})
+
+    pieces
+    |> walk(%{depth: 0, clauses: [], casts: [], last: nil, arrays: arrays}, [])
     |> IO.iodata_to_binary()
   end
 
@@ -386,13 +446,70 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp walk([], _state, acc), do: Enum.reverse(acc)
 
   defp walk([{:word, text, lower} | rest], state, acc) when lower in ["group", "order"] do
-    case by(rest) do
-      {:ok, between, by, after_by} ->
+    case {by(rest), lower} do
+      {{:ok, between, by, after_by}, _lower} ->
         walk(after_by, enter_clause(state), [by, between, text | acc])
 
-      :error ->
+      {:error, "group"} ->
+        walk(rest, %{state | last: lower}, [group_name(text, acc) | acc])
+
+      {:error, _order} ->
         walk(rest, %{state | last: lower}, [text | acc])
     end
+  end
+
+  defp walk([{:word, text, "except"} = word | rest], state, acc) do
+    if after_star?(acc),
+      do: walk(rest, %{state | last: nil}, ["EXCLUDE" | acc]),
+      else: walk_word(word, text, rest, state, acc)
+  end
+
+  defp walk([{:word, text, lower}, :open | rest], state, acc)
+       when is_map_key(@lambda_first, lower) do
+    with {:ok, arguments, after_call} <- group(rest),
+         [lambda, list] <- split_arguments(arguments) do
+      list = list |> drop_space() |> walk(inner(state), [])
+      lambda = lambda |> drop_space() |> walk(inner(state), [])
+
+      call =
+        case Map.fetch!(@lambda_first, lower) do
+          {:over, macro} -> [macro, "(list_transform(", list, ", ", lambda, "))"]
+          {:call, function} -> [function, "(", list, ", ", lambda, ")"]
+        end
+
+      walk(after_call, %{state | last: nil}, [call | acc])
+    else
+      _other_arity -> walk([:open | rest], %{state | last: lower}, [text | acc])
+    end
+  end
+
+  defp walk([{:word, text, "as"} | rest], %{depth: depth, casts: [depth | _]} = state, acc) do
+    case cast_target(rest) do
+      {:ok, type, after_type} -> walk(after_type, %{state | last: nil}, [type, " ", text | acc])
+      :error -> walk(rest, %{state | last: "as"}, [text | acc])
+    end
+  end
+
+  defp walk(
+         [{:word, left, left_lower} = word, {:other, minus}, {:word, right, right_lower} | rest] =
+           pieces,
+         %{arrays: arrays} = state,
+         acc
+       )
+       when is_map_key(arrays, left_lower) and is_map_key(arrays, right_lower) do
+    if String.trim(minus) == "-",
+      do:
+        walk(rest, %{state | last: nil}, [
+          ["clickhouse_arrayMinus(", left, ", ", right, ")"] | acc
+        ]),
+      else: walk_word(word, left, tl(pieces), state, acc)
+  end
+
+  defp walk([{:word, text, lower} | rest], state, acc)
+       when is_map_key(@doubles, lower) and not (rest != [] and hd(rest) == :open) do
+    if after_member?(acc),
+      do: walk(rest, %{state | last: lower}, [text | acc]),
+      else: walk(rest, %{state | last: nil}, [Map.fetch!(@doubles, lower) | acc])
   end
 
   defp walk([{:word, _text, "default"} = word, {:other, "." <> _after} = dot | rest], state, acc),
@@ -452,12 +569,8 @@ defmodule SmolqueryClickHouse.Rewrite do
     end
   end
 
-  defp walk([{:word, text, lower} | rest], %{depth: depth, clauses: [depth | outer]} = state, acc)
-       when lower in @clause_ends,
-       do: walk(rest, %{state | clauses: outer, last: lower}, [text | acc])
-
-  defp walk([{:word, text, lower} | rest], state, acc),
-    do: walk(rest, %{state | last: lower}, [text | acc])
+  defp walk([{:word, text, _lower} = word | rest], state, acc),
+    do: walk_word(word, text, rest, state, acc)
 
   defp walk([:open | rest], %{depth: depth, last: last} = state, acc) do
     casts = if last == "cast", do: [depth + 1 | state.casts], else: state.casts
@@ -486,12 +599,211 @@ defmodule SmolqueryClickHouse.Rewrite do
 
   defp walk([{:other, text} | rest], state, acc) do
     last = if String.trim(text) == "", do: state.last, else: nil
+    written = tuple_elements(text, acc)
 
-    walk(rest, %{state | last: last}, [text | acc])
+    case postfix_cast(text, rest) do
+      {:ok, type, after_type} -> walk(after_type, %{state | last: nil}, [type, written | acc])
+      :error -> walk(rest, %{state | last: last}, [written | acc])
+    end
   end
 
   defp walk([{_kind, text} | rest], state, acc),
     do: walk(rest, %{state | last: nil}, [text | acc])
+
+  defp postfix_cast(text, rest) do
+    if String.ends_with?(String.trim_trailing(text), "::"), do: cast_target(rest), else: :error
+  end
+
+  defp walk_word(
+         {:word, _word, lower},
+         text,
+         rest,
+         %{depth: depth, clauses: [depth | outer]} = state,
+         acc
+       )
+       when lower in @clause_ends,
+       do: walk(rest, %{state | clauses: outer, last: lower}, [text | acc])
+
+  defp walk_word({:word, _word, lower}, text, rest, state, acc),
+    do: walk(rest, %{state | last: lower}, [text | acc])
+
+  defp group_name(text, acc), do: if(after_member?(acc), do: text, else: ~s("group"))
+
+  defp after_member?(acc), do: String.ends_with?(String.trim_trailing(leading_text(acc)), ".")
+
+  defp after_star?(acc), do: String.ends_with?(String.trim_trailing(leading_text(acc)), "*")
+
+  defp leading_text(acc) do
+    case Enum.find(acc, &(not is_binary(&1) or String.trim(&1) != "")) do
+      text when is_binary(text) -> text
+      _call_or_nothing -> ""
+    end
+  end
+
+  defp tuple_elements(text, acc) do
+    text = Regex.replace(~r/(?<=[\]\)])\.(\d+)(?![\d.])/, text, "[\\1]")
+
+    if after_operand?(acc),
+      do: Regex.replace(~r/\A\.(\d+)(?![\d.])/, text, "[\\1]"),
+      else: text
+  end
+
+  defp after_operand?([head | _rest]) when is_binary(head),
+    do: Regex.match?(~r/[A-Za-z0-9_"\)\]]\z/, head)
+
+  defp after_operand?(_acc), do: false
+
+  defp cast_target(pieces) do
+    with [{:word, name, _lower} | rest] <- drop_space(pieces),
+         {:ok, written, after_type} <- type_text(name, rest),
+         {:ok, type} <- engine_type(written) do
+      {:ok, type, after_type}
+    else
+      _not_a_known_type -> :error
+    end
+  end
+
+  defp type_text(name, [:open | rest]) do
+    with {:ok, inner, after_group} <- group(rest),
+         do: {:ok, name <> "(" <> text_of(inner) <> ")", after_group}
+  end
+
+  defp type_text(name, rest), do: {:ok, name, rest}
+
+  defp text_of(pieces) do
+    Enum.map_join(pieces, fn
+      :open -> "("
+      :close -> ")"
+      :comma -> ","
+      {:word, text, _lower} -> text
+      {_kind, text} -> text
+    end)
+  end
+
+  defp split_arguments(pieces) do
+    pieces
+    |> Enum.reduce({0, [[]]}, fn
+      :open, {depth, [current | done]} -> {depth + 1, [[:open | current] | done]}
+      :close, {depth, [current | done]} -> {depth - 1, [[:close | current] | done]}
+      :comma, {0, groups} -> {0, [[] | groups]}
+      piece, {depth, [current | done]} -> {depth, [[piece | current] | done]}
+    end)
+    |> elem(1)
+    |> Enum.map(&Enum.reverse/1)
+    |> Enum.reverse()
+  end
+
+  defp array_aliases(pieces), do: pieces |> select_items([]) |> array_names(MapSet.new())
+
+  defp array_names(items, known) do
+    grown = Enum.reduce(items, known, &learned/2)
+
+    if MapSet.size(grown) == MapSet.size(known), do: grown, else: array_names(items, grown)
+  end
+
+  defp learned(item, names) do
+    case aliased_item(item) do
+      {:ok, name, expression} ->
+        if array_expression?(expression, names), do: MapSet.put(names, name), else: names
+
+      :error ->
+        names
+    end
+  end
+
+  defp select_items([], acc), do: acc |> Enum.reverse() |> Enum.concat()
+
+  defp select_items([{:word, _text, "select"} | rest], acc) do
+    {items, after_list} = select_list(rest, 0, [], [])
+    nested = Enum.flat_map(items, &select_items(&1, []))
+
+    select_items(after_list, [nested, items | acc])
+  end
+
+  defp select_items([_piece | rest], acc), do: select_items(rest, acc)
+
+  defp select_list([], _depth, current, items), do: {finish_items(current, items), []}
+
+  defp select_list([:close | _rest] = pieces, 0, current, items),
+    do: {finish_items(current, items), pieces}
+
+  defp select_list([{:word, _text, lower} | _rest] = pieces, 0, current, items)
+       when lower in @list_ends,
+       do: {finish_items(current, items), pieces}
+
+  defp select_list([{:word, _text, lower} | rest] = pieces, 0, current, items)
+       when lower in ["group", "order"] do
+    case by(rest) do
+      {:ok, _between, _by, _after_by} -> {finish_items(current, items), pieces}
+      :error -> select_list(rest, 0, [hd(pieces) | current], items)
+    end
+  end
+
+  defp select_list([:comma | rest], 0, current, items),
+    do: select_list(rest, 0, [], [Enum.reverse(current) | items])
+
+  defp select_list([:open | rest], depth, current, items),
+    do: select_list(rest, depth + 1, [:open | current], items)
+
+  defp select_list([:close | rest], depth, current, items),
+    do: select_list(rest, depth - 1, [:close | current], items)
+
+  defp select_list([piece | rest], depth, current, items),
+    do: select_list(rest, depth, [piece | current], items)
+
+  defp finish_items(current, items), do: Enum.reverse([Enum.reverse(current) | items])
+
+  defp aliased_item(item) do
+    case item |> Enum.reject(&trivia?/1) |> Enum.reverse() do
+      [name, {:word, _as, "as"} | expression] ->
+        named(name, Enum.reverse(expression))
+
+      [{:word, _text, lower} = name, :close | _rest] = reversed
+      when lower not in ["asc", "desc"] ->
+        named(name, reversed |> tl() |> Enum.reverse())
+
+      _no_alias ->
+        :error
+    end
+  end
+
+  defp named({:word, _text, lower}, expression), do: {:ok, lower, expression}
+
+  defp named({:quoted, text}, expression),
+    do: {:ok, text |> String.slice(1..-2//1) |> String.downcase(), expression}
+
+  defp named(_piece, _expression), do: :error
+
+  defp array_expression?([{:word, _text, lower}, :open | _rest], _names)
+       when lower in @array_valued,
+       do: true
+
+  defp array_expression?([{:word, _text, "cast"} | _rest] = expression, _names) do
+    expression
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.any?(&match?([{:word, _array, "array"}, :open], &1))
+  end
+
+  defp array_expression?([{:word, _text, lower}, :open | rest], names)
+       when lower in @array_through do
+    case group(rest) do
+      {:ok, arguments, _after} ->
+        arguments |> split_arguments() |> Enum.any?(&array_expression?(&1, names))
+
+      :error ->
+        false
+    end
+  end
+
+  defp array_expression?([{:other, text} | _rest], _names),
+    do: String.starts_with?(String.trim_leading(text), "[")
+
+  defp array_expression?([{:word, _text, lower}], names), do: MapSet.member?(names, lower)
+
+  defp array_expression?([{:word, _left, left}, {:other, minus}, {:word, _right, right}], names),
+    do: String.trim(minus) == "-" and MapSet.member?(names, left) and MapSet.member?(names, right)
+
+  defp array_expression?(_expression, _names), do: false
 
   defp quote_unless_member({:word, text, _lower}, %{last: "."}), do: text
   defp quote_unless_member({:word, _text, _lower}, _state), do: ~s("default")

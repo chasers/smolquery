@@ -43,6 +43,7 @@ defmodule SmolqueryClickHouse.Format do
   | `{:naive_datetime, _}` | `DateTime64(6)`, or `DateTime64(9)` at nanoseconds |
   | `:date` | `Date32` |
   | `{:decimal, p, s}` | `Decimal(p, s)` |
+  | `{:decimal, 38, 0}` | `Int128`: what the engine's `HUGEINT` crosses Arrow as, and `sum` over an `Int64` answers one, where ClickHouse answers an integer type HyperDX charts (T-501) |
   | `MAP(STRING, STRING)` | `Map(String, String)` |
   | a map of string lists, which `groupUniqArrayMap` answers | `Map(String, Array(String))` |
   | a list | `Array(Nullable(T))`, and `Array(Array(...))` for a list of lists |
@@ -223,6 +224,7 @@ defmodule SmolqueryClickHouse.Format do
   defp base_type({:datetime, :nanosecond, _zone}), do: "DateTime64(9, 'UTC')"
   defp base_type({:datetime, _precision, _zone}), do: "DateTime64(6, 'UTC')"
   defp base_type(:date), do: "Date32"
+  defp base_type({:decimal, 38, 0}), do: "Int128"
   defp base_type({:decimal, precision, scale}), do: "Decimal(#{precision}, #{scale})"
   defp base_type({:list, {:struct, _fields}}), do: "String"
   defp base_type({:list, element}), do: "Array(#{element_type(element)})"

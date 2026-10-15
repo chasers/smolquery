@@ -177,7 +177,56 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"clickhouse_isNull(x)", "x IS NULL"},
             {"clickhouse_isNotNull(x)", "x IS NOT NULL"},
             {"uniq(x)", "count(DISTINCT x)"},
-            {"uniqExact(x)", "count(DISTINCT x)"}
+            {"uniqExact(x)", "count(DISTINCT x)"},
+            {"anyLast(x)", "last(x)"},
+            {"anyIf(x, c)", "any_value(x) FILTER (WHERE c)"},
+            {"anyOrNullIf(x, c)", "any_value(x) FILTER (WHERE c)"},
+            {"sumForEach(a)",
+             "list_reduce(list(a), (acc, x) -> list_transform(list_zip(acc, x), " <>
+               "p -> coalesce(p[1], 0) + coalesce(p[2], 0)))"},
+            {"positionCaseInsensitive(h, n)", "instr(lower(h), lower(n))"},
+            {"toNullable(x)", "x"},
+            {"assumeNotNull(x)", "x"},
+            {"ifNull(x, d)", "coalesce(x, d)"},
+            {"multiIf(c1, v1, e)",
+             "CASE WHEN c1 THEN v1 ELSE e END, " <>
+               "(c1, v1, c2, v2, e) AS CASE WHEN c1 THEN v1 WHEN c2 THEN v2 ELSE e END, " <>
+               "(c1, v1, c2, v2, c3, v3, e) AS " <>
+               "CASE WHEN c1 THEN v1 WHEN c2 THEN v2 WHEN c3 THEN v3 ELSE e END, " <>
+               "(c1, v1, c2, v2, c3, v3, c4, v4, e) AS " <>
+               "CASE WHEN c1 THEN v1 WHEN c2 THEN v2 WHEN c3 THEN v3 WHEN c4 THEN v4 ELSE e END"},
+            {"tuple(a)", "a, (a, b) AS row(a, b), (a, b, c) AS row(a, b, c)"},
+            {"arrayZip(a, b)", "list_zip(a, b, true)"},
+            {"arrayZipUnaligned(a, b)", "list_zip(a, b)"},
+            {"arrayCumSum(a)",
+             "list_transform(range(1, len(a) + 1), i -> list_reduce(a[1:i], (x, y) -> x + y))"},
+            {"arrayWithConstant(n, v)", "list_transform(range(n), i -> v)"},
+            {"arraySum(a)",
+             "CASE WHEN coalesce(len(a), 0) = 0 THEN 0 ELSE list_reduce(a, (x, y) -> x + y) END"},
+            {"arrayMin(a)", "list_min(a)"},
+            {"arrayMax(a)", "list_max(a)"},
+            {"arrayReverse(a)", "list_reverse(a)"},
+            {"arrayConcat(a, b)", "list_concat(a, b)"},
+            {"arrayResize(a, n)", "list_resize(a, n, 0)"},
+            {"arraySlice(a, o, n)", "list_slice(a, o, o + n - 1)"},
+            {"emptyArrayInt64()", "CAST([] AS BIGINT[])"},
+            {"emptyArrayFloat64()", "CAST([] AS DOUBLE[])"},
+            {"emptyArrayString()", "CAST([] AS VARCHAR[])"},
+            {"bitShiftLeft(a, n)", "a << n"},
+            {"bitShiftRight(a, n)", "a >> n"},
+            {"positiveModulo(a, m)", "((a % m) + m) % m"},
+            {"exp2(x)", "power(2, x)"},
+            {"clickhouse_arrayExists(bools)",
+             "coalesce(list_bool_or(list_transform(bools, b -> CAST(b AS BOOLEAN))), false)"},
+            {"clickhouse_arrayAll(bools)",
+             "coalesce(list_bool_and(list_transform(bools, b -> CAST(b AS BOOLEAN))), true)"},
+            {"clickhouse_arrayFirstIndex(bools)",
+             "coalesce(list_position(list_transform(bools, b -> CAST(b AS BOOLEAN)), true), 0)"},
+            {"clickhouse_arrayCount(bools)", "len(list_filter(bools, b -> CAST(b AS BOOLEAN)))"},
+            {"clickhouse_arrayMinus(a, b)",
+             "list_transform(list_zip(a, b), p -> coalesce(p[1], 0) - coalesce(p[2], 0))"},
+            {"clickhouse_arrayPlus(a, b)",
+             "list_transform(list_zip(a, b), p -> coalesce(p[1], 0) + coalesce(p[2], 0))"}
           ] ++
             Enum.map(@buckets, fn {name, body} -> {name <> "(x)", body} end) ++
             Enum.flat_map(@casts, fn {name, type} ->
@@ -203,7 +252,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
   @volatile_names Enum.map(@volatile, name_of)
   @stable_names MapSet.new(@names, &String.downcase/1)
   @aggregate_names ~w(sumif avgif minif maxif quantileif grouparray grouparrayif groupuniqarray
-                      groupuniqarrayif groupuniqarrayarray groupuniqarraymap uniq uniqexact)
+                      groupuniqarrayif groupuniqarrayarray groupuniqarraymap uniq uniqexact
+                      anylast anyif anyornullif sumforeach)
 
   @definitions Map.new(@macros ++ @volatile, fn {signature, body} = macro ->
                  {String.downcase(name_of.(macro)),

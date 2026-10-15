@@ -129,6 +129,21 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.24.0: HyperDX reads metrics through the ClickHouse edge (T-501)
+
+**TL;DR.** HyperDX's metrics screens answer over three tables shaped like the OpenTelemetry exporter's `otel_metrics_gauge`, `otel_metrics_sum` and `otel_metrics_histogram`: the metric catalog, a metric's attributes, and every chart its builder makes for a gauge, a sum or a histogram, multi-series, ratios and formulas included. The tables, the stock `Metrics` source and what was checked are in [clickstack.md](clickstack.md#6-metrics).
+
+- **What changed underneath:** the dialect rewrite and the macro set grew for what those statements use — window functions, `multiIf`, array lambdas, tuple access, `* EXCEPT`, element-wise array subtraction. Every logs and traces statement answers as before.
+- **Result types:** a `UNION ALL`, a `* EXCLUDE`/`* REPLACE` star and `GROUP BY ALL` no longer make every result column `Nullable`; a 38-digit, scale-0 decimal result, which is what the engine's `sum` over an `Int64` is, answers as `Int128` instead of `Decimal(38, 0)`. Both are what HyperDX's chart code needs to find a time bucket and a number.
+- **Not yet:** exponential histograms, span events and links, sessions.
+
+### 0.24.0: an `ARRAY<T>` column type (T-489)
+
+**TL;DR.** A table column can be a list of one scalar type: `ARRAY<INT64>`, `ARRAY<FLOAT64>`, `ARRAY<STRING>`, `ARRAY<BOOL>`, `ARRAY<TIMESTAMP>`, `ARRAY<TIMESTAMP_NS>` or `ARRAY<DATE>`. It is stored as a Parquet `LIST`, written from NDJSON, read with DuckDB's list functions, and answers as `Array(Nullable(T))` on the ClickHouse edge, which also takes `Array(T)` in a RowBinary insert. Limits are under [api.md](api.md#arrayt): no stats pruning, no clustering, NDJSON only.
+
+- **Catalog:** no migration. A new column type only; existing tables are untouched.
+- **DDL:** `ALTER TABLE ds.t ADD COLUMN c ARRAY<INT64>` and `c BIGINT[]` both parse.
+
 ### Traces leave the node over OTLP when an endpoint is named (T-662)
 
 **TL;DR.** Set `OTEL_EXPORTER_OTLP_ENDPOINT` and every node exports OpenTelemetry traces there: one span per request on the API, the ClickHouse edge and the VictoriaMetrics edge, and one per query job with its phases as children. Unset, nothing changes and nothing is made.
