@@ -123,8 +123,9 @@ defmodule Smolquery.Burst.LambdaBackend do
 
   @doc """
   The runner's assignment: the environment the bootstrap exports before it
-  starts the release, as one `KEY=VALUE` line per variable, base64 encoded
-  under `"env"` so no value needs escaping on the shell side.
+  starts the release, as one `KEY='VALUE'` line per variable with the value
+  single-quoted for `sh`, base64 encoded under `"env"` so the payload needs
+  no JSON escaping on the shell side.
   """
   @spec payload(t()) :: %{String.t() => String.t()}
   def payload(%__MODULE__{} = state) do
@@ -143,10 +144,12 @@ defmodule Smolquery.Burst.LambdaBackend do
         "ELIXIR_ERL_OPTIONS" => "-dist_listen false"
       })
 
-    lines = Enum.map_join(env, "\n", fn {key, value} -> key <> "=" <> value end)
+    lines = Enum.map_join(env, "\n", fn {key, value} -> key <> "=" <> shell_quote(value) end)
 
     %{"env" => Base.encode64(lines <> "\n")}
   end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
 
   defp invoke(%__MODULE__{} = state, payload) do
     AwsCredentials.ensure_started()

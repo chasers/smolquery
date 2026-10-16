@@ -25,7 +25,11 @@ defmodule Smolquery.Burst.LambdaBackendTest do
   describe "payload/1" do
     test "carries the assignment as base64 KEY=VALUE lines" do
       {:ok, state} =
-        LambdaBackend.init(function: "fn", region: "eu-central-1", env: %{"EXTRA" => "1"})
+        LambdaBackend.init(
+          function: "fn",
+          region: "eu-central-1",
+          env: %{"EXTRA" => "1", "SPACED" => "a b", "QUOTED" => "it's"}
+        )
 
       %{"env" => encoded} = LambdaBackend.payload(state)
 
@@ -34,8 +38,8 @@ defmodule Smolquery.Burst.LambdaBackendTest do
         |> Base.decode64!()
         |> String.split("\n", trim: true)
         |> Map.new(fn line ->
-          [key, value] = String.split(line, "=", parts: 2)
-          {key, value}
+          [key, quoted] = String.split(line, "=", parts: 2)
+          {key, quoted |> String.trim("'") |> String.replace("'\\''", "'")}
         end)
 
       assert lines["RELEASE_DISTRIBUTION"] == "name"
@@ -43,6 +47,8 @@ defmodule Smolquery.Burst.LambdaBackendTest do
       assert lines["RELEASE_COOKIE"] == Atom.to_string(Node.get_cookie())
       assert lines["ELIXIR_ERL_OPTIONS"] == "-dist_listen false"
       assert lines["EXTRA"] == "1"
+      assert lines["SPACED"] == "a b"
+      assert lines["QUOTED"] == "it's"
 
       parent = lines["FLAME_PARENT"] |> Base.decode64!() |> :erlang.binary_to_term()
       assert parent.ref == state.parent_ref
