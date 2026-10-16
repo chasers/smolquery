@@ -1,5 +1,6 @@
 # Builds a branch's release image and its Lambda runner image for the burst
-# spike (T-673, PL-77). Dispatched by hand; publishes
+# spike (T-673, PL-77). Runs on every push to the spike branch (a workflow
+# is only dispatchable by name once it is on main); publishes
 # ghcr.io/smolquery/smolquery:spike-<sha> and
 # ghcr.io/smolquery/smolquery-lambda:spike-<sha>, both linux/arm64 only,
 # which is what the Lambda function runs.
@@ -7,6 +8,8 @@ name: Spike image
 
 on:
   workflow_dispatch:
+  push:
+    branches: [t673-lambda-spike]
 
 permissions:
   contents: read
