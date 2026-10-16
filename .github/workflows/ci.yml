@@ -33,6 +33,47 @@ jobs:
       - name: Compile, format, lint, audit & architecture
         run: mix ci
 
+      - name: Install Helm 3.21.3
+        run: |
+          set -euo pipefail
+          version=3.21.3
+          archive=/tmp/helm.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://get.helm.sh/helm-v${version}-linux-amd64.tar.gz"
+          echo "15e041a93a590dce8100f39385cd98c84a765c9e36aeeb9e2dc6ff9e4769e2e0  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C /tmp
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          helm version --short
+
+      - name: Provision chart assertion dependencies
+        run: |
+          python3 -m venv /tmp/smolquery-chart-venv
+          /tmp/smolquery-chart-venv/bin/pip install --quiet PyYAML==6.0.2
+          echo "/tmp/smolquery-chart-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Lint and validate Helm chart
+        run: scripts/chart-test
+
+      - name: Install kind 0.32.0
+        run: |
+          set -euo pipefail
+          binary=/tmp/kind
+          curl --fail --location --silent --show-error \
+            --output "$binary" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-amd64"
+          echo "50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54  $binary" | sha256sum --check --status
+          install -m 0755 "$binary" "$HOME/.local/bin/kind"
+          kind version
+
+      - name: Validate live Helm topology guards
+        run: |
+          set -euo pipefail
+          kind create cluster --name smolquery-chart --wait 180s
+          trap 'kind delete cluster --name smolquery-chart' EXIT
+          scripts/chart-topology-test
+
   tests:
     name: Tests
     runs-on: ubuntu-latest
