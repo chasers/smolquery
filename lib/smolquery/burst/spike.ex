@@ -93,7 +93,9 @@ defmodule Smolquery.Burst.Spike do
   end
 
   defp scan_on_runner(urls, bucket, region, threads, memory_limit) do
-    %{config: store} = S3.new(bucket: bucket, region: region)
+    %{config: store} =
+      S3.new(bucket: bucket, region: region, staging_dir: Path.join(System.tmp_dir!(), "staging"))
+
     name = Module.concat(__MODULE__, "Engine#{System.unique_integer([:positive])}")
     rchar_before = rchar()
 
