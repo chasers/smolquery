@@ -6,7 +6,7 @@
 | Branch | `t673-lambda-spike` at `652b6f0` |
 | Parent | one pod in the `smolquery-dev` EKS cluster (eu-central-1), `SMOLQUERY_ROLES=none`, node `smolquery@<pod ip>`, dist port pinned to 9100 |
 | Runner | Lambda `smolquery-burst-runner`: container image (release + `rel/lambda/bootstrap`), arm64, 10,240 MB (6 vCPU), 10 GB ephemeral, 900 s, in the cluster VPC |
-| Data | `bench/onebrc_v6` (6 files, 1.24 GB, 987M rows); `bench/hits_v2` as the catalog lists it (41 files, 3.2 GB); `bench/hits_v2_x10` (a tenfold S3 copy of the `hits_v2` prefix: 1,140 files, 64.3 GB) |
+| Data | `bench/onebrc_v6` (6 files, 1.24 GB, 987M rows); the first 41 of `bench.hits_v2`'s 240 catalog files (3.2 GB, a truncated listing, see below); `bench/hits_v2_x10` (a tenfold S3 copy of the `bench/hits_v2/` prefix: 1,140 files, 64.3 GB; partition 0's live and retired files, not the `__p1` and `__p2` partitions) |
 | Cluster baseline | `POST /v1/queries` on `bench.hits_v2` through `smolquery-query` (3 query pods, c6a.4xlarge, 32 threads each); one query pod's engine over the x10 files |
 
 ## Headline
@@ -63,7 +63,7 @@ hits (`SELECT RegionID, sum(AdvEngineID), count(*), sum(ResolutionWidth), count(
 
 | data | runners | leases | wall | scan p50 / p90 / max |
 |---|---:|---|---:|---|
-| catalog `bench.hits_v2`, 41 files, 3.2 GB | 41 (38 distinct) | cold, p50 2.15 s | 3.14 s | 271 / 656 / 716 ms |
+| 41 of the 240 `bench.hits_v2` catalog files, 3.2 GB | 41 (38 distinct) | cold, p50 2.15 s | 3.14 s | 271 / 656 / 716 ms |
 | x10, 1,140 files, 64.3 GB | 100 (88 distinct) | cold, p50 1.81 s | 5.36 s | 2,435 / 2,584 / 2,730 ms |
 | x10 | 50 | warm, 2 ms | 3.69 s | 2,706 / 2,881 / 3,061 ms |
 | x10 | 100 | cold, p50 1.33 s | 4.57 s | 1,704 / 1,872 / 2,059 ms |
@@ -115,9 +115,17 @@ and the runner then sat 60 s before shutting down.
   flattens it. The sandbox nodes are x86, so the parent needs an amd64
   image; the spike workflow builds each on a native runner.
 - A `Req` pool full of keep-alive connections the Lambda API had closed cost one lease 52 s of `:closed` retries; the invoke now closes its connection.
-- `ducklake_list_files` on the parent listed 41 files for `bench.hits_v2`
-  while the API's statistics report 245; unexplained, and why the x10 copy
-  is the comparison set.
+- The parent's catalog listing showed 41 files for `bench.hits_v2` while the
+  API reported 245. The catalog was right: the rpc helper printed the list
+  through `IO.inspect` without `printable_limit: :infinity`, which cuts a
+  string at 4,096 characters, and the saved file is 4,104 bytes ending in
+  `<> ...`. A query pod lists 240 live files, 9.29 GB, 99,997,497 rows
+  (245 earlier, before `merge_adjacent` compactions), the same as the API.
+  The 41-file run above is therefore a partial scan, still valid as a
+  per-runner throughput sample. The x10 copy was built from the S3 prefix,
+  not the catalog, so it is 114 files times ten: the 97 live files of
+  partition 0 plus 17 retired ones, without the two `__p` partitions. Both
+  the Lambda and the single-pod baselines read that same list.
 
 ## Lifetime
 
