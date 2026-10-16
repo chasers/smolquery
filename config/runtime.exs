@@ -1020,3 +1020,50 @@ if otlp_endpoint && System.get_env("OTEL_TRACES_EXPORTER", "otlp") != "none" do
       "smolquery.roles" => System.get_env("SMOLQUERY_ROLES", "all")
     }
 end
+
+# Burst (PL-77): the pool of ephemeral runners a query can fan out to. Set
+# the backend to lease runners from this node; a runner itself needs none of
+# these, it learns everything from its assignment.
+if backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
+  burst_backend =
+    case backend do
+      "lambda" ->
+        :lambda
+
+      "local" ->
+        :local
+
+      other ->
+        raise ArgumentError, "SMOLQUERY_BURST_BACKEND must be lambda or local, got: #{other}"
+    end
+
+  config :smolquery, Smolquery.Burst,
+    enabled: true,
+    backend: burst_backend,
+    max:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_BURST_MAX",
+        System.get_env("SMOLQUERY_BURST_MAX", "64")
+      ),
+    boot_timeout_ms:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_BURST_BOOT_TIMEOUT_MS",
+        System.get_env("SMOLQUERY_BURST_BOOT_TIMEOUT_MS", "120000")
+      ),
+    idle_shutdown_after_ms:
+      Smolquery.RuntimeConfig.positive_integer!(
+        "SMOLQUERY_BURST_IDLE_SHUTDOWN_MS",
+        System.get_env("SMOLQUERY_BURST_IDLE_SHUTDOWN_MS", "60000")
+      )
+
+  if burst_backend == :lambda do
+    config :smolquery, Smolquery.Burst.LambdaBackend,
+      function: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_FUNCTION"),
+      region: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_REGION"),
+      boot_timeout:
+        Smolquery.RuntimeConfig.positive_integer!(
+          "SMOLQUERY_BURST_BOOT_TIMEOUT_MS",
+          System.get_env("SMOLQUERY_BURST_BOOT_TIMEOUT_MS", "120000")
+        )
+  end
+end

@@ -26,6 +26,10 @@ defmodule Smolquery.RolesTest do
       assert Roles.parse("all") == {:ok, Roles.all()}
     end
 
+    test "\"none\" is no role at all" do
+      assert Roles.parse("none") == {:ok, []}
+    end
+
     test "parses a comma-separated subset" do
       assert Roles.parse("ingest,query") == {:ok, [:ingest, :query]}
     end

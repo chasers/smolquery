@@ -29,25 +29,37 @@ defmodule Smolquery.Application do
 
   @impl true
   def start(_type, _args) do
-    Smolquery.InternalSecret.ensure()
-
-    children =
-      [
-        Smolquery.Telemetry,
-        Smolquery.Engine.ExtensionLoader,
-        Smolquery.Tracing,
-        Smolquery.MetricsServer,
-        Smolquery.MemoryMetrics,
-        Smolquery.Allocator,
-        {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
-        {Phoenix.PubSub, name: Smolquery.PubSub},
-        Smolquery.Lifecycle,
-        Smolquery.Catalog.Migrator,
-        Smolquery.Cluster.RingCache
-      ] ++
-        Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
+    children = if Smolquery.Burst.runner?(), do: runner_children(), else: node_children()
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)
+  end
+
+  defp runner_children do
+    [
+      Smolquery.Telemetry,
+      Smolquery.Engine.ExtensionLoader,
+      {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one}
+    ] ++ Smolquery.Burst.children()
+  end
+
+  defp node_children do
+    Smolquery.InternalSecret.ensure()
+
+    [
+      Smolquery.Telemetry,
+      Smolquery.Engine.ExtensionLoader,
+      Smolquery.Tracing,
+      Smolquery.MetricsServer,
+      Smolquery.MemoryMetrics,
+      Smolquery.Allocator,
+      {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
+      {Phoenix.PubSub, name: Smolquery.PubSub},
+      Smolquery.Lifecycle,
+      Smolquery.Catalog.Migrator,
+      Smolquery.Cluster.RingCache
+    ] ++
+      Smolquery.Burst.children() ++
+      Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
   end
 
   defp subtree(:api), do: [SmolqueryApi.Supervisor]
