@@ -23,7 +23,7 @@ received value, and the accepted shape.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_ROLES` | Selects the service subtrees that start (`all`). Use `all`, or a comma-separated subset of `api,ingest,buffer,storage,query,web,pg,clickhouse,victoriametrics`. An unknown name fails the boot |
+| `SMOLQUERY_ROLES` | Selects the service subtrees that start (`all`). Use `all`, `none`, or a comma-separated subset of `api,ingest,buffer,storage,query,web,pg,clickhouse,victoriametrics`. An unknown name fails the boot. `none` starts no service: the node still joins the cluster and runs the role-independent children, which is what a node that only leases burst runners needs |
 | `SMOLQUERY_API_KEY` | The Bearer key that every `/v1` route requires. It is also the credential that changes a table's columns: there is no separate privilege for `ALTER TABLE` or the column routes. A node with the `:api` role and no key refuses to boot |
 | `SMOLQUERY_API_IP` / `SMOLQUERY_API_PORT` | The API (application programming interface) bind address and port (`0.0.0.0` in the prod image / `4000`) |
 | `SMOLQUERY_INSERT_MAX_IN_FLIGHT_BYTES` | The most ingest-body bytes that an API node admits at once (T-245). `SmolqueryApi.Admission` counts `POST .../insert` bodies by the declared `content-length` before it reads any body. Past the limit, it refuses a request with a 429 and `retry-after: 1`. The refusal costs a header read, never a body. A client burst thus sheds load instead of an out-of-memory (OOM) kill of the pod. Unset, the limit is a quarter of the container's cgroup memory limit, with a floor of one NDJSON (newline-delimited JSON) body (`SMOLQUERY_INSERT_MAX_NDJSON_BYTES`). Without a cgroup limit, the value is `268435456`. An idle counter always admits one request; the route's own body cap decides what is too large |
@@ -187,6 +187,21 @@ version's driver exists.
 The checked-in Kind overlays set `GEN_RPC_TLS=false` and `DIST_TLS=false`. They
 still mount per-node development certificates. Operators can thus opt into
 mutual TLS: change both values to `true` before you apply the overlay.
+
+### Burst
+
+Burst (PL-77) lets a query fan its sealed scan out to ephemeral runners
+leased through a FLAME pool (`Smolquery.Burst`). A runner is this same
+release booted by a backend with `FLAME_PARENT` in its environment; it starts
+no service, joins no cluster and holds no internal secret. Nothing here is
+read on a runner: it learns everything from the backend's assignment.
+
+| variable | effect (default) |
+|---|---|
+| `SMOLQUERY_BURST_BACKEND` | Names the backend and switches the pool on (unset: this node leases no runners). `local` runs runners inside this VM (`FLAME.LocalBackend`), for development and tests |
+| `SMOLQUERY_BURST_MAX` | The most runners this node holds at once (`64`). Per node, not per deployment |
+| `SMOLQUERY_BURST_BOOT_TIMEOUT_MS` | How long a lease waits for a runner to boot and connect (`120000`) |
+| `SMOLQUERY_BURST_IDLE_SHUTDOWN_MS` | How long an idle runner stays leased before it shuts down (`15000`). This is the cost lever: a runner's work is seconds per lease and the idle window is the rest of the bill |
 
 ### Diagnostics
 

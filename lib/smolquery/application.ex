@@ -21,6 +21,13 @@ defmodule Smolquery.Application do
   `Smolquery.Catalog.Migrator` prepares a Postgres metadata database before
   the cluster and every service start, and the one ordering this module
   does encode: they read the tables it makes (T-609).
+
+  A VM that a FLAME backend booted is a burst runner (`Smolquery.Burst`,
+  PL-77). It starts telemetry, the extension loader, the engine log
+  supervisor and the pool, and nothing else: no cluster, no role, no
+  catalog, no listener. `Smolquery.InternalSecret.ensure/0` is not called
+  either; a runner must not hold the secret, and a hot-tier read never
+  reaches it.
   """
 
   use Application
@@ -29,25 +36,45 @@ defmodule Smolquery.Application do
 
   @impl true
   def start(_type, _args) do
+    Supervisor.start_link(children(), strategy: :one_for_one, name: Smolquery.Supervisor)
+  end
+
+  @doc """
+  What this VM starts: a burst runner's three children and the pool when a
+  FLAME backend booted it (`Smolquery.Burst.runner?/0`), the node's full tree
+  otherwise.
+  """
+  @spec children() :: [Supervisor.child_spec() | {module(), term()} | module()]
+  def children do
+    if Smolquery.Burst.runner?(), do: runner_children(), else: node_children()
+  end
+
+  defp runner_children do
+    [
+      Smolquery.Telemetry,
+      Smolquery.Engine.ExtensionLoader,
+      {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one}
+    ] ++ Smolquery.Burst.children()
+  end
+
+  defp node_children do
     Smolquery.InternalSecret.ensure()
 
-    children =
-      [
-        Smolquery.Telemetry,
-        Smolquery.Engine.ExtensionLoader,
-        Smolquery.Tracing,
-        Smolquery.MetricsServer,
-        Smolquery.MemoryMetrics,
-        Smolquery.Allocator,
-        {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
-        {Phoenix.PubSub, name: Smolquery.PubSub},
-        Smolquery.Lifecycle,
-        Smolquery.Catalog.Migrator,
-        Smolquery.Cluster.RingCache
-      ] ++
-        Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Smolquery.Supervisor)
+    [
+      Smolquery.Telemetry,
+      Smolquery.Engine.ExtensionLoader,
+      Smolquery.Tracing,
+      Smolquery.MetricsServer,
+      Smolquery.MemoryMetrics,
+      Smolquery.Allocator,
+      {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one},
+      {Phoenix.PubSub, name: Smolquery.PubSub},
+      Smolquery.Lifecycle,
+      Smolquery.Catalog.Migrator,
+      Smolquery.Cluster.RingCache
+    ] ++
+      Smolquery.Burst.children() ++
+      Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
   end
 
   defp subtree(:api), do: [SmolqueryApi.Supervisor]

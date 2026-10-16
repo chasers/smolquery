@@ -61,9 +61,10 @@ defmodule Smolquery.Roles do
   @doc """
   Parses a `SMOLQUERY_ROLES` value into a role list.
 
-  Accepts `all` or a comma-separated list of role names. Unknown names are an
-  error rather than a silent no-op, so a typo fails the boot instead of
-  quietly starting nothing.
+  Accepts `all`, `none`, or a comma-separated list of role names. Unknown
+  names are an error rather than a silent no-op, so a typo fails the boot
+  instead of quietly starting nothing. `none` starts no service subtree at
+  all: the node that leases burst runners (`Smolquery.Burst`) runs that way.
   """
   @spec parse(String.t()) :: {:ok, [t()]} | {:error, [String.t()]}
   def parse(value) when is_binary(value) do
@@ -75,6 +76,7 @@ defmodule Smolquery.Roles do
 
     case names do
       ["all"] -> {:ok, @all}
+      ["none"] -> {:ok, []}
       names -> resolve(names)
     end
   end
@@ -93,7 +95,7 @@ defmodule Smolquery.Roles do
               IO.iodata_to_binary([
                 "unknown SMOLQUERY_ROLES value(s): ",
                 Enum.intersperse(unknown, ", "),
-                ~s(. expected "all" or a comma-separated subset of: ),
+                ~s(. expected "all", "none", or a comma-separated subset of: ),
                 @all |> Enum.map(&Atom.to_string/1) |> Enum.intersperse(", ")
               ])
     end

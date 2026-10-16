@@ -53,6 +53,7 @@ defmodule Smolquery.MixProject do
       {:plug, "~> 1.20"},
       {:req, "~> 0.7"},
       {:req_s3, "~> 0.2"},
+      {:flame, "~> 0.5.4"},
       {:aws_credentials, "~> 1.1", runtime: false},
       {:gen_rpc, github: "emqx/gen_rpc", tag: "3.6.1", manager: :rebar3},
       {:snabbkaffe,
