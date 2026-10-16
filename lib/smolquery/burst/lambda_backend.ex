@@ -18,6 +18,15 @@ defmodule Smolquery.Burst.LambdaBackend do
   nothing resolves it. This node must be reachable from the function on
   epmd (4369) and on its pinned distribution port.
 
+  The invoke closes its connection: the Lambda API drops an idle keep-alive
+  after a few minutes, and a pooled connection that died that way fails the
+  next invoke with `:closed` before the request is sent. Measured on the
+  spike: 50 such connections from a 100-runner burst cost 52 s of one-second
+  retries on the first lease after a quiet quarter hour. A `:closed` is the
+  one transport error retried, since nothing was sent on it; any other
+  failure is returned, never retried, because a retried `Event` invoke is a
+  second runner.
+
   The invoke is signed with the credential chain
   (`Smolquery.AwsCredentials`), so the node that leases runners needs
   `lambda:InvokeFunction` on the function through its pod identity, and
@@ -161,10 +170,12 @@ defmodule Smolquery.Burst.LambdaBackend do
     request =
       Req.new(
         url: url,
-        headers: [{"x-amz-invocation-type", "Event"}],
+        headers: [{"x-amz-invocation-type", "Event"}, {"connection", "close"}],
         json: payload,
         aws_sigv4: [service: :lambda] ++ AwsCredentials.sigv4_options(state.region),
-        retry: false
+        retry: &stale_connection?/2,
+        max_retries: 3,
+        retry_delay: 0
       )
 
     case Req.post(request) do
@@ -173,6 +184,9 @@ defmodule Smolquery.Burst.LambdaBackend do
       {:error, reason} -> {:error, {:invoke, reason}}
     end
   end
+
+  defp stale_connection?(_request, %Req.TransportError{reason: :closed}), do: true
+  defp stale_connection?(_request, _response_or_error), do: false
 
   defp timed(fun) do
     {micro, result} = :timer.tc(fun)

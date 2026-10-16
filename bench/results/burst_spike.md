@@ -114,13 +114,28 @@ and the runner then sat 60 s before shutting down.
 - Lambda refuses an OCI image index; `crane copy --platform linux/arm64`
   flattens it. The sandbox nodes are x86, so the parent needs an amd64
   image; the spike workflow builds each on a native runner.
+- A `Req` pool full of keep-alive connections the Lambda API had closed cost one lease 52 s of `:closed` retries; the invoke now closes its connection.
 - `ducklake_list_files` on the parent listed 41 files for `bench.hits_v2`
   while the API's statistics report 245; unexplained, and why the x10 copy
   is the comparison set.
 
 ## Lifetime
 
-LIFETIME_PENDING
+The runner held past the cap ended at exactly 900,000 ms with
+`Status: timeout` in Lambda's report. On the parent the runner's
+Terminator went `:noconnection`, the `FLAME.Runner` stopped with
+`no connection`, and the pool killed the caller checked out on it with
+`:kill` (so a `catch :exit` around `FLAME.call` does not see it; the
+caller just dies). The pool itself survived and leased again.
+
+That next lease took 52.5 s, and not because of Lambda: the backend's
+HTTP pool held about 50 keep-alive connections to the Lambda API from the
+100-runner burst, the API had closed them during the quiet quarter hour,
+and each boot attempt took one dead connection, failed with
+`Req.TransportError{reason: :closed}` before sending, and FLAME retried a
+second later. Fixed on the branch: the invoke sends `Connection: close` and
+retries only a `:closed` transport error. A `max_lifetime` under 15
+minutes on the runner (D8) turns the hard kill into a graceful shutdown.
 
 ## What this decides for PL-77
 

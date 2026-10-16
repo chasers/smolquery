@@ -1,0 +1,66 @@
+# The burst spike's parent node (T-673): one pod in the sandbox cluster that
+# leases Lambda runners. No roles, no cluster membership, no catalog. The
+# runner dials this pod's IP on epmd (4369) and the pinned dist port (9100).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: burst-parent
+  namespace: smolquery
+  labels:
+    app: burst-parent
+    tracker: t-673
+spec:
+  serviceAccountName: smolquery-burst-parent
+  restartPolicy: Never
+  enableServiceLinks: false
+  nodeSelector:
+    workload: query
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: smolquery
+      image: IMAGE   # the amd64 release image with the burst code, e.g. <ecr>/smolquery-burst-parent@sha256:…
+      command: ["/app/bin/smolquery", "start"]
+      ports:
+        - name: epmd
+          containerPort: 4369
+        - name: dist
+          containerPort: 9100
+      env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: RELEASE_DISTRIBUTION
+          value: name
+        - name: RELEASE_NODE
+          value: smolquery@$(POD_IP)
+        - name: RELEASE_COOKIE
+          value: COOKIE  # any random string; the runner receives it in its assignment
+        - name: ELIXIR_ERL_OPTIONS
+          value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+        - name: SMOLQUERY_ROLES
+          value: none
+
+        - name: SMOLQUERY_BURST_BACKEND
+          value: lambda
+        - name: SMOLQUERY_BURST_LAMBDA_FUNCTION
+          value: smolquery-burst-runner
+        - name: SMOLQUERY_BURST_LAMBDA_REGION
+          value: eu-central-1
+        - name: SMOLQUERY_BURST_MAX
+          value: "128"
+        - name: SMOLQUERY_BURST_BOOT_TIMEOUT_MS
+          value: "180000"
+        - name: SMOLQUERY_S3_BUCKET
+          value: smolquery-dev-sealed-812894577879
+        - name: SMOLQUERY_S3_REGION
+          value: eu-central-1
+        - name: SMOLQUERY_METRICS_PORT
+          value: "4003"
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          memory: 4Gi
