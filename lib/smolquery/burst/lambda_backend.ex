@@ -255,28 +255,10 @@ defmodule Smolquery.Burst.LambdaBackend do
   defp invoke(%__MODULE__{} = state, payload) do
     AwsCredentials.ensure_started()
 
-    with {:ok, sigv4} <- AwsCredentials.fetch_sigv4_options(state.region) do
-      url =
-        "https://lambda.#{state.region}.amazonaws.com" <>
-          @invoke_path <> URI.encode(state.function) <> "/invocations"
+    case AwsCredentials.fetch_sigv4_options(state.region) do
+      {:ok, sigv4} ->
+        post(state, payload, sigv4)
 
-      request =
-        Req.new(
-          url: url,
-          headers: [{"x-amz-invocation-type", "Event"}, {"connection", "close"}],
-          json: payload,
-          aws_sigv4: [service: :lambda] ++ sigv4,
-          retry: &stale_connection?/2,
-          max_retries: 3,
-          retry_delay: 0
-        )
-
-      case Req.post(request) do
-        {:ok, %Req.Response{status: 202}} -> :ok
-        {:ok, %Req.Response{status: status, body: body}} -> {:error, {:invoke, status, body}}
-        {:error, reason} -> {:error, {:invoke, reason}}
-      end
-    else
       {:error, :no_credentials} ->
         Logger.error(
           "#{inspect(__MODULE__)}: the credential chain resolved nothing; the node that " <>
@@ -284,6 +266,29 @@ defmodule Smolquery.Burst.LambdaBackend do
         )
 
         {:error, {:invoke, :no_credentials}}
+    end
+  end
+
+  defp post(%__MODULE__{} = state, payload, sigv4) do
+    url =
+      "https://lambda.#{state.region}.amazonaws.com" <>
+        @invoke_path <> URI.encode(state.function) <> "/invocations"
+
+    request =
+      Req.new(
+        url: url,
+        headers: [{"x-amz-invocation-type", "Event"}, {"connection", "close"}],
+        json: payload,
+        aws_sigv4: [service: :lambda] ++ sigv4,
+        retry: &stale_connection?/2,
+        max_retries: 3,
+        retry_delay: 0
+      )
+
+    case Req.post(request) do
+      {:ok, %Req.Response{status: 202}} -> :ok
+      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:invoke, status, body}}
+      {:error, reason} -> {:error, {:invoke, reason}}
     end
   end
 
