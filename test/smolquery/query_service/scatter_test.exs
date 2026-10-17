@@ -15,7 +15,9 @@ defmodule Smolquery.QueryService.ScatterTest do
   end
 
   defp sealed(count), do: for(i <- 1..count, do: %{"url" => "s3://b/f#{i}.parquet", "bytes" => i})
-  defp hot(count), do: for(i <- 1..count, do: %{"url" => "http://buffer-#{i}:4001/m#{i}"})
+
+  defp hot(count),
+    do: for(i <- 1..count, do: %{"url" => "http://buffer-#{i}:4001/m#{i}", "hot" => true})
 
   describe "targets/1" do
     test "peers alone when the node leases no runners, whatever the job asked" do
@@ -39,6 +41,13 @@ defmodule Smolquery.QueryService.ScatterTest do
                %{index: 3, kind: :runner, pool: @pool},
                %{index: 4, kind: :runner, pool: @pool}
              ] = Scatter.targets(runtime)
+    end
+
+    test "runners past the pool's max would only queue, so they are not targets" do
+      runtime = runtime(burst: [enabled: true, pool: @pool, max: 2])
+      runtime = %{runtime | burst: %{runtime.burst | runners: 5}}
+
+      assert Enum.count(Scatter.targets(runtime), &(&1.kind == :runner)) == 2
     end
 
     test "no runners when the job asked for none" do
@@ -104,6 +113,16 @@ defmodule Smolquery.QueryService.ScatterTest do
 
     test "nothing to deal is no shard", %{targets: targets} do
       assert Scatter.deal(targets, []) == []
+    end
+
+    test "hot units with no peer to take them are refused, never dropped" do
+      runners = [%{index: 0, kind: :runner, pool: @pool}]
+
+      assert_raise ArgumentError, ~r/hot units need a peer/, fn ->
+        Scatter.deal(runners, hot(1))
+      end
+
+      assert [{%{index: 0}, [_file]}] = Scatter.deal(runners, sealed(1))
     end
   end
 end

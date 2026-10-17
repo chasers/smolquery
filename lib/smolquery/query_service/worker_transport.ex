@@ -41,12 +41,17 @@ defmodule Smolquery.QueryService.WorkerTransport do
   builds, and the reply comes back over that runner's own distribution
   connection, which carries nothing else. `FLAME.call/3` does not return
   errors, it exits: on a checkout that waits past the timeout, on a call
-  that runs past it, when the runner dies under the shard, and when the pool
-  is not running at all. The runner clause catches every one of those exits,
-  because `Smolquery.QueryService.Scatter` runs its shards under
-  `Task.async_stream/3` with no timeout and linked to the job, where an
-  uncaught exit kills the job, skips the single-engine fallback and skips
-  the partials cleanup.
+  that runs past it, and when the runner dies under the shard. A pool that
+  is not running raises instead, from the lookup of its table. The runner
+  clause catches every one of those, because `Smolquery.QueryService.Scatter`
+  runs its shards under `Task.async_stream/3` with no timeout and linked to
+  the job, where an uncaught exit kills the job, skips the single-engine
+  fallback and skips the partials cleanup. The call is made with
+  `link: false` for the same reason: linked, the remote process would send
+  the shard's task an exit *signal* when the runner died, which no `catch`
+  sees; unlinked, FLAME's own monitor turns that death into the exit the
+  clause catches, and the runner's terminator still ends the remote work
+  when this node goes away.
 
   ## Errors
 
@@ -82,11 +87,12 @@ defmodule Smolquery.QueryService.WorkerTransport do
   def call(target, name, request, job_id, timeout_ms)
 
   def call(%{kind: :runner, pool: pool}, _name, request, _job_id, timeout_ms) do
-    if Process.whereis(pool) do
-      FLAME.call(pool, fn -> PartialWorker.run_standalone(request) end, timeout: timeout_ms)
-    else
-      {:error, {:worker_unreachable, {:runner, pool}, :noproc}}
-    end
+    FLAME.call(pool, fn -> PartialWorker.run_standalone(request) end,
+      timeout: timeout_ms,
+      link: false
+    )
+  rescue
+    ArgumentError -> {:error, {:worker_unreachable, {:runner, pool}, :noproc}}
   catch
     :exit, reason -> {:error, {:worker_unreachable, {:runner, pool}, exit_reason(reason)}}
   end

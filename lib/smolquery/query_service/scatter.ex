@@ -234,7 +234,10 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp units(runtime, plan, ref) do
     with {:ok, sealed} <- Catalog.segment_files(runtime.catalog, ref, plan.snapshot) do
-      hot = plan.hot |> Map.get(ref, []) |> Enum.map(&Map.take(&1, ["url", "field_ids"]))
+      hot =
+        plan.hot
+        |> Map.get(ref, [])
+        |> Enum.map(&(&1 |> Map.take(["url", "field_ids"]) |> Map.put("hot", true)))
 
       units =
         Enum.map(sealed, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}) ++
@@ -258,8 +261,9 @@ defmodule Smolquery.QueryService.Scatter do
   @doc """
   The targets a job on `runtime` scatters over: every peer, then the
   `runtime.burst.runners` runners the job asked for when this node leases
-  them. Empty when there is no peer: a runner only ever works beside the
-  peers, which is where the hot units go.
+  them, at most the pool's `max`, since a runner past it would only queue
+  for a checkout behind the first wave. Empty when there is no peer: a
+  runner only ever works beside the peers, which is where the hot units go.
   """
   @spec targets(Runtime.t()) :: [target()]
   def targets(%Runtime{} = runtime) do
@@ -276,7 +280,9 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp runners(%Runtime{burst: %{enabled: true, runners: runners}}), do: runners
+  defp runners(%Runtime{burst: %{enabled: true, runners: runners, max: max}}),
+    do: min(runners, max)
+
   defp runners(%Runtime{}), do: 0
 
   defp workers(%Runtime{} = runtime) do
@@ -288,9 +294,12 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   @doc """
-  Deals `units` over `targets`: hot units round-robin over the peers alone,
-  sealed files round-robin over every target, so a runner never holds a
-  unit it cannot read (PL-77 D4). A target dealt nothing is dropped.
+  Deals `units` over `targets`: hot units (tagged `"hot"` by `units/3`)
+  round-robin over the peers alone, sealed files round-robin over every
+  target, so a runner never holds a unit it cannot read (PL-77 D4). A
+  target dealt nothing is dropped. Hot units with no peer to take them are
+  an `ArgumentError`: `targets/1` never produces that list, and dropping a
+  hot unit would answer short.
   """
   @spec deal([target()], [map()]) :: [{target(), [map()]}]
   def deal(targets, units) do
@@ -309,6 +318,9 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp round_robin([], _targets), do: %{}
 
+  defp round_robin(_units, []),
+    do: raise(ArgumentError, "hot units need a peer target; runners cannot read the hot tier")
+
   defp round_robin(units, targets) do
     slots = List.to_tuple(targets)
     count = tuple_size(slots)
@@ -318,7 +330,7 @@ defmodule Smolquery.QueryService.Scatter do
     |> Enum.group_by(fn {_unit, index} -> elem(slots, rem(index, count)).index end, &elem(&1, 0))
   end
 
-  defp hot?(%{"url" => url}), do: String.starts_with?(url, "http")
+  defp hot?(unit), do: Map.get(unit, "hot", false)
 
   defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
     partials_dir = dir(job_id)
@@ -385,10 +397,12 @@ defmodule Smolquery.QueryService.Scatter do
       timeout_ms: timeout_ms
     }
 
+    runner_base = runner_base(shards, base, runtime)
+
     shards
     |> Task.async_stream(
       fn {target, files} ->
-        request = request(target, files, base, runtime, node_files)
+        request = request(target, files, base, runner_base, runtime, node_files)
 
         {target.index,
          Trace.span(:shard, &shard_meta(target, files, &1), fn ->
@@ -422,25 +436,24 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp request(%{kind: :peer, node: node}, files, base, runtime, node_files) do
+  defp runner_base(shards, base, runtime) do
+    if Enum.any?(shards, &(elem(&1, 0).kind == :runner)),
+      do: Map.put(base, :engine, PartialWorker.engine_spec(runtime)),
+      else: nil
+  end
+
+  defp request(%{kind: :peer, node: node}, files, base, _runner_base, runtime, node_files) do
     Map.merge(base, %{
       files: files,
       file_cache: runtime.file_cache.decision,
       file_cache_mode: runtime.file_cache.mode,
       node_files: Map.fetch!(node_files, node),
-      allowed_paths: hot_urls(files)
+      allowed_paths: files |> Enum.filter(&hot?/1) |> Enum.map(& &1["url"])
     })
   end
 
-  defp request(%{kind: :runner}, files, base, runtime, _node_files) do
-    Map.merge(base, %{
-      engine: PartialWorker.engine_spec(runtime),
-      files: files,
-      allowed_paths: hot_urls(files)
-    })
-  end
-
-  defp hot_urls(files), do: files |> Enum.filter(&hot?/1) |> Enum.map(& &1["url"])
+  defp request(%{kind: :runner}, files, _base, runner_base, _runtime, _node_files),
+    do: Map.merge(runner_base, %{files: files, allowed_paths: []})
 
   defp transport(%{kind: :peer, node: node}), do: node
   defp transport(%{kind: :runner, pool: pool}), do: %{kind: :runner, pool: pool}
@@ -477,7 +490,7 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp target_name(%{kind: :peer, node: node}), do: node
-  defp target_name(%{kind: :runner, pool: pool}), do: pool
+  defp target_name(%{kind: :runner, pool: pool}), do: inspect(pool)
 
   defp phase_meta(base, outcome) do
     case Telemetry.outcome(outcome) do

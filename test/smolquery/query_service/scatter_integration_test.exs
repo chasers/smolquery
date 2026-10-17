@@ -574,7 +574,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     for runner <- runners do
       assert runner.meta.hot_files == 0
-      assert runner.meta.target == runtime.burst.pool
+      assert runner.meta.target == inspect(runtime.burst.pool)
       assert runner.meta.node == node()
       assert %{engine: :standalone, rows: 1, wait_us: wait} = runner.meta
       assert is_integer(wait) and wait >= 0

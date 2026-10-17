@@ -27,6 +27,16 @@ defmodule Smolquery.BurstTest do
     end
   end
 
+  describe "max/0" do
+    test "is the default until configured" do
+      Application.delete_env(:smolquery, Burst)
+      assert Burst.max() == 64
+
+      Application.put_env(:smolquery, Burst, enabled: true, max: 3)
+      assert Burst.max() == 3
+    end
+  end
+
   describe "children/0" do
     test "starts no pool when burst is off" do
       Application.delete_env(:smolquery, Burst)

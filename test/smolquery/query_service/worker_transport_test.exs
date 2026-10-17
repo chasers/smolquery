@@ -89,6 +89,46 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
       assert pool == target.pool
     end
 
+    test "a runner that dies under the shard is an unreachable runner, not a dead caller " <>
+           "(FLAME reports a killed remote as a timeout)",
+         %{request: request} do
+      pool = :"runner_pool_dying_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: 1, max_concurrency: 1}
+      )
+
+      parent = self()
+      handler = "runner-death-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :query, :engine],
+        fn
+          _event, _measurements, %{source: :standalone}, _config ->
+            send(parent, {:shard, self()})
+            Process.sleep(:infinity)
+
+          _event, _measurements, _meta, _config ->
+            :ok
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      task =
+        Task.async(fn ->
+          WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
+        end)
+
+      assert_receive {:shard, shard}, 10_000
+      Process.exit(shard, :kill)
+
+      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
+               Task.await(task, 10_000)
+    end
+
     test "a checkout that waits past the timeout is an unreachable runner", %{request: request} do
       pool = :"runner_pool_busy_#{System.unique_integer([:positive])}"
 

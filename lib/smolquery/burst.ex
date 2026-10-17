@@ -66,6 +66,10 @@ defmodule Smolquery.Burst do
   @spec enabled?() :: boolean()
   def enabled?, do: Keyword.get(config(), :enabled, false)
 
+  @doc "The most runners this node holds at once: the pool's `max`, configured or default."
+  @spec max() :: pos_integer()
+  def max, do: @defaults |> Keyword.merge(config()) |> Keyword.fetch!(:max)
+
   @doc """
   The pool's child spec when this node leases runners, else nothing.
   """
