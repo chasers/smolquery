@@ -11,7 +11,7 @@ defmodule Smolquery.Burst.LambdaBackend do
   environment and runs the release in the foreground until the BEAM exits.
   The runner's `FLAME.Terminator` then connects back to this node over
   distribution and announces itself; the boot blocks on that announcement
-  for `boot_timeout`.
+  for the pool's `boot_timeout`, which `FLAME.Runner` hands to `init/1`.
 
   ## Reaching this node
 
@@ -23,8 +23,8 @@ defmodule Smolquery.Burst.LambdaBackend do
   (`POD_IP`, or the name resolved here), which the bootstrap writes to
   `/tmp/inetrc` and names in `ERL_INETRC`. The runner's resolver consults
   it before the system's. A node named by its IP needs no entry. The
-  distribution port must be pinned (`inet_dist_listen_min`/`max`) and open,
-  with epmd's 4369, from the function's security group.
+  distribution port must be pinned (`SMOLQUERY_DIST_PORT`) and open, with
+  epmd's 4369, from the function's security group.
 
   ## The runner
 
@@ -32,11 +32,9 @@ defmodule Smolquery.Burst.LambdaBackend do
   listener, registers with no epmd, and no other node can see or reach it.
   Its node name's host part is a label and nothing resolves it. It stops
   itself after `max_lifetime_ms` (`Smolquery.Burst.Lifetime`), under
-  Lambda's 15-minute cap: at the cap the host kills the runner outright,
-  the parent sees `:noconnection`, and the pool kills the shard's caller
-  with `:kill`, which nothing catches (T-673). A shard on a runner that
-  stopped itself fails as unreachable instead, which the scatter retries on
-  a peer.
+  Lambda's 15-minute cap, so its end is an orderly shutdown the parent sees
+  as a runner going away, not a timed-out invocation that Lambda reports as
+  an error and would retry if the function allowed it.
 
   ## The invoke
 
@@ -48,25 +46,29 @@ defmodule Smolquery.Burst.LambdaBackend do
   `:closed` is the one transport error retried, since nothing was sent on
   it; any other failure is returned, never retried, because a retried
   `Event` invoke is a second runner. The function's own event-invoke config
-  must set `MaximumRetryAttempts` to 0 for the same reason.
+  must set `MaximumRetryAttempts` to 0 for the same reason, and
+  `MaximumEventAgeInSeconds` to about the boot timeout, so an invoke Lambda
+  queued past the parent's patience is dropped rather than booted for a
+  pool that gave up on it.
 
   The invoke is signed with the credential chain (`Smolquery.AwsCredentials`),
   so the node that leases runners needs `lambda:InvokeFunction` on the
-  function through its pod identity, and nothing else of AWS.
+  function through its pod identity, and nothing else of AWS. A chain that
+  resolves nothing fails the boot with `{:invoke, :no_credentials}`.
 
   ## Configuration
 
       config :smolquery, Smolquery.Burst.LambdaBackend,
         function: "smolquery-burst-runner",
         region: "eu-central-1",
-        boot_timeout: 120_000,
         max_lifetime_ms: 840_000,
         env: %{}
 
   `env` is extra environment for the runner, merged under the assignment.
   `config/runtime.exs` fills these from `SMOLQUERY_BURST_LAMBDA_FUNCTION`,
-  `SMOLQUERY_BURST_LAMBDA_REGION`, `SMOLQUERY_BURST_BOOT_TIMEOUT_MS` and
-  `SMOLQUERY_BURST_MAX_LIFETIME_MS` when `SMOLQUERY_BURST_BACKEND` is `lambda`.
+  `SMOLQUERY_BURST_LAMBDA_REGION` and `SMOLQUERY_BURST_MAX_LIFETIME_MS`
+  when `SMOLQUERY_BURST_BACKEND` is `lambda`. `parent_host` names the host
+  the runner is told to dial instead of this node's own; it is for tests.
   """
 
   @behaviour FLAME.Backend
@@ -80,6 +82,7 @@ defmodule Smolquery.Burst.LambdaBackend do
             boot_timeout: 120_000,
             max_lifetime_ms: 840_000,
             env: %{},
+            parent_host: nil,
             parent_ref: nil,
             runner_node_base: nil,
             runner_node_name: nil,
@@ -87,7 +90,16 @@ defmodule Smolquery.Burst.LambdaBackend do
 
   @type t :: %__MODULE__{}
 
-  @valid_opts [:function, :region, :boot_timeout, :max_lifetime_ms, :env, :terminator_sup, :log]
+  @valid_opts [
+    :function,
+    :region,
+    :boot_timeout,
+    :max_lifetime_ms,
+    :env,
+    :parent_host,
+    :terminator_sup,
+    :log
+  ]
   @invoke_path "/2015-03-31/functions/"
   @erl_options "-hidden -dist_listen false"
 
@@ -99,7 +111,7 @@ defmodule Smolquery.Burst.LambdaBackend do
       conf
       |> Keyword.merge(opts)
       |> Keyword.validate!(@valid_opts)
-      |> Keyword.take([:function, :region, :boot_timeout, :max_lifetime_ms, :env])
+      |> Keyword.take([:function, :region, :boot_timeout, :max_lifetime_ms, :env, :parent_host])
 
     state = struct!(__MODULE__, provided)
 
@@ -163,13 +175,13 @@ defmodule Smolquery.Burst.LambdaBackend do
   The runner's assignment: the environment the bootstrap exports before it
   starts the release, as one `KEY='VALUE'` line per variable with the value
   single-quoted for `sh`, base64 encoded under `"env"` so the payload needs
-  no JSON escaping on the shell side. `{:error, {:parent_unresolved, host}}`
-  when this node's name resolves to no address, since a runner could never
-  dial it.
+  no JSON escaping on the shell side. An error when this node cannot be
+  named for the runner: `{:parent_unresolved, host}` when the name resolves
+  to nothing, `{:pod_ip_invalid, value}` when `POD_IP` is not an address.
   """
   @spec payload(t()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
   def payload(%__MODULE__{} = state) do
-    with {:ok, inetrc} <- parent_inetrc() do
+    with {:ok, inetrc} <- parent_inetrc(state.parent_host || own_host()) do
       encoded_parent =
         state.parent_ref
         |> FLAME.Parent.new(self(), __MODULE__, state.runner_node_base, "SMOLQUERY_BURST_HOST")
@@ -195,15 +207,13 @@ defmodule Smolquery.Burst.LambdaBackend do
   end
 
   @doc """
-  The `inetrc` a runner needs to dial this node, as `%{"SMOLQUERY_BURST_INETRC" => text}`:
-  this node's host name mapped to `POD_IP` when set, else to the address it
-  resolves to here. Empty when the host part of this node's name is already
-  an address.
+  The `inetrc` a runner needs to dial the node named `host`, as
+  `%{"SMOLQUERY_BURST_INETRC" => text}`: the host mapped to `POD_IP` when
+  set, else to the address it resolves to here. Empty when `host` is
+  already an address.
   """
-  @spec parent_inetrc() :: {:ok, %{String.t() => String.t()}} | {:error, term()}
-  def parent_inetrc do
-    host = node() |> Atom.to_string() |> String.split("@") |> List.last()
-
+  @spec parent_inetrc(String.t()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  def parent_inetrc(host) do
     case :inet.parse_address(String.to_charlist(host)) do
       {:ok, _already_an_address} ->
         {:ok, %{}}
@@ -217,10 +227,19 @@ defmodule Smolquery.Burst.LambdaBackend do
     end
   end
 
+  defp own_host, do: node() |> Atom.to_string() |> String.split("@") |> List.last()
+
   defp parent_address(host) do
     case System.get_env("POD_IP") do
       nil -> resolve(host)
-      pod_ip -> pod_ip |> String.to_charlist() |> :inet.parse_address()
+      pod_ip -> parse_pod_ip(pod_ip)
+    end
+  end
+
+  defp parse_pod_ip(pod_ip) do
+    case :inet.parse_address(String.to_charlist(pod_ip)) do
+      {:ok, address} -> {:ok, address}
+      {:error, :einval} -> {:error, {:pod_ip_invalid, pod_ip}}
     end
   end
 
@@ -236,25 +255,35 @@ defmodule Smolquery.Burst.LambdaBackend do
   defp invoke(%__MODULE__{} = state, payload) do
     AwsCredentials.ensure_started()
 
-    url =
-      "https://lambda.#{state.region}.amazonaws.com" <>
-        @invoke_path <> URI.encode(state.function) <> "/invocations"
+    with {:ok, sigv4} <- AwsCredentials.fetch_sigv4_options(state.region) do
+      url =
+        "https://lambda.#{state.region}.amazonaws.com" <>
+          @invoke_path <> URI.encode(state.function) <> "/invocations"
 
-    request =
-      Req.new(
-        url: url,
-        headers: [{"x-amz-invocation-type", "Event"}, {"connection", "close"}],
-        json: payload,
-        aws_sigv4: [service: :lambda] ++ AwsCredentials.sigv4_options(state.region),
-        retry: &stale_connection?/2,
-        max_retries: 3,
-        retry_delay: 0
-      )
+      request =
+        Req.new(
+          url: url,
+          headers: [{"x-amz-invocation-type", "Event"}, {"connection", "close"}],
+          json: payload,
+          aws_sigv4: [service: :lambda] ++ sigv4,
+          retry: &stale_connection?/2,
+          max_retries: 3,
+          retry_delay: 0
+        )
 
-    case Req.post(request) do
-      {:ok, %Req.Response{status: 202}} -> :ok
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:invoke, status, body}}
-      {:error, reason} -> {:error, {:invoke, reason}}
+      case Req.post(request) do
+        {:ok, %Req.Response{status: 202}} -> :ok
+        {:ok, %Req.Response{status: status, body: body}} -> {:error, {:invoke, status, body}}
+        {:error, reason} -> {:error, {:invoke, reason}}
+      end
+    else
+      {:error, :no_credentials} ->
+        Logger.error(
+          "#{inspect(__MODULE__)}: the credential chain resolved nothing; the node that " <>
+            "leases runners needs lambda:InvokeFunction through its pod identity"
+        )
+
+        {:error, {:invoke, :no_credentials}}
     end
   end
 

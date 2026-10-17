@@ -1037,15 +1037,12 @@ if burst_backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
     config :smolquery, Smolquery.Burst.LambdaBackend,
       function: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_FUNCTION"),
       region: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_REGION"),
-      boot_timeout:
-        Smolquery.RuntimeConfig.positive_integer!(
-          "SMOLQUERY_BURST_BOOT_TIMEOUT_MS",
-          System.get_env("SMOLQUERY_BURST_BOOT_TIMEOUT_MS", "120000")
-        ),
       max_lifetime_ms:
-        Smolquery.RuntimeConfig.positive_integer!(
+        Smolquery.RuntimeConfig.integer_in_range!(
           "SMOLQUERY_BURST_MAX_LIFETIME_MS",
-          System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS", "840000")
+          System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS", "840000"),
+          1,
+          4_294_967_295
         )
   end
 end
@@ -1055,7 +1052,12 @@ end
 if max_lifetime = System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS") do
   config :smolquery, Smolquery.Burst,
     max_lifetime_ms:
-      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_BURST_MAX_LIFETIME_MS", max_lifetime)
+      Smolquery.RuntimeConfig.integer_in_range!(
+        "SMOLQUERY_BURST_MAX_LIFETIME_MS",
+        max_lifetime,
+        1,
+        4_294_967_295
+      )
 end
 
 for {variable, key} <- [

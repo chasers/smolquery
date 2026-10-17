@@ -76,6 +76,19 @@ defmodule Smolquery.AwsCredentials do
   end
 
   @doc """
+  `sigv4_options/1` for a caller that is not a store and has its own
+  answer to an empty chain: `{:error, :no_credentials}` instead of the
+  raise that names the store's static keys.
+  """
+  @spec fetch_sigv4_options(String.t()) :: {:ok, keyword()} | {:error, :no_credentials}
+  def fetch_sigv4_options(region) do
+    case :aws_credentials.get_credentials() do
+      :undefined -> {:error, :no_credentials}
+      credentials -> {:ok, options_from(credentials, region)}
+    end
+  end
+
+  @doc """
   The signing options for one already-resolved credentials map.
 
   Split out from `sigv4_options/1` so the mapping is reachable without a

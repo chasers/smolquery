@@ -130,16 +130,20 @@ nodes' subnets, with a security group the node security group admits on
 `4369` (epmd) and `9100` (the pinned distribution port). Its role needs
 `s3:GetObject` and `s3:ListBucket` on the sealed bucket and `s3:PutObject`
 under the spill prefix (`SMOLQUERY_BURST_SPILL_PREFIX`, `burst-partials`).
-Set the event-invoke config to `MaximumRetryAttempts: 0`: Lambda retries a
-failed asynchronous invocation twice by default, and a retried runner
-would reconnect to a parent that gave up on it. Reserved concurrency is
+Set the event-invoke config to `MaximumRetryAttempts: 0` and
+`MaximumEventAgeInSeconds` to about the boot timeout (120): Lambda retries
+a failed asynchronous invocation twice by default, and keeps a queued one
+for six hours, and a runner booted from either would reconnect to a parent
+that gave up on it. Reserved concurrency is
 the deployment-wide ceiling on runners; `SMOLQUERY_BURST_MAX` caps one
 node and `SMOLQUERY_BURST_MAX_PER_JOB` one query. The function needs no
 environment of its own: a runner learns everything from the assignment
 the parent sends in the invoke payload.
 
 **The API pods.** `deploy/base/api.yaml` already pins the distribution
-listener to `9100`, exposes it, and sets `POD_IP`. A pod's node name is a
+listener to `9100` (`SMOLQUERY_DIST_PORT`, applied by `rel/env.sh.eex` to
+the running node only, so `bin/smolquery rpc` in the same pod still gets
+an ephemeral port), exposes it, and sets `POD_IP`. A pod's node name is a
 headless-service DNS name the function cannot resolve, so the parent sends
 the runner an Erlang `inetrc` mapping that name to the pod's IP; the
 runner dials the IP on epmd and the pinned port. Give the pods'

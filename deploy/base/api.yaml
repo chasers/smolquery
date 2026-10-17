@@ -94,9 +94,11 @@ spec:
               value: smolquery-headless
             # Pin the distribution listener to one port so a burst runner
             # outside the pod network can be let in on it (PL-77). Peers
-            # inside the cluster still learn it from epmd as before.
-            - name: ELIXIR_ERL_OPTIONS
-              value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+            # inside the cluster still learn it from epmd as before, and
+            # rel/env.sh.eex applies it to the running node only, never to
+            # a `bin/smolquery rpc` helper in the same pod.
+            - name: SMOLQUERY_DIST_PORT
+              value: "9100"
             # Must match buffer.yaml's replicas: the query role fails a read
             # when an expected buffer node cannot answer, rather than counting
             # its unsealed rows as zero (T-94).

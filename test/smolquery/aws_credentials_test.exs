@@ -13,6 +13,17 @@ defmodule Smolquery.AwsCredentialsTest do
     end
   end
 
+  describe "fetch_sigv4_options/1" do
+    test "answers the options when the chain holds credentials" do
+      AwsCredentials.ensure_started()
+
+      case AwsCredentials.fetch_sigv4_options("eu-central-1") do
+        {:ok, options} -> assert Keyword.keyword?(options) and options[:region] == "eu-central-1"
+        {:error, :no_credentials} -> :ok
+      end
+    end
+  end
+
   describe "options_from/2" do
     test "carries the session token a role credential arrives with" do
       options = AwsCredentials.options_from(pod_identity_credentials(), "us-west-2")

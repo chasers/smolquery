@@ -5,9 +5,10 @@ defmodule Smolquery.Burst.Lifetime do
   (Lambda's 15 minutes) leaves on its own terms.
 
   FLAME has no per-runner lifetime. At Lambda's cap the host kills the
-  runner mid-shard, the parent sees `:noconnection`, and the pool kills
-  the shard's caller with `:kill`, which no `catch` sees (T-673). A stop
-  from here is an ordinary shutdown: the shard in flight fails as an
+  runner mid-shard with no shutdown: the shard in flight is lost, the
+  invocation ends as a timeout Lambda reports as an error, and nothing
+  on the runner gets to clean up. A stop from here is an ordinary
+  shutdown: the Terminator leaves, the shard in flight fails as an
   unreachable runner, which the scatter retries on a peer, and the pool
   boots a fresh runner on the next checkout. The default, 14 minutes, sits
   one minute under the cap.
@@ -15,6 +16,7 @@ defmodule Smolquery.Burst.Lifetime do
   Started by `Smolquery.Application` in runner mode when
   `SMOLQUERY_BURST_MAX_LIFETIME_MS` is in the runner's assignment
   (`Smolquery.Burst.runner_children/0`). The `stop` option is for tests.
+  The value is bounded at boot to what a timer takes (`config/runtime.exs`).
   """
 
   use GenServer

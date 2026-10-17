@@ -6,7 +6,8 @@
 # release in the foreground. Lambda freezes an environment whose handler has
 # returned, so nothing here returns to the Runtime API until the BEAM exits.
 # When it does, the invocation completes and the next one, if any, is a
-# fresh BEAM with a fresh assignment.
+# fresh BEAM with a fresh assignment: the assignment is sourced in a
+# subshell, so nothing one runner exported reaches the next.
 #
 # SMOLQUERY_BURST_INETRC, when the assignment carries it, is an Erlang inetrc
 # with the parent's host name mapped to its address: the parent is a pod
@@ -28,25 +29,27 @@ while :; do
 
   ENV_FILE=$(mktemp)
   if sed -n 's/.*"env"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BODY" | base64 -d > "$ENV_FILE" && [ -s "$ENV_FILE" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$ENV_FILE"
-    set +a
-
-    if [ -n "${SMOLQUERY_BURST_INETRC:-}" ]; then
-      printf '%s\n' "$SMOLQUERY_BURST_INETRC" > "$RELEASE_TMP/inetrc"
-      export ERL_INETRC="$RELEASE_TMP/inetrc"
-    fi
-
     STARTED=$(date +%s)
     set +e
-    /app/bin/smolquery start
+    (
+      set -a
+      # shellcheck disable=SC1090
+      . "$ENV_FILE"
+      set +a
+
+      if [ -n "${SMOLQUERY_BURST_INETRC:-}" ]; then
+        printf '%s\n' "$SMOLQUERY_BURST_INETRC" > "$RELEASE_TMP/inetrc"
+        export ERL_INETRC="$RELEASE_TMP/inetrc"
+      fi
+
+      exec /app/bin/smolquery start
+    )
     EXIT=$?
     set -e
     ELAPSED=$(( $(date +%s) - STARTED ))
 
     curl -sS -o /dev/null -X POST "$API/invocation/$REQUEST_ID/response" \
-      -d "{\"exit\":$EXIT,\"seconds\":$ELAPSED,\"node\":\"${RELEASE_NODE:-}\"}"
+      -d "{\"exit\":$EXIT,\"seconds\":$ELAPSED}"
   else
     curl -sS -o /dev/null -X POST "$API/invocation/$REQUEST_ID/error" \
       -H 'Lambda-Runtime-Function-Error-Type: BadAssignment' \

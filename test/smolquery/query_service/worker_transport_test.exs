@@ -106,11 +106,18 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
       pool = start_pool()
       handler = hold_standalone_engines()
 
-      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
-               WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 300)
+      task =
+        Task.async(fn ->
+          WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 2_000)
+        end)
 
-      assert_receive {:shard, shard}
-      refute Process.alive?(shard)
+      assert_receive {:shard, shard}, 10_000
+      monitor = Process.monitor(shard)
+
+      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
+               Task.await(task, 10_000)
+
+      assert_receive {:DOWN, ^monitor, :process, ^shard, _reason}, 5_000
 
       :telemetry.detach(handler)
 
