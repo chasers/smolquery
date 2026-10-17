@@ -466,10 +466,8 @@ defmodule Smolquery.Segments.Store.S3 do
     )
   end
 
-  defp sigv4(%__MODULE__{access_key_id: nil, region: region}) do
-    AwsCredentials.ensure_started()
-    AwsCredentials.sigv4_options(region)
-  end
+  defp sigv4(%__MODULE__{access_key_id: nil, region: region}),
+    do: AwsCredentials.sigv4_options(region)
 
   defp sigv4(%__MODULE__{} = config) do
     [

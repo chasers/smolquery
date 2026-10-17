@@ -1059,7 +1059,9 @@ for {variable, key} <- [
 end
 
 if spill_prefix = System.get_env("SMOLQUERY_BURST_SPILL_PREFIX") do
-  config :smolquery, Smolquery.Burst, spill_prefix: String.trim(spill_prefix, "/")
+  config :smolquery, Smolquery.Burst,
+    spill_prefix:
+      Smolquery.RuntimeConfig.key_prefix!("SMOLQUERY_BURST_SPILL_PREFIX", spill_prefix)
 end
 
 if burst_default = System.get_env("SMOLQUERY_BURST_DEFAULT") do

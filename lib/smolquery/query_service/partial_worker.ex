@@ -98,6 +98,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   it after. A peer shard never spills: its request has no `spill`.
   """
 
+  alias Smolquery.AwsCredentials
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -487,7 +488,7 @@ defmodule Smolquery.QueryService.PartialWorker do
     %File.Stat{size: size} = File.stat!(path)
 
     if size > max do
-      case Store.put(spill_store(store), key, &File.cp(path, &1)) do
+      case Store.put(spill_store(store), key, &stage(path, &1)) do
         {:ok, %{location: location, byte_size: bytes}} ->
           {:ok, %{parquet: nil, spilled: %{location: location, key: key, bytes: bytes}}}
 
@@ -501,11 +502,31 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   defp deliver(path, _inline), do: {:ok, %{parquet: File.read!(path), spilled: nil}}
 
-  defp spill_store(%Store{impl: Store.S3, config: config} = store),
-    do: %{
-      store
-      | config: %{config | staging_dir: Path.join(System.tmp_dir!(), "smolquery-spill")}
-    }
+  defp stage(path, staged) do
+    case File.rename(path, staged) do
+      {:error, :exdev} -> File.cp(path, staged)
+      renamed -> renamed
+    end
+  end
 
-  defp spill_store(store), do: store
+  @doc """
+  The store a standalone shard spills through: the request's store with
+  this node's own keys when it has them for that bucket, as the engine's
+  secret gets them; a staging directory under this node's tmp, since a
+  Lambda's filesystem is read-only outside `/tmp`; and the credential
+  chain started when the keys are its, because the store arrived in the
+  request and was never built here.
+  """
+  @spec spill_store(Store.t()) :: Store.t()
+  def spill_store(%Store{} = store) do
+    case with_local_credentials(store) do
+      %Store{impl: Store.S3, config: config} = s3 ->
+        if Store.S3.credential_chain?(config), do: AwsCredentials.ensure_started()
+
+        %{s3 | config: %{config | staging_dir: Path.join(System.tmp_dir!(), "smolquery-spill")}}
+
+      local ->
+        local
+    end
+  end
 end

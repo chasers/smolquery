@@ -696,13 +696,44 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
   end
 
+  @tag burst: [dead: true, spill: true, spill_inline_max_bytes: 0]
+  test "runner shards retried on peers leave nothing under the spill prefix (T-678)",
+       %{distributed: distributed, tmp_dir: tmp_dir} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2
+             )
+
+    assert %{burst: 0, peers: 5, burst_refused: :runners_unreachable} = job.scatter
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+  end
+
+  @tag burst: [dead: true, spill: true, spill_inline_max_bytes: 0, retry_floor_ms: 600_000]
+  test "a gather that fails sweeps the spill prefix before the fallback (T-678)",
+       %{distributed: distributed, tmp_dir: tmp_dir} do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2,
+               trace: true
+             )
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert Enum.find(job.trace, &(&1.name == :gather)).meta.outcome == :error
+    assert job.scatter == nil
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+  end
+
   @tag burst: [dead: true, retry_floor_ms: 600_000]
   test "under the retry floor a failed runner shard sends the job to the single-engine fallback",
        %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, frame} =
-             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events", burst: 2)
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2,
+               trace: true
+             )
 
-    assert DataFrame.to_columns(frame) == %{"n" => [15]}
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert Enum.find(job.trace, &(&1.name == :gather)).meta.outcome == :error
     assert job.scatter == nil
   end
 

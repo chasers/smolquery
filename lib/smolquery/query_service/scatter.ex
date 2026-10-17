@@ -87,6 +87,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.Cluster
   alias Smolquery.Cluster.PgGroup
   alias Smolquery.Engine.Connection
+  alias Smolquery.Identifier
   alias Smolquery.QueryService.Decomposer
   alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.PartialWorker
@@ -371,13 +372,40 @@ defmodule Smolquery.QueryService.Scatter do
     try do
       gathered =
         Trace.span(:gather, &phase_meta(%{shards: length(shards)}, &1), fn ->
-          runtime
-          |> gather(decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms)
-          |> swept(runtime)
+          gather(runtime, decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms)
         end)
 
-      with {:ok, partials} <- gathered,
-           {:ok, frame} <- merged(runtime, connection, decomposition, partials) do
+      case gathered do
+        {:ok, partials} ->
+          answer(runtime, connection, decomposition, dealt, partials, job_id)
+
+        {:error, reason} ->
+          delete_spilled(runtime, spill_keys(runtime, dealt, job_id))
+          Logger.warning("distributed query fell back: #{inspect(reason)}")
+
+          :fallback
+      end
+    catch
+      kind, reason ->
+        delete_spilled(runtime, spill_keys(runtime, dealt, job_id))
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    after
+      File.rm_rf(partials_dir)
+    end
+  end
+
+  defp answer(runtime, connection, decomposition, dealt, partials, job_id) do
+    merged =
+      Trace.span(:merge, &phase_meta(%{}, &1), fn ->
+        merge(runtime, connection, decomposition, partials)
+      end)
+
+    delete_spilled(runtime, cleanup_keys(runtime, dealt, partials, job_id))
+
+    case merged do
+      {:ok, frame} ->
+        %{shards: shards} = dealt
+
         measurements = %{
           shards: length(shards),
           partial_bytes: Enum.sum_by(partials, & &1.bytes),
@@ -397,50 +425,58 @@ defmodule Smolquery.QueryService.Scatter do
            burst_refused: refused(dealt, measurements.burst),
            file_cache: partials |> Enum.map(& &1.decision) |> FileCache.combined()
          })}
-      else
-        {:error, reason} ->
-          Logger.warning("distributed query fell back: #{inspect(reason)}")
 
-          :fallback
-
-        :fallback ->
-          :fallback
-      end
-    after
-      File.rm_rf(partials_dir)
+      :fallback ->
+        :fallback
     end
   end
 
-  defp merged(runtime, connection, decomposition, partials) do
-    paths = Enum.map(partials, & &1.path)
+  defp spill_key(%Runtime{burst: %{spill_prefix: prefix}}, job_id, index),
+    do: "#{prefix}/#{job_id}/#{index}.parquet"
 
-    result =
-      Trace.span(:merge, &phase_meta(%{}, &1), fn ->
-        merge(runtime, connection, decomposition, paths)
-      end)
+  defp spill_keys(%Runtime{store: nil}, _dealt, _job_id), do: []
 
-    delete_spilled(runtime, partials)
+  defp spill_keys(runtime, %{shards: shards}, job_id),
+    do:
+      for(
+        {%{kind: :runner, index: index}, _files} <- shards,
+        do: spill_key(runtime, job_id, index)
+      )
 
-    result
+  defp cleanup_keys(%Runtime{store: nil}, _dealt, _partials, _job_id), do: []
+
+  defp cleanup_keys(runtime, %{shards: shards}, partials, job_id) do
+    reported = for %{spilled: key} <- partials, is_binary(key), do: key
+    answered = for %{kind: :runner, index: index} <- partials, do: index
+
+    silent =
+      for {%{kind: :runner, index: index}, _files} <- shards,
+          index not in answered,
+          do: spill_key(runtime, job_id, index)
+
+    reported ++ silent
   end
 
-  defp swept({:error, reason, partials}, runtime) do
-    delete_spilled(runtime, partials)
+  defp delete_spilled(_runtime, []), do: :ok
 
-    {:error, reason}
-  end
+  defp delete_spilled(%Runtime{store: store}, keys) do
+    keys
+    |> Task.async_stream(&{&1, Store.delete(store, &1)},
+      max_concurrency: 16,
+      ordered: false,
+      timeout: 30_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.each(fn
+      {:ok, {_key, :ok}} ->
+        :ok
 
-  defp swept(gathered, _runtime), do: gathered
+      {:ok, {key, {:error, reason}}} ->
+        Logger.warning("spill #{key} not deleted: #{inspect(reason)}")
 
-  defp delete_spilled(%Runtime{store: store}, partials) do
-    for %{spilled: key} <- partials, is_binary(key) do
-      case Store.delete(store, key) do
-        :ok -> :ok
-        {:error, reason} -> Logger.warning("spilled partial not deleted: #{inspect(reason)}")
-      end
-    end
-
-    :ok
+      {:exit, reason} ->
+        Logger.warning("spill delete exited: #{inspect(reason)}")
+    end)
   end
 
   defp gather(runtime, decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms) do
@@ -477,20 +513,21 @@ defmodule Smolquery.QueryService.Scatter do
           |> Map.merge(%{
             decision: Map.get(reply, :file_cache, runtime.file_cache.decision),
             kind: target.kind,
+            index: target.index,
             wait_us: wait_us
           })
 
         {:cont, {:ok, [partial | partials]}}
 
-      {:ok, {_target, _wait_us, {:error, reason}}}, {:ok, partials} ->
-        {:halt, {:error, reason, partials}}
+      {:ok, {_target, _wait_us, {:error, reason}}}, _acc ->
+        {:halt, {:error, reason}}
 
-      {:exit, reason}, {:ok, partials} ->
-        {:halt, {:error, reason, partials}}
+      {:exit, reason}, _acc ->
+        {:halt, {:error, reason}}
     end)
     |> case do
       {:ok, partials} -> {:ok, Enum.reverse(partials)}
-      {:error, reason, partials} -> {:error, reason, partials}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -590,11 +627,9 @@ defmodule Smolquery.QueryService.Scatter do
   defp with_spill(request, %{runtime: %Runtime{store: nil}}, _index), do: request
 
   defp with_spill(request, %{runtime: runtime, job_id: job_id}, index) do
-    %{spill_prefix: prefix, spill_inline_max_bytes: inline_max_bytes} = runtime.burst
-
     Map.put(request, :spill, %{
-      key: "#{prefix}/#{job_id}/#{index}.parquet",
-      inline_max_bytes: inline_max_bytes
+      key: spill_key(runtime, job_id, index),
+      inline_max_bytes: runtime.burst.spill_inline_max_bytes
     })
   end
 
@@ -696,17 +731,40 @@ defmodule Smolquery.QueryService.Scatter do
   defp bounded(final, :infinity), do: final
   defp bounded(final, max_rows), do: "SELECT * FROM (#{final}) LIMIT #{max_rows + 1}"
 
-  defp merge(runtime, connection, decomposition, paths) do
+  defp merge(runtime, connection, decomposition, partials) do
+    paths = Enum.map(partials, & &1.path)
     final = Decomposer.final_sql(decomposition, Views.read_parquet(paths))
 
-    case Connection.frame(connection, bounded(final, runtime.result_max_rows), [], :infinity) do
-      {:ok, frame} ->
-        {:ok, frame}
-
+    with :ok <- uncached_spill(runtime, connection, partials),
+         {:ok, frame} <-
+           Connection.frame(connection, bounded(final, runtime.result_max_rows), [], :infinity) do
+      {:ok, frame}
+    else
       {:error, reason} ->
         Logger.warning("distributed merge fell back: #{inspect(reason)}")
 
         :fallback
+    end
+  end
+
+  defp uncached_spill(%Runtime{file_cache: %{directory: nil}}, _connection, _partials), do: :ok
+
+  defp uncached_spill(%Runtime{} = runtime, connection, partials) do
+    if Enum.any?(partials, &is_binary(&1.spilled)) do
+      prefix = Store.location(runtime.store, runtime.burst.spill_prefix)
+      pattern = Identifier.sql_string("^" <> Regex.escape(prefix))
+
+      case Connection.query(
+             connection,
+             "SELECT cache_httpfs_add_exclusion_regex(#{pattern})",
+             [],
+             :infinity
+           ) do
+        {:ok, _result} -> :ok
+        {:error, reason} -> {:error, {:spill_cache_exclusion, reason}}
+      end
+    else
+      :ok
     end
   end
 end

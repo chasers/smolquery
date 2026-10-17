@@ -5,6 +5,17 @@ defmodule Smolquery.RuntimeConfigTest do
 
   doctest RuntimeConfig
 
+  test "parses an object-store key prefix and refuses one a store would reject" do
+    assert RuntimeConfig.key_prefix!("X", "burst-partials") == "burst-partials"
+    assert RuntimeConfig.key_prefix!("X", "/scratch/burst/") == "scratch/burst"
+
+    for bad <- ["", "/", "a//b", "a/../b", ".hidden", "a/./b"] do
+      assert_raise ArgumentError, ~r/X has invalid value/, fn ->
+        RuntimeConfig.key_prefix!("X", bad)
+      end
+    end
+  end
+
   test "parses positive integers" do
     assert RuntimeConfig.positive_integer!("VALUE", "42") == 42
   end

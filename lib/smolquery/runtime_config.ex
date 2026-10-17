@@ -111,6 +111,22 @@ defmodule Smolquery.RuntimeConfig do
   end
 
   @doc """
+  Parses an object-store key prefix: surrounding slashes trimmed, never
+  empty, no empty, `.` or `..` segment, and no leading dot, which is what
+  `Smolquery.Segments.Store` accepts in a key.
+  """
+  @spec key_prefix!(String.t(), String.t()) :: String.t()
+  def key_prefix!(name, value) do
+    prefix = String.trim(value, "/")
+    segments = String.split(prefix, "/")
+
+    if prefix != "" and not String.starts_with?(prefix, ".") and
+         Enum.all?(segments, &(&1 not in ["", ".", ".."])),
+       do: prefix,
+       else: invalid!(name, value, "a key prefix such as burst-partials or scratch/burst")
+  end
+
+  @doc """
   Parses a bounded comma-separated list of Erlang node names.
   """
   @spec node_names!(String.t(), String.t()) :: [String.t()]

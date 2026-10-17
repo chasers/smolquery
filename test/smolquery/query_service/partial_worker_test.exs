@@ -95,6 +95,23 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert DataFrame.to_columns(DataFrame.from_parquet!(location))["s"] == [6]
     end
 
+    test "a spill the store refuses is the shard's failure, not a crash", %{
+      request: request,
+      tmp_dir: tmp_dir
+    } do
+      not_a_dir = Path.join(tmp_dir, "a-file")
+      File.write!(not_a_dir, "x")
+      broken = Store.Local.new(dir: not_a_dir)
+
+      request =
+        request
+        |> Map.put(:engine, %{request.engine | store: broken})
+        |> Map.put(:spill, %{key: "burst-partials/job/0.parquet", inline_max_bytes: 0})
+
+      assert {:error, {:spill_failed, {:put_failed, "burst-partials/job/0.parquet", _reason}}} =
+               PartialWorker.run_standalone(request)
+    end
+
     test "a partial under the inline max stays inline", %{request: request} do
       request =
         Map.put(request, :spill, %{
@@ -251,6 +268,21 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
 
       assert [secret] = PartialWorker.standalone_options(%{spec | store: keyed})[:statements]
       assert secret =~ "KEY_ID 'sent'"
+    end
+
+    test "spill_store/1 signs the spill with this node's keys for the bucket and stages under tmp",
+         %{keyless: keyless} do
+      put_local_store(bucket: "sealed", access_key_id: "k", secret_access_key: "s")
+
+      %Store{impl: Store.S3, config: config} = PartialWorker.spill_store(keyless)
+
+      assert config.access_key_id == "k"
+      assert config.secret_access_key == "s"
+      assert String.starts_with?(config.staging_dir, System.tmp_dir!())
+
+      Application.delete_env(:smolquery, Smolquery.QueryService)
+      %Store{config: chain} = PartialWorker.spill_store(keyless)
+      assert chain.access_key_id == nil
     end
 
     test "without a key of its own, the node reads through the credential chain",
