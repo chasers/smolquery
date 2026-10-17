@@ -107,7 +107,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              [enabled: true, min_files: 4, local_workers: 3],
              Map.get(context, :distributed, [])
            )
-       ] ++ file_cache(context, catalog) ++ shared},
+       ] ++ burst(context) ++ file_cache(context, catalog) ++ shared},
       id: distributed
     )
 
@@ -140,6 +140,18 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   end
 
   defp file_cache(_context, _catalog), do: []
+
+  defp burst(%{burst: max}) do
+    pool = :"scatter_burst_pool_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: max, max_concurrency: 1}
+    )
+
+    [burst: [enabled: true, pool: pool]]
+  end
+
+  defp burst(_context), do: []
 
   defp attach_shard_decisions do
     parent = self()
@@ -538,6 +550,53 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
            |> Enum.map(& &1.meta.shard)
            |> Enum.sort() ==
              Enum.to_list(0..(shards - 1))
+  end
+
+  @tag burst: 2
+  test "a burst query answers exactly, hot rows included, from peers and runners (T-676)",
+       %{control: control, distributed: distributed} do
+    sql = "SELECT count(*) AS n, sum(id) AS s, max(id) AS m FROM analytics.events"
+    both(control, distributed, sql, burst: 2)
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, sql, burst: 2, trace: true)
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+
+    {:ok, runtime} = QueryService.Runtime.fetch(distributed)
+    shards = Enum.filter(job.trace, &(&1.name == :shard))
+    runners = Enum.filter(shards, &(&1.meta.kind == :runner))
+    peers = Enum.filter(shards, &(&1.meta.kind == :peer))
+
+    assert [_, _] = runners
+    assert [_, _, _] = peers
+    assert job.scatter.shards == 5
+
+    for runner <- runners do
+      assert runner.meta.hot_files == 0
+      assert runner.meta.target == runtime.burst.pool
+      assert runner.meta.node == node()
+      assert %{engine: :standalone, rows: 1, wait_us: wait} = runner.meta
+      assert is_integer(wait) and wait >= 0
+    end
+
+    assert Enum.sum_by(peers, & &1.meta.hot_files) >= 1
+    assert Enum.all?(peers, &(&1.meta.target == node()))
+
+    assert_receive {:scatter, %{shards: 5}, %{workers: [worker]}}
+    assert worker == node()
+  end
+
+  test "a job that asks to burst on a node that leases no runners scatters over its peers alone",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events",
+               burst: 2,
+               trace: true
+             )
+
+    assert [_, _, _] = shards = Enum.filter(job.trace, &(&1.name == :shard))
+    assert Enum.all?(shards, &(&1.meta.kind == :peer))
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do

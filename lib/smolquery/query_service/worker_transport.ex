@@ -33,11 +33,27 @@ defmodule Smolquery.QueryService.WorkerTransport do
   rpc itself waits that deadline plus a margin, the same rule the buffer
   transport follows.
 
+  ## Runners (PL-77)
+
+  A burst shard goes to a runner leased from a `FLAME.Pool`: `FLAME.call/3`
+  runs `Smolquery.QueryService.PartialWorker.run_standalone/1` on whichever
+  runner the pool checks out, so the request carries the engine the shard
+  builds, and the reply comes back over that runner's own distribution
+  connection, which carries nothing else. `FLAME.call/3` does not return
+  errors, it exits: on a checkout that waits past the timeout, on a call
+  that runs past it, when the runner dies under the shard, and when the pool
+  is not running at all. The runner clause catches every one of those exits,
+  because `Smolquery.QueryService.Scatter` runs its shards under
+  `Task.async_stream/3` with no timeout and linked to the job, where an
+  uncaught exit kills the job, skips the single-engine fallback and skips
+  the partials cleanup.
+
   ## Errors
 
   A peer outside `Node.list/0` is refused before any connect attempt. Every
-  transport failure becomes `{:error, {:worker_unreachable, peer, reason}}`,
-  which `Smolquery.QueryService.Scatter` turns into a fallback. A timeout
+  transport failure becomes `{:error, {:worker_unreachable, target, reason}}`,
+  where `target` is the peer node or `{:runner, pool}`, which
+  `Smolquery.QueryService.Scatter` turns into a fallback. A peer timeout
   also hands the destination to `Smolquery.Cluster.RpcClients.check/2`, so a
   channel whose socket went dead is redialed instead of reused (T-613).
   """
@@ -48,12 +64,32 @@ defmodule Smolquery.QueryService.WorkerTransport do
   @rpc_margin_ms 5_000
   @default_channels 4
 
+  @typedoc "Where a shard runs: a peer node, or a runner leased from a pool."
+  @type target :: node() | %{kind: :runner, pool: atom()}
+
   @doc """
-  Runs `request` on `peer`'s `PartialWorker` for job `job_id`.
+  Runs `request` on `target`'s `PartialWorker` for job `job_id`: `run/2` on
+  a peer node, `run_standalone/1` on a runner leased from the pool.
   """
-  @spec call(node(), atom(), PartialWorker.request(), String.t(), timeout()) ::
+  @spec call(
+          target(),
+          atom(),
+          PartialWorker.request() | PartialWorker.standalone_request(),
+          String.t(),
+          timeout()
+        ) ::
           {:ok, PartialWorker.reply()} | {:error, term()}
-  def call(peer, name, request, job_id, timeout_ms)
+  def call(target, name, request, job_id, timeout_ms)
+
+  def call(%{kind: :runner, pool: pool}, _name, request, _job_id, timeout_ms) do
+    if Process.whereis(pool) do
+      FLAME.call(pool, fn -> PartialWorker.run_standalone(request) end, timeout: timeout_ms)
+    else
+      {:error, {:worker_unreachable, {:runner, pool}, :noproc}}
+    end
+  catch
+    :exit, reason -> {:error, {:worker_unreachable, {:runner, pool}, exit_reason(reason)}}
+  end
 
   def call(peer, name, request, _job_id, _timeout_ms) when peer == node() do
     PartialWorker.run(name, request)
@@ -108,4 +144,7 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   defp deadline(:infinity), do: :infinity
   defp deadline(timeout_ms), do: timeout_ms + @rpc_margin_ms
+
+  defp exit_reason({reason, {FLAME.Pool, _fun, _args}}), do: reason
+  defp exit_reason(reason), do: reason
 end

@@ -196,11 +196,12 @@ A query that scattered (see Distributed execution) emits three more inside `exec
 
 ```json
 {"shard": 0, "target": "smolquery@query-1", "node": "smolquery@query-1", "kind": "peer",
- "files": 41, "sealed_bytes": 3203302024, "rows": 1,
- "engine": "warm", "engine_us": 1200, "describe_us": 8400, "scan_us": 271000, "worker_us": 290300}
+ "files": 41, "hot_files": 2, "sealed_bytes": 3203302024, "rows": 1,
+ "engine": "warm", "engine_us": 1200, "describe_us": 8400, "scan_us": 271000, "worker_us": 290300,
+ "wait_us": 4100}
 ```
 
-`engine` says where the shard's engine came from, as `engine_start`'s meta does for the job: `warm` or `cold` from a peer's pool, `standalone` for a burst runner's cold start, which is why `engine_us` differs by orders of magnitude between kinds. `worker_us` is the whole of the worker's time from engine to reply; the gap between the span's duration and `worker_us` is the wire. `sealed_bytes` counts the shard's sealed files only; hot-tier entries count in `files` but carry no size. A shard that failed carries `error` instead of the timings. A shard still running when another shard failed is stopped, and leaves no span: `gather`'s `shards` says how many there were. Nothing crosses to the worker but the request: the worker returns its timings in the reply and the coordinator emits the span, so a shard on another node, or on a burst runner, needs no trace context and no exporter.
+`engine` says where the shard's engine came from, as `engine_start`'s meta does for the job: `warm` or `cold` from a peer's pool, `standalone` for a burst runner's cold start, which is why `engine_us` differs by orders of magnitude between kinds. `worker_us` is the whole of the worker's time from engine to reply; `wait_us` is the rest of the span, which on a peer is the wire and on a runner is the lease, the boot when the pool had to grow, and the wire. `kind` is `peer` for a node of the query service and `runner` for a burst runner (PL-77), whose `target` is the pool it was leased from and whose `node` is the runner's own node name. `sealed_bytes` counts the shard's sealed files only; hot-tier entries count in `files` and in `hot_files` but carry no size, and `hot_files` is always `0` on a runner, because hot units are dealt to peers alone. A shard that failed carries `error` instead of the timings. A shard still running when another shard failed is stopped, and leaves no span: `gather`'s `shards` says how many there were. Nothing crosses to the worker but the request: the worker returns its timings in the reply and the coordinator emits the span, so a shard on another node, or on a burst runner, needs no trace context and no exporter.
 
 Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `trace` option only decides whether this job collects them. A job that failed or was cancelled still settles with the spans it got: the partial trace is exactly what explains the failure. History does not persist the trace, the same as `statistics` and `explain`. A non-boolean `trace` value is a 400.
 

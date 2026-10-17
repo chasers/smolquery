@@ -55,7 +55,9 @@ defmodule Smolquery.QueryService.Runner do
   path below as if nothing happened. The runner's part is one directory:
   the job's partials land under `Scatter.dir/1`, so `lockdown/3` includes it
   in `allowed_directories` and the merge can read them after external
-  access closes.
+  access closes. A `burst: n` option asks the scatter for `n` runner shards
+  on top of the peers (PL-77); on a node that leases no runners it asks for
+  nothing.
 
   The SQL inside the wrap is the statement's canonical text, carried on the
   plan (`Smolquery.QueryService.Plan.canonical_sql` — the planner derives it
@@ -117,6 +119,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:trace, boolean()}
           | {:trace_parent, OpenTelemetry.span_ctx() | nil}
           | {:distributed, boolean()}
+          | {:burst, non_neg_integer()}
           | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
@@ -175,6 +178,7 @@ defmodule Smolquery.QueryService.Runner do
       runtime:
         runtime
         |> override_distributed(Keyword.get(opts, :distributed))
+        |> override_burst(Keyword.get(opts, :burst))
         |> override_file_cache(Keyword.get(opts, :file_cache))
         |> override_result_max_rows(Keyword.get(opts, :result_max_rows)),
       timeout_ms: timeout_ms,
@@ -204,6 +208,13 @@ defmodule Smolquery.QueryService.Runner do
 
   defp override_distributed(%Runtime{} = runtime, enabled) when is_boolean(enabled),
     do: %{runtime | distributed: %{runtime.distributed | enabled: enabled}}
+
+  defp override_burst(runtime, nil), do: runtime
+
+  defp override_burst(%Runtime{burst: %{enabled: false}} = runtime, _runners), do: runtime
+
+  defp override_burst(%Runtime{} = runtime, runners) when is_integer(runners) and runners >= 0,
+    do: %{runtime | burst: %{runtime.burst | runners: runners}}
 
   defp override_file_cache(runtime, nil), do: runtime
 

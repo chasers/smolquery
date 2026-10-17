@@ -180,6 +180,12 @@ defmodule Smolquery.QueryService.Runtime do
   own. Decomposition, dispatch, and fallback live in
   `Smolquery.QueryService.Scatter`.
 
+  `burst` (PL-77) is whether a scattered job may also fan out to runners
+  leased from `Smolquery.Burst`'s pool: `enabled` follows the node's burst
+  configuration unless a test says otherwise, `pool` names the pool, and
+  `runners` is how many runner shards the job asked for, `0` at boot and
+  set per job by its `burst:` option. Hot units never go to a runner.
+
   `store` names nothing this service writes through — the query path never
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
   8 L3), every job engine still needs the same credentials to
@@ -239,7 +245,8 @@ defmodule Smolquery.QueryService.Runtime do
       local_workers: 4,
       worker_memory_limit: nil,
       worker_threads: nil
-    }
+    },
+    burst: %{enabled: false, pool: Smolquery.Burst.Pool, runners: 0}
   ]
 
   @type t :: %__MODULE__{
@@ -285,7 +292,8 @@ defmodule Smolquery.QueryService.Runtime do
             local_workers: pos_integer(),
             worker_memory_limit: String.t() | nil,
             worker_threads: pos_integer() | nil
-          }
+          },
+          burst: %{enabled: boolean(), pool: atom(), runners: non_neg_integer()}
         }
 
   @limits [
@@ -339,7 +347,8 @@ defmodule Smolquery.QueryService.Runtime do
           List.wrap(file_cache.directory),
       file_cache: file_cache,
       warm_probe: Keyword.get_lazy(config, :warm_probe, fn -> warm_probe(catalog_opts) end),
-      distributed: distributed(Keyword.get(config, :distributed, []))
+      distributed: distributed(Keyword.get(config, :distributed, [])),
+      burst: burst(Keyword.get(config, :burst, []))
     }
     |> struct!(Keyword.take(config, @limits))
     |> with_metadata_driver(catalog_opts)
@@ -407,6 +416,14 @@ defmodule Smolquery.QueryService.Runtime do
       local_workers: Keyword.get(opts, :local_workers, 4),
       worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
       worker_threads: Keyword.get(opts, :worker_threads)
+    }
+  end
+
+  defp burst(opts) do
+    %{
+      enabled: Keyword.get_lazy(opts, :enabled, &Smolquery.Burst.enabled?/0),
+      pool: Keyword.get(opts, :pool, Smolquery.Burst.pool()),
+      runners: 0
     }
   end
 

@@ -46,6 +46,7 @@ defmodule Smolquery.QueryService.Client do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
+          | {:burst, non_neg_integer()}
           | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
@@ -59,6 +60,7 @@ defmodule Smolquery.QueryService.Client do
     :describe,
     :trace,
     :distributed,
+    :burst,
     :file_cache,
     :snapshot,
     :hot_before_ms,
