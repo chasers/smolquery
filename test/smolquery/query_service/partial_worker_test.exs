@@ -29,8 +29,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       store: store,
       lockdown: true,
       allowed_directories: [tmp_dir],
-      clickhouse_functions: false,
-      temp_directory: nil
+      clickhouse_functions: false
     }
 
     request = %{
@@ -57,6 +56,23 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       request = %{request | engine: %{request.engine | lockdown: false}}
       assert {:ok, %{rows: 1}} = PartialWorker.run_standalone(request)
     end
+
+    test "counts its cold engine as a standalone source", %{request: request} do
+      parent = self()
+      handler = "partial-worker-engine-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :query, :engine],
+        fn _event, _measurements, meta, _config -> send(parent, {:engine, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, _reply} = PartialWorker.run_standalone(request)
+      assert_receive {:engine, %{source: :standalone}}
+    end
   end
 
   describe "standalone_options/1" do
@@ -68,6 +84,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert options[:extensions] == [:httpfs, :aws]
       assert options[:settings] == [memory_limit: "256MB", threads: 2]
       assert options[:max_rows] == :infinity
+      refute Keyword.has_key?(options, :temp_directory)
 
       assert [secret] = options[:statements]
       assert secret =~ "CREATE SECRET IF NOT EXISTS smolquery_sealed_tier"
@@ -84,14 +101,15 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert options[:statements] == []
     end
 
-    test "drops unset settings", %{spec: spec} do
-      options = PartialWorker.standalone_options(%{spec | threads: nil, temp_directory: "/tmp/d"})
-      assert options[:settings] == [memory_limit: "256MB", temp_directory: "/tmp/d"]
+    test "drops an unset thread count", %{spec: spec} do
+      options = PartialWorker.standalone_options(%{spec | threads: nil})
+      assert options[:settings] == [memory_limit: "256MB"]
     end
   end
 
   describe "engine_spec/1" do
-    test "takes the worker's limits and the store without its keys", %{tmp_dir: tmp_dir} do
+    test "takes the worker's limits and the store without its keys, and no local directories",
+         %{tmp_dir: tmp_dir} do
       runtime =
         Runtime.new(
           name: :partial_worker_spec_test,
@@ -115,8 +133,8 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert spec.extensions == [:httpfs]
       assert spec.lockdown
       refute spec.clickhouse_functions
-      assert tmp_dir in spec.allowed_directories
-      assert spec.temp_directory == nil
+      assert spec.allowed_directories == []
+      refute Map.has_key?(spec, :temp_directory)
 
       assert %Store{impl: Store.S3, config: config} = spec.store
       assert config.bucket == "sealed"
@@ -124,11 +142,14 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert config.secret_access_key == nil
     end
 
-    test "falls back to the job's limits when the worker has none" do
+    test "falls back to the job's limits and keeps the directories of a local store",
+         %{tmp_dir: tmp_dir} do
       runtime =
         Runtime.new(
           name: :partial_worker_spec_fallback_test,
           catalog: MapCatalog.new(),
+          store: {Store.Local, [dir: tmp_dir]},
+          allowed_directories: [tmp_dir],
           job_memory_limit: "2GB",
           read_engine_threads: 4
         )
@@ -137,7 +158,8 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
 
       assert spec.memory_limit == "2GB"
       assert spec.threads == 4
-      assert spec.store == nil
+      assert tmp_dir in spec.allowed_directories
+      assert %Store{impl: Store.Local} = spec.store
     end
   end
 
@@ -151,17 +173,13 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
           else: Application.delete_env(:smolquery, Smolquery.QueryService)
       end)
 
-      :ok
+      %{keyless: Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")}
     end
 
-    test "a static key configured on this node fills a keyless request store", %{spec: spec} do
-      Application.put_env(:smolquery, Smolquery.QueryService,
-        store:
-          {Store.S3,
-           [bucket: "sealed", staging_dir: "/tmp/s", access_key_id: "k", secret_access_key: "s"]}
-      )
+    test "a static key configured here for the same bucket fills a keyless request store",
+         %{spec: spec, keyless: keyless} do
+      put_local_store(bucket: "sealed", access_key_id: "k", secret_access_key: "s")
 
-      %Store{} = keyless = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
       options = PartialWorker.standalone_options(%{spec | store: keyless})
 
       assert [secret] = options[:statements]
@@ -171,15 +189,53 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert options[:extensions] == [:httpfs]
     end
 
-    test "without a key of its own, the node reads through the credential chain", %{spec: spec} do
+    test "a key for another bucket or endpoint is not used", %{spec: spec, keyless: keyless} do
+      put_local_store(bucket: "other", access_key_id: "k", secret_access_key: "s")
+      assert [secret] = PartialWorker.standalone_options(%{spec | store: keyless})[:statements]
+      assert secret =~ "credential_chain"
+
+      put_local_store(
+        bucket: "sealed",
+        endpoint: "http://minio:9000",
+        access_key_id: "k",
+        secret_access_key: "s"
+      )
+
+      assert [secret] = PartialWorker.standalone_options(%{spec | store: keyless})[:statements]
+      assert secret =~ "credential_chain"
+    end
+
+    test "a request store that still carries keys keeps them", %{spec: spec} do
+      put_local_store(bucket: "sealed", access_key_id: "local", secret_access_key: "local")
+
+      %Store{} =
+        keyed =
+        Store.S3.new(
+          bucket: "sealed",
+          staging_dir: "/tmp/staging",
+          access_key_id: "sent",
+          secret_access_key: "sent"
+        )
+
+      assert [secret] = PartialWorker.standalone_options(%{spec | store: keyed})[:statements]
+      assert secret =~ "KEY_ID 'sent'"
+    end
+
+    test "without a key of its own, the node reads through the credential chain",
+         %{spec: spec, keyless: keyless} do
       Application.delete_env(:smolquery, Smolquery.QueryService)
 
-      %Store{} = keyless = Store.S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
       options = PartialWorker.standalone_options(%{spec | store: keyless})
 
       assert [secret] = options[:statements]
       assert secret =~ "credential_chain"
       assert :aws in options[:extensions]
+    end
+
+    defp put_local_store(options) do
+      Application.put_env(:smolquery, Smolquery.QueryService,
+        store: {Store.S3, Keyword.put(options, :staging_dir, "/tmp/s")}
+      )
     end
   end
 end

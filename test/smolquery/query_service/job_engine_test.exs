@@ -131,6 +131,25 @@ defmodule Smolquery.QueryService.JobEngineTest do
     assert linked?(engine)
   end
 
+  test "start_standalone/1 starts a cold engine and counts it as a standalone source" do
+    parent = self()
+    handler = "job-engine-standalone-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :query, :engine],
+      fn _event, _measurements, meta, _config -> send(parent, {:engine, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, engine} = JobEngine.start_standalone(extensions: [], max_rows: :infinity)
+    assert {:ok, %{rows: [[1]]}} = Connection.query(engine.connection, "SELECT 1", [], 5_000)
+    assert_receive {:engine, %{source: :standalone}}
+    JobEngine.stop(engine)
+  end
+
   test "stop/1 kills both processes without an exit reaching the caller", %{engine: engine} do
     assert JobEngine.stop(engine) == :ok
 

@@ -107,6 +107,19 @@ defmodule Smolquery.QueryService.JobEngine do
   defp acquired(_failed_or_raised), do: {%{}, %{source: :failed}}
 
   @doc """
+  A cold engine for a node with no `Runtime` and no pool (a burst runner's
+  standalone shard, PL-77), bootstrapped with `opts` and counted in
+  `[:smolquery, :query, :engine]` as source `:standalone`.
+  """
+  @spec start_standalone(keyword()) :: {:ok, t()} | {:error, term()}
+  def start_standalone(opts) do
+    Telemetry.span([:smolquery, :query, :engine], &standalone/1, fn -> start(opts) end)
+  end
+
+  defp standalone({:ok, _engine}), do: {%{}, %{source: :standalone}}
+  defp standalone(_failed_or_raised), do: {%{}, %{source: :failed}}
+
+  @doc """
   Runs `runtime.warm_probe` on `engine` — `:ok` when the engine answered,
   `{:stale, reason}` when it errored, timed out, or died under the
   statement. The caller decides the engine's fate; this only reports.
