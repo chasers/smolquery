@@ -143,7 +143,8 @@ the parent sends in the invoke payload.
 **The API pods.** `deploy/base/api.yaml` already pins the distribution
 listener to `9100` (`SMOLQUERY_DIST_PORT`, applied by `rel/env.sh.eex` to
 the running node only, so `bin/smolquery rpc` in the same pod still gets
-an ephemeral port), exposes it, and sets `POD_IP`. A pod's node name is a
+an ephemeral port), declares the container port, and sets `POD_IP`; the
+node security group must admit `4369` and `9100` from the function's. A pod's node name is a
 headless-service DNS name the function cannot resolve, so the parent sends
 the runner an Erlang `inetrc` mapping that name to the pod's IP; the
 runner dials the IP on epmd and the pinned port. Give the pods'
@@ -212,12 +213,12 @@ One note per release, newest first.
 
 ### 0.25.0: burst, a query's scan on ephemeral runners (PL-77, T-674 to T-679, T-682, T-691)
 
-**TL;DR.** A distributed query can fan its sealed scan out to runners leased for the seconds it takes, through a FLAME pool with an AWS Lambda backend. `burst: false | "auto" | n` on the job, the API and the editor; `"auto"` is the default and bursts only when the sealed scan is at least 8 GiB, so nothing changes for a deployment until it sets `SMOLQUERY_BURST_BACKEND`. Hot-tier data is read by the cluster's own nodes as before, so a burst answer is as fresh as any other. Setup is under [Bursting to Lambda](#bursting-to-lambda); every knob is in [configuration.md](configuration.md#burst).
+**TL;DR.** A distributed query can fan its sealed scan out to runners leased for the seconds it takes, through a FLAME pool with an AWS Lambda backend. `burst: false | "auto" | n` on the job, the API and the editor; `"auto"` is the default and bursts only when the sealed scan is at least 8 GiB, judged against the table's whole sealed size until T-628 prunes it by the query's filters, so nothing changes for a deployment until it sets `SMOLQUERY_BURST_BACKEND`. Hot-tier data is read by the cluster's own nodes as before, so a burst answer is as fresh as any other. Setup is under [Bursting to Lambda](#bursting-to-lambda); every knob is in [configuration.md](configuration.md#burst).
 
 - **What a deployment sees without burst:** `deploy/base/api.yaml` pins the distribution listener to port `9100`, exposes it, and sets `POD_IP`. Peers keep finding each other through epmd; the pin only matters to a runner outside the pod network. The release boots as a bare runner when a FLAME backend set `FLAME_PARENT`, and `SMOLQUERY_ROLES=none` is accepted.
 - **The job record:** `scatter` gains `peers`, `burst`, `burstWaitMs`, `burstRefused` and `backend`; a distributed query's trace gains `gather`, `merge` and one `shard` span per worker, on the editor's waterfall and in the OTel traces.
-- **Partials:** a runner partial over 4 MiB is written to the sealed store under `burst-partials/` and deleted after the merge; give the runner's role `PutObject` and the node's `DeleteObject` there, and add a one-day lifecycle rule as the backstop.
-- **Not yet:** TLS distribution to a runner (T-684), the Supabase Compute backend (T-687), measured policy defaults from the 100-to-1,000 runner bench (T-683).
+- **Partials:** a runner partial over 4 MiB is written to the sealed store under `burst-partials/` and deleted after the merge; give the runner's role `PutObject` there, on top of the `GetObject` and `ListBucket` it needs on the bucket to scan at all, the node's role `DeleteObject`, and add a one-day lifecycle rule as the backstop.
+- **Not yet:** TLS distribution to a runner (T-684); a coordinator reachable from outside the cluster's VPC, which a Lambda in the VPC does not need (T-689); the Supabase Compute backend (T-687); measured policy defaults from the 100-to-1,000 runner bench (T-683); the tree merge for high-cardinality shapes (T-685) and byte-weighted targets (T-686).
 
 ### 0.24.0: HyperDX reads metrics through the ClickHouse edge (T-501)
 
