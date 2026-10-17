@@ -30,6 +30,26 @@ defmodule Smolquery.QueryService.PartialWorker do
   Polars — DuckDB intermittently fails to read Polars-written parquet
   (PL-48) — and returns to the coordinator as the file's bytes.
 
+  ## A standalone shard (PL-77)
+
+  A burst runner (`Smolquery.Burst`) has no `Runtime`: no catalog, no
+  warm pool, no file cache, no internal secret. `run_standalone/1` runs the
+  same shard from a request that also carries `engine`, the engine
+  configuration the coordinator resolved with `engine_spec/1`: extensions,
+  memory limit, threads, the sealed store's settings, lockdown and the
+  directories it allows. Credentials never travel in it. The store arrives
+  without keys, and the engine reads S3 with the runner's own: static keys
+  from the runner's `SMOLQUERY_S3_*` configuration when it has them, the
+  AWS credential chain (the Lambda execution role, Pod Identity) otherwise.
+  The engine is always cold, loads no `ducklake`, attaches no lake, loads no
+  `cache_httpfs`, and renders no hot-tier secret: a runner is handed sealed
+  units only (D4), so it never fetches a hot URL. `standalone_options/1` is
+  the bootstrap, public so a test can read it.
+
+  `run/2` and `run_standalone/1` share everything after the engine exists:
+  the settings, the field-id description, the view, the lockdown and the
+  `COPY` out.
+
   ## File cache
 
   The shard decides whether to read through this node's file cache itself
@@ -40,7 +60,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   carries the decision, and a shard that answered counts it in
   `[:smolquery, :query, :file_cache, :shard]`. A request from a
   coordinator older than T-630 has no mode, only that coordinator's own
-  verdict as `file_cache`, and the shard follows it.
+  verdict as `file_cache`, and the shard follows it. A standalone shard has
+  no cache and reports `nil`.
 
   ## Lockdown
 
@@ -65,6 +86,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
   alias Smolquery.Segments.FieldIds
+  alias Smolquery.Segments.Store
 
   @type request :: %{
           required(:table_ref) => Smolquery.Catalog.table_ref(),
@@ -79,6 +101,34 @@ defmodule Smolquery.QueryService.PartialWorker do
           optional(:params) => [term()]
         }
 
+  @typedoc """
+  The engine a standalone shard builds, resolved on the coordinator from its
+  `Runtime` by `engine_spec/1`. `store` carries no credentials.
+  """
+  @type engine_spec :: %{
+          extensions: [atom() | String.t()],
+          memory_limit: String.t(),
+          threads: pos_integer() | nil,
+          store: Store.t() | nil,
+          lockdown: boolean(),
+          allowed_directories: [String.t()],
+          clickhouse_functions: boolean(),
+          temp_directory: String.t() | nil
+        }
+
+  @type standalone_request :: %{
+          required(:engine) => engine_spec(),
+          required(:table_ref) => Smolquery.Catalog.table_ref(),
+          required(:schema) => Smolquery.Schema.t(),
+          required(:files) => [map()],
+          required(:partial_sql) => String.t(),
+          required(:allowed_paths) => [String.t()],
+          optional(:timeout_ms) => timeout(),
+          optional(:params) => [term()]
+        }
+
+  @type reply :: %{parquet: binary(), rows: non_neg_integer(), file_cache: FileCache.decision()}
+
   @doc """
   Whether query service instance `name` runs on this node.
   """
@@ -90,9 +140,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   parquet bytes with its row count and what the shard did with the file
   cache.
   """
-  @spec run(atom(), request()) ::
-          {:ok, %{parquet: binary(), rows: non_neg_integer(), file_cache: FileCache.decision()}}
-          | {:error, term()}
+  @spec run(atom(), request()) :: {:ok, reply()} | {:error, term()}
   def run(name, request) do
     case Runtime.fetch(name) do
       {:ok, runtime} -> with_engine(runtime, request)
@@ -100,53 +148,150 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
+  @doc """
+  Runs `request`'s partial query on a cold engine built from
+  `request.engine`, with nothing from this node but its S3 credentials.
+  """
+  @spec run_standalone(standalone_request()) :: {:ok, reply()} | {:error, term()}
+  def run_standalone(%{engine: spec} = request) do
+    case JobEngine.start(standalone_options(spec)) do
+      {:ok, engine} ->
+        execute(engine, request, nil, %{
+          settings: [],
+          functions: functions(spec.clickhouse_functions, request.partial_sql),
+          lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2)
+        })
+
+      {:error, reason} ->
+        {:error, {:engine_failed, reason}}
+    end
+  end
+
+  @doc """
+  The engine a standalone shard of a job on `runtime` builds: the worker's
+  limits, the sealed store without its credentials, and the lockdown the
+  runtime applies. `temp_directory` is left to the runner.
+  """
+  @spec engine_spec(Runtime.t()) :: engine_spec()
+  def engine_spec(%Runtime{} = runtime) do
+    %{
+      extensions: runtime.engine_extensions,
+      memory_limit: runtime.distributed.worker_memory_limit || runtime.job_memory_limit,
+      threads: runtime.distributed.worker_threads || runtime.read_engine_threads,
+      store: without_credentials(runtime.store),
+      lockdown: runtime.lockdown,
+      allowed_directories: runtime.allowed_directories,
+      clickhouse_functions: runtime.clickhouse_functions,
+      temp_directory: nil
+    }
+  end
+
+  @doc """
+  The bootstrap a standalone shard's engine runs: `spec`'s extensions plus
+  what its store's credential needs, its limits as settings, and the sealed
+  tier's secret with this node's own keys when it has them. No lake, no hot
+  tier, no file cache.
+  """
+  @spec standalone_options(engine_spec()) :: keyword()
+  def standalone_options(spec) do
+    store = with_local_credentials(spec.store)
+
+    [
+      extensions: EngineSecrets.sealed_tier_extensions(store, spec.extensions),
+      settings: standalone_settings(spec),
+      statements: EngineSecrets.sealed_tier(store),
+      max_rows: :infinity
+    ]
+  end
+
+  defp standalone_settings(spec) do
+    [memory_limit: spec.memory_limit, threads: spec.threads, temp_directory: spec.temp_directory]
+    |> Enum.reject(fn {_setting, value} -> is_nil(value) end)
+  end
+
+  defp without_credentials(%Store{impl: Store.S3, config: config} = store),
+    do: %{store | config: Store.S3.without_credentials(config)}
+
+  defp without_credentials(store), do: store
+
+  defp with_local_credentials(%Store{impl: Store.S3, config: config} = store) do
+    case local_store() do
+      %Store{impl: Store.S3, config: %Store.S3{access_key_id: id, secret_access_key: secret}}
+      when is_binary(id) and is_binary(secret) ->
+        %{store | config: %{config | access_key_id: id, secret_access_key: secret}}
+
+      _chain ->
+        store
+    end
+  end
+
+  defp with_local_credentials(store), do: store
+
+  defp local_store do
+    :smolquery
+    |> Application.get_env(Smolquery.QueryService, [])
+    |> Keyword.get(:store)
+    |> Store.from_config()
+  end
+
   defp with_engine(runtime, request) do
+    decision = cache_decision(runtime, request)
+
+    case JobEngine.acquire(runtime) do
+      {:ok, engine, _source} ->
+        execute(engine, request, decision, %{
+          settings: settings(runtime) ++ FileCache.statements(decision),
+          functions: functions(runtime.clickhouse_functions, request.partial_sql),
+          lockdown:
+            &lockdown(
+              runtime.lockdown,
+              runtime.allowed_directories,
+              runtime.store,
+              &1,
+              &2
+            )
+        })
+
+      {:error, reason} ->
+        {:error, {:engine_failed, reason}}
+    end
+  end
+
+  defp execute(engine, request, decision, plan) do
     path =
       Path.join(
         System.tmp_dir!(),
         "smolquery-partial-#{System.unique_integer([:positive])}.parquet"
       )
 
-    decision = cache_decision(runtime, request)
-
-    case JobEngine.acquire(runtime) do
-      {:ok, engine, _source} ->
-        try do
-          with :ok <-
-                 apply_statements(
-                   engine.connection,
-                   settings(runtime) ++ FileCache.statements(decision)
-                 ),
-               :ok <- apply_statements(engine.connection, functions(runtime, request.partial_sql)),
-               {:ok, files} <- described(engine.connection, request.files),
-               :ok <-
-                 apply_statements(
-                   engine.connection,
-                   view(request, files) ++ lockdown(runtime, path, request.allowed_paths)
-                 ),
-               {:ok, partial} <-
-                 copy_out(
-                   engine.connection,
-                   request.partial_sql,
-                   Map.get(request, :params, []),
-                   path,
-                   Map.get(request, :timeout_ms, :infinity)
-                 ) do
-            if decision do
-              :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
-                decision: decision
-              })
-            end
-
-            {:ok, Map.put(partial, :file_cache, decision)}
-          end
-        after
-          JobEngine.stop(engine)
-          File.rm(path)
+    try do
+      with :ok <- apply_statements(engine.connection, plan.settings),
+           :ok <- apply_statements(engine.connection, plan.functions),
+           {:ok, files} <- described(engine.connection, request.files),
+           :ok <-
+             apply_statements(
+               engine.connection,
+               view(request, files) ++ plan.lockdown.(path, request.allowed_paths)
+             ),
+           {:ok, partial} <-
+             copy_out(
+               engine.connection,
+               request.partial_sql,
+               Map.get(request, :params, []),
+               path,
+               Map.get(request, :timeout_ms, :infinity)
+             ) do
+        if decision do
+          :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
+            decision: decision
+          })
         end
 
-      {:error, reason} ->
-        {:error, {:engine_failed, reason}}
+        {:ok, Map.put(partial, :file_cache, decision)}
+      end
+    after
+      JobEngine.stop(engine)
+      File.rm(path)
     end
   end
 
@@ -218,8 +363,8 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
-  defp functions(%Runtime{clickhouse_functions: false}, _sql), do: []
-  defp functions(%Runtime{}, sql), do: ClickHouseFunctions.statements_for(sql)
+  defp functions(false, _sql), do: []
+  defp functions(true, sql), do: ClickHouseFunctions.statements_for(sql)
 
   defp apply_statements(connection, statements) do
     Enum.reduce_while(statements, :ok, fn statement, :ok ->
@@ -230,12 +375,11 @@ defmodule Smolquery.QueryService.PartialWorker do
     end)
   end
 
-  defp lockdown(%Runtime{lockdown: false}, _path, _allowed_paths), do: []
+  defp lockdown(false, _allowed_directories, _store, _path, _allowed_paths), do: []
 
-  defp lockdown(%Runtime{} = runtime, path, allowed_paths) do
+  defp lockdown(true, allowed_directories, store, path, allowed_paths) do
     directories =
-      [Path.dirname(path) | runtime.allowed_directories] ++
-        EngineSecrets.sealed_prefixes(runtime.store)
+      [Path.dirname(path) | allowed_directories] ++ EngineSecrets.sealed_prefixes(store)
 
     Lockdown.statements(directories, allowed_paths, external_access: true)
   end

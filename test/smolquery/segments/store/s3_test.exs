@@ -165,4 +165,31 @@ defmodule Smolquery.Segments.Store.S3Test do
       end
     end
   end
+
+  describe "without_credentials/1" do
+    test "drops the static keys and keeps every other setting" do
+      %Store{config: static} =
+        S3.new(
+          bucket: "sealed",
+          access_key_id: "id",
+          secret_access_key: "secret",
+          staging_dir: "/tmp/staging",
+          endpoint: "http://minio:9000",
+          region: "eu-central-1"
+        )
+
+      stripped = S3.without_credentials(static)
+
+      assert S3.credential_chain?(stripped)
+      assert stripped.bucket == "sealed"
+      assert stripped.endpoint == "http://minio:9000"
+      assert stripped.region == "eu-central-1"
+      refute S3.create_secret_statement(stripped) =~ "secret"
+    end
+
+    test "leaves a chain-mode config as it is" do
+      %Store{config: chain} = S3.new(bucket: "sealed", staging_dir: "/tmp/staging")
+      assert S3.without_credentials(chain) == chain
+    end
+  end
 end

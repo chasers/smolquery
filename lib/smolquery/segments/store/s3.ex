@@ -349,6 +349,15 @@ defmodule Smolquery.Segments.Store.S3 do
   def required_extensions(%__MODULE__{access_key_id: nil}), do: [:aws]
   def required_extensions(%__MODULE__{}), do: []
 
+  @doc """
+  The same store without its static keys: what a coordinator hands a burst
+  runner, which reads with credentials of its own (PL-77 D3). A chain-mode
+  config is returned as it is.
+  """
+  @spec without_credentials(t()) :: t()
+  def without_credentials(%__MODULE__{} = config),
+    do: %{config | access_key_id: nil, secret_access_key: nil}
+
   defp endpoint_options(%__MODULE__{endpoint: nil}), do: []
 
   defp endpoint_options(%__MODULE__{endpoint: endpoint} = config) do
