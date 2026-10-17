@@ -97,6 +97,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.QueryService.VariantResults
   alias Smolquery.QueryService.Views
   alias Smolquery.QueryService.WorkerTransport
+  alias Smolquery.Segments.Store
   alias Smolquery.Telemetry
 
   @default_spill_root ".tmp"
@@ -368,27 +369,18 @@ defmodule Smolquery.QueryService.Scatter do
     File.mkdir_p!(partials_dir)
 
     try do
-      with {:ok, partials} <-
-             Trace.span(:gather, &phase_meta(%{shards: length(shards)}, &1), fn ->
-               gather(
-                 runtime,
-                 decomposition,
-                 ref,
-                 schema,
-                 dealt,
-                 partials_dir,
-                 job_id,
-                 timeout_ms
-               )
-             end),
-           paths = Enum.map(partials, & &1.path),
-           {:ok, frame} <-
-             Trace.span(:merge, &phase_meta(%{}, &1), fn ->
-               merge(runtime, connection, decomposition, paths)
-             end) do
+      gathered =
+        Trace.span(:gather, &phase_meta(%{shards: length(shards)}, &1), fn ->
+          runtime
+          |> gather(decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms)
+          |> swept(runtime)
+        end)
+
+      with {:ok, partials} <- gathered,
+           {:ok, frame} <- merged(runtime, connection, decomposition, partials) do
         measurements = %{
           shards: length(shards),
-          partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size),
+          partial_bytes: Enum.sum_by(partials, & &1.bytes),
           peers: Enum.count(partials, &(&1.kind == :peer)),
           burst: Enum.count(partials, &(&1.kind == :runner))
         }
@@ -419,6 +411,38 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
+  defp merged(runtime, connection, decomposition, partials) do
+    paths = Enum.map(partials, & &1.path)
+
+    result =
+      Trace.span(:merge, &phase_meta(%{}, &1), fn ->
+        merge(runtime, connection, decomposition, paths)
+      end)
+
+    delete_spilled(runtime, partials)
+
+    result
+  end
+
+  defp swept({:error, reason, partials}, runtime) do
+    delete_spilled(runtime, partials)
+
+    {:error, reason}
+  end
+
+  defp swept(gathered, _runtime), do: gathered
+
+  defp delete_spilled(%Runtime{store: store}, partials) do
+    for %{spilled: key} <- partials, is_binary(key) do
+      case Store.delete(store, key) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("spilled partial not deleted: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
   defp gather(runtime, decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms) do
     %{shards: shards, runner_shards: runner_shards} = dealt
 
@@ -446,29 +470,38 @@ defmodule Smolquery.QueryService.Scatter do
       timeout: :infinity
     )
     |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {target, wait_us, {:ok, %{parquet: parquet} = reply}}}, {:ok, partials} ->
-        path = Path.join(partials_dir, "partial-#{target.index}.parquet")
-        File.write!(path, parquet)
-
-        partial = %{
-          path: path,
-          decision: Map.get(reply, :file_cache, runtime.file_cache.decision),
-          kind: target.kind,
-          wait_us: wait_us
-        }
+      {:ok, {target, wait_us, {:ok, reply}}}, {:ok, partials} ->
+        partial =
+          reply
+          |> landed(partials_dir, target.index)
+          |> Map.merge(%{
+            decision: Map.get(reply, :file_cache, runtime.file_cache.decision),
+            kind: target.kind,
+            wait_us: wait_us
+          })
 
         {:cont, {:ok, [partial | partials]}}
 
-      {:ok, {_target, _wait_us, {:error, reason}}}, _acc ->
-        {:halt, {:error, reason}}
+      {:ok, {_target, _wait_us, {:error, reason}}}, {:ok, partials} ->
+        {:halt, {:error, reason, partials}}
 
-      {:exit, reason}, _acc ->
-        {:halt, {:error, reason}}
+      {:exit, reason}, {:ok, partials} ->
+        {:halt, {:error, reason, partials}}
     end)
     |> case do
       {:ok, partials} -> {:ok, Enum.reverse(partials)}
-      {:error, reason} -> {:error, reason}
+      {:error, reason, partials} -> {:error, reason, partials}
     end
+  end
+
+  defp landed(%{spilled: %{location: location, key: key, bytes: bytes}}, _dir, _index),
+    do: %{path: location, spilled: key, bytes: bytes}
+
+  defp landed(%{parquet: parquet}, partials_dir, index) do
+    path = Path.join(partials_dir, "partial-#{index}.parquet")
+    File.write!(path, parquet)
+
+    %{path: path, spilled: nil, bytes: byte_size(parquet)}
   end
 
   defp concurrency(shards, runner_shards, %Runtime{burst: %{max_inflight: max_inflight}}),
@@ -548,8 +581,22 @@ defmodule Smolquery.QueryService.Scatter do
     })
   end
 
-  defp request(%{kind: :runner}, files, %{runner_base: runner_base}),
-    do: Map.merge(runner_base, %{files: files, allowed_paths: []})
+  defp request(%{kind: :runner, index: index}, files, %{runner_base: runner_base} = context) do
+    runner_base
+    |> Map.merge(%{files: files, allowed_paths: []})
+    |> with_spill(context, index)
+  end
+
+  defp with_spill(request, %{runtime: %Runtime{store: nil}}, _index), do: request
+
+  defp with_spill(request, %{runtime: runtime, job_id: job_id}, index) do
+    %{spill_prefix: prefix, spill_inline_max_bytes: inline_max_bytes} = runtime.burst
+
+    Map.put(request, :spill, %{
+      key: "#{prefix}/#{job_id}/#{index}.parquet",
+      inline_max_bytes: inline_max_bytes
+    })
+  end
 
   defp retried_sealed(%{retry: true}, files),
     do: for(%{"bytes" => bytes, "url" => url} <- files, do: %{"url" => url, "bytes" => bytes})
@@ -597,6 +644,8 @@ defmodule Smolquery.QueryService.Scatter do
         |> Map.merge(timings)
         |> Map.merge(%{
           rows: rows,
+          partial_bytes: partial_bytes(reply),
+          spilled: match?(%{spilled: %{}}, reply),
           node: Map.get(reply, :node, target_name(target)),
           wait_us: wait_us(elapsed_us, {:ok, reply})
         })
@@ -614,6 +663,10 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp target_name(%{kind: :peer, node: node}), do: node
   defp target_name(%{kind: :runner, pool: pool}), do: inspect(pool)
+
+  defp partial_bytes(%{spilled: %{bytes: bytes}}), do: bytes
+  defp partial_bytes(%{parquet: parquet}) when is_binary(parquet), do: byte_size(parquet)
+  defp partial_bytes(_older_worker), do: 0
 
   defp phase_meta(base, outcome) do
     case Telemetry.outcome(outcome) do

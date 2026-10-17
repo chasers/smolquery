@@ -43,6 +43,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.QueryService.PartialWorker
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
+  alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.FileCacheFixture
   alias Smolquery.Test.SegmentFixture
@@ -141,11 +142,13 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
   defp file_cache(_context, _catalog), do: []
 
-  defp burst(%{burst: max}) when is_integer(max), do: burst(%{burst: [max: max]})
+  defp burst(%{burst: max} = context) when is_integer(max),
+    do: burst(%{context | burst: [max: max]})
 
-  defp burst(%{burst: opts}) do
+  defp burst(%{burst: opts, tmp_dir: tmp_dir}) do
     pool = :"scatter_burst_pool_#{:erlang.unique_integer([:positive])}"
     {dead, opts} = Keyword.pop(opts, :dead, false)
+    {spill, opts} = Keyword.pop(opts, :spill, false)
     max = Keyword.get(opts, :max, 2)
 
     unless dead do
@@ -155,8 +158,14 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       )
     end
 
-    [burst: Keyword.merge([enabled: true, pool: pool, max: max], opts)]
+    burst = [burst: Keyword.merge([enabled: true, pool: pool, max: max], opts)]
+
+    if spill,
+      do: [{:store, seed_store(tmp_dir)} | burst],
+      else: burst
   end
+
+  defp seed_store(tmp_dir), do: Local.new(dir: Path.join(tmp_dir, "seg"))
 
   defp burst(_context), do: []
 
@@ -182,7 +191,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   end
 
   defp seed(catalog, buffer, tmp_dir) do
-    store = Local.new(dir: Path.join(tmp_dir, "seg"))
+    store = seed_store(tmp_dir)
 
     segments =
       for batch <- 0..5 do
@@ -661,6 +670,30 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     assert Enum.sort(Enum.map(retried, & &1.meta.shard)) ==
              Enum.sort(Enum.map(failed, & &1.meta.shard))
+  end
+
+  @tag burst: [max: 2, spill: true, spill_inline_max_bytes: 0]
+  test "a runner partial over the inline max spills to the store, merges from there, and is deleted after (T-678)",
+       %{control: control, distributed: distributed, tmp_dir: tmp_dir} do
+    sql = "SELECT count(*) AS n, max(id) AS m FROM analytics.events"
+    both(control, distributed, sql, burst: 2)
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, sql, burst: 2, trace: true)
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert %{shards: 5, peers: 3, burst: 2, partial_bytes: bytes} = job.scatter
+    assert bytes > 0
+
+    shards = Enum.filter(job.trace, &(&1.name == :shard))
+    runners = Enum.filter(shards, &(&1.meta.kind == :runner))
+    peers = Enum.filter(shards, &(&1.meta.kind == :peer))
+
+    assert [_, _] = runners
+    assert Enum.all?(runners, &(&1.meta.spilled and &1.meta.partial_bytes > 0))
+    assert Enum.all?(peers, &(not &1.meta.spilled and &1.meta.partial_bytes > 0))
+
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
   end
 
   @tag burst: [dead: true, retry_floor_ms: 600_000]

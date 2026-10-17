@@ -210,6 +210,8 @@ read on a runner: it learns everything from the backend's assignment.
 | `SMOLQUERY_BURST_WAIT_MS` | How long a shard waits for a runner to be checked out, booted if the pool has room (`10000`). Its own clock, not the job deadline: a shard that waited the whole deadline would have no budget left to run. A lease past it fails the shard, which is retried on a peer |
 | `SMOLQUERY_BURST_RETRY_FLOOR_MS` | A runner shard that failed, at the lease or on the runner, is retried once on a peer when at least this much of the job's deadline remains (`5000`); under it the job falls back to one engine |
 | `SMOLQUERY_BURST_MAX_INFLIGHT` | The most runner shards one job has in flight at once (`64`). Every runner reply is held in the coordinator until it is written, so this bounds that memory; runner shards past it start as earlier ones answer |
+| `SMOLQUERY_BURST_SPILL_INLINE_MAX_BYTES` | The largest runner partial that travels back as bytes over the runner's distribution connection (`4194304`, 4 MiB). A larger one is written by the runner to the sealed store under the spill prefix and returned as a location the merge reads directly, so a thousand wide partials never sit in the coordinator at once. `0` spills every runner partial |
+| `SMOLQUERY_BURST_SPILL_PREFIX` | The key prefix in the sealed bucket where runner partials spill (`burst-partials`), as `<prefix>/<job id>/<shard>.parquet`. The runner's role needs `PutObject` under it and the node's `DeleteObject`; the coordinator deletes a job's partials after the merge, and a one-day lifecycle rule on the prefix is the backstop for a job that died between the two |
 
 ### Diagnostics
 

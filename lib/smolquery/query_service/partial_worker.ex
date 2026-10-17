@@ -84,6 +84,18 @@ defmodule Smolquery.QueryService.PartialWorker do
   `COPY ... TO` needs it — and while it is on DuckDB applies neither list
   (T-690), so what the lock seals today is the configuration, honoring the
   runtime's `lockdown` flag the same way `Runner` does.
+
+  ## The spill (PL-77 D6)
+
+  A standalone shard's partial travels back as bytes over the runner's own
+  distribution connection, and the coordinator holds every reply until it
+  is written, so a thousand wide partials would be gigabytes in one
+  process. A request that carries `spill` names a key under the engine's
+  store and a size: a partial over it is written to the store by the
+  runner, with the store's own credentials and a staging directory under
+  the runner's tmp, and the reply carries its location instead. The
+  coordinator's merge reads that location like any sealed file and deletes
+  it after. A peer shard never spills: its request has no `spill`.
   """
 
   alias Smolquery.Engine.Connection
@@ -126,6 +138,14 @@ defmodule Smolquery.QueryService.PartialWorker do
           clickhouse_functions: boolean()
         }
 
+  @typedoc """
+  Where a standalone shard's partial goes when it is larger than
+  `inline_max_bytes` (PL-77 D6): the key under the engine's store the
+  runner writes it to, so the coordinator's merge reads it from there and
+  deletes it after.
+  """
+  @type spill :: %{key: Store.key(), inline_max_bytes: non_neg_integer()}
+
   @type standalone_request :: %{
           required(:engine) => engine_spec(),
           required(:table_ref) => Smolquery.Catalog.table_ref(),
@@ -134,23 +154,27 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:partial_sql) => String.t(),
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
-          optional(:params) => [term()]
+          optional(:params) => [term()],
+          optional(:spill) => spill()
         }
 
   @typedoc """
-  What a shard answers: the partial as parquet bytes, its row count, what
-  the shard did with the file cache, the node that ran it, and its timings
-  (T-691): where the engine came from and how long it took, the field-id
-  description, the scan, and `worker_us`, the whole of the worker's time
-  from engine to reply, so a coordinator knows what of a shard's span was
-  the worker and what was the wire.
+  What a shard answers: the partial as parquet bytes, or `nil` with
+  `spilled` saying where in the store the runner put it and how big it is;
+  its row count, what the shard did with the file cache, the node that ran
+  it, and its timings (T-691): where the engine came from and how long it
+  took, the field-id description, the scan, and `worker_us`, the whole of
+  the worker's time from engine to reply, so a coordinator knows what of a
+  shard's span was the worker and what was the wire.
   """
   @type reply :: %{
-          parquet: binary(),
-          rows: non_neg_integer(),
-          file_cache: FileCache.decision(),
-          node: node(),
-          timings: %{
+          required(:parquet) => binary() | nil,
+          optional(:spilled) =>
+            %{location: String.t(), key: Store.key(), bytes: non_neg_integer()} | nil,
+          required(:rows) => non_neg_integer(),
+          required(:file_cache) => FileCache.decision(),
+          required(:node) => node(),
+          required(:timings) => %{
             engine_us: non_neg_integer(),
             describe_us: non_neg_integer(),
             scan_us: non_neg_integer()
@@ -310,7 +334,7 @@ defmodule Smolquery.QueryService.PartialWorker do
                engine.connection,
                view(request, files) ++ plan.lockdown.(path, request.allowed_paths)
              ),
-           {scan_us, {:ok, partial}} <-
+           {scan_us, {:ok, rows}} <-
              Telemetry.timed(fn ->
                copy_out(
                  engine.connection,
@@ -319,7 +343,8 @@ defmodule Smolquery.QueryService.PartialWorker do
                  path,
                  Map.get(request, :timeout_ms, :infinity)
                )
-             end) do
+             end),
+           {:ok, partial} <- deliver(path, request) do
         if decision do
           :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
             decision: decision
@@ -328,6 +353,7 @@ defmodule Smolquery.QueryService.PartialWorker do
 
         {:ok,
          Map.merge(partial, %{
+           rows: rows,
            file_cache: decision,
            node: node(),
            timings: %{
@@ -447,10 +473,39 @@ defmodule Smolquery.QueryService.PartialWorker do
     statement = "COPY (#{partial_sql}) TO #{Identifier.sql_string(path)} (FORMAT parquet)"
 
     with {:ok, result} <- Connection.query(connection, statement, params, timeout_ms) do
-      {:ok, %{parquet: File.read!(path), rows: copied_rows(result)}}
+      {:ok, copied_rows(result)}
     end
   end
 
   defp copied_rows(%{rows: [[count]]}) when is_integer(count), do: count
   defp copied_rows(_result), do: 0
+
+  defp deliver(path, %{
+         spill: %{key: key, inline_max_bytes: max},
+         engine: %{store: %Store{} = store}
+       }) do
+    %File.Stat{size: size} = File.stat!(path)
+
+    if size > max do
+      case Store.put(spill_store(store), key, &File.cp(path, &1)) do
+        {:ok, %{location: location, byte_size: bytes}} ->
+          {:ok, %{parquet: nil, spilled: %{location: location, key: key, bytes: bytes}}}
+
+        {:error, reason} ->
+          {:error, {:spill_failed, reason}}
+      end
+    else
+      {:ok, %{parquet: File.read!(path), spilled: nil}}
+    end
+  end
+
+  defp deliver(path, _inline), do: {:ok, %{parquet: File.read!(path), spilled: nil}}
+
+  defp spill_store(%Store{impl: Store.S3, config: config} = store),
+    do: %{
+      store
+      | config: %{config | staging_dir: Path.join(System.tmp_dir!(), "smolquery-spill")}
+    }
+
+  defp spill_store(store), do: store
 end

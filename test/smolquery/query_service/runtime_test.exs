@@ -43,6 +43,8 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert default.burst.max_per_job == 64
       assert default.burst.retry_floor_ms == 5_000
       assert default.burst.max_inflight == 64
+      assert default.burst.spill_inline_max_bytes == 4_194_304
+      assert default.burst.spill_prefix == "burst-partials"
 
       leased =
         Runtime.new(

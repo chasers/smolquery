@@ -1049,12 +1049,17 @@ end
 
 for {variable, key} <- [
       {"SMOLQUERY_BURST_MIN_SCAN_BYTES", :min_scan_bytes},
-      {"SMOLQUERY_BURST_RETRY_FLOOR_MS", :retry_floor_ms}
+      {"SMOLQUERY_BURST_RETRY_FLOOR_MS", :retry_floor_ms},
+      {"SMOLQUERY_BURST_SPILL_INLINE_MAX_BYTES", :spill_inline_max_bytes}
     ],
     value = System.get_env(variable) do
   config :smolquery, Smolquery.Burst, [
     {key, Smolquery.RuntimeConfig.non_negative_integer!(variable, value)}
   ]
+end
+
+if spill_prefix = System.get_env("SMOLQUERY_BURST_SPILL_PREFIX") do
+  config :smolquery, Smolquery.Burst, spill_prefix: String.trim(spill_prefix, "/")
 end
 
 if burst_default = System.get_env("SMOLQUERY_BURST_DEFAULT") do

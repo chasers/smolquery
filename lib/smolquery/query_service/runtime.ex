@@ -185,8 +185,11 @@ defmodule Smolquery.QueryService.Runtime do
   (`Smolquery.Burst.policy/0`, overridable here for a test): `enabled`,
   `pool`, the pool's `max`, the job `request` (`:auto` by default, set per
   job by its `burst:` option), the `:auto` threshold and target, the
-  per-job cap, the checkout wait and retry floor, and the in-flight cap.
-  Hot units never go to a runner.
+  per-job cap, the checkout wait and retry floor, the in-flight cap, and
+  the spill: a runner partial over `spill_inline_max_bytes` lands in the
+  sealed `store` under `spill_prefix` instead of travelling as bytes, and
+  the coordinator deletes it after the merge. Hot units never go to a
+  runner.
 
   `store` names nothing this service writes through — the query path never
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
@@ -258,7 +261,9 @@ defmodule Smolquery.QueryService.Runtime do
       max_per_job: 64,
       wait_ms: 10_000,
       retry_floor_ms: 5_000,
-      max_inflight: 64
+      max_inflight: 64,
+      spill_inline_max_bytes: 4_194_304,
+      spill_prefix: "burst-partials"
     }
   ]
 
@@ -316,7 +321,9 @@ defmodule Smolquery.QueryService.Runtime do
             max_per_job: pos_integer(),
             wait_ms: pos_integer(),
             retry_floor_ms: non_neg_integer(),
-            max_inflight: pos_integer()
+            max_inflight: pos_integer(),
+            spill_inline_max_bytes: non_neg_integer(),
+            spill_prefix: String.t()
           }
         }
 
@@ -456,7 +463,9 @@ defmodule Smolquery.QueryService.Runtime do
       max_per_job: Keyword.fetch!(policy, :max_per_job),
       wait_ms: Keyword.fetch!(policy, :wait_ms),
       retry_floor_ms: Keyword.fetch!(policy, :retry_floor_ms),
-      max_inflight: Keyword.fetch!(policy, :max_inflight)
+      max_inflight: Keyword.fetch!(policy, :max_inflight),
+      spill_inline_max_bytes: Keyword.fetch!(policy, :spill_inline_max_bytes),
+      spill_prefix: Keyword.fetch!(policy, :spill_prefix)
     }
   end
 

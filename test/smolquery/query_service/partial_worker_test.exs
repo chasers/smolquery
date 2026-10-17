@@ -80,6 +80,31 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert {:ok, _reply} = PartialWorker.run_standalone(request)
       assert_receive {:engine, %{source: :standalone}}
     end
+
+    test "a partial over the inline max spills to the store and answers its location (T-678)",
+         %{request: request, store: store} do
+      key = "burst-partials/job/0.parquet"
+      request = Map.put(request, :spill, %{key: key, inline_max_bytes: 0})
+
+      assert {:ok,
+              %{parquet: nil, rows: 1, spilled: %{location: location, key: ^key, bytes: bytes}}} =
+               PartialWorker.run_standalone(request)
+
+      assert bytes > 0
+      assert location == Store.location(store, key)
+      assert DataFrame.to_columns(DataFrame.from_parquet!(location))["s"] == [6]
+    end
+
+    test "a partial under the inline max stays inline", %{request: request} do
+      request =
+        Map.put(request, :spill, %{
+          key: "burst-partials/job/0.parquet",
+          inline_max_bytes: 10_000_000
+        })
+
+      assert {:ok, %{parquet: parquet, spilled: nil}} = PartialWorker.run_standalone(request)
+      assert is_binary(parquet)
+    end
   end
 
   describe "standalone_options/1" do

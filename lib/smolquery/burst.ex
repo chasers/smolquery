@@ -60,7 +60,9 @@ defmodule Smolquery.Burst do
     max_per_job: 64,
     wait_ms: 10_000,
     retry_floor_ms: 5_000,
-    max_inflight: 64
+    max_inflight: 64,
+    spill_inline_max_bytes: 4_194_304,
+    spill_prefix: "burst-partials"
   ]
 
   @doc "The pool runners are leased from."
@@ -84,8 +86,10 @@ defmodule Smolquery.Burst do
   D7): whether the node leases runners, the pool's `max`, the job default
   (`:auto`), the `:auto` threshold and target, the per-job cap, the two
   clocks (`wait_ms` for a checkout, `retry_floor_ms` under which a failed
-  runner shard is not retried on a peer) and `max_inflight`, the most runner
-  replies the coordinator holds outstanding at once (D6). Configured keys
+  runner shard is not retried on a peer), `max_inflight`, the most runner
+  replies the coordinator holds outstanding at once, and the spill (D6):
+  a runner partial over `spill_inline_max_bytes` is written to the sealed
+  store under `spill_prefix` and returned as a location, not as bytes. Configured keys
   override the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
   """
   @spec policy() :: keyword()
