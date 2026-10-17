@@ -65,6 +65,9 @@ spec:
               containerPort: 5369
             - name: gen-rpc-tls
               containerPort: 5870
+            # The pinned distribution port a burst runner dials (PL-77).
+            - name: dist
+              containerPort: 9100
           envFrom:
             - secretRef:
                 name: smolquery-env
@@ -81,8 +84,19 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # The address a burst runner maps this pod's node name to
+            # (Smolquery.Burst.LambdaBackend, PL-77).
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: HEADLESS_SERVICE
               value: smolquery-headless
+            # Pin the distribution listener to one port so a burst runner
+            # outside the pod network can be let in on it (PL-77). Peers
+            # inside the cluster still learn it from epmd as before.
+            - name: ELIXIR_ERL_OPTIONS
+              value: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
             # Must match buffer.yaml's replicas: the query role fails a read
             # when an expected buffer node cannot answer, rather than counting
             # its unsealed rows as zero (T-94).

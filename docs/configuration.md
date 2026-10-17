@@ -198,7 +198,10 @@ read on a runner: it learns everything from the backend's assignment.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_BURST_BACKEND` | Names the backend and switches the pool on (unset: this node leases no runners). `local` runs runners inside this VM (`FLAME.LocalBackend`), for development and tests |
+| `SMOLQUERY_BURST_BACKEND` | Names the backend and switches the pool on (unset: this node leases no runners). `local` runs runners inside this VM (`FLAME.LocalBackend`), for development and tests; `lambda` leases one AWS Lambda invocation per runner (`Smolquery.Burst.LambdaBackend`), see docs/deployment.md |
+| `SMOLQUERY_BURST_LAMBDA_FUNCTION` | With the `lambda` backend: the function's name. Required |
+| `SMOLQUERY_BURST_LAMBDA_REGION` | With the `lambda` backend: the function's region. Required |
+| `SMOLQUERY_BURST_MAX_LIFETIME_MS` | How long a runner lives before it stops itself (`840000`, 14 minutes), under the host's own cap (15 minutes on Lambda), so a runner ends on its own terms and a shard on it fails as unreachable, which the scatter retries on a peer, rather than with the host's kill. The parent passes it in the runner's assignment; on a runner it is read from the environment |
 | `SMOLQUERY_BURST_MAX` | The most runners this node holds at once (`64`). Per node, not per deployment |
 | `SMOLQUERY_BURST_BOOT_TIMEOUT_MS` | How long a lease waits for a runner to boot and connect (`120000`) |
 | `SMOLQUERY_BURST_IDLE_SHUTDOWN_MS` | How long an idle runner stays leased before it shuts down (`15000`). This is the cost lever: a runner's work is seconds per lease and the idle window is the rest of the bill |

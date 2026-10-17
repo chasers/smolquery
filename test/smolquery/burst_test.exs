@@ -114,6 +114,16 @@ defmodule Smolquery.BurstTest do
     end
   end
 
+  describe "runner_children/0" do
+    test "is the lifetime clock when the assignment set one, else nothing" do
+      Application.delete_env(:smolquery, Burst)
+      assert Burst.runner_children() == []
+
+      Application.put_env(:smolquery, Burst, max_lifetime_ms: 840_000)
+      assert Burst.runner_children() == [{Smolquery.Burst.Lifetime, 840_000}]
+    end
+  end
+
   describe "children/0" do
     test "starts no pool when burst is off" do
       Application.delete_env(:smolquery, Burst)

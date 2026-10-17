@@ -1025,10 +1025,37 @@ end
 # the backend to lease runners from this node; a runner itself needs none of
 # these, it learns everything from its assignment.
 if burst_backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
+  backend =
+    Smolquery.RuntimeConfig.enum!("SMOLQUERY_BURST_BACKEND", burst_backend, [
+      {"local", :local},
+      {"lambda", Smolquery.Burst.LambdaBackend}
+    ])
+
+  config :smolquery, Smolquery.Burst, enabled: true, backend: backend
+
+  if backend == Smolquery.Burst.LambdaBackend do
+    config :smolquery, Smolquery.Burst.LambdaBackend,
+      function: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_FUNCTION"),
+      region: System.fetch_env!("SMOLQUERY_BURST_LAMBDA_REGION"),
+      boot_timeout:
+        Smolquery.RuntimeConfig.positive_integer!(
+          "SMOLQUERY_BURST_BOOT_TIMEOUT_MS",
+          System.get_env("SMOLQUERY_BURST_BOOT_TIMEOUT_MS", "120000")
+        ),
+      max_lifetime_ms:
+        Smolquery.RuntimeConfig.positive_integer!(
+          "SMOLQUERY_BURST_MAX_LIFETIME_MS",
+          System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS", "840000")
+        )
+  end
+end
+
+# A runner reads its lifetime from its assignment and stops itself before
+# the host's cap (Smolquery.Burst.Lifetime).
+if max_lifetime = System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS") do
   config :smolquery, Smolquery.Burst,
-    enabled: true,
-    backend:
-      Smolquery.RuntimeConfig.enum!("SMOLQUERY_BURST_BACKEND", burst_backend, [{"local", :local}])
+    max_lifetime_ms:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_BURST_MAX_LIFETIME_MS", max_lifetime)
 end
 
 for {variable, key} <- [

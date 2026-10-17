@@ -1,0 +1,57 @@
+#!/bin/sh
+# The Lambda custom-runtime bootstrap for a burst runner (PL-77 L4).
+#
+# One invocation is one runner. The payload carries the runner's assignment
+# as base64 "KEY=VALUE" lines under "env"; this exports them and runs the
+# release in the foreground. Lambda freezes an environment whose handler has
+# returned, so nothing here returns to the Runtime API until the BEAM exits.
+# When it does, the invocation completes and the next one, if any, is a
+# fresh BEAM with a fresh assignment.
+#
+# SMOLQUERY_BURST_INETRC, when the assignment carries it, is an Erlang inetrc
+# with the parent's host name mapped to its address: the parent is a pod
+# whose name only the cluster's DNS resolves. ERL_INETRC points the runner's
+# resolver at it.
+set -eu
+
+API="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+export RELEASE_TMP="${RELEASE_TMP:-/tmp}"
+export HOME="${HOME:-/tmp}"
+export SMOLQUERY_DATA_DIR="${SMOLQUERY_DATA_DIR:-/tmp/data}"
+mkdir -p "$SMOLQUERY_DATA_DIR" "$RELEASE_TMP"
+
+while :; do
+  HEADERS=$(mktemp)
+  BODY=$(mktemp)
+  curl -sS -D "$HEADERS" -o "$BODY" "$API/invocation/next"
+  REQUEST_ID=$(awk 'tolower($1) == "lambda-runtime-aws-request-id:" {print $2}' "$HEADERS" | tr -d '\r')
+
+  ENV_FILE=$(mktemp)
+  if sed -n 's/.*"env"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BODY" | base64 -d > "$ENV_FILE" && [ -s "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+
+    if [ -n "${SMOLQUERY_BURST_INETRC:-}" ]; then
+      printf '%s\n' "$SMOLQUERY_BURST_INETRC" > "$RELEASE_TMP/inetrc"
+      export ERL_INETRC="$RELEASE_TMP/inetrc"
+    fi
+
+    STARTED=$(date +%s)
+    set +e
+    /app/bin/smolquery start
+    EXIT=$?
+    set -e
+    ELAPSED=$(( $(date +%s) - STARTED ))
+
+    curl -sS -o /dev/null -X POST "$API/invocation/$REQUEST_ID/response" \
+      -d "{\"exit\":$EXIT,\"seconds\":$ELAPSED,\"node\":\"${RELEASE_NODE:-}\"}"
+  else
+    curl -sS -o /dev/null -X POST "$API/invocation/$REQUEST_ID/error" \
+      -H 'Lambda-Runtime-Function-Error-Type: BadAssignment' \
+      -d '{"errorMessage":"payload has no base64 env assignment","errorType":"BadAssignment"}'
+  fi
+
+  rm -f "$HEADERS" "$BODY" "$ENV_FILE"
+done

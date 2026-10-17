@@ -28,8 +28,8 @@ defmodule Smolquery.Burst do
         call_timeout_ms: 600_000
 
   `backend` is `:local` (`FLAME.LocalBackend`, for tests and development),
-  a module that implements `FLAME.Backend`, or `{module, opts}` as
-  `FLAME.Pool` takes it. `max` bounds the runners this node may hold at
+  a module that implements `FLAME.Backend` (`Smolquery.Burst.LambdaBackend`
+  is the one built here), or `{module, opts}` as `FLAME.Pool` takes it. `max` bounds the runners this node may hold at
   once; it is per node, not per deployment. Each runner takes one shard at
   a time (`max_concurrency: 1`): a shard is one DuckDB engine that uses the
   whole sandbox. The defaults live here; `config/runtime.exs` overrides a
@@ -132,6 +132,19 @@ defmodule Smolquery.Burst do
     if enabled?(),
       do: [__MODULE__.Boots, pool_spec(Keyword.merge(@defaults, config()))],
       else: []
+  end
+
+  @doc """
+  What a runner starts beyond an engine's prerequisites: its lifetime clock
+  (`Smolquery.Burst.Lifetime`) when the assignment set `max_lifetime_ms`
+  (`SMOLQUERY_BURST_MAX_LIFETIME_MS`), else nothing.
+  """
+  @spec runner_children() :: [{module(), pos_integer()}]
+  def runner_children do
+    case Keyword.get(config(), :max_lifetime_ms) do
+      nil -> []
+      max_lifetime_ms -> [{__MODULE__.Lifetime, max_lifetime_ms}]
+    end
   end
 
   defp pool_spec(config) do

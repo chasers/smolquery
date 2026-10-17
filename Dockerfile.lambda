@@ -1,0 +1,19 @@
+# The burst runner image for AWS Lambda (PL-77 L4): the release image plus
+# the custom-runtime bootstrap. Lambda's filesystem is read-only outside
+# /tmp, so everything the release writes points there. BASE is the arm64
+# release image the Release workflow just published; the function runs on
+# arm64.
+ARG BASE=ghcr.io/smolquery/smolquery:latest
+FROM ${BASE}
+
+COPY rel/lambda/bootstrap /app/bootstrap
+RUN chmod 0755 /app/bootstrap
+
+ENV HOME=/tmp \
+    RELEASE_TMP=/tmp \
+    SMOLQUERY_DATA_DIR=/tmp/data \
+    SMOLQUERY_SPILL_DIR=/tmp/spill \
+    SMOLQUERY_ROLES=none
+
+ENTRYPOINT ["/app/bootstrap"]
+CMD []

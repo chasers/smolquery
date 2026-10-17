@@ -99,6 +99,83 @@ and `SMOLQUERY_DISTRIBUTED_WORKER_THREADS`. A scattered query's declared
 budget on one node is the worker count `×` the worker limit, on top of the
 job engine's own limit, `SMOLQUERY_JOB_MEMORY_LIMIT` (`1GB`).
 
+### Bursting to Lambda
+
+Burst (PL-77) lets a distributed query fan its sealed scan out to runners
+leased for the seconds it takes: copies of this release booted on demand
+by `Smolquery.Burst.LambdaBackend`, one AWS Lambda invocation each. The
+runners read sealed files from the object store with the function's own
+role; hot-tier data stays on the cluster's nodes, which read it as they
+always have, so a burst answer is as fresh as any other. Each release
+publishes the runner image beside the node image:
+
+- `ghcr.io/smolquery/smolquery-lambda:sha-<commit>` and, on a version
+  bump, `ghcr.io/smolquery/smolquery-lambda:vX.Y.Z`: the arm64 release
+  image plus the custom-runtime bootstrap (`Dockerfile.lambda`).
+
+Lambda pulls only from ECR in its own account, so copy the tag across
+once per release and point the function at it:
+
+```sh
+crane copy ghcr.io/smolquery/smolquery-lambda:v0.25.0 \
+  <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:v0.25.0
+aws lambda update-function-code --function-name smolquery-burst-runner \
+  --image-uri <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:v0.25.0
+```
+
+**The function.** Container image, `arm64`, 10 GB of memory (which buys
+about 6 vCPUs), ephemeral storage sized for DuckDB spill at the engine's
+memory limit, a 15-minute timeout. Attach it to the cluster's VPC in the
+nodes' subnets, with a security group the node security group admits on
+`4369` (epmd) and `9100` (the pinned distribution port). Its role needs
+`s3:GetObject` and `s3:ListBucket` on the sealed bucket and `s3:PutObject`
+under the spill prefix (`SMOLQUERY_BURST_SPILL_PREFIX`, `burst-partials`).
+Set the event-invoke config to `MaximumRetryAttempts: 0`: Lambda retries a
+failed asynchronous invocation twice by default, and a retried runner
+would reconnect to a parent that gave up on it. Reserved concurrency is
+the deployment-wide ceiling on runners; `SMOLQUERY_BURST_MAX` caps one
+node and `SMOLQUERY_BURST_MAX_PER_JOB` one query. The function needs no
+environment of its own: a runner learns everything from the assignment
+the parent sends in the invoke payload.
+
+**The API pods.** `deploy/base/api.yaml` already pins the distribution
+listener to `9100`, exposes it, and sets `POD_IP`. A pod's node name is a
+headless-service DNS name the function cannot resolve, so the parent sends
+the runner an Erlang `inetrc` mapping that name to the pod's IP; the
+runner dials the IP on epmd and the pinned port. Give the pods'
+ServiceAccount `lambda:InvokeFunction` on the function (EKS Pod Identity
+or IRSA) and `s3:DeleteObject` under the spill prefix, and set:
+
+```yaml
+- name: SMOLQUERY_BURST_BACKEND
+  value: lambda
+- name: SMOLQUERY_BURST_LAMBDA_FUNCTION
+  value: smolquery-burst-runner
+- name: SMOLQUERY_BURST_LAMBDA_REGION
+  value: eu-central-1
+- name: SMOLQUERY_BURST_MAX
+  value: "64"
+```
+
+**The bucket.** Add a lifecycle rule expiring objects under the spill
+prefix after one day. The coordinator deletes a job's spilled partials
+after the merge, and after a failed gather; the rule is the backstop for
+a coordinator that died between the two.
+
+**Clocks.** `SMOLQUERY_BURST_WAIT_MS` (10 s) bounds a lease, which pays a
+runner's cold start when the pool grows; `SMOLQUERY_BURST_IDLE_SHUTDOWN_MS`
+(15 s) is how long a warm runner waits for the next shard, and the cost
+lever; `SMOLQUERY_BURST_MAX_LIFETIME_MS` (14 minutes) is when a runner
+stops itself, under Lambda's cap. The spike (T-673) measured a cold lease
+at 1.3 to 2.9 s and a warm one at a few milliseconds, and 100 runners
+scanning 64 GB in 1.75 s warm.
+
+**What is not yet there.** Distribution between a pod and its runners is
+plain TCP inside the VPC; `inet_tls_dist` with a runner certificate is
+T-684. The policy's defaults (`SMOLQUERY_BURST_MIN_SCAN_BYTES`,
+`SMOLQUERY_BURST_TARGET_BYTES`) are the plan's starting points until the
+bench at 100, 500 and 1,000 runners (T-683) sets them.
+
 ## When a peer dies without closing its sockets
 
 A pod that is killed hard closes none of its sockets. Its replacement has the

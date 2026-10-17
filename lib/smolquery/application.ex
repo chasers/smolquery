@@ -23,9 +23,10 @@ defmodule Smolquery.Application do
   does encode: they read the tables it makes (T-609).
 
   A VM that a FLAME backend booted is a burst runner (`Smolquery.Burst`,
-  PL-77). It starts telemetry, the extension loader and the engine log
-  supervisor, and nothing else: no cluster, no role, no catalog, no
-  listener, no pool (`FLAME.Application` starts the Terminator that takes
+  PL-77). It starts telemetry, the extension loader, the engine log
+  supervisor and, when its assignment set one, its lifetime clock
+  (`Smolquery.Burst.Lifetime`), and nothing else: no cluster, no role, no
+  catalog, no listener, no pool (`FLAME.Application` starts the Terminator that takes
   the parent's work). `Smolquery.InternalSecret.ensure/0` is not called
   either; a runner must not hold the secret, and a hot-tier read never
   reaches it.
@@ -44,7 +45,7 @@ defmodule Smolquery.Application do
   end
 
   @doc """
-  What this VM starts: a burst runner's three children when a FLAME backend
+  What this VM starts: a burst runner's few children when a FLAME backend
   booted it (`Smolquery.Burst.runner?/0`), the node's full tree otherwise.
   """
   @spec children(boolean()) :: [Supervisor.child_spec() | {module(), term()} | module()]
@@ -53,7 +54,7 @@ defmodule Smolquery.Application do
       Smolquery.Telemetry,
       Smolquery.Engine.ExtensionLoader,
       {DynamicSupervisor, name: Smolquery.Engine.LogSupervisor, strategy: :one_for_one}
-    ]
+    ] ++ Smolquery.Burst.runner_children()
   end
 
   def children(false) do
