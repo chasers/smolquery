@@ -118,6 +118,27 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
                WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
     end
 
+    test "a shard whose caller is killed dies on the runner too, so the runner is freed",
+         %{request: request} do
+      pool = start_pool()
+      handler = hold_standalone_engines()
+
+      caller =
+        spawn(fn ->
+          WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
+        end)
+
+      assert_receive {:shard, shard}, 10_000
+      monitor = Process.monitor(shard)
+      Process.exit(caller, :kill)
+
+      assert_receive {:DOWN, ^monitor, :process, ^shard, _reason}, 5_000
+      :telemetry.detach(handler)
+
+      assert {:ok, %{rows: 1}} =
+               WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
+    end
+
     test "a lease that waits past wait_ms is a checkout timeout, whatever the shard's deadline",
          %{request: request} do
       pool = start_pool()

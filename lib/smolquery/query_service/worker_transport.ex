@@ -88,14 +88,23 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   A runner shard runs under two clocks (PL-77 D7). The lease waits
   `wait_ms` for a checkout, booting a runner when the pool has room; the
-  shard itself then has `timeout_ms`, the job's own deadline, so a lease
-  that waits never eats the budget the shard needs to run. The shard is a
-  `Task` placed on the runner (`FLAME.place_child/3`), which holds the
-  runner checked out for exactly as long as it lives, and its answer comes
-  back as a message over the runner's own distribution connection. A
-  lease that times out is `{:checkout, :timeout}`; a shard that outruns
-  its deadline is killed on the runner and answers `:timeout`; a runner
-  that dies under its shard answers with the exit reason.
+  shard then has what is left of `timeout_ms`, so a lease that waits never
+  runs the shard past the job's deadline. The shard is a `Task` placed on
+  the runner (`FLAME.place_child/3`), which holds the runner checked out
+  for exactly as long as it lives, and its answer comes back as a message
+  over the runner's own distribution connection. A lease that times out is
+  `{:checkout, :timeout}`; a shard that outruns its deadline is killed on
+  the runner and answers `:timeout`; a runner that dies under its shard
+  answers with the exit reason; a shard that raises on the runner answers
+  `{:shard_crashed, ...}`, which is the shard's failure, not the runner's.
+
+  The placed task is linked, and this process traps exits for the rest of
+  its life: linked, a caller that is killed (the job fell back, timed out
+  or was cancelled, and `Task.async_stream/3` killed its shards) takes the
+  task on the runner down with it, so no abandoned shard keeps a runner
+  scanning for a dead pid; trapping, the runner's death reaches this
+  process as a message instead of an exit signal. A `Smolquery.QueryService.Scatter`
+  shard task is a process of its own, so the flag outlives nothing else.
   """
   @spec call(
           target(),
@@ -108,15 +117,17 @@ defmodule Smolquery.QueryService.WorkerTransport do
   def call(target, name, request, job_id, timeout_ms)
 
   def call(%{kind: :runner, pool: pool} = target, _name, request, _job_id, timeout_ms) do
+    Process.flag(:trap_exit, true)
+    deadline = deadline_at(timeout_ms)
     caller = self()
     ref = make_ref()
-    shard = {Task, fn -> send(caller, {ref, PartialWorker.run_standalone(request)}) end}
+    shard = {Task, fn -> send(caller, {ref, standalone(request)}) end}
 
     case FLAME.place_child(pool, shard,
            timeout: Map.get(target, :wait_ms, timeout_ms),
-           link: false
+           link: true
          ) do
-      {:ok, pid} -> await(pid, ref, timeout_ms, pool)
+      {:ok, pid} -> await(pid, ref, deadline, pool)
       {:error, reason} -> {:error, {:worker_unreachable, {:runner, pool}, {:checkout, reason}}}
     end
   rescue
@@ -180,23 +191,47 @@ defmodule Smolquery.QueryService.WorkerTransport do
   defp deadline(:infinity), do: :infinity
   defp deadline(timeout_ms), do: timeout_ms + @rpc_margin_ms
 
-  defp await(pid, ref, timeout_ms, pool) do
-    monitor = Process.monitor(pid)
+  @doc false
+  @spec standalone(PartialWorker.standalone_request()) ::
+          {:ok, PartialWorker.reply()} | {:error, term()}
+  def standalone(request) do
+    PartialWorker.run_standalone(request)
+  catch
+    kind, reason ->
+      {:error, {:shard_crashed, Exception.format(kind, reason, __STACKTRACE__)}}
+  end
 
+  defp await(pid, ref, deadline, pool) do
     receive do
       {^ref, result} ->
-        Process.demonitor(monitor, [:flush])
         result
 
-      {:DOWN, ^monitor, :process, ^pid, reason} ->
+      {:EXIT, ^pid, reason} ->
         {:error, {:worker_unreachable, {:runner, pool}, reason}}
+
+      {:EXIT, _flame_helper, :normal} ->
+        await(pid, ref, deadline, pool)
+
+      {:EXIT, _parent, reason} ->
+        kill(pid)
+        exit(reason)
     after
-      timeout_ms ->
-        Process.exit(pid, :kill)
-        Process.demonitor(monitor, [:flush])
+      remaining(deadline) ->
+        kill(pid)
         {:error, {:worker_unreachable, {:runner, pool}, :timeout}}
     end
   end
+
+  defp kill(pid) do
+    Process.unlink(pid)
+    Process.exit(pid, :kill)
+  end
+
+  defp deadline_at(:infinity), do: :infinity
+  defp deadline_at(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+
+  defp remaining(:infinity), do: :infinity
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp exit_reason({reason, {FLAME.Pool, _fun, _args}}), do: reason
   defp exit_reason(reason), do: reason

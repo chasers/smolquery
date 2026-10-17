@@ -176,8 +176,11 @@ defmodule SmolqueryApi.JobController do
   end
 
   defp refusal_json(nil), do: nil
-  defp refusal_json({reason, _scan_bytes, _threshold}), do: Atom.to_string(reason)
-  defp refusal_json(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp refusal_json({:under_threshold, scan_bytes, threshold}),
+    do: %{"reason" => "under_threshold", "scanBytes" => scan_bytes, "thresholdBytes" => threshold}
+
+  defp refusal_json(reason) when is_atom(reason), do: %{"reason" => Atom.to_string(reason)}
 
   defp trace_json(nil), do: nil
 

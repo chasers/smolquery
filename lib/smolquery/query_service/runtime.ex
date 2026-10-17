@@ -450,7 +450,7 @@ defmodule Smolquery.QueryService.Runtime do
       enabled: Keyword.fetch!(policy, :enabled),
       pool: Keyword.get(opts, :pool, Smolquery.Burst.pool()),
       max: Keyword.fetch!(policy, :max),
-      request: Keyword.fetch!(policy, :default),
+      request: Keyword.get(opts, :request, Keyword.fetch!(policy, :default)),
       min_scan_bytes: Keyword.fetch!(policy, :min_scan_bytes),
       target_bytes: Keyword.fetch!(policy, :target_bytes),
       max_per_job: Keyword.fetch!(policy, :max_per_job),

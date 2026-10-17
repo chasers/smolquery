@@ -86,7 +86,8 @@ defmodule Smolquery.QueryService.Job do
           peers: non_neg_integer(),
           burst: non_neg_integer(),
           burst_wait_ms: non_neg_integer(),
-          burst_refused: Smolquery.Burst.Policy.refusal() | :runners_unreachable | nil
+          burst_refused:
+            Smolquery.Burst.Policy.refusal() | :runners_unreachable | :too_few_files | nil
         }
 
   @type t :: %__MODULE__{
