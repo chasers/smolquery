@@ -141,14 +141,21 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
   defp file_cache(_context, _catalog), do: []
 
-  defp burst(%{burst: max}) do
+  defp burst(%{burst: max}) when is_integer(max), do: burst(%{burst: [max: max]})
+
+  defp burst(%{burst: opts}) do
     pool = :"scatter_burst_pool_#{:erlang.unique_integer([:positive])}"
+    {dead, opts} = Keyword.pop(opts, :dead, false)
+    max = Keyword.get(opts, :max, 2)
 
-    start_supervised!(
-      {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: max, max_concurrency: 1}
-    )
+    unless dead do
+      start_supervised!(
+        {FLAME.Pool,
+         name: pool, backend: FLAME.LocalBackend, min: 0, max: max, max_concurrency: 1}
+      )
+    end
 
-    [burst: [enabled: true, pool: pool]]
+    [burst: Keyword.merge([enabled: true, pool: pool, max: max], opts)]
   end
 
   defp burst(_context), do: []
@@ -587,7 +594,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert worker == node()
   end
 
-  test "a job that asks to burst on a node that leases no runners scatters over its peers alone",
+  test "a count asked of a node that leases no runners scatters over its peers and says no_pool",
        %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events",
@@ -597,6 +604,73 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     assert [_, _, _] = shards = Enum.filter(job.trace, &(&1.name == :shard))
     assert Enum.all?(shards, &(&1.meta.kind == :peer))
+
+    assert %{shards: 3, peers: 3, burst: 0, burst_refused: :no_pool, burst_wait_ms: 0} =
+             job.scatter
+  end
+
+  test "auto on a node that leases no runners is quietly peers only", %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events", burst: :auto)
+
+    assert %{shards: 3, peers: 3, burst: 0, burst_refused: nil} = job.scatter
+  end
+
+  @tag burst: [max: 2, min_scan_bytes: 0, target_bytes: 1]
+  test "auto bursts over the threshold, one runner per target_bytes up to the pool's max (T-677)",
+       %{control: control, distributed: distributed} do
+    sql = "SELECT count(*) AS n, max(id) AS m FROM analytics.events"
+    both(control, distributed, sql, burst: :auto)
+
+    assert {:ok, %{state: :done} = job, frame} = Client.query(distributed, sql, burst: :auto)
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert %{shards: 5, peers: 3, burst: 2, burst_refused: nil, burst_wait_ms: wait} = job.scatter
+    assert is_integer(wait) and wait >= 0
+  end
+
+  @tag burst: 2
+  test "auto under the threshold stays on peers and says so", %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events", burst: :auto)
+
+    assert %{shards: 3, burst: 0, burst_refused: {:under_threshold, bytes, 8_589_934_592}} =
+             job.scatter
+
+    assert is_integer(bytes) and bytes > 0
+  end
+
+  @tag burst: [dead: true]
+  test "a runner shard that cannot be leased is retried on a peer, and the job says runners_unreachable (T-677)",
+       %{control: control, distributed: distributed} do
+    sql = "SELECT count(*) AS n, max(id) AS m FROM analytics.events"
+    both(control, distributed, sql, burst: 2)
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, sql, burst: 2, trace: true)
+
+    assert %{shards: 5, peers: 5, burst: 0, burst_refused: :runners_unreachable} = job.scatter
+
+    shards = Enum.filter(job.trace, &(&1.name == :shard))
+    failed = Enum.filter(shards, &(&1.meta.kind == :runner))
+    retried = Enum.filter(shards, &Map.get(&1.meta, :retry, false))
+
+    assert [_, _] = failed
+    assert Enum.all?(failed, &(&1.meta.error =~ "worker_unreachable"))
+    assert [_, _] = retried
+    assert Enum.all?(retried, &(&1.meta.kind == :peer and &1.meta.rows == 1))
+
+    assert Enum.sort(Enum.map(retried, & &1.meta.shard)) ==
+             Enum.sort(Enum.map(failed, & &1.meta.shard))
+  end
+
+  @tag burst: [dead: true, retry_floor_ms: 600_000]
+  test "under the retry floor a failed runner shard sends the job to the single-engine fallback",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n FROM analytics.events", burst: 2)
+
+    assert DataFrame.to_columns(frame) == %{"n" => [15]}
+    assert job.scatter == nil
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do

@@ -1035,10 +1035,33 @@ for {variable, key} <- [
       {"SMOLQUERY_BURST_MAX", :max},
       {"SMOLQUERY_BURST_BOOT_TIMEOUT_MS", :boot_timeout_ms},
       {"SMOLQUERY_BURST_IDLE_SHUTDOWN_MS", :idle_shutdown_after_ms},
-      {"SMOLQUERY_BURST_CALL_TIMEOUT_MS", :call_timeout_ms}
+      {"SMOLQUERY_BURST_CALL_TIMEOUT_MS", :call_timeout_ms},
+      {"SMOLQUERY_BURST_MAX_PER_JOB", :max_per_job},
+      {"SMOLQUERY_BURST_TARGET_BYTES", :target_bytes},
+      {"SMOLQUERY_BURST_WAIT_MS", :wait_ms},
+      {"SMOLQUERY_BURST_MAX_INFLIGHT", :max_inflight}
     ],
     value = System.get_env(variable) do
   config :smolquery, Smolquery.Burst, [
     {key, Smolquery.RuntimeConfig.positive_integer!(variable, value)}
   ]
+end
+
+for {variable, key} <- [
+      {"SMOLQUERY_BURST_MIN_SCAN_BYTES", :min_scan_bytes},
+      {"SMOLQUERY_BURST_RETRY_FLOOR_MS", :retry_floor_ms}
+    ],
+    value = System.get_env(variable) do
+  config :smolquery, Smolquery.Burst, [
+    {key, Smolquery.RuntimeConfig.non_negative_integer!(variable, value)}
+  ]
+end
+
+if burst_default = System.get_env("SMOLQUERY_BURST_DEFAULT") do
+  config :smolquery, Smolquery.Burst,
+    default:
+      Smolquery.RuntimeConfig.enum!("SMOLQUERY_BURST_DEFAULT", burst_default, [
+        {"auto", :auto},
+        {"off", false}
+      ])
 end

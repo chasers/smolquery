@@ -203,6 +203,13 @@ read on a runner: it learns everything from the backend's assignment.
 | `SMOLQUERY_BURST_BOOT_TIMEOUT_MS` | How long a lease waits for a runner to boot and connect (`120000`) |
 | `SMOLQUERY_BURST_IDLE_SHUTDOWN_MS` | How long an idle runner stays leased before it shuts down (`15000`). This is the cost lever: a runner's work is seconds per lease and the idle window is the rest of the bill |
 | `SMOLQUERY_BURST_CALL_TIMEOUT_MS` | How long a call on a runner may run before it fails with a timeout the caller can catch (`600000`). Keep it below the runner's own lifetime cap (15 minutes on Lambda): when the host kills a runner first, the pool kills the caller outright instead |
+| `SMOLQUERY_BURST_DEFAULT` | What a job that names no `burst` option asks for: `auto` (the default) bursts when the policy says so, `off` keeps every job on its peers unless it asks. A job's own `"burst"` overrides it either way |
+| `SMOLQUERY_BURST_MIN_SCAN_BYTES` | The smallest sealed scan, in bytes, that `auto` bursts (`8589934592`, 8 GiB). Under it a query stays on its peers and the job says `burstRefused: under_threshold`. Until T-628 lands this is the table's whole sealed size, not the pruned scan |
+| `SMOLQUERY_BURST_TARGET_BYTES` | How many sealed bytes one runner takes under `auto` (`1073741824`, 1 GiB): the scan divided by this, rounded up, is the runner count before the caps |
+| `SMOLQUERY_BURST_MAX_PER_JOB` | The most runners one job gets (`64`), whatever it asked. The pool's `SMOLQUERY_BURST_MAX` caps it again per node, and the provider (reserved concurrency on Lambda) is the ceiling outside this code |
+| `SMOLQUERY_BURST_WAIT_MS` | How long a shard waits for a runner to be checked out, booted if the pool has room (`10000`). Its own clock, not the job deadline: a shard that waited the whole deadline would have no budget left to run. A lease past it fails the shard, which is retried on a peer |
+| `SMOLQUERY_BURST_RETRY_FLOOR_MS` | A runner shard that failed, at the lease or on the runner, is retried once on a peer when at least this much of the job's deadline remains (`5000`); under it the job falls back to one engine |
+| `SMOLQUERY_BURST_MAX_INFLIGHT` | The most runner shards one job has in flight at once (`64`). Every runner reply is held in the coordinator until it is written, so this bounds that memory; runner shards past it start as earlier ones answer |
 
 ### Diagnostics
 

@@ -66,12 +66,7 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
     end
 
     test "runs the shard standalone on a runner leased from the pool", %{request: request} do
-      pool = :"runner_pool_#{System.unique_integer([:positive])}"
-
-      start_supervised!(
-        {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: 1, max_concurrency: 1}
-      )
-
+      pool = start_pool()
       target = %{kind: :runner, pool: pool}
 
       assert {:ok, %{rows: 1, parquet: parquet, timings: %{engine: :standalone}}} =
@@ -89,17 +84,77 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
       assert pool == target.pool
     end
 
-    test "a runner that dies under the shard is an unreachable runner, not a dead caller " <>
-           "(FLAME reports a killed remote as a timeout)",
+    test "a runner that dies under the shard is an unreachable runner, not a dead caller",
          %{request: request} do
-      pool = :"runner_pool_dying_#{System.unique_integer([:positive])}"
+      pool = start_pool()
+      hold_standalone_engines()
+
+      task =
+        Task.async(fn ->
+          WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
+        end)
+
+      assert_receive {:shard, shard}, 10_000
+      Process.exit(shard, :kill)
+
+      assert {:error, {:worker_unreachable, {:runner, ^pool}, :killed}} =
+               Task.await(task, 10_000)
+    end
+
+    test "a shard that outruns its deadline is killed on the runner, and the runner is freed",
+         %{request: request} do
+      pool = start_pool()
+      handler = hold_standalone_engines()
+
+      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
+               WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 300)
+
+      assert_receive {:shard, shard}
+      refute Process.alive?(shard)
+
+      :telemetry.detach(handler)
+
+      assert {:ok, %{rows: 1}} =
+               WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
+    end
+
+    test "a lease that waits past wait_ms is a checkout timeout, whatever the shard's deadline",
+         %{request: request} do
+      pool = start_pool()
+      parent = self()
+
+      holder =
+        spawn_link(fn ->
+          FLAME.call(pool, fn ->
+            send(parent, :held)
+            Process.sleep(:infinity)
+          end)
+        end)
+
+      assert_receive :held, 5_000
+
+      target = %{kind: :runner, pool: pool, wait_ms: 200}
+
+      assert {:error, {:worker_unreachable, {:runner, ^pool}, {:checkout, :timeout}}} =
+               WorkerTransport.call(target, :unused, request, "job", 30_000)
+
+      Process.unlink(holder)
+      Process.exit(holder, :kill)
+    end
+
+    defp start_pool do
+      pool = :"runner_pool_#{System.unique_integer([:positive])}"
 
       start_supervised!(
         {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: 1, max_concurrency: 1}
       )
 
+      pool
+    end
+
+    defp hold_standalone_engines do
       parent = self()
-      handler = "runner-death-#{System.unique_integer([:positive])}"
+      handler = "hold-standalone-#{System.unique_integer([:positive])}"
 
       :telemetry.attach(
         handler,
@@ -117,42 +172,7 @@ defmodule Smolquery.QueryService.WorkerTransportTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      task =
-        Task.async(fn ->
-          WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 30_000)
-        end)
-
-      assert_receive {:shard, shard}, 10_000
-      Process.exit(shard, :kill)
-
-      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
-               Task.await(task, 10_000)
-    end
-
-    test "a checkout that waits past the timeout is an unreachable runner", %{request: request} do
-      pool = :"runner_pool_busy_#{System.unique_integer([:positive])}"
-
-      start_supervised!(
-        {FLAME.Pool, name: pool, backend: FLAME.LocalBackend, min: 0, max: 1, max_concurrency: 1}
-      )
-
-      parent = self()
-
-      holder =
-        spawn_link(fn ->
-          FLAME.call(pool, fn ->
-            send(parent, :held)
-            Process.sleep(:infinity)
-          end)
-        end)
-
-      assert_receive :held, 5_000
-
-      assert {:error, {:worker_unreachable, {:runner, ^pool}, :timeout}} =
-               WorkerTransport.call(%{kind: :runner, pool: pool}, :unused, request, "job", 200)
-
-      Process.unlink(holder)
-      Process.exit(holder, :kill)
+      handler
     end
   end
 

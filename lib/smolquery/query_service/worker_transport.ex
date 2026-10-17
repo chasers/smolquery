@@ -69,12 +69,33 @@ defmodule Smolquery.QueryService.WorkerTransport do
   @rpc_margin_ms 5_000
   @default_channels 4
 
-  @typedoc "Where a shard runs: a peer node, or a runner leased from a pool."
-  @type target :: node() | %{kind: :runner, pool: atom()}
+  @typedoc """
+  Where a shard runs: a peer node, or a runner leased from a pool, with the
+  longest a lease may wait for a checkout (`wait_ms`, default: the shard's
+  own timeout).
+  """
+  @type target ::
+          node()
+          | %{
+              required(:kind) => :runner,
+              required(:pool) => atom(),
+              optional(:wait_ms) => timeout()
+            }
 
   @doc """
   Runs `request` on `target`'s `PartialWorker` for job `job_id`: `run/2` on
   a peer node, `run_standalone/1` on a runner leased from the pool.
+
+  A runner shard runs under two clocks (PL-77 D7). The lease waits
+  `wait_ms` for a checkout, booting a runner when the pool has room; the
+  shard itself then has `timeout_ms`, the job's own deadline, so a lease
+  that waits never eats the budget the shard needs to run. The shard is a
+  `Task` placed on the runner (`FLAME.place_child/3`), which holds the
+  runner checked out for exactly as long as it lives, and its answer comes
+  back as a message over the runner's own distribution connection. A
+  lease that times out is `{:checkout, :timeout}`; a shard that outruns
+  its deadline is killed on the runner and answers `:timeout`; a runner
+  that dies under its shard answers with the exit reason.
   """
   @spec call(
           target(),
@@ -86,15 +107,23 @@ defmodule Smolquery.QueryService.WorkerTransport do
           {:ok, PartialWorker.reply()} | {:error, term()}
   def call(target, name, request, job_id, timeout_ms)
 
-  def call(%{kind: :runner, pool: pool}, _name, request, _job_id, timeout_ms) do
-    FLAME.call(pool, fn -> PartialWorker.run_standalone(request) end,
-      timeout: timeout_ms,
-      link: false
-    )
+  def call(%{kind: :runner, pool: pool} = target, _name, request, _job_id, timeout_ms) do
+    caller = self()
+    ref = make_ref()
+    shard = {Task, fn -> send(caller, {ref, PartialWorker.run_standalone(request)}) end}
+
+    case FLAME.place_child(pool, shard,
+           timeout: Map.get(target, :wait_ms, timeout_ms),
+           link: false
+         ) do
+      {:ok, pid} -> await(pid, ref, timeout_ms, pool)
+      {:error, reason} -> {:error, {:worker_unreachable, {:runner, pool}, {:checkout, reason}}}
+    end
   rescue
     ArgumentError -> {:error, {:worker_unreachable, {:runner, pool}, :noproc}}
   catch
-    :exit, reason -> {:error, {:worker_unreachable, {:runner, pool}, exit_reason(reason)}}
+    :exit, reason ->
+      {:error, {:worker_unreachable, {:runner, pool}, {:checkout, exit_reason(reason)}}}
   end
 
   def call(peer, name, request, _job_id, _timeout_ms) when peer == node() do
@@ -150,6 +179,24 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   defp deadline(:infinity), do: :infinity
   defp deadline(timeout_ms), do: timeout_ms + @rpc_margin_ms
+
+  defp await(pid, ref, timeout_ms, pool) do
+    monitor = Process.monitor(pid)
+
+    receive do
+      {^ref, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        {:error, {:worker_unreachable, {:runner, pool}, reason}}
+    after
+      timeout_ms ->
+        Process.exit(pid, :kill)
+        Process.demonitor(monitor, [:flush])
+        {:error, {:worker_unreachable, {:runner, pool}, :timeout}}
+    end
+  end
 
   defp exit_reason({reason, {FLAME.Pool, _fun, _args}}), do: reason
   defp exit_reason(reason), do: reason

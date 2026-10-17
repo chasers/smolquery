@@ -181,11 +181,12 @@ defmodule Smolquery.QueryService.Runtime do
   `Smolquery.QueryService.Scatter`.
 
   `burst` (PL-77) is whether a scattered job may also fan out to runners
-  leased from `Smolquery.Burst`'s pool: `enabled` follows the node's burst
-  configuration unless a test says otherwise, `pool` names the pool, `max`
-  is the most runners it holds, and `runners` is how many runner shards the
-  job asked for, `0` at boot and set per job by its `burst:` option. Hot
-  units never go to a runner.
+  leased from `Smolquery.Burst`'s pool, and the policy it bursts under
+  (`Smolquery.Burst.policy/0`, overridable here for a test): `enabled`,
+  `pool`, the pool's `max`, the job `request` (`:auto` by default, set per
+  job by its `burst:` option), the `:auto` threshold and target, the
+  per-job cap, the checkout wait and retry floor, and the in-flight cap.
+  Hot units never go to a runner.
 
   `store` names nothing this service writes through — the query path never
   writes — but when the sealed tier lives on `Segments.Store.S3` (Milestone
@@ -247,7 +248,18 @@ defmodule Smolquery.QueryService.Runtime do
       worker_memory_limit: nil,
       worker_threads: nil
     },
-    burst: %{enabled: false, pool: Smolquery.Burst.Pool, max: 64, runners: 0}
+    burst: %{
+      enabled: false,
+      pool: Smolquery.Burst.Pool,
+      max: 64,
+      request: :auto,
+      min_scan_bytes: 8_589_934_592,
+      target_bytes: 1_073_741_824,
+      max_per_job: 64,
+      wait_ms: 10_000,
+      retry_floor_ms: 5_000,
+      max_inflight: 64
+    }
   ]
 
   @type t :: %__MODULE__{
@@ -298,7 +310,13 @@ defmodule Smolquery.QueryService.Runtime do
             enabled: boolean(),
             pool: atom(),
             max: pos_integer(),
-            runners: non_neg_integer()
+            request: Smolquery.Burst.Policy.request(),
+            min_scan_bytes: non_neg_integer(),
+            target_bytes: pos_integer(),
+            max_per_job: pos_integer(),
+            wait_ms: pos_integer(),
+            retry_floor_ms: non_neg_integer(),
+            max_inflight: pos_integer()
           }
         }
 
@@ -426,11 +444,19 @@ defmodule Smolquery.QueryService.Runtime do
   end
 
   defp burst(opts) do
+    policy = Keyword.merge(Smolquery.Burst.policy(), opts)
+
     %{
-      enabled: Keyword.get_lazy(opts, :enabled, &Smolquery.Burst.enabled?/0),
+      enabled: Keyword.fetch!(policy, :enabled),
       pool: Keyword.get(opts, :pool, Smolquery.Burst.pool()),
-      max: Keyword.get_lazy(opts, :max, &Smolquery.Burst.max/0),
-      runners: 0
+      max: Keyword.fetch!(policy, :max),
+      request: Keyword.fetch!(policy, :default),
+      min_scan_bytes: Keyword.fetch!(policy, :min_scan_bytes),
+      target_bytes: Keyword.fetch!(policy, :target_bytes),
+      max_per_job: Keyword.fetch!(policy, :max_per_job),
+      wait_ms: Keyword.fetch!(policy, :wait_ms),
+      retry_floor_ms: Keyword.fetch!(policy, :retry_floor_ms),
+      max_inflight: Keyword.fetch!(policy, :max_inflight)
     }
   end
 

@@ -79,6 +79,7 @@ defmodule Smolquery.QueryService.Scatter do
 
   require Logger
 
+  alias Smolquery.Burst.Policy
   alias Smolquery.Catalog
   alias Smolquery.Cluster
   alias Smolquery.Cluster.PgGroup
@@ -106,6 +107,22 @@ defmodule Smolquery.QueryService.Scatter do
   @type target ::
           %{index: non_neg_integer(), kind: :peer, node: node()}
           | %{index: non_neg_integer(), kind: :runner, pool: atom()}
+
+  @typedoc """
+  How a scattered job was answered: its shard count and merged partial
+  bytes, how many shards ran on peers and how many on runners, the longest
+  wait a runner shard spent outside its worker, why burst was refused when
+  the job asked for it, and what the shards did with the file cache.
+  """
+  @type answer :: %{
+          shards: pos_integer(),
+          partial_bytes: non_neg_integer(),
+          peers: non_neg_integer(),
+          burst: non_neg_integer(),
+          burst_wait_ms: non_neg_integer(),
+          burst_refused: Policy.refusal() | :runners_unreachable | nil,
+          file_cache: FileCache.decision()
+        }
 
   @doc """
   Where job `job_id`'s partial files land.
@@ -138,14 +155,7 @@ defmodule Smolquery.QueryService.Scatter do
           String.t(),
           timeout(),
           [VariantResults.column()] | nil
-        ) ::
-          {:ok, Explorer.DataFrame.t(),
-           %{
-             shards: pos_integer(),
-             partial_bytes: non_neg_integer(),
-             file_cache: FileCache.decision()
-           }}
-          | :fallback
+        ) :: {:ok, Explorer.DataFrame.t(), answer()} | :fallback
   def execute(runtime, connection, plan, job_id, timeout_ms, outputs \\ nil)
 
   def execute(
@@ -174,8 +184,8 @@ defmodule Smolquery.QueryService.Scatter do
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
          :ok <- value_lists(runtime, plan, decomposition),
          {:ok, units} <- units(runtime, plan, ref),
-         {:ok, shards} <- shards(runtime, units) do
-      run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms)
+         {:ok, dealt} <- shards(runtime, units) do
+      run(runtime, connection, decomposition, ref, schema, dealt, job_id, timeout_ms)
     else
       {:refused, reason} ->
         Logger.debug(fn -> "distributed query refused: #{inspect(reason)}" end)
@@ -252,38 +262,41 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp shards(runtime, units) do
-    case targets(runtime) do
+    scan_bytes = units |> Enum.reject(&hot?/1) |> Enum.sum_by(&Map.get(&1, "bytes", 0))
+
+    {runners, refused} =
+      case Policy.runners(runtime.burst.request, scan_bytes, runtime.burst) do
+        {:ok, runners} -> {runners, nil}
+        {:none, :off} -> {0, nil}
+        {:none, reason} -> {0, reason}
+      end
+
+    case targets(runtime, runners) do
       [] -> {:refused, :no_workers}
-      targets -> {:ok, deal(targets, units)}
+      targets -> {:ok, %{shards: deal(targets, units), runners: runners, refused: refused}}
     end
   end
 
   @doc """
-  The targets a job on `runtime` scatters over: every peer, then the
-  `runtime.burst.runners` runners the job asked for when this node leases
-  them, at most the pool's `max`, since a runner past it would only queue
-  for a checkout behind the first wave. Empty when there is no peer: a
-  runner only ever works beside the peers, which is where the hot units go.
+  The targets a job on `runtime` scatters over: every peer, then `runners`
+  runners from the node's pool, as `Smolquery.Burst.Policy` sized them.
+  Empty when there is no peer: a runner only ever works beside the peers,
+  which is where the hot units go.
   """
-  @spec targets(Runtime.t()) :: [target()]
-  def targets(%Runtime{} = runtime) do
+  @spec targets(Runtime.t(), non_neg_integer()) :: [target()]
+  def targets(%Runtime{} = runtime, runners) do
     case workers(runtime) do
       [] ->
         []
 
       peers ->
-        runners = List.duplicate(%{kind: :runner, pool: runtime.burst.pool}, runners(runtime))
+        runners = List.duplicate(%{kind: :runner, pool: runtime.burst.pool}, runners)
 
         Enum.map(peers, &%{kind: :peer, node: &1})
         |> Enum.concat(runners)
         |> Enum.with_index(&Map.put(&1, :index, &2))
     end
   end
-
-  defp runners(%Runtime{burst: %{enabled: true, runners: runners, max: max}}),
-    do: min(runners, max)
-
-  defp runners(%Runtime{}), do: 0
 
   defp workers(%Runtime{} = runtime) do
     if Cluster.enabled?() do
@@ -332,7 +345,8 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp hot?(unit), do: Map.get(unit, "hot", false)
 
-  defp run(runtime, connection, decomposition, ref, schema, shards, job_id, timeout_ms) do
+  defp run(runtime, connection, decomposition, ref, schema, dealt, job_id, timeout_ms) do
+    %{shards: shards} = dealt
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
 
@@ -350,14 +364,16 @@ defmodule Smolquery.QueryService.Scatter do
                  timeout_ms
                )
              end),
-           paths = Enum.map(partials, &elem(&1, 0)),
+           paths = Enum.map(partials, & &1.path),
            {:ok, frame} <-
              Trace.span(:merge, &phase_meta(%{}, &1), fn ->
                merge(runtime, connection, decomposition, paths)
              end) do
         measurements = %{
           shards: length(shards),
-          partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
+          partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size),
+          peers: Enum.count(partials, &(&1.kind == :peer)),
+          burst: Enum.count(partials, &(&1.kind == :runner))
         }
 
         :telemetry.execute(
@@ -367,11 +383,11 @@ defmodule Smolquery.QueryService.Scatter do
         )
 
         {:ok, frame,
-         Map.put(
-           measurements,
-           :file_cache,
-           partials |> Enum.map(&elem(&1, 1)) |> FileCache.combined()
-         )}
+         Map.merge(measurements, %{
+           burst_wait_ms: burst_wait_ms(partials),
+           burst_refused: refused(dealt, measurements.burst),
+           file_cache: partials |> Enum.map(& &1.decision) |> FileCache.combined()
+         })}
       else
         {:error, reason} ->
           Logger.warning("distributed query fell back: #{inspect(reason)}")
@@ -387,8 +403,6 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms) do
-    node_files = node_files(shards)
-
     base = %{
       table_ref: ref,
       schema: schema,
@@ -397,34 +411,38 @@ defmodule Smolquery.QueryService.Scatter do
       timeout_ms: timeout_ms
     }
 
-    runner_base = runner_base(shards, base, runtime)
+    context = %{
+      runtime: runtime,
+      job_id: job_id,
+      timeout_ms: timeout_ms,
+      deadline_ms: deadline_ms(timeout_ms),
+      base: base,
+      runner_base: runner_base(shards, base, runtime),
+      node_files: node_files(shards),
+      peers: shards |> peer_shards() |> Enum.map(&elem(&1, 0))
+    }
 
     shards
-    |> Task.async_stream(
-      fn {target, files} ->
-        request = request(target, files, base, runner_base, runtime, node_files)
-
-        {target.index,
-         Trace.span(:shard, &shard_meta(target, files, &1), fn ->
-           Telemetry.timed(fn ->
-             WorkerTransport.call(transport(target), runtime.name, request, job_id, timeout_ms)
-           end)
-         end)}
-      end,
-      max_concurrency: length(shards),
+    |> Task.async_stream(fn {target, files} -> shard(target, files, context) end,
+      max_concurrency: concurrency(shards, runtime),
       ordered: true,
       timeout: :infinity
     )
     |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {index, {_elapsed_us, {:ok, %{parquet: parquet} = reply}}}}, {:ok, partials} ->
-        path = Path.join(partials_dir, "partial-#{index}.parquet")
+      {:ok, {target, wait_us, {:ok, %{parquet: parquet} = reply}}}, {:ok, partials} ->
+        path = Path.join(partials_dir, "partial-#{target.index}.parquet")
         File.write!(path, parquet)
 
-        decision = Map.get(reply, :file_cache, runtime.file_cache.decision)
+        partial = %{
+          path: path,
+          decision: Map.get(reply, :file_cache, runtime.file_cache.decision),
+          kind: target.kind,
+          wait_us: wait_us
+        }
 
-        {:cont, {:ok, [{path, decision} | partials]}}
+        {:cont, {:ok, [partial | partials]}}
 
-      {:ok, {_index, {_elapsed_us, {:error, reason}}}}, _acc ->
+      {:ok, {_target, _wait_us, {:error, reason}}}, _acc ->
         {:halt, {:error, reason}}
 
       {:exit, reason}, _acc ->
@@ -436,27 +454,109 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
+  defp concurrency(shards, %Runtime{burst: %{max_inflight: max_inflight}}) do
+    runners = Enum.count(shards, &(elem(&1, 0).kind == :runner))
+
+    max(length(shards) - runners + min(runners, max_inflight), 1)
+  end
+
+  defp deadline_ms(:infinity), do: :infinity
+  defp deadline_ms(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
+
+  defp shard(target, files, context) do
+    {elapsed_us, result} = dispatch(target, files, context)
+
+    case {target, result} do
+      {%{kind: :runner}, {:error, {:worker_unreachable, {:runner, _pool}, _reason}}} ->
+        retry_on_peer(target, files, context, {elapsed_us, result})
+
+      _answered_or_peer_failed ->
+        {target, wait_us(elapsed_us, result), result}
+    end
+  end
+
+  defp retry_on_peer(target, files, context, {elapsed_us, result}) do
+    case retry_target(target, context) do
+      nil ->
+        {target, wait_us(elapsed_us, result), result}
+
+      peer ->
+        {retry_us, retried} = dispatch(peer, files, context)
+        {peer, wait_us(retry_us, retried), retried}
+    end
+  end
+
+  defp retry_target(%{index: index}, %{peers: [_ | _] = peers} = context) do
+    if remaining_ms(context.deadline_ms) > context.runtime.burst.retry_floor_ms do
+      peers
+      |> Enum.at(rem(index, length(peers)))
+      |> Map.merge(%{index: index, retry: true})
+    end
+  end
+
+  defp retry_target(_target, _no_peers), do: nil
+
+  defp remaining_ms(:infinity), do: :infinity
+  defp remaining_ms(deadline_ms), do: deadline_ms - System.monotonic_time(:millisecond)
+
+  defp dispatch(target, files, context) do
+    %{runtime: runtime, job_id: job_id, timeout_ms: timeout_ms} = context
+    request = request(target, files, context)
+
+    Trace.span(:shard, &shard_meta(target, files, &1), fn ->
+      Telemetry.timed(fn ->
+        WorkerTransport.call(
+          transport(target, runtime),
+          runtime.name,
+          request,
+          job_id,
+          timeout_ms
+        )
+      end)
+    end)
+  end
+
   defp runner_base(shards, base, runtime) do
     if Enum.any?(shards, &(elem(&1, 0).kind == :runner)),
       do: Map.put(base, :engine, PartialWorker.engine_spec(runtime)),
       else: nil
   end
 
-  defp request(%{kind: :peer, node: node}, files, base, _runner_base, runtime, node_files) do
+  defp request(%{kind: :peer, node: node}, files, context) do
+    %{runtime: runtime, base: base, node_files: node_files} = context
+
     Map.merge(base, %{
       files: files,
       file_cache: runtime.file_cache.decision,
       file_cache_mode: runtime.file_cache.mode,
-      node_files: Map.fetch!(node_files, node),
+      node_files: Map.get(node_files, node, []),
       allowed_paths: files |> Enum.filter(&hot?/1) |> Enum.map(& &1["url"])
     })
   end
 
-  defp request(%{kind: :runner}, files, _base, runner_base, _runtime, _node_files),
+  defp request(%{kind: :runner}, files, %{runner_base: runner_base}),
     do: Map.merge(runner_base, %{files: files, allowed_paths: []})
 
-  defp transport(%{kind: :peer, node: node}), do: node
-  defp transport(%{kind: :runner, pool: pool}), do: %{kind: :runner, pool: pool}
+  defp transport(%{kind: :peer, node: node}, _runtime), do: node
+
+  defp transport(%{kind: :runner, pool: pool}, %Runtime{burst: %{wait_ms: wait_ms}}),
+    do: %{kind: :runner, pool: pool, wait_ms: wait_ms}
+
+  defp wait_us(elapsed_us, {:ok, %{timings: %{worker_us: worker_us}}}),
+    do: max(elapsed_us - worker_us, 0)
+
+  defp wait_us(_elapsed_us, _failed_or_older_worker), do: 0
+
+  defp burst_wait_ms(partials) do
+    partials
+    |> Enum.filter(&(&1.kind == :runner))
+    |> Enum.map(& &1.wait_us)
+    |> Enum.max(fn -> 0 end)
+    |> div(1000)
+  end
+
+  defp refused(%{refused: nil, runners: runners}, 0) when runners > 0, do: :runners_unreachable
+  defp refused(%{refused: refused}, _burst), do: refused
 
   defp shard_meta(target, files, outcome) do
     base = %{
@@ -468,6 +568,8 @@ defmodule Smolquery.QueryService.Scatter do
       sealed_bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0))
     }
 
+    base = if Map.get(target, :retry), do: Map.put(base, :retry, true), else: base
+
     case outcome do
       {elapsed_us, {:ok, %{rows: rows, timings: timings} = reply}} ->
         base
@@ -475,7 +577,7 @@ defmodule Smolquery.QueryService.Scatter do
         |> Map.merge(%{
           rows: rows,
           node: Map.get(reply, :node, target_name(target)),
-          wait_us: max(elapsed_us - Map.get(timings, :worker_us, elapsed_us), 0)
+          wait_us: wait_us(elapsed_us, {:ok, reply})
         })
 
       {_elapsed_us, {:ok, _older_worker}} ->

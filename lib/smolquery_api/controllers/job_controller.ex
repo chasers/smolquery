@@ -164,8 +164,20 @@ defmodule SmolqueryApi.JobController do
 
   defp scatter_json(nil), do: nil
 
-  defp scatter_json(%{shards: shards, partial_bytes: partial_bytes}),
-    do: %{"shards" => shards, "partialBytes" => partial_bytes}
+  defp scatter_json(%{shards: shards, partial_bytes: partial_bytes} = scatter) do
+    %{
+      "shards" => shards,
+      "partialBytes" => partial_bytes,
+      "peers" => Map.get(scatter, :peers, shards),
+      "burst" => Map.get(scatter, :burst, 0),
+      "burstWaitMs" => Map.get(scatter, :burst_wait_ms, 0),
+      "burstRefused" => refusal_json(Map.get(scatter, :burst_refused))
+    }
+  end
+
+  defp refusal_json(nil), do: nil
+  defp refusal_json({reason, _scan_bytes, _threshold}), do: Atom.to_string(reason)
+  defp refusal_json(reason) when is_atom(reason), do: Atom.to_string(reason)
 
   defp trace_json(nil), do: nil
 
@@ -261,17 +273,20 @@ defmodule SmolqueryApi.JobController do
   `timeoutMs` bounds the job; `explain` (`"plan"` or `"analyze"`) asks for
   the engine's plan instead of rows; `trace` (boolean, default false)
   collects the job's phase spans onto the response; `distributed` and
-  `fileCache` (booleans) override the deployment for this job. Any other
-  `explain`, `trace`, `distributed` or `fileCache` value is refused — silently running the query a caller asked to
-  explain would be the worst possible reading of a typo.
+  `fileCache` (booleans) override the deployment for this job; `burst`
+  (`false`, `"auto"` or a count, PL-77) asks the scatter for runners. Any
+  other `explain`, `trace`, `distributed`, `burst` or `fileCache` value is
+  refused — silently running the query a caller asked to explain would be
+  the worst possible reading of a typo.
   """
   @spec submit_opts(map()) :: {:ok, keyword()} | {:error, {:invalid_param, String.t()}}
   def submit_opts(body) do
     with {:ok, explain} <- explain_opt(body),
          {:ok, trace} <- trace_opt(body),
          {:ok, distributed} <- distributed_opt(body),
+         {:ok, burst} <- burst_opt(body),
          {:ok, file_cache} <- file_cache_opt(body) do
-      {:ok, timeout_opt(body) ++ explain ++ trace ++ distributed ++ file_cache}
+      {:ok, timeout_opt(body) ++ explain ++ trace ++ distributed ++ burst ++ file_cache}
     end
   end
 
@@ -297,6 +312,16 @@ defmodule SmolqueryApi.JobController do
   defp distributed_opt(%{"distributed" => nil}), do: {:ok, []}
   defp distributed_opt(%{"distributed" => _other}), do: {:error, {:invalid_param, "distributed"}}
   defp distributed_opt(_body), do: {:ok, []}
+
+  defp burst_opt(%{"burst" => false}), do: {:ok, [burst: false]}
+  defp burst_opt(%{"burst" => "auto"}), do: {:ok, [burst: :auto]}
+
+  defp burst_opt(%{"burst" => count}) when is_integer(count) and count >= 0,
+    do: {:ok, [burst: count]}
+
+  defp burst_opt(%{"burst" => nil}), do: {:ok, []}
+  defp burst_opt(%{"burst" => _other}), do: {:error, {:invalid_param, "burst"}}
+  defp burst_opt(_body), do: {:ok, []}
 
   defp file_cache_opt(%{"fileCache" => value}) when is_boolean(value),
     do: {:ok, [file_cache: value]}

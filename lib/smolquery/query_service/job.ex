@@ -74,6 +74,21 @@ defmodule Smolquery.QueryService.Job do
 
   @type state :: :pending | :running | :done | :error | :cancelled
 
+  @typedoc """
+  How the distributed path answered: the shard count and the partial bytes
+  it merged, how many shards ran on peers and how many burst to runners
+  (PL-77), the longest wait a runner shard spent outside its worker, and
+  why burst was refused when the job asked for it and got none.
+  """
+  @type scatter :: %{
+          shards: pos_integer(),
+          partial_bytes: non_neg_integer(),
+          peers: non_neg_integer(),
+          burst: non_neg_integer(),
+          burst_wait_ms: non_neg_integer(),
+          burst_refused: Smolquery.Burst.Policy.refusal() | :runners_unreachable | nil
+        }
+
   @type t :: %__MODULE__{
           id: String.t(),
           sql: String.t(),
@@ -86,7 +101,7 @@ defmodule Smolquery.QueryService.Job do
           statistics: Statistics.t() | nil,
           explain: String.t() | nil,
           trace: [Trace.span()] | nil,
-          scatter: %{shards: pos_integer(), partial_bytes: non_neg_integer()} | nil,
+          scatter: scatter() | nil,
           file_cache: Smolquery.QueryService.FileCache.decision(),
           ddl: Smolquery.Ddl.outcome() | nil,
           error: term(),

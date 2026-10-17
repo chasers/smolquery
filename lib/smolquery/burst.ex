@@ -53,6 +53,15 @@ defmodule Smolquery.Burst do
     idle_shutdown_after_ms: 15_000,
     call_timeout_ms: 600_000
   ]
+  @policy_defaults [
+    default: :auto,
+    min_scan_bytes: 8_589_934_592,
+    target_bytes: 1_073_741_824,
+    max_per_job: 64,
+    wait_ms: 10_000,
+    retry_floor_ms: 5_000,
+    max_inflight: 64
+  ]
 
   @doc "The pool runners are leased from."
   @spec pool() :: atom()
@@ -69,6 +78,24 @@ defmodule Smolquery.Burst do
   @doc "The most runners this node holds at once: the pool's `max`, configured or default."
   @spec max() :: pos_integer()
   def max, do: @defaults |> Keyword.merge(config()) |> Keyword.fetch!(:max)
+
+  @doc """
+  The policy a scattered job on this node bursts under (`Smolquery.Burst.Policy`,
+  D7): whether the node leases runners, the pool's `max`, the job default
+  (`:auto`), the `:auto` threshold and target, the per-job cap, the two
+  clocks (`wait_ms` for a checkout, `retry_floor_ms` under which a failed
+  runner shard is not retried on a peer) and `max_inflight`, the most runner
+  replies the coordinator holds outstanding at once (D6). Configured keys
+  override the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
+  """
+  @spec policy() :: keyword()
+  def policy do
+    merged = @policy_defaults |> Keyword.merge(@defaults) |> Keyword.merge(config())
+
+    merged
+    |> Keyword.take(Keyword.keys(@policy_defaults) ++ [:max])
+    |> Keyword.put(:enabled, Keyword.get(merged, :enabled, false))
+  end
 
   @doc """
   The pool's child spec when this node leases runners, else nothing.

@@ -46,7 +46,7 @@ defmodule Smolquery.QueryService.Client do
           | {:describe, boolean()}
           | {:trace, boolean()}
           | {:distributed, boolean()}
-          | {:burst, non_neg_integer()}
+          | {:burst, Smolquery.Burst.Policy.request()}
           | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}

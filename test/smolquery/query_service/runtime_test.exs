@@ -33,15 +33,25 @@ defmodule Smolquery.QueryService.RuntimeTest do
 
     test "burst follows the node's pool unless told otherwise, and asks for no runner at boot (PL-77)" do
       default = Runtime.new(name: :"burst_default_#{System.unique_integer([:positive])}")
-      assert default.burst == %{enabled: false, pool: Smolquery.Burst.pool(), max: 64, runners: 0}
+
+      assert %{enabled: false, pool: pool, max: 64, request: :auto, wait_ms: 10_000} =
+               default.burst
+
+      assert pool == Smolquery.Burst.pool()
+      assert default.burst.min_scan_bytes == 8_589_934_592
+      assert default.burst.target_bytes == 1_073_741_824
+      assert default.burst.max_per_job == 64
+      assert default.burst.retry_floor_ms == 5_000
+      assert default.burst.max_inflight == 64
 
       leased =
         Runtime.new(
           name: :"burst_on_#{System.unique_integer([:positive])}",
-          burst: [enabled: true, pool: __MODULE__.Pool, max: 8]
+          burst: [enabled: true, pool: __MODULE__.Pool, max: 8, default: false, wait_ms: 1]
         )
 
-      assert leased.burst == %{enabled: true, pool: __MODULE__.Pool, max: 8, runners: 0}
+      assert %{enabled: true, pool: __MODULE__.Pool, max: 8, request: false, wait_ms: 1} =
+               leased.burst
     end
 
     test "warm_probe is the lake's current snapshot when the catalog names a lake, SELECT 1 otherwise" do

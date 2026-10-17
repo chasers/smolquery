@@ -199,6 +199,24 @@ defmodule SmolqueryApi.JobControllerTest do
       assert message =~ "fileCache"
     end
 
+    test "burst takes false, auto or a count; anything else is a 400", %{name: name} do
+      for value <- [false, "auto", 3] do
+        response =
+          post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "burst" => value})
+
+        assert response.status == 200
+      end
+
+      for value <- [true, "yes", -1] do
+        refused =
+          post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "burst" => value})
+
+        assert refused.status == 400
+        assert %{"error" => %{"message" => message}} = JSON.decode!(refused.resp_body)
+        assert message =~ "burst"
+      end
+    end
+
     test "a non-boolean trace is refused", %{name: name} do
       response =
         post_json(name, "/v1/queries", %{"query" => "SELECT 1 + 1 AS n", "trace" => "yes"})

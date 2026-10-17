@@ -19,39 +19,22 @@ defmodule Smolquery.QueryService.ScatterTest do
   defp hot(count),
     do: for(i <- 1..count, do: %{"url" => "http://buffer-#{i}:4001/m#{i}", "hot" => true})
 
-  describe "targets/1" do
-    test "peers alone when the node leases no runners, whatever the job asked" do
-      runtime = runtime(burst: [enabled: false, pool: @pool])
-      runtime = %{runtime | burst: %{runtime.burst | runners: 4}}
-
+  describe "targets/2" do
+    test "peers alone when the policy sized no runner" do
       assert [%{index: 0, kind: :peer, node: node}, %{index: 1, kind: :peer, node: node}] =
-               Scatter.targets(runtime)
+               Scatter.targets(runtime(burst: [enabled: true, pool: @pool]), 0)
 
       assert node == node()
     end
 
-    test "the job's runners follow the peers, indexed on from them" do
-      runtime = runtime(burst: [enabled: true, pool: @pool])
-      runtime = %{runtime | burst: %{runtime.burst | runners: 3}}
-
+    test "the runners follow the peers, indexed on from them" do
       assert [
                %{index: 0, kind: :peer},
                %{index: 1, kind: :peer},
                %{index: 2, kind: :runner, pool: @pool},
                %{index: 3, kind: :runner, pool: @pool},
                %{index: 4, kind: :runner, pool: @pool}
-             ] = Scatter.targets(runtime)
-    end
-
-    test "runners past the pool's max would only queue, so they are not targets" do
-      runtime = runtime(burst: [enabled: true, pool: @pool, max: 2])
-      runtime = %{runtime | burst: %{runtime.burst | runners: 5}}
-
-      assert Enum.count(Scatter.targets(runtime), &(&1.kind == :runner)) == 2
-    end
-
-    test "no runners when the job asked for none" do
-      assert Enum.all?(Scatter.targets(runtime(burst: [enabled: true])), &(&1.kind == :peer))
+             ] = Scatter.targets(runtime(burst: [enabled: true, pool: @pool]), 3)
     end
   end
 

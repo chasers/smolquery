@@ -55,9 +55,9 @@ defmodule Smolquery.QueryService.Runner do
   path below as if nothing happened. The runner's part is one directory:
   the job's partials land under `Scatter.dir/1`, so `lockdown/3` includes it
   in `allowed_directories` and the merge can read them after external
-  access closes. A `burst: n` option asks the scatter for `n` runner shards
-  on top of the peers (PL-77); on a node that leases no runners it asks for
-  nothing.
+  access closes. A `burst` option (`false | :auto | n`, PL-77) sets the
+  job's request under `Smolquery.Burst.Policy`; the scatter decides from it
+  how many runner shards join the peers, if any.
 
   The SQL inside the wrap is the statement's canonical text, carried on the
   plan (`Smolquery.QueryService.Plan.canonical_sql` — the planner derives it
@@ -95,6 +95,7 @@ defmodule Smolquery.QueryService.Runner do
   use GenServer, restart: :temporary
 
   alias Explorer.DataFrame
+  alias Smolquery.Burst.Policy
   alias Smolquery.Ddl
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
@@ -119,7 +120,7 @@ defmodule Smolquery.QueryService.Runner do
           | {:trace, boolean()}
           | {:trace_parent, OpenTelemetry.span_ctx() | nil}
           | {:distributed, boolean()}
-          | {:burst, non_neg_integer()}
+          | {:burst, Policy.request()}
           | {:file_cache, boolean()}
           | {:snapshot, Smolquery.Catalog.snapshot()}
           | {:hot_before_ms, pos_integer()}
@@ -211,10 +212,11 @@ defmodule Smolquery.QueryService.Runner do
 
   defp override_burst(runtime, nil), do: runtime
 
-  defp override_burst(%Runtime{burst: %{enabled: false}} = runtime, _runners), do: runtime
-
-  defp override_burst(%Runtime{} = runtime, runners) when is_integer(runners) and runners >= 0,
-    do: %{runtime | burst: %{runtime.burst | runners: runners}}
+  defp override_burst(%Runtime{} = runtime, request) do
+    if Policy.request?(request),
+      do: %{runtime | burst: %{runtime.burst | request: request}},
+      else: runtime
+  end
 
   defp override_file_cache(runtime, nil), do: runtime
 
