@@ -134,6 +134,15 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_s3_requests_total", failed_delete) == before_failed + 1
   end
 
+  describe "timed/1" do
+    test "returns the result with the microseconds it took" do
+      {us, result} = Smolquery.Telemetry.timed(fn -> Process.sleep(2) && :done end)
+
+      assert result == :done
+      assert us >= 2_000
+    end
+  end
+
   describe "the HTTP edges' latency (T-546)" do
     defp stopped(event, private, status, duration_us) do
       :telemetry.execute(

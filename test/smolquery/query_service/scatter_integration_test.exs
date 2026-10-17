@@ -508,19 +508,29 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     gather = Enum.find(job.trace, &(&1.name == :gather))
     merge = Enum.find(job.trace, &(&1.name == :merge))
-    assert gather.meta == %{shards: shards}
+    assert gather.meta == %{shards: shards, outcome: :ok}
+    assert merge.meta == %{outcome: :ok}
     assert merge.start_us >= gather.start_us + gather.duration_us
 
     for shard <- Enum.filter(job.trace, &(&1.name == :shard)) do
       assert shard.start_us >= gather.start_us
       assert shard.start_us + shard.duration_us <= gather.start_us + gather.duration_us
-      assert %{kind: :peer, target: target, node: node, files: files, bytes: bytes} = shard.meta
+
+      assert %{kind: :peer, target: target, node: node, files: files, sealed_bytes: bytes} =
+               shard.meta
+
       assert target == node()
       assert node == node()
       assert is_integer(files) and files > 0
       assert is_integer(bytes) and bytes > 0
-      assert %{engine_us: engine, describe_us: describe, scan_us: scan, rows: 1} = shard.meta
-      assert engine + describe + scan <= shard.duration_us
+
+      assert %{engine: source, engine_us: engine, describe_us: describe, scan_us: scan} =
+               shard.meta
+
+      assert %{rows: 1, worker_us: worker} = shard.meta
+      assert source in [:warm, :cold]
+      assert engine + describe + scan <= worker
+      assert worker <= shard.duration_us
     end
 
     assert job.trace

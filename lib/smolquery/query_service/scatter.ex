@@ -86,6 +86,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.QueryService.VariantResults
   alias Smolquery.QueryService.Views
   alias Smolquery.QueryService.WorkerTransport
+  alias Smolquery.Telemetry
 
   @default_spill_root ".tmp"
 
@@ -263,7 +264,7 @@ defmodule Smolquery.QueryService.Scatter do
 
     try do
       with {:ok, partials} <-
-             Trace.span(:gather, %{shards: length(shards)}, fn ->
+             Trace.span(:gather, &phase_meta(%{shards: length(shards)}, &1), fn ->
                gather(
                  runtime,
                  decomposition,
@@ -277,7 +278,9 @@ defmodule Smolquery.QueryService.Scatter do
              end),
            paths = Enum.map(partials, &elem(&1, 0)),
            {:ok, frame} <-
-             Trace.span(:merge, fn -> merge(runtime, connection, decomposition, paths) end) do
+             Trace.span(:merge, &phase_meta(%{}, &1), fn ->
+               merge(runtime, connection, decomposition, paths)
+             end) do
         measurements = %{
           shards: length(shards),
           partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
@@ -366,7 +369,7 @@ defmodule Smolquery.QueryService.Scatter do
       target: peer,
       kind: :peer,
       files: length(files),
-      bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0))
+      sealed_bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0))
     }
 
     case outcome do
@@ -376,13 +379,24 @@ defmodule Smolquery.QueryService.Scatter do
       {:ok, _older_worker} ->
         base
 
-      {:error, reason} ->
-        Map.put(base, :error, inspect(reason, limit: 20, printable_limit: 200))
-
-      {:raised, kind, reason} ->
-        Map.put(base, :error, inspect({kind, reason}, limit: 20, printable_limit: 200))
+      failed ->
+        Map.put(base, :error, error_text(failed))
     end
   end
+
+  defp phase_meta(base, outcome) do
+    case Telemetry.outcome(outcome) do
+      :ok -> Map.put(base, :outcome, :ok)
+      :error -> base |> Map.put(:outcome, :error) |> Map.put(:error, error_text(outcome))
+    end
+  end
+
+  defp error_text({:error, reason}), do: inspect(reason, limit: 20, printable_limit: 200)
+
+  defp error_text({:raised, kind, reason}),
+    do: inspect({kind, reason}, limit: 20, printable_limit: 200)
+
+  defp error_text(other), do: inspect(other, limit: 20, printable_limit: 200)
 
   defp node_files(shards) do
     shards

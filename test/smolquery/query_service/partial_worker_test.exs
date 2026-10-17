@@ -51,8 +51,12 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
 
       assert DataFrame.to_columns(DataFrame.load_parquet!(parquet))["s"] == [6]
       assert reply.node == node()
-      assert %{engine_us: engine, describe_us: describe, scan_us: scan} = reply.timings
+
+      assert %{engine: :standalone, engine_us: engine, describe_us: describe, scan_us: scan} =
+               reply.timings
+
       assert engine > 0 and describe > 0 and scan > 0
+      assert reply.timings.worker_us >= describe + scan
     end
 
     test "runs without lockdown when the spec says so", %{request: request} do

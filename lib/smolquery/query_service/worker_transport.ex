@@ -52,7 +52,7 @@ defmodule Smolquery.QueryService.WorkerTransport do
   Runs `request` on `peer`'s `PartialWorker` for job `job_id`.
   """
   @spec call(node(), atom(), PartialWorker.request(), String.t(), timeout()) ::
-          {:ok, %{parquet: binary(), rows: non_neg_integer()}} | {:error, term()}
+          {:ok, PartialWorker.reply()} | {:error, term()}
   def call(peer, name, request, job_id, timeout_ms)
 
   def call(peer, name, request, _job_id, _timeout_ms) when peer == node() do

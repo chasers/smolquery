@@ -56,10 +56,10 @@ defmodule SmolqueryWeb.Waterfall do
   defp row_title(%{meta: meta} = span) when map_size(meta) > 0 do
     detail = Enum.map_join(meta, ", ", fn {key, value} -> "#{key}: #{value}" end)
 
-    "#{span.name} (#{detail})"
+    "#{label(span)} (#{detail})"
   end
 
-  defp row_title(span), do: to_string(span.name)
+  defp row_title(span), do: label(span)
 
   @doc """
   A human-readable duration from microseconds.

@@ -38,7 +38,8 @@ defmodule SmolqueryWeb.WaterfallTest do
         ]
       )
 
-    assert html =~ "shard 2"
+    assert html =~ ">shard 2<"
+    assert html =~ ~r/title="shard 2 \(/
     assert html =~ ">gather<"
   end
 

@@ -192,7 +192,15 @@ A query the Top-N bound applies to (T-400) — one SELECT over one table with `O
 
 A query over a table with a `VARIANT` column also emits a `variants` span inside `execute`: the `DESCRIBE` that finds which result columns need the cast to JSON. It appears only then.
 
-A query that scattered (see Distributed execution) emits three more inside `execute` (T-691). `gather` is the wait for every shard, with `{"shards": 3}`. `merge` is the final query over the partials. And each shard is one `shard` span, timed on the coordinator from dispatch to reply, whose meta says where it ran and what the worker measured there: `{"shard": 0, "target": "smolquery@query-1", "node": "smolquery@query-1", "kind": "peer", "files": 41, "bytes": 3203302024, "rows": 1, "engine_us": 1200, "describe_us": 8400, "scan_us": 271000}`. The gap between the shard's own duration and `engine_us + describe_us + scan_us` is transport. A shard that failed carries `error` instead of the timings. Nothing crosses to the worker but the request: the worker returns its timings in the reply and the coordinator emits the span, so a shard on another node, or on a burst runner, needs no trace context and no exporter.
+A query that scattered (see Distributed execution) emits three more inside `execute` (T-691). `gather` is the wait for every shard, with `{"shards": 3, "outcome": "ok"}`. `merge` is the final query over the partials, with its `outcome`. Either phase that failed, which is what sends the query down the single-engine fallback, says `"outcome": "error"` and carries `error`, so the trace explains why the local execution that follows it is there. And each shard is one `shard` span, timed on the coordinator from dispatch to reply, whose meta says where it ran and what the worker measured there:
+
+```json
+{"shard": 0, "target": "smolquery@query-1", "node": "smolquery@query-1", "kind": "peer",
+ "files": 41, "sealed_bytes": 3203302024, "rows": 1,
+ "engine": "warm", "engine_us": 1200, "describe_us": 8400, "scan_us": 271000, "worker_us": 290300}
+```
+
+`engine` says where the shard's engine came from, as `engine_start`'s meta does for the job: `warm` or `cold` from a peer's pool, `standalone` for a burst runner's cold start, which is why `engine_us` differs by orders of magnitude between kinds. `worker_us` is the whole of the worker's time from engine to reply; the gap between the span's duration and `worker_us` is the wire. `sealed_bytes` counts the shard's sealed files only; hot-tier entries count in `files` but carry no size. A shard that failed carries `error` instead of the timings. A shard still running when another shard failed is stopped, and leaves no span: `gather`'s `shards` says how many there were. Nothing crosses to the worker but the request: the worker returns its timings in the reply and the coordinator emits the span, so a shard on another node, or on a burst runner, needs no trace context and no exporter.
 
 Every phase always emits an `[:smolquery, :query, :span]` telemetry event. The `trace` option only decides whether this job collects them. A job that failed or was cancelled still settles with the spans it got: the partial trace is exactly what explains the failure. History does not persist the trace, the same as `statistics` and `explain`. A non-boolean `trace` value is a 400.
 

@@ -263,6 +263,19 @@ defmodule Smolquery.Telemetry do
   def outcome({:ok, _value}), do: :ok
   def outcome(_error_or_raised), do: :error
 
+  @doc """
+  `fun`'s result with the microseconds it took, on the monotonic clock: the
+  measurement a reply carries when the caller, not the callee, emits the
+  span (a scatter shard's timings, T-691).
+  """
+  @spec timed((-> result)) :: {non_neg_integer(), result} when result: var
+  def timed(fun) when is_function(fun, 0) do
+    started = System.monotonic_time(:microsecond)
+    result = fun.()
+
+    {System.monotonic_time(:microsecond) - started, result}
+  end
+
   defp emit(event, started, {measurements, meta}) when is_map(measurements) and is_map(meta) do
     duration_us = System.monotonic_time(:microsecond) - started
     clock = %{start_us: started, duration_us: duration_us}

@@ -97,6 +97,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.Views
   alias Smolquery.Segments.FieldIds
   alias Smolquery.Segments.Store
+  alias Smolquery.Telemetry
 
   @type request :: %{
           required(:table_ref) => Smolquery.Catalog.table_ref(),
@@ -138,8 +139,11 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   @typedoc """
   What a shard answers: the partial as parquet bytes, its row count, what
-  the shard did with the file cache, the node that ran it, and how long the
-  engine, the field-id description and the scan took on that node (T-691).
+  the shard did with the file cache, the node that ran it, and its timings
+  (T-691): where the engine came from and how long it took, the field-id
+  description, the scan, and `worker_us`, the whole of the worker's time
+  from engine to reply, so a coordinator knows what of a shard's span was
+  the worker and what was the wire.
   """
   @type reply :: %{
           parquet: binary(),
@@ -184,8 +188,8 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2)
     }
 
-    case timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
-      {engine_us, {:ok, engine}} -> execute(engine, request, nil, plan, engine_us)
+    case Telemetry.timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
+      {engine_us, {:ok, engine}} -> execute(engine, request, nil, plan, {:standalone, engine_us})
       {_engine_us, {:error, reason}} -> {:error, {:engine_failed, reason}}
     end
   end
@@ -278,13 +282,18 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2)
     }
 
-    case timed(fn -> JobEngine.acquire(runtime) end) do
-      {engine_us, {:ok, engine, _source}} -> execute(engine, request, decision, plan, engine_us)
-      {_engine_us, {:error, reason}} -> {:error, {:engine_failed, reason}}
+    case Telemetry.timed(fn -> JobEngine.acquire(runtime) end) do
+      {engine_us, {:ok, engine, source}} ->
+        execute(engine, request, decision, plan, {source, engine_us})
+
+      {_engine_us, {:error, reason}} ->
+        {:error, {:engine_failed, reason}}
     end
   end
 
-  defp execute(engine, request, decision, plan, engine_us) do
+  defp execute(engine, request, decision, plan, {source, engine_us}) do
+    started = System.monotonic_time(:microsecond)
+
     path =
       Path.join(
         System.tmp_dir!(),
@@ -295,14 +304,14 @@ defmodule Smolquery.QueryService.PartialWorker do
       with :ok <- apply_statements(engine.connection, plan.settings),
            :ok <- apply_statements(engine.connection, plan.functions),
            {describe_us, {:ok, files}} <-
-             timed(fn -> described(engine.connection, request.files) end),
+             Telemetry.timed(fn -> described(engine.connection, request.files) end),
            :ok <-
              apply_statements(
                engine.connection,
                view(request, files) ++ plan.lockdown.(path, request.allowed_paths)
              ),
            {scan_us, {:ok, partial}} <-
-             timed(fn ->
+             Telemetry.timed(fn ->
                copy_out(
                  engine.connection,
                  request.partial_sql,
@@ -321,7 +330,13 @@ defmodule Smolquery.QueryService.PartialWorker do
          Map.merge(partial, %{
            file_cache: decision,
            node: node(),
-           timings: %{engine_us: engine_us, describe_us: describe_us, scan_us: scan_us}
+           timings: %{
+             engine: source,
+             engine_us: engine_us,
+             describe_us: describe_us,
+             scan_us: scan_us,
+             worker_us: engine_us + System.monotonic_time(:microsecond) - started
+           }
          })}
       else
         {_elapsed_us, {:error, reason}} -> {:error, reason}
@@ -331,13 +346,6 @@ defmodule Smolquery.QueryService.PartialWorker do
       JobEngine.stop(engine)
       File.rm(path)
     end
-  end
-
-  defp timed(fun) do
-    started = System.monotonic_time(:microsecond)
-    result = fun.()
-
-    {System.monotonic_time(:microsecond) - started, result}
   end
 
   defp view(_request, []), do: []
