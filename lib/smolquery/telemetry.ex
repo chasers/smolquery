@@ -1242,12 +1242,12 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_query_scatter_burst_total", []}, Map.get(measurements, :burst, 0))
     bump({"smolquery_query_burst_wait_ms_total", []}, Map.get(measurements, :burst_wait_ms, 0))
 
-    if reason = Map.get(meta, :burst_refused),
+    if reason = burst_refused_reason(Map.get(meta, :burst_refused)),
       do: bump({"smolquery_query_burst_refused_total", [reason: reason]}, 1)
   end
 
   def handle_event([:smolquery, :burst, :boot], measurements, meta, nil) do
-    bump({"smolquery_burst_boots_total", [outcome: Map.get(meta, :outcome, :ok)]}, 1)
+    bump({"smolquery_burst_boots_total", [outcome: boot_outcome(Map.get(meta, :outcome))]}, 1)
     bump({"smolquery_burst_boot_ms_total", []}, Map.get(measurements, :duration_ms, 0))
   end
 
@@ -1256,6 +1256,15 @@ defmodule Smolquery.Telemetry do
   end
 
   def handle_event(_event, _measurements, _meta, nil), do: :ok
+
+  defp burst_refused_reason(reason)
+       when reason in [:under_threshold, :no_pool, :too_few_files, :runners_unreachable],
+       do: reason
+
+  defp burst_refused_reason(_none_or_unknown), do: nil
+
+  defp boot_outcome(:ok), do: :ok
+  defp boot_outcome(_error_or_unknown), do: :error
 
   defp bump(_key, increment) when not is_integer(increment), do: :ok
   defp bump(_key, 0), do: :ok

@@ -51,6 +51,15 @@ defmodule Smolquery.Burst.PolicyTest do
     end
   end
 
+  describe "reason/1" do
+    test "strips the bytes from an under_threshold refusal and passes atoms and nil through" do
+      assert Policy.reason({:under_threshold, 10, 20}) == :under_threshold
+      assert Policy.reason(:no_pool) == :no_pool
+      assert Policy.reason(:runners_unreachable) == :runners_unreachable
+      assert Policy.reason(nil) == nil
+    end
+  end
+
   describe "request?/1" do
     test "accepts false, auto and a count" do
       assert Policy.request?(false)

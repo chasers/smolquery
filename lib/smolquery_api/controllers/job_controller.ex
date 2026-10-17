@@ -20,6 +20,7 @@ defmodule SmolqueryApi.JobController do
   use SmolqueryApi, :controller
 
   alias Explorer.DataFrame
+  alias Smolquery.Burst.Policy
   alias Smolquery.Ddl
   alias Smolquery.Engine.Frame
   alias Smolquery.QueryService.Client
@@ -178,10 +179,14 @@ defmodule SmolqueryApi.JobController do
 
   defp refusal_json(nil), do: nil
 
-  defp refusal_json({:under_threshold, scan_bytes, threshold}),
-    do: %{"reason" => "under_threshold", "scanBytes" => scan_bytes, "thresholdBytes" => threshold}
+  defp refusal_json({:under_threshold, scan_bytes, threshold} = refusal),
+    do: %{
+      "reason" => refusal |> Policy.reason() |> Atom.to_string(),
+      "scanBytes" => scan_bytes,
+      "thresholdBytes" => threshold
+    }
 
-  defp refusal_json(reason) when is_atom(reason), do: %{"reason" => Atom.to_string(reason)}
+  defp refusal_json(reason), do: %{"reason" => reason |> Policy.reason() |> Atom.to_string()}
 
   defp trace_json(nil), do: nil
 

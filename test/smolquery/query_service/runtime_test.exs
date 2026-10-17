@@ -49,11 +49,20 @@ defmodule Smolquery.QueryService.RuntimeTest do
       leased =
         Runtime.new(
           name: :"burst_on_#{System.unique_integer([:positive])}",
-          burst: [enabled: true, pool: __MODULE__.Pool, max: 8, default: false, wait_ms: 1]
+          burst: [
+            enabled: true,
+            pool: __MODULE__.Pool,
+            backend_name: "lambda",
+            max: 8,
+            default: false,
+            wait_ms: 1
+          ]
         )
 
-      assert %{enabled: true, pool: __MODULE__.Pool, max: 8, request: false, wait_ms: 1} =
+      assert %{enabled: true, pool: __MODULE__.Pool, backend: "lambda", max: 8, request: false} =
                leased.burst
+
+      assert leased.burst.wait_ms == 1
     end
 
     test "warm_probe is the lake's current snapshot when the catalog names a lake, SELECT 1 otherwise" do

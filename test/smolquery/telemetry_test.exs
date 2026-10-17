@@ -122,6 +122,19 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_query_burst_refused_total", refused) == before_refused + 1
   end
 
+  test "a burst refusal outside the closed set is not a label (PL-77)" do
+    before = Telemetry.render()
+
+    :telemetry.execute(
+      [:smolquery, :query, :scatter],
+      %{shards: 3, partial_bytes: 1, peers: 3, burst: 0, burst_wait_ms: 0},
+      %{workers: [node()], burst_refused: {:under_threshold, 1, 2}, backend: "local"}
+    )
+
+    refute Telemetry.render() =~ "smolquery_query_burst_refused_total{reason=\"{"
+    assert before != Telemetry.render()
+  end
+
   test "counts runner boots by outcome with their time (PL-77)" do
     ok = ~s({outcome="ok"})
     failed = ~s({outcome="error"})

@@ -425,7 +425,7 @@ defmodule Smolquery.QueryService.Scatter do
           Map.put(measurements, :burst_wait_ms, burst.burst_wait_ms),
           %{
             workers: shards |> peer_shards() |> Enum.map(&elem(&1, 0).node) |> Enum.uniq(),
-            burst_refused: refusal_reason(burst.burst_refused),
+            burst_refused: Policy.reason(burst.burst_refused),
             backend: burst.backend
           }
         )
@@ -670,11 +670,7 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp refused(%{refused: refused}, _burst), do: refused
 
-  defp refusal_reason(nil), do: nil
-  defp refusal_reason({reason, _scan_bytes, _threshold}), do: reason
-  defp refusal_reason(reason), do: reason
-
-  defp backend(%Runtime{burst: %{enabled: true}}), do: Smolquery.Burst.backend_name()
+  defp backend(%Runtime{burst: %{enabled: true, backend: backend}}), do: backend
   defp backend(%Runtime{}), do: nil
 
   defp shard_meta(target, files, outcome) do

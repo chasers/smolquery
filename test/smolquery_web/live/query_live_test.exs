@@ -249,11 +249,13 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert patched =~ "burst=true"
       assert patched =~ "burst_nodes=8"
 
-      render_change(lv, "sql_changed", %{
-        "query" => %{"sql" => "SELECT 1", "trace" => "true", "burst_nodes" => "lots"}
-      })
+      for junk <- ["lots", "0", "-1"] do
+        render_change(lv, "sql_changed", %{
+          "query" => %{"sql" => "SELECT 1", "trace" => "true", "burst_nodes" => junk}
+        })
 
-      assert assert_patch(lv) =~ "burst_nodes=8"
+        assert assert_patch(lv) =~ "burst_nodes=8"
+      end
     end
 
     test "the trace toggle starts enabled", %{conn: conn} do

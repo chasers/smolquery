@@ -124,11 +124,14 @@ defmodule Smolquery.Burst do
   end
 
   @doc """
-  The pool's child spec when this node leases runners, else nothing.
+  The pool's child specs when this node leases runners, else nothing: the
+  boot clock (`Smolquery.Burst.Boots`) and the pool itself.
   """
   @spec children() :: [{module(), keyword()}]
   def children do
-    if enabled?(), do: [pool_spec(Keyword.merge(@defaults, config()))], else: []
+    if enabled?(),
+      do: [__MODULE__.Boots, pool_spec(Keyword.merge(@defaults, config()))],
+      else: []
   end
 
   defp pool_spec(config) do
@@ -148,23 +151,19 @@ defmodule Smolquery.Burst do
 
   @doc false
   @spec grow_started(%{pid: pid()}) :: :ok
-  def grow_started(%{pid: pid}) do
-    Process.put({__MODULE__, :boot, pid}, System.monotonic_time(:millisecond))
-
-    :ok
-  end
+  def grow_started(%{pid: pid}), do: __MODULE__.Boots.started(pid)
 
   @doc """
   The pool's growth hook: one `[:smolquery, :burst, :boot]` event per runner
   boot, with how long it took and whether the runner connected, so a
   deployment sees its cold-start cost and its boot failures as counters.
-  Both hooks run in the pool's own process, which is where the start time
-  waits for the end.
+  FLAME runs the start hook in the task that boots the runner and the end
+  hook in the pool, so the start time crosses between them through
+  `Smolquery.Burst.Boots`.
   """
   @spec grow_ended(:ok | {:exit, term()}, %{pid: pid(), count: non_neg_integer()}) :: :ok
   def grow_ended(result, %{pid: pid, count: count}) do
-    started = Process.delete({__MODULE__, :boot, pid})
-    duration_ms = if started, do: System.monotonic_time(:millisecond) - started, else: 0
+    duration_ms = __MODULE__.Boots.finished(pid) || 0
 
     :telemetry.execute(
       [:smolquery, :burst, :boot],

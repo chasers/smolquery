@@ -54,7 +54,8 @@ defmodule Smolquery.BurstTest do
   end
 
   describe "the boot hooks" do
-    test "emit one boot event per runner with its duration and outcome" do
+    test "emit one boot event per runner with its duration and outcome, across the two hook processes" do
+      start_supervised!(Smolquery.Burst.Boots)
       parent = self()
       handler = "burst-boot-#{System.unique_integer([:positive])}"
 
@@ -68,13 +69,20 @@ defmodule Smolquery.BurstTest do
       on_exit(fn -> :telemetry.detach(handler) end)
 
       booter = spawn(fn -> :ok end)
-      :ok = Burst.grow_started(%{name: Burst.pool(), count: 1, pid: booter})
+
+      spawn(fn ->
+        :ok = Burst.grow_started(%{name: Burst.pool(), count: 1, pid: booter})
+        send(parent, :started)
+      end)
+
+      assert_receive :started
+      Process.sleep(20)
       :ok = Burst.grow_ended(:ok, %{name: Burst.pool(), count: 1, pid: booter})
 
       assert_receive {:boot, %{duration_ms: duration},
                       %{outcome: :ok, backend: "local", runners: 1}}
 
-      assert is_integer(duration) and duration >= 0
+      assert is_integer(duration) and duration >= 20
 
       :ok = Burst.grow_ended({:exit, :boot_timeout}, %{name: Burst.pool(), count: 0, pid: booter})
       assert_receive {:boot, %{duration_ms: 0}, %{outcome: :error, runners: 0}}
@@ -82,8 +90,7 @@ defmodule Smolquery.BurstTest do
 
     test "a local pool built from children/0 reports its first runner's boot" do
       Application.put_env(:smolquery, Burst, enabled: true, backend: :local, max: 1)
-      [spec] = Burst.children()
-      start_supervised!(spec)
+      for spec <- Burst.children(), do: start_supervised!(spec)
 
       parent = self()
       handler = "burst-pool-boot-#{System.unique_integer([:positive])}"
@@ -91,14 +98,19 @@ defmodule Smolquery.BurstTest do
       :telemetry.attach(
         handler,
         [:smolquery, :burst, :boot],
-        fn _event, _measurements, meta, _config -> send(parent, {:boot, meta}) end,
+        fn _event, measurements, meta, _config -> send(parent, {:boot, measurements, meta}) end,
         nil
       )
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
       assert FLAME.call(Burst.pool(), fn -> :ran end) == :ran
-      assert_receive {:boot, %{outcome: :ok, backend: "local", runners: 1}}, 5_000
+
+      assert_receive {:boot, %{duration_ms: duration},
+                      %{outcome: :ok, backend: "local", runners: 1}},
+                     5_000
+
+      assert is_integer(duration) and duration >= 0
     end
   end
 
@@ -111,7 +123,7 @@ defmodule Smolquery.BurstTest do
     test "starts one pool, one shard per runner, with the module's defaults" do
       Application.put_env(:smolquery, Burst, enabled: true, backend: :local)
 
-      assert [{FLAME.Pool, opts}] = Burst.children()
+      assert [Smolquery.Burst.Boots, {FLAME.Pool, opts}] = Burst.children()
       assert opts[:name] == Burst.pool()
       assert opts[:backend] == FLAME.LocalBackend
       assert opts[:min] == 0
@@ -132,7 +144,7 @@ defmodule Smolquery.BurstTest do
         call_timeout_ms: 5_000
       )
 
-      assert [{FLAME.Pool, opts}] = Burst.children()
+      assert [_boots, {FLAME.Pool, opts}] = Burst.children()
       assert opts[:max] == 3
       assert opts[:idle_shutdown_after] == 1_000
       assert opts[:timeout] == 5_000
@@ -140,11 +152,11 @@ defmodule Smolquery.BurstTest do
 
     test "takes a FLAME.Backend module, with or without its options" do
       Application.put_env(:smolquery, Burst, enabled: true, backend: FLAME.FlyBackend)
-      assert [{FLAME.Pool, opts}] = Burst.children()
+      assert [_boots, {FLAME.Pool, opts}] = Burst.children()
       assert opts[:backend] == FLAME.FlyBackend
 
       Application.put_env(:smolquery, Burst, enabled: true, backend: {FLAME.FlyBackend, cpus: 2})
-      assert [{FLAME.Pool, opts}] = Burst.children()
+      assert [_boots, {FLAME.Pool, opts}] = Burst.children()
       assert opts[:backend] == {FLAME.FlyBackend, cpus: 2}
     end
 

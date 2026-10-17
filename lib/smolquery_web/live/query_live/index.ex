@@ -22,8 +22,10 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   The Burst toggle and its nodes field (PL-77) render only on a node that
   leases runners (`Smolquery.QueryService.Client.burst_enabled?/1`). The
-  toggle on with the field blank submits `burst: :auto`, a number submits
-  that many runners, and the toggle off submits `burst: false`. A burst
+  toggle on with the field blank submits `burst: :auto`, a number from one
+  up submits that many runners (anything else leaves the field as it was),
+  and the toggle off submits `burst: false`. Both join the query string as
+  `burst` and `burst_nodes`, on such a node only. A burst
   answer's badge reads `scattered × 3 peers · 2 burst`, with the runner
   wait and the backend in its tooltip; a job that asked and got none shows
   why beside it.
@@ -34,7 +36,8 @@ defmodule SmolqueryWeb.QueryLive.Index do
   did: cached, cache bypassed, or cache off.
 
   The editor's state lives in the URL. Each change patches `sql`, `trace`,
-  `distributed` and `file_cache` into the query string, so a reload, a restored tab, or
+  `distributed`, `file_cache` and, where burst is offered, `burst` and
+  `burst_nodes` into the query string, so a reload, a restored tab, or
   a pasted link brings the editor back with the same SQL. The patch replaces the history entry
   rather than pushing one, so Back leaves the page instead of walking the
   keystrokes.
@@ -47,6 +50,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   use SmolqueryWeb, :live_view
 
+  alias Smolquery.Burst.Policy
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Statistics
   alias SmolqueryWeb.DataTable
@@ -170,7 +174,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   defp nodes_choice(nodes, current) do
     case Integer.parse(nodes) do
-      {count, ""} when count >= 0 -> Integer.to_string(count)
+      {count, ""} when count >= 1 -> Integer.to_string(count)
       _not_a_count -> current
     end
   end
@@ -241,11 +245,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp scatter_title(_peers_only), do: nil
 
   defp refusal_badge(%{burst_refused: nil}), do: nil
-
-  defp refusal_badge(%{burst_refused: {reason, _scan_bytes, _threshold}}),
-    do: "burst refused · #{reason}"
-
-  defp refusal_badge(%{burst_refused: reason}), do: "burst refused · #{reason}"
+  defp refusal_badge(%{burst_refused: refusal}), do: "burst refused · #{Policy.reason(refusal)}"
   defp refusal_badge(_older_job), do: nil
 
   defp cache_badge(:used), do: "cached"
@@ -430,7 +430,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
               type="number"
               name="query[burst_nodes]"
               value={@burst_nodes}
-              min="0"
+              min="1"
               placeholder="auto"
               class="input input-xs w-16"
               disabled={not @burst}

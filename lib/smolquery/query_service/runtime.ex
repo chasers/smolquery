@@ -183,7 +183,7 @@ defmodule Smolquery.QueryService.Runtime do
   `burst` (PL-77) is whether a scattered job may also fan out to runners
   leased from `Smolquery.Burst`'s pool, and the policy it bursts under
   (`Smolquery.Burst.policy/0`, overridable here for a test): `enabled`,
-  `pool`, the pool's `max`, the job `request` (`:auto` by default, set per
+  `pool`, the `backend` name a job record carries, the pool's `max`, the job `request` (`:auto` by default, set per
   job by its `burst:` option), the `:auto` threshold and target, the
   per-job cap, the checkout wait and retry floor, the in-flight cap, and
   the spill: a runner partial over `spill_inline_max_bytes` lands in the
@@ -254,6 +254,7 @@ defmodule Smolquery.QueryService.Runtime do
     burst: %{
       enabled: false,
       pool: Smolquery.Burst.Pool,
+      backend: "local",
       max: 64,
       request: :auto,
       min_scan_bytes: 8_589_934_592,
@@ -314,6 +315,7 @@ defmodule Smolquery.QueryService.Runtime do
           burst: %{
             enabled: boolean(),
             pool: atom(),
+            backend: String.t(),
             max: pos_integer(),
             request: Smolquery.Burst.Policy.request(),
             min_scan_bytes: non_neg_integer(),
@@ -456,6 +458,7 @@ defmodule Smolquery.QueryService.Runtime do
     %{
       enabled: Keyword.fetch!(policy, :enabled),
       pool: Keyword.get(opts, :pool, Smolquery.Burst.pool()),
+      backend: Keyword.get_lazy(opts, :backend_name, &Smolquery.Burst.backend_name/0),
       max: Keyword.fetch!(policy, :max),
       request: Keyword.get(opts, :request, Keyword.fetch!(policy, :default)),
       min_scan_bytes: Keyword.fetch!(policy, :min_scan_bytes),

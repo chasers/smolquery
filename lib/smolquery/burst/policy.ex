@@ -60,6 +60,17 @@ defmodule Smolquery.Burst.Policy do
   def request?(count) when is_integer(count) and count >= 0, do: true
   def request?(_other), do: false
 
+  @doc """
+  The reason of a refusal as a bare atom, for a label, a badge or a JSON
+  field: `under_threshold` without the bytes it was judged against. `nil`
+  stays `nil`, and an atom that is not a refusal passes through, since the
+  scatter adds reasons of its own (`runners_unreachable`, `too_few_files`).
+  """
+  @spec reason(refusal() | atom() | nil) :: atom() | nil
+  def reason(nil), do: nil
+  def reason({reason, _scan_bytes, _threshold}), do: reason
+  def reason(reason) when is_atom(reason), do: reason
+
   defp cap(count, %{max_per_job: per_job, max: max}),
     do: count |> min(per_job) |> min(max) |> max(1)
 
