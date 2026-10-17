@@ -196,6 +196,66 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert render_click(lv, "explain", %{"mode" => "plan"}) =~ "Write some SQL first"
     end
 
+    test "the burst controls stay hidden on a node that leases no runners", %{
+      conn: conn,
+      query: query
+    } do
+      start_web!(query_name: query)
+
+      {:ok, lv, html} = live(conn, ~p"/query")
+
+      refute html =~ ~s|name="query[burst]"|
+
+      render_change(lv, "sql_changed", %{
+        "query" => %{"sql" => "SELECT 1", "trace" => "true", "distributed" => "true"}
+      })
+
+      refute assert_patch(lv) =~ "burst"
+    end
+
+    test "on a node that leases runners the burst toggle and nodes field render and survive the URL (T-679)",
+         %{conn: conn} do
+      query = :"web_query_burst_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {QueryService.Supervisor,
+         name: query,
+         catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
+         burst: [enabled: true, pool: :"web_burst_pool_#{:erlang.unique_integer([:positive])}"]},
+        id: query
+      )
+
+      on_exit(fn -> QueryService.Runtime.delete(query) end)
+      start_web!(query_name: query)
+
+      {:ok, lv, html} = live(conn, ~p"/query?#{[burst: "false", burst_nodes: "4"]}")
+
+      assert html =~ ~s|name="query[burst]"|
+      assert html =~ ~s|name="query[burst_nodes]"|
+      assert html =~ ~s|value="4"|
+
+      render_change(lv, "sql_changed", %{
+        "query" => %{
+          "sql" => "SELECT 1",
+          "trace" => "true",
+          "distributed" => "true",
+          "burst" => "true",
+          "burst_nodes" => "8",
+          "file_cache" => "auto"
+        }
+      })
+
+      patched = assert_patch(lv)
+      assert patched =~ "burst=true"
+      assert patched =~ "burst_nodes=8"
+
+      render_change(lv, "sql_changed", %{
+        "query" => %{"sql" => "SELECT 1", "trace" => "true", "burst_nodes" => "lots"}
+      })
+
+      assert assert_patch(lv) =~ "burst_nodes=8"
+    end
+
     test "the trace toggle starts enabled", %{conn: conn} do
       start_web!()
 

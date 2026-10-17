@@ -126,6 +126,7 @@ defmodule Smolquery.QueryService.Scatter do
           burst: non_neg_integer(),
           burst_wait_ms: non_neg_integer(),
           burst_refused: Policy.refusal() | :runners_unreachable | :too_few_files | nil,
+          backend: String.t() | nil,
           file_cache: FileCache.decision()
         }
 
@@ -413,18 +414,26 @@ defmodule Smolquery.QueryService.Scatter do
           burst: Enum.count(partials, &(&1.kind == :runner))
         }
 
+        burst = %{
+          burst_wait_ms: burst_wait_ms(partials),
+          burst_refused: refused(dealt, measurements.burst),
+          backend: backend(runtime)
+        }
+
         :telemetry.execute(
           [:smolquery, :query, :scatter],
-          measurements,
-          %{workers: shards |> peer_shards() |> Enum.map(&elem(&1, 0).node) |> Enum.uniq()}
+          Map.put(measurements, :burst_wait_ms, burst.burst_wait_ms),
+          %{
+            workers: shards |> peer_shards() |> Enum.map(&elem(&1, 0).node) |> Enum.uniq(),
+            burst_refused: refusal_reason(burst.burst_refused),
+            backend: burst.backend
+          }
         )
 
         {:ok, frame,
-         Map.merge(measurements, %{
-           burst_wait_ms: burst_wait_ms(partials),
-           burst_refused: refused(dealt, measurements.burst),
-           file_cache: partials |> Enum.map(& &1.decision) |> FileCache.combined()
-         })}
+         measurements
+         |> Map.merge(burst)
+         |> Map.put(:file_cache, partials |> Enum.map(& &1.decision) |> FileCache.combined())}
 
       :fallback ->
         :fallback
@@ -660,6 +669,13 @@ defmodule Smolquery.QueryService.Scatter do
     do: :runners_unreachable
 
   defp refused(%{refused: refused}, _burst), do: refused
+
+  defp refusal_reason(nil), do: nil
+  defp refusal_reason({reason, _scan_bytes, _threshold}), do: reason
+  defp refusal_reason(reason), do: reason
+
+  defp backend(%Runtime{burst: %{enabled: true}}), do: Smolquery.Burst.backend_name()
+  defp backend(%Runtime{}), do: nil
 
   defp shard_meta(target, files, outcome) do
     base = %{

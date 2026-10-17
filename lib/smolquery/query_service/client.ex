@@ -247,6 +247,19 @@ defmodule Smolquery.QueryService.Client do
   end
 
   @doc """
+  Whether the query service `name` on this node leases burst runners, so a
+  UI knows whether to offer the option at all (PL-77). `false` when the
+  service is not running here.
+  """
+  @spec burst_enabled?(atom()) :: boolean()
+  def burst_enabled?(name) do
+    case runtime(name) do
+      {:ok, runtime} -> runtime.burst.enabled
+      {:error, :query_service_unavailable} -> false
+    end
+  end
+
+  @doc """
   Whether a failed job's `error` is the service's rather than the
   statement's, so that sending the same statement again later can succeed:
   an engine that did not start or died, a worker or a buffer node that

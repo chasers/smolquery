@@ -77,6 +77,28 @@ defmodule Smolquery.Burst do
   @spec enabled?() :: boolean()
   def enabled?, do: Keyword.get(config(), :enabled, false)
 
+  @doc """
+  The backend's short name for a job record and a span: `"local"` for
+  `FLAME.LocalBackend`, else the module's last segment without its `Backend`
+  suffix, lowercased (`"lambda"` for `Smolquery.Burst.LambdaBackend`).
+  """
+  @spec backend_name() :: String.t()
+  def backend_name do
+    case Keyword.get(config(), :backend, :local) do
+      :local -> "local"
+      {module, _opts} -> short_name(module)
+      module -> short_name(module)
+    end
+  end
+
+  defp short_name(module) do
+    module
+    |> Module.split()
+    |> List.last()
+    |> String.replace_suffix("Backend", "")
+    |> String.downcase()
+  end
+
   @doc "The most runners this node holds at once: the pool's `max`, configured or default."
   @spec max() :: pos_integer()
   def max, do: @defaults |> Keyword.merge(config()) |> Keyword.fetch!(:max)
@@ -119,8 +141,40 @@ defmodule Smolquery.Burst do
      boot_timeout: Keyword.fetch!(config, :boot_timeout_ms),
      idle_shutdown_after: Keyword.fetch!(config, :idle_shutdown_after_ms),
      timeout: Keyword.fetch!(config, :call_timeout_ms),
+     on_grow_start: &__MODULE__.grow_started/1,
+     on_grow_end: &__MODULE__.grow_ended/2,
      log: :info}
   end
+
+  @doc false
+  @spec grow_started(%{pid: pid()}) :: :ok
+  def grow_started(%{pid: pid}) do
+    Process.put({__MODULE__, :boot, pid}, System.monotonic_time(:millisecond))
+
+    :ok
+  end
+
+  @doc """
+  The pool's growth hook: one `[:smolquery, :burst, :boot]` event per runner
+  boot, with how long it took and whether the runner connected, so a
+  deployment sees its cold-start cost and its boot failures as counters.
+  Both hooks run in the pool's own process, which is where the start time
+  waits for the end.
+  """
+  @spec grow_ended(:ok | {:exit, term()}, %{pid: pid(), count: non_neg_integer()}) :: :ok
+  def grow_ended(result, %{pid: pid, count: count}) do
+    started = Process.delete({__MODULE__, :boot, pid})
+    duration_ms = if started, do: System.monotonic_time(:millisecond) - started, else: 0
+
+    :telemetry.execute(
+      [:smolquery, :burst, :boot],
+      %{duration_ms: duration_ms},
+      %{outcome: boot_outcome(result), backend: backend_name(), runners: count}
+    )
+  end
+
+  defp boot_outcome(:ok), do: :ok
+  defp boot_outcome({:exit, _reason}), do: :error
 
   defp backend(:local), do: FLAME.LocalBackend
   defp backend(module) when is_atom(module), do: module

@@ -77,8 +77,9 @@ defmodule Smolquery.QueryService.Job do
   @typedoc """
   How the distributed path answered: the shard count and the partial bytes
   it merged, how many shards ran on peers and how many burst to runners
-  (PL-77), the longest wait a runner shard spent outside its worker, and
-  why burst was refused when the job asked for it and got none.
+  (PL-77), the longest wait a runner shard spent outside its worker, why
+  burst was refused when the job asked for it and got none, and the
+  backend the runners came from.
   """
   @type scatter :: %{
           shards: pos_integer(),

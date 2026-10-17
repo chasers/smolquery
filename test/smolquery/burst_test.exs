@@ -37,6 +37,71 @@ defmodule Smolquery.BurstTest do
     end
   end
 
+  describe "backend_name/0" do
+    test "local by default, else the backend module's short name" do
+      Application.delete_env(:smolquery, Burst)
+      assert Burst.backend_name() == "local"
+
+      Application.put_env(:smolquery, Burst, backend: FLAME.FlyBackend)
+      assert Burst.backend_name() == "fly"
+
+      Application.put_env(:smolquery, Burst,
+        backend: {Smolquery.Burst.LambdaBackend, region: "x"}
+      )
+
+      assert Burst.backend_name() == "lambda"
+    end
+  end
+
+  describe "the boot hooks" do
+    test "emit one boot event per runner with its duration and outcome" do
+      parent = self()
+      handler = "burst-boot-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :burst, :boot],
+        fn _event, measurements, meta, _config -> send(parent, {:boot, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      booter = spawn(fn -> :ok end)
+      :ok = Burst.grow_started(%{name: Burst.pool(), count: 1, pid: booter})
+      :ok = Burst.grow_ended(:ok, %{name: Burst.pool(), count: 1, pid: booter})
+
+      assert_receive {:boot, %{duration_ms: duration},
+                      %{outcome: :ok, backend: "local", runners: 1}}
+
+      assert is_integer(duration) and duration >= 0
+
+      :ok = Burst.grow_ended({:exit, :boot_timeout}, %{name: Burst.pool(), count: 0, pid: booter})
+      assert_receive {:boot, %{duration_ms: 0}, %{outcome: :error, runners: 0}}
+    end
+
+    test "a local pool built from children/0 reports its first runner's boot" do
+      Application.put_env(:smolquery, Burst, enabled: true, backend: :local, max: 1)
+      [spec] = Burst.children()
+      start_supervised!(spec)
+
+      parent = self()
+      handler = "burst-pool-boot-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :burst, :boot],
+        fn _event, _measurements, meta, _config -> send(parent, {:boot, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert FLAME.call(Burst.pool(), fn -> :ran end) == :ran
+      assert_receive {:boot, %{outcome: :ok, backend: "local", runners: 1}}, 5_000
+    end
+  end
+
   describe "children/0" do
     test "starts no pool when burst is off" do
       Application.delete_env(:smolquery, Burst)
@@ -55,6 +120,8 @@ defmodule Smolquery.BurstTest do
       assert opts[:boot_timeout] == 120_000
       assert opts[:idle_shutdown_after] == 15_000
       assert opts[:timeout] == 600_000
+      assert is_function(opts[:on_grow_start], 1)
+      assert is_function(opts[:on_grow_end], 2)
     end
 
     test "a configured key overrides its default" do

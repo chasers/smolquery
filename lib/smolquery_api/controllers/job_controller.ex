@@ -171,7 +171,8 @@ defmodule SmolqueryApi.JobController do
       "peers" => Map.get(scatter, :peers, shards),
       "burst" => Map.get(scatter, :burst, 0),
       "burstWaitMs" => Map.get(scatter, :burst_wait_ms, 0),
-      "burstRefused" => refusal_json(Map.get(scatter, :burst_refused))
+      "burstRefused" => refusal_json(Map.get(scatter, :burst_refused)),
+      "backend" => Map.get(scatter, :backend)
     }
   end
 

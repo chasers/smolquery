@@ -599,7 +599,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert Enum.sum_by(peers, & &1.meta.hot_files) >= 1
     assert Enum.all?(peers, &(&1.meta.target == node()))
 
-    assert_receive {:scatter, %{shards: 5}, %{workers: [worker]}}
+    assert job.scatter.backend == "local"
+
+    assert_receive {:scatter, %{shards: 5, peers: 3, burst: 2},
+                    %{workers: [worker], backend: "local", burst_refused: nil}}
+
     assert worker == node()
   end
 
@@ -616,6 +620,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
     assert %{shards: 3, peers: 3, burst: 0, burst_refused: :no_pool, burst_wait_ms: 0} =
              job.scatter
+
+    assert job.scatter.backend == nil
+    assert_receive {:scatter, _measurements, %{burst_refused: :no_pool, backend: nil}}
   end
 
   test "auto on a node that leases no runners is quietly peers only", %{distributed: distributed} do

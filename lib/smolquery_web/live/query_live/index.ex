@@ -20,6 +20,14 @@ defmodule SmolqueryWeb.QueryLive.Index do
   a shard badge from `job.scatter`; no badge means the ordinary scan
   answered, including every silent fallback.
 
+  The Burst toggle and its nodes field (PL-77) render only on a node that
+  leases runners (`Smolquery.QueryService.Client.burst_enabled?/1`). The
+  toggle on with the field blank submits `burst: :auto`, a number submits
+  that many runners, and the toggle off submits `burst: false`. A burst
+  answer's badge reads `scattered × 3 peers · 2 burst`, with the runner
+  wait and the backend in its tooltip; a job that asked and got none shows
+  why beside it.
+
   The File cache select (T-629) submits `file_cache: true` for On and
   `false` for Off, and nothing for Auto, where a cold scan too large to fill
   the node's read cache on the way skips it. A badge shows what the job
@@ -60,6 +68,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:sql, "")
       |> assign(:trace, true)
       |> assign(:distributed, true)
+      |> assign(:burst_available, QueryService.Client.burst_enabled?(runtime.query_name))
+      |> assign(:burst, true)
+      |> assign(:burst_nodes, "")
       |> assign(:file_cache, "auto")
       |> assign(:sql_in_url, true)
       |> assign(:job, nil)
@@ -79,6 +90,11 @@ defmodule SmolqueryWeb.QueryLive.Index do
      |> assign(:sql, Map.get(params, "sql", socket.assigns.sql))
      |> assign(:trace, params_flag(params, "trace", socket.assigns.trace))
      |> assign(:distributed, params_flag(params, "distributed", socket.assigns.distributed))
+     |> assign(:burst, params_flag(params, "burst", socket.assigns.burst))
+     |> assign(
+       :burst_nodes,
+       nodes_choice(Map.get(params, "burst_nodes"), socket.assigns.burst_nodes)
+     )
      |> assign(
        :file_cache,
        cache_choice(Map.get(params, "file_cache"), socket.assigns.file_cache)
@@ -133,6 +149,11 @@ defmodule SmolqueryWeb.QueryLive.Index do
     |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
     |> assign(:trace, Map.get(query, "trace") == "true")
     |> assign(:distributed, Map.get(query, "distributed") == "true")
+    |> assign(:burst, Map.get(query, "burst") == "true")
+    |> assign(
+      :burst_nodes,
+      nodes_choice(Map.get(query, "burst_nodes"), socket.assigns.burst_nodes)
+    )
     |> assign(:file_cache, cache_choice(Map.get(query, "file_cache"), socket.assigns.file_cache))
     |> assign_sql_in_url()
   end
@@ -143,6 +164,26 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp cache_opt("on"), do: [file_cache: true]
   defp cache_opt("off"), do: [file_cache: false]
   defp cache_opt(_auto), do: []
+
+  defp nodes_choice(nil, current), do: current
+  defp nodes_choice("", _current), do: ""
+
+  defp nodes_choice(nodes, current) do
+    case Integer.parse(nodes) do
+      {count, ""} when count >= 0 -> Integer.to_string(count)
+      _not_a_count -> current
+    end
+  end
+
+  defp burst_opt(%{burst_available: false}), do: []
+  defp burst_opt(%{burst: false}), do: [burst: false]
+  defp burst_opt(%{burst_nodes: ""}), do: [burst: :auto]
+  defp burst_opt(%{burst_nodes: nodes}), do: [burst: String.to_integer(nodes)]
+
+  defp burst_params(%{burst_available: false}), do: []
+
+  defp burst_params(%{burst: burst, burst_nodes: nodes}),
+    do: [burst: to_string(burst), burst_nodes: nodes]
 
   defp params_flag(params, name, current) do
     case Map.fetch(params, name) do
@@ -165,18 +206,21 @@ defmodule SmolqueryWeb.QueryLive.Index do
     ~p"/query?#{editor_params(assigns)}"
   end
 
-  defp editor_params(%{
-         sql: sql,
-         trace: trace,
-         distributed: distributed,
-         file_cache: file_cache,
-         sql_in_url: sql_in_url
-       }) do
-    flag_params = [
-      trace: to_string(trace),
-      distributed: to_string(distributed),
-      file_cache: file_cache
-    ]
+  defp editor_params(
+         %{
+           sql: sql,
+           trace: trace,
+           distributed: distributed,
+           file_cache: file_cache,
+           sql_in_url: sql_in_url
+         } = assigns
+       ) do
+    flag_params =
+      [
+        trace: to_string(trace),
+        distributed: to_string(distributed),
+        file_cache: file_cache
+      ] ++ burst_params(assigns)
 
     if sql == "" or not sql_in_url do
       flag_params
@@ -184,6 +228,25 @@ defmodule SmolqueryWeb.QueryLive.Index do
       [{:sql, sql} | flag_params]
     end
   end
+
+  defp scatter_badge(%{burst: burst, peers: peers}) when burst > 0,
+    do: "scattered × #{peers} peers · #{burst} burst"
+
+  defp scatter_badge(%{shards: shards}), do: "scattered × #{shards}"
+
+  defp scatter_title(%{burst: burst} = scatter) when burst > 0,
+    do:
+      "runner wait #{Map.get(scatter, :burst_wait_ms, 0)} ms · backend #{Map.get(scatter, :backend) || "unknown"}"
+
+  defp scatter_title(_peers_only), do: nil
+
+  defp refusal_badge(%{burst_refused: nil}), do: nil
+
+  defp refusal_badge(%{burst_refused: {reason, _scan_bytes, _threshold}}),
+    do: "burst refused · #{reason}"
+
+  defp refusal_badge(%{burst_refused: reason}), do: "burst refused · #{reason}"
+  defp refusal_badge(_older_job), do: nil
 
   defp cache_badge(:used), do: "cached"
   defp cache_badge(:bypassed), do: "cache bypassed"
@@ -207,7 +270,8 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   defp submit(socket, opts) do
     opts =
-      [{:distributed, socket.assigns.distributed} | cache_opt(socket.assigns.file_cache)] ++ opts
+      [{:distributed, socket.assigns.distributed} | cache_opt(socket.assigns.file_cache)] ++
+        burst_opt(socket.assigns) ++ opts
 
     opts = if socket.assigns.trace, do: [{:trace, true} | opts], else: opts
 
@@ -354,6 +418,24 @@ defmodule SmolqueryWeb.QueryLive.Index do
               class="checkbox checkbox-sm"
             /> Distribute
           </label>
+          <label :if={@burst_available} class="label cursor-pointer gap-1 text-sm">
+            <input
+              type="checkbox"
+              name="query[burst]"
+              value="true"
+              checked={@burst}
+              class="checkbox checkbox-sm"
+            /> Burst
+            <input
+              type="number"
+              name="query[burst_nodes]"
+              value={@burst_nodes}
+              min="0"
+              placeholder="auto"
+              class="input input-xs w-16"
+              disabled={not @burst}
+            />
+          </label>
           <label class="label gap-1 text-sm">
             File cache
             <select name="query[file_cache]" class="select select-xs">
@@ -375,8 +457,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
             Cancel
           </button>
           <span :if={@job} class={["badge", state_badge(@job.state)]}>{@job.state}</span>
-          <span :if={@job && @job.scatter} class="badge badge-accent">
-            scattered × {@job.scatter.shards}
+          <span
+            :if={@job && @job.scatter}
+            class="badge badge-accent"
+            title={scatter_title(@job.scatter)}
+          >
+            {scatter_badge(@job.scatter)}
+          </span>
+          <span :if={@job && @job.scatter && refusal_badge(@job.scatter)} class="badge badge-ghost">
+            {refusal_badge(@job.scatter)}
           </span>
           <span :if={@job && @job.file_cache} class="badge badge-ghost">
             {cache_badge(@job.file_cache)}

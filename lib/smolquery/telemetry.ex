@@ -194,8 +194,12 @@ defmodule Smolquery.Telemetry do
       [:db_connection, :connection_error] %{count}, meta %{error: %DBConnection.ConnectionError{}}
                                           — DBConnection's own event, one per failed pool
                                           checkout on this node, whichever Postgrex pool
-      [:smolquery, :query, :scatter]      %{shards, partial_bytes}, meta %{workers: [node()]}
-                                          — one per query the distributed path answered (PL-49)
+      [:smolquery, :query, :scatter]      %{shards, partial_bytes, peers, burst, burst_wait_ms},
+                                          meta %{workers: [node()], burst_refused, backend}
+                                          — one per query the distributed path answered (PL-49);
+                                          peers and burst say where its shards ran (PL-77)
+      [:smolquery, :burst, :boot]         %{duration_ms}, meta %{outcome: :ok | :error, backend, runners}
+                                          — one per runner the burst pool booted (PL-77)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
                                           — one per query phase (Smolquery.QueryService.Trace);
                                           not aggregated here, collected per job when tracing.
@@ -284,6 +288,7 @@ defmodule Smolquery.Telemetry do
   end
 
   @events [
+    [:smolquery, :burst, :boot],
     [:smolquery, :api, :stop],
     [:smolquery, :clickhouse, :stop],
     [:smolquery, :clickhouse, :unanswered],
@@ -563,6 +568,22 @@ defmodule Smolquery.Telemetry do
       "Shards executed by scattered queries; divide by scattered for the mean fan-out.",
     "smolquery_query_scatter_partial_bytes_total" =>
       "Partial-result bytes scattered queries merged; the network bill once workers are remote.",
+    "smolquery_query_scatter_peers_total" =>
+      "Shards of scattered queries that ran on the cluster's own nodes (PL-77).",
+    "smolquery_query_scatter_burst_total" =>
+      "Shards of scattered queries that ran on burst runners (PL-77); divide by scattered " <>
+        "queries with burst for the mean fan-out.",
+    "smolquery_query_burst_wait_ms_total" =>
+      "Milliseconds scattered queries spent waiting for their slowest runner outside the " <>
+        "worker: the lease, the boot when the pool grew, and the wire (PL-77).",
+    "smolquery_query_burst_refused_total" =>
+      "Scattered queries that asked for burst and got no runner, by reason: under_threshold, " <>
+        "no_pool, too_few_files, or runners_unreachable (PL-77).",
+    "smolquery_burst_boots_total" =>
+      "Runners the burst pool booted, by outcome: ok when the runner connected, error when " <>
+        "the boot failed or timed out (PL-77).",
+    "smolquery_burst_boot_ms_total" =>
+      "Milliseconds the burst pool spent booting runners; divide by boots for the mean cold start.",
     "smolquery_buffer_commit_bytes_total" =>
       "Wire bytes in committed group commits; what flush_max_bytes gates on (T-333).",
     "smolquery_buffer_commit_scanned_columns_total" =>
@@ -1208,7 +1229,7 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_catalog_database_checkout_errors_total", [reason: checkout_reason(meta)]}, 1)
   end
 
-  def handle_event([:smolquery, :query, :scatter], measurements, _meta, nil) do
+  def handle_event([:smolquery, :query, :scatter], measurements, meta, nil) do
     bump({"smolquery_query_scattered_total", []}, 1)
     bump({"smolquery_query_scatter_shards_total", []}, Map.get(measurements, :shards, 0))
 
@@ -1216,6 +1237,18 @@ defmodule Smolquery.Telemetry do
       {"smolquery_query_scatter_partial_bytes_total", []},
       Map.get(measurements, :partial_bytes, 0)
     )
+
+    bump({"smolquery_query_scatter_peers_total", []}, Map.get(measurements, :peers, 0))
+    bump({"smolquery_query_scatter_burst_total", []}, Map.get(measurements, :burst, 0))
+    bump({"smolquery_query_burst_wait_ms_total", []}, Map.get(measurements, :burst_wait_ms, 0))
+
+    if reason = Map.get(meta, :burst_refused),
+      do: bump({"smolquery_query_burst_refused_total", [reason: reason]}, 1)
+  end
+
+  def handle_event([:smolquery, :burst, :boot], measurements, meta, nil) do
+    bump({"smolquery_burst_boots_total", [outcome: Map.get(meta, :outcome, :ok)]}, 1)
+    bump({"smolquery_burst_boot_ms_total", []}, Map.get(measurements, :duration_ms, 0))
   end
 
   def handle_event([:smolquery, :lifecycle, :broadcast], _measurements, meta, nil) do

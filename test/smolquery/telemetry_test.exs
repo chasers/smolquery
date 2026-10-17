@@ -96,6 +96,57 @@ defmodule Smolquery.TelemetryTest do
     end
   end
 
+  test "counts where a scattered query's shards ran, its runner wait, and burst refusals (PL-77)" do
+    refused = ~s({reason="under_threshold"})
+
+    before_peers = value("smolquery_query_scatter_peers_total")
+    before_burst = value("smolquery_query_scatter_burst_total")
+    before_wait = value("smolquery_query_burst_wait_ms_total")
+    before_refused = value("smolquery_query_burst_refused_total", refused)
+
+    :telemetry.execute(
+      [:smolquery, :query, :scatter],
+      %{shards: 5, partial_bytes: 10, peers: 3, burst: 2, burst_wait_ms: 140},
+      %{workers: [node()], burst_refused: nil, backend: "local"}
+    )
+
+    :telemetry.execute(
+      [:smolquery, :query, :scatter],
+      %{shards: 3, partial_bytes: 10, peers: 3, burst: 0, burst_wait_ms: 0},
+      %{workers: [node()], burst_refused: :under_threshold, backend: "local"}
+    )
+
+    assert value("smolquery_query_scatter_peers_total") == before_peers + 6
+    assert value("smolquery_query_scatter_burst_total") == before_burst + 2
+    assert value("smolquery_query_burst_wait_ms_total") == before_wait + 140
+    assert value("smolquery_query_burst_refused_total", refused) == before_refused + 1
+  end
+
+  test "counts runner boots by outcome with their time (PL-77)" do
+    ok = ~s({outcome="ok"})
+    failed = ~s({outcome="error"})
+
+    before_ok = value("smolquery_burst_boots_total", ok)
+    before_failed = value("smolquery_burst_boots_total", failed)
+    before_ms = value("smolquery_burst_boot_ms_total")
+
+    :telemetry.execute([:smolquery, :burst, :boot], %{duration_ms: 1_800}, %{
+      outcome: :ok,
+      backend: "lambda",
+      runners: 1
+    })
+
+    :telemetry.execute([:smolquery, :burst, :boot], %{duration_ms: 120_000}, %{
+      outcome: :error,
+      backend: "lambda",
+      runners: 0
+    })
+
+    assert value("smolquery_burst_boots_total", ok) == before_ok + 1
+    assert value("smolquery_burst_boots_total", failed) == before_failed + 1
+    assert value("smolquery_burst_boot_ms_total") == before_ms + 121_800
+  end
+
   test "prices object-store requests by op, class, bytes, and latency bucket (T-379)" do
     put = ~s({op="put"})
     counted = ~s({op="put",class="2xx"})
