@@ -46,6 +46,14 @@ defmodule Smolquery.QueryService.Scatter do
      `Runner` put it inside `allowed_directories` before lockdown — and the
      final query reads them back with `read_parquet` on the job's own
      engine, inside the same result bound as any other query.
+  6. The fan-out is traced (T-691): `gather` spans the wait for every
+     shard, `merge` the final query, and each shard is a `shard` span of
+     its own under `gather`, timed on the coordinator from dispatch to
+     reply and carrying what the worker measured on its side (engine,
+     describe, scan) with the target node, its kind, files and bytes.
+     The spans ride the job's phase collection, so they reach the
+     `trace: true` answer, the query UI waterfall and the OpenTelemetry
+     trace without a context crossing to the worker.
 
   ## PoC limits
 
@@ -74,6 +82,7 @@ defmodule Smolquery.QueryService.Scatter do
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Statistics
+  alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.VariantResults
   alias Smolquery.QueryService.Views
   alias Smolquery.QueryService.WorkerTransport
@@ -254,9 +263,21 @@ defmodule Smolquery.QueryService.Scatter do
 
     try do
       with {:ok, partials} <-
-             gather(runtime, decomposition, ref, schema, shards, partials_dir, job_id, timeout_ms),
+             Trace.span(:gather, %{shards: length(shards)}, fn ->
+               gather(
+                 runtime,
+                 decomposition,
+                 ref,
+                 schema,
+                 shards,
+                 partials_dir,
+                 job_id,
+                 timeout_ms
+               )
+             end),
            paths = Enum.map(partials, &elem(&1, 0)),
-           {:ok, frame} <- merge(runtime, connection, decomposition, paths) do
+           {:ok, frame} <-
+             Trace.span(:merge, fn -> merge(runtime, connection, decomposition, paths) end) do
         measurements = %{
           shards: length(shards),
           partial_bytes: Enum.sum_by(paths, &File.stat!(&1).size)
@@ -309,7 +330,10 @@ defmodule Smolquery.QueryService.Scatter do
           timeout_ms: timeout_ms
         }
 
-        {index, WorkerTransport.call(peer, runtime.name, request, job_id, timeout_ms)}
+        {index,
+         Trace.span(:shard, &shard_meta(index, peer, files, &1), fn ->
+           WorkerTransport.call(peer, runtime.name, request, job_id, timeout_ms)
+         end)}
       end,
       max_concurrency: length(shards),
       ordered: true,
@@ -333,6 +357,30 @@ defmodule Smolquery.QueryService.Scatter do
     |> case do
       {:ok, partials} -> {:ok, Enum.reverse(partials)}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp shard_meta(index, peer, files, outcome) do
+    base = %{
+      shard: index,
+      target: peer,
+      kind: :peer,
+      files: length(files),
+      bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0))
+    }
+
+    case outcome do
+      {:ok, %{rows: rows, timings: timings} = reply} ->
+        base |> Map.merge(timings) |> Map.merge(%{rows: rows, node: Map.get(reply, :node, peer)})
+
+      {:ok, _older_worker} ->
+        base
+
+      {:error, reason} ->
+        Map.put(base, :error, inspect(reason, limit: 20, printable_limit: 200))
+
+      {:raised, kind, reason} ->
+        Map.put(base, :error, inspect({kind, reason}, limit: 20, printable_limit: 200))
     end
   end
 

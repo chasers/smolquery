@@ -28,6 +28,20 @@ defmodule SmolqueryWeb.WaterfallTest do
     assert html =~ "manifest_fetch (url: http://n1:4321)"
   end
 
+  test "a shard span is labelled with its index" do
+    html =
+      render_component(&Waterfall.waterfall/1,
+        id: "trace",
+        spans: [
+          %{name: :shard, start_us: 0, duration_us: 10, meta: %{shard: 2, target: :a@b}},
+          %{name: :gather, start_us: 0, duration_us: 10, meta: %{shards: 3}}
+        ]
+      )
+
+    assert html =~ "shard 2"
+    assert html =~ ">gather<"
+  end
+
   test "a zero-length span still gets a visible bar" do
     html =
       render_component(&Waterfall.waterfall/1,

@@ -51,9 +51,12 @@ defmodule Smolquery.Tracing do
 
   ## What stays out
 
-  Buffer flushes, seals and scatter shards keep their events and metrics
-  and get no spans yet. A shard runs on another node with no context
-  propagated, so a scattered query is one span on the coordinator.
+  Buffer flushes and seals keep their events and metrics and get no spans
+  yet. A scattered query's shards do appear, as `gather`, `merge` and one
+  `shard` phase each (T-691), but every one of those spans is emitted on
+  the coordinator from timings the worker returns in its reply: no context
+  crosses to a worker node or a burst runner, and none of them needs an
+  exporter.
   """
 
   use GenServer

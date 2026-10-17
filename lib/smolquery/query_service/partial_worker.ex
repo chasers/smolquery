@@ -136,7 +136,22 @@ defmodule Smolquery.QueryService.PartialWorker do
           optional(:params) => [term()]
         }
 
-  @type reply :: %{parquet: binary(), rows: non_neg_integer(), file_cache: FileCache.decision()}
+  @typedoc """
+  What a shard answers: the partial as parquet bytes, its row count, what
+  the shard did with the file cache, the node that ran it, and how long the
+  engine, the field-id description and the scan took on that node (T-691).
+  """
+  @type reply :: %{
+          parquet: binary(),
+          rows: non_neg_integer(),
+          file_cache: FileCache.decision(),
+          node: node(),
+          timings: %{
+            engine_us: non_neg_integer(),
+            describe_us: non_neg_integer(),
+            scan_us: non_neg_integer()
+          }
+        }
 
   @doc """
   Whether query service instance `name` runs on this node.
@@ -169,9 +184,9 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2)
     }
 
-    case JobEngine.start_standalone(standalone_options(spec)) do
-      {:ok, engine} -> execute(engine, request, nil, plan)
-      {:error, reason} -> {:error, {:engine_failed, reason}}
+    case timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
+      {engine_us, {:ok, engine}} -> execute(engine, request, nil, plan, engine_us)
+      {_engine_us, {:error, reason}} -> {:error, {:engine_failed, reason}}
     end
   end
 
@@ -263,13 +278,13 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2)
     }
 
-    case JobEngine.acquire(runtime) do
-      {:ok, engine, _source} -> execute(engine, request, decision, plan)
-      {:error, reason} -> {:error, {:engine_failed, reason}}
+    case timed(fn -> JobEngine.acquire(runtime) end) do
+      {engine_us, {:ok, engine, _source}} -> execute(engine, request, decision, plan, engine_us)
+      {_engine_us, {:error, reason}} -> {:error, {:engine_failed, reason}}
     end
   end
 
-  defp execute(engine, request, decision, plan) do
+  defp execute(engine, request, decision, plan, engine_us) do
     path =
       Path.join(
         System.tmp_dir!(),
@@ -279,32 +294,50 @@ defmodule Smolquery.QueryService.PartialWorker do
     try do
       with :ok <- apply_statements(engine.connection, plan.settings),
            :ok <- apply_statements(engine.connection, plan.functions),
-           {:ok, files} <- described(engine.connection, request.files),
+           {describe_us, {:ok, files}} <-
+             timed(fn -> described(engine.connection, request.files) end),
            :ok <-
              apply_statements(
                engine.connection,
                view(request, files) ++ plan.lockdown.(path, request.allowed_paths)
              ),
-           {:ok, partial} <-
-             copy_out(
-               engine.connection,
-               request.partial_sql,
-               Map.get(request, :params, []),
-               path,
-               Map.get(request, :timeout_ms, :infinity)
-             ) do
+           {scan_us, {:ok, partial}} <-
+             timed(fn ->
+               copy_out(
+                 engine.connection,
+                 request.partial_sql,
+                 Map.get(request, :params, []),
+                 path,
+                 Map.get(request, :timeout_ms, :infinity)
+               )
+             end) do
         if decision do
           :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
             decision: decision
           })
         end
 
-        {:ok, Map.put(partial, :file_cache, decision)}
+        {:ok,
+         Map.merge(partial, %{
+           file_cache: decision,
+           node: node(),
+           timings: %{engine_us: engine_us, describe_us: describe_us, scan_us: scan_us}
+         })}
+      else
+        {_elapsed_us, {:error, reason}} -> {:error, reason}
+        {:error, reason} -> {:error, reason}
       end
     after
       JobEngine.stop(engine)
       File.rm(path)
     end
+  end
+
+  defp timed(fun) do
+    started = System.monotonic_time(:microsecond)
+    result = fun.()
+
+    {System.monotonic_time(:microsecond) - started, result}
   end
 
   defp view(_request, []), do: []

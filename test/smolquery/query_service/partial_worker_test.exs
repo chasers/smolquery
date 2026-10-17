@@ -46,10 +46,13 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
 
   describe "run_standalone/1" do
     test "answers a shard with nothing but the request", %{request: request} do
-      assert {:ok, %{rows: 1, file_cache: nil, parquet: parquet}} =
+      assert {:ok, %{rows: 1, file_cache: nil, parquet: parquet} = reply} =
                PartialWorker.run_standalone(request)
 
       assert DataFrame.to_columns(DataFrame.load_parquet!(parquet))["s"] == [6]
+      assert reply.node == node()
+      assert %{engine_us: engine, describe_us: describe, scan_us: scan} = reply.timings
+      assert engine > 0 and describe > 0 and scan > 0
     end
 
     test "runs without lockdown when the spec says so", %{request: request} do

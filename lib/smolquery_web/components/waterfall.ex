@@ -26,7 +26,7 @@ defmodule SmolqueryWeb.Waterfall do
         class="flex items-center gap-2 text-xs font-mono"
         title={row_title(span)}
       >
-        <span class="w-32 shrink-0 text-right opacity-70">{span.name}</span>
+        <span class="w-32 shrink-0 text-right opacity-70">{label(span)}</span>
         <div class="relative h-4 grow rounded bg-base-200">
           <div class="absolute inset-y-0 rounded bg-primary" style={bar_style(span, @total)}></div>
         </div>
@@ -35,6 +35,9 @@ defmodule SmolqueryWeb.Waterfall do
     </div>
     """
   end
+
+  defp label(%{name: name, meta: %{shard: index}}), do: "#{name} #{index}"
+  defp label(%{name: name}), do: to_string(name)
 
   defp total_us(spans) do
     spans

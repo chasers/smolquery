@@ -494,6 +494,42 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, %{rows: 1, file_cache: :bypassed}} = PartialWorker.run(distributed, request)
   end
 
+  test "a scattered query traces gather, merge and one shard per worker (T-691)",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events", trace: true)
+
+    assert %{shards: shards} = job.scatter
+    names = Enum.map(job.trace, & &1.name)
+
+    assert :gather in names
+    assert :merge in names
+    assert Enum.count(names, &(&1 == :shard)) == shards
+
+    gather = Enum.find(job.trace, &(&1.name == :gather))
+    merge = Enum.find(job.trace, &(&1.name == :merge))
+    assert gather.meta == %{shards: shards}
+    assert merge.start_us >= gather.start_us + gather.duration_us
+
+    for shard <- Enum.filter(job.trace, &(&1.name == :shard)) do
+      assert shard.start_us >= gather.start_us
+      assert shard.start_us + shard.duration_us <= gather.start_us + gather.duration_us
+      assert %{kind: :peer, target: target, node: node, files: files, bytes: bytes} = shard.meta
+      assert target == node()
+      assert node == node()
+      assert is_integer(files) and files > 0
+      assert is_integer(bytes) and bytes > 0
+      assert %{engine_us: engine, describe_us: describe, scan_us: scan, rows: 1} = shard.meta
+      assert engine + describe + scan <= shard.duration_us
+    end
+
+    assert job.trace
+           |> Enum.filter(&(&1.name == :shard))
+           |> Enum.map(& &1.meta.shard)
+           |> Enum.sort() ==
+             Enum.to_list(0..(shards - 1))
+  end
+
   test "a query that does not decompose still answers", %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, frame} =
              Client.query(distributed, "SELECT id, name FROM analytics.events ORDER BY id")
