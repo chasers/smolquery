@@ -2,6 +2,7 @@ defmodule Smolquery.RolesTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.Roles
+  alias Smolquery.Test.FlameParent
 
   doctest Roles
 
@@ -82,6 +83,11 @@ defmodule Smolquery.RolesTest do
       on_exit(fn -> Application.put_env(:smolquery, :roles, original) end)
 
       assert Roles.enabled() == Roles.all()
+    end
+
+    test "is empty on a burst runner, whatever is configured" do
+      FlameParent.put_env()
+      assert Roles.enabled() == []
     end
   end
 

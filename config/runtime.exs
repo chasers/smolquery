@@ -1024,29 +1024,21 @@ end
 # Burst (PL-77): the pool of ephemeral runners a query can fan out to. Set
 # the backend to lease runners from this node; a runner itself needs none of
 # these, it learns everything from its assignment.
-if backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
-  burst_backend =
-    case backend do
-      "local" -> :local
-      other -> raise ArgumentError, "SMOLQUERY_BURST_BACKEND must be local, got: #{other}"
-    end
-
+if burst_backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
   config :smolquery, Smolquery.Burst,
     enabled: true,
-    backend: burst_backend,
-    max:
-      Smolquery.RuntimeConfig.positive_integer!(
-        "SMOLQUERY_BURST_MAX",
-        System.get_env("SMOLQUERY_BURST_MAX", "64")
-      ),
-    boot_timeout_ms:
-      Smolquery.RuntimeConfig.positive_integer!(
-        "SMOLQUERY_BURST_BOOT_TIMEOUT_MS",
-        System.get_env("SMOLQUERY_BURST_BOOT_TIMEOUT_MS", "120000")
-      ),
-    idle_shutdown_after_ms:
-      Smolquery.RuntimeConfig.positive_integer!(
-        "SMOLQUERY_BURST_IDLE_SHUTDOWN_MS",
-        System.get_env("SMOLQUERY_BURST_IDLE_SHUTDOWN_MS", "15000")
-      )
+    backend:
+      Smolquery.RuntimeConfig.enum!("SMOLQUERY_BURST_BACKEND", burst_backend, [{"local", :local}])
+end
+
+for {variable, key} <- [
+      {"SMOLQUERY_BURST_MAX", :max},
+      {"SMOLQUERY_BURST_BOOT_TIMEOUT_MS", :boot_timeout_ms},
+      {"SMOLQUERY_BURST_IDLE_SHUTDOWN_MS", :idle_shutdown_after_ms},
+      {"SMOLQUERY_BURST_CALL_TIMEOUT_MS", :call_timeout_ms}
+    ],
+    value = System.get_env(variable) do
+  config :smolquery, Smolquery.Burst, [
+    {key, Smolquery.RuntimeConfig.positive_integer!(variable, value)}
+  ]
 end

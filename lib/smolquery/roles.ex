@@ -12,13 +12,17 @@ defmodule Smolquery.Roles do
 
   Roles come from `config :smolquery, :roles`, which `config/runtime.exs`
   populates from the `SMOLQUERY_ROLES` environment variable — a comma-separated
-  list of role names, or `all`:
+  list of role names, `all`, or `none`:
 
       SMOLQUERY_ROLES=all
       SMOLQUERY_ROLES=ingest,query
       SMOLQUERY_ROLES=buffer
+      SMOLQUERY_ROLES=none
 
-  With the variable unset, a node runs every role.
+  With the variable unset, a node runs every role. `none` runs no service
+  subtree, for a node whose job is to lease burst runners (`Smolquery.Burst`).
+  A burst runner itself has no roles whatever the variable says: it is not a
+  node, and a cluster page that asks it over RPC must not see every service.
   """
 
   @type t ::
@@ -42,10 +46,14 @@ defmodule Smolquery.Roles do
   def all, do: @all
 
   @doc """
-  The roles enabled for this node.
+  The roles enabled for this node; none on a burst runner.
   """
   @spec enabled() :: [t()]
   def enabled do
+    if Smolquery.Burst.runner?(), do: [], else: configured()
+  end
+
+  defp configured do
     case Application.fetch_env(:smolquery, :roles) do
       {:ok, roles} -> roles
       :error -> @all

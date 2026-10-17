@@ -202,6 +202,7 @@ read on a runner: it learns everything from the backend's assignment.
 | `SMOLQUERY_BURST_MAX` | The most runners this node holds at once (`64`). Per node, not per deployment |
 | `SMOLQUERY_BURST_BOOT_TIMEOUT_MS` | How long a lease waits for a runner to boot and connect (`120000`) |
 | `SMOLQUERY_BURST_IDLE_SHUTDOWN_MS` | How long an idle runner stays leased before it shuts down (`15000`). This is the cost lever: a runner's work is seconds per lease and the idle window is the rest of the bill |
+| `SMOLQUERY_BURST_CALL_TIMEOUT_MS` | How long a call on a runner may run before it fails with a timeout the caller can catch (`600000`). Keep it below the runner's own lifetime cap (15 minutes on Lambda): when the host kills a runner first, the pool kills the caller outright instead |
 
 ### Diagnostics
 
