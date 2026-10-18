@@ -1060,6 +1060,21 @@ if max_lifetime = System.get_env("SMOLQUERY_BURST_MAX_LIFETIME_MS") do
       )
 end
 
+# A runner sizes its engine from its own host, not from the coordinator's
+# worker limits (T-695): these two override what it would read from the
+# host (`AWS_LAMBDA_FUNCTION_MEMORY_SIZE`, the VM's schedulers).
+if limit = System.get_env("SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT") do
+  config :smolquery, Smolquery.Burst,
+    runner_memory_limit:
+      Smolquery.RuntimeConfig.size!("SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT", limit)
+end
+
+if threads = System.get_env("SMOLQUERY_BURST_RUNNER_THREADS") do
+  config :smolquery, Smolquery.Burst,
+    runner_threads:
+      Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_BURST_RUNNER_THREADS", threads)
+end
+
 for {variable, key} <- [
       {"SMOLQUERY_BURST_MAX", :max},
       {"SMOLQUERY_BURST_BOOT_TIMEOUT_MS", :boot_timeout_ms},

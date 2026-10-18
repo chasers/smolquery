@@ -44,6 +44,20 @@ defmodule Smolquery.Burst do
   waits. It sits below the 15-minute lifetime a Lambda runner has, so a
   stuck shard fails with a timeout exit the caller can catch, not with the
   `:kill` the pool deals out when the runner's host ends it (T-673).
+
+  ## A runner's engine limits
+
+  A shard's request carries the engine the coordinator resolved, with the
+  coordinator's worker memory limit and thread count. A runner's host is
+  not the coordinator's: a 10 GB function under a 20 GB worker limit does
+  not spill before the host kills it (T-695). So a runner sizes its engine
+  from its own host (`runner_limits/0`) and ignores the spec's limits:
+  memory from `runner_memory_limit`, or three quarters of
+  `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` when Lambda set it, leaving the rest to
+  the BEAM and the partial; threads from `runner_threads`, or the VM's
+  online schedulers. The two keys come from the runner's own environment,
+  `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS`,
+  which on Lambda means the function's environment variables.
   """
 
   @pool __MODULE__.Pool
@@ -144,6 +158,37 @@ defmodule Smolquery.Burst do
     case Keyword.get(config(), :max_lifetime_ms) do
       nil -> []
       max_lifetime_ms -> [{__MODULE__.Lifetime, max_lifetime_ms}]
+    end
+  end
+
+  @doc """
+  The engine limits a runner applies in place of the coordinator's, as DuckDB
+  settings: `memory_limit` from the configured `runner_memory_limit`, else
+  three quarters of `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` (megabytes, set by
+  Lambda), else none; `threads` from `runner_threads`, else
+  `System.schedulers_online/0`. Empty on a node that is not a runner, so a
+  local runner keeps the coordinator's limits: it shares the host they were
+  sized for.
+  """
+  @spec runner_limits() :: [memory_limit: String.t(), threads: pos_integer()]
+  def runner_limits do
+    if runner?(), do: host_limits(config()), else: []
+  end
+
+  defp host_limits(config) do
+    memory_limit = Keyword.get_lazy(config, :runner_memory_limit, &lambda_memory_limit/0)
+    threads = Keyword.get_lazy(config, :runner_threads, &System.schedulers_online/0)
+
+    case memory_limit do
+      nil -> [threads: threads]
+      limit -> [memory_limit: limit, threads: threads]
+    end
+  end
+
+  defp lambda_memory_limit do
+    case Integer.parse(System.get_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "")) do
+      {megabytes, ""} when megabytes > 0 -> "#{div(megabytes * 3, 4)}MB"
+      _other -> nil
     end
   end
 

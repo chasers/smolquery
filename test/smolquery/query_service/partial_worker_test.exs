@@ -6,6 +6,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Schema
   alias Smolquery.Segments.Store
+  alias Smolquery.Test.FlameParent
   alias Smolquery.Test.MapCatalog
   alias Smolquery.Test.SegmentFixture
 
@@ -153,6 +154,26 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
     test "drops an unset thread count", %{spec: spec} do
       options = PartialWorker.standalone_options(%{spec | threads: nil})
       assert options[:settings] == [memory_limit: "256MB"]
+    end
+
+    test "on a runner the host's limits replace the coordinator's", %{spec: spec} do
+      previous = Application.get_env(:smolquery, Smolquery.Burst)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:smolquery, Smolquery.Burst, previous),
+          else: Application.delete_env(:smolquery, Smolquery.Burst)
+      end)
+
+      FlameParent.put_env()
+
+      Application.put_env(:smolquery, Smolquery.Burst,
+        runner_memory_limit: "7GB",
+        runner_threads: 6
+      )
+
+      options = PartialWorker.standalone_options(spec)
+      assert options[:settings] == [memory_limit: "7GB", threads: 6]
     end
   end
 

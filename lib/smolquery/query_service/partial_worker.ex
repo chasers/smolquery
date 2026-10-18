@@ -54,6 +54,13 @@ defmodule Smolquery.QueryService.PartialWorker do
   runner. A spec for a local store keeps them, since a local store is only
   readable from a VM that shares the filesystem.
 
+  The spec's memory limit and thread count are the coordinator's worker
+  limits, sized for the coordinator's host. A runner's host is its own, so
+  on a runner `standalone_options/1` takes the limits
+  `Smolquery.Burst.runner_limits/0` reads from that host instead (T-695): a
+  Lambda function's memory, the VM's schedulers. A local runner shares the
+  coordinator's host and keeps the spec's.
+
   `run/2` and `run_standalone/1` share everything after the engine exists:
   the settings, the field-id description, the view, the lockdown and the
   `COPY` out. Both build the statements they will run before they take an
@@ -243,7 +250,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   The bootstrap a standalone shard's engine runs: `spec`'s extensions plus
   what its store's credential needs, its limits as settings, and the sealed
   tier's secret with this node's own keys when it has them for that bucket.
-  No lake, no hot tier, no file cache.
+  No lake, no hot tier, no file cache. On a runner the host's own limits
+  (`Smolquery.Burst.runner_limits/0`) replace the spec's (T-695).
   """
   @spec standalone_options(engine_spec()) :: keyword()
   def standalone_options(spec) do
@@ -251,11 +259,16 @@ defmodule Smolquery.QueryService.PartialWorker do
 
     [
       extensions: EngineSecrets.sealed_tier_extensions(store, spec.extensions),
-      settings:
-        Enum.reject([memory_limit: spec.memory_limit, threads: spec.threads], &nil_value?/1),
+      settings: standalone_settings(spec),
       statements: EngineSecrets.sealed_tier(store),
       max_rows: :infinity
     ]
+  end
+
+  defp standalone_settings(spec) do
+    [memory_limit: spec.memory_limit, threads: spec.threads]
+    |> Keyword.merge(Smolquery.Burst.runner_limits())
+    |> Enum.reject(&nil_value?/1)
   end
 
   defp nil_value?({_setting, value}), do: is_nil(value)
