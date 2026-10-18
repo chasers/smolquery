@@ -136,7 +136,12 @@ a failed asynchronous invocation twice by default, and keeps a queued one
 for six hours, and a runner booted from either would reconnect to a parent
 that gave up on it. Reserved concurrency is
 the deployment-wide ceiling on runners; `SMOLQUERY_BURST_MAX` caps one
-node and `SMOLQUERY_BURST_MAX_PER_JOB` one query. The function needs no
+node and `SMOLQUERY_BURST_MAX_PER_JOB` one query. A runner sizes its DuckDB
+engine from the function, not from the coordinator's worker limits: three
+quarters of the function's memory and the VM's schedulers, or
+`SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS`
+set as the function's environment variables (T-695). Beyond those two the
+function needs no
 environment of its own: a runner learns everything from the assignment
 the parent sends in the invoke payload.
 
@@ -210,6 +215,10 @@ answers nothing at the TCP level.
 ## Upgrade notes
 
 One note per release, newest first.
+
+### 0.25.1: a burst runner sizes its engine from its own host (T-695)
+
+**TL;DR.** A runner's DuckDB engine took the coordinator's worker limits (`SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`, `_THREADS`), sized for the coordinator's host. On a 10 GB function under a 20 GB limit DuckDB never spilled before Lambda killed the runner, and the shard failed over to a peer, slower and dearer than no burst. A runner now takes three quarters of `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` and the VM's online schedulers, or `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS` from the function's environment. A local runner (`SMOLQUERY_BURST_BACKEND=local`) shares the coordinator's host and keeps its limits. Nothing to do unless you want the overrides.
 
 ### 0.25.0: burst, a query's scan on ephemeral runners (PL-77, T-674 to T-679, T-682, T-691)
 

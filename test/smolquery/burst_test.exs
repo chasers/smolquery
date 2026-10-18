@@ -124,6 +124,60 @@ defmodule Smolquery.BurstTest do
     end
   end
 
+  describe "runner_limits/0" do
+    setup do
+      previous = System.get_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+      System.delete_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+
+      on_exit(fn ->
+        if previous,
+          do: System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", previous),
+          else: System.delete_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+      end)
+    end
+
+    test "is empty on a node that is not a runner, whatever is configured" do
+      Application.put_env(:smolquery, Burst, runner_memory_limit: "7GB", runner_threads: 6)
+      System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
+      assert Burst.runner_limits() == []
+    end
+
+    test "a runner with no Lambda and no overrides sizes threads from the VM" do
+      FlameParent.put_env()
+      Application.delete_env(:smolquery, Burst)
+      assert Burst.runner_limits() == [threads: System.schedulers_online()]
+    end
+
+    test "a Lambda runner takes three quarters of the function's memory" do
+      FlameParent.put_env()
+      Application.delete_env(:smolquery, Burst)
+      System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
+
+      assert Burst.runner_limits() == [
+               memory_limit: "7680MB",
+               threads: System.schedulers_online()
+             ]
+    end
+
+    test "the configured overrides win over the host" do
+      FlameParent.put_env()
+      Application.put_env(:smolquery, Burst, runner_memory_limit: "7GB", runner_threads: 6)
+      System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
+
+      assert Burst.runner_limits() == [memory_limit: "7GB", threads: 6]
+    end
+
+    test "a memory size that is not a positive integer is ignored" do
+      FlameParent.put_env()
+      Application.delete_env(:smolquery, Burst)
+
+      for junk <- ["", "lots", "0", "-1", "10GB"] do
+        System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", junk)
+        assert Burst.runner_limits() == [threads: System.schedulers_online()]
+      end
+    end
+  end
+
   describe "children/0" do
     test "starts no pool when burst is off" do
       Application.delete_env(:smolquery, Burst)
